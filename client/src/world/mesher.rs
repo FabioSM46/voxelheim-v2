@@ -22,9 +22,10 @@
 //!
 //! The sweep fills two masks per plane from one pair of samples and produces the first
 //! two of the [`ChunkMesh`]'s three [`SurfaceMesh`]es: the opaque surface and the water
-//! surface. The third — cover — is not swept at all, because a flower has no coplanar
-//! face to merge with its neighbour; [`build_cover`] walks the voxels once and emits a
-//! stem and a head for each. The reason each is its own mesh is on [`ChunkMesh`] itself — blending is order-dependent and
+//! surface. The third — cover — is not swept at all, because a plant has no coplanar
+//! face to merge with its neighbour; [`build_cover`] walks the voxels once and grows a
+//! flower or a bush in each voxel [`palette::is_shaped`] answers for. The reason each is
+//! its own mesh is on [`ChunkMesh`] itself — blending is order-dependent and
 //! Bevy sorts per entity, so the two have to be separate draws. The face rules are
 //! on [`build_masks`]; the greedy merge below is shared and knows about neither.
 //!
@@ -327,12 +328,15 @@ pub struct ChunkMesh {
     /// Water against transparent non-water voxels, plus the exposed skirt between
     /// unequal water levels. Equal water and water against solid blocks stay hidden.
     pub water: SurfaceMesh,
-    /// Every cover voxel's stem and head, from [`build_cover`].
+    /// Every plant, grown one voxel at a time by [`build_cover`]: a flower's stem and
+    /// head, and a bush's clumps of foliage.
     ///
     /// **The third surface, and it is not produced by the sweep at all.** The sweep
-    /// exists to merge coplanar faces of adjacent voxels, and a flower has no coplanar
-    /// faces to merge: its geometry is a cross and a small cube inside a voxel that is
-    /// otherwise empty. Two flowers side by side are two flowers, so there is nothing a
+    /// exists to merge coplanar faces of adjacent voxels, and a plant has none to merge:
+    /// a flower is a cross of blades under a small cube and a bush is three overlapping
+    /// clumps, both inside a voxel nothing else is drawn in. Two of either side by side
+    /// are two plants — which is the point for the bush, since being merged into its
+    /// neighbour is exactly what made a row of them one flat slab — so there is nothing a
     /// mask could join and every reason not to pay for a third one per plane.
     ///
     /// It is its own half rather than more quads in [`Self::opaque`] because its
@@ -365,14 +369,51 @@ const COVER_STEM_HEIGHT: f32 = 0.5;
 /// occupies the lower three quarters of its voxel and never crosses into the next one.
 const COVER_HEAD_SIZE: f32 = 0.25;
 
-/// How many quads one cover voxel contributes: two stem blades and the head's six
-/// faces.
+/// How far a bush's foliage keeps back from the walls of its voxel, in blocks.
+///
+/// A bush is `world.Solid` on the server, so what is drawn has to fill the cube a body is
+/// stopped by — but bushes grow in clusters of up to three (`visitBush` on the server),
+/// and a face exactly on the plane two of them share would be coincident with the
+/// neighbour's, two quads fighting the depth buffer over one surface. The same plane is
+/// the one the ground under a bush now draws its top face on, since a bush stopped being
+/// opaque when it stopped being a cube. Two percent is far too small to be a wall a
+/// player can walk into unseen and far too large to z-fight, and it is why a bush's drawn
+/// extent is 96% of its voxel on every axis rather than 100%.
+const BUSH_INSET: f32 = 0.02;
+
+/// How tall a bush's skirt stands, and how far that height varies per voxel, in blocks.
+///
+/// The skirt is the clump that reaches the voxel's floor and its four walls, so its size
+/// is fixed and only its **top** is jittered — which is the whole of what stops a row of
+/// bushes from having one flat surface across all of them at the same height.
+const BUSH_SKIRT_TOP: f32 = 0.3;
+const BUSH_SKIRT_JITTER: f32 = 0.16;
+
+/// The body clump: how wide and tall it is, where its underside starts and how far that
+/// start varies, in blocks. Its footprint is jittered inside the voxel, its overlap with
+/// the skirt below it is guaranteed by the arithmetic — see [`push_bush`].
+const BUSH_BODY_SPAN: f32 = 0.68;
+const BUSH_BODY_HEIGHT: f32 = 0.44;
+const BUSH_BODY_FLOOR: f32 = 0.2;
+const BUSH_BODY_JITTER: f32 = 0.1;
+
+/// The crown clump: how wide it is, and where its underside starts. It reaches the
+/// voxel's ceiling, which is the other half of the fill guarantee.
+const BUSH_CROWN_SPAN: f32 = 0.56;
+const BUSH_CROWN_FLOOR: f32 = 0.52;
+const BUSH_CROWN_JITTER: f32 = 0.1;
+
+/// How many quads one flower contributes: two stem blades and the head's six faces.
 ///
 /// Test-only for the reason [`palette::PALETTE`] is: production code emits the quads
 /// rather than counting them, and a constant nothing reads is a claim nothing checks.
 /// Here it is read by the assertions that pin the geometry.
 #[cfg(test)]
 const QUADS_PER_COVER: usize = 8;
+
+/// How many quads one bush contributes: three clumps of six faces each.
+#[cfg(test)]
+const QUADS_PER_BUSH: usize = 18;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -542,30 +583,38 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
     mesh
 }
 
-/// Fills the cover half: one stem and one head per [`palette::is_cover`] voxel.
+/// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a stem and a head
+/// for each of the three cover ids, a clump of foliage for a bush.
 ///
 /// A whole pass over the chunk rather than a third mask, because there is nothing here
-/// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a
-/// flower's geometry is entirely inside its own voxel, which is why
-/// `ChunkStore::apply_block` needs no new remesh rule for one. Breaking a flower on a
-/// chunk's edge remeshes that chunk and nothing across the border.
+/// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a plant's
+/// geometry is entirely inside its own voxel, which is why `ChunkStore::apply_block`
+/// needs no new remesh rule for one. Breaking a flower on a chunk's edge remeshes that
+/// chunk and nothing across the border.
 ///
 /// The iteration order is y, then z, then x — fixed, like the sweep's, so the same
 /// voxels produce byte-identical buffers every time.
 fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
     let size = chunk.size();
-    let stem = [
-        palette::STEM_LINEAR[0],
-        palette::STEM_LINEAR[1],
-        palette::STEM_LINEAR[2],
-        1.0,
-    ];
+    let stem = opaque(palette::STEM_LINEAR);
 
     for y in 0..size {
         for z in 0..size {
             for x in 0..size {
                 let block = chunk.block([x, y, z]);
-                if !palette::is_cover(block) {
+                // The gate is [`palette::is_shaped`] and not the two ids read apart,
+                // because that predicate is a statement *about this loop*: it is what
+                // makes [`palette::is_opaque`] false, so the sweep emits nothing at all
+                // for a shaped voxel. An id that answers it and reaches no branch here
+                // is not drawn as a cube — it is not drawn at all. Asking it once is
+                // what keeps that from happening silently, for the reason
+                // `player::inventory`'s `KITS` is a table and not a comparison: the
+                // failure that costs something is the omission, not the extra entry.
+                if !palette::is_shaped(block) {
+                    continue;
+                }
+                if block == palette::BUSH {
+                    push_bush(mesh, [x as f32, y as f32, z as f32], plant_seed(x, y, z));
                     continue;
                 }
 
@@ -593,6 +642,111 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
             }
         }
     }
+}
+
+/// A deterministic word for the plant standing in this chunk-local voxel, from which
+/// [`dial`] draws the small variations that keep two neighbours from being stamped
+/// copies of each other.
+///
+/// **Derived from nothing but integer coordinates**, which is the rule the whole mesher
+/// is written to: the same voxels must produce byte-identical buffers every time, or a
+/// remesh triggered by something else would move geometry that did not change. It is
+/// chunk-*local* on purpose — `build_cover` is handed no chunk coordinate and asking for
+/// one would give the cover half an input the sweep does not have, to break a repeat
+/// nobody can see at a spacing of 32 blocks.
+fn plant_seed(x: usize, y: usize, z: usize) -> u32 {
+    let mut hash = (x as u32).wrapping_mul(0x9E37_79B1)
+        ^ (y as u32).wrapping_mul(0x85EB_CA6B)
+        ^ (z as u32).wrapping_mul(0xC2B2_AE35);
+    hash ^= hash >> 15;
+    hash = hash.wrapping_mul(0x2545_F491);
+    hash ^ (hash >> 13)
+}
+
+/// One dial in `[0, 1)` from a plant's seed; `index` picks a different one from the same
+/// word, so a plant's several offsets do not move together.
+fn dial(seed: u32, index: u32) -> f32 {
+    let mut hash = seed.wrapping_add(index.wrapping_mul(0x9E37_79B1));
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x7FEB_352D);
+    hash ^= hash >> 15;
+    f32::from(((hash >> 8) & 0xFFFF) as u16) / 65536.0
+}
+
+/// One bush, filling the voxel whose minimum corner is `floor`.
+///
+/// Three overlapping clumps and eighteen quads. **The shape has to satisfy two things at
+/// once**, and they pull in opposite directions: `world.Bush` is `Solid` on the server, so
+/// a body is stopped by the whole cube and anything drawn smaller than it is a wall the
+/// player cannot see — while a cube is exactly what made a cluster of bushes read as one
+/// green slab. So the clumps between them span the voxel less [`BUSH_INSET`] on every
+/// axis, and everything that can vary without breaking that span does: the skirt's top,
+/// and the footprint and underside of the body and the crown.
+///
+/// The skirt owns the floor and the four walls, the crown owns the ceiling, and the
+/// jitter ranges are sized so the three always overlap — a clump that floated free of the
+/// two beside it would be a leaf hanging in the air.
+fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
+    let foliage = palette::linear_rgba(palette::BUSH);
+    let crown_color = opaque(palette::BUSH_CROWN_LINEAR);
+
+    let low = BUSH_INSET;
+    let high = 1.0 - BUSH_INSET;
+    let clump = |mesh: &mut SurfaceMesh,
+                 x: f32,
+                 z: f32,
+                 span: f32,
+                 bottom: f32,
+                 top: f32,
+                 color: [f32; 4]| {
+        push_box(
+            mesh,
+            [floor[0] + x, floor[1] + bottom, floor[2] + z],
+            [floor[0] + x + span, floor[1] + top, floor[2] + z + span],
+            color,
+        );
+    };
+
+    // The skirt: the full inset footprint, standing on the voxel's floor. Only its top
+    // moves, which is what breaks the one flat surface a row of bushes used to share.
+    let skirt_top = BUSH_SKIRT_TOP + dial(seed, 0) * BUSH_SKIRT_JITTER;
+    clump(mesh, low, low, high - low, low, skirt_top, foliage);
+
+    // The body: a smaller box sliding inside the same footprint. Its underside is at most
+    // `BUSH_BODY_FLOOR + BUSH_BODY_JITTER`, which is below the skirt's lowest top, so the
+    // two always meet.
+    let slack = high - low - BUSH_BODY_SPAN;
+    let body_floor = BUSH_BODY_FLOOR + dial(seed, 1) * BUSH_BODY_JITTER;
+    clump(
+        mesh,
+        low + dial(seed, 2) * slack,
+        low + dial(seed, 3) * slack,
+        BUSH_BODY_SPAN,
+        body_floor,
+        body_floor + BUSH_BODY_HEIGHT,
+        foliage,
+    );
+
+    // The crown: smaller again, reaching the voxel's ceiling, and the lighter of the two
+    // tones because it is the half of a bush the sky reaches.
+    let crown_slack = high - low - BUSH_CROWN_SPAN;
+    clump(
+        mesh,
+        low + dial(seed, 4) * crown_slack,
+        low + dial(seed, 5) * crown_slack,
+        BUSH_CROWN_SPAN,
+        BUSH_CROWN_FLOOR + dial(seed, 6) * BUSH_CROWN_JITTER,
+        high,
+        crown_color,
+    );
+}
+
+/// A palette tone as the opaque RGBA a vertex carries. The cover half has no alpha of its
+/// own — `render.rs` gives it an opaque material — so this is the only shape the
+/// conversion ever takes, and the three tones the mesher names directly are the only
+/// callers: [`palette::linear_rgba`] already answers with an alpha.
+fn opaque(tone: [f32; 3]) -> [f32; 4] {
+    [tone[0], tone[1], tone[2], 1.0]
 }
 
 /// One vertical blade of a stem: a quad `2 * half` wide along `span`, rising from
@@ -2798,6 +2952,59 @@ mod tests {
         );
     }
 
+    /// Which colour every quad of a surface carries, counted. The census the bush tests
+    /// below read: a bush is two named tones, and how many quads each one covers is the
+    /// whole of what "a skirt, a body and a lighter crown" means to a test with no
+    /// screen.
+    fn quads_by_colour(mesh: &SurfaceMesh) -> BTreeMap<[u32; 4], usize> {
+        let mut counts = BTreeMap::new();
+        for quad in 0..mesh.quad_count() {
+            let colour = mesh.colors[quad * VERTICES_PER_QUAD];
+            *counts.entry(colour.map(f32::to_bits)).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn tone(rgb: [f32; 3]) -> [u32; 4] {
+        [rgb[0], rgb[1], rgb[2], 1.0].map(f32::to_bits)
+    }
+
+    /// Every quad of `mesh` is wound the way its declared normal says it is.
+    ///
+    /// The check that catches a face drawn inside-out without a screen, and the cover
+    /// material's `cull_mode: None` is why it has to be made here: a reversed quad is
+    /// still drawn, so the mistake would show up in the lighting and not in the picture.
+    /// `hands::BladeSection::perimeter` is where the same warning is written down.
+    fn winding_agrees_with_every_normal(mesh: &SurfaceMesh) {
+        for quad in 0..mesh.quad_count() {
+            let winding = winding_normal(mesh, quad);
+            let declared = mesh.normals[quad * VERTICES_PER_QUAD];
+            let length =
+                (winding[0] * winding[0] + winding[1] * winding[1] + winding[2] * winding[2])
+                    .sqrt();
+            assert!(length > 1e-6, "quad {quad} is degenerate");
+            for axis in 0..3 {
+                assert!(
+                    (winding[axis] / length - declared[axis]).abs() < 1e-5,
+                    "quad {quad} is wound against its normal: {winding:?} vs {declared:?}"
+                );
+            }
+        }
+    }
+
+    /// Every quad of `mesh` lies inside the voxel with minimum corner `corner`.
+    fn stays_inside_the_voxel(mesh: &SurfaceMesh, corner: [f32; 3]) {
+        for quad in 0..mesh.quad_count() {
+            for (axis, floor) in corner.into_iter().enumerate() {
+                let (minimum, maximum) = quad_extent(mesh, quad, axis);
+                assert!(
+                    minimum >= floor - 1e-5 && maximum <= floor + 1.0 + 1e-5,
+                    "quad {quad} leaves its voxel on axis {axis}: {minimum}..{maximum}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn one_flower_is_a_stem_and_a_head_in_the_cover_half_and_nothing_else() {
         // #551's whole geometry, in the one chunk that isolates it. The grass keeps its
@@ -2898,6 +3105,134 @@ mod tests {
     }
 
     #[test]
+    fn a_bush_is_three_clumps_that_still_fill_the_voxel_a_body_is_stopped_by() {
+        // The constraint the bush has and the flower does not: `world.Bush` is `Solid` on
+        // the server, so what is drawn has to span the cube collision uses. It is drawn
+        // per voxel now, which means the opaque sweep must stop drawing its cube — and
+        // the grass under it must start drawing the top face that cube used to cull.
+        let mut chunk = solid(SIZE, palette::GRASS);
+        chunk.set(4, 5, 6, palette::AIR);
+        let hole = super::mesh_chunk(&chunk, &alone());
+        chunk.set(4, 5, 6, palette::BUSH);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(
+            mesh.opaque, hole.opaque,
+            "a bush is drawn by itself now, so the sweep sees the same hole as before"
+        );
+        assert!(mesh.water.is_empty());
+        assert_eq!(mesh.cover.quad_count(), QUADS_PER_BUSH);
+        assert_eq!(
+            quads_by_colour(&mesh.cover),
+            BTreeMap::from([
+                (palette::linear_rgba(palette::BUSH).map(f32::to_bits), 12),
+                (tone(palette::BUSH_CROWN_LINEAR), 6),
+            ]),
+            "two clumps of foliage under a lighter crown"
+        );
+
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+
+        // The whole of why `BUSH_INSET` is 2% and not 20%: a bush a player is stopped by
+        // has to be a bush they can see, on every axis.
+        for (axis, floor) in [(0, 4.0), (1, 5.0), (2, 6.0)] {
+            let (minimum, maximum) = (0..mesh.cover.quad_count()).fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(low, high), quad| {
+                    let (quad_low, quad_high) = quad_extent(&mesh.cover, quad, axis);
+                    (low.min(quad_low), high.max(quad_high))
+                },
+            );
+            assert!(
+                (minimum - (floor + BUSH_INSET)).abs() < 1e-5
+                    && (maximum - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
+                "axis {axis}: the drawn bush spans {minimum}..{maximum}, want the voxel \
+                 less the inset"
+            );
+        }
+    }
+
+    #[test]
+    fn two_bushes_side_by_side_are_two_bushes() {
+        // What #634 is for. A bush used to be an ordinary opaque cube, so the greedy
+        // sweep merged a cluster of them into one slab with one flat top; `visitBush` on
+        // the server grows clusters of up to three, so that was the common case rather
+        // than the corner one. Now each is its own eighteen quads, and the per-voxel
+        // jitter puts their surfaces at different heights.
+        let mut chunk = air(SIZE);
+        chunk.set(4, 5, 6, palette::BUSH);
+        chunk.set(5, 5, 6, palette::BUSH);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(
+            mesh.opaque.is_empty(),
+            "a bush is drawn by nothing but itself"
+        );
+        assert_eq!(mesh.cover.quad_count(), 2 * QUADS_PER_BUSH);
+
+        // Neither bush leaves its own voxel, and the two are not the same shape shifted
+        // by one block: the skirt tops alone put a visible step between them.
+        let (first, second) = (0..mesh.cover.quad_count()).fold(
+            (Vec::new(), Vec::new()),
+            |(mut first, mut second), quad| {
+                let (low, _) = quad_extent(&mesh.cover, quad, 0);
+                if low < 5.0 {
+                    first.push(quad)
+                } else {
+                    second.push(quad)
+                }
+                (first, second)
+            },
+        );
+        assert_eq!(first.len(), QUADS_PER_BUSH);
+        assert_eq!(second.len(), QUADS_PER_BUSH);
+
+        let skirt_top = |quads: &[usize]| quad_extent(&mesh.cover, quads[0], 1).1;
+        assert_ne!(
+            skirt_top(&first),
+            skirt_top(&second),
+            "two neighbours drawn at the same height are the slab again"
+        );
+
+        // And the two never share a plane, which is what `BUSH_INSET` buys: coincident
+        // quads on the boundary would fight the depth buffer along the whole seam.
+        let (_, first_high) = quad_extent(&mesh.cover, first[0], 0);
+        let (second_low, _) = quad_extent(&mesh.cover, second[0], 0);
+        assert!(
+            first_high < second_low,
+            "{first_high} and {second_low} meet on one plane"
+        );
+    }
+
+    #[test]
+    fn a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing() {
+        // The regression the issue asked for: cover is per voxel and unmerged, so every
+        // quad a plant gains is paid once per plant in the world. A change that
+        // multiplies either shape has to come here and say so.
+        let mut chunk = air(SIZE);
+        let (mut flowers, mut bushes) = (0, 0);
+        for z in (0..SIZE).step_by(4) {
+            for x in (0..SIZE).step_by(4) {
+                chunk.set(x, 5, z, palette::FLOWER_YELLOW);
+                flowers += 1;
+                if x % 8 == 0 {
+                    chunk.set(x, 5, z + 1, palette::BUSH);
+                    bushes += 1;
+                }
+            }
+        }
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!((flowers, bushes), (64, 32));
+        assert_eq!(
+            mesh.cover.quad_count(),
+            flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
+        );
+        assert_eq!(mesh.cover.quad_count(), 1088);
+    }
+
+    #[test]
     fn every_cover_id_grows_its_own_flower_and_a_bare_chunk_grows_none() {
         // Per voxel and not by mask: three flowers in a row do not merge into one, and
         // each takes its own head colour.
@@ -2932,6 +3267,37 @@ mod tests {
         let none = super::mesh_chunk(&solid(SIZE, palette::STONE), &alone());
         assert!(none.cover.is_empty());
         assert_eq!(none.cover.quad_count(), 0);
+    }
+
+    #[test]
+    fn every_shaped_id_grows_geometry_and_no_other_id_does() {
+        // The lockstep `palette::is_shaped` claims and `palette::is_opaque` leans on.
+        // A shaped voxel is see-through to the sweep, so it emits no mask face at all;
+        // if `build_cover` skipped it too the block would be *invisible*, not a cube.
+        // Driven off the palette rather than off a list typed here, so a fifth shaped
+        // id is caught by this test instead of by somebody noticing a hole in a hill.
+        const EDGE: usize = 4;
+        for block in palette::PALETTE {
+            let mut chunk = air(EDGE);
+            chunk.set(2, 2, 2, block);
+            let mesh = super::mesh_chunk(&chunk, &alone());
+            if palette::is_shaped(block) {
+                assert!(
+                    mesh.cover.quad_count() > 0,
+                    "shaped block {block} grows no geometry anywhere"
+                );
+                assert!(
+                    mesh.opaque.is_empty() && mesh.water.is_empty(),
+                    "shaped block {block} is drawn by nothing but the cover half"
+                );
+            } else {
+                assert_eq!(
+                    mesh.cover.quad_count(),
+                    0,
+                    "block {block} is swept as a cube and grows no plant"
+                );
+            }
+        }
     }
 
     #[test]
