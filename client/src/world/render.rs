@@ -104,6 +104,24 @@ const MAX_JOBS_PER_FRAME: usize = 32;
 /// Bounded for the other half of the same reason: `Assets<Mesh>::add` and the entity
 /// spawn are main-thread work, so a frame that applied two hundred meshes would be
 /// exactly the stall that moving the meshing off-thread was meant to avoid.
+///
+/// **Still a count, and #629 is where that was measured rather than assumed.** That
+/// issue named this number and `MAX_DECODES_PER_FRAME` as its two suspects and asked
+/// for the spike to be attributed to a system before either moved. The harness at the
+/// foot of this file did the attribution: on the frames a chunk shell lands on, this
+/// system spent **0.02 to 0.13 ms** — under 2% of the spike frame — where
+/// `ingest_world_updates` spent 88% of it. Over a whole optimized drain its median
+/// frame was 0.037 ms, its 99th percentile 0.094 ms and its worst 0.28 ms. So the
+/// expansion budget became a duration (`MAX_DECODE_TIME_PER_FRAME` in `world/mod.rs`)
+/// and this one did not move at all, because nothing measured says it is a cost.
+///
+/// **What that measurement cannot see, said here rather than left in a pull request.**
+/// The harness runs with no render app, so `Assets<Mesh>::add` is a resource insert and
+/// the GPU buffer upload it schedules never happens. The number above is the *main
+/// schedule's* share, which is a floor on what applying a mesh costs a real frame. If a
+/// capture on a machine with a display ever shows the upload dominating, this is the
+/// constant to revisit, and the change would be the one `world/mod.rs` already made:
+/// keep 16 as the ceiling and let a slice of the frame be the rule.
 const MAX_APPLIED_PER_FRAME: usize = 16;
 
 /// Keeps one mesh entity per loaded chunk.
@@ -683,7 +701,10 @@ mod tests {
 
     use super::*;
     use crate::net::{BlockCoord, SessionParams, WorldInbox, WorldUpdate};
-    use crate::world::{BlockId, MAX_DECODE_BACKLOG, MAX_DECODES_PER_FRAME, Neighbours, palette};
+    use crate::world::{
+        BlockId, DecodeTimeBudget, MAX_DECODE_BACKLOG, MAX_DECODE_TIME_PER_FRAME,
+        MAX_DECODES_PER_FRAME, Neighbours, palette,
+    };
 
     const SIZE: u16 = 32;
     const VOLUME: u16 = 32768;
@@ -751,13 +772,28 @@ mod tests {
     /// app: `Assets<Mesh>` is a plain resource, so everything short of the GPU upload
     /// is exercised with no display at all. CI has neither a display nor a GPU, and
     /// these tests run there.
+    ///
+    /// The expansion time budget is [`Duration::MAX`], so the count is the only bound
+    /// the drain can reach and the burst assertions below stay exact rather than
+    /// measuring the runner — `DecodeTimeBudget` in `world/mod.rs` carries the argument.
+    /// The measurements at the end of this file install the real default instead.
     fn headless_world() -> App {
+        world_with_budget(DecodeTimeBudget(Duration::MAX))
+    }
+
+    /// [`headless_world`] with the expansion budget named rather than disabled.
+    ///
+    /// `insert_resource` after the plugin, so the value here wins over the one
+    /// `WorldPlugin` installs. What the plugin installs is pinned by
+    /// [`the_plugin_ships_the_metered_drain`].
+    fn world_with_budget(budget: DecodeTimeBudget) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
             .insert_resource(session())
-            .add_plugins(crate::world::WorldPlugin);
+            .add_plugins(crate::world::WorldPlugin)
+            .insert_resource(budget);
         app
     }
 
@@ -805,6 +841,26 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query::<&ChunkMeshEntity>();
         query.iter(world).count()
+    }
+
+    #[test]
+    fn the_plugin_ships_the_metered_drain() {
+        // The other half of `the_shipping_budget_is_two_milliseconds` in `world/mod.rs`,
+        // and it lives here because this is the file with an app that carries the whole
+        // plugin stack. Every other test in this module overrides the budget so its
+        // per-frame counts stay exact; this one is what says the client does not.
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(session())
+            .add_plugins(crate::world::WorldPlugin);
+
+        assert_eq!(
+            *app.world().resource::<DecodeTimeBudget>(),
+            DecodeTimeBudget::default(),
+            "a client built from this tree expands on a slice of the frame"
+        );
     }
 
     #[test]
@@ -2182,5 +2238,351 @@ mod tests {
             VoxelChunk::from_runs(&solid_chunk(palette::STONE), SIZE.into()).expect("valid");
 
         assert_eq!(mesh_chunk(&chunk, &Neighbours::default()).quad_count(), 6);
+    }
+
+    // -----------------------------------------------------------------
+    // The measurement harness (#629)
+    // -----------------------------------------------------------------
+    //
+    // Two `#[ignore]`d measurements, so `cargo test` never times anything and CI never
+    // goes red because a runner was busy, and so the numbers in the constants below
+    // stay re-derivable rather than becoming folklore:
+    //
+    //     cargo test --release -- --ignored --nocapture measure_
+    //
+    // **What it cannot see, stated where it will be read.** There is no display and no
+    // render app, so `Assets<Mesh>::add` is a resource insert and the GPU buffer upload
+    // that follows it never happens. Everything the *main schedule* does is measured;
+    // the render world's share of applying a mesh is not, and no number here may be
+    // quoted as though it were.
+    //
+    // **What is measured is printed; what is conserved is asserted.** A frame time is a
+    // reading and cannot be a bound on a shared runner — but "every chunk arrived,
+    // nothing was refused or evicted, and the bound did not change the world" is exact,
+    // so `drain_burst` and `same_world` assert it rather than leaving a regression to be
+    // spotted in a printed line. Being `#[ignore]`d, those assertions bind whoever runs
+    // the measurement and not CI; for every run the same conservation is pinned by
+    // `a_burst_drained_a_chunk_a_frame_loses_nothing_and_refuses_nothing`, which is not.
+
+    /// Run-length encodes a dense voxel array the way the server's `world.Encode` does.
+    fn encode_runs(blocks: &[BlockId]) -> Vec<u16> {
+        let mut pairs = Vec::new();
+        let mut current = blocks[0];
+        let mut run: u16 = 1;
+        for block in &blocks[1..] {
+            if *block == current && run < u16::MAX {
+                run += 1;
+                continue;
+            }
+            pairs.extend_from_slice(&[current, run]);
+            current = *block;
+            run = 1;
+        }
+        pairs.extend_from_slice(&[current, run]);
+        pairs
+    }
+
+    /// The wire's index order: x fastest, then z, then y.
+    fn at(size: usize, x: usize, y: usize, z: usize) -> usize {
+        (y * size + z) * size + x
+    }
+
+    /// A chunk shaped like ground a player walks over: a ridged stone surface under a
+    /// grass skin, with air above it.
+    ///
+    /// Deliberately not flat and deliberately not solid. A solid chunk is two `u16` on
+    /// the wire and six quads on screen, and measuring against one would understate
+    /// every cost here by an order of magnitude.
+    fn terrain_runs(cx: i32, cz: i32) -> Vec<u16> {
+        let size = usize::from(SIZE);
+        let mut blocks = vec![palette::AIR; size * size * size];
+        for z in 0..size {
+            for x in 0..size {
+                let wx = i64::from(cx) * size as i64 + x as i64;
+                let wz = i64::from(cz) * size as i64 + z as i64;
+                let height = 12
+                    + (wx * 7 + wz * 13).rem_euclid(9) as usize
+                    + (wx * wz).rem_euclid(3) as usize;
+                for y in 0..height {
+                    blocks[at(size, x, y, z)] = palette::STONE;
+                }
+                blocks[at(size, x, height - 1, z)] = palette::GRASS;
+            }
+        }
+        encode_runs(&blocks)
+    }
+
+    /// One column of the streamed volume: bedrock below, one surface chunk, sky above.
+    fn column(cx: i32, cz: i32, radius: i32) -> Vec<(ChunkCoord, Vec<u16>)> {
+        (-radius..=radius)
+            .map(|cy| {
+                let runs = match cy {
+                    ..=-1 => solid_chunk(palette::STONE),
+                    0 => terrain_runs(cx, cz),
+                    _ => solid_chunk(palette::AIR),
+                };
+                (coord(cx, cy, cz), runs)
+            })
+            .collect()
+    }
+
+    /// The chunks one chunk-boundary crossing streams at the server's default view
+    /// distance of 3 — a 7 x 7 slab, 49 chunks, in `View.MoveTo`'s order.
+    fn boundary_slab() -> Vec<(ChunkCoord, Vec<u16>)> {
+        (-3..=3).flat_map(|cz| column(0, cz, 3)).collect()
+    }
+
+    /// The chunks a join streams at the same view distance: the whole 7 x 7 x 7 volume.
+    fn join_volume() -> Vec<(ChunkCoord, Vec<u16>)> {
+        (-3..=3)
+            .flat_map(|cx| (-3..=3).flat_map(move |cz| column(cx, cz, 3)))
+            .collect()
+    }
+
+    /// Where a frame went, stamped around the three world systems.
+    #[derive(Resource, Default)]
+    struct Phases {
+        mark: Option<Instant>,
+        ingest: Duration,
+        jobs: Duration,
+        apply: Duration,
+    }
+
+    fn phase_begin(mut phases: ResMut<Phases>) {
+        phases.mark = Some(Instant::now());
+    }
+
+    fn phase_ingest_end(mut phases: ResMut<Phases>) {
+        phases.ingest = phases.mark.take().unwrap_or_else(Instant::now).elapsed();
+        phases.mark = Some(Instant::now());
+    }
+
+    fn phase_jobs_end(mut phases: ResMut<Phases>) {
+        phases.jobs = phases.mark.take().unwrap_or_else(Instant::now).elapsed();
+        phases.mark = Some(Instant::now());
+    }
+
+    fn phase_apply_end(mut phases: ResMut<Phases>) {
+        phases.apply = phases.mark.take().unwrap_or_else(Instant::now).elapsed();
+    }
+
+    /// [`world_with_budget`] with a stopwatch around each of the three world systems.
+    fn instrumented_world(budget: DecodeTimeBudget) -> App {
+        let mut app = world_with_budget(budget);
+        app.init_resource::<Phases>().add_systems(
+            Update,
+            (
+                phase_begin.before(crate::world::ingest_world_updates),
+                phase_ingest_end
+                    .after(crate::world::ingest_world_updates)
+                    .before(start_mesh_jobs),
+                phase_jobs_end
+                    .after(start_mesh_jobs)
+                    .before(apply_finished_meshes),
+                phase_apply_end.after(apply_finished_meshes),
+            ),
+        );
+        app
+    }
+
+    /// The two bounds each burst is drained under: the count on its own, which is what
+    /// `MAX_DECODES_PER_FRAME` was before #629, and the shipping pair.
+    const COMPARED: [(&str, DecodeTimeBudget); 2] = [
+        ("count only", DecodeTimeBudget(Duration::MAX)),
+        ("metered", DecodeTimeBudget(MAX_DECODE_TIME_PER_FRAME)),
+    ];
+
+    fn ms(elapsed: Duration) -> f64 {
+        elapsed.as_secs_f64() * 1000.0
+    }
+
+    /// Streams `burst` in one frame under `budget`, reports what every frame cost, and
+    /// returns what the drain left behind.
+    fn drain_burst(
+        what: &str,
+        budget: DecodeTimeBudget,
+        burst: Vec<(ChunkCoord, Vec<u16>)>,
+    ) -> MeshStats {
+        let chunks = burst.len();
+        let mut app = instrumented_world(budget);
+        app.update();
+
+        for (coord, runs) in burst {
+            push(&mut app, WorldUpdate::Chunk { coord, runs });
+        }
+
+        let deadline = Instant::now() + PATIENCE;
+        let (mut frame, mut worst, mut spent) = (0usize, Duration::ZERO, Duration::ZERO);
+        let mut worst_ingest = Duration::ZERO;
+        // The frame the last payload became voxels on. This is the half of "how long
+        // until the world is there" that the expansion budget can move; the frames after
+        // it belong to the mesher and the task pool.
+        let mut expanded_on = None;
+        loop {
+            let began = Instant::now();
+            app.update();
+            let total = began.elapsed();
+            let phases = app.world().resource::<Phases>();
+            let (ingest, jobs, apply) = (phases.ingest, phases.jobs, phases.apply);
+            let seen = stats(&app);
+            frame += 1;
+            spent += total;
+            worst = worst.max(total);
+            worst_ingest = worst_ingest.max(ingest);
+            if expanded_on.is_none() && seen.decode_backlog == 0 && seen.chunks_held == chunks {
+                expanded_on = Some(frame);
+            }
+            println!(
+                "  frame {frame:>3}: total {:>8.3} | ingest {:>7.3} | jobs {:>6.3} | \
+                 apply {:>6.3} | backlog {:>4} queued {:>3} in flight {:>3} meshed {:>3}",
+                ms(total),
+                ms(ingest),
+                ms(jobs),
+                ms(apply),
+                seen.decode_backlog,
+                seen.queued,
+                seen.in_flight,
+                seen.meshed_chunks,
+            );
+            if !is_busy(&seen) && frame > 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "timed out: {seen:?}");
+            // The task pool needs a moment, and a spin would starve it on one core.
+            // Outside the stopwatch: only `app.update()` is being timed.
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let seen = stats(&app);
+        println!(
+            "{what}: {chunks} chunks, all expanded by frame {:?}, settled after {frame} \
+             frames, {:.1} ms of main schedule in all\n  worst frame {:.3} ms (worst \
+             ingest {:.3} ms); {} held, {} meshed, {} quads, refused {}, evicted {}",
+            expanded_on,
+            ms(spent),
+            ms(worst),
+            ms(worst_ingest),
+            seen.chunks_held,
+            seen.meshed_chunks,
+            seen.total_quads,
+            seen.decode_refused,
+            seen.decode_evicted,
+        );
+
+        // The acceptance criteria, checked rather than printed.
+        assert_eq!(
+            seen.chunks_held, chunks,
+            "{what}: {chunks} chunks streamed, {} held",
+            seen.chunks_held
+        );
+        assert_eq!(seen.decode_refused, 0, "{what}: updates were refused");
+        assert_eq!(seen.decode_evicted, 0, "{what}: chunks were evicted");
+        assert!(seen.total_quads > 0, "{what}: the burst meshed nothing");
+        seen
+    }
+
+    /// The bound may change how long a burst takes to drain; it may not change what the
+    /// burst leaves behind. Asserted across the runs in [`COMPARED`] rather than left to
+    /// whoever reads the printed lines.
+    fn same_world(outcomes: &[MeshStats]) {
+        // `windows(2)` over one outcome compares nothing and passes anyway.
+        assert_eq!(outcomes.len(), COMPARED.len(), "a bound went unmeasured");
+        for pair in outcomes.windows(2) {
+            assert_eq!(
+                pair[0].chunks_held, pair[1].chunks_held,
+                "chunks held differ"
+            );
+            assert_eq!(
+                pair[0].meshed_chunks, pair[1].meshed_chunks,
+                "meshed chunks differ"
+            );
+            assert_eq!(
+                pair[0].total_quads, pair[1].total_quads,
+                "quad totals differ"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_what_one_frames_streaming_budget_costs() {
+        // Half one: what the two halves of an expansion actually cost, on a bare store
+        // with no ECS around it. `from_runs` is what the budget's own documentation
+        // reasons about; `ChunkStore::insert` is the neighbour-staleness scan that
+        // follows it, and the point of separating them is that only one of the two was
+        // ever in the argument for the number.
+        let slab = boundary_slab();
+        println!("a boundary crossing is {} chunks", slab.len());
+        println!(
+            "  a surface chunk is {} runs on the wire; a solid or empty one is 1",
+            terrain_runs(0, 0).len() / 2
+        );
+
+        // Warm the allocator so the first chunk is not measured cold.
+        for (_, runs) in &slab {
+            let _ = VoxelChunk::from_runs(runs, SIZE.into()).expect("valid");
+        }
+
+        let began = Instant::now();
+        let decoded: Vec<_> = slab
+            .iter()
+            .map(|(coord, runs)| {
+                (
+                    *coord,
+                    VoxelChunk::from_runs(runs, SIZE.into()).expect("valid"),
+                )
+            })
+            .collect();
+        let expanding = began.elapsed();
+
+        let mut store = ChunkStore::default();
+        let began = Instant::now();
+        for (coord, chunk) in decoded {
+            store.insert(coord, chunk);
+        }
+        let storing = began.elapsed();
+
+        println!(
+            "  VoxelChunk::from_runs x{}: {:.3} ms ({:.4} ms each)",
+            slab.len(),
+            ms(expanding),
+            ms(expanding) / slab.len() as f64
+        );
+        println!(
+            "  ChunkStore::insert   x{}: {:.3} ms ({:.4} ms each)",
+            slab.len(),
+            ms(storing),
+            ms(storing) / slab.len() as f64
+        );
+
+        // Half two: the same crossing through the real pipeline, frame by frame, under
+        // each bound in turn. Both runs are in one process on one build, which is the
+        // whole point — a before and an after taken from two `cargo test` invocations
+        // minutes apart compare the machine's mood as much as the code.
+        let mut outcomes = Vec::new();
+        for (label, budget) in COMPARED {
+            outcomes.push(drain_burst(
+                &format!("one boundary crossing, {label}"),
+                budget,
+                boundary_slab(),
+            ));
+        }
+        same_world(&outcomes);
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_the_join_burst() {
+        // The case the per-frame budgets were set for, and the one the fix must not
+        // make materially slower: the whole 7 x 7 x 7 view volume in one burst.
+        let mut outcomes = Vec::new();
+        for (label, budget) in COMPARED {
+            outcomes.push(drain_burst(
+                &format!("a join, {label}"),
+                budget,
+                join_volume(),
+            ));
+        }
+        same_world(&outcomes);
     }
 }
