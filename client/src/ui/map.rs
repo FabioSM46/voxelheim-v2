@@ -261,23 +261,36 @@ impl Default for MapScreen {
 }
 
 impl MapScreen {
-    /// Puts the map up, looking at `centre`.
+    /// Puts the map up, looking at `centre`. The rung it was closed at stays.
     ///
-    /// The scale and the zoom go back to their defaults with it: a map that reopened at
-    /// whatever the last look happened to leave behind would answer *where am I* with a
-    /// view of somewhere else.
+    /// The centre is replaced and the look is not, because only one of the two goes stale
+    /// while the map is down. *Where am I* is answered by the centre, and the player has
+    /// been walking; *how closely was I looking* is answered by the scale and the zoom,
+    /// and nothing touched the wheel. Resetting the rung made every reopen cost back the
+    /// three wheel steps that found the valley the map was closed over.
+    ///
+    /// The rung starts over with the session rather than with the window — see
+    /// [`MapScreen::reset_zoom`], called from [`follow_input_mode`] where the rest of the
+    /// per-session map state is dropped. So does the viewport, which is a measurement of
+    /// this window and survives a close for the reason [`measure_the_viewport`] gives.
     fn open(&mut self, centre: IVec2) {
         let clamp = |value: i32| value.clamp(-WORLD_EXTENT, WORLD_EXTENT);
-        *self = Self {
-            open: true,
-            centre: IVec2::new(clamp(centre.x), clamp(centre.y)),
-            ..Self::default()
-        };
+        self.open = true;
+        self.centre = IVec2::new(clamp(centre.x), clamp(centre.y));
     }
 
     /// Takes the map down. The cache outlives it — see [`MapTiles`].
     fn close(&mut self) {
         self.open = false;
+    }
+
+    /// Puts the look back on [`DEFAULT_RUNG`], the rung every first open is at.
+    ///
+    /// A new sign-in is a new look at the world, so the rung is per-session state and is
+    /// dropped where the tiles and the marks are. In memory only: a value that resets on
+    /// every sign-in has no business in the settings file.
+    fn reset_zoom(&mut self) {
+        (self.scale, self.zoom) = ZOOM_LADDER[DEFAULT_RUNG];
     }
 
     /// Whether the map window is up.
@@ -2367,6 +2380,11 @@ fn follow_input_mode(
         if !markers.0.is_empty() {
             markers.0.clear();
         }
+        // The rung outlives a close on purpose and must not outlive the session: it is the
+        // same per-session rule as the two above, at the same one event.
+        if (screen.scale, screen.zoom) != ZOOM_LADDER[DEFAULT_RUNG] {
+            screen.reset_zoom();
+        }
         return;
     }
 
@@ -2583,6 +2601,76 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
         app.update();
         assert!(!screen_of(&mut app).is_open());
+    }
+
+    #[test]
+    fn the_map_reopens_at_the_zoom_it_was_closed_at() {
+        let (mut app, _frames) = app();
+        app.world_mut().resource_mut::<PlayerStats>().position = Some(Vec3::new(0.0, 70.0, 0.0));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+
+        {
+            let mut screen = app.world_mut().resource_mut::<MapScreen>();
+            screen.zoom_by(2, Vec2::ZERO);
+            // The measurement a real layout pass would have made. It belongs to the
+            // window rather than to one opening of it, so it survives the close too.
+            screen.viewport = UVec2::new(640, 480);
+        }
+        let closed = screen_of(&mut app);
+        assert_eq!(closed.rung(), DEFAULT_RUNG + 2, "two rungs in");
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert!(!screen_of(&mut app).is_open());
+
+        // The player walked while the map was down: the centre is what went stale.
+        app.world_mut().resource_mut::<PlayerStats>().position =
+            Some(Vec3::new(300.5, 70.0, -12.25));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+
+        let reopened = screen_of(&mut app);
+        assert!(reopened.is_open());
+        assert_eq!(
+            reopened.centre,
+            IVec2::new(300, -13),
+            "recentred on the player"
+        );
+        assert_eq!(
+            (reopened.scale, reopened.zoom),
+            (closed.scale, closed.zoom),
+            "the rung is the one the map was closed at"
+        );
+        assert_eq!(
+            reopened.viewport,
+            UVec2::new(640, 480),
+            "the size it will reopen at is not thrown away"
+        );
+    }
+
+    #[test]
+    fn a_new_session_opens_the_map_at_the_default_zoom() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        app.world_mut()
+            .resource_mut::<MapScreen>()
+            .zoom_by(2, Vec2::ZERO);
+        assert_ne!(screen_of(&mut app).rung(), DEFAULT_RUNG);
+
+        app.world_mut().remove_resource::<Session>();
+        app.update();
+        assert!(!screen_of(&mut app).is_open());
+
+        app.world_mut().insert_resource(session());
+        app.update();
+
+        let reopened = screen_of(&mut app);
+        assert!(reopened.is_open(), "the mode is still Map");
+        assert_eq!(reopened.rung(), DEFAULT_RUNG, "a new session is a new look");
+        assert_eq!(reopened.scale, MapScale::S4);
+        assert_eq!(reopened.zoom, 2);
     }
 
     #[test]
