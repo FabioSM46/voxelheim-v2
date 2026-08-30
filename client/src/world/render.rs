@@ -85,6 +85,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 
+use super::water_material::{FlowingWater, FlowingWaterPlugin};
 use super::{ChunkChange, ChunkMesh, ChunkStore, DecodeQueue, SurfaceMesh, VoxelChunk, mesh_chunk};
 use crate::net::{ChunkCoord, Session};
 
@@ -110,6 +111,7 @@ impl Plugin for ChunkRenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MeshJobs>()
             .init_resource::<MeshStats>()
+            .add_plugins(FlowingWaterPlugin)
             .add_systems(Startup, create_materials)
             .add_systems(
                 Update,
@@ -142,8 +144,13 @@ struct TerrainMaterial(Handle<StandardMaterial>);
 /// same way. Its base colour is white for the same reason [`TerrainMaterial`]'s is —
 /// `palette::linear_rgba` owns what water looks like, alpha included, and a tint here
 /// would multiply into itself.
+///
+/// A [`FlowingWater`] rather than a bare `StandardMaterial` since #598: the base half
+/// is the same material this always was, and the extension beside it slides a ripple
+/// along the flow the mesher wrote into the vertex attributes. What the base half
+/// answers for — colour, alpha, roughness, the blending phase — did not move.
 #[derive(Resource, Debug)]
-struct WaterMaterial(Handle<StandardMaterial>);
+struct WaterMaterial(Handle<FlowingWater>);
 
 /// The two materials a chunk is drawn with, as one system parameter.
 ///
@@ -258,7 +265,11 @@ struct MeshJobs {
     meshed: HashMap<ChunkCoord, MeshedChunk>,
 }
 
-fn create_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn create_materials(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut water: ResMut<Assets<FlowingWater>>,
+) {
     commands.insert_resource(TerrainMaterial(materials.add(StandardMaterial {
         // White, and that is load-bearing: the shader multiplies the material's
         // base colour by the vertex colour, so anything else here tints the whole
@@ -269,20 +280,25 @@ fn create_materials(mut commands: Commands, mut materials: ResMut<Assets<Standar
         ..default()
     })));
 
-    commands.insert_resource(WaterMaterial(materials.add(StandardMaterial {
-        // White for the reason above, and it matters more here: the vertex colour carries
-        // water's alpha as well as its blue, so a tinted base colour would fade the water
-        // by `WATER_ALPHA` twice over.
-        base_color: Color::WHITE,
-        // The whole of what makes this a second material. `Blend` puts the mesh in the
-        // transparent phase, where Bevy sorts entities back to front — which is why the
-        // water half has to be its own entity rather than more quads in the opaque mesh.
-        alpha_mode: AlphaMode::Blend,
-        // The one wet surface in this world; everything else is rock, earth or snow at
-        // 0.95. Low enough for a highlight, which is most of what tells a still lake from
-        // a hole in the ground.
-        perceptual_roughness: 0.15,
-        ..default()
+    commands.insert_resource(WaterMaterial(water.add(FlowingWater {
+        base: StandardMaterial {
+            // White for the reason above, and it matters more here: the vertex colour
+            // carries water's alpha as well as its blue, so a tinted base colour would
+            // fade the water by `WATER_ALPHA` twice over.
+            base_color: Color::WHITE,
+            // The whole of what makes this a second material. `Blend` puts the mesh in
+            // the transparent phase, where Bevy sorts entities back to front — which is
+            // why the water half has to be its own entity rather than more quads in the
+            // opaque mesh.
+            alpha_mode: AlphaMode::Blend,
+            // The one wet surface in this world; everything else is rock, earth or snow
+            // at 0.95. Low enough for a highlight, which is most of what tells a still
+            // lake from a hole in the ground.
+            perceptual_roughness: 0.15,
+            ..default()
+        },
+        // Zero, and a system replaces it every frame from `Res<Time>`.
+        extension: default(),
     })));
 }
 
@@ -601,7 +617,7 @@ fn to_bevy_mesh(mesh: SurfaceMesh) -> Mesh {
     // attribute: `MeshPipeline` already forwards UV_0 and UV_1 to the fragment stage
     // under `VERTEX_UVS_A` / `VERTEX_UVS_B`, so this needs no vertex shader and no
     // layout specialization of ours. See `WaterFlow` in `mesher.rs` for what is in
-    // them; the shader that reads them is #598's second half.
+    // them, and `world/flowing_water.wgsl` for what reads them.
     if !mesh.flow.is_empty() {
         built = built
             .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, mesh.flow)
@@ -828,9 +844,9 @@ mod tests {
     }
 
     /// Every material handle hanging off a chunk entity's children.
-    fn water_child_materials(app: &mut App) -> Vec<Handle<StandardMaterial>> {
+    fn water_child_materials(app: &mut App) -> Vec<Handle<FlowingWater>> {
         let world = app.world_mut();
-        let mut query = world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<ChildOf>>();
+        let mut query = world.query_filtered::<&MeshMaterial3d<FlowingWater>, With<ChildOf>>();
         query
             .iter(world)
             .map(|material| material.0.clone())
@@ -861,18 +877,25 @@ mod tests {
 
         let water = app.world().resource::<WaterMaterial>().0.clone();
         let terrain = app.world().resource::<TerrainMaterial>().0.clone();
-        assert_ne!(water, terrain, "two materials, not one handle twice");
         assert_eq!(water_child_materials(&mut app), vec![water.clone()]);
 
         // And the material really is the blending one, which is the property that makes
-        // the child necessary at all.
-        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        // the child necessary at all. It lives on the extended material's **base** half
+        // since #598, together with everything else that decides what water looks like:
+        // the extension animates the brightness and answers for nothing here.
+        let base = app
+            .world()
+            .resource::<Assets<FlowingWater>>()
+            .get(&water)
+            .expect("water material")
+            .base
+            .clone();
+        assert_eq!(base.alpha_mode, AlphaMode::Blend);
+        assert_eq!(base.base_color, Color::WHITE);
+        assert_eq!(base.perceptual_roughness, 0.15);
         assert_eq!(
-            materials.get(&water).expect("water material").alpha_mode,
-            AlphaMode::Blend
-        );
-        assert_eq!(
-            materials
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
                 .get(&terrain)
                 .expect("terrain material")
                 .alpha_mode,
@@ -1008,8 +1031,8 @@ mod tests {
     fn only_the_water_mesh_asset_carries_the_flow_attributes() {
         // The other half of `mesher.rs`'s all-or-nothing invariant, on the assets the
         // renderer actually builds: the water child gets UV_0 and UV_1 — the flow
-        // vector and the falling bit — and the opaque mesh gets neither, so an opaque
-        // vertex is four floats lighter than a water one.
+        // vector and the falling bit the shader reads — and the opaque mesh gets
+        // neither, so an opaque vertex is four floats lighter than a water one.
         let mut app = headless_world();
         push(
             &mut app,
