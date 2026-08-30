@@ -71,7 +71,7 @@ func assertCapital(t *testing.T, seed int64) {
 		t.Fatalf("seed %#x: the capital's cell holds a %v", seed, s.Kind)
 	}
 
-	distance := isqrt(squaredDistance(spawnColumnX, spawnColumnZ, s.CentreX, s.CentreZ))
+	distance := isqrt(squaredDistance(originColumnX, originColumnZ, s.CentreX, s.CentreZ))
 	if distance < capitalMinSpawnDistance || distance > capitalMaxSpawnDistance {
 		t.Errorf("seed %#x: the capital is %d blocks from the origin column, outside [%d, %d]",
 			seed, distance, capitalMinSpawnDistance, capitalMaxSpawnDistance)
@@ -88,8 +88,8 @@ func assertCapital(t *testing.T, seed int64) {
 	}
 }
 
-// TestOnlyTheSpawnCellHoldsACapital pins the other half of "there is one capital".
-func TestOnlyTheSpawnCellHoldsACapital(t *testing.T) {
+// TestOnlyTheOriginCellHoldsACapital pins the other half of "there is one capital".
+func TestOnlyTheOriginCellHoldsACapital(t *testing.T) {
 	t.Parallel()
 
 	villages := 0
@@ -99,8 +99,7 @@ func TestOnlyTheSpawnCellHoldsACapital(t *testing.T) {
 			if !ok {
 				continue
 			}
-			isSpawnCell := cx == settlementCellOf(spawnColumnX) && cz == settlementCellOf(spawnColumnZ)
-			if (s.Kind == SettlementCapital) != isSpawnCell {
+			if (s.Kind == SettlementCapital) != isCapitalCell(cx, cz) {
 				t.Fatalf("cell (%d, %d) holds a %v", cx, cz, s.Kind)
 			}
 			if s.Kind == SettlementVillage {
@@ -109,7 +108,7 @@ func TestOnlyTheSpawnCellHoldsACapital(t *testing.T) {
 		}
 	}
 	if villages == 0 {
-		t.Fatal("eighty cells around spawn hold no village at all; the density rule is not being exercised")
+		t.Fatal("eighty cells around the origin hold no village at all; the density rule is not being exercised")
 	}
 }
 
@@ -382,7 +381,7 @@ func TestVillagesAreAboutOneCellInThree(t *testing.T) {
 func TestTheCapitalUsesALaterOffsetWhenTheFirstIsRefused(t *testing.T) {
 	t.Parallel()
 
-	cellX, cellZ := settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ)
+	cellX, cellZ := settlementCellOf(originColumnX), settlementCellOf(originColumnZ)
 
 	late := 0
 	for seed := int64(1); seed <= 200; seed++ {
@@ -1044,7 +1043,7 @@ func TestEveryAnchorIsAirOverSolidGround(t *testing.T) {
 	world := newGeneratedWorld(settlementTestSeed)
 	kinds := map[AnchorKind]int{}
 
-	for _, s := range SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 3) {
+	for _, s := range SettlementsNear(settlementTestSeed, originColumnX, originColumnZ, 3) {
 		anchors := s.Anchors()
 		if len(anchors) == 0 {
 			t.Fatalf("the %v at (%d, %d) offers no slot", s.Kind, s.CentreX, s.CentreZ)
@@ -1110,7 +1109,7 @@ func TestABuildingIsBuiltFromItsDrawingWhicheverChunkAsks(t *testing.T) {
 
 	horizontal, vertical, checked := 0, 0, 0
 
-	for _, s := range SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 3) {
+	for _, s := range SettlementsNear(settlementTestSeed, originColumnX, originColumnZ, 3) {
 		for _, b := range s.Buildings {
 			schematic := SchematicFor(b.Kind)
 			w, d := rotatedFootprint(schematic, b.Facing)
@@ -1233,8 +1232,8 @@ func TestSettlementsNearIsOrderedAndNearestAgreesWithIt(t *testing.T) {
 	// vacuous anywhere the own cell is empty.** Both sides are nil there, and nil
 	// equals nil however the bounds behave; the spawn cell is the one cell in the
 	// world guaranteed to hold something.
-	if got, want := SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, -1),
-		SettlementsNear(settlementTestSeed, spawnColumnX, spawnColumnZ, 0); len(want) == 0 {
+	if got, want := SettlementsNear(settlementTestSeed, originColumnX, originColumnZ, -1),
+		SettlementsNear(settlementTestSeed, originColumnX, originColumnZ, 0); len(want) == 0 {
 		t.Fatal("the spawn cell holds no settlement, so the negative-count clamp is not being checked")
 	} else if len(got) != len(want) {
 		t.Fatalf("a search of -1 cells at spawn returned %d settlements and a search of 0 returned %d", len(got), len(want))
@@ -1675,7 +1674,7 @@ func TestBuildingsStandClearOfEachOtherAndInsideThePlateau(t *testing.T) {
 		}
 	}
 	for seed := int64(1); seed <= 40; seed++ {
-		plans = append(plans, plan{seed, settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ)})
+		plans = append(plans, plan{seed, settlementCellOf(originColumnX), settlementCellOf(originColumnZ)})
 	}
 
 	for _, p := range plans {
@@ -1804,7 +1803,7 @@ func TestASettlementIsBuiltOutOfTheThreeBlocksItsIssueAppended(t *testing.T) {
 // actually near, and because a plateau *removes* work: no tree roots inside a radius and
 // nothing is carved in the top six blocks of it.
 func BenchmarkGenerateInACapital(b *testing.B) {
-	s, ok := SettlementAt(settlementTestSeed, settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ))
+	s, ok := SettlementAt(settlementTestSeed, settlementCellOf(originColumnX), settlementCellOf(originColumnZ))
 	if !ok {
 		b.Fatal("no capital")
 	}
