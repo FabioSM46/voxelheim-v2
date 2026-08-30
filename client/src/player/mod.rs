@@ -31,6 +31,7 @@
 //! | ------ | ---- |
 //! | `mod.rs` | input sampling, the send cadence, the bodies the snapshots drive |
 //! | `ambience.rs` | the cosmetic ground look read from loaded voxels around the eye |
+//! | `birds.rs` | the ambient birds: the species table, the flight paths and the flap |
 //! | `interpolate.rs` | the two-snapshot buffer and the interpolation — pure, no Bevy world |
 //! | `drops.rs` | authoritative drop spawn/despawn and cosmetic cube motion |
 //! | `hands.rs` | the camera-space held item and its cosmetic swing |
@@ -47,6 +48,7 @@
 
 mod ambience;
 mod appearance;
+mod birds;
 mod camera;
 mod combat;
 mod constants;
@@ -300,6 +302,7 @@ impl Plugin for PlayerPlugin {
                     structures::create_visuals,
                     sky::spawn_sun,
                     precipitation::create_visuals,
+                    birds::create_visuals,
                 ),
             )
             .add_systems(
@@ -389,6 +392,18 @@ impl Plugin for PlayerPlugin {
             // A look is read only after the camera owns this frame's eye, beside the
             // sky and the other presentation systems that consume no gameplay rule.
             .add_systems(Update, ambience::sample_the_ground.after(camera::AimCamera))
+            // After the camera, because the flock is anchored to the eye, and after the
+            // ground sample, because which species flies is the look this frame settled on.
+            // The pair is chained: `keep_the_flock` decides what should exist and
+            // `fly_the_flock` moves what does, and a frame between the two would draw a
+            // newborn bird at the origin.
+            .add_systems(
+                Update,
+                (birds::keep_the_flock, birds::fly_the_flock)
+                    .chain()
+                    .after(camera::AimCamera)
+                    .after(ambience::sample_the_ground),
+            )
             // After the camera plugin, because the walls follow the eye's coarse height
             // step and WardBoundaryPlugin orders its rebuild after AimCamera.
             .add_plugins(wards::WardBoundaryPlugin)
