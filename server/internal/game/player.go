@@ -1605,9 +1605,25 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// [Terrain.Fluid], where that direction is argued.
 	inWater := overlapsFluid(terrain, playerBox(p.pos))
 
-	// Horizontal velocity is *set* from the intent, not accumulated into. There is no
-	// momentum in this issue, so releasing the controls stops the player on the same
-	// tick and there is no acceleration curve to exploit.
+	// Which way the water is going, asked once and only in water: a unit horizontal
+	// direction and a flag saying this voxel is a fall. **The server decides this**,
+	// because a current that moves a body is a gameplay outcome like any other; a
+	// client is free to mirror [FlowDirection] to animate the surface, and the drift
+	// it renders is still the one this tick computed.
+	//
+	// One sample at the body's centre rather than a scan of the box. A box spanning a
+	// bank and a channel would otherwise need a rule for combining two answers, and
+	// the centre is the point every server-side rule that needs one already uses — see
+	// EditReach, which measures reach from the same place.
+	currentX, falling, currentZ := 0.0, 0.0, 0.0
+	if inWater {
+		cx, cy, cz := playerCentreVoxel(p.pos)
+		currentX, falling, currentZ = FlowDirection(terrain, cx, cy, cz)
+	}
+
+	// Horizontal velocity is *set* from the intent on land, not accumulated into:
+	// there is no momentum out of water, so releasing the controls stops the player on
+	// the same tick and there is no acceleration curve to exploit.
 	speed := WalkSpeed
 	if p.hunger == 0 {
 		speed *= StarvingSpeedScale
@@ -1624,8 +1640,33 @@ func (p *Player) step(dt float64, terrain Terrain) {
 		// a blizzard is worse than either, and SnowSpeedScale is where that is argued.
 		speed *= SnowSpeedScale
 	}
-	p.vel[0] = (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
-	p.vel[2] = (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
+	targetX := (forward[0]*p.current.moveZ + right[0]*p.current.moveX) * speed
+	targetZ := (forward[1]*p.current.moveZ + right[1]*p.current.moveX) * speed
+
+	if inWater {
+		// **The current is a target, not a force.** It is added to the swimmer's own
+		// target and the velocity eases toward the sum, so what it can ever contribute
+		// is CurrentSpeed and nothing accumulates across ticks — no accumulator is
+		// stored on the Player, and there is nothing to leave behind when the swimmer
+		// leaves the channel. Because CurrentSpeed is under SwimSpeed, full opposing
+		// intent still settles upstream at the difference: a river is fought, not won
+		// against instantly and not lost to.
+		//
+		// The ease is the same one the vertical has used since swimming arrived, and it
+		// is what stops a channel from being a wall of velocity: entering, leaving and
+		// turning inside a current all cost about a fifth of a second at
+		// SwimAcceleration rather than a single tick's snap. Its price is that
+		// horizontal water movement now has that much momentum, which is a change to
+		// swimming in still water too — deliberately, because the alternative is a rule
+		// that behaves differently depending on which voxel the body's centre happens
+		// to be sampling.
+		targetX += currentX * CurrentSpeed
+		targetZ += currentZ * CurrentSpeed
+		p.vel[0] = approach(p.vel[0], targetX, SwimAcceleration*dt)
+		p.vel[2] = approach(p.vel[2], targetZ, SwimAcceleration*dt)
+	} else {
+		p.vel[0], p.vel[2] = targetX, targetZ
+	}
 
 	// Whether a jump *happens* is the server's decision, and ground contact is the
 	// part of it a client cannot know. onGround is last tick's answer, which is the
@@ -1643,7 +1684,19 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	}
 
 	if inWater {
-		p.vel[1] = approach(p.vel[1], SwimSinkSpeed, SwimAcceleration*dt)
+		// A fall pulls harder than still water does, and it pulls with a target rather
+		// than with a force for the same reason the horizontal current does.
+		//
+		// **The jump intent wins outright.** Holding the rise leaves SwimSinkSpeed as
+		// the target, so the SwimRiseSpeed the switch above just set survives its first
+		// eased step and stays positive — a swimmer under a waterfall climbs out of it
+		// by swimming, rather than being pinned there while the fall and the rise
+		// average each other into nothing.
+		sink := SwimSinkSpeed
+		if falling < 0 && !p.current.jump {
+			sink = WaterfallSinkSpeed
+		}
+		p.vel[1] = approach(p.vel[1], sink, SwimAcceleration*dt)
 	} else {
 		p.vel[1] = max(p.vel[1]-Gravity*dt, -TerminalFallSpeed)
 	}
