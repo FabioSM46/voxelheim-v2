@@ -457,6 +457,7 @@ func TestPlantSpeciesShareSettlementAndSeaLevelRefusals(t *testing.T) {
 	submerged.surface = seaLevel - 1
 	submerged.standingWater = true
 	submerged.waterSurface = seaLevel
+	submerged.waterBlock = Water
 	if species, _, ok := plantAtColumnIn(table, seed, x, z, submerged); ok || species != nil {
 		t.Fatalf("submerged surface selected (%v, %t), want no plant", species, ok)
 	}
@@ -465,6 +466,7 @@ func TestPlantSpeciesShareSettlementAndSeaLevelRefusals(t *testing.T) {
 	highRiver.river = true
 	highRiver.standingWater = true
 	highRiver.waterSurface = col.surface + riverBedDrop
+	highRiver.waterBlock = WaterCurrentXPos
 	if species, _, ok := plantAtColumnIn(table, seed, x, z, highRiver); ok || species != nil {
 		t.Fatalf("a channel above the sea line selected (%v, %t), want no plant", species, ok)
 	}
