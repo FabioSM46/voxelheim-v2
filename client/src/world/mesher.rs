@@ -18,11 +18,13 @@
 //! Interior faces vanish for free: a plane with opaque voxels on both sides
 //! contributes nothing to the mask.
 //!
-//! ## Two masks, two meshes
+//! ## Two masks, three meshes
 //!
-//! The sweep fills two masks per plane from one pair of samples and produces a
-//! [`ChunkMesh`] holding two [`SurfaceMesh`]es: the opaque surface and the water
-//! surface. The reason is on [`ChunkMesh`] itself — blending is order-dependent and
+//! The sweep fills two masks per plane from one pair of samples and produces the first
+//! two of the [`ChunkMesh`]'s three [`SurfaceMesh`]es: the opaque surface and the water
+//! surface. The third — cover — is not swept at all, because a flower has no coplanar
+//! face to merge with its neighbour; [`build_cover`] walks the voxels once and emits a
+//! stem and a head for each. The reason each is its own mesh is on [`ChunkMesh`] itself — blending is order-dependent and
 //! Bevy sorts per entity, so the two have to be separate draws. The face rules are
 //! on [`build_masks`]; the greedy merge below is shared and knows about neither.
 //!
@@ -218,20 +220,52 @@ pub struct ChunkMesh {
     /// Water against transparent non-water voxels, plus the exposed skirt between
     /// unequal water levels. Equal water and water against solid blocks stay hidden.
     pub water: SurfaceMesh,
+    /// Every cover voxel's stem and head, from [`build_cover`].
+    ///
+    /// **The third surface, and it is not produced by the sweep at all.** The sweep
+    /// exists to merge coplanar faces of adjacent voxels, and a flower has no coplanar
+    /// faces to merge: its geometry is a cross and a small cube inside a voxel that is
+    /// otherwise empty. Two flowers side by side are two flowers, so there is nothing a
+    /// mask could join and every reason not to pay for a third one per plane.
+    ///
+    /// It is its own half rather than more quads in [`Self::opaque`] because its
+    /// material differs: a stem is a plane, so it is seen from both sides and is drawn
+    /// with no back-face culling. That is a pipeline, and a pipeline is an entity.
+    pub cover: SurfaceMesh,
 }
 
 impl ChunkMesh {
-    /// How many merged quads the chunk holds across both halves.
+    /// How many merged quads the chunk holds across all three halves.
     pub fn quad_count(&self) -> usize {
-        self.opaque.quad_count() + self.water.quad_count()
+        self.opaque.quad_count() + self.water.quad_count() + self.cover.quad_count()
     }
 
-    /// Whether there is anything at all to draw. Both halves empty, which is the
+    /// Whether there is anything at all to draw. Every half empty, which is the
     /// all-air chunk and the wholly-buried one.
     pub fn is_empty(&self) -> bool {
-        self.opaque.is_empty() && self.water.is_empty()
+        self.opaque.is_empty() && self.water.is_empty() && self.cover.is_empty()
     }
 }
+
+/// How wide the two crossing blades of a cover stem are, in blocks.
+const COVER_STEM_WIDTH: f32 = 0.3;
+
+/// How tall a stem stands above the bottom of its voxel, in blocks.
+const COVER_STEM_HEIGHT: f32 = 0.5;
+
+/// The edge of the cube that sits on the stem, in blocks. It spans
+/// `[COVER_STEM_HEIGHT, COVER_STEM_HEIGHT + COVER_HEAD_SIZE]` vertically, so a flower
+/// occupies the lower three quarters of its voxel and never crosses into the next one.
+const COVER_HEAD_SIZE: f32 = 0.25;
+
+/// How many quads one cover voxel contributes: two stem blades and the head's six
+/// faces.
+///
+/// Test-only for the reason [`palette::PALETTE`] is: production code emits the quads
+/// rather than counting them, and a constant nothing reads is a claim nothing checks.
+/// Here it is read by the assertions that pin the geometry.
+#[cfg(test)]
+const QUADS_PER_COVER: usize = 8;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -390,7 +424,127 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
         }
     }
 
+    build_cover(&mut mesh.cover, chunk);
+
     mesh
+}
+
+/// Fills the cover half: one stem and one head per [`palette::is_cover`] voxel.
+///
+/// A whole pass over the chunk rather than a third mask, because there is nothing here
+/// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a
+/// flower's geometry is entirely inside its own voxel, which is why
+/// `ChunkStore::apply_block` needs no new remesh rule for one. Breaking a flower on a
+/// chunk's edge remeshes that chunk and nothing across the border.
+///
+/// The iteration order is y, then z, then x — fixed, like the sweep's, so the same
+/// voxels produce byte-identical buffers every time.
+fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
+    let size = chunk.size();
+    let stem = [
+        palette::STEM_LINEAR[0],
+        palette::STEM_LINEAR[1],
+        palette::STEM_LINEAR[2],
+        1.0,
+    ];
+
+    for y in 0..size {
+        for z in 0..size {
+            for x in 0..size {
+                let block = chunk.block([x, y, z]);
+                if !palette::is_cover(block) {
+                    continue;
+                }
+
+                let (x, y, z) = (x as f32, y as f32, z as f32);
+                // The middle of the voxel's floor: where the stem stands.
+                let base = [x + 0.5, y, z + 0.5];
+                let half = COVER_STEM_WIDTH / 2.0;
+                let top = y + COVER_STEM_HEIGHT;
+
+                // Two blades crossing on the voxel's vertical axis, each a single quad:
+                // the material draws both sides, so a second wound the other way would
+                // be a coincident copy fighting the depth buffer for nothing.
+                push_blade(mesh, base, half, top, 0, stem);
+                push_blade(mesh, base, half, top, 2, stem);
+
+                // The head, centred over the crossing. Its colour is the block's, from
+                // the one function that owns what an id looks like.
+                let head = COVER_HEAD_SIZE / 2.0;
+                push_box(
+                    mesh,
+                    [base[0] - head, top, base[2] - head],
+                    [base[0] + head, top + COVER_HEAD_SIZE, base[2] + head],
+                    palette::linear_rgba(block),
+                );
+            }
+        }
+    }
+}
+
+/// One vertical blade of a stem: a quad `2 * half` wide along `span`, rising from
+/// `base` to `top`, facing along the other horizontal axis.
+///
+/// `span` is 0 or 2, and `2 - span` is therefore the axis the blade faces. Wound
+/// through the same right-handed `(u, v, axis)` frame [`quad_corners`] uses, so the
+/// front is the side the named normal points at and the lighting agrees with it.
+fn push_blade(
+    mesh: &mut SurfaceMesh,
+    base: [f32; 3],
+    half: f32,
+    top: f32,
+    span: usize,
+    color: [f32; 4],
+) {
+    let facing = 2 - span;
+    let u = (facing + 1) % 3;
+
+    let mut origin = base;
+    origin[span] -= half;
+
+    let mut across = [0.0f32; 3];
+    across[span] = 2.0 * half;
+    let up = [0.0, top - base[1], 0.0];
+    // Whichever of u and v is the vertical axis takes the rise; the other takes the
+    // width. That is the whole of what differs between the two blades.
+    let (along_u, along_v) = if u == 1 { (up, across) } else { (across, up) };
+
+    let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+    let far = add(add(origin, along_u), along_v);
+    mesh.push_quad(
+        [origin, add(origin, along_u), far, add(origin, along_v)],
+        normal(facing, true),
+        color,
+        None,
+    );
+}
+
+/// The six faces of an axis-aligned box, wound the way [`quad_corners`] winds a merged
+/// quad and for the same reason: (u, v, axis) is right-handed, so walking
+/// `origin -> +u -> +u+v -> +v` is counter-clockwise seen from `+axis`.
+fn push_box(mesh: &mut SurfaceMesh, min: [f32; 3], max: [f32; 3], color: [f32; 4]) {
+    let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        let mut along_u = [0.0f32; 3];
+        along_u[u] = max[u] - min[u];
+        let mut along_v = [0.0f32; 3];
+        along_v[v] = max[v] - min[v];
+
+        for positive in [false, true] {
+            let mut origin = min;
+            origin[axis] = if positive { max[axis] } else { min[axis] };
+            let far = add(add(origin, along_u), along_v);
+            let corners = if positive {
+                [origin, add(origin, along_u), far, add(origin, along_v)]
+            } else {
+                [origin, add(origin, along_v), far, add(origin, along_u)]
+            };
+            mesh.push_quad(corners, normal(axis, positive), color, None);
+        }
+    }
 }
 
 /// Fills both masks with the faces on the plane at `axis = plane`.
@@ -2048,6 +2202,166 @@ mod tests {
             [0.0, 0.0],
             "a source across the border is skipped, and nothing else pushes"
         );
+    }
+
+    #[test]
+    fn one_flower_is_a_stem_and_a_head_in_the_cover_half_and_nothing_else() {
+        // #551's whole geometry, in the one chunk that isolates it. The grass keeps its
+        // top face because a flower is not opaque, so the opaque half is a solid chunk's
+        // six walls and not five; the water half never hears about cover at all.
+        let mut chunk = solid(SIZE, palette::GRASS);
+        chunk.set(4, 5, 6, palette::AIR);
+        let bare = super::mesh_chunk(&chunk, &alone());
+        chunk.set(4, 5, 6, palette::FLOWER_RED);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(
+            mesh.opaque, bare.opaque,
+            "a flower is see-through, so the opaque sweep must not notice it"
+        );
+        assert!(mesh.water.is_empty());
+        assert_eq!(mesh.cover.quad_count(), QUADS_PER_COVER);
+        assert_eq!(
+            mesh.quad_count(),
+            mesh.opaque.quad_count() + QUADS_PER_COVER
+        );
+        assert!(!mesh.is_empty());
+
+        // Two blades and six head faces, and the head is a closed box: one quad in each
+        // of the six directions.
+        let by_normal = quads_by_normal(&mesh.cover);
+        assert_eq!(
+            by_normal.get(&[1, 0, 0]),
+            Some(&2),
+            "+x head face and a blade"
+        );
+        assert_eq!(
+            by_normal.get(&[0, 0, 1]),
+            Some(&2),
+            "+z head face and a blade"
+        );
+        for direction in [[-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, -1]] {
+            assert_eq!(by_normal.get(&direction), Some(&1), "{direction:?}");
+        }
+
+        // The declared normal and the winding agree on every quad, which is how a
+        // face drawn inside-out is caught without a screen. `cull_mode: None` would
+        // hide the mistake in the picture and not in the lighting.
+        for quad in 0..mesh.cover.quad_count() {
+            let winding = winding_normal(&mesh.cover, quad);
+            let declared = mesh.cover.normals[quad * VERTICES_PER_QUAD];
+            let length =
+                (winding[0] * winding[0] + winding[1] * winding[1] + winding[2] * winding[2])
+                    .sqrt();
+            let unit = [
+                winding[0] / length,
+                winding[1] / length,
+                winding[2] / length,
+            ];
+            for axis in 0..3 {
+                assert!(
+                    (unit[axis] - declared[axis]).abs() < 1e-5,
+                    "cover quad {quad} is wound against its normal: {unit:?} vs {declared:?}"
+                );
+            }
+        }
+
+        // Everything stays inside the voxel it grew in, and nothing reaches its lid —
+        // which is what makes cover a per-voxel surface with no neighbour to consult.
+        assert_eq!(quad_extent(&mesh.cover, 0, 1).0, 5.0);
+        for quad in 0..mesh.cover.quad_count() {
+            for (axis, (low, high)) in [(0, (4.0, 5.0)), (1, (5.0, 5.75)), (2, (6.0, 7.0))] {
+                let (minimum, maximum) = quad_extent(&mesh.cover, quad, axis);
+                assert!(
+                    minimum >= low && maximum <= high,
+                    "cover quad {quad} leaves its voxel on axis {axis}: {minimum}..{maximum}"
+                );
+            }
+        }
+
+        // The cover half carries no flow, which is what keeps `SurfaceMesh`'s
+        // all-or-nothing invariant true for it and what keeps `to_bevy_mesh` from
+        // inserting a UV attribute nothing reads.
+        assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
+
+        // The head is the block's colour and the stem is not, which is the whole of what
+        // makes a flower read as a flower rather than as a coloured smear.
+        let stem = [
+            palette::STEM_LINEAR[0],
+            palette::STEM_LINEAR[1],
+            palette::STEM_LINEAR[2],
+            1.0,
+        ];
+        let head = palette::linear_rgba(palette::FLOWER_RED);
+        assert_ne!(stem, head);
+        let mut heads = 0;
+        for quad in 0..mesh.cover.quad_count() {
+            let colour = mesh.cover.colors[quad * VERTICES_PER_QUAD];
+            assert!(colour == stem || colour == head, "quad {quad}: {colour:?}");
+            heads += usize::from(colour == head);
+        }
+        assert_eq!(heads, 6, "the head is the six-faced part");
+    }
+
+    #[test]
+    fn every_cover_id_grows_its_own_flower_and_a_bare_chunk_grows_none() {
+        // Per voxel and not by mask: three flowers in a row do not merge into one, and
+        // each takes its own head colour.
+        let mut chunk = air(SIZE);
+        for (offset, block) in [
+            palette::FLOWER_RED,
+            palette::FLOWER_YELLOW,
+            palette::FLOWER_BLUE,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            chunk.set(4 + offset, 5, 6, block);
+        }
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert!(
+            mesh.opaque.is_empty(),
+            "cover is drawn by nothing but itself"
+        );
+        assert_eq!(mesh.cover.quad_count(), 3 * QUADS_PER_COVER);
+        for block in [
+            palette::FLOWER_RED,
+            palette::FLOWER_YELLOW,
+            palette::FLOWER_BLUE,
+        ] {
+            assert!(mesh.cover.colors.contains(&palette::linear_rgba(block)));
+        }
+
+        // And a chunk with no cover in it gets an empty third half rather than an empty
+        // buffer of the wrong length.
+        let none = super::mesh_chunk(&solid(SIZE, palette::STONE), &alone());
+        assert!(none.cover.is_empty());
+        assert_eq!(none.cover.quad_count(), 0);
+    }
+
+    #[test]
+    fn a_flower_on_a_shore_leaves_the_lake_surface_whole() {
+        // The one thing cover changes about the water sweep, and it needed no new mask
+        // arm: `is_opaque` is false for a flower, so the arm that already reads
+        // "see-through" rather than "air" draws the surface against it. A flower that
+        // was opaque would punch a hole in the lake beside it.
+        let mut chunk = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                chunk.set(x, 0, z, palette::WATER);
+            }
+        }
+        let lake = super::mesh_chunk(&chunk, &alone()).water.quad_count();
+        chunk.set(4, 1, 6, palette::FLOWER_BLUE);
+        let shore = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(
+            shore.water.quad_count(),
+            lake,
+            "the flower above the water changed the surface"
+        );
+        assert_eq!(shore.cover.quad_count(), QUADS_PER_COVER);
     }
 
     #[test]

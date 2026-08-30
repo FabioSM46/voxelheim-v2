@@ -61,19 +61,21 @@
 //! `tick_of_day` it belonged with the rest of the snapshot-driven presentation, and
 //! `player/sky.rs` owns it now.
 //!
-//! What stayed is what this module can answer for on its own: the chunk meshes and the two
+//! What stayed is what this module can answer for on its own: the chunk meshes and the three
 //! materials they share.
 //!
-//! ## Two materials, and one entity per chunk with one child
+//! ## Three materials, and one entity per chunk with two children
 //!
-//! `mesh_chunk` returns a [`ChunkMesh`] holding an opaque surface and a water surface — the
-//! reason is on that type — and each half gets a material and a `Mesh3d`. The chunk's entity
-//! carries the opaque half and the transform; the water half hangs off it as a child, so it
-//! inherits that transform and goes with it under the same `despawn()`.
+//! `mesh_chunk` returns a [`ChunkMesh`] holding an opaque surface, a water surface and a
+//! cover surface — the reason is on that type — and each half gets a material and a
+//! `Mesh3d`. The chunk's entity carries the opaque half and the transform; the other two
+//! hang off it as children, so they inherit that transform and go with it under the same
+//! `despawn()`, which despawns descendants.
 //!
-//! **A chunk with water but no opaque surface still gets the parent entity**, without a mesh
-//! on it: the middle of a lake is exactly that shape. A chunk with neither half gets no entity
-//! at all, which is the case this module has always skipped and is most of the sky.
+//! **A chunk with water or cover but no opaque surface still gets the parent entity**,
+//! without a mesh on it: the middle of a lake is exactly that shape, and so is a chunk of
+//! meadow air above the ground. A chunk with no half at all gets no entity, which is the
+//! case this module has always skipped and is most of the sky.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -152,16 +154,29 @@ struct TerrainMaterial(Handle<StandardMaterial>);
 #[derive(Resource, Debug)]
 struct WaterMaterial(Handle<FlowingWater>);
 
-/// The two materials a chunk is drawn with, as one system parameter.
+/// The material every cover face shares.
 ///
-/// Two resources and not one, because they answer two different questions and a system
-/// that needs only one should say so. Bundled for the reason `player/camera.rs`'s `Aim`
-/// is: it names the pair, and it keeps [`apply_finished_meshes`] inside the argument
-/// budget the second material took it past. Both are absent only before `Startup`.
+/// The third material, and the split is by **pipeline** again rather than by block: a
+/// stem is a plane, so it is seen from behind as often as from in front, and a
+/// `cull_mode` is baked into the pipeline a material builds. Opaque and lit like the
+/// terrain — a flower in shade should read as being in shade — so this is
+/// [`TerrainMaterial`] with the back faces kept and their normals flipped, and its base
+/// colour is white for the reason the other two are.
+#[derive(Resource, Debug)]
+struct CoverMaterial(Handle<StandardMaterial>);
+
+/// The three materials a chunk is drawn with, as one system parameter.
+///
+/// Three resources and not one, because they answer three different questions and a
+/// system that needs only one should say so. Bundled for the reason
+/// `player/camera.rs`'s `Aim` is: it names the set, and it keeps
+/// [`apply_finished_meshes`] inside the argument budget the second material took it
+/// past. All are absent only before `Startup`.
 #[derive(SystemParam)]
 struct ChunkMaterials<'w> {
     opaque: Option<Res<'w, TerrainMaterial>>,
     water: Option<Res<'w, WaterMaterial>>,
+    cover: Option<Res<'w, CoverMaterial>>,
 }
 
 /// Marks the entities this module spawns for chunks, so a query can find them
@@ -300,6 +315,24 @@ fn create_materials(
         // Zero, and a system replaces it every frame from `Res<Time>`.
         extension: default(),
     })));
+
+    commands.insert_resource(CoverMaterial(materials.add(StandardMaterial {
+        // White for the reason the other two are: `palette` owns the colours, and the
+        // vertex colours carry them.
+        base_color: Color::WHITE,
+        // A stem's two blades are planes with no inside, so the half of each that faces
+        // away from the camera has to be drawn rather than culled. `double_sided` is the
+        // other half of that: without it the back face would be shaded by the front's
+        // normal and one side of every flower would be lit from the wrong direction.
+        cull_mode: None,
+        double_sided: true,
+        // Vegetation, not rock and not water.
+        perceptual_roughness: 0.8,
+        // No alpha, deliberately: the geometry is the flower's shape, so there is
+        // nothing to cut out, and staying in the opaque phase keeps cover out of the
+        // sort water needs.
+        ..default()
+    })));
 }
 
 /// Turns the store's change log into meshing work and starts as much of it as the
@@ -405,10 +438,10 @@ fn apply_finished_meshes(
     session: Option<Res<Session>>,
     mut commands: Commands,
 ) {
-    // All three exist from the first frame after startup. A frame without them is a
+    // All four exist from the first frame after startup. A frame without them is a
     // frame before there is a world, and there is nothing to place a chunk relative to.
-    let (Some(material), Some(water_material), Some(session)) =
-        (materials.opaque, materials.water, session)
+    let (Some(material), Some(water_material), Some(cover_material), Some(session)) =
+        (materials.opaque, materials.water, materials.cover, session)
     else {
         return;
     };
@@ -474,11 +507,13 @@ fn apply_finished_meshes(
         let ChunkMesh {
             opaque,
             water: water_surface,
+            cover: cover_surface,
         } = outcome.mesh;
 
-        // The chunk's own entity: the transform both halves are placed by, and the opaque
+        // The chunk's own entity: the transform every half is placed by, and the opaque
         // mesh when there is one. A chunk in the middle of a lake has water and no opaque
-        // surface, and it gets the entity without a mesh rather than an empty asset.
+        // surface, and it gets the entity without a mesh rather than an empty asset. So
+        // does a chunk holding nothing but flowers, for the same reason.
         let mut chunk_entity = commands.spawn((
             ChunkMeshEntity,
             Transform::from_translation(chunk_origin(coord, chunk_size)),
@@ -492,12 +527,25 @@ fn apply_finished_meshes(
         }
         let entity = chunk_entity.id();
 
-        // A child rather than a sibling, so the `despawn` above takes both — it despawns
-        // descendants — and so the water is placed by the chunk's own transform.
+        // Children rather than siblings, so the `despawn` above takes all three — it
+        // despawns descendants — and so each half is placed by the chunk's own transform.
+        //
+        // Two blocks and not one loop over the pair: since #598 the water handle is a
+        // `FlowingWater` and the cover handle a `StandardMaterial`, so there is no one
+        // type an array of the two could have. The shape they share is `MeshMaterial3d`,
+        // and that is a component rather than a value these can be quantified over.
         if !water_surface.is_empty() {
             commands.spawn((
                 Mesh3d(meshes.add(to_bevy_mesh(water_surface))),
                 MeshMaterial3d(water_material.0.clone()),
+                Transform::default(),
+                ChildOf(entity),
+            ));
+        }
+        if !cover_surface.is_empty() {
+            commands.spawn((
+                Mesh3d(meshes.add(to_bevy_mesh(cover_surface))),
+                MeshMaterial3d(cover_material.0.clone()),
                 Transform::default(),
                 ChildOf(entity),
             ));
@@ -612,7 +660,7 @@ fn to_bevy_mesh(mesh: SurfaceMesh) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, mesh.colors);
 
     // The flow attributes, on the surfaces that carry them — which is the water half
-    // and nothing else, so the opaque half's vertices stay four floats lighter. The
+    // and nothing else, so the opaque and cover halves' vertices stay four floats lighter. The
     // two ride in the pipeline's own texture-coordinate slots rather than in a custom
     // attribute: `MeshPipeline` already forwards UV_0 and UV_1 to the fragment stage
     // under `VERTEX_UVS_A` / `VERTEX_UVS_B`, so this needs no vertex shader and no
@@ -843,6 +891,32 @@ mod tests {
             .collect()
     }
 
+    /// Every `StandardMaterial` handle hanging off a chunk entity's children — which is
+    /// the cover half and nothing else, since water's handle is a `FlowingWater`.
+    fn cover_child_materials(app: &mut App) -> Vec<Handle<StandardMaterial>> {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&MeshMaterial3d<StandardMaterial>, With<ChildOf>>();
+        query
+            .iter(world)
+            .map(|material| material.0.clone())
+            .collect()
+    }
+
+    /// A chunk of grass with one flower standing on it, as the wire's run order sends it.
+    fn meadow_chunk() -> Vec<u16> {
+        // y is the slowest axis, so one layer of grass is a contiguous run and the
+        // flower is a single voxel in the layer above it.
+        const LAYER: u16 = SIZE * SIZE;
+        vec![
+            palette::GRASS,
+            LAYER,
+            palette::FLOWER_RED,
+            1,
+            palette::AIR,
+            VOLUME - LAYER - 1,
+        ]
+    }
+
     /// Every material handle hanging off a chunk entity's children.
     fn water_child_materials(app: &mut App) -> Vec<Handle<FlowingWater>> {
         let world = app.world_mut();
@@ -902,6 +976,111 @@ mod tests {
             AlphaMode::Opaque,
             "the opaque half must stay in the opaque phase"
         );
+    }
+
+    #[test]
+    fn cover_is_drawn_by_a_child_entity_with_the_double_sided_material() {
+        // The third half's rendering split. The chunk entity carries the grass, one
+        // child carries the flower, and the material it gets is the one that keeps both
+        // sides of a stem — opaque and lit, because a flower in shade is in shade.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: meadow_chunk(),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        assert_eq!(
+            chunk_entities(&mut app),
+            vec![(true, 1)],
+            "one chunk entity with the opaque mesh and one cover child"
+        );
+
+        let cover = app.world().resource::<CoverMaterial>().0.clone();
+        let terrain = app.world().resource::<TerrainMaterial>().0.clone();
+        assert_ne!(cover, terrain, "three materials, not one handle twice");
+        assert_eq!(cover_child_materials(&mut app), vec![cover.clone()]);
+        assert!(
+            water_child_materials(&mut app).is_empty(),
+            "a meadow has no water, so no `FlowingWater` child"
+        );
+
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let material = materials.get(&cover).expect("cover material");
+        assert_eq!(material.cull_mode, None, "a stem is seen from both sides");
+        assert!(material.double_sided, "and lit correctly on both");
+        assert!(
+            !material.unlit,
+            "cover is lit like the terrain it stands in"
+        );
+        assert_eq!(
+            material.alpha_mode,
+            AlphaMode::Opaque,
+            "cover has no alpha, so it stays out of the sort water needs"
+        );
+    }
+
+    #[test]
+    fn a_chunk_of_nothing_but_flowers_gets_a_placer_with_no_mesh_of_its_own() {
+        // The water precedent, and the reason `ChunkMesh::is_empty` had to learn about
+        // the third half: a chunk with cover and nothing else is not an empty chunk, and
+        // the entity exists because the cover has to be placed by something.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: solid_chunk(palette::FLOWER_BLUE),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+
+        assert_eq!(chunk_entities(&mut app), vec![(false, 1)]);
+        let cover = app.world().resource::<CoverMaterial>().0.clone();
+        assert_eq!(cover_child_materials(&mut app), vec![cover]);
+    }
+
+    #[test]
+    fn breaking_a_flower_empties_the_cover_half_and_despawns_only_its_mesh() {
+        // A `BlockUpdate` to air on the one flower. The chunk keeps its entity because
+        // the grass under it is still there; what goes is the cover child.
+        let mut app = headless_world();
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord: coord(0, 0, 0),
+                runs: meadow_chunk(),
+            },
+        );
+        pump_until(&mut app, "the chunk's mesh", |app| {
+            stats(app).meshed_chunks == 1
+        });
+        let before = stats(&app).total_quads;
+
+        push(
+            &mut app,
+            WorldUpdate::Block {
+                pos: BlockCoord { x: 0, y: 1, z: 0 },
+                block_id: palette::AIR,
+            },
+        );
+        pump_until(&mut app, "the remesh", |app| {
+            stats(app).total_quads != before
+        });
+
+        assert_eq!(
+            chunk_entities(&mut app),
+            vec![(true, 0)],
+            "the flower's child is gone and the grass's entity is not"
+        );
+        assert_eq!(stats(&app).meshed_chunks, 1);
     }
 
     #[test]

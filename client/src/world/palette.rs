@@ -310,6 +310,14 @@ const FLOWER_YELLOW_LINEAR: [f32; 3] = [0.806_952, 0.564_712, 0.068_478];
 /// puddle. `#5B76C8`.
 const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 
+/// The stem every flower stands on, whatever colour its head is. `#3E6B2E`.
+///
+/// Darker and yellower than [`GRASS_LINEAR`] so a stem is a shape against the ground
+/// rather than a smear of it. **Not a block colour**: no id renders as this, so
+/// [`linear_rgba`] never returns it and the palette's distinctness test never sees it.
+/// [`super::mesher::build_cover`] asks for it directly, once per stem quad.
+pub const STEM_LINEAR: [f32; 3] = [0.048_172, 0.147_027, 0.027_321];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -352,9 +360,9 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         DESERT_SHRUB => DESERT_SHRUB_LINEAR,
         BROAD_LEAVES => BROAD_LEAVES_LINEAR,
         BUSH => BUSH_LINEAR,
-        // A cover block's colour is its **head**. A stem is a green of its own, and
-        // whatever draws one asks for that by name, because a flower is two colours in
-        // one voxel and this function answers per id.
+        // A cover block's colour is its **head**. The stem is [`STEM_LINEAR`], which the
+        // mesher asks for by name, because a flower is two colours in one voxel and this
+        // function answers per id.
         FLOWER_RED => FLOWER_RED_LINEAR,
         FLOWER_YELLOW => FLOWER_YELLOW_LINEAR,
         FLOWER_BLUE => FLOWER_BLUE_LINEAR,
@@ -383,7 +391,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 25] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 26] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -408,6 +416,7 @@ mod tests {
         ("flower red", [0xC4, 0x38, 0x3A], FLOWER_RED_LINEAR),
         ("flower yellow", [0xE8, 0xC6, 0x4A], FLOWER_YELLOW_LINEAR),
         ("flower blue", [0x5B, 0x76, 0xC8], FLOWER_BLUE_LINEAR),
+        ("stem", [0x3E, 0x6B, 0x2E], STEM_LINEAR),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 
@@ -559,6 +568,12 @@ mod tests {
             .chain([AIR, BlockId::MAX])
         {
             assert!(!is_cover(block), "block {block} is not cover");
+        }
+        // The stem is a colour and not a block: nothing renders as it through this
+        // function, which is what keeps it out of the distinctness test above.
+        let stem = [STEM_LINEAR[0], STEM_LINEAR[1], STEM_LINEAR[2], 1.0];
+        for block in PALETTE.into_iter().chain([AIR, BlockId::MAX]) {
+            assert_ne!(linear_rgba(block), stem);
         }
     }
 
