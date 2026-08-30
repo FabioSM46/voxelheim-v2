@@ -59,7 +59,7 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on, and the two questions about a voxel — `solid_at` for what stops a body, `targetable_at` for what the crosshair finds | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a stem and a head for each cover id and a clump of foliage for a bush | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a flower for each cover id and a clump of foliage for a bush | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the three materials, one entity per chunk with the water and cover halves as its children | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), which are cover — there to be seen and broken but solid to nothing (`is_cover`) — and which the mesher grows a shape for rather than sweeping as a cube (`is_shaped`) | know about meshes or about the wire |
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
@@ -461,20 +461,21 @@ the cover half hang off it as children, which is also why unloading needed no ne
 `despawn` takes descendants. A chunk in the middle of a lake gets the parent with no mesh of its
 own, because an empty opaque mesh is a draw call that renders nothing.
 
-**The third is cover, and it is split by pipeline rather than by alpha.** A stem is a single plane,
-so the cover material is `cull_mode: None` and `double_sided` — and a material is a pipeline, so it
-is an entity. It is otherwise `AlphaMode::Opaque`, which keeps it out of the back-to-front sort
-water needs.
+**The third is cover, and it is split by pipeline rather than by alpha.** A stem, a petal and a
+leaf are single planes, so the cover material is `cull_mode: None` and `double_sided` — and a
+material is a pipeline, so it is an entity. It is otherwise `AlphaMode::Opaque`, which keeps it out
+of the back-to-front sort water needs.
 
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
-once and grows a shape inside each one `palette::is_shaped` answers for: a stem and a head for each
-of the three flower ids, three overlapping clumps of foliage for a bush. Every vertex stays inside
-its own voxel, which is the property that lets `ChunkStore::apply_block` need no remesh rule for a
-plant on a chunk border — a neighbour's sweep can no more see one than it can see the air that
-replaces it. There is nothing for a mask to merge here, and for the bush that is the point: it used
-to be an ordinary opaque cube, so a cluster of them merged into one flat green slab. Small per-voxel
-variations are drawn from a hash of the *chunk-local* coordinate, so a row of bushes is a row of
-different bushes and the buffers are still byte-identical on every remesh.
+once and grows a shape inside each one `palette::is_shaped` answers for: a stem, two leaves, a
+five-petal corolla and an eye for each of the three flower ids, three overlapping clumps of foliage
+for a bush. Every vertex stays inside its own voxel, which is the property that lets
+`ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
+no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
+and for the bush that is the point: it used to be an ordinary opaque cube, so a cluster of them
+merged into one flat green slab. Small per-voxel variations are drawn from a hash of the *chunk-local*
+coordinate, so a row of plants is a row of different plants and the buffers are still byte-identical
+on every remesh.
 
 **A bush is where `is_opaque` and `is_solid` part company, and it is the first id where they do.**
 `world.Bush` is `Solid` on the server, so a body is stopped by the whole cube and the drawn clumps
@@ -485,10 +486,10 @@ to cull: `is_opaque` is false for it and `is_solid` is still true. Making `Bush`
 would be a **server** change with three enforced consequences, and it is not this.
 
 **The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
-unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 8 quads and
-a bush is 18. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 258 quads
-where it was 96, while the opaque half fell by 24 — the bush's cube left the sweep and the ground
-under it gained the faces that cube was culling.
+unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads and
+a bush is 18. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 294 quads
+where the two shapes before #634 cost 96, while the opaque half fell by 24 — the bush's cube left
+the sweep and the ground under it gained the faces that cube was culling.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 
 **`palette.rs` answers two questions and they are not the same question.** `is_solid` is "does
