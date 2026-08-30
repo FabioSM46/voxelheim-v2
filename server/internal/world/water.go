@@ -336,12 +336,40 @@ func riverSurfaceAt(seed, worldX, worldZ int64) int {
 // the column is left to the sea and the basin rule — the alternative is two fills at
 // two heights in one column.
 //
+// **That test is per column, so one course can end and begin again further along the
+// same field — and the gap between the two reaches is water rather than land.**
+// riverSurfaceAt is a multiple of riverTerraceStep and seaLevel is 47, so the lowest
+// terrace a channel may stand on is 48 and the comparison below says exactly "the
+// smoothed land here is at or under the sea line". A gap is therefore never high
+// ground: it is the lake or the sea the reach runs into, and the reach beyond it is the
+// same river leaving that body. Swept at seeds 0x5EED and 0xC0FFEE over five contiguous
+// 768x768 windows — 192953 channel columns — 19849 columns of the field carry no
+// channel, 15986 of them (80.5%) stand under water, and of the 1644 dry ones that touch
+// a channel 860 sit a block *below* the neighbouring channel's own surface, 559 level
+// with it and none more than riverBedDrop above it. That is a shoreline the flow
+// automaton pours over, not a dam, and nothing is stranded behind it.
+//
+// **The rule this replaced is where that artifact was real.** riverMaxSurface cut the
+// channel wherever the unlowered land climbed past seaLevel+24, so its gaps were
+// hilltops: over those same ten sweeps it leaves 55 interior gaps, every one of them
+// dry and the largest 3966 columns — a river that stops at the foot of a hill and
+// resumes on the far side, with no water in between.
+//
 // **And a bed is never raised above the land.** riverSurfaceAt is a neighbourhood
 // mean, so a column in a dip inside a rising reach can have a terrace above its own
 // ground, and the unclamped bed would be an embankment the river runs along. The min
 // follows the ground down instead, deepening the pool. Rare and not theoretical: swept
 // at seed 0x5EED over 32768 blocks of map at a 3-block stride, 255 of 7011223 channel
 // columns — 0.004% — would have been lifted, by at most three blocks.
+//
+// **A bed under the sea line is the arithmetic and not that clamp**, which is easy to
+// read the other way round. 48 is the lowest terrace and riverBedDrop is 3, so the
+// shallowest channel in the world already cuts to 45, two blocks under seaLevel. In the
+// ten sweeps above, 20748 channel columns hold a bed below the sea line and all 20748 of
+// them are below it with the min removed; the min itself changed 1 column of 192953.
+// The water over such a bed still stands at its own terrace, so a channel meeting the
+// open sea steps down into it — by exactly one block at 583 of the 588 junctions in
+// those sweeps, and by 5 or 9 at the remaining five, which is the coastal fall.
 func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int, ok bool) {
 	if !riverAt(seed, worldX, worldZ) {
 		return 0, 0, false
