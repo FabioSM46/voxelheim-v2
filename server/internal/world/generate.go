@@ -215,7 +215,7 @@ const _ = uint8(ironMinDepth - coalMaxDepth - 1)
 // reads the capital's plateau off the lattice. A caller that finds
 // itself asking for a height per entity or per tick wants columnAt, not this.
 func HeightAt(seed int64, worldX, worldZ int64) int {
-	surface, _, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
+	surface, _, _, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
 	return surface
 }
 
@@ -223,10 +223,11 @@ func HeightAt(seed int64, worldX, worldZ int64) int {
 // alone, with no basin, no river bed and no settlement plateau.
 //
 // **The one definition of "what the land was doing here".** Three rules read it and all
-// three would be wrong against the final height: riverMaxSurface asks whether the ground
-// is low enough for a channel, the settlement site rules ask whether it is high enough
-// to build on, and the plateau blend eases back towards it. Reading the finished surface
-// instead would make each of them depend on the order the lowerings happened to run in.
+// three would be wrong against the final height: [riverSurfaceAt] averages it to decide
+// how high a channel's water stands, the settlement site rules ask whether it is high
+// enough to build on, and the plateau blend eases back towards it. Reading the finished
+// surface instead would make each of them depend on the order the lowerings happened to
+// run in.
 func unloweredHeightAt(seed, worldX, worldZ int64) int {
 	// Position in Q16.16 lattice units. Integer division truncates toward zero,
 	// which for negative coordinates would mirror the terrain across the origin;
@@ -248,14 +249,14 @@ func unloweredHeightAt(seed, worldX, worldZ int64) int {
 // cannot be asked again afterwards without paying a second fbm2D for an answer this
 // function already had; worse, a second reading could disagree with the ground,
 // because a column near the origin passes the river field and has no channel.
-func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, settled bool) {
+func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface int, river, settled bool) {
 	base := unloweredHeightAt(seed, worldX, worldZ)
 
 	// The square around the origin column keeps the terrain it would have had. See
 	// spawnWaterClearance, and spawnCaveClearance beside it: the two exemptions are
 	// the same shape and are checked the same way, before any noise is paid for.
 	if nearSpawnColumn(worldX, worldZ) {
-		return base, false, false
+		return base, 0, false, false
 	}
 
 	// **The plateau comes before both water features, and that is the whole of "a
@@ -274,11 +275,11 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, s
 	// was twenty-two. The band still carries no channel of its own and is still marked
 	// `river = false`; it simply lands on the terrain that is actually there.
 	if plateau, inside, near := settlementShapeAt(seed, worldX, worldZ, base, climate); near {
-		return plateau, false, inside
+		return plateau, 0, false, inside
 	}
 
-	surface, river = loweredHeightAt(seed, worldX, worldZ, base, climate)
-	return surface, river, false
+	surface, riverSurface, river = loweredHeightAt(seed, worldX, worldZ, base, climate)
+	return surface, riverSurface, river, false
 }
 
 // loweredHeightAt is the land after the two features that cut down into it: a river bed
@@ -290,14 +291,20 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface int, river, s
 // second copy of the arithmetic in either place is how the two ends of that blend stop
 // meeting.
 //
-// **The height test comes before the river field, and the order is the budget.**
-// riverMaxSurface rejects high ground with one comparison; the fbm2D behind riverAt is
-// only paid where a channel could actually be.
-func loweredHeightAt(seed, worldX, worldZ int64, base int, climate Climate) (surface int, river bool) {
-	if base <= riverMaxSurface && riverAt(seed, worldX, worldZ) {
-		return seaLevel - riverBedDrop, true
+// **The height test that used to come first is gone, and with it its budget.**
+// riverMaxSurface rejected high ground before the fbm2D behind riverAt was paid for; a
+// river now runs at any height, so every column pays that sum and a channel column pays
+// [riverSurfaceAt]'s five height fields on top. It is affordable because a channel is a
+// curve: riverHalfWidth selects a few percent of columns and only those reach the
+// expensive half. BenchmarkGenerate is the check.
+//
+// riverSurface is meaningful only beside river, exactly as [column.waterSurface] is
+// beside [column.standingWater].
+func loweredHeightAt(seed, worldX, worldZ int64, base int, climate Climate) (surface, riverSurface int, river bool) {
+	if bed, waterSurface, ok := riverChannelAt(seed, worldX, worldZ, base); ok {
+		return bed, waterSurface, true
 	}
-	return base - basinAt(seed, worldX, worldZ, climate), false
+	return base - basinAt(seed, worldX, worldZ, climate), 0, false
 }
 
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole
@@ -397,7 +404,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // surface instead of stopping at the global deep-cave level. Terrain heights and
 // every uncarved voxel stay byte-identical, but carved air below a sea, basin or river
 // may become water, so stored deltas in those caves need the new base version.
-const WorldgenVersion uint32 = 14
+const WorldgenVersion uint32 = 15
 
 // Generate builds the chunk at coord for seed.
 //
@@ -459,7 +466,7 @@ type column struct {
 
 	// standingWater is true for a sea or basin column lowered below seaLevel and for
 	// every river column. waterSurface is meaningful only beside it: the sea line for
-	// sea and basins, and the channel's own surface for a river.
+	// sea and basins, and the channel's own terrace for a river.
 	standingWater bool
 	waterSurface  int
 
@@ -485,14 +492,19 @@ type column struct {
 // know what its ground is made of.
 func columnAt(seed, worldX, worldZ int64) column {
 	climate := ClimateAt(seed, worldX, worldZ)
-	surface, river, settled := shapeAt(seed, worldX, worldZ, climate)
-	waterSurface, standingWater := standingWaterSurface(surface, river)
+	surface, riverSurface, river, settled := shapeAt(seed, worldX, worldZ, climate)
+	waterSurface, standingWater := standingWaterSurface(surface, riverSurface, river)
+
+	// A channel is never a shore, and this is where that is said. A terraced bed can
+	// land anywhere, the beach band included, and [column.blockAt] would then put
+	// gravel on top of two blocks of sand under three of water. See [beachAt], which
+	// stays the plain band rule.
 	return column{
 		surface:       surface,
 		climate:       climate,
 		gravel:        gravelAt(seed, worldX, worldZ, surface, climate),
 		river:         river,
-		beach:         beachAt(surface, climate),
+		beach:         !river && beachAt(surface, climate),
 		standingWater: standingWater,
 		waterSurface:  waterSurface,
 		settlement:    settled,
@@ -902,7 +914,12 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 
 		// A submerged surface may still be valid soil, but a plant rooted there
 		// would be clipped by the standing water and appear to float above it.
-		if col.surface < seaLevel {
+		//
+		// **The column's own water line, not the sea's.** The two were the same test
+		// while every river bed sat under the sea line; a terraced channel runs at any
+		// height, so the sea line alone would let a conifer root in a bed two hundred
+		// blocks up and grow a canopy over the water.
+		if col.standingWater {
 			continue
 		}
 

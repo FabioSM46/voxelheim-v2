@@ -450,10 +450,23 @@ func TestPlantSpeciesShareSettlementAndSeaLevelRefusals(t *testing.T) {
 		t.Fatalf("settlement selected (%v, %t), want no plant", species, ok)
 	}
 
+	// Standing water rather than a surface under the sea line: since #595 a terraced
+	// river carries its own water line and can run well above the sea. The column is
+	// drowned either way, and drowned is what the refusal is about.
 	submerged := col
 	submerged.surface = seaLevel - 1
+	submerged.standingWater = true
+	submerged.waterSurface = seaLevel
 	if species, _, ok := plantAtColumnIn(table, seed, x, z, submerged); ok || species != nil {
 		t.Fatalf("submerged surface selected (%v, %t), want no plant", species, ok)
+	}
+
+	highRiver := col
+	highRiver.river = true
+	highRiver.standingWater = true
+	highRiver.waterSurface = col.surface + riverBedDrop
+	if species, _, ok := plantAtColumnIn(table, seed, x, z, highRiver); ok || species != nil {
+		t.Fatalf("a channel above the sea line selected (%v, %t), want no plant", species, ok)
 	}
 }
 
