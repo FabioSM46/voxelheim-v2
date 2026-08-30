@@ -9,8 +9,8 @@ const (
 	caveSeed = 0x5EED
 
 	// The sample area, and why it is not at the origin. Two reasons, and both
-	// matter: spawnCaveClearance exempts a square around (0, 0), so an area
-	// containing spawn measures the exemption as well as the field; and
+	// matter: originCaveClearance exempts a square around (0, 0), so an area
+	// containing the origin measures the exemption as well as the field; and
 	// caveMouthScaleBlocks is 96, so a 128-block window is barely more than one
 	// lattice cell of the mouth field and whether it holds a mouth at all is a
 	// regional property rather than a global one. This window has mouths in it. A
@@ -211,8 +211,8 @@ func TestNothingIsCarvedNearTheOriginColumn(t *testing.T) {
 	t.Parallel()
 
 	for seed := int64(1); seed <= 200; seed++ {
-		for z := int64(spawnColumnZ - spawnCaveClearance); z <= spawnColumnZ+spawnCaveClearance; z++ {
-			for x := int64(spawnColumnX - spawnCaveClearance); x <= spawnColumnX+spawnCaveClearance; x++ {
+		for z := int64(originColumnZ - originCaveClearance); z <= originColumnZ+originCaveClearance; z++ {
+			for x := int64(originColumnX - originCaveClearance); x <= originColumnX+originCaveClearance; x++ {
 				surface := columnAt(seed, x, z).surface
 				for depth := range caveMaxDepth + 1 {
 					if caveAt(seed, x, int64(surface-depth), z, surface) {
@@ -222,8 +222,8 @@ func TestNothingIsCarvedNearTheOriginColumn(t *testing.T) {
 			}
 		}
 
-		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
-		if top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ); top < surface {
+		surface := HeightAt(seed, originColumnX, originColumnZ)
+		if top := generatedColumnTop(seed, originColumnX, originColumnZ); top < surface {
 			t.Fatalf("seed %d has a carved origin column: generated top %d is below its surface %d", seed, top, surface)
 		}
 	}

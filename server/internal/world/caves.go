@@ -84,17 +84,19 @@ const (
 	caveMouthScaleBlocks = 96
 	caveMouthThreshold   = one * 69 / 100
 
-	// spawnCaveClearance is how far from the spawn column, in blocks on each
-	// horizontal axis, nothing is carved.
+	// originCaveClearance is how far from the world's origin column, in blocks on
+	// each horizontal axis, nothing is carved.
 	//
-	// **SpawnAt derives the player's feet from the generated column, so a tunnel
-	// under spawn is not a cosmetic problem** — it would drop the first thing a
-	// session does into a hole, or open the floor under it. Eight blocks on each axis
-	// is a small square of guaranteed ground, and it is a Chebyshev radius rather
-	// than a Euclidean one because two axis comparisons are the cheapest correct
-	// answer to "is this column near spawn" and this check sits in front of every
-	// carved voxel in the world.
-	spawnCaveClearance = 8
+	// **It guards generated blocks, not a spawn.** It was put here because [SpawnAt]
+	// derived the player's feet from the generated column at the origin, so a tunnel
+	// under it would have dropped the first thing a session did into a hole; #519
+	// moved the join onto the capital's gate square and the pillar of solid rock
+	// stayed, because removing it would carve terrain and bump [WorldgenVersion].
+	// Eight blocks on each axis is a small square of guaranteed ground, and it is a
+	// Chebyshev radius rather than a Euclidean one because two axis comparisons are
+	// the cheapest correct answer to "is this column near the origin" and this check
+	// sits in front of every carved voxel in the world.
+	originCaveClearance = 8
 )
 
 // The two cave fields and the mouth field each get their own offset from the world
@@ -117,7 +119,7 @@ const _ = uint8(caveMaxDepth - caveMinDepth)
 //
 // **The cheap rejections come first, and their order is their cost.** A depth
 // comparison excludes every voxel above the ground and everything under ninety-six
-// blocks of rock; the spawn square is two more comparisons; the mouth field is one
+// blocks of rock; the origin square is two more comparisons; the mouth field is one
 // fbm2D and is only ever asked about the top two voxels of a column. Only what
 // survives all three pays for the two fbm3D sums this function is actually about.
 //
@@ -129,7 +131,7 @@ func caveAt(seed, worldX, worldY, worldZ int64, surface int) bool {
 	if depth < 0 || depth > caveMaxDepth {
 		return false
 	}
-	if absInt64(worldX-spawnColumnX) <= spawnCaveClearance && absInt64(worldZ-spawnColumnZ) <= spawnCaveClearance {
+	if absInt64(worldX-originColumnX) <= originCaveClearance && absInt64(worldZ-originColumnZ) <= originCaveClearance {
 		return false
 	}
 	if depth < caveMinDepth && !caveMouthAt(seed, worldX, worldZ) {

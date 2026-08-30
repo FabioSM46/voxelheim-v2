@@ -5,8 +5,8 @@ import (
 	"slices"
 )
 
-// Settlements: a capital by the spawn, villages across the land, and the flat ground
-// under both.
+// Settlements: a capital by the world's origin column, villages across the land, and
+// the flat ground under both.
 //
 // **A settlement is a lattice cell's answer, not a field's.** Every other feature in
 // this package is a continuous function sampled per column, because a hillside has no
@@ -18,9 +18,9 @@ import (
 // hashing. Two chunks that share a building reach the same voxels because they compute
 // the same cell, not because either read the other.
 //
-// **The lattice is centred on spawn rather than cornered on it.** `settlementCellOf`
-// shifts by half a cell, so the origin sits in the middle of cell (0, 0) and the
-// capital can stand at any bearing from the player's first step without falling into a
+// **The lattice is centred on the world's origin column rather than cornered on it.**
+// `settlementCellOf` shifts by half a cell, so the origin sits in the middle of cell
+// (0, 0) and the capital can stand at any bearing from it without falling into a
 // neighbouring cell. (At any bearing up to the 1/cos θ clustering [capitalCandidateAt]
 // documents.)
 //
@@ -175,11 +175,11 @@ const (
 	//
 	// **The capital always exists, so its site rules are preferences and not
 	// refusals** — that is the one asymmetry in this file, and it is forced: a world
-	// whose spawn happens to sit in high relief would otherwise have no capital at
-	// all, and the capital is the place the game starts. Four attempts, because the
-	// relief field's lattice is 768 blocks and every candidate is inside 200 of
-	// spawn: they are strongly correlated, so a fifth try buys almost nothing while
-	// costing another site evaluation on the height path.
+	// whose origin column happens to sit in high relief would otherwise have no capital
+	// at all, and the capital is the place the game starts. Four attempts, because the
+	// relief field's lattice is 768 blocks and every candidate is inside 200 of the
+	// origin column: they are strongly correlated, so a fifth try buys almost nothing
+	// while costing another site evaluation on the height path.
 	capitalSiteAttempts = 4
 
 	// capitalAttemptSeedStride decorrelates one attempt's offset from the next.
@@ -240,7 +240,8 @@ const _ uint64 = settlementCellBlocks/2 - settlementReach
 // within [settlementReach] of one is in that same cell — which is what lets
 // [settlementShapeAt] return on its first hit and what keeps two settlements from ever
 // reaching the same column. (The capital is the other case and has far more room: it
-// stands within [capitalMaxSpawnDistance] of spawn, which is the middle of its cell.)
+// stands within [capitalMaxSpawnDistance] of the origin column, which is the middle of
+// its cell.)
 //
 // Measured consequence of it holding: collapsing that scan to the single cell holding the
 // column leaves the world byte-identical today. The scan is therefore insurance rather
@@ -282,8 +283,9 @@ const _ = uint8(len(settlementBearings)/2 - capitalHutCount)
 // there is one by being sent planks and a map tile that says [SurfaceSettlement].
 type SettlementKind uint8
 
-// The two kinds. There is exactly one capital in a world — the cell holding spawn
-// always has it and no other cell may — and as many villages as the lattice rolls.
+// The two kinds. There is exactly one capital in a world — the cell holding the world's
+// origin column always has it and no other cell may — and as many villages as the
+// lattice rolls.
 const (
 	SettlementCapital SettlementKind = iota
 	SettlementVillage
@@ -406,7 +408,7 @@ func CapitalAt(seed int64) Settlement {
 // origin column. A function rather than a constant because [settlementCellOf] is one —
 // it is two shifts, and nothing here is on a hot path.
 func capitalCell() (cellX, cellZ int64) {
-	return settlementCellOf(spawnColumnX), settlementCellOf(spawnColumnZ)
+	return settlementCellOf(originColumnX), settlementCellOf(originColumnZ)
 }
 
 // SettlementsNear returns every settlement in the square of lattice cells `cells` out
@@ -483,7 +485,7 @@ const nearestSettlementBlocks = 3 * settlementCellBlocks
 // nearest in the world.
 //
 // The alternative — widening until something turns up — cannot be bounded here. Every
-// world does have a settlement, because the spawn cell always holds the capital, so an
+// world does have a settlement, because the origin cell always holds the capital, so an
 // exhaustive search would always succeed; from a column at the edge of the world it would
 // enumerate on the order of 10^8 cells to prove it. A bounded search that can say "not
 // near here" is the affordable shape, and this is it.
@@ -551,8 +553,8 @@ func nearestSettlementSite(seed int64, x, z, reach int64) (best settlementSite, 
 
 // settlementCellOf maps a world coordinate on one axis to its lattice cell.
 //
-// The half-cell shift is what puts spawn in the middle of cell (0, 0) rather than on
-// its corner; see the file comment for why that matters.
+// The half-cell shift is what puts the world's origin column in the middle of cell
+// (0, 0) rather than on its corner; see the file comment for why that matters.
 func settlementCellOf(v int64) int64 {
 	return floorDiv(v+settlementCellBlocks/2, settlementCellBlocks)
 }
@@ -575,7 +577,7 @@ type settlementCandidate struct {
 // settlementCandidateAt is the cell's proposal: a village one time in
 // [villageInverseDensity], somewhere inside the cell's own bounds.
 //
-// **The spawn cell answers with its *first* capital offset, which is not necessarily
+// **The origin cell answers with its *first* capital offset, which is not necessarily
 // the one the capital ends up on.** That is why nothing on the height path reaches the
 // capital through here — [settlementMayReach] considers every attempt and
 // [settlementSiteAt] hands the cell straight to [capitalSiteAt]. The branch is kept so
@@ -601,10 +603,10 @@ func settlementCandidateAt(seed int64, cellX, cellZ int64) (settlementCandidate,
 	}, true
 }
 
-// isCapitalCell reports whether a lattice cell is the one holding spawn — the one cell
-// that always has a settlement in it.
+// isCapitalCell reports whether a lattice cell is the one holding the world's origin
+// column — the one cell that always has a settlement in it.
 func isCapitalCell(cellX, cellZ int64) bool {
-	return cellX == settlementCellOf(spawnColumnX) && cellZ == settlementCellOf(spawnColumnZ)
+	return cellX == settlementCellOf(originColumnX) && cellZ == settlementCellOf(originColumnZ)
 }
 
 // capitalCandidateAt is one of the capital's [capitalSiteAttempts] proposed offsets.
@@ -637,8 +639,8 @@ func capitalCandidateAt(seed int64, cellX, cellZ int64, attempt int) settlementC
 	}
 	return settlementCandidate{
 		kind:    SettlementCapital,
-		centreX: spawnColumnX + dx,
-		centreZ: spawnColumnZ + dz,
+		centreX: originColumnX + dx,
+		centreZ: originColumnZ + dz,
 		radius:  capitalRadius,
 	}
 }
@@ -684,23 +686,23 @@ func settlementSiteAt(seed int64, cellX, cellZ int64) (settlementSite, bool) {
 // **Every rule that rejects a village only ranks the capital**, and the measurement is
 // why. `reliefAt > one/2` reads as "the hillier half of the world", but fbm2D piles up
 // around its midpoint, so it is close to half of all *columns* — and the relief field's
-// lattice is 768 blocks wide while every candidate here is inside 200 of spawn, so the
-// four attempts are strongly correlated rather than four independent rolls. Seeds 1, 7
-// and 99 all fail it at every offset. A capital that a seed can simply not have is not
-// a capital, and the game begins at this one.
+// lattice is 768 blocks wide while every candidate here is inside 200 of the origin
+// column, so the four attempts are strongly correlated rather than four independent
+// rolls. Seeds 1, 7 and 99 all fail it at every offset. A capital that a seed can simply
+// not have is not a capital, and the game begins at this one.
 //
 // **The river test is not applied here at all, and dropping it costs nothing.** Its
 // field has the largest lattice in the generator — 640 blocks — so four offsets inside
-// two hundred of spawn are all reading essentially the same value: it cannot separate
-// them, and it cannot reject the capital either, because the capital is not rejectable.
-// What it can do is cost thirteen fbm sums per candidate on the height path, once for
-// every column standing in the capital, and the capital is the one settlement in the
-// world every session starts beside. A channel the plateau meets stops at the edge of
-// the flat ground, which is what a river meeting raised ground does anyway.
+// two hundred of the origin column are all reading essentially the same value: it cannot
+// separate them, and it cannot reject the capital either, because the capital is not
+// rejectable. What it can do is cost thirteen fbm sums per candidate on the height path,
+// once for every column standing in the capital, and the capital is the one settlement
+// in the world every session starts beside. A channel the plateau meets stops at the
+// edge of the flat ground, which is what a river meeting raised ground does anyway.
 //
 // The last resort keeps the two things a settlement cannot do without: the first
 // offset, and a plateau at or above [settlementMinPlateau], so the fallback capital
-// stands on dry ground even where the land around spawn does not.
+// stands on dry ground even where the land around the origin column does not.
 //
 // **That floor is now the only thing keeping a session out of the water**, where it used
 // to be the second of two: [SpawnAt] carried a `max(top, seaLevel)` of its own until #519
@@ -710,12 +712,12 @@ func settlementSiteAt(seed int64, cellX, cellZ int64) (settlementSite, bool) {
 // modal outcome.** Chosen attempt over two thousand seeds — 0: 973, 1: 99, 2: 45, 3: 31,
 // **fallback: 852**. Forty-three per cent of worlds put their capital on an offset that
 // no rule accepted, which is the paragraph above working as designed rather than a bug:
-// four candidates inside 200 blocks of spawn are reading a relief field whose lattice is
-// 768 blocks wide, so they fail together far more often than four independent rolls
-// would. Two consequences worth carrying: the largest plateau-to-land drops live on this
-// path, which is where [settlementBlendBlocks] terraces worst; and *which* candidate the
-// fallback returns is load-bearing for 43% of worlds, so it is pinned by a test rather
-// than left to read as an unimportant default.
+// four candidates inside 200 blocks of the origin column are reading a relief field
+// whose lattice is 768 blocks wide, so they fail together far more often than four
+// independent rolls would. Two consequences worth carrying: the largest plateau-to-land
+// drops live on this path, which is where [settlementBlendBlocks] terraces worst; and
+// *which* candidate the fallback returns is load-bearing for 43% of worlds, so it is
+// pinned by a test rather than left to read as an unimportant default.
 func capitalSiteAt(seed int64, cellX, cellZ int64) settlementSite {
 	var first settlementSite
 	for attempt := range capitalSiteAttempts {

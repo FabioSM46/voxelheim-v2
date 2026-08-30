@@ -14,8 +14,8 @@ const (
 	// The sample window, and why it is where it is. Three reasons, and each of them
 	// is an acceptance criterion this file has to be able to reach:
 	//
-	//   - it is not at the origin, because spawnWaterClearance exempts a square there
-	//     and a window containing spawn measures the exemption as well as the fields;
+	//   - it is not at the origin, because originWaterClearance exempts a square there
+	//     and a window containing it measures the exemption as well as the fields;
 	//   - it holds tundra as well as plains and taiga, because ice exists in exactly
 	//     one climate and a window without one cannot see it;
 	//   - it holds channels, because riverScaleBlocks is 640 and whether a 1024-block

@@ -1004,20 +1004,20 @@ func TestTheOriginColumnIsAirAboveItsGeneratedTopForEverySeed(t *testing.T) {
 
 	canopySeeds := 0
 	for seed := int64(1); seed <= 300; seed++ {
-		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
+		surface := HeightAt(seed, originColumnX, originColumnZ)
 		chunks := make(map[Coord]*Chunk)
 
 		// Read the actual voxels rather than trusting the arithmetic: the height field
 		// and the generator could disagree, and that disagreement is the bug class here.
 		at := func(worldY int) Block {
-			coord := ContainingChunk(spawnColumnX+0.5, float32(worldY), spawnColumnZ+0.5)
+			coord := ContainingChunk(originColumnX+0.5, float32(worldY), originColumnZ+0.5)
 			chunk := chunks[coord]
 			if chunk == nil {
 				chunk = Generate(seed, coord)
 				chunks[coord] = chunk
 			}
 			ox, oy, oz := coord.Origin()
-			return chunk.At(spawnColumnX-int(ox), worldY-int(oy), spawnColumnZ-int(oz))
+			return chunk.At(originColumnX-int(ox), worldY-int(oy), originColumnZ-int(oz))
 		}
 
 		// Find the real top from generated voxels, independently of the helper SpawnAt
@@ -1033,7 +1033,7 @@ func TestTheOriginColumnIsAirAboveItsGeneratedTopForEverySeed(t *testing.T) {
 				actualTop = worldY
 			}
 		}
-		if helperTop := generatedColumnTop(seed, spawnColumnX, spawnColumnZ); helperTop != actualTop {
+		if helperTop := generatedColumnTop(seed, originColumnX, originColumnZ); helperTop != actualTop {
 			t.Fatalf("seed %d computed generated top %d, actual generated top is %d", seed, helperTop, actualTop)
 		}
 		if actualTop > surface {
@@ -1191,7 +1191,7 @@ func TestSpawnClearanceKeepsThePlayerOnTheGroundWithoutBuryingThem(t *testing.T)
 // A session never begins under water, for any seed.
 //
 // **The rule that delivers this moved.** It used to be two halves on the origin column:
-// spawnWaterClearance kept basins and channels off it, and SpawnAt floored its height at
+// originWaterClearance kept basins and channels off it, and SpawnAt floored its height at
 // the sea line for the ordinary terrain that put it on a lake bed anyway. Neither is on
 // the spawn path now — what keeps a session dry is [settlementMinPlateau], three blocks
 // of freeboard [capitalSiteAt] holds even on its fallback. The counter keeps that from
@@ -1206,7 +1206,7 @@ func TestASessionNeverBeginsUnderWater(t *testing.T) {
 		if int(spawn[1]) <= seaLevel {
 			t.Fatalf("seed %d spawns at y=%v, at or under the sea line %d", seed, spawn[1], seaLevel)
 		}
-		if generatedColumnTop(seed, spawnColumnX, spawnColumnZ) < seaLevel {
+		if generatedColumnTop(seed, originColumnX, originColumnZ) < seaLevel {
 			submergedOrigins++
 		}
 	}
@@ -1216,21 +1216,21 @@ func TestASessionNeverBeginsUnderWater(t *testing.T) {
 }
 
 // Neither a basin nor a channel touches the ground around the origin column.
-func TestNoWaterFeatureReachesTheSpawnSquare(t *testing.T) {
+func TestNoWaterFeatureReachesTheOriginSquare(t *testing.T) {
 	t.Parallel()
 
 	const seed = goldenSeed
-	for z := int64(spawnColumnZ - spawnWaterClearance); z <= spawnColumnZ+spawnWaterClearance; z++ {
-		for x := int64(spawnColumnX - spawnWaterClearance); x <= spawnColumnX+spawnWaterClearance; x++ {
+	for z := int64(originColumnZ - originWaterClearance); z <= originColumnZ+originWaterClearance; z++ {
+		for x := int64(originColumnX - originWaterClearance); x <= originColumnX+originWaterClearance; x++ {
 			col := columnAt(seed, x, z)
 			if col.river {
-				t.Errorf("a river channel runs through the spawn square at (%d, %d)", x, z)
+				t.Errorf("a river channel runs through the origin square at (%d, %d)", x, z)
 			}
 			nx := floorDiv(x<<fracBits, terrainScaleBlocks)
 			nz := floorDiv(z<<fracBits, terrainScaleBlocks)
 			base := baseHeight + int((amplitudeAt(seed, x, z)*(fbm2D(seed, nx, nz)-one/2))>>fracBits)
 			if col.surface != base {
-				t.Errorf("the column at (%d, %d) was lowered from %d to %d inside the spawn square", x, z, base, col.surface)
+				t.Errorf("the column at (%d, %d) was lowered from %d to %d inside the origin square", x, z, base, col.surface)
 			}
 		}
 	}

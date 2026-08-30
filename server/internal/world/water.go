@@ -236,16 +236,17 @@ const (
 	// every carved voxel below it.
 	caveWaterLevel = 36
 
-	// spawnWaterClearance is how far from the spawn column, in blocks on each
-	// horizontal axis, neither a basin nor a river applies.
+	// originWaterClearance is how far from the world's origin column, in blocks on
+	// each horizontal axis, neither a basin nor a river applies.
 	//
-	// Chebyshev, and the same eight blocks spawnCaveClearance uses, for the same
+	// Chebyshev, and the same eight blocks [originCaveClearance] uses, for the same
 	// reason and with the same cost: two comparisons in front of the two fbm sums
-	// below. What it buys is that the first thing a session does is not a swim
-	// because a river happened to cross the origin — SpawnAt keeps the player out of
-	// the water either way, but standing on ground is a better first frame than
-	// treading water in a channel.
-	spawnWaterClearance = 8
+	// below. **It guards generated blocks, not a spawn.** It was put here so that the
+	// first thing a session did was not a swim, back when [SpawnAt] read the ground at
+	// the origin column; #519 moved the join onto the capital's gate square and the
+	// square of dry land stayed, because removing it would move terrain and bump
+	// [WorldgenVersion].
+	originWaterClearance = 8
 )
 
 // The basin and river fields each get their own offset from the world seed, in the
@@ -477,11 +478,11 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 	return min(surface-riverBedDrop, base), surface, true
 }
 
-// nearSpawnColumn reports whether a column is inside the square around spawn that
-// water leaves alone.
-func nearSpawnColumn(worldX, worldZ int64) bool {
-	return absInt64(worldX-spawnColumnX) <= spawnWaterClearance &&
-		absInt64(worldZ-spawnColumnZ) <= spawnWaterClearance
+// nearOriginColumn reports whether a column is inside the square around the world's
+// origin column that water leaves alone. See [originWaterClearance].
+func nearOriginColumn(worldX, worldZ int64) bool {
+	return absInt64(worldX-originColumnX) <= originWaterClearance &&
+		absInt64(worldZ-originColumnZ) <= originWaterClearance
 }
 
 // beachAt reports whether a column's top blocks are the sand of a shoreline.
