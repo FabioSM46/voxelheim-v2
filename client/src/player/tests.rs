@@ -4892,6 +4892,231 @@ fn weather_updates_a_clockless_servers_sky_and_fog_together() {
     assert!((after_end - before_end * 0.6).abs() < 1e-4);
 }
 
+// ---------------------------------------------------------------------------
+// The birds
+// ---------------------------------------------------------------------------
+
+/// The look these tests want held, whatever the ground sampler makes of an empty store.
+///
+/// `ambience::sample_the_ground` publishes `Unknown` once a second when there are no chunks
+/// to read, which is correct and would silently empty the sky under every test below. This
+/// resource plus [`hold_the_ambience`] make the look an input rather than a race.
+#[derive(Resource, Debug, Clone, Copy)]
+struct HeldLook(Ambience);
+
+fn hold_the_ambience(held: Res<HeldLook>, mut ambience: ResMut<Ambience>) {
+    if *ambience != held.0 {
+        *ambience = held.0;
+    }
+}
+
+/// A headless client whose ground look is whatever the test says it is.
+fn birdwatching(ground: GroundLook, wooded: bool) -> App {
+    let mut app = headless_player();
+    app.insert_resource(HeldLook(Ambience { ground, wooded }))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )))
+        .add_systems(
+            Update,
+            hold_the_ambience
+                .before(birds::keep_the_flock)
+                .after(ambience::sample_the_ground),
+        );
+    app
+}
+
+fn look_at(app: &mut App, ground: GroundLook, wooded: bool) {
+    app.world_mut().resource_mut::<HeldLook>().0 = Ambience { ground, wooded };
+}
+
+/// The row each bird alive belongs to.
+fn flock(app: &mut App) -> Vec<usize> {
+    let world = app.world_mut();
+    let mut query = world.query::<&birds::Bird>();
+    query.iter(world).map(|bird| bird.species).collect()
+}
+
+fn bird_entities(app: &mut App) -> Vec<Entity> {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<Entity, With<birds::Bird>>();
+    query.iter(world).collect()
+}
+
+/// Runs `frames` frames of 100 ms each.
+fn watch(app: &mut App, frames: usize) {
+    for _ in 0..frames {
+        app.update();
+    }
+}
+
+#[test]
+fn each_look_gets_its_own_flock_and_a_bare_plain_gets_none() {
+    for (ground, wooded, species) in [
+        (GroundLook::Sand, false, Some(1)),
+        (GroundLook::Snow, false, Some(2)),
+        (GroundLook::Grass, true, Some(0)),
+        (GroundLook::Grass, false, None),
+        (GroundLook::Unknown, false, None),
+    ] {
+        let mut app = birdwatching(ground, wooded);
+        watch(&mut app, 3);
+
+        let birds = flock(&mut app);
+        match species {
+            None => assert!(
+                birds.is_empty(),
+                "{ground:?}/{wooded} put {} birds in the sky",
+                birds.len()
+            ),
+            Some(index) => {
+                let row = &birds::BIRDS[index];
+                assert!(
+                    row.flock.contains(&(birds.len() as u8)),
+                    "{ground:?}/{wooded} flew {} of row {index}",
+                    birds.len()
+                );
+                assert!(birds.iter().all(|row| *row == index));
+            }
+        }
+        assert!(birds.len() <= birds::BIRD_COUNT_MAX);
+    }
+}
+
+#[test]
+fn a_crossing_replaces_the_flock_rather_than_mixing_two() {
+    // The look is the whole of the existence set: a vulture over grass is a vulture the
+    // ground stopped explaining, so it goes. *How* it goes — retired on the frame, or faded
+    // out of the sky — is the second half of this issue; that it goes is this one.
+    let mut app = birdwatching(GroundLook::Sand, false);
+    watch(&mut app, 3);
+    assert!(flock(&mut app).iter().all(|row| *row == 1));
+
+    look_at(&mut app, GroundLook::Grass, true);
+    app.update();
+    let parrots = flock(&mut app);
+    assert!(
+        !parrots.is_empty() && parrots.iter().all(|row| *row == 0),
+        "the crossing left the sky as {parrots:?}"
+    );
+    assert!(parrots.len() <= birds::BIRD_COUNT_MAX);
+
+    look_at(&mut app, GroundLook::Grass, false);
+    app.update();
+    assert!(
+        flock(&mut app).is_empty(),
+        "felling the wood left the parrots in the air"
+    );
+}
+
+#[test]
+fn walking_a_long_way_re_seeds_the_flock_around_the_new_anchor() {
+    // The anchor is what makes a bird's path a pure function of the clock, and it holds
+    // still for a cell's width. Cross enough of them and every bird is behind the eye, so
+    // the whole flock is replaced by one seeded where the player now is.
+    let mut app = birdwatching(GroundLook::Snow, false);
+    watch(&mut app, 3);
+    let before = bird_entities(&mut app);
+    assert!(!before.is_empty());
+
+    put_the_eye_at(&mut app, Vec3::new(4096.0, 64.0, -4096.0));
+    app.update();
+    let after = bird_entities(&mut app);
+    assert!(
+        after.iter().all(|entity| !before.contains(entity)),
+        "a bird outlived the anchor it was drawn around"
+    );
+    let anchored = bird_positions(&mut app);
+    assert!(!anchored.is_empty(), "the new cell got no flock");
+    for position in anchored {
+        assert!(
+            (position - Vec3::new(4096.0, 64.0, -4096.0))
+                .abs()
+                .max_element()
+                <= birds::BIRD_RANGE + birds::BIRD_ANCHOR_CELL,
+            "a re-seeded bird landed at {position}"
+        );
+    }
+}
+
+#[test]
+fn a_one_cell_walk_leaves_one_flock_in_the_sky_and_not_two() {
+    // A bird the previous anchor stood up is kept while it is still inside the new box —
+    // that continuity is the point of the range test — but it holds no slot in the new
+    // flock's table, because its `index` belongs to another anchor's flock. Until those
+    // birds were counted against the new flock's size, the spawn loop read every slot as
+    // free and stood a second flock up beside the first: four eagles in a sky whose row
+    // allows two, and a parrot wood could reach `BIRD_COUNT_MAX` against a row max of five.
+    //
+    // One cell is 32 blocks and the box is 64, so a single step is the case that keeps the
+    // most strays — which is what makes it the case that overcounted worst.
+    let mut app = birdwatching(GroundLook::Snow, false);
+    watch(&mut app, 3);
+    let row = &birds::BIRDS[2];
+    assert!(
+        row.flock.contains(&(flock(&mut app).len() as u8)),
+        "the sky started outside its own row"
+    );
+
+    let mut eye = Vec3::ZERO;
+    for step in 1..=8 {
+        eye.x += birds::BIRD_ANCHOR_CELL;
+        put_the_eye_at(&mut app, eye);
+        app.update();
+
+        let sky = flock(&mut app);
+        assert!(
+            row.flock.contains(&(sky.len() as u8)),
+            "step {step} left {} eagles in a sky whose row allows {:?}",
+            sky.len(),
+            row.flock
+        );
+        assert!(
+            sky.iter().all(|index| *index == 2),
+            "step {step} mixed rows: {sky:?}"
+        );
+    }
+}
+
+/// The material table is the assertion because the material table is what used to grow.
+#[test]
+fn crossing_cell_after_cell_mints_no_new_bird_materials() {
+    // Every plumage a bird can wear is built once, in `create_visuals`. A flock is stood up
+    // and retired on every anchor crossing, so a `materials.add` at spawn time added two
+    // fresh handles per bird for a colour that already had one, for the whole session.
+    // The parrot is the row worth crossing with: it is the only one with variant plumages,
+    // so it is the row a per-bird `add` would have grown fastest.
+    let mut app = birdwatching(GroundLook::Grass, true);
+    watch(&mut app, 3);
+    assert!(!flock(&mut app).is_empty(), "the wood got no parrots");
+    let settled = app.world().resource::<Assets<StandardMaterial>>().len();
+
+    let mut eye = Vec3::ZERO;
+    for step in 1..=12 {
+        eye.x += birds::BIRD_ANCHOR_CELL;
+        put_the_eye_at(&mut app, eye);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Assets<StandardMaterial>>().len(),
+            settled,
+            "crossing {step} cells minted a material a plumage already had"
+        );
+    }
+    assert!(
+        !flock(&mut app).is_empty(),
+        "the parrots stopped flying, so this test would pass vacuously"
+    );
+}
+
+fn bird_positions(app: &mut App) -> Vec<Vec3> {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<&Transform, With<birds::Bird>>();
+    query
+        .iter(world)
+        .map(|transform| transform.translation)
+        .collect()
+}
+
 /// The dome sits on the eye, and it never takes the eye's rotation.
 #[test]
 fn the_sky_dome_is_centred_on_the_eye_and_does_not_turn_with_it() {

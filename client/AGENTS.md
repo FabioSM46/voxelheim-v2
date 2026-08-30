@@ -65,6 +65,7 @@ keeps meaning "everything the client is".
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
+| `player/birds.rs` | the ambient birds — the species table, the flight paths and the flap — chosen by `Ambience` | be sent, be hit, be targeted, be counted by anything, or be chosen by anything the server said |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
