@@ -1176,3 +1176,66 @@ func TestSwitchingToTheRightToolMidBlockAppliesImmediately(t *testing.T) {
 		t.Errorf("putting the tool away changed progress from %d to %d", paid, got)
 	}
 }
+
+// **Breaking a flower leaves nothing in the hand and nothing on the ground**, and it
+// costs what the rest of the plant matter costs. Checked together because each half
+// fails silently alone: a drop row would put an unusable item in a pack, an
+// experience row would make picking flowers a progression exploit, and a voxel that
+// did not become air would leave the flower standing.
+func TestBreakingAFlowerLeavesNothingBehind(t *testing.T) {
+	t.Parallel()
+
+	// The registry rows are per id, so all three are read; the break runs once,
+	// because nothing on that path names a flower by id.
+	for _, block := range []world.Block{world.FlowerRed, world.FlowerYellow, world.FlowerBlue} {
+		if got := handMiningTimes[block]; got != 300*time.Millisecond {
+			t.Errorf("block %d hand time = %v, want 300ms", block, got)
+		}
+		if !helpsWith(ItemAxe, block) {
+			t.Errorf("the axe does not help with block %d", block)
+		}
+		if helpsWith(ItemShovel, block) || helpsWith(ItemPickaxe, block) {
+			t.Errorf("block %d is assigned to more than the axe", block)
+		}
+		if got := itemDroppedBy(block); got != ItemNone {
+			t.Errorf("block %d drops item %d, want nothing", block, got)
+		}
+	}
+
+	const block = world.FlowerRed
+	target := [3]int32{3, 200, 0}
+	sim, player, terrain, _ := newMiningPlayer(t, map[[3]int64]world.Block{mineTarget(target): block})
+	cost, breakable := sim.hardnessTicks(block, ItemNone)
+	if !breakable {
+		t.Fatalf("block %d is not breakable by hand", block)
+	}
+	for tick := 1; tick <= cost; tick++ {
+		if err := player.Mine(activeMine(target, uint32(tick)), true); err != nil {
+			t.Fatalf("mining refresh %d: %v", tick, err)
+		}
+		sim.Step(uint64(tick))
+	}
+	completion := awaitCompletion(t, player)
+	result, err := player.CompleteMining(context.Background(), completion)
+	if err != nil {
+		t.Fatalf("CompleteMining: %v", err)
+	}
+	if result.Block != world.Air {
+		t.Errorf("breaking the flower reports block %d, want Air", result.Block)
+	}
+	if got, _ := terrain.Block(3, 200, 0); got != world.Air {
+		t.Errorf("the voxel holds block %d after the flower broke, want Air", got)
+	}
+	if got := experienceOf(player); got != 0 {
+		t.Errorf("breaking the flower awarded %d experience, want 0", got)
+	}
+	sim.mu.Lock()
+	drops := len(sim.drops)
+	sim.mu.Unlock()
+	if drops != 0 {
+		t.Errorf("breaking the flower created %d drop entities, want none", drops)
+	}
+	if result.Inventory != nil {
+		t.Error("breaking the flower reported an inventory change")
+	}
+}

@@ -5,8 +5,8 @@ import "testing"
 func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 	t.Parallel()
 
-	if len(plantSpeciesTable) != 5 {
-		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm, shrub, broadleaf and bush", len(plantSpeciesTable))
+	if len(plantSpeciesTable) != 6 {
+		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm, shrub, broadleaf, bush and flower", len(plantSpeciesTable))
 	}
 	conifer := plantSpeciesTable[0]
 	if conifer.name != "conifer" || conifer.seedOffset != treeSeedOffset || conifer.footprint != treeCanopyRadius || !conifer.forest {
@@ -75,6 +75,9 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 	}{
 		{"broadleaf", broadleafSeedOffset, broadleafChanceDenominator, broadleafCanopyRadius, true},
 		{"bush", bushSeedOffset, bushChanceDenominator, 1, false},
+		// The flower is last, which is its priority: every other plant is asked for
+		// a column first, so a drift never thins a wood.
+		{"flower", flowerSeedOffset, flowerChanceDenominator, 0, false},
 	} {
 		species := plantSpeciesTable[index+3]
 		if species.name != tc.name || species.seedOffset != tc.seedOffset || species.footprint != tc.footprint || species.forest != tc.forest {
@@ -95,6 +98,18 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 		}
 	}
 
+	// **The patch field is the flower's alone, and every tree's nil is the assertion.**
+	// A row that grew one by accident would silently start clustering, which a density
+	// test would attribute to the denominator.
+	if plantSpeciesTable[5].patch == nil {
+		t.Error("the flower row has no patch field: flowers would be a uniform sprinkle")
+	}
+	for i := range plantSpeciesTable[:5] {
+		if species := &plantSpeciesTable[i]; species.patch != nil {
+			t.Errorf("%s carries a patch field; every tree row grows wherever its density says", species.name)
+		}
+	}
+
 	offsets := map[int64]string{}
 	for i := range plantSpeciesTable {
 		species := &plantSpeciesTable[i]
@@ -102,6 +117,11 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 			t.Errorf("%s and %s share seed offset %#x", other, species.name, species.seedOffset)
 		}
 		offsets[species.seedOffset] = species.name
+	}
+	// The patch lattice is decorrelated from every density lattice for the reason
+	// gravelSeedOffset is.
+	if _, shared := offsets[flowerPatchSeedOffset]; shared {
+		t.Errorf("flowerPatchSeedOffset %#x is also a species density offset", flowerPatchSeedOffset)
 	}
 }
 

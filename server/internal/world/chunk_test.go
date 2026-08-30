@@ -354,3 +354,44 @@ func TestChunkOfAgreesWithContainingChunk(t *testing.T) {
 		}
 	}
 }
+
+// The three flowers, and the second id class that ends the "not air means solid"
+// equivalence water started. **Cover is checked exhaustively over the palette rather
+// than over three ids**: what is worth pinning is that nothing *else* is cover, since
+// a fourth block in that class would make a wall a player walks through.
+func TestTheFlowerBlocksAreCoverAndNotGround(t *testing.T) {
+	t.Parallel()
+
+	flowers := map[Block]Block{FlowerRed: 33, FlowerYellow: 34, FlowerBlue: 35}
+	for block, id := range flowers {
+		if block != id {
+			t.Errorf("flower block id = %d, want appended id %d", block, id)
+		}
+		if !Cover(block) {
+			t.Errorf("Cover(%d) = false, want true", block)
+		}
+		if Solid(block) {
+			t.Errorf("Solid(%d) = true, want false: a body walks through a flower", block)
+		}
+		if Fluid(block) {
+			t.Errorf("Fluid(%d) = true, want false: a flower is not something to swim in", block)
+		}
+		if IsWater(block) {
+			t.Errorf("IsWater(%d) = true, want false", block)
+		}
+		if Placeable(block) {
+			t.Errorf("Placeable(%d) = true, want false: there is no flower item to hold", block)
+		}
+	}
+
+	for block := Air; block <= FlowerBlue; block++ {
+		_, flower := flowers[block]
+		if got := Cover(block); got != flower {
+			t.Errorf("Cover(%d) = %t, want %t", block, got, flower)
+		}
+	}
+	if Cover(Block(65535)) {
+		t.Error("an unknown block id was classified as cover")
+	}
+
+}

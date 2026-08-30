@@ -496,6 +496,14 @@ var blockDrops = map[world.Block]ItemID{
 	world.DesertShrub: ItemNone,
 	world.BroadLeaves: ItemNone,
 	world.Bush:        ItemNone,
+
+	// The three flowers: deliberate ItemNones rather than absent rows, because a
+	// flower *is* breakable and the table has to say what breaking one yields. No
+	// recipe, station or dye would consume a flower item, so one would be an
+	// inventory row nobody can spend.
+	world.FlowerRed:    ItemNone,
+	world.FlowerYellow: ItemNone,
+	world.FlowerBlue:   ItemNone,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -538,6 +546,12 @@ var blockExperience = map[world.Block]uint16{
 	// remains ordinary Log, so no new item or drop row is needed for its trunk.
 	world.BroadLeaves: 0,
 	world.Bush:        0,
+
+	// And three more explicit zeroes. The GDD names flowers as a harvest for
+	// experience; nothing consumes one yet, so picking one teaches nothing.
+	world.FlowerRed:    0,
+	world.FlowerYellow: 0,
+	world.FlowerBlue:   0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {

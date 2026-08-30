@@ -420,6 +420,44 @@ func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 	}
 }
 
+// A flower is displaced by a placement on exactly the terms water is, and sits beside
+// the water case for that reason: one rule with two id classes in it. Water schedules
+// flow after a placement; ground cover schedules nothing.
+func TestPlacingIntoAFlowerReplacesIt(t *testing.T) {
+	t.Parallel()
+
+	// One flower: allowPlacement reads world.Cover rather than an id, and world's own
+	// palette test pins the class to exactly these three.
+	const flower = world.FlowerRed
+
+	h, chunks := editWorld(t)
+	player, _ := h.join(1, [3]float32{0.5, 200, 0.5})
+	giveBlock(t, h, player, chunks, world.Stone)
+
+	target := [3]int32{3, 200, 0}
+	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), flower, nil); err != nil {
+		t.Fatalf("grow the target flower: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != flower {
+		t.Fatalf("the fixture target holds block %d, want block %d", got, flower)
+	}
+
+	before := countOf(player.InventoryState(), game.ItemStone)
+	result, err := player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
+	if err != nil {
+		t.Fatalf("placing Stone into a flower was refused: %v", err)
+	}
+	if got := blockAt(t, chunks, 3, 200, 0); got != world.Stone {
+		t.Errorf("the target voxel holds block %d after the placement, want Stone", got)
+	}
+	if result.Inventory == nil {
+		t.Fatal("the accepted placement reported no inventory change")
+	}
+	if got := countOf(*result.Inventory, game.ItemStone); got != before-1 {
+		t.Errorf("Stone count after placing = %d, want %d: a placement into a flower spends one block like any other", got, before-1)
+	}
+}
+
 // A block placed inside a player would leave them stuck: moveAndCollide refuses to move a
 // player who is already inside a solid rather than teleporting them out of it.
 func TestPlacingInsideAPlayersBoxIsRefused(t *testing.T) {
