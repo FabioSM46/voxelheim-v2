@@ -134,7 +134,7 @@ func TestWhatFallsIsDecidedByTheLandUnderIt(t *testing.T) {
 			}
 
 			climate := ClimateAt(seed, x, z)
-			surface, _, _ := shapeAt(seed, x, z, climate)
+			surface, _, _, _ := shapeAt(seed, x, z, climate)
 
 			want := WeatherRain
 			switch {

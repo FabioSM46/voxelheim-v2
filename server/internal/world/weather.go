@@ -215,7 +215,7 @@ func weatherIntensityOf(field int64) uint8 {
 // for an answer this function already holds.
 func weatherKindAt(seed, x, z int64) WeatherKind {
 	climate := ClimateAt(seed, x, z)
-	surface, _, _ := shapeAt(seed, x, z, climate)
+	surface, _, _, _ := shapeAt(seed, x, z, climate)
 
 	switch {
 	case climate == Tundra || surface >= snowLine:

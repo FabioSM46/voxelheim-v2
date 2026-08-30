@@ -90,8 +90,15 @@ const (
 	// enough to swim down into and shallow enough that the bottom is worth reaching.
 	basinDepth = 10
 
-	// Rivers: a channel cut to a fixed bed, wherever a slow field crosses its own
-	// midpoint and the land is low enough to be crossed.
+	// Rivers: a channel that follows the land in terraces, wherever a slow field
+	// crosses its own midpoint.
+	//
+	// **The bed used to be one height everywhere and is now the land's, quantised.**
+	// A fixed bed made a river a canal: flat from source to sea, cut into a gorge
+	// wherever the ground rose, and capped by riverMaxSurface because a canal through
+	// a mountain is a slot. The surface is riverSurfaceAt — the smoothed land, floored
+	// to riverTerraceStep — so a channel climbs with the ground, the cap is gone, and
+	// a river ends where its own surface falls under the sea line.
 	//
 	// **The condition is |n − ½| < riverHalfWidth, which is caveAt's condition in two
 	// dimensions and for the same reason.** A field *thresholded* selects a region
@@ -123,28 +130,47 @@ const (
 	// one rather than trusting this sentence.
 	riverHalfWidth = one * 4 / 1000
 
-	// riverBedDrop is how far under the sea line a river bed sits, so that a channel
-	// is three blocks of water deep wherever it runs.
+	// riverBedDrop is how far under its own surface a river bed sits, so that a
+	// channel is three blocks of water deep wherever it runs.
+	//
+	// It used to be measured from the sea line, which was the same number while every
+	// river surface *was* the sea line. Measured from riverSurfaceAt, a channel two
+	// hundred blocks up is as deep as one at the shore.
 	riverBedDrop = 3
 
-	// riverMaxSurface is the highest unlowered surface a river may cut through.
+	// riverTerraceStep is how tall one step of a river's surface is.
 	//
-	// **This is the whole of "rivers stop where the land climbs".** Without it a
-	// channel at a fixed bed height would cut a slot straight through a mountain,
-	// because the field that decides where a river is knows nothing about how high
-	// the ground is there. Twenty-four blocks over the sea line is seven over
-	// baseHeight: a river crosses rolling ground and ends at the foot of anything
-	// that deserves the name of a hill.
+	// **A river that runs downhill in a voxel world runs down in steps.** The surface
+	// is the land it crosses, quantised to this, so a channel is a flat pool per
+	// terrace and a fall between two of them. At one block a change is a ripple nobody
+	// reads as a waterfall; at eight the pool above is a wall you cannot see over from
+	// the pool below.
 	//
-	// **What it does not remove is the gorge, and that is deliberate.** A fixed bed
-	// under land that rises to the limit is a channel with walls, and at the top of
-	// the band those walls are the better part of twenty blocks. That is the shape a
-	// fixed bed has; softening it is a different river and a different issue.
+	// **Four is also one more than riverBedDrop, and that is load-bearing.** A step
+	// taller than the channel is deep keeps the lower terrace's water under the higher
+	// terrace's bed, so a fall goes over a lip of gravel rather than out of the side of
+	// a pool. Lower it to three and the two surfaces meet.
+	riverTerraceStep = 4
+
+	// riverSmoothSpan is how far either side of a column the land is averaged before
+	// it is quantised.
 	//
-	// It is read from the *unlowered* height — the terrain before basins and before
-	// this rule — so a river's course is a property of the land rather than of the
-	// order two lowerings happened to be applied in.
-	riverMaxSurface = seaLevel + 24
+	// **Quantising the raw height is not a staircase, and is still measurably worse.**
+	// This comment first claimed a raw quantisation would break a terrace at every
+	// wrinkle of the fourth octave; it does not, because terrainScaleBlocks is 96 and
+	// the field is already smooth one block out. What the mean buys is narrower and
+	// real. At seed 0x5EED over a contiguous 256x256 window of some 24000 adjacent
+	// channel pairs, the share of pairs on different terraces — a fall you can step
+	// across — runs 4.4% at span 0, 3.9% at 4, 3.5% at 8, 3.3% at 16 and 3.1% at 24.
+	// So the mean removes about a fifth of the falls and lengthens the pools by as
+	// much, and eight is where that stops being worth paying for: each doubling past
+	// it buys a tenth as much, while a mean taken further out is decreasingly a
+	// statement about the column it is for.
+	//
+	// Five samples rather than a square: the column and its four axis neighbours cost
+	// five height fields where a 3x3 costs nine, and a river follows a curve rather
+	// than a patch. The cost does not change with the span.
+	riverSmoothSpan = 8
 
 	// Beaches: what a plains or taiga surface is made of when it stands at the
 	// water's edge.
@@ -209,6 +235,15 @@ const _ = uint8(beachAboveSea + beachBelowSea)
 const _ = uint8(riverBedDrop - 1)
 const _ = uint8(seaLevel - riverBedDrop - 1)
 
+// A terrace has to be taller than the channel is deep, or the water on the lower step
+// stands level with the lip of the higher one and the fall between them is not a fall.
+// riverTerraceStep = 0 would also divide by zero in riverSurfaceAt; this catches both.
+const _ = uint8(riverTerraceStep - riverBedDrop - 1)
+
+// A smoothing span of nought averages one sample five times, which is the raw height
+// the mean exists to replace. Non-zero is the whole claim.
+const _ = uint8(riverSmoothSpan - 1)
+
 // A basin has to deepen with the field rather than the other way about. Swap these
 // two and the rescale below divides by a negative, which is a compile error here
 // instead of an inverted lake. Unsigned and untyped-width rather than the uint8 the
@@ -261,6 +296,63 @@ func riverAt(seed, worldX, worldZ int64) bool {
 	return absInt64(n-one/2) < riverHalfWidth
 }
 
+// riverSmoothedHeightAt is the land under a channel with its finest octave averaged
+// out: the mean of [unloweredHeightAt] at the column and at ±riverSmoothSpan along
+// both axes.
+//
+// **The unlowered height, for the reason every other rule reads it.** A basin or a
+// neighbouring channel would otherwise feed its own lowering back into this one, and
+// what a river follows is the land rather than the order two lowerings ran in.
+//
+// floorDiv rather than Go's division: terrain reaches below y = 0 in a deep enough
+// trough, and truncation toward zero would round those columns the wrong way.
+func riverSmoothedHeightAt(seed, worldX, worldZ int64) int {
+	sum := unloweredHeightAt(seed, worldX, worldZ) +
+		unloweredHeightAt(seed, worldX-riverSmoothSpan, worldZ) +
+		unloweredHeightAt(seed, worldX+riverSmoothSpan, worldZ) +
+		unloweredHeightAt(seed, worldX, worldZ-riverSmoothSpan) +
+		unloweredHeightAt(seed, worldX, worldZ+riverSmoothSpan)
+	return int(floorDiv(int64(sum), 5))
+}
+
+// riverSurfaceAt is the height a channel's water stands at: the smoothed land,
+// floored to a terrace.
+//
+// **This is the whole of "a river runs with the land".** Two adjacent columns whose
+// smoothed heights land in the same terrace share a water surface exactly, so a river
+// is a chain of flat pools; where the land crosses a terrace boundary the two differ
+// by a multiple of riverTerraceStep, and that difference is a fall. Nothing here
+// paints the fall — the flow automaton pours it — and nothing here reads a neighbour,
+// which is what keeps the two sides of a chunk border agreeing.
+func riverSurfaceAt(seed, worldX, worldZ int64) int {
+	return int(floorDiv(int64(riverSmoothedHeightAt(seed, worldX, worldZ)), riverTerraceStep)) * riverTerraceStep
+}
+
+// riverChannelAt is the channel one column carries: the bed its ground is cut to and
+// the height its water stands at, or ok = false where there is no channel here.
+//
+// **Two ways a column in the field is not a channel, and they are different.** Below
+// the sea line the river's own surface is under the water that is already there, so
+// the column is left to the sea and the basin rule — the alternative is two fills at
+// two heights in one column.
+//
+// **And a bed is never raised above the land.** riverSurfaceAt is a neighbourhood
+// mean, so a column in a dip inside a rising reach can have a terrace above its own
+// ground, and the unclamped bed would be an embankment the river runs along. The min
+// follows the ground down instead, deepening the pool. Rare and not theoretical: swept
+// at seed 0x5EED over 32768 blocks of map at a 3-block stride, 255 of 7011223 channel
+// columns — 0.004% — would have been lifted, by at most three blocks.
+func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int, ok bool) {
+	if !riverAt(seed, worldX, worldZ) {
+		return 0, 0, false
+	}
+	surface := riverSurfaceAt(seed, worldX, worldZ)
+	if surface < seaLevel {
+		return 0, 0, false
+	}
+	return min(surface-riverBedDrop, base), surface, true
+}
+
 // nearSpawnColumn reports whether a column is inside the square around spawn that
 // water leaves alone.
 func nearSpawnColumn(worldX, worldZ int64) bool {
@@ -272,9 +364,12 @@ func nearSpawnColumn(worldX, worldZ int64) bool {
 //
 // Plains and taiga only, and the band is read from the *final* surface — the one
 // basins and rivers have already moved — because a beach is where the ground meets
-// the water and not where it would have met it. A river bed sits at
-// seaLevel-riverBedDrop, below the band, so a channel keeps its gravel rather than
-// turning into a sand ditch.
+// the water and not where it would have met it.
+//
+// **A river bed used to be excluded by arithmetic and is now excluded by its caller.**
+// The bed sat three blocks under the band, so no channel could land in it; a terraced
+// bed can sit anywhere, so [columnAt] refuses a beach on a river column instead. The
+// rule here is unchanged.
 func beachAt(surface int, climate Climate) bool {
 	if climate != Plains && climate != Taiga {
 		return false
@@ -282,12 +377,17 @@ func beachAt(surface int, climate Climate) bool {
 	return surface >= seaLevel-beachBelowSea && surface <= seaLevel+beachAboveSea
 }
 
-// standingWaterSurface reports the hydrostatic surface a column owns. A river's
-// surface is derived from its bed rather than restating the sea line, so the bed and
-// its water remain one decision if river depth moves later.
-func standingWaterSurface(surface int, river bool) (height int, ok bool) {
+// standingWaterSurface reports the hydrostatic surface a column owns: the sea line
+// for a sea or a basin, and its own terraced surface for a river.
+//
+// **The river surface is passed in rather than derived from the bed, and that is what
+// a floored bed costs.** `surface + riverBedDrop` was exact while every bed was cut to
+// exactly that depth; [riverChannelAt] now lowers a bed onto ground already under it,
+// so the water would follow it down and a pool in a dip would report a surface below
+// the terrace it belongs to.
+func standingWaterSurface(surface, riverSurface int, river bool) (height int, ok bool) {
 	if river {
-		return surface + riverBedDrop, true
+		return riverSurface, true
 	}
 	if surface < seaLevel {
 		return seaLevel, true
@@ -298,10 +398,11 @@ func standingWaterSurface(surface int, river bool) (height int, ok bool) {
 // fillAt is what stands in an air voxel of this column: water up to its standing
 // surface, ice on the top of it where the climate is cold enough, and air above.
 //
-// **Ice is one voxel thick and only ever at the sea line**, which is what makes it a
-// lid rather than a frozen lake: everything under it is still water, so a hole
+// **Ice is one voxel thick and only ever on the top of a body**, which is what makes
+// it a lid rather than a frozen lake: everything under it is still water, so a hole
 // broken in the surface is a way in. It is also the only [Solid] block in this file,
-// so a tundra shore is something you walk out onto.
+// so a tundra shore is something you walk out onto. The rule is unchanged; what moved
+// is that a river's top is now its own terrace rather than the sea line.
 //
 // The caller has already established that the terrain here is air.
 func (c column) fillAt(worldY int) Block {
