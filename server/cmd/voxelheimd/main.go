@@ -245,9 +245,8 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		TickRate:     uint8(opts.tickRate),
 		ChunkSize:    world.ChunkSize,
 		ViewDistance: uint8(opts.viewDistance),
-		// Derived from the terrain, never hardcoded: the surface at the spawn column
-		// depends on the seed, and a constant was wrong for the seeds that peaked
-		// above it.
+		// Derived from the world, never hardcoded: since #519 this is the square
+		// outside the capital's castle gate, and the capital is a function of the seed.
 		Spawn: world.SpawnAt(opts.seed),
 	}
 	// options.validate covers what the operator can type; this covers the contract

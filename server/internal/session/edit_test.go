@@ -286,10 +286,16 @@ func editDeps(t *testing.T, cfg session.Config) (*world.Cache, *game.Sim, *sessi
 // editConfig is a session config with a one-chunk streaming radius: 27 chunks is few enough
 // to wait for and wide enough that the voxel under the spawn is inside the view whichever
 // side of a chunk border the surface falls on.
+//
+// **Its spawn is deliberately not [world.SpawnAt].** Since #519 that is the capital's gate
+// square, and a settlement wards every column of its plateau — so these tests would be
+// measuring a ward refusal instead of the edit path, and the one that is genuinely about
+// warding would have nothing left to prove, its runestone claiming ground the settlement
+// already holds.
 func editConfig() session.Config {
 	cfg := testConfig()
 	cfg.ViewDistance = 1
-	cfg.Spawn = world.SpawnAt(cfg.WorldSeed)
+	cfg.Spawn = openCountrySpawn(cfg.WorldSeed)
 	return cfg
 }
 
@@ -337,8 +343,9 @@ func admitNamed(t *testing.T, cfg session.Config, chunks *world.Cache, sim *game
 	return conn, frames
 }
 
-// surfaceUnderSpawn is the world coordinate of the topmost solid voxel in the spawn column:
-// the block a player is standing over, and the obvious thing to dig.
+// surfaceUnderSpawn is the world coordinate of the topmost solid voxel in the column
+// [editConfig] stands a session in — the block a player is standing over, and the obvious
+// thing to dig. That column is the world's origin, not [world.SpawnAt]'s.
 func surfaceUnderSpawn(seed int64) [3]int32 {
 	return [3]int32{0, int32(world.HeightAt(seed, 0, 0)), 0}
 }

@@ -202,13 +202,12 @@ func TestCarvingStaysInsideItsDepthBand(t *testing.T) {
 	}
 }
 
-// Nothing is carved near the spawn column, and the spawn a session actually gets
-// is still air over ground.
+// Nothing is carved near the origin column, and its ground is still whole.
 //
-// The second half is not redundant with the spawn tests in generate_test.go: those
-// were written against a world with no holes in it, and what this one says is that
-// the clearance is why they still pass.
-func TestNothingIsCarvedNearSpawn(t *testing.T) {
+// **The second half used to be about the spawn and no longer can be**: [SpawnAt] read this
+// column until #519. The spawn is the capital's plateau now, which no cave reaches for a
+// different reason ([settlementCaveClearance]).
+func TestNothingIsCarvedNearTheOriginColumn(t *testing.T) {
 	t.Parallel()
 
 	for seed := int64(1); seed <= 200; seed++ {
@@ -217,23 +216,15 @@ func TestNothingIsCarvedNearSpawn(t *testing.T) {
 				surface := columnAt(seed, x, z).surface
 				for depth := range caveMaxDepth + 1 {
 					if caveAt(seed, x, int64(surface-depth), z, surface) {
-						t.Fatalf("seed %d carved (%d, %d) at depth %d, inside the spawn clearance", seed, x, z, depth)
+						t.Fatalf("seed %d carved (%d, %d) at depth %d, inside the origin clearance", seed, x, z, depth)
 					}
 				}
 			}
 		}
 
-		spawn := SpawnAt(seed)
-		coord := ContainingChunk(spawn[0], spawn[1], spawn[2])
-		chunk := Generate(seed, coord)
-		originX, originY, originZ := coord.Origin()
-		feet := chunk.At(spawnColumnX-int(originX), int(spawn[1])-int(originY), spawnColumnZ-int(originZ))
-		if feet != Air {
-			t.Fatalf("seed %d spawns inside block %d", seed, feet)
-		}
 		surface := HeightAt(seed, spawnColumnX, spawnColumnZ)
 		if top := generatedColumnTop(seed, spawnColumnX, spawnColumnZ); top < surface {
-			t.Fatalf("seed %d has a carved spawn column: generated top %d is below its surface %d", seed, top, surface)
+			t.Fatalf("seed %d has a carved origin column: generated top %d is below its surface %d", seed, top, surface)
 		}
 	}
 }
