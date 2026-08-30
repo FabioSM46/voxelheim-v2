@@ -999,9 +999,8 @@ func TestTheOriginColumnIsAirAboveItsGeneratedTopForEverySeed(t *testing.T) {
 				t.Fatalf("seed %d has solid block %d over its generated top at y=%d", seed, got, worldY)
 			}
 			// Below the sea line that space may be water — a body swims out of it. Above
-			// it, air and ground cover are both legal: a column whose generated top wears a
-			// drift puts a body's feet *in* a flower rather than on top of one, and solidity
-			// is what this space is about (checked above).
+			// it, air and ground cover are legal: a top wearing a drift puts a body's feet
+			// *in* a flower, and solidity is what this space is about (checked above).
 			if worldY > seaLevel && got != Air && !Cover(got) {
 				t.Fatalf("seed %d has block %d at y=%d, above the sea line", seed, got, worldY)
 			}
