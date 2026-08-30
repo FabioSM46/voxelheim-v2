@@ -26,6 +26,17 @@
 //! [`NIGHT_ROOST`] of the night has arrived, and they are hidden — not faded — while the eye
 //! is submerged.
 //!
+//! ## How high a bird is, and the one thing that overrides it
+//!
+//! An altitude band is measured from the *anchor*, and the anchor is a quantised copy of the
+//! eye — so a band says how far above the **player** a bird flies and nothing at all about
+//! the ground under the bird. Stand in a valley beside a ridge and the arithmetic puts a
+//! parrot inside the ridge. So `fly_the_flock` holds every bird to [`BIRD_CLEARANCE`] over
+//! whatever is beneath it, eased in at [`CLEARANCE_LIFT_SPEED`] and bounded by
+//! [`BIRD_RANGE`], as a named step over [`place`]'s answer rather than as a fifth argument
+//! to it. It is a minimum height and nothing more: no collision, no avoidance, no
+//! pathfinding, and no landing.
+//!
 //! ## Two ideas already in this crate, with a species table in front
 //!
 //! `player/sky.rs` draws hand-built quads that follow the eye and are hash-seeded from a
@@ -49,8 +60,8 @@ use bevy::prelude::*;
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
 use super::sky::{self, SkyClock};
-use crate::net::Session;
-use crate::world::ChunkStore;
+use crate::net::{BlockCoord, ChunkCoord, Session};
+use crate::world::{ChunkStore, palette};
 
 /// How coarsely the eye is quantised before it anchors a flock, in blocks.
 ///
@@ -120,6 +131,37 @@ const ARC_RISE: f32 = 3.0;
 
 /// How far ahead a bird is sampled to find which way it is facing, in seconds.
 const HEADING_STEP: f32 = 0.05;
+
+/// How much clear air a bird keeps under it, in blocks.
+///
+/// A bird's altitude is measured from its anchor, and the anchor is the centre of the
+/// [`BIRD_ANCHOR_CELL`] the *eye* is in — so "four blocks up" is four blocks above the
+/// **player**, and says nothing at all about the ridge the bird is crossing. Stand in a
+/// valley beside a hill and a parrot's band puts it inside the hill. This is the floor that
+/// answer is held to, and holding it is the whole of the clamp: there is no avoidance and no
+/// pathfinding here, only a height a bird may not be drawn below.
+///
+/// **Five blocks, argued from the three things it has to be at once.** It is five wingspans
+/// of daylight under the widest row in [`BIRDS`] and fourteen under the narrowest, which is
+/// the gap that reads as *flying over* a slope rather than as brushing it. It is a block
+/// over the parrot's four-block band floor, so on broken ground the clamp is what decides a
+/// low bird's height rather than half-deciding it with the band. And it is small enough that
+/// a flock crossing a wood is still among the treetops rather than above the weather — the
+/// surface a bird clears includes the canopy, so a larger number would push every parrot off
+/// the trees its row exists to fly over.
+const BIRD_CLEARANCE: f32 = 5.0;
+
+/// How fast the clearance may lift a bird, in blocks per second.
+///
+/// The lift is eased rather than applied, for the reason the server's `approach` gives in
+/// `internal/game/player.go`: a value that snaps to its target reads as a wall of velocity,
+/// and a bird that jumps upward the instant it crosses a cliff edge is exactly that.
+///
+/// Four blocks a second is under the slowest row's own `max_speed` of 7.5, so the correction
+/// never outruns the flight it is correcting, and it covers the whole of [`BIRD_CLEARANCE`]
+/// in a little over a second — inside the [`BIRD_FADE_SECONDS`] a new bird arrives over, so
+/// a bird seeded inside a hill is clear of it by the time it is fully drawn.
+const CLEARANCE_LIFT_SPEED: f32 = 4.0;
 
 /// How a bird moves through the air.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +413,128 @@ fn waypoint(seed: u64, index: i64) -> Vec3 {
 }
 
 // ---------------------------------------------------------------------------
+// How far the ground pushes a bird up
+// ---------------------------------------------------------------------------
+//
+// [`place`] answers where a bird *would* be, from four arguments and nothing else, and
+// nothing below changes that. The clamp is a second, named step over its answer, applied in
+// `fly_the_flock` where the terrain and the previous frame's lift both already are — so the
+// path stays a pure function of `(species, seed, elapsed, anchor)` and stays testable
+// without a window, and the whole of what the ground does to a bird is one number.
+
+/// One float floored to the voxel index containing it.
+///
+/// `floor`, never a bare cast, for the reason `player/target.rs`'s raycast gives: `-0.5 as
+/// i32` truncates to 0 and the voxel containing -0.5 is -1. Half the world is on that side
+/// of the origin. glam's cast saturates, so an absurd height gives an absurd index rather
+/// than a wrapped one.
+fn voxel_of(value: f32) -> i32 {
+    Vec3::splat(value).floor().as_ivec3().x
+}
+
+/// The top face of whatever is under a bird, looked for within one clearance of `drawn_y`.
+///
+/// **`None` means "no constraint", and it is reached two ways this deliberately does not
+/// tell apart**, because both answer the same lift. Either the probe found only air, in
+/// which case the surface is already below the window and the clearance is met by
+/// construction; or a chunk the window crosses is not loaded, in which case there is no
+/// answer at all and the bird is left where the pattern put it. **An absent chunk is not
+/// evidence of a mountain** — the same conservative direction `Terrain.Fluid` takes, and the
+/// mesher's neighbour rule, and the server's step-up probe. The store is *read* here and
+/// never asked to fetch: [`ChunkStore::get`] answering `None` ends the probe.
+///
+/// **Not air, rather than [`ChunkStore::solid_at`].** The question is what a bird would be
+/// seen to fly into, and a lake's surface and a leaf canopy are both that, while solidity —
+/// what stops a *body* — deliberately excludes water and cover. `block_at` alone cannot
+/// answer it either: a coordinate in a chunk this session does not hold and one in a chunk
+/// full of air are both `AIR`, which is why the presence check is separate.
+///
+/// **The window is `[drawn_y - BIRD_CLEARANCE - 1, drawn_y]`** — seven voxels, one probe per
+/// bird per frame, forty-two at [`BIRD_COUNT_MAX`]. Two things about it are load-bearing.
+/// The probe hangs off where the bird is **drawn** rather than off [`place`]'s answer, so a
+/// bird buried deep in a hill walks its way out over a few frames instead of needing a
+/// window as tall as the world. And the extra block *below* the clearance is what makes it
+/// converge: at rest a bird sits exactly [`BIRD_CLEARANCE`] over the surface, so a window
+/// one clearance deep would hold nothing but air, answer "no constraint", drop the bird back
+/// into the hill and lift it again forever.
+fn surface_under(store: &ChunkStore, column: Vec3, drawn_y: f32, chunk_size: usize) -> Option<f32> {
+    if !column.is_finite() || !drawn_y.is_finite() || chunk_size == 0 {
+        return None;
+    }
+    let size = i32::try_from(chunk_size).ok()?;
+    let x = voxel_of(column.x);
+    let z = voxel_of(column.z);
+    let high = voxel_of(drawn_y);
+    let low = voxel_of(drawn_y - BIRD_CLEARANCE - 1.0);
+
+    for y in (low..=high).rev() {
+        let coord = ChunkCoord {
+            cx: x.div_euclid(size),
+            cy: y.div_euclid(size),
+            cz: z.div_euclid(size),
+        };
+        // Downwards, and a gap ends the probe rather than being read through: a voxel this
+        // session does not hold could be higher than anything found under it.
+        store.get(coord)?;
+        if store.block_at(BlockCoord { x, y, z }, chunk_size) != palette::AIR {
+            // The voxel spans `[y, y + 1)`, so its top face is what a bird flies over.
+            return Some((y + 1) as f32);
+        }
+    }
+    None
+}
+
+/// Moves `current` toward `target` by at most `step`, without overshooting.
+///
+/// The client's mirror of the server's `approach` in `internal/game/player.go`, and here for
+/// the reason given there: a signed max/min pair rather than an exponential ease, because
+/// there is no time constant to tune and "eases toward a target" is exactly what it says.
+/// Once the target moves slower than `step`, this sits on it exactly rather than trailing
+/// it — which is what lets a clamped bird hold the clearance to the bit while its pattern
+/// keeps rising and falling underneath.
+fn approach(current: f32, target: f32, step: f32) -> f32 {
+    if current > target {
+        (current - step).max(target)
+    } else {
+        (current + step).min(target)
+    }
+}
+
+/// This frame's lift for one bird: the whole of the clamp, as one step over [`place`].
+///
+/// `ground` is `None` for a frame with no session or no store, which is the same "no answer"
+/// an unloaded chunk gives and takes the same conservative direction: no lift.
+///
+/// **The lift is never negative.** The clearance is a floor under a bird and never a ceiling
+/// over one, so a pattern already flying high enough is left alone to the last bit and flat
+/// ground under the whole box changes nothing.
+///
+/// **And it is bounded by the box the anchor draws.** A bird lifted past [`BIRD_RANGE`] is
+/// one `keep_the_flock` retires as left behind by its anchor, so where a hill is high enough
+/// for the clearance and the box to disagree the box wins and the bird flies through the
+/// hill. That is the cheaper of the two mistakes: `a_bird_never_leaves_its_box` is the
+/// invariant every other part of this module is built on, and a bird that far under a ridge
+/// is one nobody is looking at. The bound is applied twice — to the target and to the eased
+/// result — because a ceiling that falls faster than [`CLEARANCE_LIFT_SPEED`] would
+/// otherwise leave yesterday's lift outside today's box.
+fn next_lift(
+    ground: Option<(&ChunkStore, usize)>,
+    unclamped: Vec3,
+    anchor: Vec3,
+    lift: f32,
+    dt: f32,
+) -> f32 {
+    let ceiling = (anchor.y + BIRD_RANGE - unclamped.y).max(0.0);
+    let wanted = ground
+        .and_then(|(store, chunk_size)| {
+            surface_under(store, unclamped, unclamped.y + lift, chunk_size)
+        })
+        .map_or(0.0, |surface| surface + BIRD_CLEARANCE - unclamped.y)
+        .clamp(0.0, ceiling);
+    approach(lift, wanted, CLEARANCE_LIFT_SPEED * dt).min(ceiling)
+}
+
+// ---------------------------------------------------------------------------
 // Seeds
 // ---------------------------------------------------------------------------
 
@@ -507,6 +671,14 @@ pub(super) struct Bird {
     /// What `fade` is moving towards. Zero means this bird is on its way out, and nothing
     /// ever moves it back, so a look that flickers cannot make a bird flicker with it.
     pub(super) wanted: f32,
+    /// How far the clearance has lifted this bird above where [`place`] put it, in blocks.
+    ///
+    /// The only per-bird state the flight has, and it is deliberately the *offset* rather
+    /// than a position: [`place`] remains the whole of where a bird would be, and this is
+    /// how far the ground has pushed it off that. Zero is the untouched case and stays
+    /// exactly zero, so a flock over ground it already clears is drawn where it was before
+    /// the clamp existed.
+    lift: f32,
     /// Which pair of [`BirdVisuals::pool`] this bird draws from. Distinct from `index`: a
     /// stray and a new bird can hold the same *flock* slot, and must not share an alpha.
     pool: usize,
@@ -749,6 +921,9 @@ pub(super) fn keep_the_flock(
                     anchor,
                     fade: 0.0,
                     wanted: 1.0,
+                    // Where the pattern put it. `fly_the_flock` eases the ground's answer
+                    // in on the frames that follow, inside the fade it arrives over.
+                    lift: 0.0,
                     pool,
                     body_material: body_material.clone(),
                     wing_material: wing_material.clone(),
@@ -803,6 +978,11 @@ pub(super) struct FlightInputs<'w> {
 /// The wings are a second query rather than a child lookup because the parent's `Bird` is
 /// already held here: `BirdWing` carries its own copy of the row's beat, so neither loop has
 /// to reach into the other's entity.
+///
+/// It is also where the ground clamp lives, because this is where the terrain and the
+/// previous frame's lift both already are — see [`next_lift`]. That adds one bounded column
+/// probe per bird per frame to the budget above, next to the one [`sky::submerged_at`]
+/// already takes for the eye.
 pub(super) fn fly_the_flock(
     read: FlightInputs<'_>,
     mut commands: Commands,
@@ -831,6 +1011,12 @@ pub(super) fn fly_the_flock(
         ),
         _ => false,
     };
+    // The terrain the clearance is measured against, if there is any to read. A frame with
+    // no session or no store answers the same way an unloaded chunk does: no clamp.
+    let ground = match (store.as_deref(), session.as_deref()) {
+        (Some(store), Some(session)) => Some((store, usize::from(session.0.chunk_size))),
+        _ => None,
+    };
 
     for (entity, mut bird, mut transform, mut visibility) in &mut flock {
         let fade = if bird.wanted > bird.fade {
@@ -853,10 +1039,22 @@ pub(super) fn fly_the_flock(
 
         let species = &BIRDS[bird.species];
         let position = place(species, bird.seed, elapsed, bird.anchor);
-        transform.translation = position;
+        // The clamp: a named step over `place`'s answer, never a fifth argument to it. It
+        // moves the bird up and never sideways, so everything below still reads the
+        // pattern's own point.
+        let lift = next_lift(ground, position, bird.anchor, bird.lift, time.delta_secs());
+        // Guarded for the reason the visibility write below is: `Mut` marks a component
+        // changed on every `DerefMut`, and over ground a flock already clears this is zero
+        // every frame forever.
+        if lift != bird.lift {
+            bird.lift = lift;
+        }
+        transform.translation = position + Vec3::Y * lift;
         // Which way it faces is the direction it is going, sampled from the same pure
         // function rather than differenced against last frame — so a bird nothing drew for
-        // a hundred frames comes back facing correctly on the first one.
+        // a hundred frames comes back facing correctly on the first one. Both samples are
+        // unclamped, so the heading stays the pattern's and a lift never tips a bird's nose
+        // up: the clearance changes where a bird is, not where it is going.
         let ahead = place(species, bird.seed, elapsed + HEADING_STEP, bird.anchor) - position;
         if let Ok(heading) = Dir3::new(ahead) {
             transform.look_to(heading.as_vec3(), Vec3::Y);
@@ -888,6 +1086,7 @@ pub(super) fn fly_the_flock(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::{BlockId, VoxelChunk};
 
     const SAMPLES: usize = 120 * 60;
     const DT: f32 = 1.0 / 60.0;
@@ -1105,5 +1304,335 @@ mod tests {
             cell_seed(IVec3::ZERO),
             mix(BIRD_SEED.wrapping_add(1), mix(0, mix(0, 0))),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The ground under a bird
+    // -----------------------------------------------------------------------
+
+    /// The chunk edge every clamp fixture below is built at, and asks about.
+    const CHUNK: usize = 32;
+
+    /// How long a walk is given to settle before its height is read.
+    ///
+    /// A bird seeded inside a hill climbs out of it a clearance at a time, because the
+    /// probe hangs off where it is *drawn*. Ten seconds is forty blocks of climb at
+    /// [`CLEARANCE_LIFT_SPEED`], which is most of a box.
+    const SETTLED: usize = 10 * 60;
+
+    /// A store over every chunk a box of `reach` around `centre` touches, holding `block`
+    /// wherever `solid` says so and air everywhere else.
+    ///
+    /// Synthetic on purpose: the clamp's whole input is "what is under this column", so a
+    /// terrain a test can state in one closure is the only fixture it needs.
+    fn terrain(
+        centre: Vec3,
+        reach: f32,
+        block: BlockId,
+        solid: impl Fn(IVec3) -> bool,
+    ) -> ChunkStore {
+        let span = CHUNK as i32;
+        let low = (centre - Vec3::splat(reach)).floor().as_ivec3();
+        let high = (centre + Vec3::splat(reach)).floor().as_ivec3();
+        let mut store = ChunkStore::default();
+        for cx in low.x.div_euclid(span)..=high.x.div_euclid(span) {
+            for cy in low.y.div_euclid(span)..=high.y.div_euclid(span) {
+                for cz in low.z.div_euclid(span)..=high.z.div_euclid(span) {
+                    let mut chunk = VoxelChunk::all_air(CHUNK);
+                    for ly in 0..CHUNK {
+                        for lz in 0..CHUNK {
+                            for lx in 0..CHUNK {
+                                let at = IVec3::new(
+                                    cx * span + lx as i32,
+                                    cy * span + ly as i32,
+                                    cz * span + lz as i32,
+                                );
+                                if solid(at) {
+                                    chunk.set(lx, ly, lz, block);
+                                }
+                            }
+                        }
+                    }
+                    store.insert(ChunkCoord { cx, cy, cz }, chunk);
+                }
+            }
+        }
+        store
+    }
+
+    /// Walks one bird for `samples` frames and answers `(drawn point, lift)` for each.
+    ///
+    /// It drives [`next_lift`] rather than restating what `fly_the_flock` does with it: a
+    /// test that re-implemented the clamp would pass whatever the client actually drew.
+    fn flown(
+        ground: Option<(&ChunkStore, usize)>,
+        species: &BirdSpecies,
+        seed: u64,
+        anchor: Vec3,
+        samples: usize,
+    ) -> Vec<(Vec3, f32)> {
+        let mut lift = 0.0;
+        let mut path = Vec::with_capacity(samples + 1);
+        for sample in 0..=samples {
+            let unclamped = place(species, seed, sample as f32 * DT, anchor);
+            lift = next_lift(ground, unclamped, anchor, lift, DT);
+            path.push((unclamped + Vec3::Y * lift, lift));
+        }
+        path
+    }
+
+    #[test]
+    fn the_surface_a_bird_clears_is_the_top_face_of_what_is_under_it() {
+        // Solid below 40, so the highest voxel is 39. It spans `[39, 40)`, and 40 is the
+        // height a bird flies over.
+        let store = terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, palette::STONE, |at| {
+            at.y < 40
+        });
+        let column = Vec3::new(8.5, 0.0, 8.5);
+        assert_eq!(surface_under(&store, column, 44.0, CHUNK), Some(40.0));
+
+        // At rest a bird sits exactly the clearance up, and the window has to still see the
+        // block that put it there. This is the one probed block *below* `BIRD_CLEARANCE`
+        // earning its place: without it the answer here is `None`, the lift falls to zero,
+        // the bird drops back into the hill, and it lifts again forever.
+        assert_eq!(
+            surface_under(&store, column, 40.0 + BIRD_CLEARANCE, CHUNK),
+            Some(40.0)
+        );
+
+        // Higher than that and the ground has nothing to say about where the bird flies.
+        assert_eq!(surface_under(&store, column, 48.0, CHUNK), None);
+
+        // And it floors rather than truncating, on the side of the origin where the two
+        // differ — the trap `player/target.rs`'s raycast names, over half the world.
+        let below = terrain(Vec3::new(-8.0, -8.0, -8.0), 24.0, palette::STONE, |at| {
+            at.y < -8
+        });
+        assert_eq!(
+            surface_under(&below, Vec3::new(-0.5, 0.0, -0.5), -4.0, CHUNK),
+            Some(-8.0)
+        );
+    }
+
+    #[test]
+    fn a_bird_clears_a_lake_surface_and_a_canopy_rather_than_what_is_under_them() {
+        // Not `ChunkStore::solid_at`: solidity answers what stops a *body*, and since #446
+        // and #550 it deliberately excludes water and cover. The question here is what a
+        // bird would be seen to fly into, and a lake's surface and a leaf canopy are both
+        // that — a clearance measured to a lake bed would draw a parrot under water.
+        for block in [
+            palette::STONE,
+            palette::WATER,
+            palette::WATER_FLOW3,
+            palette::LEAVES,
+            palette::FLOWER_RED,
+        ] {
+            let store = terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, block, |at| at.y == 39);
+            assert_eq!(
+                surface_under(&store, Vec3::new(8.5, 0.0, 8.5), 44.0, CHUNK),
+                Some(40.0),
+                "a bird was flown through block {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_nobody_has_streamed_is_not_evidence_of_a_mountain() {
+        // Absence is not evidence — the direction `Terrain.Fluid`, the mesher's neighbour
+        // rule and the server's step-up probe all take. A bird over a chunk that has not
+        // arrived is left exactly where the pattern put it.
+        let nothing = ChunkStore::default();
+        let column = Vec3::new(8.5, 0.0, 8.5);
+        assert_eq!(surface_under(&nothing, column, 44.0, CHUNK), None);
+
+        let unclamped = Vec3::new(8.5, 44.0, 8.5);
+        let anchor = Vec3::new(8.5, 40.0, 8.5);
+        assert_eq!(
+            next_lift(Some((&nothing, CHUNK)), unclamped, anchor, 0.0, DT),
+            0.0
+        );
+        // And a frame with no store or no session at all takes the same direction.
+        assert_eq!(next_lift(None, unclamped, anchor, 0.0, DT), 0.0);
+
+        // A gap is not read *through*, either. One chunk holds a hilltop at 40 and the
+        // chunk above it never arrived: a probe that crossed the hole would answer with
+        // the highest thing it happens to hold rather than with the highest thing there is.
+        let mut chunk = VoxelChunk::all_air(8);
+        for y in 0..8 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    chunk.set(x, y, z, palette::STONE);
+                }
+            }
+        }
+        let mut gapped = ChunkStore::default();
+        gapped.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 4,
+                cz: 0,
+            },
+            chunk,
+        );
+        let column = Vec3::new(4.5, 0.0, 4.5);
+        // `[32, 40)` is the one chunk there is, and inside it the answer is the honest one.
+        assert_eq!(surface_under(&gapped, column, 39.0, 8), Some(40.0));
+        // Six blocks higher the window opens into the missing chunk, and the hilltop two
+        // blocks under it is no longer an answer anybody may give.
+        assert_eq!(surface_under(&gapped, column, 44.0, 8), None);
+    }
+
+    #[test]
+    fn ground_a_flock_already_clears_moves_no_bird() {
+        // The clearance is a floor under a bird and never a ceiling over one. With a level
+        // surface under the whole box, every bird is exactly where it was before the clamp
+        // existed — to the bit, and with no lift to write.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |at| at.y < 16);
+        // Not vacuous: the floor of the box is there to be found.
+        assert_eq!(surface_under(&store, anchor, 20.0, CHUNK), Some(16.0));
+
+        for species in &BIRDS {
+            for seed in 0..4u64 {
+                let seed = mix(seed, 0xF1A7);
+                for (sample, (drawn, lift)) in
+                    flown(Some((&store, CHUNK)), species, seed, anchor, SAMPLES)
+                        .into_iter()
+                        .enumerate()
+                {
+                    assert_eq!(
+                        lift, 0.0,
+                        "{:?} was lifted over ground it already cleared",
+                        species.pattern
+                    );
+                    assert_eq!(drawn, place(species, seed, sample as f32 * DT, anchor));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bird_inside_a_hill_is_drawn_exactly_the_clearance_over_it() {
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        for species in &BIRDS {
+            // A hill reaching the floor of this row's own band, so every row is genuinely
+            // buried for part of its pattern rather than only the low one.
+            let top = anchor.y + *species.altitude.start();
+            let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |at| {
+                (at.y as f32) < top
+            });
+            let mut lowest = f32::INFINITY;
+            for seed in 0..4u64 {
+                let seed = mix(seed, 0xC11F);
+                for (sample, (drawn, _)) in
+                    flown(Some((&store, CHUNK)), species, seed, anchor, SAMPLES)
+                        .into_iter()
+                        .enumerate()
+                        .skip(SETTLED)
+                {
+                    assert!(
+                        drawn.y >= top + BIRD_CLEARANCE - 1e-3,
+                        "{:?} was drawn at {} over a hilltop at {top}",
+                        species.pattern,
+                        drawn.y
+                    );
+                    // Up, and only up: the clamp is one axis and the pattern owns the
+                    // other two.
+                    let unclamped = place(species, seed, sample as f32 * DT, anchor);
+                    assert_eq!((drawn.x, drawn.z), (unclamped.x, unclamped.z));
+                    assert!(drawn.y >= unclamped.y);
+                    lowest = lowest.min(drawn.y);
+                }
+            }
+            // Exactly the clearance, and reached: a bound nothing ever touches would be
+            // satisfied by a bird parked in the stratosphere.
+            assert!(
+                (lowest - (top + BIRD_CLEARANCE)).abs() <= 1e-3,
+                "{:?} settled at {lowest}, not at {}",
+                species.pattern,
+                top + BIRD_CLEARANCE
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_in_the_ground_lifts_a_bird_without_teleporting_it() {
+        // A cliff through the middle of the box: low ground on one side, a hundred-block
+        // wall on the other. Crossing it a bird climbs, and the whole reason the lift is
+        // approached rather than assigned is that it must not jump.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |at| {
+            at.y < if at.x < 16 { 8 } else { 108 }
+        });
+        let mut climbed = 0usize;
+        for species in &BIRDS {
+            for seed in 0..4u64 {
+                let seed = mix(seed, 0xC11F);
+                for pair in flown(Some((&store, CHUNK)), species, seed, anchor, SAMPLES).windows(2)
+                {
+                    let ((was, before), (now, after)) = (pair[0], pair[1]);
+                    // The row's own bound plus the lift's, which is the whole of what the
+                    // clamp may add — `a_bird_moves_no_faster_than_its_row_allows` pins the
+                    // first term on the unclamped path and this pins the sum on the drawn
+                    // one.
+                    let moved = now.distance(was);
+                    assert!(
+                        moved <= (species.max_speed + CLEARANCE_LIFT_SPEED) * DT + 1e-4,
+                        "{:?} moved {moved} in {DT}s at a cliff edge",
+                        species.pattern
+                    );
+                    assert!(
+                        (after - before).abs() <= CLEARANCE_LIFT_SPEED * DT + 1e-4,
+                        "{:?} snapped its lift from {before} to {after}",
+                        species.pattern
+                    );
+                    climbed += usize::from(after > before);
+                }
+            }
+        }
+        assert!(
+            climbed > 0,
+            "no bird ever met the cliff, so this test would pass vacuously"
+        );
+    }
+
+    #[test]
+    fn a_clamped_bird_never_leaves_its_box() {
+        // `a_bird_never_leaves_its_box`, with the clamp on. Solid rock everywhere means the
+        // clearance asks for more lift than `BIRD_RANGE` allows, and the box wins — the
+        // documented trade, and the invariant `keep_the_flock`'s retirement rests on.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |_| true);
+        let mut ceilinged = 0usize;
+        for species in &BIRDS {
+            for seed in 0..4u64 {
+                let seed = mix(seed, 0xB0C5);
+                for (drawn, _) in flown(Some((&store, CHUNK)), species, seed, anchor, SAMPLES) {
+                    let from = drawn - anchor;
+                    assert!(
+                        from.abs().max_element() <= BIRD_RANGE + 1e-3,
+                        "{:?} reached {from} from its anchor",
+                        species.pattern
+                    );
+                    ceilinged += usize::from(from.y >= BIRD_RANGE - 1e-3);
+                }
+            }
+        }
+        assert!(
+            ceilinged > 0,
+            "nothing ever reached the ceiling, so the box was never the binding bound"
+        );
+    }
+
+    #[test]
+    fn a_lift_approaches_its_target_and_then_sits_on_it() {
+        // The server's `approach`, mirrored: no overshoot in either direction, and exact
+        // once the target is within one step — which is what lets a clamped bird hold the
+        // clearance to the bit while its pattern rises and falls underneath.
+        assert_eq!(approach(0.0, 1.0, 0.25), 0.25);
+        assert_eq!(approach(0.9, 1.0, 0.25), 1.0);
+        assert_eq!(approach(2.0, 1.0, 0.25), 1.75);
+        assert_eq!(approach(1.1, 1.0, 0.25), 1.0);
+        assert_eq!(approach(1.0, 1.0, 0.25), 1.0);
     }
 }
