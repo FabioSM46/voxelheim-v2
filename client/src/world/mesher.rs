@@ -28,6 +28,23 @@
 //! Bevy sorts per entity, so the two have to be separate draws. The face rules are
 //! on [`build_masks`]; the greedy merge below is shared and knows about neither.
 //!
+//! ## Corners are darkened, and it is the merge key that pays for it
+//!
+//! Lighting is a function of the face normal, and every face pointing the same way is
+//! therefore exactly the same colour whatever is in front of it. A staircase of one
+//! block type seen head-on is one flat rectangle. [`Occlusion`] is the answer: each of
+//! a quad's four corners counts the opaque voxels that touch it on the side the face
+//! points at, and darkens that vertex's colour.
+//!
+//! It rides in the vertex colour that was already there — [`SurfaceMesh::colors`], which
+//! `render.rs` uploads as `Mesh::ATTRIBUTE_COLOR` — so it costs no attribute, no
+//! material and no shader. Four vertices per quad, never shared, is what makes that
+//! possible at all.
+//!
+//! **And it is part of the mask key**, so two faces whose corners are lit differently do
+//! not merge. That raises the quad count, deliberately: the merge is exactly what
+//! erased the seam this is drawn to show.
+//!
 //! ## The chunk border is culled against the neighbour it is handed
 //!
 //! A face on the outer surface of a chunk is culled against the voxel across it in
@@ -127,6 +144,79 @@ impl WaterFlow {
     }
 }
 
+/// How much of the sky each of a quad's four corners is cut off from, as the count of
+/// opaque voxels that touch it on the side the face points at.
+///
+/// **Per-vertex ambient occlusion, and the reason it can exist at all is
+/// [`VERTICES_PER_QUAD`]**: four vertices per quad, never shared, so the four corners of
+/// one quad can carry four different colours without any other quad disagreeing.
+///
+/// Three voxels touch a corner on the outward side — the two that share an edge with the
+/// face and the one diagonally across from it — so a level runs 0 (nothing beside it) to
+/// 3 (a corner buried in rock). The two edge-adjacent voxels being solid is level 3 on
+/// its own: the diagonal is behind them and cannot be seen whether or not it is there,
+/// which is the standard rule and the one that keeps an inside corner from reading
+/// lighter than the wall beside it.
+///
+/// **It is part of the sweep's mask key**, for exactly the reason [`WaterFlow`] is: the
+/// greedy merge compares mask entries with `Eq`, and two faces whose corners are lit
+/// differently must not be fused into one quad that has to pick one of the two answers.
+/// That costs quads — it is why a step in a staircase stops merging into the step beside
+/// it — and the cost is the feature, since the merge is what erased the seam.
+///
+/// Quantised to a level rather than held as a float for the same reason `WaterFlow` is
+/// quantised: a mask key has to answer `Eq`, and a float derived from a division cannot.
+///
+/// Corners are stored in the plane's own `(u, v)` frame — `(0,0)`, `(1,0)`, `(1,1)`,
+/// `(0,1)` — which is the winding order [`quad_corners`] emits for a face pointing along
+/// `+axis`. A face pointing the other way walks the same four corners in the other
+/// direction; [`Self::shade`] is the one place that knows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Occlusion([u8; VERTICES_PER_QUAD]);
+
+/// The brightness of a vertex at each occlusion level.
+///
+/// One occluding voxel takes a fifth of the light and the next takes a fifth of what is
+/// left, so the curve is `0.8ⁿ` written out rather than computed — a `powi` per vertex
+/// for four values that never change. The multiplication happens in **linear** space,
+/// which is where [`palette::linear_rgba`] already works, so a step here is a smaller
+/// perceptual step than the same number applied to an sRGB colour would be.
+const OCCLUSION_SHADE: [f32; 4] = [1.0, 0.8, 0.64, 0.512];
+
+/// Which way to step, in the plane's `(u, v)` frame, to reach the voxels that touch each
+/// corner. Same order as [`Occlusion`]'s corners.
+const CORNER_STEPS: [(isize, isize); VERTICES_PER_QUAD] = [(-1, -1), (1, -1), (1, 1), (-1, 1)];
+
+impl Occlusion {
+    /// A face with nothing beside it: every corner fully lit.
+    ///
+    /// What every water and cover quad carries — the occlusion is the opaque sweep's and
+    /// nothing else's — and what an opaque face standing alone in the air computes.
+    pub const NONE: Self = Self([0; VERTICES_PER_QUAD]);
+
+    /// `color` darkened per corner, in the winding order [`quad_corners`] emits for a
+    /// face whose normal points along `+axis` when `positive`.
+    ///
+    /// Alpha is carried through untouched: occlusion is a shading term, and darkening a
+    /// surface must not also make it see-through.
+    fn shade(self, color: [f32; 4], positive: bool) -> [[f32; 4]; VERTICES_PER_QUAD] {
+        // `quad_corners` walks origin → +u → +u+v → +v for a positive face and
+        // origin → +v → +u+v → +u for a negative one, which is this array reversed
+        // after its first entry.
+        let winding: [usize; VERTICES_PER_QUAD] =
+            if positive { [0, 1, 2, 3] } else { [0, 3, 2, 1] };
+        winding.map(|corner| {
+            let shade = OCCLUSION_SHADE[usize::from(self.0[corner])];
+            [
+                color[0] * shade,
+                color[1] * shade,
+                color[2] * shade,
+                color[3],
+            ]
+        })
+    }
+}
+
 /// One pass's worth of surface, as the parallel attribute buffers a GPU wants.
 ///
 /// Deliberately not a `bevy::mesh::Mesh`: this type crosses a thread boundary and
@@ -146,7 +236,10 @@ pub struct SurfaceMesh {
     /// One outward face normal per vertex. Flat by construction — every vertex of
     /// a quad shares the quad's normal, and no vertex is shared between quads.
     pub normals: Vec<[f32; 3]>,
-    /// Linear RGBA per vertex, from [`palette::linear_rgba`].
+    /// Linear RGBA per vertex, from [`palette::linear_rgba`], with its RGB darkened by
+    /// the vertex's own [`Occlusion`] on the opaque half. Four vertices of one quad can
+    /// therefore differ, which is the whole of how an edge becomes visible without a
+    /// second attribute, a second material or a shader.
     pub colors: Vec<[f32; 4]>,
     /// The horizontal flow per vertex, from [`WaterFlow::vector`]. Empty on a
     /// surface whose faces carry no flow.
@@ -183,13 +276,27 @@ impl SurfaceMesh {
         color: [f32; 4],
         flow: Option<WaterFlow>,
     ) {
+        self.push_shaded_quad(corners, normal, [color; VERTICES_PER_QUAD], flow);
+    }
+
+    /// [`Self::push_quad`] with a colour per corner rather than one for the quad.
+    ///
+    /// The opaque sweep is the only caller that needs it: its four corners carry four
+    /// [`Occlusion`] levels. Water and cover push one colour four times through
+    /// [`Self::push_quad`], which is what leaves them untouched by this.
+    fn push_shaded_quad(
+        &mut self,
+        corners: [[f32; 3]; 4],
+        normal: [f32; 3],
+        colors: [[f32; 4]; VERTICES_PER_QUAD],
+        flow: Option<WaterFlow>,
+    ) {
         let base = self.positions.len() as u32;
 
         self.positions.extend_from_slice(&corners);
         self.normals
             .extend(std::iter::repeat_n(normal, VERTICES_PER_QUAD));
-        self.colors
-            .extend(std::iter::repeat_n(color, VERTICES_PER_QUAD));
+        self.colors.extend_from_slice(&colors);
         if let Some(flow) = flow {
             self.flow
                 .extend(std::iter::repeat_n(flow.vector(), VERTICES_PER_QUAD));
@@ -374,6 +481,12 @@ struct Face {
     /// `None` on every opaque face — the opaque surface carries no flow attribute at
     /// all, which is what keeps [`SurfaceMesh`]'s all-or-nothing invariant true.
     flow: Option<WaterFlow>,
+    /// How dark each of this face's four corners is, and part of the key for the same
+    /// reason `flow` is: two faces lit differently at their corners must not merge into
+    /// one quad that could only carry one of the two answers. [`Occlusion::NONE`] on
+    /// every water face — occlusion is the opaque half's, and water is drawn through
+    /// rather than lit at its edges.
+    occlusion: Occlusion,
 }
 
 /// Meshes one chunk against the neighbours it was given.
@@ -619,12 +732,34 @@ fn build_masks(
                         positive: true,
                         geometry: FaceGeometry::Full,
                         flow: None,
+                        // The face points along +axis, so the side it is lit from is the
+                        // layer at `plane`: the see-through one it was emitted against.
+                        occlusion: occlusion_at(
+                            chunk,
+                            neighbours,
+                            axis,
+                            u,
+                            v,
+                            plane as isize,
+                            i,
+                            j,
+                        ),
                     }),
                     (false, true) if above_is_ours => Some(Face {
                         block: positive,
                         positive: false,
                         geometry: FaceGeometry::Full,
                         flow: None,
+                        occlusion: occlusion_at(
+                            chunk,
+                            neighbours,
+                            axis,
+                            u,
+                            v,
+                            plane as isize - 1,
+                            i,
+                            j,
+                        ),
                     }),
                     // See-through on both sides: nothing. Opaque on both sides: an
                     // interior face, which is what greedy meshing exists never to emit.
@@ -680,6 +815,7 @@ fn water_face(
     match (negative_water, positive_water) {
         (true, false) if !palette::is_opaque(positive) && negative_is_ours => Some(Face {
             block: palette::WATER,
+            occlusion: Occlusion::NONE,
             positive: true,
             flow: None,
             geometry: if axis == 1 {
@@ -695,6 +831,7 @@ fn water_face(
         }),
         (false, true) if !palette::is_opaque(negative) && positive_is_ours => Some(Face {
             block: palette::WATER,
+            occlusion: Occlusion::NONE,
             positive: false,
             flow: None,
             geometry: if axis == 1 {
@@ -711,6 +848,7 @@ fn water_face(
         (true, true) if axis == 1 => None,
         (true, true) if negative_level > positive_level && negative_is_ours => Some(Face {
             block: palette::WATER,
+            occlusion: Occlusion::NONE,
             positive: true,
             geometry: FaceGeometry::WaterSide {
                 bottom: positive_level,
@@ -720,6 +858,7 @@ fn water_face(
         }),
         (true, true) if positive_level > negative_level && positive_is_ours => Some(Face {
             block: palette::WATER,
+            occlusion: Occlusion::NONE,
             positive: false,
             geometry: FaceGeometry::WaterSide {
                 bottom: negative_level,
@@ -878,6 +1017,107 @@ fn stepped_block(
     across.block(probe)
 }
 
+/// The [`Occlusion`] of the face on mask cell `(i, j)`, sampled on the layer it points
+/// at.
+///
+/// `outward` is that layer's index along `axis`, and it is an `isize` because it is
+/// legitimately `-1` or `size`: a face on a chunk's border points out of the chunk, and
+/// what is beyond it is the neighbour's — or air, when no neighbour was handed in.
+///
+/// Three samples per corner and twelve per face, all of them on one layer, and none of
+/// them taken for a mask cell that has no face. That keeps the cost proportional to the
+/// **surface** rather than to the volume, which is why it can live in the sweep at all.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep's coordinate frame, the same one `sample` and `merge_mask` take"
+)]
+fn occlusion_at(
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    axis: usize,
+    u: usize,
+    v: usize,
+    outward: isize,
+    i: usize,
+    j: usize,
+) -> Occlusion {
+    let (i, j) = (i as isize, j as isize);
+    let opaque = |i, j| is_opaque_at(chunk, neighbours, axis, u, v, outward, i, j);
+
+    let mut levels = [0u8; VERTICES_PER_QUAD];
+    for (corner, (du, dv)) in CORNER_STEPS.into_iter().enumerate() {
+        let side_u = opaque(i + du, j);
+        let side_v = opaque(i, j + dv);
+        levels[corner] = if side_u && side_v {
+            // Both edges walled in. The diagonal is behind them either way, so it is
+            // not sampled and cannot lighten the corner — the rule that keeps an
+            // inside corner from reading brighter than the two walls that form it.
+            3
+        } else {
+            u8::from(side_u) + u8::from(side_v) + u8::from(opaque(i + du, j + dv))
+        };
+    }
+    Occlusion(levels)
+}
+
+/// Whether the voxel at `(outward, i, j)` in the plane's frame hides light, reading
+/// across a chunk border when one of the three coordinates leaves this chunk.
+///
+/// **Two rules, and both are the ones the sweep already follows.** A coordinate that
+/// leaves the chunk on **one** axis is read from the neighbour across that face, and an
+/// absent neighbour reads as air — the face is lit rather than darkened, which is the
+/// same direction of being wrong as emitting a border face rather than culling it, and
+/// it is undone by the same remesh when the neighbour arrives. A coordinate that leaves
+/// on **two** axes at once belongs to a diagonal chunk, which [`Neighbours`] does not
+/// carry and [`mesh_chunk`] is not handed; it reads as air for the same reason. That
+/// second case is the only place occlusion is deliberately approximate, and it reaches
+/// one corner sample of the faces that run along a chunk's twelve edges — never the
+/// faces themselves, which are culled and lit against the six neighbours in full.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sweep's coordinate frame, as an `isize` triple that may leave the chunk"
+)]
+fn is_opaque_at(
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    axis: usize,
+    u: usize,
+    v: usize,
+    outward: isize,
+    i: isize,
+    j: isize,
+) -> bool {
+    let size = chunk.size();
+    let mut cell = [0isize; 3];
+    cell[axis] = outward;
+    cell[u] = i;
+    cell[v] = j;
+
+    let mut leaves = None;
+    for (a, coordinate) in cell.iter().enumerate() {
+        if *coordinate < 0 || *coordinate >= size as isize {
+            if leaves.is_some() {
+                return false;
+            }
+            leaves = Some(a);
+        }
+    }
+
+    let block = match leaves {
+        None => chunk.block(cell.map(|coordinate| coordinate as usize)),
+        Some(a) => {
+            let positive = cell[a] >= size as isize;
+            let Some(across) = neighbours.across(a, positive, size) else {
+                return false;
+            };
+            cell[a] = if positive { 0 } else { size as isize - 1 };
+            across.block(cell.map(|coordinate| coordinate as usize))
+        }
+    };
+
+    palette::is_opaque(block)
+}
+
 /// One voxel of a plane's negative or positive side.
 ///
 /// `None` is the side that has no chunk behind it — a neighbour this session has not
@@ -950,10 +1190,14 @@ fn merge_mask(
                 mask[row * size + i..row * size + i + width].fill(None);
             }
 
-            mesh.push_quad(
+            // Every cell of this rectangle carried the same `Face`, occlusion
+            // included — that is what the mask key buys — so the merged quad's four
+            // corners are the four any one of its cells had.
+            mesh.push_shaded_quad(
                 quad_corners(axis, u, v, plane, i, j, width, height, face),
                 normal(axis, face.positive),
-                palette::linear_rgba(face.block),
+                face.occlusion
+                    .shade(palette::linear_rgba(face.block), face.positive),
                 face.flow,
             );
 
@@ -1736,6 +1980,356 @@ mod tests {
         assert!(
             elapsed < CEILING,
             "the worst case took {elapsed:?}, over the {CEILING:?} tripwire"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ambient occlusion: the corner shading, and what the mask key costs (#628)
+    // -----------------------------------------------------------------------
+
+    /// The occlusion level of each of a quad's four vertices, read back out of the
+    /// colours the sweep wrote.
+    ///
+    /// A finished mesh cannot be asked what its occlusion was — the factor is multiplied
+    /// into the colour and the level is gone — so this inverts it against the block's own
+    /// palette entry. Indexed in the buffers' own order, which is the **winding** order
+    /// and therefore not [`Occlusion`]'s `(u, v)` frame; every assertion below is about a
+    /// set of four levels or about which vertex sits where, so the two never have to be
+    /// reconciled and neither is quietly assumed to be the other.
+    fn shade_levels(mesh: &SurfaceMesh, quad: usize, block: BlockId) -> [u8; VERTICES_PER_QUAD] {
+        let base = palette::linear_rgba(block);
+        // The brightest channel, so a colour with no red is still readable.
+        let channel = (0..3)
+            .max_by(|a, b| base[*a].total_cmp(&base[*b]))
+            .expect("a colour has three channels");
+        assert!(
+            base[channel] > 0.0,
+            "a black block carries no readable shade"
+        );
+
+        std::array::from_fn(|vertex| {
+            let color = mesh.colors[quad * VERTICES_PER_QUAD + vertex];
+            assert_eq!(color[3], base[3], "occlusion changed a vertex's alpha");
+            let shade = color[channel] / base[channel];
+            OCCLUSION_SHADE
+                .iter()
+                .position(|level| (level - shade).abs() < 1e-4)
+                .unwrap_or_else(|| panic!("quad {quad} vertex {vertex} is shaded {shade}"))
+                as u8
+        })
+    }
+
+    /// A floor one block deep filling the chunk's y = 0 layer.
+    fn floor(size: usize, block: BlockId) -> VoxelChunk {
+        let mut chunk = air(size);
+        for z in 0..size {
+            for x in 0..size {
+                chunk.set(x, 0, z, block);
+            }
+        }
+        chunk
+    }
+
+    #[test]
+    fn a_block_alone_in_the_air_is_occluded_nowhere() {
+        // The control: with nothing beside it, every vertex keeps the palette's colour
+        // exactly. Level 0 multiplies by 1.0, which changes no bit, so this is `==` and
+        // not an epsilon — a shade curve that did not start at 1.0 would show up here.
+        let mesh = mesh_chunk(&single_block(SIZE, palette::STONE), &alone());
+
+        assert_eq!(mesh.quad_count(), 6);
+        for color in &mesh.colors {
+            assert_eq!(*color, palette::linear_rgba(palette::STONE));
+        }
+    }
+
+    #[test]
+    fn a_flat_wall_with_nothing_near_it_is_unshaded_and_still_merges() {
+        // The acceptance criterion about a large flat surface: no occlusion and no
+        // banding. The floor still merges to one quad per direction, which is the part a
+        // mask key gone wrong would break — a key that varied across a flat surface
+        // would answer 1024 here rather than 6.
+        let mesh = mesh_chunk(&floor(SIZE, palette::STONE), &alone());
+
+        assert_eq!(mesh.quad_count(), 6, "the slab still merges per direction");
+        for color in &mesh.colors {
+            assert_eq!(*color, palette::linear_rgba(palette::STONE));
+        }
+    }
+
+    #[test]
+    fn a_voxel_on_the_outward_side_darkens_exactly_the_two_corners_it_touches() {
+        // What "the three voxels touching that corner on the outward side" means, at the
+        // smallest size that has an answer. The block at (4, 4, 4) keeps its top face;
+        // the block diagonally above it along x sits in that face's outward layer,
+        // edge-on to two of its four corners and to neither of the other two.
+        //
+        // A block merely *beside* it, at the same height, would darken nothing: it is not
+        // in the layer the face points at. That is the algorithm rather than an omission,
+        // and it is why the fixture is a step and not a pair.
+        let mut chunk = air(SIZE);
+        chunk.set(4, 4, 4, palette::STONE);
+        chunk.set(5, 5, 4, palette::STONE);
+        let mesh = mesh_chunk(&chunk, &alone());
+
+        let lower = quads_facing(&mesh, [0.0, 1.0, 0.0])
+            .into_iter()
+            .find(|quad| quad_extent(&mesh, *quad, 1) == (5.0, 5.0))
+            .expect("the lower block's top face");
+
+        let levels = shade_levels(&mesh, lower, palette::STONE);
+        for (vertex, level) in levels.into_iter().enumerate() {
+            let x = mesh.positions[lower * VERTICES_PER_QUAD + vertex][0];
+            // One occluder, edge-on, and no diagonal behind it: level 1 on the two
+            // corners at the far x, nothing on the two at the near one.
+            assert_eq!(level, u8::from(x == 5.0), "vertex {vertex} at x = {x}");
+        }
+    }
+
+    #[test]
+    fn a_staircase_gains_a_dark_seam_along_the_base_of_each_riser() {
+        // The reported bug, as an assertion. A staircase of one block type: column x is
+        // solid from y = 0 to y = x, spanning every z. Every riser faces -x, so they
+        // share one normal and one block colour and were one flat rectangle with no seam
+        // anywhere until the camera moved.
+        //
+        // Each riser is now darker at its foot than at its head: the step below is
+        // edge-on to its two bottom corners, and nothing at all is near the top two.
+        const STEPS: usize = 6;
+        let mut chunk = air(SIZE);
+        for x in 0..STEPS {
+            for z in 0..SIZE {
+                for y in 0..=x {
+                    chunk.set(x, y, z, palette::STONE);
+                }
+            }
+        }
+        let mesh = mesh_chunk(&chunk, &alone());
+
+        // Every riser but the first, which stands on the chunk floor with no step below.
+        let risers: Vec<usize> = quads_facing(&mesh, [-1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| quad_extent(&mesh, *quad, 1).0 > 0.0)
+            .collect();
+        assert!(!risers.is_empty(), "the fixture has no risers to read");
+
+        let mut fully_seamed = 0;
+        for riser in risers {
+            let (foot_y, _) = quad_extent(&mesh, riser, 1);
+            let levels = shade_levels(&mesh, riser, palette::STONE);
+            let (mut foot, mut head) = (Vec::new(), Vec::new());
+            for (vertex, level) in levels.into_iter().enumerate() {
+                let y = mesh.positions[riser * VERTICES_PER_QUAD + vertex][1];
+                if y == foot_y {
+                    foot.push(level)
+                } else {
+                    head.push(level)
+                }
+            }
+
+            assert_eq!((foot.len(), head.len()), (2, 2), "{levels:?}");
+            assert_eq!(
+                head,
+                vec![0, 0],
+                "the head of a riser is darkened: {levels:?}"
+            );
+            assert!(
+                foot.iter().all(|level| *level > 0),
+                "the base of a riser is not darkened: {levels:?}"
+            );
+            if foot == vec![2, 2] {
+                fully_seamed += 1;
+            }
+        }
+
+        // The riser is cut into three along z: the run down the middle sees the step
+        // below on both diagonals, and the two cells on the chunk's z borders see one
+        // of theirs across a chunk this mesher was handed none of. That split is the
+        // mask key doing its job, and the middle run is the seam a player reads.
+        assert_eq!(
+            fully_seamed,
+            STEPS - 1,
+            "one fully occluded run per riser above the first"
+        );
+    }
+
+    #[test]
+    fn the_occlusion_of_two_faces_is_what_decides_whether_they_merge() {
+        // Straight at the key rather than through a fixture. `Face` is compared with
+        // `Eq` during the merge, so two faces alike in every other field and unlike at
+        // one corner must not compare equal — that comparison is the whole mechanism,
+        // and it is the same discipline `WaterFlow` is in the key for.
+        let face = Face {
+            block: palette::STONE,
+            positive: true,
+            geometry: FaceGeometry::Full,
+            flow: None,
+            occlusion: Occlusion::NONE,
+        };
+
+        assert_eq!(face, Face { ..face });
+        assert_ne!(
+            face,
+            Face {
+                occlusion: Occlusion([0, 0, 0, 1]),
+                ..face
+            },
+            "a face darkened at one corner merged with one that is not"
+        );
+    }
+
+    #[test]
+    fn a_floor_stops_merging_where_something_stands_on_it() {
+        // The mask-key criterion as a before and after on one fixture, and the quad cost
+        // the issue asks to be reported. A bare floor is one quad; put a single block on
+        // it and the cells around that block are lit differently from the rest, so the
+        // floor cannot be one quad any more.
+        let bare = floor(SIZE, palette::STONE);
+        let mut occupied = bare.clone();
+        occupied.set(SIZE / 2, 1, SIZE / 2, palette::STONE);
+
+        let bare = mesh_chunk(&bare, &alone());
+        let occupied = mesh_chunk(&occupied, &alone());
+
+        assert_eq!(
+            quads_facing(&bare, [0.0, 1.0, 0.0]).len(),
+            1,
+            "an unoccluded floor is one merged quad"
+        );
+        let split = quads_facing(&occupied, [0.0, 1.0, 0.0]).len();
+        assert!(
+            split > 1,
+            "the floor merged across cells lit differently: {split} quads"
+        );
+    }
+
+    #[test]
+    fn a_border_face_reads_the_neighbour_it_was_handed_and_air_when_it_was_handed_none() {
+        // The border rule, both ways round. A block on the chunk's -x wall has a top
+        // face whose outward layer runs across that border. Handed no neighbour it reads
+        // as air and the face is unoccluded — the same over-draw convention the sweep
+        // already uses for the face itself, and undone by the same remesh. Handed a
+        // solid one it is occluded, so the darkening crosses the border rather than
+        // stopping at it.
+        let mut chunk = air(SIZE);
+        chunk.set(0, 4, 4, palette::STONE);
+
+        let unknown = mesh_chunk(&chunk, &alone());
+        let top = quads_facing(&unknown, [0.0, 1.0, 0.0]);
+        assert_eq!(top.len(), 1);
+        assert_eq!(
+            shade_levels(&unknown, top[0], palette::STONE),
+            [0; VERTICES_PER_QUAD],
+            "an absent neighbour occluded something"
+        );
+
+        let known = mesh_chunk(&chunk, &across(0, false, solid(SIZE, palette::STONE)));
+        let top = quads_facing(&known, [0.0, 1.0, 0.0]);
+        assert_eq!(top.len(), 1);
+        let levels = shade_levels(&known, top[0], palette::STONE);
+        for (vertex, level) in levels.into_iter().enumerate() {
+            let x = known.positions[top[0] * VERTICES_PER_QUAD + vertex][0];
+            // The neighbour is solid throughout, so the corners on the border see an
+            // edge-on voxel and the diagonal behind it: level 2 there, nothing opposite.
+            assert_eq!(level, if x == 0.0 { 2 } else { 0 }, "vertex at x = {x}");
+        }
+    }
+
+    #[test]
+    fn two_loaded_chunks_show_no_seam_where_their_floors_meet() {
+        // The border acceptance criterion on the shape that would show a failure. The
+        // floor continues into the chunk next door, occlusion is sampled across the
+        // border, so the border cells see the same flat floor the interior ones do and
+        // the whole top still merges into one unshaded quad. A mesher that read air
+        // across the border would draw a dark stripe one block wide along every chunk
+        // edge — a seam of exactly the kind this issue exists to remove.
+        let floor = floor(SIZE, palette::STONE);
+        let mesh = mesh_chunk(&floor, &surrounded_by(&floor));
+
+        let top = quads_facing(&mesh, [0.0, 1.0, 0.0]);
+        assert_eq!(top.len(), 1, "the floor's top split at the border");
+        assert_eq!(quad_area(&mesh, top[0]), (SIZE * SIZE) as f32);
+        assert_eq!(
+            shade_levels(&mesh, top[0], palette::STONE),
+            [0; VERTICES_PER_QUAD],
+            "the border cells were darkened by a chunk that is right there"
+        );
+    }
+
+    #[test]
+    fn occlusion_never_reaches_the_water_or_the_cover_half() {
+        // The out-of-scope rule, asserted rather than trusted. Occlusion is the opaque
+        // sweep's; a water or cover quad carries one colour repeated four times, which is
+        // exactly what `Occlusion::NONE` and `push_quad` between them guarantee. Read as
+        // "the four vertices of every quad agree", which is the property that breaks the
+        // moment either half starts asking for a corner value.
+        let mut chunk = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                chunk.set(x, 0, z, palette::STONE);
+                chunk.set(x, 1, z, palette::WATER);
+            }
+        }
+        chunk.set(4, 1, 4, palette::FLOWER_RED);
+        // A ledge over the water, so the water and the cover both have something solid
+        // beside them that the opaque half is being darkened by.
+        chunk.set(6, 2, 6, palette::STONE);
+
+        let mesh = super::mesh_chunk(&chunk, &alone());
+        assert!(
+            !mesh.water.is_empty() && !mesh.cover.is_empty(),
+            "the fixture is inert"
+        );
+
+        for (half, surface) in [("water", &mesh.water), ("cover", &mesh.cover)] {
+            for quad in 0..surface.quad_count() {
+                let corners = &surface.colors[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+                assert!(
+                    corners.iter().all(|color| *color == corners[0]),
+                    "the {half} half's quad {quad} carries four colours: {corners:?}"
+                );
+            }
+        }
+    }
+
+    /// A chunk shaped like ground a player walks over: a ridged stone body under a grass
+    /// skin, with air above it. The same shape the streaming measurement in `render.rs`
+    /// streams, so the counts here and the totals there are about the same ground.
+    fn ridged_terrain(size: usize) -> VoxelChunk {
+        let mut chunk = air(size);
+        for z in 0..size {
+            for x in 0..size {
+                let (x64, z64) = (x as i64, z as i64);
+                let height = 12
+                    + (x64 * 7 + z64 * 13).rem_euclid(9) as usize
+                    + (x64 * z64).rem_euclid(3) as usize;
+                for y in 0..height {
+                    chunk.set(x, y, z, palette::STONE);
+                }
+                chunk.set(x, height - 1, z, palette::GRASS);
+            }
+        }
+        chunk
+    }
+
+    #[test]
+    fn the_quad_count_of_a_chunk_of_terrain_is_recorded() {
+        // The regression the issue asks for, and the number its description reports.
+        // Occlusion in the mask key raises the quad count — that is the price of the
+        // seam, paid once — and this is where a later change that multiplies it *again*
+        // has to say so in a diff rather than in a frame time nobody is watching.
+        //
+        // Meshed alone, so the number is a property of these voxels and not of whichever
+        // neighbourhood a test happened to build.
+        const BEFORE_OCCLUSION: usize = 4642;
+        const WITH_OCCLUSION: usize = 7637;
+
+        let mesh = mesh_chunk(&ridged_terrain(SIZE), &alone());
+
+        assert_eq!(
+            mesh.quad_count(),
+            WITH_OCCLUSION,
+            "the corner key was worth {BEFORE_OCCLUSION} quads before #628"
         );
     }
 
