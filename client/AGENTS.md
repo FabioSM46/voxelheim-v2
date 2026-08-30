@@ -62,6 +62,7 @@ keeps meaning "everything the client is".
 | `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, and the per-vertex `WaterFlow` the water surface carries | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the two materials, one entity per chunk with the water half as its child | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`) and which hide what is behind them (`is_opaque`) | know about meshes or about the wire |
+| `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
@@ -1786,7 +1787,13 @@ coincidence — a gate CI cannot run is not a gate. Three patterns keep it true:
 - `world/render.rs` adds `MinimalPlugins` + `AssetPlugin` and `init_asset::<Mesh>()` /
   `init_asset::<StandardMaterial>()`. `Assets<T>` is an ordinary resource, so the whole pipeline
   short of the GPU upload — tasks, mesh assets, entities, despawns, counters — runs with no render
-  app at all.
+  app at all. `MaterialPlugin` is safe there too: it creates the render-app systems only
+  `if let Some(render_app)`, so on a headless app it registers the asset and nothing else.
+- `world/water_material.rs` adds `init_asset::<Shader>()` and `init_asset_loader::<ShaderLoader>()`,
+  the two registrations `RenderPlugin` would otherwise make, and loads the embedded WGSL through
+  the real `AssetServer`. That proves the path, the registration and the WGSL preprocessor.
+  **It does not prove the shader compiles**, and the one test that does is `#[ignore]`d because
+  it needs a render device — see "Known gaps".
 - `world/mesher.rs` and `world/palette.rs` need none of that: they are plain Rust.
 
 **A test that needs a concrete port must hold it, never learn it and let go.** The only way to
@@ -1838,6 +1845,27 @@ tests is the helper.
 
 Recorded here so the next reader does not mistake them for oversights:
 
+- **CI compiles no shader, and the water shader is the first one that would notice.** Four
+  things about `world/flowing_water.wgsl` are checked on every run — the path resolves, the file
+  is embedded at it, the WGSL loader parses it, and the imports it declares are the `bevy_pbr`
+  modules it is composed from — and none of them is compilation. Composition (`naga_oil`
+  splicing those modules in, naga validating the result) happens in `ShaderCache`, which is only
+  ever reached from a `RenderDevice`; the `client` job installs `libasound2-dev libudev-dev
+  pkg-config` and nothing else, so wgpu opens no adapter and there is no software one either.
+  **A shader that does not compile therefore turns nothing red**: Bevy logs the error and the
+  water draws with the base material's fragment shader, which looks like water that has stopped
+  moving rather than like a failure.
+
+  `the_shader_compiles_through_the_real_pipeline` in `world/water_material.rs` is the test that
+  does answer it — `DefaultPlugins` without a window, a camera rendering into an `Image`, one
+  water quad, and every `PipelineCache` entry read back for an `Err` — and it is `#[ignore]`d
+  for exactly the reason above. Run it by hand on a machine with a GPU after touching the WGSL;
+  it takes ten seconds. It was verified against a deliberately broken shader before it was
+  trusted, which is the only thing that makes a passing run mean anything.
+
+  #598 raised this rather than adding `naga` as a direct dependency to parse around it: a second
+  parser agreeing is not the pipeline agreeing. Closing it needs a render device in CI —
+  lavapipe on the runner, or a runner that has one — which is a CI change and not a client one.
 - **`--server` reaches a server nothing can verify, and it is the development path.** An address
   typed on the command line is in no list, so no fingerprint states what to expect there and the
   session is encrypted but unauthenticated. What keeps that from being a hole is what it may hand
@@ -2150,12 +2178,13 @@ Recorded here so the next reader does not mistake them for oversights:
 
   **The water half is the exception, and it samples nothing.** Since #598 the water surface carries
   `ATTRIBUTE_UV_0` and `ATTRIBUTE_UV_1`, and neither is a texture coordinate: UV_0 is the
-  horizontal flow the server's block ids imply and UV_1's `x` is whether the water is falling.
-  They ride in the UV slots because `MeshPipeline` already forwards those two to the fragment
-  stage under `VERTEX_UVS_A` / `VERTEX_UVS_B` — a custom attribute would need a vertex shader and
-  a layout specialization of ours, for the same four floats. The opaque half still carries
-  neither, which is `SurfaceMesh`'s all-or-nothing rule: the buffers are filled for every vertex
-  of a surface whose faces carry a flow and empty for one whose faces do not.
+  horizontal flow the server's block ids imply, UV_1's `x` is whether the water is falling, and
+  `world/flowing_water.wgsl` slides a procedural two-octave ripple along them. They ride in the
+  UV slots because `MeshPipeline` already forwards those two to the fragment stage under
+  `VERTEX_UVS_A` / `VERTEX_UVS_B` — a custom attribute would need a vertex shader and a layout
+  specialization of ours, for the same four floats. The opaque half still carries neither, which
+  is `SurfaceMesh`'s all-or-nothing rule: the buffers are filled for every vertex of a surface
+  whose faces carry a flow and empty for one whose faces do not.
   Greedy meshing merges quads across blocks, so a texture there is a different problem with
   different costs — seams across merged quads, an atlas, a per-chunk material decision — and none
   of it is on the table. Item-only swatches live in `player/items.rs` beside the rows that name
