@@ -432,15 +432,38 @@ fn voxel_of(value: f32) -> i32 {
     Vec3::splat(value).floor().as_ivec3().x
 }
 
+/// What the probe found under a bird: three answers, not two.
+///
+/// It answered `Option<f32>` until the review on #640, and `None` meant two things that were
+/// deliberately not told apart on the grounds that both wanted the same lift. They do not.
+/// An empty window is a **measurement** — the surface is further down than the window
+/// reaches, the clearance is already met, and letting the lift ease back to nothing is the
+/// whole of how a bird comes down off a hill it has crossed. An unloaded chunk is the
+/// **absence** of a measurement, and there the last frame that could see the ground is
+/// better evidence than zero: decaying the lift walks a bird down into terrain that may
+/// well be there, which is "an absent chunk is not evidence of a mountain" read backwards.
+///
+/// Collapsing the two is not a hypothetical mistake. `map_or(lift, ..)` — holding on both —
+/// leaves a bird that has cleared a hill stranded at its old lift forever, and the suite
+/// this type was added to did not catch that either: it is
+/// `a_bird_holds_its_lift_only_where_the_ground_went_unread` that now separates them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GroundUnder {
+    /// The top face of the first thing found under the bird.
+    Surface(f32),
+    /// Nothing in the window, and every chunk it crosses was there to be read. The surface
+    /// is below the window, so the clearance is met and the lift may ease away.
+    Clear,
+    /// A chunk the window crosses is not loaded, so there is no answer at all.
+    Unknown,
+}
+
 /// The top face of whatever is under a bird, looked for within one clearance of `drawn_y`.
 ///
-/// **`None` means "no constraint", and it is reached two ways this deliberately does not
-/// tell apart**, because both answer the same lift. Either the probe found only air, in
-/// which case the surface is already below the window and the clearance is met by
-/// construction; or a chunk the window crosses is not loaded, in which case there is no
-/// answer at all and the bird is left where the pattern put it. **An absent chunk is not
-/// evidence of a mountain** — the same conservative direction `Terrain.Fluid` takes, and the
-/// mesher's neighbour rule, and the server's step-up probe. The store is *read* here and
+/// **An absent chunk is not evidence of a mountain** — the same conservative direction
+/// `Terrain.Fluid` takes, and the mesher's neighbour rule, and the server's step-up probe —
+/// and it is not evidence of a plain either, which is why it answers
+/// [`GroundUnder::Unknown`] rather than [`GroundUnder::Clear`]. The store is *read* here and
 /// never asked to fetch: [`ChunkStore::get`] answering `None` ends the probe.
 ///
 /// **Not air, rather than [`ChunkStore::solid_at`].** The question is what a bird would be
@@ -457,11 +480,14 @@ fn voxel_of(value: f32) -> i32 {
 /// converge: at rest a bird sits exactly [`BIRD_CLEARANCE`] over the surface, so a window
 /// one clearance deep would hold nothing but air, answer "no constraint", drop the bird back
 /// into the hill and lift it again forever.
-fn surface_under(store: &ChunkStore, column: Vec3, drawn_y: f32, chunk_size: usize) -> Option<f32> {
+fn surface_under(store: &ChunkStore, column: Vec3, drawn_y: f32, chunk_size: usize) -> GroundUnder {
+    // An argument nothing can be measured from is an absence, not an empty window.
     if !column.is_finite() || !drawn_y.is_finite() || chunk_size == 0 {
-        return None;
+        return GroundUnder::Unknown;
     }
-    let size = i32::try_from(chunk_size).ok()?;
+    let Ok(size) = i32::try_from(chunk_size) else {
+        return GroundUnder::Unknown;
+    };
     let x = voxel_of(column.x);
     let z = voxel_of(column.z);
     let high = voxel_of(drawn_y);
@@ -475,13 +501,15 @@ fn surface_under(store: &ChunkStore, column: Vec3, drawn_y: f32, chunk_size: usi
         };
         // Downwards, and a gap ends the probe rather than being read through: a voxel this
         // session does not hold could be higher than anything found under it.
-        store.get(coord)?;
+        if store.get(coord).is_none() {
+            return GroundUnder::Unknown;
+        }
         if store.block_at(BlockCoord { x, y, z }, chunk_size) != palette::AIR {
             // The voxel spans `[y, y + 1)`, so its top face is what a bird flies over.
-            return Some((y + 1) as f32);
+            return GroundUnder::Surface((y + 1) as f32);
         }
     }
-    None
+    GroundUnder::Clear
 }
 
 /// Moves `current` toward `target` by at most `step`, without overshooting.
@@ -502,8 +530,14 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 
 /// This frame's lift for one bird: the whole of the clamp, as one step over [`place`].
 ///
-/// `ground` is `None` for a frame with no session or no store, which is the same "no answer"
-/// an unloaded chunk gives and takes the same conservative direction: no lift.
+/// **The three answers [`GroundUnder`] gives are three different targets**, and only two of
+/// them move a bird. A [`GroundUnder::Surface`] asks for the clearance over it. A
+/// [`GroundUnder::Clear`] window asks for nothing, and the lift eases away — that is how a
+/// bird comes down again once the hill it climbed is behind it. [`GroundUnder::Unknown`]
+/// asks for **this frame's lift back**: nothing was measured, so nothing moves, and the
+/// bird holds the height the last frame that could see the ground put it at. `ground` is
+/// `None` for a frame with no session or no store, and that is the same absence — at spawn
+/// the lift is zero, so holding it is the old behaviour to the bit.
 ///
 /// **The lift is never negative.** The clearance is a floor under a bird and never a ceiling
 /// over one, so a pattern already flying high enough is left alone to the last bit and flat
@@ -517,6 +551,16 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 /// is one nobody is looking at. The bound is applied twice — to the target and to the eased
 /// result — because a ceiling that falls faster than [`CLEARANCE_LIFT_SPEED`] would
 /// otherwise leave yesterday's lift outside today's box.
+///
+/// **That second bound cannot snap a bird downward, and it is worth saying why rather than
+/// leaving it to be re-derived.** The review on #640 read `.min(ceiling)` as able to
+/// teleport a bird when the anchor steps down a cell — but [`Bird::anchor`] is written once
+/// at spawn and never again, so a living bird's ceiling has no term the eye can move. The
+/// only thing that lowers it is the pattern's own climb, and that is slower than the ease
+/// step by a factor of three: `a_falling_ceiling_lowers_a_bird_no_faster_than_it_raises_one`
+/// measures both, over ground where the ceiling is the binding bound on nine frames in ten.
+/// A crossing eye *retires* the birds it leaves behind and spawns replacements at zero lift;
+/// it never re-aims a live one.
 fn next_lift(
     ground: Option<(&ChunkStore, usize)>,
     unclamped: Vec3,
@@ -525,12 +569,17 @@ fn next_lift(
     dt: f32,
 ) -> f32 {
     let ceiling = (anchor.y + BIRD_RANGE - unclamped.y).max(0.0);
-    let wanted = ground
-        .and_then(|(store, chunk_size)| {
-            surface_under(store, unclamped, unclamped.y + lift, chunk_size)
-        })
-        .map_or(0.0, |surface| surface + BIRD_CLEARANCE - unclamped.y)
-        .clamp(0.0, ceiling);
+    let under = ground.map_or(GroundUnder::Unknown, |(store, chunk_size)| {
+        surface_under(store, unclamped, unclamped.y + lift, chunk_size)
+    });
+    let wanted = match under {
+        GroundUnder::Surface(surface) => surface + BIRD_CLEARANCE - unclamped.y,
+        GroundUnder::Clear => 0.0,
+        // Held, not decayed. The box still bounds it below, so a lift kept across an
+        // unloaded chunk cannot outlive a ceiling that has closed under it.
+        GroundUnder::Unknown => lift,
+    }
+    .clamp(0.0, ceiling);
     approach(lift, wanted, CLEARANCE_LIFT_SPEED * dt).min(ceiling)
 }
 
@@ -1389,7 +1438,10 @@ mod tests {
             at.y < 40
         });
         let column = Vec3::new(8.5, 0.0, 8.5);
-        assert_eq!(surface_under(&store, column, 44.0, CHUNK), Some(40.0));
+        assert_eq!(
+            surface_under(&store, column, 44.0, CHUNK),
+            GroundUnder::Surface(40.0)
+        );
 
         // At rest a bird sits exactly the clearance up, and the window has to still see the
         // block that put it there. This is the one probed block *below* `BIRD_CLEARANCE`
@@ -1397,11 +1449,16 @@ mod tests {
         // the bird drops back into the hill, and it lifts again forever.
         assert_eq!(
             surface_under(&store, column, 40.0 + BIRD_CLEARANCE, CHUNK),
-            Some(40.0)
+            GroundUnder::Surface(40.0)
         );
 
         // Higher than that and the ground has nothing to say about where the bird flies.
-        assert_eq!(surface_under(&store, column, 48.0, CHUNK), None);
+        // `Clear`, not `Unknown`: every chunk the window crosses was read, and finding
+        // nothing in it is an answer rather than the lack of one.
+        assert_eq!(
+            surface_under(&store, column, 48.0, CHUNK),
+            GroundUnder::Clear
+        );
 
         // And it floors rather than truncating, on the side of the origin where the two
         // differ — the trap `player/target.rs`'s raycast names, over half the world.
@@ -1410,7 +1467,7 @@ mod tests {
         });
         assert_eq!(
             surface_under(&below, Vec3::new(-0.5, 0.0, -0.5), -4.0, CHUNK),
-            Some(-8.0)
+            GroundUnder::Surface(-8.0)
         );
     }
 
@@ -1430,7 +1487,7 @@ mod tests {
             let store = terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, block, |at| at.y == 39);
             assert_eq!(
                 surface_under(&store, Vec3::new(8.5, 0.0, 8.5), 44.0, CHUNK),
-                Some(40.0),
+                GroundUnder::Surface(40.0),
                 "a bird was flown through block {block}"
             );
         }
@@ -1443,7 +1500,10 @@ mod tests {
         // arrived is left exactly where the pattern put it.
         let nothing = ChunkStore::default();
         let column = Vec3::new(8.5, 0.0, 8.5);
-        assert_eq!(surface_under(&nothing, column, 44.0, CHUNK), None);
+        assert_eq!(
+            surface_under(&nothing, column, 44.0, CHUNK),
+            GroundUnder::Unknown
+        );
 
         let unclamped = Vec3::new(8.5, 44.0, 8.5);
         let anchor = Vec3::new(8.5, 40.0, 8.5);
@@ -1476,10 +1536,16 @@ mod tests {
         );
         let column = Vec3::new(4.5, 0.0, 4.5);
         // `[32, 40)` is the one chunk there is, and inside it the answer is the honest one.
-        assert_eq!(surface_under(&gapped, column, 39.0, 8), Some(40.0));
+        assert_eq!(
+            surface_under(&gapped, column, 39.0, 8),
+            GroundUnder::Surface(40.0)
+        );
         // Six blocks higher the window opens into the missing chunk, and the hilltop two
         // blocks under it is no longer an answer anybody may give.
-        assert_eq!(surface_under(&gapped, column, 44.0, 8), None);
+        assert_eq!(
+            surface_under(&gapped, column, 44.0, 8),
+            GroundUnder::Unknown
+        );
     }
 
     #[test]
@@ -1490,7 +1556,10 @@ mod tests {
         let anchor = Vec3::new(16.0, 80.0, 16.0);
         let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |at| at.y < 16);
         // Not vacuous: the floor of the box is there to be found.
-        assert_eq!(surface_under(&store, anchor, 20.0, CHUNK), Some(16.0));
+        assert_eq!(
+            surface_under(&store, anchor, 20.0, CHUNK),
+            GroundUnder::Surface(16.0)
+        );
 
         for species in &BIRDS {
             for seed in 0..4u64 {
@@ -1621,6 +1690,103 @@ mod tests {
         assert!(
             ceilinged > 0,
             "nothing ever reached the ceiling, so the box was never the binding bound"
+        );
+    }
+
+    #[test]
+    fn a_bird_holds_its_lift_only_where_the_ground_went_unread() {
+        // The review on #640 read `map_or(0.0, ..)` as decaying a real lift to nothing the
+        // moment the chunk under a bird stopped being readable, and it was right: a bird
+        // eased downward into terrain the last frame that could see it had measured. What
+        // the suggested `map_or(lift, ..)` would also do is hold the lift where the window
+        // is *empty*, and that is the case a bird descends through — so the two reasons
+        // `surface_under` had for answering "no surface" are separated instead, and this
+        // pins both directions of the separation.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let unclamped = Vec3::new(16.5, 80.0, 16.5);
+        let step = CLEARANCE_LIFT_SPEED * DT;
+        let held = 20.0;
+
+        // Read, and empty: the surface is far below the window, the clearance is met, and
+        // the lift eases off. Hold it here and a bird that has crossed a hill never comes
+        // down again — measured before this test existed, at exactly 20.0 after ten frames.
+        let loaded = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |at| at.y < 16);
+        assert_eq!(
+            surface_under(&loaded, unclamped, unclamped.y + held, CHUNK),
+            GroundUnder::Clear
+        );
+        assert_eq!(
+            next_lift(Some((&loaded, CHUNK)), unclamped, anchor, held, DT),
+            held - step
+        );
+
+        // Unread: nothing was measured this frame, so nothing moves. The bird stays where
+        // the last frame that could see the ground put it.
+        let nothing = ChunkStore::default();
+        assert_eq!(
+            surface_under(&nothing, unclamped, unclamped.y + held, CHUNK),
+            GroundUnder::Unknown
+        );
+        assert_eq!(
+            next_lift(Some((&nothing, CHUNK)), unclamped, anchor, held, DT),
+            held
+        );
+        // A frame with no session and no store at all is the same absence.
+        assert_eq!(next_lift(None, unclamped, anchor, held, DT), held);
+
+        // Holding is still bounded by the box, which is what keeps `GroundUnder::Unknown`
+        // from outliving a ceiling that closed under it while nobody could read the ground.
+        let ceiling = anchor.y + BIRD_RANGE - unclamped.y;
+        assert_eq!(
+            next_lift(None, unclamped, anchor, ceiling + 10.0, DT),
+            ceiling
+        );
+
+        // And an unread frame changes nothing at spawn, where the lift is zero — the
+        // behaviour `terrain_nobody_has_streamed_is_not_evidence_of_a_mountain` pins.
+        assert_eq!(next_lift(None, unclamped, anchor, 0.0, DT), 0.0);
+    }
+
+    #[test]
+    fn a_falling_ceiling_lowers_a_bird_no_faster_than_it_raises_one() {
+        // The other half of `a_step_in_the_ground_lifts_a_bird_without_teleporting_it`,
+        // which only ever climbs a cliff. The review on #640 asked whether the
+        // `.min(ceiling)` after `approach` can move a lift *down* faster than the ease
+        // step. Solid rock everywhere is where it could: the clearance asks for more than
+        // the box allows, so the ceiling is the binding bound nearly every frame, and it
+        // falls whenever the pattern climbs.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, BIRD_RANGE + 8.0, palette::STONE, |_| true);
+        let mut fell_at_the_ceiling = 0usize;
+        for species in &BIRDS {
+            for seed in 0..4u64 {
+                let seed = mix(seed, 0xB0C5);
+                for pair in flown(Some((&store, CHUNK)), species, seed, anchor, SAMPLES).windows(2)
+                {
+                    let ((was, before), (now, after)) = (pair[0], pair[1]);
+                    assert!(
+                        (after - before).abs() <= CLEARANCE_LIFT_SPEED * DT + 1e-4,
+                        "{:?} snapped its lift from {before} to {after} under a falling ceiling",
+                        species.pattern
+                    );
+                    // What a player actually sees. The drawn point is the pattern's own,
+                    // plus a lift the ceiling may cut — and cutting a value can only ever
+                    // move it *toward* the previous frame's, never past it.
+                    let moved = now.distance(was);
+                    assert!(
+                        moved <= (species.max_speed + CLEARANCE_LIFT_SPEED) * DT + 1e-4,
+                        "{:?} moved {moved} in {DT}s with the box as its bound",
+                        species.pattern
+                    );
+                    if after < before && now.y - anchor.y >= BIRD_RANGE - 1e-3 {
+                        fell_at_the_ceiling += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            fell_at_the_ceiling > 0,
+            "no lift ever fell while the box was the binding bound, so this proves nothing"
         );
     }
 
