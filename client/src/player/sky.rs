@@ -240,16 +240,17 @@ const HORIZON_FALLOFF: f32 = 0.35;
 /// The angular radius of the sun and the moon, in degrees.
 ///
 /// Three degrees across, against the half a degree the real sun subtends: at true size the
-/// disc is under four blocks wide at [`SKY_BODY_DISTANCE`] and reads as a speck. Also the
-/// threshold a body disappears at — drawn while its altitude is above the negation of this,
-/// which is the moment its upper limb goes under.
+/// disc is four blocks wide at [`SKY_BODY_DISTANCE`] and reads as a speck. Also the threshold
+/// a body disappears at, which is the moment its upper limb goes under.
 const SKY_BODY_RADIUS_DEGREES: f32 = 1.5;
 
-/// The sun's disc, as sRGB: a warm white, unlit, and unchanged by the hour.
-///
-/// **It is not the light.** [`DAY_ILLUMINANCE`] and [`NIGHT_ILLUMINANCE`] are what the world
-/// is lit by; a disc that dimmed as it set would be a second day-night curve over the one
-/// this module already computes.
+/// How many triangles a disc is fanned out of. Thirty-two, at which its rim departs from a
+/// true circle by `1 - cos(PI / 32)`: half a percent of [`SKY_BODY_RADIUS_DEGREES`].
+const DISC_SEGMENTS: usize = 32;
+
+/// The sun's disc, as sRGB: a warm white, unlit, and unchanged by the hour. **It is not the
+/// light** — a disc that dimmed as it set would be a second day-night curve over the one
+/// [`DAY_ILLUMINANCE`] and [`NIGHT_ILLUMINANCE`] already draw.
 const SUN_COLOUR: [f32; 3] = [1.0, 0.94, 0.82];
 
 /// The moon's disc, as sRGB: paler and cooler than the sun, and always full.
@@ -258,29 +259,21 @@ const MOON_COLOUR: [f32; 3] = [0.78, 0.82, 0.90];
 /// How many stars the field holds. One mesh, one material, one draw.
 const STAR_COUNT: usize = 600;
 
-/// The seed the star positions are drawn from.
-///
-/// **A constant, and deliberately not `world_seed`.** Every world looks up at the same sky:
-/// the constellations belong to the sky this client draws rather than to the terrain a
-/// server generated.
+/// The seed the star positions are drawn from. **A constant, and deliberately not
+/// `world_seed`** — every world looks up at the same sky.
 const STAR_SEED: u32 = 0x5EED_5747;
 
 /// The three sizes a star is drawn at, in blocks at [`SKY_BODY_DISTANCE`], and how the field
-/// is divided between them: mostly small, which is what makes a field read as depth rather
-/// than as a scatter of equal dots.
+/// is divided between them: mostly small, so it reads as depth and not as equal dots.
 const STAR_SIZES: [f32; 3] = [1.4, 2.4, 4.0];
 const STAR_SIZE_SHARES: [f32; 2] = [0.72, 0.94];
 
-/// A star's colour, as sRGB. The alpha is not here: it is the night fraction, written onto
-/// the one material every frame the hour moves.
+/// A star's colour, as sRGB. The alpha is not here: it is the night fraction.
 const STAR_COLOUR: [f32; 3] = [0.90, 0.93, 1.0];
 
-/// Where in the day the star field's own hemisphere is directly overhead.
-///
-/// The stars are generated on the upper hemisphere and the field turns once a day, so half
-/// the sky carries them at any hour. Three quarters through the sun's revolution is the
-/// middle of the night — see [`sun_phase`] — and that is the one hour the field is at full
-/// alpha, so it is where the populated half is put.
+/// Where in the day the star field's own hemisphere is directly overhead. The stars are on
+/// the upper hemisphere and the field turns once a day, so the populated half is put where it
+/// is at full alpha: three quarters round, which [`sun_phase`] makes the middle of the night.
 const MIDNIGHT_PHASE: f32 = 0.75;
 
 /// Marks the one directional light this module owns.
@@ -297,10 +290,8 @@ pub struct Sun;
 #[derive(Component)]
 pub struct SkyBody;
 
-/// Which of the four things drawn on the sky an entity is.
-///
-/// A value rather than four marker components, because every rule here is a `match` on
-/// exactly this: what to place where, and what to hide when.
+/// Which of the four things drawn on the sky an entity is — a value rather than four marker
+/// components, because every rule here is a `match` on exactly this.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkyBodyKind {
     /// The gradient the other three are seen against.
@@ -313,11 +304,8 @@ pub enum SkyBodyKind {
     Stars,
 }
 
-/// Where one sky entity sits relative to the eye, as [`drive_the_sky`] last computed it.
-///
-/// Written there and consumed by [`follow_the_eye`] — the split [`SkyBody`] describes: where
-/// a body belongs is a function of the clock, and where the eye is is only final after
-/// `AimCamera`.
+/// Where one sky entity sits relative to the eye, as [`drive_the_sky`] last computed it and
+/// [`follow_the_eye`] consumes it — the split [`SkyBody`] describes.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub(super) enum SkyPlacement {
     /// Centred on the eye and turned by this: the dome (never) and the field (once a day).
@@ -333,8 +321,8 @@ pub(super) enum SkyPlacement {
 #[derive(Resource, Debug)]
 pub(super) struct SkyVisuals {
     dome: Handle<Mesh>,
-    /// The star field's one material. Its base colour's **alpha** is the night fraction, so
-    /// the whole field fades in and out through a single write.
+    /// The star field's one material: its base colour's **alpha** is the night fraction, so
+    /// the whole field fades through a single write.
     stars: Handle<StandardMaterial>,
 }
 
@@ -575,16 +563,12 @@ fn sun_position(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
 
 /// How far round its one revolution the sun is at `tick_of_day`, in turns.
 ///
-/// Zero at `night_end_ticks`, a half at `night_start_ticks`, and back to zero there again:
-/// half a revolution across the daylight and half across the night, so the two pieces meet
-/// at the boundaries and the whole is continuous across every one of them, tick zero
-/// included.
+/// Zero at `night_end_ticks` and a half at `night_start_ticks`: half a revolution across the
+/// daylight and half across the night, so the two meet at the boundaries and the whole is
+/// continuous across every one of them, tick zero included.
 ///
-/// **Extracted from [`sun_position`] rather than copied out of it**, so the disc and the
-/// light cannot drift apart — the disc takes the apparent altitude and the *light's*
-/// azimuth, and one azimuth means one expression for it. `sun_position` is otherwise
-/// unchanged, and `the_sun_crosses_the_south_between_east_and_west` and
-/// `the_light_always_shines_downwards` are what pin that.
+/// **Extracted from [`sun_position`] rather than copied out of it**, so one azimuth is one
+/// expression and the disc and the light cannot drift apart.
 fn sun_phase(clock: &WorldClock, tick_of_day: f32) -> f32 {
     let day_length = clock.day_length_ticks as f32;
     let night_length = (clock.night_end_ticks - clock.night_start_ticks) as f32;
@@ -600,19 +584,14 @@ fn sun_phase(clock: &WorldClock, tick_of_day: f32) -> f32 {
 
 /// Where the sun's **disc** stands at `tick_of_day`, in degrees above the horizon.
 ///
-/// **A second curve, and why there are two is the whole shape of this module.** The light's
-/// altitude never drops below [`HORIZON_ALTITUDE_DEGREES`], because a directional light under
-/// the horizon shines upward and lights the undersides of terrain — a rendering constraint,
-/// not a fact about the sky. So the *disc* is free to set: one sine over the whole
-/// revolution, zero at both of the server's boundaries, `+MIDDAY_ALTITUDE_DEGREES` at midday,
-/// its negation in the middle of the night, and continuous across tick zero because
-/// [`sun_phase`] is.
+/// **A second curve**, because the light's own altitude never drops below
+/// [`HORIZON_ALTITUDE_DEGREES`]. The *disc* is free to set: one sine over the whole
+/// revolution, zero at both boundaries, continuous across tick zero because [`sun_phase`] is.
 pub(super) fn apparent_sun_altitude(clock: &WorldClock, tick_of_day: f32) -> f32 {
     MIDDAY_ALTITUDE_DEGREES * (TAU * sun_phase(clock, tick_of_day)).sin()
 }
 
-/// The unit vector from the eye towards the sun's disc: the light's azimuth, the apparent
-/// altitude.
+/// The unit vector from the eye towards the sun's disc: the light's azimuth, its own altitude.
 fn apparent_sun_direction(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
     let phase = sun_phase(clock, tick_of_day);
     let (azimuth_sin, azimuth_cos) = (TAU * phase).sin_cos();
@@ -626,10 +605,9 @@ fn apparent_sun_direction(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
     )
 }
 
-/// Everything the bodies on the sky are placed and faded by, at one tick of one day.
-///
-/// Computed only where the server declared a clock: a world with no time of day has no
-/// apparent sun, which is exactly why it draws no disc, no moon and no stars.
+/// Everything the bodies on the sky are placed and faded by, at one tick of one day —
+/// computed only where the server declared a clock, which is why a world without one draws no
+/// disc, no moon and no stars.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ApparentSky {
     /// Towards the sun's disc. The moon is at its negation.
@@ -723,8 +701,7 @@ pub(super) fn spawn_sky(
     commands.spawn((
         SkyBody,
         SkyBodyKind::Dome,
-        // Never turned. A dome that took the camera's rotation would be a horizon that could
-        // not be looked away from.
+        // Never turned: a dome on the camera's rotation is a horizon you cannot look away from.
         SkyPlacement::Around(Quat::IDENTITY),
         Mesh3d(dome.clone()),
         MeshMaterial3d(material),
@@ -732,7 +709,6 @@ pub(super) fn spawn_sky(
         Visibility::Hidden,
     ));
 
-    // The two discs share one mesh and differ only in material and in where they are put.
     let disc = meshes.add(disc_mesh());
     for (kind, colour) in [
         (SkyBodyKind::Sun, SUN_COLOUR),
@@ -753,7 +729,6 @@ pub(super) fn spawn_sky(
 
     let stars = materials.add(StandardMaterial {
         base_color: Color::srgba(STAR_COLOUR[0], STAR_COLOUR[1], STAR_COLOUR[2], 0.0),
-        // The one material here that blends: the field fades through its alpha.
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         fog_enabled: false,
@@ -776,8 +751,7 @@ pub(super) fn spawn_sky(
 /// The material every opaque body on the sky is drawn with.
 ///
 /// Unlit and unfogged for the reasons the dome's material gives, and `cull_mode: None`
-/// because a camera-facing quad is seen from whichever face the billboard maths presents —
-/// the reason `mobs.rs` gives for its aggro marker.
+/// because a billboard is seen from whichever face the maths presents.
 fn sky_material(colour: Color) -> StandardMaterial {
     StandardMaterial {
         base_color: colour,
@@ -793,25 +767,35 @@ fn disc_half_width() -> f32 {
     SKY_BODY_DISTANCE * SKY_BODY_RADIUS_DEGREES.to_radians().tan()
 }
 
-/// One quad in the XY plane at the angular size of the sun and the moon, built at its final
+/// One disc in the XY plane at the angular size of the sun and the moon, built at its final
 /// size rather than scaled by the transform, so [`follow_the_eye`] never writes a scale.
+///
+/// **A fan, not a quad**: nothing here is textured, so a quad's silhouette is the quad — a
+/// square sun whose corners stand at `sqrt(2) * SKY_BODY_RADIUS_DEGREES`, 2.12°, and whose
+/// angular size therefore depends on which way across it is measured.
 fn disc_mesh() -> Mesh {
     let half = disc_half_width();
-    quad_mesh(&[(Vec3::ZERO, Vec3::X * half, Vec3::Y * half)], Vec3::NEG_Z)
+    let mut positions = vec![[0.0, 0.0, 0.0]];
+    let mut uvs = vec![[0.5, 0.5]];
+    let mut indices = Vec::with_capacity(DISC_SEGMENTS * 3);
+    for segment in 0..DISC_SEGMENTS {
+        let (sin, cos) = (TAU * segment as f32 / DISC_SEGMENTS as f32).sin_cos();
+        positions.push([half * cos, half * sin, 0.0]);
+        uvs.push([0.5 + 0.5 * cos, 0.5 - 0.5 * sin]);
+        let rim = 1 + segment as u32;
+        indices.extend_from_slice(&[0, rim, 1 + (rim % DISC_SEGMENTS as u32)]);
+    }
+    sky_mesh(positions, uvs, indices, Vec3::NEG_Z)
 }
 
 /// Every star as one mesh, in the field's own space: quads on a sphere of
-/// [`SKY_BODY_DISTANCE`], each one already square-on to the centre.
-///
-/// **The billboard is baked in, and that is what makes this one draw.** The eye is always at
-/// this mesh's origin — [`follow_the_eye`] puts it there — so a quad in the tangent plane at
-/// its own position faces the eye at every rotation of the field. A per-star billboard would
-/// be six hundred quads rewritten every frame for a field that only turns.
+/// [`SKY_BODY_DISTANCE`], each one already square-on to the centre. **The billboard is baked
+/// in, and that is what makes this one draw** — the eye is always at this mesh's origin, so a
+/// quad in the tangent plane at its own position faces it at every rotation.
 fn star_mesh() -> Mesh {
     let mut quads = Vec::with_capacity(STAR_COUNT);
     for star in 0..STAR_COUNT as u32 {
-        // Uniform in height gives uniform density on the sphere — Archimedes' hat-box — so
-        // the field is not crowded at the zenith.
+        // Uniform in height is uniform density on the sphere — Archimedes' hat-box.
         let height = hash_unit(star * 3);
         let azimuth = TAU * hash_unit(star * 3 + 1);
         let radius = (1.0 - height * height).sqrt();
@@ -819,8 +803,7 @@ fn star_mesh() -> Mesh {
         let towards = Vec3::new(radius * azimuth_cos, height, radius * azimuth_sin);
 
         let half = star_size(hash_unit(star * 3 + 2)) * 0.5;
-        // Degenerate only where `towards` is exactly +Y, which the fallback answers with an
-        // arbitrary but perfectly good tangent basis.
+        // Degenerate only at exactly +Y, where the fallback is as good a tangent basis.
         let right = towards.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
         quads.push((
             towards * SKY_BODY_DISTANCE,
@@ -856,33 +839,32 @@ fn quad_mesh(quads: &[(Vec3, Vec3, Vec3)], normal: Vec3) -> Mesh {
         ]);
         indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
     }
+    let uvs = (0..quads.len())
+        .flat_map(|_| [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+        .collect();
+    sky_mesh(positions, uvs, indices, normal)
+}
 
+/// Positions, texture coordinates and indices as the one mesh a sky body is drawn from.
+fn sky_mesh(positions: Vec<[f32; 3]>, uvs: Vec<[f32; 2]>, indices: Vec<u32>, normal: Vec3) -> Mesh {
+    let vertices = positions.len();
     Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     // Never read — every material here is unlit — and present because a `StandardMaterial`
-    // mesh in this crate carries the three attributes `mobs.rs` also writes.
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        vec![normal.to_array(); quads.len() * 4],
-    )
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        (0..quads.len())
-            .flat_map(|_| [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
-            .collect::<Vec<[f32; 2]>>(),
-    )
+    // mesh in this crate carries the three attributes `mobs.rs` writes.
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![normal.to_array(); vertices])
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
     .with_inserted_indices(Indices::U32(indices))
 }
 
 /// One deterministic value in `[0, 1)` per index, out of [`STAR_SEED`].
 ///
-/// Pelle Evensen's `lowbias32` avalanche, which is what `precipitation.rs` uses for the same
-/// job and the same reason: consecutive inputs are all this ever gets. **Not shared with that
-/// copy** — `precipitation.rs` already reads [`submerged_at`] from here, and exporting a hash
-/// back would couple two presentation modules in both directions for eight lines.
+/// Pelle Evensen's `lowbias32` avalanche, which `precipitation.rs` uses for the same job and
+/// reason: consecutive inputs are all this ever gets. **Not shared with that copy**, which
+/// would couple two presentation modules both ways.
 fn hash_unit(index: u32) -> f32 {
     let mut hash = index ^ STAR_SEED;
     hash ^= hash >> 16;
@@ -1002,8 +984,8 @@ pub(super) fn follow_the_eye(
                 rotation: turn,
                 scale: Vec3::ONE,
             },
-            // `looking_at` the eye leaves the quad's plane square-on to the view whichever
-            // face it presents, which is why every disc material is `cull_mode: None`.
+            // `looking_at` leaves the plane square-on whichever face it presents, which is
+            // why every disc material is `cull_mode: None`.
             SkyPlacement::Facing(direction) => {
                 Transform::from_translation(at + direction * SKY_BODY_DISTANCE)
                     .looking_at(at, Vec3::Y)
@@ -1148,9 +1130,8 @@ pub(super) fn drive_the_sky(
     // `NaN`, and a `NaN` that reached a colour would propagate through every value
     // downstream. Same rule as `net/codec.rs`: reject the shape, never repair the number.
     //
-    // `None` covers both refusals with one value: a server that keeps no clock, and the
-    // frames before the first snapshot has named a time of day. Neither has an hour, so
-    // neither draws a sun, a moon or a star.
+    // `None` covers both refusals — no clock, and the frames before the first snapshot named
+    // a time of day. Neither has an hour, so neither draws a sun, a moon or a star.
     let sampled = declared
         .then(|| {
             clock.ticks_at(
@@ -1307,7 +1288,6 @@ fn paint_the_sky(
 ) {
     for (kind, mut visibility, mut placement) in &mut geometry.bodies {
         let (wanted, wanted_placement) = match (kind, apparent) {
-            // The sky itself, and every world has one.
             (SkyBodyKind::Dome, _) => (!submerged, Some(SkyPlacement::Around(Quat::IDENTITY))),
             (_, None) => (false, None),
             (SkyBodyKind::Sun, Some(sky)) => (
@@ -1338,7 +1318,6 @@ fn paint_the_sky(
         }
     }
 
-    // The field's alpha is the night fraction, and a world with no hour has no night.
     let night = apparent.map_or(0.0, |sky| sky.night);
     if memory.stars != Some(night)
         && let Some(visuals) = geometry.visuals.as_deref()
@@ -1909,6 +1888,28 @@ mod tests {
             let direction = apparent_sun_direction(&clock, tick as f32);
             assert!(
                 (altitude_of(direction) - apparent_sun_altitude(&clock, tick as f32)).abs() < 1e-3
+            );
+        }
+    }
+
+    /// The sun and the moon are round: every rim vertex stands at exactly the radius
+    /// [`SKY_BODY_RADIUS_DEGREES`] names, which a quad's corners overshoot by `sqrt(2)`.
+    #[test]
+    fn the_sun_is_a_disc_and_not_a_square() {
+        let mesh = disc_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the disc's positions are three floats each");
+        };
+        assert_eq!(positions.len(), DISC_SEGMENTS + 1);
+        let half = disc_half_width();
+        for (index, vertex) in positions.iter().enumerate() {
+            let radius = Vec3::from_array(*vertex).length();
+            let wanted = if index == 0 { 0.0 } else { half };
+            assert!(
+                (radius - wanted).abs() < half * 1e-4,
+                "vertex {index} stood {radius} from the centre, not {wanted}"
             );
         }
     }
