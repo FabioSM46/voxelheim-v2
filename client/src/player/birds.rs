@@ -44,12 +44,21 @@
 //! contents are a pure function of a seed and the elapsed time. A bird is those two with
 //! [`Ambience`] choosing which row of [`BIRDS`] flies.
 //!
-//! Three entities and no asset: a body quad with two wing quads as children, and the flap is
-//! the children's own rotation about their hinge. `player/precipitation.rs` rewrites six
-//! hundred quads because they are *one* draw; six birds are six draws either way, so
-//! rotating a child is cheaper to write and to read than recomputing vertices.
+//! ## Three entities and no asset
+//!
+//! A body lofted through eight cross-sections with a tail on the end of it, and two wings as
+//! children — one mesh each, so a bird is three draws and a full sky is eighteen, exactly what
+//! it cost when those same three entities were flat quads. The model is built in code the way
+//! `player/hands.rs` lofts its blade, because this client ships no art asset and has no
+//! pipeline to load one with; [`BodySection::perimeter`] carries that file's warning about
+//! corner order and `every_face_of_a_bird_is_wound_outward` holds it to it.
+//!
+//! The flap stays the children's own rotation about their hinge.
+//! `player/precipitation.rs` rewrites six hundred quads because they are *one* draw; six birds
+//! are eighteen draws either way, so rotating a child is cheaper to write and to read than
+//! recomputing vertices.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
 use std::ops::RangeInclusive;
 
 use bevy::asset::RenderAssetUsages;
@@ -80,7 +89,17 @@ pub(super) const BIRD_RANGE: f32 = 64.0;
 pub(super) const BIRD_COUNT_MAX: usize = 6;
 
 /// How long a bird takes to fade in, and to fade out before it is despawned.
-pub(super) const BIRD_FADE_SECONDS: f32 = 1.5;
+///
+/// **Three seconds, and it was one and a half.** A fade is only a fade relative to what is
+/// fading: a bird that subtended about a degree was a bright dot whatever its alpha was doing,
+/// so a second and a half of it read as a twinkle rather than as an arrival. At the sizes in
+/// [`BIRDS`] a bird is a shape from the first frame it is drawn at all, and a shape appearing
+/// over three seconds is one gliding in out of the haze.
+///
+/// It also widens a margin the ground clamp already relied on: [`CLEARANCE_LIFT_SPEED`] covers
+/// the whole of [`BIRD_CLEARANCE`] in a little over a second, and that is meant to finish
+/// *inside* the fade so a bird seeded in a hill is clear of it before anybody sees it.
+pub(super) const BIRD_FADE_SECONDS: f32 = 3.0;
 
 /// The one constant every bird seed is mixed from.
 ///
@@ -141,14 +160,22 @@ const HEADING_STEP: f32 = 0.05;
 /// answer is held to, and holding it is the whole of the clamp: there is no avoidance and no
 /// pathfinding here, only a height a bird may not be drawn below.
 ///
-/// **Five blocks, argued from the three things it has to be at once.** It is five wingspans
-/// of daylight under the widest row in [`BIRDS`] and fourteen under the narrowest, which is
-/// the gap that reads as *flying over* a slope rather than as brushing it. It is a block
-/// over the parrot's four-block band floor, so on broken ground the clamp is what decides a
-/// low bird's height rather than half-deciding it with the band. And it is small enough that
-/// a flock crossing a wood is still among the treetops rather than above the weather — the
-/// surface a bird clears includes the canopy, so a larger number would push every parrot off
-/// the trees its row exists to fly over.
+/// **Five blocks, argued from the three things it has to be at once.** It is a block over the
+/// parrot's four-block band floor, so on broken ground the clamp is what decides a low bird's
+/// height rather than half-deciding it with the band. It is small enough that a flock crossing
+/// a wood is still among the treetops rather than above the weather — the surface a bird
+/// clears includes the canopy, so a larger number would push every parrot off the trees its
+/// row exists to fly over. And it is still daylight rather than a graze at the sizes in
+/// [`BIRDS`]: the clearance is measured to a bird's **origin**, and the lowest thing a bird
+/// draws is a wingtip at the bottom of its beat, about a quarter of a wingspan down — 0.8
+/// blocks for the widest row, 0.24 for the narrowest — so the gap seen under an eagle is a
+/// little over four blocks.
+///
+/// **This used to be stated in wingspans, and #632 is why it is not.** It read "five wingspans
+/// under the widest row and fourteen under the narrowest", which was true of a one-block eagle
+/// and is one and two thirds of a three-block one. The number did not move; what it was five
+/// of did. A clearance stated in wingspans is a claim about [`BIRDS`], and nobody is going to
+/// re-derive this constant every time that table changes.
 const BIRD_CLEARANCE: f32 = 5.0;
 
 /// How fast the clearance may lift a bird, in blocks per second.
@@ -188,6 +215,10 @@ pub(super) struct BirdSpecies {
     /// How far above the anchor they fly, in blocks.
     pub(super) altitude: RangeInclusive<f32>,
     /// The wingspan, in blocks. The whole bird is drawn at this scale.
+    ///
+    /// Literally the wingspan: the model is authored a wingtip to either side of `x = 0`, so
+    /// this is a scale and a span at once and nothing divides it back out.
+    /// `the_model_is_authored_at_a_wingspan_of_exactly_one` is what keeps that true.
     pub(super) size: f32,
     /// How often a wing completes one beat, in hertz. Under one is a glide.
     pub(super) flap_hz: f32,
@@ -257,6 +288,28 @@ impl BirdSpecies {
 ///
 /// Appended to, never reordered: [`Bird::species`] is an index into this table and a bird
 /// alive across a reorder would change species in the air.
+///
+/// ## How the wingspans were chosen: an angle, not a taxonomy
+///
+/// What decides whether a bird reads as a bird is the angle it subtends at the top of its own
+/// band and nothing else. Each row's [`BirdSpecies::size`] lands between two and a half and
+/// four and a half degrees there — five to eight full moons wide, which is where a silhouette
+/// stops being a dot:
+///
+/// | row | wingspan | band top | subtends |
+/// |---|---|---|---|
+/// | parrot | 0.9 | 12 | 4.3° |
+/// | vulture | 2.6 | 45 | 3.3° |
+/// | eagle | 3.0 | 60 | 2.9° |
+///
+/// The three were 0.35, 0.9 and 1.0, which is 1.67°, 1.15° and 0.95° — an eagle two moons
+/// wide, which is what a spark is.
+///
+/// **The eagle is bounded by [`BIRD_RANGE`] rather than by ornithology.** Its band tops at 60
+/// and [`ARC_RISE`] adds three, so its origin reaches 63 of a 64-block box; a three-block
+/// wingspan puts its raised wingtip 0.79 higher, leaving about a fifth of a block.
+/// `the_drawn_bird_stays_inside_its_box` asserts that sum in both directions — over the box
+/// fails, and so does a margin wide enough to mean the box stopped being the bound.
 pub(super) const BIRDS: [BirdSpecies; 3] = [
     // The parrot: small, bright, fast and low, and the only row that needs trees.
     BirdSpecies {
@@ -264,7 +317,9 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
         requires_wooded: true,
         flock: 3..=5,
         altitude: 4.0..=12.0,
-        size: 0.35,
+        // A macaw, and the only row whose real wingspan this is: at twelve blocks it already
+        // subtends 4.3°, so it is the row that needed the least.
+        size: 0.9,
         flap_hz: 5.0,
         body: Color::srgb(0.85, 0.16, 0.14),
         wing: Color::srgb(0.16, 0.66, 0.24),
@@ -283,7 +338,8 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
         requires_wooded: false,
         flock: 2..=4,
         altitude: 25.0..=45.0,
-        size: 0.9,
+        // A griffon vulture's own 2.6 m, which at forty-five blocks is 3.3°.
+        size: 2.6,
         flap_hz: 0.6,
         body: Color::srgb(0.24, 0.17, 0.12),
         wing: Color::srgb(0.13, 0.09, 0.07),
@@ -299,7 +355,10 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
         requires_wooded: false,
         flock: 1..=2,
         altitude: 35.0..=60.0,
-        size: 1.0,
+        // Larger than any eagle alive, because it flies fifteen blocks higher than the
+        // vulture and still has to read: 2.9° at sixty. The box is what stops it going
+        // further — see the table on [`BIRDS`].
+        size: 3.0,
         flap_hz: 0.6,
         body: Color::srgb(0.31, 0.21, 0.13),
         wing: Color::srgb(0.72, 0.68, 0.60),
@@ -752,10 +811,10 @@ pub(super) fn create_visuals(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(BirdVisuals {
-        body: meshes.add(quad(Vec2::new(-0.15, -0.5), Vec2::new(0.15, 0.5))),
+        body: meshes.add(body_mesh()),
         // Authored from the hinge outwards, so rotating the child about its own origin is
         // the flap and nothing has to offset it.
-        wing: meshes.add(quad(Vec2::new(0.0, -0.25), Vec2::new(0.5, 0.25))),
+        wing: meshes.add(wing_mesh()),
         // Colourless and invisible until a bird claims the pair and writes its plumage in.
         pool: std::array::from_fn(|_| {
             (
@@ -766,30 +825,354 @@ pub(super) fn create_visuals(
     });
 }
 
-/// A flat quad in the XZ plane, facing up.
+/// The fractions of a wing's chord the spar's flat runs between.
 ///
-/// `cull_mode: None` on the material is what makes one quad enough for a bird seen from
-/// below as well as from above.
-fn quad(low: Vec2, high: Vec2) -> Mesh {
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    )
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_POSITION,
+/// The wing is a hexagon in section for the reason `hands::BladeSection` is one: it has to be
+/// thin at the leading and trailing edges and thick somewhere between them, and no primitive
+/// expresses that. These two put the flat where a bird's arm is — forward of centre.
+const WING_SPAR: (f32, f32) = (0.22, 0.55);
+
+/// The buffers one hand-authored bird mesh is accumulated into.
+///
+/// The same three-attribute accumulator `player/hands.rs` uses for its blade, and deliberately
+/// a second small copy rather than that one made public: its `fan` writes `livery::neutral_uv`
+/// into every corner, which is a statement about the first-person hand's atlas that a bird —
+/// whose material carries no image at all — has no part in.
+#[derive(Debug, Default)]
+struct MeshBuild {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl MeshBuild {
+    /// One flat-shaded quad, wound around its perimeter.
+    ///
+    /// Flat rather than smooth, for the reason `hands::MeshBuild::quad` gives: the facets are
+    /// the shape, and averaging normals along a ring would soften exactly where the light
+    /// should break.
+    fn quad(&mut self, corners: [Vec3; 4], uvs: [[f32; 2]; 4]) {
+        let [a, b, c, d] = corners;
+        // From the diagonals rather than from one triangle's two edges: a quad lofted between
+        // two sections of different widths is not exactly planar.
+        let normal = (c - a).cross(d - b).normalize_or_zero();
+        let first = self.push(corners.into_iter().zip(uvs), normal);
+        self.indices
+            .extend([first, first + 1, first + 3, first + 1, first + 2, first + 3]);
+    }
+
+    /// One flat-shaded polygon, as a fan from its first corner.
+    ///
+    /// The corners must already be wound so that `normal` is the outward one; [`loft`]
+    /// reverses them for the end that faces the other way.
+    fn fan(&mut self, corners: &[Vec3], normal: Vec3) {
+        let first = self.push(corners.iter().map(|corner| (*corner, [0.5, 0.5])), normal);
+        for corner in 1..corners.len() as u32 - 1 {
+            self.indices
+                .extend([first, first + corner, first + corner + 1]);
+        }
+    }
+
+    /// Appends vertices sharing one normal, and answers the index the first of them landed at.
+    fn push(&mut self, corners: impl Iterator<Item = (Vec3, [f32; 2])>, normal: Vec3) -> u32 {
+        let first = self.positions.len() as u32;
+        for (corner, uv) in corners {
+            self.positions.push(corner.to_array());
+            self.normals.push(normal.to_array());
+            self.uvs.push(uv);
+        }
+        first
+    }
+
+    /// The three attributes and the indices, as the asset the renderer draws.
+    fn finish(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// Lofts one closed shell through `rings` and caps both ends.
+///
+/// Every ring must carry the same number of corners, wound the same way, and the rings must
+/// run along `forward`. The first cap is the first ring **reversed** — it faces the other way,
+/// exactly as `hands::blade_loft`'s root cap does — and the last is the last ring as authored.
+fn loft(build: &mut MeshBuild, rings: &[Vec<Vec3>], forward: Vec3) {
+    let spans = rings.len() - 1;
+    for (span, pair) in rings.windows(2).enumerate() {
+        let [lower, upper] = pair else {
+            unreachable!("windows(2) yields pairs")
+        };
+        let sides = lower.len();
+        let along = |step: usize| step as f32 / spans as f32;
+        for corner in 0..sides {
+            let next = (corner + 1) % sides;
+            let around = |step: usize| step as f32 / sides as f32;
+            build.quad(
+                [lower[corner], lower[next], upper[next], upper[corner]],
+                [
+                    [around(corner), along(span)],
+                    [around(corner + 1), along(span)],
+                    [around(corner + 1), along(span + 1)],
+                    [around(corner), along(span + 1)],
+                ],
+            );
+        }
+    }
+    let mut first: Vec<Vec3> = rings[0].clone();
+    first.reverse();
+    build.fan(&first, -forward);
+    build.fan(&rings[spans], forward);
+}
+
+/// One cross-section of a bird's body: where it sits along the bird, and how far it reaches to
+/// either side and above.
+#[derive(Debug, Clone, Copy)]
+struct BodySection {
+    z: f32,
+    half_width: f32,
+    half_height: f32,
+}
+
+impl BodySection {
+    /// The eight corners of the section, in order around its perimeter.
+    ///
+    /// **The order is load-bearing rather than a convention**, and this is the warning
+    /// `hands::BladeSection::perimeter` carries one module over: [`MeshBuild::quad`] takes the
+    /// outward normal from the corners it is handed, so a ring walked the other way round is a
+    /// bird lit entirely from the inside. It is *worse* here than on the sword, because
+    /// `cull_mode: None` means the shape does not even vanish to say so — it merely looks
+    /// wrong, at forty blocks, where nobody will diagnose it. Counter-clockwise seen from
+    /// `+Z`, lofted toward `+Z`, and `every_face_of_a_bird_is_wound_outward` is what checks
+    /// that rather than a pair of eyes.
+    ///
+    /// Eight corners rather than the blade's six because a body is round and a blade is not.
+    fn perimeter(self) -> Vec<Vec3> {
+        let Self {
+            z,
+            half_width: w,
+            half_height: h,
+        } = self;
+        let (dw, dh) = (w * FRAC_1_SQRT_2, h * FRAC_1_SQRT_2);
         vec![
-            [low.x, 0.0, low.y],
-            [high.x, 0.0, low.y],
-            [high.x, 0.0, high.y],
-            [low.x, 0.0, high.y],
-        ],
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; 4])
-    .with_inserted_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-    )
-    .with_inserted_indices(Indices::U32(vec![0, 2, 1, 0, 3, 2]))
+            Vec3::new(0.0, h, z),
+            Vec3::new(-dw, dh, z),
+            Vec3::new(-w, 0.0, z),
+            Vec3::new(-dw, -dh, z),
+            Vec3::new(0.0, -h, z),
+            Vec3::new(dw, -dh, z),
+            Vec3::new(w, 0.0, z),
+            Vec3::new(dw, dh, z),
+        ]
+    }
+}
+
+/// One chord-section of a wing: how far out along the span it sits, where its leading and
+/// trailing edges are, and how thick it is through the spar.
+#[derive(Debug, Clone, Copy)]
+struct WingSection {
+    x: f32,
+    front: f32,
+    back: f32,
+    half_thickness: f32,
+}
+
+impl WingSection {
+    /// The six corners of the section, in order around its perimeter.
+    ///
+    /// Wound from the leading edge over the **top** to the trailing edge and back underneath,
+    /// which is what puts the normal outward for a shell lofted toward `+X`. The same warning
+    /// as [`BodySection::perimeter`] applies, and the same test answers it.
+    fn perimeter(self) -> Vec<Vec3> {
+        let Self {
+            x,
+            front,
+            back,
+            half_thickness: t,
+        } = self;
+        let chord = back - front;
+        let (spar_front, spar_back) = (front + chord * WING_SPAR.0, front + chord * WING_SPAR.1);
+        vec![
+            Vec3::new(x, 0.0, front),
+            Vec3::new(x, t, spar_front),
+            Vec3::new(x, t, spar_back),
+            Vec3::new(x, 0.0, back),
+            Vec3::new(x, -t, spar_back),
+            Vec3::new(x, -t, spar_front),
+        ]
+    }
+}
+
+/// The sections the body is lofted through, from the tip of the beak to the stern.
+///
+/// **`-Z` is forward.** `fly_the_flock` aims a bird with `Transform::look_to`, which points
+/// `-Z` along the heading, so the beak is the most negative `z` in this table and everything
+/// else follows from that.
+///
+/// The whole model is authored at a wingspan of exactly one, so [`BirdSpecies::size`] is
+/// literally the wingspan. The body runs 0.60 of that from beak to tail tip: long enough to
+/// point somewhere, short enough that the wings are still the shape.
+fn body_sections() -> [BodySection; 8] {
+    [
+        // The beak: a point, and the reason a bird has a front at all from underneath.
+        BodySection {
+            z: -0.285,
+            half_width: 0.008,
+            half_height: 0.007,
+        },
+        BodySection {
+            z: -0.250,
+            half_width: 0.018,
+            half_height: 0.016,
+        },
+        // The head, and the neck waisted behind it — the waist is what makes it a head
+        // rather than the front of the body.
+        BodySection {
+            z: -0.215,
+            half_width: 0.048,
+            half_height: 0.046,
+        },
+        BodySection {
+            z: -0.160,
+            half_width: 0.040,
+            half_height: 0.044,
+        },
+        // The shoulders, where the wings hinge and the body is deepest.
+        BodySection {
+            z: -0.055,
+            half_width: 0.075,
+            half_height: 0.072,
+        },
+        BodySection {
+            z: 0.040,
+            half_width: 0.068,
+            half_height: 0.062,
+        },
+        BodySection {
+            z: 0.135,
+            half_width: 0.036,
+            half_height: 0.034,
+        },
+        BodySection {
+            z: 0.175,
+            half_width: 0.020,
+            half_height: 0.018,
+        },
+    ]
+}
+
+/// The sections the tail is lofted through: a second shell, rooted inside the body.
+///
+/// Flat rather than round — the height halves while the width nearly quintuples — because a
+/// tail is a thing a bird *spreads*, and from underneath it is the half of the silhouette that
+/// says which way the bird is pointing. A separate shell rather than four more rows of
+/// [`body_sections`] because the loft from a round section to a flat one is a twist.
+fn tail_sections() -> [BodySection; 3] {
+    [
+        BodySection {
+            z: 0.120,
+            half_width: 0.026,
+            half_height: 0.014,
+        },
+        BodySection {
+            z: 0.220,
+            half_width: 0.070,
+            half_height: 0.010,
+        },
+        BodySection {
+            z: 0.310,
+            half_width: 0.120,
+            half_height: 0.005,
+        },
+    ]
+}
+
+/// The sections one wing is lofted through, from the hinge to the tip.
+///
+/// **Authored from the hinge outwards along `+X`**, so rotating the child entity about its own
+/// origin is the flap and nothing has to offset it — the property the flat quad had and the
+/// one thing about the wing that has not changed.
+///
+/// Two things make it a wing rather than a paddle. It **tapers**, from a chord of 0.255 at the
+/// root to 0.065 at the tip; and it is **swept**, the tip trailing the shoulder the way a
+/// soaring bird's does. The sweep is also why the mirrored wing turns about `Z` rather than
+/// about `Y` — see [`wing_turn`].
+fn wing_sections() -> [WingSection; 4] {
+    [
+        WingSection {
+            x: 0.000,
+            front: -0.150,
+            back: 0.105,
+            half_thickness: 0.024,
+        },
+        WingSection {
+            x: 0.150,
+            front: -0.160,
+            back: 0.085,
+            half_thickness: 0.019,
+        },
+        WingSection {
+            x: 0.320,
+            front: -0.130,
+            back: 0.035,
+            half_thickness: 0.011,
+        },
+        WingSection {
+            x: 0.500,
+            front: -0.055,
+            back: 0.010,
+            half_thickness: 0.0035,
+        },
+    ]
+}
+
+/// The body and the tail, as one mesh and therefore one draw.
+///
+/// Two closed shells that interpenetrate at the stern rather than one that tries to be both.
+/// Nothing downstream can tell — a mesh is a triangle list — and the alternative costs either
+/// a fourth entity or the twist [`tail_sections`] names.
+fn body_mesh() -> Mesh {
+    let mut build = MeshBuild::default();
+    let rings = |sections: &[BodySection]| -> Vec<Vec<Vec3>> {
+        sections.iter().map(|section| section.perimeter()).collect()
+    };
+    loft(&mut build, &rings(&body_sections()), Vec3::Z);
+    loft(&mut build, &rings(&tail_sections()), Vec3::Z);
+    build.finish()
+}
+
+/// One wing, lofted from its hinge out to its tip.
+fn wing_mesh() -> Mesh {
+    let mut build = MeshBuild::default();
+    let rings: Vec<Vec<Vec3>> = wing_sections()
+        .iter()
+        .map(|section| section.perimeter())
+        .collect();
+    loft(&mut build, &rings, Vec3::X);
+    build.finish()
+}
+
+/// The rotation one wing has, `elapsed` seconds into the session.
+///
+/// **The mirrored wing is a half turn about `Z`, and it was a half turn about `Y`.** About `Y`
+/// takes the arm to `-X`, which is all a symmetric quad could show — but it also swaps front
+/// for back, and a swept wing has a front: the left wing would have flown leading edge last.
+/// About `Z` takes the arm to `-X` and leaves `z` alone, so both wings lead with the same
+/// edge. It also turns the wing upside down, which [`WingSection::perimeter`] cannot show
+/// because it is symmetric about its own chord plane. The angle is mirrored with it, so both
+/// tips rise on one beat rather than scissoring.
+///
+/// A negative scale would mirror it too and would invert the winding — which `cull_mode: None`
+/// hides rather than fixes, which is exactly why it is not used.
+fn wing_turn(wing: &BirdWing, elapsed: f32) -> Quat {
+    let angle = (elapsed * wing.flap_hz * TAU).sin() * FLAP_AMPLITUDE_RADIANS;
+    Quat::from_rotation_z(if wing.left { PI - angle } else { angle })
 }
 
 /// Lit, blended and drawn from both faces.
@@ -798,8 +1181,11 @@ fn quad(low: Vec2, high: Vec2) -> Mesh {
 /// the light source, and a bird is not — it is an object in the world, so night darkens it
 /// and the fog takes it at distance exactly as they take a mob.
 ///
-/// **`cull_mode: None`** because a flat quad is seen from below as often as from above, the
-/// same reason `mobs.rs` gives for the aggro marker. **`AlphaMode::Blend` and an explicit
+/// **`cull_mode: None`** was for a flat quad, seen from below as often as from above — the
+/// same reason `mobs.rs` gives for the aggro marker. The model is a closed shell now and could
+/// be culled, and deliberately is not: drawing both faces turns the winding mistake
+/// [`BodySection::perimeter`] warns about into a shading mistake rather than a hole, and a
+/// hole at forty blocks is what nobody diagnoses. The winding is held by a test instead. **`AlphaMode::Blend` and an explicit
 /// alpha** because the fade is written here, which is also why the pair a bird draws from
 /// is its own rather than its plumage's — see [`BirdVisuals`].
 fn plumage_material(colour: Color, alpha: f32) -> StandardMaterial {
@@ -1122,19 +1508,15 @@ pub(super) fn fly_the_flock(
     }
 
     for (wing, mut transform) in &mut wings {
-        let angle = (elapsed * wing.flap_hz * TAU).sin() * FLAP_AMPLITUDE_RADIANS;
-        // The mirrored wing is a half turn about Y first, which takes its arm to -X and
-        // makes the same local rotation lift it by the same amount. A negative scale would
-        // do it too and would invert the winding, which `cull_mode: None` hides rather than
-        // fixes.
-        let mirror = if wing.left { PI } else { 0.0 };
-        transform.rotation = Quat::from_rotation_y(mirror) * Quat::from_rotation_z(angle);
+        transform.rotation = wing_turn(wing, elapsed);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::mesh::MeshVertexAttributeId;
+
     use crate::world::{BlockId, VoxelChunk};
 
     const SAMPLES: usize = 120 * 60;
@@ -1800,5 +2182,226 @@ mod tests {
         assert_eq!(approach(2.0, 1.0, 0.25), 1.75);
         assert_eq!(approach(1.1, 1.0, 0.25), 1.0);
         assert_eq!(approach(1.0, 1.0, 0.25), 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // The model
+    // -----------------------------------------------------------------------
+
+    /// One mesh's positions, its normals, and its triangles as index triples.
+    fn geometry(mesh: &Mesh) -> (Vec<Vec3>, Vec<Vec3>, Vec<[usize; 3]>) {
+        let read = |id: MeshVertexAttributeId| {
+            mesh.attribute(id)
+                .and_then(|values| values.as_float3())
+                .expect("a bird mesh carries positions and normals")
+                .iter()
+                .map(|value| Vec3::from_array(*value))
+                .collect::<Vec<_>>()
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("a bird mesh is a U32 triangle list")
+        };
+        let triangles = indices
+            .chunks_exact(3)
+            .map(|triple| [triple[0] as usize, triple[1] as usize, triple[2] as usize])
+            .collect();
+        (
+            read(Mesh::ATTRIBUTE_POSITION.id),
+            read(Mesh::ATTRIBUTE_NORMAL.id),
+            triangles,
+        )
+    }
+
+    /// Every position in a mesh.
+    fn points(mesh: &Mesh) -> Vec<Vec3> {
+        geometry(mesh).0
+    }
+
+    /// How far the drawn bird reaches from its own origin on each axis, in wingspans, with
+    /// its wings anywhere in the beat.
+    ///
+    /// The mirrored wing needs no separate pass: `wing_turn` reflects it through the origin in
+    /// `x` and `y` over the same angles, so a per-axis reach in absolute value covers both.
+    fn drawn_reach() -> Vec3 {
+        let mut reach = Vec3::ZERO;
+        for point in points(&body_mesh()) {
+            reach = reach.max(point.abs());
+        }
+        let wing = points(&wing_mesh());
+        for step in 0..=32u32 {
+            let angle = lerp(
+                -FLAP_AMPLITUDE_RADIANS,
+                FLAP_AMPLITUDE_RADIANS,
+                step as f32 / 32.0,
+            );
+            let turn = Quat::from_rotation_z(angle);
+            for point in &wing {
+                reach = reach.max((turn * *point).abs());
+            }
+        }
+        reach
+    }
+
+    #[test]
+    fn every_face_of_a_bird_is_wound_outward() {
+        // The failure `hands::BladeSection::perimeter` warns about, made a machine's problem.
+        // A ring walked the wrong way round is a shell lit entirely from the inside, and
+        // because the plumage material draws both faces it does not vanish to announce itself.
+        //
+        // Three properties settle it without anybody looking: every triangle's stored normal
+        // agrees in direction with its own winding, the area vectors cancel (true of a closed
+        // surface and of nothing else, so no cap was forgotten), and the volume that winding
+        // encloses is positive — which is the whole of what "outward" means, and the one of
+        // the three a mesh built inside out fails.
+        for (name, mesh) in [("body", body_mesh()), ("wing", wing_mesh())] {
+            let (positions, normals, triangles) = geometry(&mesh);
+            let mut area = Vec3::ZERO;
+            let mut volume = 0.0f32;
+            for corners in triangles {
+                let [a, b, c] = corners.map(|corner| positions[corner]);
+                let cross = (b - a).cross(c - a);
+                assert!(cross.length() > 1e-9, "{name} has a degenerate face at {a}");
+                let wound = cross.normalize();
+                for corner in corners {
+                    let stored = normals[corner];
+                    // **The sign is the property; the margin is a sanity bound.** A quad
+                    // lofted between two sections of different shape is not planar, and
+                    // `MeshBuild::quad` deliberately hands both its triangles the *diagonal*
+                    // normal rather than either one's own — so the two can never agree
+                    // exactly. The worst fold in the model is where the tail flares, at about
+                    // 0.92; anything under 0.8 is a section table that has folded a quad over
+                    // rather than tapered it.
+                    assert!(
+                        stored.dot(wound) > 0.8,
+                        "{name}: a face stores {stored} where its winding gives {wound}"
+                    );
+                }
+                area += cross;
+                volume += a.cross(b).dot(c);
+            }
+            assert!(
+                area.length() < 1e-4,
+                "{name} is not a closed shell: its area vectors sum to {area}"
+            );
+            assert!(
+                volume > 0.0,
+                "{name} encloses {}, so its rings are wound inside out",
+                volume / 6.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_model_is_authored_at_a_wingspan_of_exactly_one() {
+        // `BirdSpecies::size` is documented as the wingspan *and* used as the scale, so the
+        // model has to be one wingspan across, or every angle argued on `BIRDS` is wrong by a
+        // factor nobody wrote down.
+        let wing = points(&wing_mesh());
+        let out = wing.iter().fold(f32::NEG_INFINITY, |far, at| far.max(at.x));
+        let hinge = wing.iter().fold(f32::INFINITY, |near, at| near.min(at.x));
+        assert_eq!(out, 0.5, "the wingtip is not half a span from the hinge");
+        assert_eq!(hinge, 0.0, "the wing is not authored from its own hinge");
+
+        // And the body is a bird rather than a plank: narrow across, long enough to point.
+        let body = points(&body_mesh());
+        assert!(
+            body.iter().all(|at| at.x.abs() <= 0.13),
+            "the body is wider than a wing is long"
+        );
+        let ahead = body.iter().fold(f32::INFINITY, |near, at| near.min(at.z));
+        let behind = body.iter().fold(f32::NEG_INFINITY, |far, at| far.max(at.z));
+        assert!(
+            behind - ahead > 0.5,
+            "a body {} long has no silhouette to read",
+            behind - ahead
+        );
+        // `-Z` is forward, so the beak has to be the far end of that.
+        assert!(ahead < -0.25 && behind > 0.25);
+    }
+
+    #[test]
+    fn the_drawn_bird_stays_inside_its_box() {
+        // `a_bird_never_leaves_its_box` is about where `place` puts a bird's **origin**, and
+        // `place` reads no part of `BirdSpecies::size` — so it is untouched by this issue and
+        // would pass with a bird the size of a hill. This is the half raising the sizes moved:
+        // the wingtip, not the origin.
+        let reach = drawn_reach();
+        let anchor = Vec3::new(-512.0, 64.0, 512.0);
+        for species in &BIRDS {
+            let half = reach * species.size;
+            for seed in 0..16u64 {
+                let seed = mix(seed, 0xB0A7);
+                for sample in 0..=SAMPLES {
+                    let drawn =
+                        (place(species, seed, sample as f32 * DT, anchor) - anchor).abs() + half;
+                    assert!(
+                        drawn.max_element() <= BIRD_RANGE,
+                        "{:?} drew out to {drawn} from its anchor",
+                        species.pattern
+                    );
+                }
+            }
+        }
+
+        // Sixteen seeds are not the bound, though, and the row that binds is the eagle: the
+        // top of its band plus what `ARC_RISE` adds is 63 of a 64-block box whatever any
+        // sample happens to reach. Both directions are asserted, because a comfortable margin
+        // means the wingspan could have been larger and the table's argument has gone stale.
+        let eagle = &BIRDS[2];
+        let highest = *eagle.altitude.end() + ARC_RISE + reach.y * eagle.size;
+        assert!(
+            highest <= BIRD_RANGE,
+            "an eagle's raised wingtip reaches {highest} of a {BIRD_RANGE} box"
+        );
+        assert!(
+            BIRD_RANGE - highest < 1.0,
+            "the box stopped being what the eagle's wingspan is bounded by: {} blocks spare",
+            BIRD_RANGE - highest
+        );
+    }
+
+    #[test]
+    fn both_wings_lift_together_and_lead_with_the_same_edge() {
+        // The mirror was a half turn about Y, which two symmetric quads could not tell from a
+        // half turn about Z. A swept wing can: about Y the left wing's leading edge ends up
+        // behind its trailing one. Measured at the tip, where the sweep is largest.
+        let tip = wing_sections()[3];
+        let leading = Vec3::new(tip.x, 0.0, tip.front);
+        assert!(leading.z < 0.0, "the model's forward is not -Z");
+
+        let mut lifted = 0usize;
+        for step in 0..64u32 {
+            let elapsed = step as f32 / 8.0;
+            let right = wing_turn(
+                &BirdWing {
+                    left: false,
+                    flap_hz: 1.0,
+                },
+                elapsed,
+            ) * leading;
+            let left = wing_turn(
+                &BirdWing {
+                    left: true,
+                    flap_hz: 1.0,
+                },
+                elapsed,
+            ) * leading;
+            assert!(
+                (left.y - right.y).abs() < 1e-5,
+                "the wings scissored: {} against {}",
+                left.y,
+                right.y
+            );
+            assert!(
+                (left.x + right.x).abs() < 1e-5,
+                "the wings are not mirrored across the body"
+            );
+            assert!(
+                left.z < 0.0 && right.z < 0.0,
+                "a wing flew leading edge last: {left} and {right}"
+            );
+            lifted += usize::from(right.y.abs() > 0.05);
+        }
+        assert!(lifted > 0, "nothing ever flapped, so this proves nothing");
     }
 }
