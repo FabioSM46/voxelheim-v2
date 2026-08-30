@@ -59,7 +59,7 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, and the per-vertex `WaterFlow` the water surface carries | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the two materials, one entity per chunk with the water half as its child | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`) and which hide what is behind them (`is_opaque`) | know about meshes or about the wire |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
@@ -2127,7 +2127,17 @@ Recorded here so the next reader does not mistake them for oversights:
   if the UI ever wants typographic characters generally.
 - **No texture atlas, and no art assets — but there is one generated image, and the meshes that
   sample it carry real UVs.** `palette.rs` is still the whole *terrain* material system: a colour
-  per block id, carried as vertex colours, on chunk meshes whose texture coordinates nothing reads.
+  per block id, carried as vertex colours, on **opaque** chunk meshes with no texture coordinates
+  at all.
+
+  **The water half is the exception, and it samples nothing.** Since #598 the water surface carries
+  `ATTRIBUTE_UV_0` and `ATTRIBUTE_UV_1`, and neither is a texture coordinate: UV_0 is the
+  horizontal flow the server's block ids imply and UV_1's `x` is whether the water is falling.
+  They ride in the UV slots because `MeshPipeline` already forwards those two to the fragment
+  stage under `VERTEX_UVS_A` / `VERTEX_UVS_B` — a custom attribute would need a vertex shader and
+  a layout specialization of ours, for the same four floats. The opaque half still carries
+  neither, which is `SurfaceMesh`'s all-or-nothing rule: the buffers are filled for every vertex
+  of a surface whose faces carry a flow and empty for one whose faces do not.
   Greedy meshing merges quads across blocks, so a texture there is a different problem with
   different costs — seams across merged quads, an atlas, a per-chunk material decision — and none
   of it is on the table. Item-only swatches live in `player/items.rs` beside the rows that name
