@@ -478,6 +478,44 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 	return min(surface-riverBedDrop, base), surface, true
 }
 
+// riverFallTopAt is how high the water in a channel column stands because the channel
+// *beside* it stands higher: the top of the fall that pours into this column, or this
+// column's own surface where nothing pours into it.
+//
+// **A terrace step is a fall, and until #654 nobody wrote one.** [riverSurfaceAt] floors
+// the smoothed land, so two adjacent channel columns can differ by a whole terrace; the
+// upper pool then stood with three blocks of its face against open air, which is the
+// shape a waterfall has and none of the substance. The comment at [riverSurfaceAt] said
+// the flow automaton would pour it. Before #653 the automaton could not pour anything at
+// all; since #653 it can, and pouring the same fall on every composition of every chunk
+// costs 557 block updates a chunk, broadcast to every client watching it. Writing the
+// answer into the terrain costs nothing and is byte-identical on every load.
+//
+// **Flowing water and not a source, which is the whole distinction.** A source is
+// permanent by construction — [NextWater]'s first arm — so a painted source would be a
+// pillar of water standing in the air for ever. Flowing water is the automaton's to
+// keep: it is exactly what that function settles this cell to, it drains the moment the
+// channel above stops feeding it, and it is what carries the falling bit the client
+// draws with.
+//
+// Four neighbours and no diagonals, because the fall is what pours across a shared face.
+// Only channel columns are asked, and only their surface: this is [riverChannelAt]'s two
+// conditions, not a whole [columnAt], so a channel column pays four river fields and
+// four smoothed heights rather than four columns.
+func riverFallTopAt(seed, worldX, worldZ int64, ownSurface int) int {
+	top := ownSurface
+	for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		x, z := worldX+step[0], worldZ+step[1]
+		if !riverAt(seed, x, z) {
+			continue
+		}
+		if surface := riverSurfaceAt(seed, x, z); surface >= seaLevel {
+			top = max(top, surface)
+		}
+	}
+	return top
+}
+
 // nearOriginColumn reports whether a column is inside the square around the world's
 // origin column that water leaves alone. See [originWaterClearance].
 func nearOriginColumn(worldX, worldZ int64) bool {
@@ -535,8 +573,13 @@ func standingWaterSurface(surface, riverSurface int, river bool) (height int, ok
 //
 // The caller has already established that the terrain here is air.
 func (c column) fillAt(worldY int) Block {
-	if !c.standingWater || worldY > c.waterSurface {
+	if !c.standingWater || worldY > c.fallSurface {
 		return Air
+	}
+	// Above this column's own pool and under the one next door: the fall, and flowing
+	// rather than source so the automaton owns it. See [riverFallTopAt].
+	if worldY > c.waterSurface {
+		return WaterFlow7
 	}
 	if c.climate == Tundra && worldY == c.waterSurface {
 		return Ice
@@ -544,20 +587,51 @@ func (c column) fillAt(worldY int) Block {
 	return c.waterBlock
 }
 
-// caveFillAt is what stands in a carved voxel: water below the dry-world cave
-// level, water up to this column's standing surface when it has one, and air above.
+// caveFillAt is what stands in a carved voxel: water below the dry-world cave level,
+// water up to this column's standing surface where it has one and is a body rather than
+// a channel, and air above.
 //
-// Both are world heights rather than depths. The fallback level makes dry-land cave
-// water one body a walk descends to; the column surface makes a carved space beneath
-// a lake part of that lake without consulting any neighbouring column.
+// Both are world heights rather than depths. The fallback level makes dry-land cave water
+// one body a walk descends to; the column surface makes a carved space beneath a lake part
+// of that lake without consulting any neighbouring column.
 //
-// **The column's own surface is asked first, and the order is what carries the
-// current.** A carved voxel under a channel is that channel's water and wears its
-// direction; one under dry ground is an aquifer with no direction to have, and plain
-// [Water] is what says so. Either way both are source water, exactly as before.
+// **The column's own surface is asked first, and the order is what carries the current.**
+// A carved voxel under a sea or a basin is that body's water; one under dry ground is an
+// aquifer with no direction to have, and plain [Water] is what says so.
+//
+// **A channel is excluded above [caveWaterLevel] since #654, and this is the one place a
+// measurement overruled a rule rather than tuning it.** A river's surface is its own
+// terrace, which [riverSurfaceAt] lets stand two hundred blocks up; filling every carved
+// voxel beneath it to that height put a column of source water through the whole rock
+// under the channel. Where the cave then opened sideways into dry ground — 847 such faces
+// in one 128x128 window at seed 1 — that was water with nothing holding it, and since
+// #653 gave the automaton a way to pour, it poured: 1639 of the 4457 block updates a
+// freshly generated eight-chunk volume settled through went into flooding caves.
+//
+// Excluding it costs #593's sentence only for channels. A sea or a basin still fills its
+// caves to [seaLevel], which is eleven blocks above [caveWaterLevel] and is the case #593
+// was written for — a cave under a lake is still part of the lake. What is gone is the
+// claim that a river carries an aquifer to its own height, which nothing about water says
+// and which the rock under a terraced channel made absurd.
+//
+// **Measured, over the same eight-chunk volume run to a fixed point:**
+//
+//	                                      settles in   changes   into caves
+//	as it stood                            44 steps      4457       1639
+//	with the terrace fall painted          44 steps      3777       1389
+//	and this exclusion                     10 steps      1738          0
+//
+// **Flowing water here was tried and is much worse**, which is worth recording because it
+// is the obvious idea: emitting the deep fill as [WaterFlow7] so it drains itself turned
+// 4457 changes into 413847, because a body that drains and is re-fed from the sources
+// beside it churns instead of settling. The fill is source or it is absent.
 func (c column) caveFillAt(worldY int) Block {
 	if c.standingWater && worldY <= c.waterSurface {
-		return c.waterBlock
+		// A body fills the rock beneath it; a channel does not, above the dry-world
+		// level. See the paragraph on #654 above for the measurement that chose this.
+		if !c.river || worldY <= caveWaterLevel {
+			return c.waterBlock
+		}
 	}
 	if worldY <= caveWaterLevel {
 		return Water
