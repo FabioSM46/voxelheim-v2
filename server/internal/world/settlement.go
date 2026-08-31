@@ -54,15 +54,28 @@ const (
 	// The two sizes of settlement, as the radius of flat ground each stands on.
 	//
 	// A capital has to hold a castle, a hall, a smithy and a ring of six huts without
-	// any of them touching; fifty-six is what that measures out to with the ring at
-	// forty and the largest footprint twenty-one across. A village is half of it.
+	// any of them touching; sixty-eight is what that measures out to with the ring at
+	// sixty-one and the largest footprint sixty-three across. A village is under half.
 	//
-	// **The castle grew from 15 across to 21 in #555 and none of the three radii moved**,
-	// which is worth saying because it looked at first as though one had to. What binds
-	// the plateau is `capitalHutRingRadius + hutRingClearance` and the huts are the
+	// **The hut ring is six blocks further out than the guard below would accept, and
+	// the six are not padding.** `capitalHutRingRadius - capitalPlotRadius -
+	// plotRingHalfFootprint - hutHalfFootprint` is a *nearest-axis* argument: it asks
+	// whether two buildings on the same bearing clear each other. Two on adjacent
+	// bearings do not stand on the same axis, and at zero margin
+	// TestBuildingsStandClearOfEachOtherAndInsideThePlateau found a hall and a hut
+	// sharing a column at x=168. The guard is a floor, not the answer.
+	//
+	// **The castle grew from 15 across to 21 in #555 and none of the three radii moved;
+	// it grew from 21 to 63 in #682 and all three did.** The reason is the same one both
+	// times and it is worth keeping, because it says which number to move next. What
+	// binds the plateau is `capitalHutRingRadius + hutRingClearance` and the huts are the
 	// outermost thing here; what binds the middle is the guard beside
-	// [plotRingNearestAxis], and the plot ring already cleared a castle this wide.
-	capitalRadius = 56
+	// [plotRingNearestAxis]. At 21 across the plot ring already cleared the castle and
+	// nothing had to move. At 63 it does not: the keep's corner now reaches past where a
+	// plot-ring building stood, so [capitalPlotRadius] goes out, the hut ring goes out
+	// behind it, and the plateau goes out behind that. **Four blocks of plateau for
+	// forty-two blocks of castle** — the plateau was never sized by the keep.
+	capitalRadius = 68
 	villageRadius = 28
 
 	// settlementBlendBlocks is how far past the radius the plateau eases back into
@@ -139,8 +152,12 @@ const (
 
 	// The capital's plan: a keep in the middle, the hall and the smithy on their own
 	// bearings a short walk out, and the huts on a ring beyond both.
-	capitalPlotRadius    = 25
-	capitalHutRingRadius = 40
+	// Forty-six rather than the forty-four the guard below would just accept: at 44 the
+	// nearer-axis distance is 38 and `38 − 31 − 6 − 1` is exactly zero, which compiles
+	// and leaves a keep's corner touching a hall's. Forty-six buys the one block of air
+	// between them that makes the two read as separate buildings.
+	capitalPlotRadius    = 46
+	capitalHutRingRadius = 61
 	capitalHutCount      = 6
 
 	// capitalSpawnGateClearance is how far outside the castle's gate a session begins:
@@ -159,6 +176,8 @@ const (
 	// to 21, and a literal written against the older drawing would put a session in the
 	// gate passage. TestTheSpawnIsOnTheCapitalsSquareOutsideTheKeep checks the column
 	// against every building's actual extent, so the guard is not this arithmetic alone.
+	// #682 grew it again, from 21 to 63, and this line did not have to be touched — which
+	// is the whole of what deriving it bought.
 	capitalSpawnOffset = largestHalfFootprint + capitalSpawnGateClearance
 
 	// The village's plan: one public building in the middle and a few huts round it.
@@ -209,7 +228,7 @@ const (
 	hutRingClearance      = 5  // ceil(3√2)
 	smithyHalfFootprint   = 4  // smithySchematic is 9 across
 	hallHalfFootprint     = 6  // hallSchematic is 13 across
-	largestHalfFootprint  = 10 // keepSchematic is 21 across
+	largestHalfFootprint  = 31 // keepSchematic is 63 across
 	publicHalfFootprint   = hallHalfFootprint
 	plotRingHalfFootprint = hallHalfFootprint
 )
