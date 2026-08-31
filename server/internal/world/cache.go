@@ -65,13 +65,23 @@ func CacheCapacityFor(viewDistance, maxPlayers int, terrainMemoryMiB uint64) int
 
 	wanted := uint64(workingSet) * uint64(maxPlayers)
 	wanted = max(wanted, uint64(DefaultCacheCapacity))
-	budgetChunks := wanted
-	if terrainMemoryMiB < MemoryMiBFor(wanted) {
-		budgetChunks = terrainMemoryMiB * (1 << 20) / EstimatedResidentChunkBytes
-	}
+	budgetChunks := residentChunksForMemoryMiB(terrainMemoryMiB)
 	capacity := min(wanted, budgetChunks)
 	capacity -= capacity % uint64(workingSet)
 	return int(capacity)
+}
+
+// residentChunksForMemoryMiB converts the operator's budget without allowing a
+// syntactically valid uint64 flag to wrap while it is scaled to bytes. Past the point
+// where byte arithmetic saturates the budget is effectively unlimited for this cache;
+// CacheCapacityFor still clamps it to the useful player-count bound.
+func residentChunksForMemoryMiB(memoryMiB uint64) uint64 {
+	const bytesPerMiB uint64 = 1 << 20
+	const maxUint64 = ^uint64(0)
+	if memoryMiB > maxUint64/bytesPerMiB {
+		return maxUint64
+	}
+	return memoryMiB * bytesPerMiB / EstimatedResidentChunkBytes
 }
 
 // MemoryMiBFor rounds a chunk residency up to a budget the flag can satisfy.
@@ -80,14 +90,16 @@ func MemoryMiBFor(residentChunks uint64) uint64 {
 	return (bytes + (1 << 20) - 1) / (1 << 20)
 }
 
-// LargestViewDistanceHeld is the greatest distance for which the budget holds one
-// complete working set.
-func LargestViewDistanceHeld(terrainMemoryMiB uint64) int {
-	for distance := 0; ; distance++ {
+// LargestViewDistanceHeld is the greatest distance, no higher than maxDistance, for
+// which the budget holds one complete working set. The caller supplies the protocol's
+// ceiling so this package does not create a second copy of a wire-contract rule.
+func LargestViewDistanceHeld(terrainMemoryMiB uint64, maxDistance int) int {
+	for distance := 0; distance < maxDistance; distance++ {
 		if MemoryMiBFor(uint64(CacheWorkingSetFor(distance+1))) > terrainMemoryMiB {
 			return distance
 		}
 	}
+	return max(maxDistance, 0)
 }
 
 // DefaultWorkers is how many chunks may be generated concurrently.

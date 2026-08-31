@@ -294,7 +294,7 @@ func TestOptionsValidate(t *testing.T) {
 		"terrain memory 0": func(o *options) { o.terrainMemoryMiB = 0 },
 		// The new refusal: inside the contract's ceiling and outside this server's.
 		"view distance the cache cannot hold": func(o *options) {
-			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB)) + 1
+			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance)) + 1
 		},
 		"one session does not fit the terrain budget": func(o *options) {
 			o.terrainMemoryMiB = world.MemoryMiBFor(
@@ -350,7 +350,7 @@ func TestOptionsValidate(t *testing.T) {
 		// [world.LargestViewDistanceHeld] answers rather than this test restating.
 		func(o *options) {
 			o.tickRate = 255
-			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB))
+			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance))
 		},
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
 		func(o *options) { o.stormPeriod = 0 },

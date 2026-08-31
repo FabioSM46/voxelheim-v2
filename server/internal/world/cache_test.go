@@ -344,7 +344,7 @@ func TestThePlayerLimitBoundsAWellFundedResidency(t *testing.T) {
 func TestTheBudgetNamesTheCollapseBoundary(t *testing.T) {
 	t.Parallel()
 
-	largest := LargestViewDistanceHeld(DefaultTerrainMemoryMiB)
+	largest := LargestViewDistanceHeld(DefaultTerrainMemoryMiB, 16)
 	if got := CacheCapacityFor(largest, 100, DefaultTerrainMemoryMiB); got < CacheWorkingSetFor(largest) {
 		t.Fatalf("largest held distance %d has capacity %d below its working set", largest, got)
 	}
@@ -358,5 +358,27 @@ func TestTheBudgetNamesTheCollapseBoundary(t *testing.T) {
 	}
 	if got := CacheCapacityFor(3, 100, needed); got < CacheWorkingSetFor(3) {
 		t.Errorf("quoted %d MiB requirement still yields only %d chunks", needed, got)
+	}
+}
+
+func TestAnExtremeBudgetCannotWrapTheResidency(t *testing.T) {
+	t.Parallel()
+
+	workingSet := CacheWorkingSetFor(3)
+	want := workingSet * 100
+	if got := CacheCapacityFor(3, 100, ^uint64(0)); got != want {
+		t.Errorf("residency with the largest budget = %d, want player bound %d", got, want)
+	}
+}
+
+func TestLargestViewDistanceHeldStopsAtTheCallersCeiling(t *testing.T) {
+	t.Parallel()
+
+	const ceiling = 16
+	if got := LargestViewDistanceHeld(^uint64(0), ceiling); got != ceiling {
+		t.Errorf("largest distance with an unlimited budget = %d, want ceiling %d", got, ceiling)
+	}
+	if got := LargestViewDistanceHeld(^uint64(0), -1); got != 0 {
+		t.Errorf("largest distance with a negative ceiling = %d, want 0", got)
 	}
 }

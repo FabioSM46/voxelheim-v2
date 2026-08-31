@@ -224,7 +224,7 @@ func (o options) validate() error {
 				"the largest view distance this budget can hold is %d",
 			o.maxPlayers, o.terrainMemoryMiB, capacity, o.viewDistance, workingSet,
 			world.ChunksInView(int(o.viewDistance)), world.MemoryMiBFor(uint64(workingSet)),
-			world.LargestViewDistanceHeld(o.terrainMemoryMiB))
+			world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance))
 	}
 	return o.validateTicketKeySource()
 }
