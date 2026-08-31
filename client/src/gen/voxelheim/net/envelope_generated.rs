@@ -848,6 +848,36 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_leave_cancel_request(&self) -> Option<LeaveCancelRequest<'a>> {
+        if self.payload_type() == Payload::LeaveCancelRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LeaveCancelRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_leave_cancel_result(&self) -> Option<LeaveCancelResult<'a>> {
+        if self.payload_type() == Payload::LeaveCancelResult {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LeaveCancelResult::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -911,6 +941,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::VendorClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VendorClosed>>("Payload::VendorClosed", pos),
           Payload::StormWarning => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<StormWarning>>("Payload::StormWarning", pos),
           Payload::WardsNearby => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WardsNearby>>("Payload::WardsNearby", pos),
+          Payload::LeaveCancelRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveCancelRequest>>("Payload::LeaveCancelRequest", pos),
+          Payload::LeaveCancelResult => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveCancelResult>>("Payload::LeaveCancelResult", pos),
           _ => Ok(()),
         }
      })?
@@ -1484,6 +1516,26 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::WardsNearby => {
                 if let Some(x) = self.payload_as_wards_nearby() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LeaveCancelRequest => {
+                if let Some(x) = self.payload_as_leave_cancel_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LeaveCancelResult => {
+                if let Some(x) = self.payload_as_leave_cancel_result() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

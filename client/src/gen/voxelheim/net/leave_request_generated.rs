@@ -8,10 +8,12 @@ pub enum LeaveRequestOffset {}
 /// A player asking to leave the world. Client -> server, and intent only.
 ///
 /// Empty deliberately. The server owns the ten-second linger, so the client cannot
-/// name a duration, an end time, or a cancellation. Once accepted, every later input
-/// from this session is inert and the character remains in the simulation until the
-/// server's countdown expires. Closing the socket instead reaches the same server-side
-/// transition without this message, which is the feature's security boundary.
+/// name a duration, an end time, or an outcome. Once accepted, every later gameplay
+/// input from this session is inert and the character remains in the simulation until
+/// the server's countdown expires or it accepts a `LeaveCancelRequest`. Closing the
+/// socket still reaches the non-cancellable server-side transition without this message:
+/// keeping the body in the world after the socket is gone is the feature's security
+/// boundary, not making a live session's request irreversible.
 pub struct LeaveRequest<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }

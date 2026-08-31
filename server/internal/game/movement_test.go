@@ -1121,6 +1121,25 @@ func TestALeavingPlayerIsVisibleAndSimulatedButCannotAct(t *testing.T) {
 	_, states := decodeSnapshot(t, watcherOut.last())
 	for _, state := range states {
 		if state.EntityID == leaver.EntityID() {
+			if !leaver.CancelLeaving() {
+				t.Fatal("server refused to resume a body still in its leave linger")
+			}
+			if leaver.CancelLeaving() {
+				t.Fatal("a second cancellation claimed to resume a player already live")
+			}
+			h.clientTick++
+			if err := leaver.Submit(protocol.PlayerInput{
+				ClientTick: h.clientTick,
+				MoveZ:      forward,
+				Yaw:        yawNorth,
+			}); err != nil {
+				t.Fatalf("input after authoritative cancellation: %v", err)
+			}
+			resumedAt := leaver.State()
+			h.advance(10)
+			if horizontalDistance(leaver.State().Pos, resumedAt.Pos) <= tolerance {
+				t.Fatal("accepted leave cancellation did not make later input live")
+			}
 			return
 		}
 	}

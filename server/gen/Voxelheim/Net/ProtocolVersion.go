@@ -195,6 +195,13 @@ import "strconv"
 // / One bump owed is still one bump, and taking the whole iteration's contract with it lets
 // / the weather, storm, runestone and ward issues that follow consume one settled contract
 // / instead of moving this number four more times.
+// /
+// / **V27 adds authoritative leave cancellation.** `LeaveCancelRequest` travels client ->
+// / server, so a V26 server cannot name the tag and closes the session rather than dropping
+// / it. `LeaveCancelResult` is the server's answer: only its accepted result puts the client
+// / back in play, while a refusal carries the server-owned time still remaining. The request
+// / is the break; the result travels server -> client and would have been safely droppable on
+// / its own.
 type ProtocolVersion uint16
 
 const (
@@ -203,7 +210,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 26
+	ProtocolVersionCurrent ProtocolVersion = 27
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 26;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 27;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -211,6 +211,13 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// One bump owed is still one bump, and taking the whole iteration's contract with it lets
 /// the weather, storm, runestone and ward issues that follow consume one settled contract
 /// instead of moving this number four more times.
+///
+/// **V27 adds authoritative leave cancellation.** `LeaveCancelRequest` travels client ->
+/// server, so a V26 server cannot name the tag and closes the session rather than dropping
+/// it. `LeaveCancelResult` is the server's answer: only its accepted result puts the client
+/// back in play, while a refusal carries the server-owned time still remaining. The request
+/// is the break; the result travels server -> client and would have been safely droppable on
+/// its own.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -221,10 +228,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(26);
+    pub const Current: Self = Self(27);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 26;
+    pub const ENUM_MAX: u16 = 27;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

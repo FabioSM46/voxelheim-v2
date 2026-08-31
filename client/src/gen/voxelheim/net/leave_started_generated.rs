@@ -5,7 +5,7 @@ use super::*;
 pub enum LeaveStartedOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// The server acknowledging that this session's irrevocable leave has begun.
+/// The server acknowledging that this session's leave countdown has begun.
 /// Server -> client.
 ///
 /// `remaining_ms` is the server-owned window at the moment this frame is produced. The
