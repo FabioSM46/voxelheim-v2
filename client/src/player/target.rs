@@ -452,7 +452,16 @@ fn raycast_with(
 
 /// Entry distance and outward entry face for one axis-aligned box.
 fn ray_box_hit(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<(f32, IVec3)> {
-    let inside = (0..3).all(|axis| origin[axis] >= min[axis] && origin[axis] <= max[axis]);
+    // A point on a face belongs to the box only while the ray enters it or runs
+    // along it. Counting a ray that leaves the face as inside would turn that
+    // zero-area contact into a distance-zero hit — most visibly when looking up
+    // from the top of a bottom slab.
+    let inside = (0..3).all(|axis| {
+        origin[axis] >= min[axis]
+            && origin[axis] <= max[axis]
+            && !(origin[axis] == min[axis] && direction[axis] < 0.0)
+            && !(origin[axis] == max[axis] && direction[axis] > 0.0)
+    });
     let mut near = f32::NEG_INFINITY;
     let mut far = f32::INFINITY;
     let mut face = IVec3::ZERO;
@@ -491,8 +500,10 @@ fn ray_box_hit(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<(f
     }
     if inside {
         Some((0.0, IVec3::ZERO))
+    } else if near >= 0.0 {
+        Some((near, face))
     } else {
-        Some((near.max(0.0), face))
+        None
     }
 }
 
@@ -1277,6 +1288,11 @@ mod tests {
                 face: IVec3::Y,
             }),
             "the top face is at y = 0.5 inside the voxel"
+        );
+        assert_eq!(
+            raycast_blocks(Vec3::new(2.5, 0.5, 0.5), Vec3::Y, MAX_REACH, world),
+            None,
+            "a ray leaving the slab's top face must not target the slab behind it"
         );
     }
 
