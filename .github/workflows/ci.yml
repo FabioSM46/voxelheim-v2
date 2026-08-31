@@ -236,7 +236,18 @@ jobs:
     needs: detect
     if: ${{ !cancelled() && needs.detect.outputs.client != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 40 and not 25 since #650, and the number moved because a measurement moved
+    # under it. The client dev profile now optimizes dependencies, which costs
+    # nothing on a cache hit and about 1.7x on a cold build — and this PR's own
+    # cold run took 23m16s against the old 25, a margin of 104 seconds on a shared
+    # runner whose speed varies by more than that.
+    #
+    # A cold run is a cache miss: a lockfile or manifest change, a toolchain bump,
+    # or the seven-day eviction client-cache.yml exists to beat. Those are ordinary
+    # rather than exotic, and a budget the ordinary case sits 7% inside is a budget
+    # that fails on somebody else's busy afternoon. 40 leaves the measured cold run
+    # at 58% of it.
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: client

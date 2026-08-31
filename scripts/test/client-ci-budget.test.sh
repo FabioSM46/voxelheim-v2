@@ -64,7 +64,11 @@ step_minutes = int(
     )
 )
 
-assert job_minutes == 25, f"client job timeout must be 25 minutes, got {job_minutes}"
+# 40 since #650. The client dev profile optimizes dependencies, and this PR's own
+# cold CI run took 23m16s against the previous budget of 25 — a 104-second margin on
+# a shared runner. The number is a measurement's to move and this test's to pin, so
+# that it moves deliberately rather than drifting.
+assert job_minutes == 40, f"client job timeout must be 40 minutes, got {job_minutes}"
 assert step_minutes == 5, (
     f"dependency step timeout must be 5 minutes, got {step_minutes}"
 )
@@ -123,6 +127,23 @@ for command in rust_gates:
     count = client_job.count(f"run: {command}")
     assert count == 1, f"expected one unchanged Rust gate {command!r}, found {count}"
 
+# The warm-up workflow runs the same commands and always runs them cold, so a budget
+# that differs there is a cache that never gets built. Pinned rather than trusted:
+# ci.yml is the source and client-cache.yml is what has to follow.
+cache_workflow = (root / ".github/workflows/client-cache.yml").read_text()
+cache_client = job_block(cache_workflow, "client")
+cache_minutes = int(
+    exactly_one(
+        r"^    timeout-minutes:\s*(\d+)\s*$",
+        cache_client,
+        "client-cache.yml client job timeout",
+    )
+)
+assert cache_minutes == job_minutes, (
+    "the cache warm-up must carry the gate's budget: "
+    f"gate={job_minutes}m warm-up={cache_minutes}m"
+)
+
 automation_job = job_block(workflow, "automation")
 invocation = "bash scripts/test/client-ci-budget.test.sh"
 assert automation_job.count(invocation) == 1, (
@@ -131,7 +152,7 @@ assert automation_job.count(invocation) == 1, (
 
 print(
     "client CI budget — "
-    f"dependencies={step_minutes}m job={job_minutes}m "
+    f"dependencies={step_minutes}m job={job_minutes}m warm-up={cache_minutes}m "
     "apt-retries=2 apt-network-timeout=15s"
 )
 PY

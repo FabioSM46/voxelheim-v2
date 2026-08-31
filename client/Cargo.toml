@@ -170,9 +170,11 @@ rustls = { version = "0.23.43", default-features = false, features = ["ring", "s
 #
 # **What it costs is the cold build, and only the cold build**: 1.7x on the full gate
 # sequence, paid on a fresh checkout, a toolchain bump or a lockfile change. On CI that
-# is a cache miss, which is the case `client-cache.yml` exists to make rare; the
-# `client` job's 25-minute budget is what this has to stay inside, and it is the number
-# to re-measure if that job ever runs close to it.
+# is a cache miss, which is the case `client-cache.yml` exists to make rare. Measured on
+# a hosted runner, this branch's own cold `client` job took **23m16s** against a budget
+# of 25 minutes — 104 seconds of margin — so the budget moved to 40 in `ci.yml` and
+# `client-cache.yml` together, with `scripts/test/client-ci-budget.test.sh` pinning both.
+# That is the number to re-measure if the job ever runs close to it again.
 #
 # **Where the chunk figure lands, stated rather than rounded off.** 0.046–0.069 ms is
 # not the 0.026–0.044 ms of a release build, because this crate is at `opt-level = 1`
