@@ -1,11 +1,9 @@
 //! The countdown that runs while a leave is being honoured and the character is still
 //! standing in the world.
 //!
-//! **Nothing here decides anything, and one line of `schemas/player.fbs` is why.** The
-//! server owns the linger: `LeaveRequest` states that the client "cannot name a duration,
-//! an end time, or a cancellation", and `LeaveStarted.remaining_ms` is the only place a
-//! duration comes from. So this module renders [`ConnectionState::Leaving`] and does
-//! nothing else with it:
+//! **Nothing here decides anything.** The server owns the linger and whether a request to
+//! cancel it succeeds. This module renders [`ConnectionState::Leaving`], including the
+//! request/refusal state, and never turns a key press into resumed play:
 //!
 //! - The number on screen is `seconds_remaining` exactly as `net/` published it. No
 //!   [`Timer`], no [`Time`], no interpolation between frames -- and the absence is
@@ -86,9 +84,14 @@ const NO_COUNTDOWN_YET: &str = "--";
 /// The sentence under the number once there is one.
 const STILL_IN_THE_WORLD: &str = "YOUR CHARACTER IS STILL IN THE WORLD";
 
+const CAN_CANCEL: &str = "PRESS THE MENU KEY TO STAY - YOUR CHARACTER IS STILL IN THE WORLD";
+
+const CANCELLATION_PENDING: &str = "CANCELLATION REQUESTED - WAITING FOR THE SERVER";
+
+const CANCELLATION_REFUSED: &str = "CANCELLATION REFUSED - COUNTDOWN STILL RUNNING";
+
 /// And what it says while the acknowledgement is outstanding.
-const WAITING_FOR_THE_SERVER: &str =
-    "WAITING FOR THE SERVER - YOUR CHARACTER IS STILL IN THE WORLD";
+const WAITING_FOR_THE_SERVER: &str = "WAITING FOR THE SERVER - PRESS THE MENU KEY TO STAY";
 
 /// Every line fits across the narrowest window, at compile time.
 ///
@@ -106,13 +109,15 @@ const _: () = assert!(
     "the longest wire-valid countdown must fit - lower COUNTDOWN_SIZE"
 );
 const _: () = assert!(
-    WAITING_FOR_THE_SERVER.len() as f32 * DEFAULT_FONT_ADVANCE_EM * DETAIL_SIZE
-        <= PANEL_INNER_WIDTH,
+    CAN_CANCEL.len() as f32 * DEFAULT_FONT_ADVANCE_EM * DETAIL_SIZE <= PANEL_INNER_WIDTH,
     "the longer of the two sentences must fit - shorten it or lower DETAIL_SIZE"
 );
 const _: () = assert!(
-    STILL_IN_THE_WORLD.len() <= WAITING_FOR_THE_SERVER.len(),
-    "the assertion above is only a bound on both sentences while this one is the shorter"
+    WAITING_FOR_THE_SERVER.len() <= CAN_CANCEL.len()
+        && STILL_IN_THE_WORLD.len() <= CAN_CANCEL.len()
+        && CANCELLATION_PENDING.len() <= CAN_CANCEL.len()
+        && CANCELLATION_REFUSED.len() <= CAN_CANCEL.len(),
+    "CAN_CANCEL must remain the longest detail sentence"
 );
 
 /// The panel behind the text. Dark enough that the reading survives any sky, and short of
@@ -174,8 +179,8 @@ fn spawn_leave_overlay(mut commands: Commands) {
                 ..default()
             },
             // **The pointer passes straight through, and so does everything else.** This
-            // is a reading, not a control: there is nothing on it to click, the leave it
-            // reports cannot be cancelled, and a node that blocked would take the pointer
+            // is a reading, not a control: there is nothing on it to click, cancellation
+            // is the existing menu key, and a node that blocked would take the pointer
             // away from the surfaces that can still be used. It is also why this overlay
             // is not one of `ui/mod.rs`'s `Overlays` -- those are the screens whose being
             // up means this frame's input is not for the world, and this one changes
@@ -268,13 +273,18 @@ fn show_leave_overlay(
 /// no other moment.
 fn refresh_leave_overlay(
     state: Option<Res<ConnectionState>>,
+    cancellation: Option<Res<crate::net::LeaveCancellation>>,
     mut countdowns: Query<&mut Text, (With<LeaveCountdownText>, Without<LeaveDetailText>)>,
     mut details: Query<&mut Text, (With<LeaveDetailText>, Without<LeaveCountdownText>)>,
 ) {
     let Some(state) = state else {
         return;
     };
-    if !state.is_changed() {
+    if !state.is_changed()
+        && !cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.is_changed())
+    {
         return;
     }
     let ConnectionState::Leaving { seconds_remaining } = *state else {
@@ -290,7 +300,13 @@ fn refresh_leave_overlay(
         }
     }
 
-    let detail = detail_line(seconds_remaining);
+    let detail = detail_line(
+        seconds_remaining,
+        cancellation
+            .as_deref()
+            .copied()
+            .unwrap_or(crate::net::LeaveCancellation::Available),
+    );
     for mut text in &mut details {
         if text.0 != detail {
             text.0.clear();
@@ -315,10 +331,17 @@ fn countdown_line(seconds_remaining: Option<u32>) -> String {
 
 /// What is still true of the character, and -- until the acknowledgement arrives -- what
 /// the client is waiting for.
-fn detail_line(seconds_remaining: Option<u32>) -> &'static str {
-    match seconds_remaining {
-        Some(_) => STILL_IN_THE_WORLD,
-        None => WAITING_FOR_THE_SERVER,
+fn detail_line(
+    seconds_remaining: Option<u32>,
+    cancellation: crate::net::LeaveCancellation,
+) -> &'static str {
+    match cancellation {
+        crate::net::LeaveCancellation::Pending => CANCELLATION_PENDING,
+        crate::net::LeaveCancellation::Refused => CANCELLATION_REFUSED,
+        crate::net::LeaveCancellation::Available => match seconds_remaining {
+            Some(_) => CAN_CANCEL,
+            None => WAITING_FOR_THE_SERVER,
+        },
     }
 }
 
@@ -401,7 +424,7 @@ mod tests {
         let mut app = overlay(leaving_in(10));
         assert_eq!(visibility(&mut app), Visibility::Visible);
         assert_eq!(countdown(&mut app), "10s");
-        assert_eq!(detail(&mut app), STILL_IN_THE_WORLD);
+        assert_eq!(detail(&mut app), CAN_CANCEL);
 
         // Every later value is the one the server published, including the zero the
         // countdown genuinely passes through on its way to a socket closure.
@@ -436,6 +459,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_overlay_distinguishes_a_request_from_an_authoritative_refusal() {
+        let mut app = overlay(ConnectionState::Leaving {
+            seconds_remaining: Some(8),
+        });
+        app.insert_resource(crate::net::LeaveCancellation::Pending);
+        app.update();
+        assert_eq!(detail(&mut app), CANCELLATION_PENDING);
+
+        deliver(
+            &mut app,
+            ConnectionState::Leaving {
+                seconds_remaining: Some(7),
+            },
+        );
+        app.insert_resource(crate::net::LeaveCancellation::Refused);
+        app.update();
+        assert_eq!(countdown(&mut app), "7s");
+        assert_eq!(detail(&mut app), CANCELLATION_REFUSED);
+        assert_eq!(visibility(&mut app), Visibility::Visible);
+    }
+
     /// The acknowledgement replaces the placeholder, and going back to waiting -- a second
     /// session, leaving again -- restores it rather than leaving the last number up.
     #[test]
@@ -445,7 +490,7 @@ mod tests {
 
         deliver(&mut app, leaving_in(10));
         assert_eq!(countdown(&mut app), "10s");
-        assert_eq!(detail(&mut app), STILL_IN_THE_WORLD);
+        assert_eq!(detail(&mut app), CAN_CANCEL);
 
         deliver(&mut app, ConnectionState::Disconnected);
         deliver(&mut app, ConnectionState::Connected);
@@ -546,7 +591,7 @@ mod tests {
         }
 
         assert_eq!(countdown(&mut app), "10s");
-        assert_eq!(detail(&mut app), STILL_IN_THE_WORLD);
+        assert_eq!(detail(&mut app), CAN_CANCEL);
         assert_eq!(visibility(&mut app), Visibility::Visible);
     }
 

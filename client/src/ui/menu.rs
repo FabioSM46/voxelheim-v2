@@ -6,7 +6,7 @@ use super::login::login_is_up;
 use super::set_mode;
 use super::settings::SettingsScreen;
 use super::{BUTTON, button_colour};
-use crate::net::{DisconnectRequest, Session, SignInState};
+use crate::net::{ConnectionState, DisconnectRequest, Session, SignInState};
 use crate::player::InputMode;
 
 /// Above every health and death presentation, so the controls that leave a dead session
@@ -125,6 +125,7 @@ fn spawn_button(parent: &mut ChildSpawnerCommands<'_>, action: MenuAction, label
 fn show_menu(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
+    state: Option<Res<ConnectionState>>,
     sign_in: Option<Res<SignInState>>,
     screen: Res<SettingsScreen>,
     mut roots: Query<&mut Visibility, With<MenuRoot>>,
@@ -137,6 +138,7 @@ fn show_menu(
     // be two overlays for one state, which is the argument one line up.
     let next = if *mode == InputMode::Menu
         && session.is_some()
+        && !matches!(state.as_deref(), Some(ConnectionState::Leaving { .. }))
         && !login_is_up(sign_in.as_deref())
         && !screen.is_open()
     {
@@ -283,5 +285,27 @@ mod tests {
         assert!(app.world().resource::<SettingsScreen>().is_open());
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
         assert_eq!(visible(&mut app), vec![Visibility::Hidden]);
+    }
+
+    #[test]
+    fn a_leave_uses_the_menu_input_gate_without_drawing_the_pause_panel() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_message::<DisconnectRequest>()
+            .add_message::<AppExit>()
+            .insert_resource(session())
+            .insert_resource(InputMode::Menu)
+            .insert_resource(ConnectionState::Leaving {
+                seconds_remaining: Some(8),
+            })
+            .add_plugins(MenuPlugin);
+        app.update();
+
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Visibility, With<MenuRoot>>();
+        assert_eq!(
+            *query.single(world).expect("one pause menu root"),
+            Visibility::Hidden
+        );
     }
 }
