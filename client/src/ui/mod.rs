@@ -39,16 +39,16 @@ use icon::StackIcon;
 pub use character::PlayAs;
 
 use crate::net::{
-    CharacterChoice, ChooseCharacter, ConnectRequest, ConnectionState, DisconnectRequest,
-    InventoryStack, ReconnectRequest, RefreshServerList, ServerList, Session, SignInRequest,
-    SignInState,
+    CancelLeaveRequest, CharacterChoice, ChooseCharacter, ConnectRequest, ConnectionState,
+    DisconnectRequest, InventoryStack, LeaveCancellation, ReconnectRequest, RefreshServerList,
+    ServerList, Session, SignInRequest, SignInState,
 };
 
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, Liveries, SelfVitals,
     ViewMode, item_linear_rgba, item_livery, item_shape,
 };
-use crate::settings::{Control, Settings};
+use crate::settings::{Bindings, Control, Settings};
 
 #[cfg(test)]
 use crate::world::palette;
@@ -153,6 +153,7 @@ impl Plugin for UiPlugin {
             .add_message::<crate::player::LootTakeClick>()
             .add_message::<crate::player::VendorTradeClick>()
             .add_message::<DisconnectRequest>()
+            .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
             // when no account service is configured. `add_message` is idempotent,
             // and this is what keeps the login screen headlessly testable on its
@@ -208,7 +209,7 @@ impl Plugin for UiPlugin {
 /// `choose_input_mode` runs relative to the snapshots it reads, and a registration
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
-    app.add_systems(
+    app.add_message::<CancelLeaveRequest>().add_systems(
         Update,
         (
             // After the snapshots, because this system reads the life state they
@@ -260,6 +261,22 @@ impl Typing<'_> {
     }
 }
 
+/// Configured controls and the one intent this input gate emits directly.
+#[derive(bevy::ecs::system::SystemParam)]
+struct Controls<'w> {
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+    settings: Option<Res<'w, Settings>>,
+    cancel_leave: MessageWriter<'w, CancelLeaveRequest>,
+}
+
+impl Controls<'_> {
+    fn bindings(&self) -> Bindings {
+        self.settings
+            .as_deref()
+            .map_or_else(Default::default, |settings| *settings.bindings())
+    }
+}
+
 /// Every resource that decides which screen owns the pointer, as one parameter.
 ///
 /// Grouped rather than listed, for the reason `net::Inboxes` is: there is one of these
@@ -273,6 +290,7 @@ struct Overlays<'w> {
     list: Option<Res<'w, ServerList>>,
     choice: Option<Res<'w, CharacterChoice>>,
     state: Option<Res<'w, ConnectionState>>,
+    cancellation: Option<Res<'w, LeaveCancellation>>,
 }
 
 impl Overlays<'_> {
@@ -303,6 +321,18 @@ impl Overlays<'_> {
             .as_deref()
             .is_some_and(|state| *state == ConnectionState::Connected)
     }
+
+    fn leave_cancellation(&self) -> Option<LeaveCancellation> {
+        match self.state.as_deref() {
+            Some(ConnectionState::Leaving { .. }) => Some(
+                self.cancellation
+                    .as_deref()
+                    .copied()
+                    .unwrap_or(LeaveCancellation::Available),
+            ),
+            _ => None,
+        }
+    }
 }
 
 /// `E` owns the inventory toggle and `Esc` owns the pause menu.
@@ -314,11 +344,10 @@ impl Overlays<'_> {
 /// a second one — and both are presentation, since the server owns every outcome a click
 /// in there could ask for.
 fn choose_input_mode(
-    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut controls: Controls<'_>,
     session: Option<Res<Session>>,
     overlays: Overlays<'_>,
     vitals: Res<SelfVitals>,
-    settings: Option<Res<Settings>>,
     typing: Typing<'_>,
     mut mode: ResMut<InputMode>,
 ) {
@@ -333,6 +362,27 @@ fn choose_input_mode(
         set_mode(&mut mode, InputMode::Menu);
         return;
     }
+    let leave_cancellation = overlays.leave_cancellation();
+
+    // A live leave owns the controls until the server answers cancellation. `Menu` is
+    // already the input gate for a released pointer and inert gameplay; the pause panel
+    // is hidden separately while `ConnectionState::Leaving` is up. Escape asks and
+    // leaves the gate closed. Only the accepted result changes the connection state,
+    // after which the ordinary changed-state path below restores play.
+    if let Some(cancellation) = leave_cancellation {
+        set_mode(&mut mode, InputMode::Menu);
+        let Some(keys) = controls.keys.as_deref() else {
+            return;
+        };
+        let bindings = controls.bindings();
+        if cancellation != LeaveCancellation::Pending
+            && keys.just_pressed(bindings.key(Control::Menu))
+        {
+            controls.cancel_leave.write(CancelLeaveRequest);
+        }
+        return;
+    }
+
     // The frame either comes down, the player is playing rather than paused: they
     // never opened the pause menu, and leaving them in it would be this client
     // inventing a press they did not make.
@@ -354,7 +404,7 @@ fn choose_input_mode(
         set_mode(&mut mode, InputMode::Playing);
     }
 
-    let Some(keys) = keys else {
+    let Some(keys) = controls.keys.as_deref() else {
         return;
     };
 
@@ -376,9 +426,7 @@ fn choose_input_mode(
 
     // The bindings, or the defaults for an app built without them — which are `Escape` and
     // `E`, the two literals that stood here until this screen existed.
-    let bindings = settings
-        .as_deref()
-        .map_or_else(Default::default, |settings| *settings.bindings());
+    let bindings = controls.bindings();
 
     // **The map's note field owns `Escape` while it is up, and nothing else.** It is chat's
     // exception, narrowed: chat is a whole mode and this is one field inside one, so only the
@@ -1537,6 +1585,7 @@ mod tests {
             .insert_resource(initial)
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(life_state)))
+            .add_message::<CancelLeaveRequest>()
             .add_systems(Update, choose_input_mode);
         app.update();
         *app.world().resource::<InputMode>()
@@ -1578,6 +1627,49 @@ mod tests {
             InputMode::Menu,
             "inventory cannot replace an open pause menu"
         );
+    }
+
+    #[test]
+    fn escape_during_leave_asks_but_only_the_server_answer_restores_play() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(keys)
+            .insert_resource(InputMode::Playing)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .insert_resource(ConnectionState::Leaving {
+                seconds_remaining: Some(8),
+            })
+            .insert_resource(LeaveCancellation::Available)
+            .add_message::<CancelLeaveRequest>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<CancelLeaveRequest>>()
+                .drain()
+                .count(),
+            1
+        );
+
+        // The key press and even a local pending marker cannot resume play.
+        app.insert_resource(ConnectionState::Leaving {
+            seconds_remaining: Some(8),
+        });
+        app.insert_resource(LeaveCancellation::Pending);
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
+
+        // This state transition is published only from an accepted server result.
+        app.insert_resource(ConnectionState::Connected);
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
     }
 
     /// `M` opens and closes the map, and every screen that already owns the keyboard
@@ -1649,6 +1741,7 @@ mod tests {
             .insert_resource(settings)
             .insert_resource(screen)
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .add_message::<CancelLeaveRequest>()
             .add_systems(Update, choose_input_mode);
         app.update();
         *app.world().resource::<InputMode>()

@@ -2174,12 +2174,16 @@ Recorded here so the next reader does not mistake them for oversights:
   recovery: the server closes by contract, the client dials once, and the new list re-enables the
   form. Every other refusal and every unasked ending sets no flag.
 
-  A deliberate disconnect is also not locally complete. It sends the empty `LeaveRequest`, drops
-  the gameplay `Outbound` resource immediately, and retains the session socket until the server
-  answers `LeaveStarted` and closes it after the authoritative linger. `ConnectionState::Leaving`
-  is display state only: its local clock may render the server's remaining milliseconds, but may
-  neither cancel the leave nor close the session. Only the server close permits the one rejoin,
-  which means the client never attempts to take control of the inert body during its ten seconds.
+  A deliberate disconnect is also not locally complete. It sends the empty `LeaveRequest` and
+  retains the session socket while setting its bounded `Outbound` sender aside: an accepted
+  cancellation restores that sender on this same connection, so there is no second writer to invent. `InputMode::Menu` closes
+  gameplay and releases the pointer while `ConnectionState::Leaving` is up; the pause panel is
+  hidden, and `send_player_input` therefore carries only inert input until the answer. Esc sends
+  the empty `LeaveCancelRequest` once and changes only the display to pending. A refused
+  `LeaveCancelResult` refreshes the local presentation deadline from the server's milliseconds and
+  leaves the gate closed; only `accepted=true` restores `Connected`, drops `Rejoining` and lets the
+  ordinary changed-state path restore play. A close that arrives first still removes the session
+  and permits the one rejoin, so the countdown wins the race exactly where the server decided it.
 
   The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
   refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
