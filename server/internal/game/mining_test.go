@@ -1239,3 +1239,59 @@ func TestBreakingAFlowerLeavesNothingBehind(t *testing.T) {
 		t.Error("breaking the flower reported an inventory change")
 	}
 }
+
+// The castle's eight materials: a stated hand time each, and exactly one implement.
+//
+// **The invariant this pins is the one [toolFamilies] names — every block a hand can
+// break has exactly one implement for it — and eight blocks added at once is precisely
+// when it drifts.** A block put in handMiningTimes and forgotten in toolFamilies is
+// merely unhelped, which is the fail-closed direction and is why nothing else would have
+// caught it; a block put in two families is four times faster with either, which is the
+// direction that is not fail-closed at all.
+//
+// The times are written out rather than compared as an ordering, because "the wall is
+// harder than the roof" is true of numbers that are all wrong together.
+func TestTheCastleMaterialsCarryTheirHandTimesAndOneImplement(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		block world.Block
+		want  time.Duration
+		tool  ItemID
+	}{
+		{world.BlackBrick, 3500 * time.Millisecond, ItemPickaxe},
+		{world.SmoothBlackStone, 3 * time.Second, ItemPickaxe},
+		{world.Basalt, 3 * time.Second, ItemPickaxe},
+		{world.BlackBrickWorn, 2500 * time.Millisecond, ItemPickaxe},
+		{world.SlateTile, 1500 * time.Millisecond, ItemPickaxe},
+		{world.DarkGlass, 400 * time.Millisecond, ItemPickaxe},
+		{world.DarkTimber, 800 * time.Millisecond, ItemAxe},
+		{world.PaleTimber, 800 * time.Millisecond, ItemAxe},
+	} {
+		if got := handMiningTimes[tc.block]; got != tc.want {
+			t.Errorf("block %d hand time = %v, want %v", tc.block, got, tc.want)
+		}
+		for _, tool := range []ItemID{ItemShovel, ItemPickaxe, ItemAxe} {
+			helps := helpsWith(tool, tc.block)
+			if tool == tc.tool && !helps {
+				t.Errorf("item %d does not help with block %d", tool, tc.block)
+			}
+			if tool != tc.tool && helps {
+				t.Errorf("item %d also helps with block %d", tool, tc.block)
+			}
+		}
+	}
+
+	// The wall is the hardest thing in the game to break by hand, and a wall that has
+	// already lost its polish is not. Both are relations the numbers above are chosen
+	// for, so a retune that keeps the numbers plausible and loses the point fails here.
+	if handMiningTimes[world.BlackBrick] <= handMiningTimes[world.Cobblestone] {
+		t.Error("dressed castle brick is no harder than a hut's cobblestone")
+	}
+	if handMiningTimes[world.BlackBrickWorn] >= handMiningTimes[world.BlackBrick] {
+		t.Error("a weathered wall is not softer than an intact one")
+	}
+	if handMiningTimes[world.SlateTile] <= handMiningTimes[world.Thatch] {
+		t.Error("a slate roof comes off no slower than a thatched one")
+	}
+}
