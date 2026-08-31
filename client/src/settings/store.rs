@@ -21,7 +21,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::KeyCode;
 
-use super::{Bindings, Control, Corner, Settings, key_from_name, key_name};
+use super::{
+    Bindings, Control, Corner, DisplayMode, MonitorPreference, Settings, key_from_name, key_name,
+    valid_monitor_identity,
+};
 
 /// The environment variable naming the XDG data directory.
 ///
@@ -180,6 +183,13 @@ fn render(settings: &Settings) -> String {
     // silently, and only for a value that landed a fraction away from a round number.
     // `every_setting_survives_a_restart` is what caught it.
     out.push_str(&format!("look-sensitivity {}\n", settings.look_sensitivity));
+    out.push_str(&format!("window-mode {}\n", settings.window_mode.name()));
+    match &settings.monitor {
+        MonitorPreference::Primary => out.push_str("monitor primary\n"),
+        MonitorPreference::Specific(identity) => {
+            out.push_str(&format!("monitor {identity}\n"));
+        }
+    }
     out.push_str(&format!("render-distance {}\n", settings.render_distance));
     out.push_str(&format!("field-of-view {}\n", settings.field_of_view));
     out.push_str(&format!("brightness {}\n", settings.brightness));
@@ -240,6 +250,17 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "look-sensitivity" => match value.parse::<f32>() {
                 Ok(parsed) if parsed.is_finite() => settings.look_sensitivity = parsed,
                 _ => refuse("a mouse sensitivity"),
+            },
+            "window-mode" => match DisplayMode::from_name(value) {
+                Some(parsed) => settings.window_mode = parsed,
+                None => refuse("borderless or windowed"),
+            },
+            "monitor" => match value {
+                "primary" => settings.monitor = MonitorPreference::Primary,
+                identity if valid_monitor_identity(identity) => {
+                    settings.monitor = MonitorPreference::Specific(identity.to_owned());
+                }
+                _ => refuse("the primary monitor or a saved display"),
             },
             "render-distance" => match value.parse::<u8>() {
                 Ok(parsed) => settings.render_distance = parsed,
@@ -397,7 +418,10 @@ mod tests {
     /// one shows it.
     fn every_field_moved() -> Settings {
         let mut settings = Settings::default();
+        let monitors = super::super::MonitorChoices::named(&["Main display", "Side display"]);
         settings.adjust(Knob::LookSensitivity, 4);
+        settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
+        settings.adjust_with_monitors(Knob::Monitor, 1, &monitors);
         settings.adjust(Knob::RenderDistance, -3);
         settings.adjust(Knob::FieldOfView, 3);
         settings.adjust(Knob::Brightness, -2);
@@ -484,6 +508,23 @@ mod tests {
             !complaints[0].contains("banana"),
             "a complaint carried the file's contents: {complaints:?}"
         );
+    }
+
+    #[test]
+    fn an_unknown_monitor_line_keeps_the_primary_default() {
+        let scratch = Scratch::new("settings-bad-monitor");
+        let path = scratch.join("settings");
+        fs::write(
+            &path,
+            "window-mode windowed\nmonitor display-not-an-identity\n",
+        )
+        .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(settings.window_mode(), DisplayMode::Windowed);
+        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 2"), "{complaints:?}");
     }
 
     #[test]
