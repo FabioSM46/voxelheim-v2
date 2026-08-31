@@ -118,10 +118,12 @@ static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum NetCommand {
     Disconnect,
-    /// Ask the authoritative server to begin the irrevocable leave. Unlike
-    /// `Disconnect`, this writes a wire frame and keeps the reader alive for the
-    /// acknowledgement and final server close.
+    /// Ask the authoritative server to begin leaving. Unlike `Disconnect`, this writes
+    /// a wire frame and keeps the reader alive for the acknowledgement, a possible
+    /// cancellation answer, and the final server close.
     Leave,
+    /// Ask the server to stop a leave that this live session already began.
+    CancelLeave,
     /// Which character this session plays, as the player chose it.
     ///
     /// **It travels as a command rather than as a frame, and that is what keeps one
@@ -225,6 +227,8 @@ pub(super) enum SessionEvent {
     ActionRefused(ActionRefused),
     /// The server accepted a leave and owns this remaining duration.
     Leaving(codec::LeaveStarted),
+    /// The authoritative answer to a leave-cancellation request.
+    LeaveCancellation(codec::LeaveCancelResult),
     /// One accepted world-chat line, preserved in wire order for the ECS log.
     Chat(ChatMessage),
     /// One still-live party invitation, preserved in wire order for the ECS log.
@@ -1222,6 +1226,7 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
     // the id the server minted. See [`ChosenCharacter`].
     let mut playing: Option<u64> = None;
     let mut leave_sent = false;
+    let mut leave_cancel_sent = false;
 
     loop {
         // Every command that has arrived rather than the first, because two can be
@@ -1257,6 +1262,21 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                         )));
                     }
                     leave_sent = true;
+                }
+                Ok(NetCommand::CancelLeave) => {
+                    if !leave_sent || leave_cancel_sent || !handshake.established() {
+                        continue;
+                    }
+                    if outbound_sender
+                        .send(codec::encode_leave_cancel_request())
+                        .is_err()
+                    {
+                        return Some(SessionEvent::Ended(Some(
+                            "the network writer ended before the leave cancellation was sent"
+                                .to_owned(),
+                        )));
+                    }
+                    leave_cancel_sent = true;
                 }
                 Ok(NetCommand::Choose(choice)) => {
                     // **The phase decides, and it decides before anything is written.**
@@ -1419,6 +1439,20 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::Leaving(started)) => {
                     events.send(SessionEvent::Leaving(started)).ok()?;
+                }
+                Ok(Transition::LeaveCancellation(result)) => {
+                    if !leave_cancel_sent {
+                        return Some(protocol_failure(
+                            &handshake,
+                            addr,
+                            "LeaveCancelResult answered no cancellation request",
+                        ));
+                    }
+                    leave_cancel_sent = false;
+                    if result.accepted {
+                        leave_sent = false;
+                    }
+                    events.send(SessionEvent::LeaveCancellation(result)).ok()?;
                 }
                 Ok(Transition::MineProgress(progress)) => {
                     events.send(SessionEvent::MineProgress(progress)).ok()?;
