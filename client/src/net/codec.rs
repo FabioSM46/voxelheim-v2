@@ -3720,6 +3720,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::CreateCharacterRequest
         | fb::Payload::DropItemRequest
         | fb::Payload::LeaveRequest
+        | fb::Payload::LeaveCancelRequest
         | fb::Payload::ConsumeRequest
         | fb::Payload::ChatRequest
         | fb::Payload::PartyRequest
@@ -3732,6 +3733,10 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
+        // V27's server answer is deliberately staged with the contract and server half
+        // of leave cancellation. This build cannot send its request yet, so carrying the
+        // result by name keeps the first half compilable without pretending play resumed.
+        fb::Payload::LeaveCancelResult => Ok(Message::Deferred(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
         // and the ward boundary is its own issue. Validating at the decode boundary is
@@ -7530,14 +7535,19 @@ mod tests {
     /// caller ends the session. Same shape as `MobKind::Villager` one version earlier, and
     /// the same conclusion.
     ///
+    /// **V27 appends leave cancellation.** `LeaveCancelRequest` travels client to server,
+    /// so a V26 server would close the session on the unknown tag. `LeaveCancelResult`
+    /// travels back and is safely deferred by this contract-and-server half; the request
+    /// is the break and the reason for the bump.
+    ///
     /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v26_names_the_fimbulvetr() {
+    fn protocol_v27_adds_authoritative_leave_cancellation() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 26);
+        assert_eq!(fb::ProtocolVersion::Current.0, 27);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -7591,6 +7601,8 @@ mod tests {
             (fb::Payload::VendorClosed, 50),
             (fb::Payload::StormWarning, 51),
             (fb::Payload::WardsNearby, 52),
+            (fb::Payload::LeaveCancelRequest, 53),
+            (fb::Payload::LeaveCancelResult, 54),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -7606,7 +7618,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            53,
+            55,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -7636,7 +7648,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 53] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 55] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -7694,6 +7706,10 @@ mod tests {
         // meant "this build has no arm yet" rather than "this contract has no member".
         (fb::Payload::StormWarning, Handling::Consumed),
         (fb::Payload::WardsNearby, Handling::Consumed),
+        // Staged seam: the request belongs to the later client half, and the result is
+        // carried by name until that half gives it state-machine meaning.
+        (fb::Payload::LeaveCancelRequest, Handling::ClientOnly),
+        (fb::Payload::LeaveCancelResult, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.

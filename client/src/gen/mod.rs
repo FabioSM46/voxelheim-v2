@@ -116,6 +116,10 @@ pub mod voxelheim {
         pub use self::leave_request_generated::*;
         mod leave_started_generated;
         pub use self::leave_started_generated::*;
+        mod leave_cancel_request_generated;
+        pub use self::leave_cancel_request_generated::*;
+        mod leave_cancel_result_generated;
+        pub use self::leave_cancel_result_generated::*;
         mod chat_request_generated;
         pub use self::chat_request_generated::*;
         mod chat_message_generated;
