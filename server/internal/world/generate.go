@@ -440,7 +440,12 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // under a body may become air, a thin shell of carved voxels beside one becomes rock —
 // and a cave mouth that shell fills in is ground a plant may now root on. Stored deltas
 // in any of those resolve against a different base, so the precondition advances.
-const WorldgenVersion uint32 = 20
+// 20 → 21: #696 makes generated terrace falls obey their higher source's encoded
+// current. A lower channel no longer fills to every higher adjacent terrace; only a
+// source pointing across their shared face paints the fall. Terrain height and river
+// sources stay byte-identical, but flowing-water voxels above lower terraces change,
+// so stored deltas need the new generated base.
+const WorldgenVersion uint32 = 21
 
 // Generate builds the chunk at coord for seed.
 //

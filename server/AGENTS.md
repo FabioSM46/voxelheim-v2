@@ -2659,6 +2659,15 @@ Recorded here so the next reader does not mistake them for oversights:
   walks along the bed, because a mob has a path where a player has intent, and answering the swim
   rules for a path is a change to the pathing. The spawn director keeps that from being the common
   case by refusing every water-family voxel and the ice lid above one.
+- **A full water source is not necessarily an isotropic one.** Plain `Water` supplies all four
+  horizontal neighbours, as a lake or sea must. A `WaterCurrent*` source supplies only the
+  neighbour its id points toward. `world.WaterFeedsToward` is that distinction, and the three
+  server readers share it: `riverFallTopAt` paints a generated terrace fall only across the
+  higher source's downstream face, `NextWater` accepts side supply only across that face, and
+  `FlowDirection` includes the same source in a flowing voxel's gradient. `WaterFlow1..7` has no
+  encoded heading and keeps spreading by level. This is deliberately cardinal and local — not a
+  finite-volume simulation — but it prevents one river source from feeding upstream and sideways
+  curtains while its current carries the swimmer somewhere else.
 - **Moving water is a target the swimmer's own target is added to, never a force accumulated
   across ticks.** `FlowDirection` (`internal/game/current.go`) reads one voxel and its five
   neighbours and answers a unit horizontal direction plus a falling flag: a `WaterCurrent*` id

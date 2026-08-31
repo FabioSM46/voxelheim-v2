@@ -55,6 +55,10 @@ func NextWater(here Block, above, below Block, sides, sidesAbove [4]Block) Block
 		if IsWater(sidesAbove[i]) {
 			continue
 		}
+		step := waterSideSteps[i]
+		if IsWater(side) && !WaterFeedsToward(side, -step[0], -step[1]) {
+			continue
+		}
 		maxSide = max(maxSide, WaterLevel(side))
 	}
 
@@ -85,6 +89,10 @@ func NextWater(here Block, above, below Block, sides, sidesAbove [4]Block) Block
 	// is exactly "no side can still supply this cell".
 	return waterFlow(maxSide - 1)
 }
+
+// waterSideSteps is NextWater's side order, as the offset from here to the side.
+// A side source feeds here along the inverse vector.
+var waterSideSteps = [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 
 // unsupported reports whether what is under a voxel can hold water up: air cannot, and
 // neither can a flowing cell that is not full, because the water in it is on its way

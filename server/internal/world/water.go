@@ -478,9 +478,9 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 	return min(surface-riverBedDrop, base), surface, true
 }
 
-// riverFallTopAt is how high the water in a channel column stands because the channel
-// *beside* it stands higher: the top of the fall that pours into this column, or this
-// column's own surface where nothing pours into it.
+// riverFallTopAt is how high the water in a channel column stands because a higher
+// channel beside it points into it: the top of the fall that pours into this column,
+// or this column's own surface where nothing pours into it.
 //
 // **A terrace step is a fall, and until #654 nobody wrote one.** [riverSurfaceAt] floors
 // the smoothed land, so two adjacent channel columns can differ by a whole terrace; the
@@ -498,15 +498,24 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 // channel above stops feeding it, and it is what carries the falling bit the client
 // draws with.
 //
-// Four neighbours and no diagonals, because the fall is what pours across a shared face.
-// Only channel columns are asked, and only their surface: this is [riverChannelAt]'s two
-// conditions, not a whole [columnAt], so a channel column pays four river fields and
-// four smoothed heights rather than four columns.
+// **Height permits a fall; current chooses it.** Before #696 every higher adjacent
+// channel raised this column's fall surface, including upstream and perpendicular
+// neighbours. Across a terrace that painted several broad curtains from one course.
+// The higher source now has to point across the shared face into this column, which is
+// the same [WaterFeedsToward] rule the runtime automaton applies after generation.
+//
+// Four neighbours and no diagonals, because a fall pours across a shared face. Only
+// channel columns are asked, and only their field, current and surface: this is
+// [riverChannelAt]'s two conditions, not a whole [columnAt].
 func riverFallTopAt(seed, worldX, worldZ int64, ownSurface int) int {
 	top := ownSurface
 	for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 		x, z := worldX+step[0], worldZ+step[1]
 		if !riverAt(seed, x, z) {
+			continue
+		}
+		current := waterCurrentBlock(riverCurrentAt(seed, x, z))
+		if !WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
 			continue
 		}
 		if surface := riverSurfaceAt(seed, x, z); surface >= seaLevel {
