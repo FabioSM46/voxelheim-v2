@@ -243,10 +243,16 @@ fn run(start: Start) -> AppExit {
         (Some(addr), None) => NetPlugin::developing_against(addr),
         (None, _) => NetPlugin::listening(),
     };
+    let settings = SettingsPlugin::from_environment();
+    let initial_window_mode = settings.initial_window_mode();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window { title, ..default() }),
+        primary_window: Some(Window {
+            title,
+            mode: initial_window_mode,
+            ..default()
+        }),
         ..default()
     }))
     .add_plugins(
@@ -258,7 +264,7 @@ fn run(start: Start) -> AppExit {
     // bindings out of the resource this inserts, and `ui` draws the screen that writes
     // them. It is the whole of the file this client keeps for a player's preferences —
     // nothing here reaches the wire, and nothing here decides an outcome.
-    .add_plugins(SettingsPlugin::from_environment())
+    .add_plugins(settings)
     // The player before the UI: the player plugin owns the one camera, and `bevy_ui`
     // draws through it. See the module comment in player/camera.rs.
     .add_plugins(PlayerPlugin)

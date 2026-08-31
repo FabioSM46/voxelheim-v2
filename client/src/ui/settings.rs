@@ -20,7 +20,7 @@ use bevy::prelude::*;
 
 use super::{BUTTON, TAB_SELECTED, button_colour};
 use crate::player::InputMode;
-use crate::settings::{CONTROLS, Control, KNOBS, Knob, Settings, Tab, key_name};
+use crate::settings::{CONTROLS, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name};
 
 /// Whether the screen is up, and what it is waiting for.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -62,6 +62,7 @@ impl Plugin for SettingsScreenPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsScreen>()
             .init_resource::<Settings>()
+            .init_resource::<MonitorChoices>()
             .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
             // Chained, and the order is what makes a press readable on the frame it
@@ -660,6 +661,7 @@ type SettingsButton<'a> = (&'a Interaction, &'a SettingsAction, &'a mut Backgrou
 /// Applies a press.
 fn settings_actions(
     mut buttons: Query<SettingsButton<'_>, (Changed<Interaction>, With<Button>)>,
+    monitors: Res<MonitorChoices>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
@@ -669,7 +671,9 @@ fn settings_actions(
             continue;
         }
         match *action {
-            SettingsAction::Nudge(knob, steps) => settings.adjust(knob, steps),
+            SettingsAction::Nudge(knob, steps) => {
+                settings.adjust_with_monitors(knob, steps, &monitors);
+            }
             SettingsAction::ToggleVsync => settings.toggle_vsync(),
             SettingsAction::ToggleReadout => settings.toggle_readout(),
             SettingsAction::CycleCorner => settings.cycle_readout_corner(),
@@ -756,14 +760,15 @@ fn read_settings_keys(
 /// Keeps every value on the panel in step with the settings behind it.
 fn refresh_readings(
     settings: Res<Settings>,
+    monitors: Res<MonitorChoices>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
-    if !settings.is_changed() && !screen.is_changed() {
+    if !settings.is_changed() && !monitors.is_changed() && !screen.is_changed() {
         return;
     }
     for (reading, mut text) in &mut readings {
-        let next = describe(&settings, &screen, *reading);
+        let next = describe(&settings, &monitors, &screen, *reading);
         if text.0 != next {
             text.0 = next;
         }
@@ -772,9 +777,14 @@ fn refresh_readings(
 
 /// What one piece of text on the panel says. A pure function of the two resources, so the
 /// panel's content is testable with no window.
-fn describe(settings: &Settings, screen: &SettingsScreen, reading: Reading) -> String {
+fn describe(
+    settings: &Settings,
+    monitors: &MonitorChoices,
+    screen: &SettingsScreen,
+    reading: Reading,
+) -> String {
     match reading {
-        Reading::Knob(knob) => settings.reading(knob),
+        Reading::Knob(knob) => settings.reading_with_monitors(knob, monitors),
         Reading::Vsync => on_or_off(settings.vsync()),
         Reading::Readout => on_or_off(settings.readout_shown()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
@@ -801,6 +811,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<InputMode>()
             .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(MonitorChoices::named(&["Main display", "Side display"]))
             .add_plugins(SettingsScreenPlugin);
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
         app.world_mut().resource_mut::<SettingsScreen>().open();
@@ -917,10 +928,9 @@ mod tests {
             press(&mut app, SettingsAction::Nudge(knob, 1));
             let after = app.world().resource::<Settings>().clone();
             assert_ne!(before, after, "{knob:?} did not move");
-            assert_eq!(
-                reading_of(&mut app, Reading::Knob(knob)),
-                after.reading(knob)
-            );
+            let expected =
+                after.reading_with_monitors(knob, app.world().resource::<MonitorChoices>());
+            assert_eq!(reading_of(&mut app, Reading::Knob(knob)), expected);
 
             press(&mut app, SettingsAction::Nudge(knob, -1));
             assert_eq!(
@@ -929,6 +939,40 @@ mod tests {
                 "{knob:?} did not come back"
             );
         }
+    }
+
+    #[test]
+    fn the_window_rows_offer_the_modes_and_the_attached_monitors_by_name() {
+        let mut app = screen_app();
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
+            "borderless"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::Monitor)),
+            "primary - Main display (1920x1080 at 0,0)"
+        );
+
+        press(&mut app, SettingsAction::Nudge(Knob::WindowMode, 1));
+        press(&mut app, SettingsAction::Nudge(Knob::Monitor, 1));
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
+            "windowed"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::Monitor)),
+            "Side display (1920x1080 at 1920,0)"
+        );
+
+        press(&mut app, SettingsAction::Reset(Tab::Graphics));
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
+            "borderless"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::Monitor)),
+            "primary - Main display (1920x1080 at 0,0)"
+        );
     }
 
     #[test]
