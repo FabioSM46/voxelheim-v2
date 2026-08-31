@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 )
 
-// DefaultCacheCapacity is how many chunks a cache keeps before evicting the least
-// recently used.
+// DefaultCacheCapacity is the floor a cache uses when the configured terrain-memory
+// budget can afford it.
 //
 // A chunk is 64 KiB of blocks plus its encoded payload, so 1024 of them is on the
 // order of 70 MiB — comfortably more than the (2·3+1)³ = 343 chunks one session's
@@ -21,6 +21,14 @@ import (
 // the same deltas.
 const DefaultCacheCapacity = 1024
 
+// EstimatedResidentChunkBytes charges the fixed 64 KiB block array plus encoded
+// payload, composition, map and LRU overhead to the operator's terrain budget.
+const EstimatedResidentChunkBytes uint64 = 96 << 10
+
+// DefaultTerrainMemoryMiB preserves #666's default 2056-chunk residency: four
+// complete 514-chunk working sets at view distance 3.
+const DefaultTerrainMemoryMiB uint64 = 193
+
 // cacheHeadroom is how many view volumes one session holds, as a numerator over four.
 //
 // Six quarters: one whole volume for where the player is, and half of another for the
@@ -28,40 +36,6 @@ const DefaultCacheCapacity = 1024
 // is the collapse [CacheCapacityFor] exists to prevent; much more buys nothing, because a
 // player who keeps walking never returns to the rest of it.
 const cacheHeadroom = 6
-
-// cacheWorkingSets is how many simultaneous working sets the residency is sized for.
-//
-// **It is deliberately not the server's player cap, and the arithmetic is why.** A hundred
-// players walking apart at the default view distance want 100 x 343 x 1.5 = 51450 chunks,
-// about 4.8 GiB; a thousand want 48 GiB. No constant here can size for that, and none
-// needs to — because the two failure modes are not the same failure at different sizes.
-//
-// **Only one of them is a collapse.** When a *single* session's own volume does not fit,
-// every chunk it streams is evicted before that same session asks for it again, so the
-// cache returns nothing and the server regenerates the world continuously: measured at
-// view distance 8, the residency pinned at its cap, 1576 ticks over 10 ms in 104 seconds,
-// and the client's meshed-chunk count frozen while the player walked. When several
-// sessions each fit but their union does not, they evict each other's chunks and every
-// one of them is still reused many times before it goes — an LRU degrading, which is what
-// an LRU is for.
-//
-// So this sizes for the collapse and lets the degradation degrade. Four is a small
-// co-operative server's simultaneous working sets — players who have walked away from
-// each other, since players standing together share nearly all their chunks and a party
-// of two to five costs barely more than one. A server expecting a hundred separated
-// players needs a memory budget it can state, which is a flag this server does not have
-// and is not this issue's to add.
-const cacheWorkingSets = 4
-
-// MaxCacheCapacity is the largest residency this server will size itself to.
-//
-// A chunk is 64 KiB of blocks plus its encoded payload, so this is on the order of three
-// gigabytes — **a ceiling rather than an allocation**, since the cache fills lazily and is
-// reached only by [cacheWorkingSets] players who have walked apart at the largest view
-// distance this accepts. What it is really for is turning a view distance that cannot work
-// into a refusal at startup instead of a server that runs and regenerates the world for
-// ever.
-const MaxCacheCapacity = 32768
 
 // ChunksInView is how many chunks one session's view distance covers.
 func ChunksInView(viewDistance int) int {
@@ -72,33 +46,45 @@ func ChunksInView(viewDistance int) int {
 	return span * span * span
 }
 
-// CacheCapacityFor is the residency a view distance needs, never below
-// [DefaultCacheCapacity].
-//
-// **What this returns is larger than the 1024 that was here, and that is the correction
-// rather than a regression.** 1024 was sized against one session's volume at the default
-// distance, and this server has no player cap at all: two players at distance 4 who walk
-// apart need 1458 chunks between them, where a one-session formula answers 1093. See
-// [cacheWorkingSets] for why the answer is a small number and not the player cap.
-//
-// **Nothing related the two before #666, and at the default they never had to.** The
-// paragraph above [DefaultCacheCapacity] does the arithmetic for view distance 3 — 343
-// chunks against a residency of 1024 — and then the flag was free to move without it.
-// Measured at `-view-distance 8`, where one volume is 17³ = 4913 chunks: the residency
-// pinned at its cap of 1024, the tick sat at 14–18 ms for as long as the player walked,
-// and the client's meshed-chunk count stopped moving entirely — the server was evicting
-// what it was about to need and generating it again. 1576 ticks over 10 ms in 104
-// seconds, and no chunk of progress to show for them.
-func CacheCapacityFor(viewDistance int) int {
-	needed := ChunksInView(viewDistance) * cacheHeadroom / 4 * cacheWorkingSets
-	return max(needed, DefaultCacheCapacity)
+// CacheWorkingSetFor is the residency one separated session needs: its current view
+// volume plus half of the shell it has just left. Below it, one session collapses;
+// above it, sessions may evict one another and the LRU merely degrades.
+func CacheWorkingSetFor(viewDistance int) int {
+	return ChunksInView(viewDistance) * cacheHeadroom / 4
 }
 
-// LargestViewDistanceHeld is the greatest view distance [MaxCacheCapacity] can hold, and
-// is what a refusal quotes rather than leaving the operator to solve a cubic.
-func LargestViewDistanceHeld() int {
+// CacheCapacityFor sizes residency from the session ceiling and terrain budget. The
+// ceiling is the useful upper bound; memory is the hard bound. A budget that cannot
+// cover every separated session is rounded down to complete working sets, allowing
+// ordinary LRU degradation without admitting a one-session collapse.
+func CacheCapacityFor(viewDistance, maxPlayers int, terrainMemoryMiB uint64) int {
+	workingSet := CacheWorkingSetFor(viewDistance)
+	if workingSet <= 0 || maxPlayers <= 0 || terrainMemoryMiB == 0 {
+		return 0
+	}
+
+	wanted := uint64(workingSet) * uint64(maxPlayers)
+	wanted = max(wanted, uint64(DefaultCacheCapacity))
+	budgetChunks := wanted
+	if terrainMemoryMiB < MemoryMiBFor(wanted) {
+		budgetChunks = terrainMemoryMiB * (1 << 20) / EstimatedResidentChunkBytes
+	}
+	capacity := min(wanted, budgetChunks)
+	capacity -= capacity % uint64(workingSet)
+	return int(capacity)
+}
+
+// MemoryMiBFor rounds a chunk residency up to a budget the flag can satisfy.
+func MemoryMiBFor(residentChunks uint64) uint64 {
+	bytes := residentChunks * EstimatedResidentChunkBytes
+	return (bytes + (1 << 20) - 1) / (1 << 20)
+}
+
+// LargestViewDistanceHeld is the greatest distance for which the budget holds one
+// complete working set.
+func LargestViewDistanceHeld(terrainMemoryMiB uint64) int {
 	for distance := 0; ; distance++ {
-		if CacheCapacityFor(distance+1) > MaxCacheCapacity {
+		if MemoryMiBFor(uint64(CacheWorkingSetFor(distance+1))) > terrainMemoryMiB {
 			return distance
 		}
 	}
@@ -239,6 +225,9 @@ func newCache(seed int64, store *Store, workers, capacity int) *Cache {
 
 // Seed is the world seed every chunk in this cache is generated from.
 func (c *Cache) Seed() int64 { return c.seed }
+
+// Capacity is the maximum number of chunks this cache keeps resident.
+func (c *Cache) Capacity() int { return c.capacity }
 
 // Len is how many chunks are resident.
 func (c *Cache) Len() int {
