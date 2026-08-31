@@ -47,7 +47,7 @@ use crate::net::{
     BlockCoord, BlockEditRequest, EditAction, MineProgress, MineProgressInbox, MineRequest,
     Outbound, Sent, Session, encode_block_edit_request, encode_mine_request,
 };
-use crate::world::ChunkStore;
+use crate::world::{ChunkStore, palette};
 
 /// The control that breaks the targeted block.
 const BREAK_BUTTON: MouseButton = MouseButton::Left;
@@ -307,6 +307,50 @@ pub fn raycast(
     reach: f32,
     mut solid: impl FnMut(IVec3) -> bool,
 ) -> Option<BlockHit> {
+    raycast_with(origin, direction, reach, |voxel| {
+        solid(voxel).then_some(RayShape::Full)
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RayShape {
+    Full,
+    Architectural {
+        bounds: [palette::BlockBounds; 2],
+        count: usize,
+    },
+}
+
+fn ray_shape(block: crate::world::BlockId) -> Option<RayShape> {
+    if palette::is_cover(block) {
+        return Some(RayShape::Full);
+    }
+    if !palette::is_solid(block) {
+        return None;
+    }
+    if palette::is_architectural_shape(block) {
+        let (bounds, count) = palette::collision_bounds(block);
+        Some(RayShape::Architectural { bounds, count })
+    } else {
+        Some(RayShape::Full)
+    }
+}
+
+fn raycast_blocks(
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    mut block_at: impl FnMut(IVec3) -> crate::world::BlockId,
+) -> Option<BlockHit> {
+    raycast_with(origin, direction, reach, |voxel| ray_shape(block_at(voxel)))
+}
+
+fn raycast_with(
+    origin: Vec3,
+    direction: Vec3,
+    reach: f32,
+    mut shape_at: impl FnMut(IVec3) -> Option<RayShape>,
+) -> Option<BlockHit> {
     if !origin.is_finite() || !direction.is_finite() || !reach.is_finite() || reach < 0.0 {
         return None;
     }
@@ -347,8 +391,33 @@ pub fn raycast(
     let mut face = IVec3::ZERO;
 
     for _ in 0..MAX_STEPS {
-        if solid(voxel) {
-            return Some(BlockHit { block: voxel, face });
+        if let Some(shape) = shape_at(voxel) {
+            match shape {
+                RayShape::Full => return Some(BlockHit { block: voxel, face }),
+                RayShape::Architectural { bounds, count } => {
+                    let floor = voxel.as_vec3();
+                    let exit = next.into_iter().fold(f32::INFINITY, f32::min);
+                    let hit = bounds[..count]
+                        .iter()
+                        .filter_map(|bounds| {
+                            let min = floor
+                                + Vec3::from_array(bounds.min.map(|value| f32::from(value) * 0.5));
+                            let max = floor
+                                + Vec3::from_array(bounds.max.map(|value| f32::from(value) * 0.5));
+                            ray_box_hit(origin, direction, min, max)
+                        })
+                        .min_by(|left, right| left.0.total_cmp(&right.0));
+                    if let Some((distance, shape_face)) = hit
+                        && distance <= reach
+                        && distance <= exit
+                    {
+                        return Some(BlockHit {
+                            block: voxel,
+                            face: shape_face,
+                        });
+                    }
+                }
+            }
         }
 
         // The axis whose boundary comes soonest. Ties are broken towards the lower
@@ -379,6 +448,63 @@ pub fn raycast(
     }
 
     None
+}
+
+/// Entry distance and outward entry face for one axis-aligned box.
+fn ray_box_hit(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<(f32, IVec3)> {
+    // A point on a face belongs to the box only while the ray enters it or runs
+    // along it. Counting a ray that leaves the face as inside would turn that
+    // zero-area contact into a distance-zero hit — most visibly when looking up
+    // from the top of a bottom slab.
+    let inside = (0..3).all(|axis| {
+        origin[axis] >= min[axis]
+            && origin[axis] <= max[axis]
+            && !(origin[axis] == min[axis] && direction[axis] < 0.0)
+            && !(origin[axis] == max[axis] && direction[axis] > 0.0)
+    });
+    let mut near = f32::NEG_INFINITY;
+    let mut far = f32::INFINITY;
+    let mut face = IVec3::ZERO;
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if origin[axis] < min[axis] || origin[axis] > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let (entry, exit, entry_sign) = if direction[axis] > 0.0 {
+            (
+                (min[axis] - origin[axis]) / direction[axis],
+                (max[axis] - origin[axis]) / direction[axis],
+                -1,
+            )
+        } else {
+            (
+                (max[axis] - origin[axis]) / direction[axis],
+                (min[axis] - origin[axis]) / direction[axis],
+                1,
+            )
+        };
+        if entry > near {
+            near = entry;
+            face = IVec3::ZERO;
+            face[axis] = entry_sign;
+        }
+        far = far.min(exit);
+        if near > far {
+            return None;
+        }
+    }
+    if far < 0.0 {
+        return None;
+    }
+    if inside {
+        Some((0.0, IVec3::ZERO))
+    } else if near >= 0.0 {
+        Some((near, face))
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,15 +686,17 @@ fn aim_at_a_block(
             // server side of the same distinction, and `ChunkStore::targetable_at` for
             // why the other three callers of `solid_at` keep reading solidity. Water is
             // still looked through: it is not cover.
-            raycast(eye.translation, *eye.forward(), MAX_REACH, |voxel| {
-                store.targetable_at(
-                    BlockCoord {
-                        x: voxel.x,
-                        y: voxel.y,
-                        z: voxel.z,
-                    },
-                    size,
-                )
+            raycast_blocks(eye.translation, *eye.forward(), MAX_REACH, |voxel| {
+                let pos = BlockCoord {
+                    x: voxel.x,
+                    y: voxel.y,
+                    z: voxel.z,
+                };
+                if store.targetable_at(pos, size) {
+                    store.block_at(pos, size)
+                } else {
+                    palette::AIR
+                }
             })
         }
         _ => None,
@@ -1125,6 +1253,70 @@ mod tests {
             raycast(origin, Vec3::X, 4.4, only(&[near])),
             None,
             "and the near voxel goes out of reach as soon as the limit is short of its face"
+        );
+    }
+
+    #[test]
+    fn a_slab_is_targeted_at_its_real_height_and_looked_over_above_it() {
+        let slab = IVec3::new(2, 0, 0);
+        let behind = IVec3::new(3, 0, 0);
+        let world = |voxel| match voxel {
+            value if value == slab => palette::SLATE_SLAB_BOTTOM,
+            value if value == behind => palette::STONE,
+            _ => palette::AIR,
+        };
+
+        assert_eq!(
+            raycast_blocks(Vec3::new(0.5, 0.25, 0.5), Vec3::X, MAX_REACH, world),
+            Some(BlockHit {
+                block: slab,
+                face: IVec3::NEG_X,
+            })
+        );
+        assert_eq!(
+            raycast_blocks(Vec3::new(0.5, 0.75, 0.5), Vec3::X, MAX_REACH, world),
+            Some(BlockHit {
+                block: behind,
+                face: IVec3::NEG_X,
+            }),
+            "the empty upper half must not catch the crosshair"
+        );
+        assert_eq!(
+            raycast_blocks(Vec3::new(2.5, 2.0, 0.5), Vec3::NEG_Y, MAX_REACH, world),
+            Some(BlockHit {
+                block: slab,
+                face: IVec3::Y,
+            }),
+            "the top face is at y = 0.5 inside the voxel"
+        );
+        assert_eq!(
+            raycast_blocks(Vec3::new(2.5, 0.5, 0.5), Vec3::Y, MAX_REACH, world),
+            None,
+            "a ray leaving the slab's top face must not target the slab behind it"
+        );
+    }
+
+    #[test]
+    fn stair_targeting_reads_the_same_facing_as_the_server_bounds() {
+        let stair = IVec3::new(2, 0, 0);
+        let world = |voxel| {
+            if voxel == stair {
+                palette::SLATE_STAIR_NORTH_BOTTOM
+            } else {
+                palette::AIR
+            }
+        };
+
+        assert_eq!(
+            raycast_blocks(Vec3::new(0.5, 0.75, 0.25), Vec3::X, MAX_REACH, world)
+                .map(|hit| hit.block),
+            Some(stair),
+            "North is the high -Z half"
+        );
+        assert_eq!(
+            raycast_blocks(Vec3::new(0.5, 0.75, 0.75), Vec3::X, MAX_REACH, world),
+            None,
+            "the upper +Z half is empty"
         );
     }
 

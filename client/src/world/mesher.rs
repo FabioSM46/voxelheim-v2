@@ -621,9 +621,412 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
         }
     }
 
+    build_architecture(&mut mesh.opaque, chunk, neighbours);
     build_cover(&mut mesh.cover, chunk);
 
     mesh
+}
+
+/// Adds slabs and stairs to the opaque surface on their exact half-block grid.
+///
+/// Ordinary cubes remain in the full-block greedy sweep above. Shapes are sparse,
+/// cannot merge through a neighbouring voxel without changing identity, and need
+/// partial culling, so this pass pays a 2x2x2 sweep only for a shaped voxel. A full
+/// cube beside one contributes only the uncovered quadrants of their shared face;
+/// every other cube face is still owned by the ordinary sweep.
+fn build_architecture(mesh: &mut SurfaceMesh, chunk: &VoxelChunk, neighbours: &Neighbours) {
+    let size = chunk.size();
+    for y in 0..size {
+        for z in 0..size {
+            for x in 0..size {
+                let cell = [x, y, z];
+                let block = chunk.block(cell);
+                if palette::is_architectural_shape(block) {
+                    push_architectural_shape(mesh, chunk, neighbours, cell, block);
+                    for axis in 0..3 {
+                        for positive in [false, true] {
+                            let step = if positive { 1 } else { -1 };
+                            let coordinate = cell[axis] as isize + step;
+                            if coordinate < 0 || coordinate >= size as isize {
+                                continue;
+                            }
+                            let mut cube_cell = cell;
+                            cube_cell[axis] = coordinate as usize;
+                            let cube = chunk.block(cube_cell);
+                            if palette::is_greedy_opaque(cube) {
+                                push_cube_shape_interface(
+                                    mesh, chunk, neighbours, cube_cell, cube, axis, !positive,
+                                    block,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Shapes in another chunk are not visited above. Only the six border layers can
+    // meet one, so inspect those instead of making every ordinary cube pay six
+    // neighbour lookups throughout the volume.
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        for positive in [false, true] {
+            let Some(across) = neighbours.across(axis, positive, size) else {
+                continue;
+            };
+            for j in 0..size {
+                for i in 0..size {
+                    let mut cell = [0usize; 3];
+                    cell[axis] = if positive { size - 1 } else { 0 };
+                    cell[u] = i;
+                    cell[v] = j;
+                    let cube = chunk.block(cell);
+                    if !palette::is_greedy_opaque(cube) {
+                        continue;
+                    }
+                    let mut neighbour_cell = cell;
+                    neighbour_cell[axis] = if positive { 0 } else { size - 1 };
+                    let shape = across.block(neighbour_cell);
+                    if palette::is_architectural_shape(shape) {
+                        push_cube_shape_interface(
+                            mesh, chunk, neighbours, cell, cube, axis, positive, shape,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_architectural_shape(
+    mesh: &mut SurfaceMesh,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    cell: [usize; 3],
+    block: BlockId,
+) {
+    let material = palette::shape_of(block).material;
+    let base = cell.map(|coordinate| coordinate * 2);
+    let mut mask = [None; 4];
+
+    for axis in 0..3 {
+        let u = (axis + 1) % 3;
+        let v = (axis + 2) % 3;
+        for plane in 0usize..=2 {
+            for j in 0..2 {
+                for i in 0..2 {
+                    let mut negative = [0u8; 3];
+                    negative[axis] = plane.saturating_sub(1) as u8;
+                    negative[u] = i as u8;
+                    negative[v] = j as u8;
+                    let mut positive = negative;
+                    positive[axis] = plane.min(1) as u8;
+
+                    let negative_occupied = if plane > 0 {
+                        palette::occupies_half(block, negative)
+                    } else {
+                        let mut probe = base.map(|coordinate| coordinate as isize);
+                        probe[axis] -= 1;
+                        probe[u] += i as isize;
+                        probe[v] += j as isize;
+                        occupied_half_at(chunk, neighbours, probe)
+                    };
+                    let positive_occupied = if plane < 2 {
+                        palette::occupies_half(block, positive)
+                    } else {
+                        let mut probe = base.map(|coordinate| coordinate as isize);
+                        probe[axis] += 2;
+                        probe[u] += i as isize;
+                        probe[v] += j as isize;
+                        occupied_half_at(chunk, neighbours, probe)
+                    };
+
+                    let face = match (negative_occupied, positive_occupied) {
+                        (true, false) if plane > 0 => Some(half_face(
+                            chunk,
+                            neighbours,
+                            material,
+                            axis,
+                            u,
+                            v,
+                            true,
+                            base[axis] + plane,
+                            base[u] + i,
+                            base[v] + j,
+                        )),
+                        (false, true) if plane < 2 => Some(half_face(
+                            chunk,
+                            neighbours,
+                            material,
+                            axis,
+                            u,
+                            v,
+                            false,
+                            base[axis] + plane,
+                            base[u] + i,
+                            base[v] + j,
+                        )),
+                        _ => None,
+                    };
+                    mask[j * 2 + i] = face;
+                }
+            }
+            merge_half_mask(
+                mesh,
+                axis,
+                u,
+                v,
+                base[axis] + plane,
+                base[u],
+                base[v],
+                &mut mask,
+            );
+        }
+    }
+}
+
+/// Emits the part of a full cube's face a neighbouring slab or stair does not cover.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one partial interface names both blocks and the face between them"
+)]
+fn push_cube_shape_interface(
+    mesh: &mut SurfaceMesh,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    cell: [usize; 3],
+    block: BlockId,
+    axis: usize,
+    positive: bool,
+    neighbour: BlockId,
+) {
+    let base = cell.map(|coordinate| coordinate * 2);
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    let mut mask = [None; 4];
+    for j in 0..2 {
+        for i in 0..2 {
+            let mut half = [0u8; 3];
+            half[axis] = u8::from(!positive);
+            half[u] = i as u8;
+            half[v] = j as u8;
+            if !palette::occupies_half(neighbour, half) {
+                mask[j * 2 + i] = Some(half_face(
+                    chunk,
+                    neighbours,
+                    block,
+                    axis,
+                    u,
+                    v,
+                    positive,
+                    base[axis] + usize::from(positive) * 2,
+                    base[u] + i,
+                    base[v] + j,
+                ));
+            }
+        }
+    }
+    merge_half_mask(
+        mesh,
+        axis,
+        u,
+        v,
+        base[axis] + usize::from(positive) * 2,
+        base[u],
+        base[v],
+        &mut mask,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a half-grid face needs the sweep frame and its absolute coordinates"
+)]
+fn half_face(
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    block: BlockId,
+    axis: usize,
+    u: usize,
+    v: usize,
+    positive: bool,
+    plane: usize,
+    i: usize,
+    j: usize,
+) -> Face {
+    let outward = if positive {
+        plane as isize
+    } else {
+        plane as isize - 1
+    };
+    Face {
+        block,
+        positive,
+        geometry: FaceGeometry::Full,
+        flow: None,
+        occlusion: half_occlusion_at(chunk, neighbours, axis, u, v, outward, i, j),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the half-grid AO probe carries the same coordinate frame as its face"
+)]
+fn half_occlusion_at(
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    axis: usize,
+    u: usize,
+    v: usize,
+    outward: isize,
+    i: usize,
+    j: usize,
+) -> Occlusion {
+    let (i, j) = (i as isize, j as isize);
+    let occupied = |i, j| {
+        let mut probe = [0isize; 3];
+        probe[axis] = outward;
+        probe[u] = i;
+        probe[v] = j;
+        occupied_half_at(chunk, neighbours, probe)
+    };
+    let mut levels = [0u8; VERTICES_PER_QUAD];
+    for (corner, (du, dv)) in CORNER_STEPS.into_iter().enumerate() {
+        let side_u = occupied(i + du, j);
+        let side_v = occupied(i, j + dv);
+        levels[corner] = if side_u && side_v {
+            3
+        } else {
+            u8::from(side_u) + u8::from(side_v) + u8::from(occupied(i + du, j + dv))
+        };
+    }
+    Occlusion(levels)
+}
+
+/// Whether one half-cell in chunk-local half coordinates is opaque.
+fn occupied_half_at(chunk: &VoxelChunk, neighbours: &Neighbours, half: [isize; 3]) -> bool {
+    let size = chunk.size() as isize;
+    let mut voxel = [0isize; 3];
+    let mut local_half = [0u8; 3];
+    for axis in 0..3 {
+        voxel[axis] = half[axis].div_euclid(2);
+        local_half[axis] = half[axis].rem_euclid(2) as u8;
+    }
+
+    let mut leaves = None;
+    for (axis, coordinate) in voxel.iter().enumerate() {
+        if *coordinate < 0 || *coordinate >= size {
+            if leaves.is_some() {
+                return false;
+            }
+            leaves = Some(axis);
+        }
+    }
+    let block = match leaves {
+        None => chunk.block(voxel.map(|coordinate| coordinate as usize)),
+        Some(axis) => {
+            let positive = voxel[axis] >= size;
+            let Some(across) = neighbours.across(axis, positive, chunk.size()) else {
+                return false;
+            };
+            voxel[axis] = if positive { 0 } else { size - 1 };
+            across.block(voxel.map(|coordinate| coordinate as usize))
+        }
+    };
+    palette::is_opaque(block) && palette::occupies_half(block, local_half)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the half-grid version of the greedy sweep carries the same coordinate frame"
+)]
+fn merge_half_mask(
+    mesh: &mut SurfaceMesh,
+    axis: usize,
+    u: usize,
+    v: usize,
+    plane: usize,
+    base_u: usize,
+    base_v: usize,
+    mask: &mut [Option<Face>; 4],
+) {
+    for j in 0..2 {
+        let mut i = 0;
+        while i < 2 {
+            let Some(face) = mask[j * 2 + i] else {
+                i += 1;
+                continue;
+            };
+            let mut width = 1;
+            while i + width < 2 && mask[j * 2 + i + width] == Some(face) {
+                width += 1;
+            }
+            let mut height = 1;
+            while j + height < 2 && (i..i + width).all(|x| mask[(j + height) * 2 + x] == Some(face))
+            {
+                height += 1;
+            }
+            for row in j..j + height {
+                mask[row * 2 + i..row * 2 + i + width].fill(None);
+            }
+
+            let corners = half_quad_corners(
+                axis,
+                u,
+                v,
+                plane,
+                base_u + i,
+                base_v + j,
+                width,
+                height,
+                face.positive,
+            );
+            mesh.push_shaded_quad(
+                corners,
+                normal(axis, face.positive),
+                face.occlusion
+                    .shade(palette::linear_rgba(face.block), face.positive),
+                None,
+            );
+            i += width;
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the half-grid quad carries the sweep's complete coordinate frame"
+)]
+fn half_quad_corners(
+    axis: usize,
+    u: usize,
+    v: usize,
+    plane: usize,
+    i: usize,
+    j: usize,
+    width: usize,
+    height: usize,
+    positive: bool,
+) -> [[f32; 3]; 4] {
+    let mut origin = [0.0; 3];
+    origin[axis] = plane as f32 * 0.5;
+    origin[u] = i as f32 * 0.5;
+    origin[v] = j as f32 * 0.5;
+    let mut along_u = [0.0; 3];
+    along_u[u] = width as f32 * 0.5;
+    let mut along_v = [0.0; 3];
+    along_v[v] = height as f32 * 0.5;
+    let add = |left: [f32; 3], right: [f32; 3]| {
+        [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+    };
+    let far = add(add(origin, along_u), along_v);
+    if positive {
+        [origin, add(origin, along_u), far, add(origin, along_v)]
+    } else {
+        [origin, add(origin, along_v), far, add(origin, along_u)]
+    }
 }
 
 /// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
@@ -1023,12 +1426,15 @@ fn build_masks(
             let negative = sample(below, axis, u, v, i, j);
             let positive = sample(above, axis, u, v, i, j);
 
-            opaque_mask[j * size + i] =
-                match (palette::is_opaque(negative), palette::is_opaque(positive)) {
-                    // Opaque below, see-through above: the face belongs to the opaque
-                    // voxel and points along +axis. "See-through" is air or water,
-                    // which is what keeps the lake bed's top.
-                    (true, false) if below_is_ours => Some(Face {
+            opaque_mask[j * size + i] = match (
+                palette::is_greedy_opaque(negative),
+                palette::is_greedy_opaque(positive),
+            ) {
+                // Opaque below, see-through above: the face belongs to the opaque
+                // voxel and points along +axis. "See-through" is air or water,
+                // which is what keeps the lake bed's top.
+                (true, false) if below_is_ours && !palette::is_architectural_shape(positive) => {
+                    Some(Face {
                         block: negative,
                         positive: true,
                         geometry: FaceGeometry::Full,
@@ -1041,12 +1447,15 @@ fn build_masks(
                             axis,
                             u,
                             v,
+                            true,
                             plane as isize,
                             i,
                             j,
                         ),
-                    }),
-                    (false, true) if above_is_ours => Some(Face {
+                    })
+                }
+                (false, true) if above_is_ours && !palette::is_architectural_shape(negative) => {
+                    Some(Face {
                         block: positive,
                         positive: false,
                         geometry: FaceGeometry::Full,
@@ -1057,17 +1466,19 @@ fn build_masks(
                             axis,
                             u,
                             v,
+                            false,
                             plane as isize - 1,
                             i,
                             j,
                         ),
-                    }),
-                    // See-through on both sides: nothing. Opaque on both sides: an
-                    // interior face, which is what greedy meshing exists never to emit.
-                    // What is left is a face whose opaque side is across the border, and
-                    // the chunk that owns it draws it.
-                    _ => None,
-                };
+                    })
+                }
+                // See-through on both sides: nothing. Opaque on both sides: an
+                // interior face, which is what greedy meshing exists never to emit.
+                // What is left is a face whose opaque side is across the border, and
+                // the chunk that owns it draws it.
+                _ => None,
+            };
 
             let negative_level = effective_water_level(below, chunk, neighbours, axis, u, v, i, j);
             let positive_level = effective_water_level(above, chunk, neighbours, axis, u, v, i, j);
@@ -1346,24 +1757,73 @@ fn occlusion_at(
     axis: usize,
     u: usize,
     v: usize,
+    positive: bool,
     outward: isize,
     i: usize,
     j: usize,
 ) -> Occlusion {
     let (i, j) = (i as isize, j as isize);
-    let opaque = |i, j| is_opaque_at(chunk, neighbours, axis, u, v, outward, i, j);
-
     let mut levels = [0u8; VERTICES_PER_QUAD];
     for (corner, (du, dv)) in CORNER_STEPS.into_iter().enumerate() {
-        let side_u = opaque(i + du, j);
-        let side_v = opaque(i, j + dv);
+        let axis_half = u8::from(!positive);
+        let current_u_half = u8::from(du > 0);
+        let current_v_half = u8::from(dv > 0);
+        let outside_u_half = u8::from(du < 0);
+        let outside_v_half = u8::from(dv < 0);
+        let mut side_u_half = [0u8; 3];
+        side_u_half[axis] = axis_half;
+        side_u_half[u] = outside_u_half;
+        side_u_half[v] = current_v_half;
+        let mut side_v_half = [0u8; 3];
+        side_v_half[axis] = axis_half;
+        side_v_half[u] = current_u_half;
+        side_v_half[v] = outside_v_half;
+        let mut diagonal_half = [0u8; 3];
+        diagonal_half[axis] = axis_half;
+        diagonal_half[u] = outside_u_half;
+        diagonal_half[v] = outside_v_half;
+
+        let side_u = is_opaque_at(
+            chunk,
+            neighbours,
+            axis,
+            u,
+            v,
+            outward,
+            i + du,
+            j,
+            side_u_half,
+        );
+        let side_v = is_opaque_at(
+            chunk,
+            neighbours,
+            axis,
+            u,
+            v,
+            outward,
+            i,
+            j + dv,
+            side_v_half,
+        );
         levels[corner] = if side_u && side_v {
             // Both edges walled in. The diagonal is behind them either way, so it is
             // not sampled and cannot lighten the corner — the rule that keeps an
             // inside corner from reading brighter than the two walls that form it.
             3
         } else {
-            u8::from(side_u) + u8::from(side_v) + u8::from(opaque(i + du, j + dv))
+            u8::from(side_u)
+                + u8::from(side_v)
+                + u8::from(is_opaque_at(
+                    chunk,
+                    neighbours,
+                    axis,
+                    u,
+                    v,
+                    outward,
+                    i + du,
+                    j + dv,
+                    diagonal_half,
+                ))
         };
     }
     Occlusion(levels)
@@ -1395,6 +1855,7 @@ fn is_opaque_at(
     outward: isize,
     i: isize,
     j: isize,
+    half: [u8; 3],
 ) -> bool {
     let size = chunk.size();
     let mut cell = [0isize; 3];
@@ -1424,7 +1885,7 @@ fn is_opaque_at(
         }
     };
 
-    palette::is_opaque(block)
+    palette::is_opaque(block) && palette::occupies_half(block, half)
 }
 
 /// One voxel of a plane's negative or positive side.
@@ -1782,6 +2243,78 @@ mod tests {
                 "one face per direction; got {by_normal:?}"
             );
         }
+    }
+
+    #[test]
+    fn isolated_slabs_and_stairs_have_a_recorded_quad_census() {
+        for slab in [palette::SLATE_SLAB_BOTTOM, palette::SLATE_SLAB_TOP] {
+            let mesh = mesh_chunk(&single_block(SIZE, slab), &alone());
+            assert_eq!(mesh.quad_count(), 6, "slab {slab}");
+            assert!(
+                mesh.colors
+                    .iter()
+                    .all(|color| color[3] == palette::linear_rgba(palette::SLATE_TILE)[3])
+            );
+        }
+
+        for stair in palette::SLATE_STAIR_NORTH_BOTTOM..=palette::SLATE_STAIR_WEST_TOP {
+            let mesh = mesh_chunk(&single_block(SIZE, stair), &alone());
+            assert_eq!(mesh.quad_count(), 12, "stair {stair}");
+            assert_eq!(quads_by_normal(&mesh).len(), 6, "stair {stair}");
+        }
+    }
+
+    #[test]
+    fn a_cube_beside_a_slab_keeps_only_the_uncovered_half_of_the_shared_face() {
+        let mut chunk = air(SIZE);
+        chunk.set(4, 4, 4, palette::STONE);
+        chunk.set(5, 4, 4, palette::SLATE_SLAB_BOTTOM);
+        let mesh = mesh_chunk(&chunk, &alone());
+
+        let shared: Vec<usize> = quads_facing(&mesh, [1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| quad_extent(&mesh, *quad, 0) == (5.0, 5.0))
+            .collect();
+        assert_eq!(shared.len(), 2, "AO splits the two half-cells: {shared:?}");
+        assert!(
+            shared
+                .iter()
+                .all(|quad| quad_extent(&mesh, *quad, 1) == (4.5, 5.0))
+        );
+        assert_eq!(
+            shared
+                .iter()
+                .map(|quad| quad_area(&mesh, *quad))
+                .sum::<f32>(),
+            0.5
+        );
+    }
+
+    #[test]
+    fn partial_culling_reads_a_shaped_neighbour_across_a_chunk_border() {
+        let mut chunk = air(SIZE);
+        chunk.set(SIZE - 1, 4, 4, palette::STONE);
+        let mut neighbour = air(SIZE);
+        neighbour.set(0, 4, 4, palette::SLATE_SLAB_BOTTOM);
+        let mesh = mesh_chunk(&chunk, &across(0, true, neighbour));
+
+        let border: Vec<usize> = quads_facing(&mesh, [1.0, 0.0, 0.0])
+            .into_iter()
+            .filter(|quad| quad_extent(&mesh, *quad, 0) == (SIZE as f32, SIZE as f32))
+            .collect();
+        assert_eq!(border.len(), 2);
+        assert!(
+            border
+                .iter()
+                .all(|quad| quad_extent(&mesh, *quad, 1) == (4.5, 5.0))
+        );
+        assert_eq!(
+            border
+                .iter()
+                .map(|quad| quad_area(&mesh, *quad))
+                .sum::<f32>(),
+            0.5
+        );
     }
 
     #[test]
@@ -2393,6 +2926,33 @@ mod tests {
             // corners at the far x, nothing on the two at the near one.
             assert_eq!(level, u8::from(x == 5.0), "vertex {vertex} at x = {x}");
         }
+    }
+
+    #[test]
+    fn a_top_slab_does_not_cast_the_full_cubes_ambient_occlusion() {
+        let mut cube = air(SIZE);
+        cube.set(4, 4, 4, palette::STONE);
+        cube.set(5, 5, 4, palette::STONE);
+        let mut slab = air(SIZE);
+        slab.set(4, 4, 4, palette::STONE);
+        slab.set(5, 5, 4, palette::SLATE_SLAB_TOP);
+
+        let top = |mesh: &SurfaceMesh| {
+            quads_facing(mesh, [0.0, 1.0, 0.0])
+                .into_iter()
+                .find(|quad| quad_extent(mesh, *quad, 1) == (5.0, 5.0))
+                .expect("the lower block's top face")
+        };
+        let cube = mesh_chunk(&cube, &alone());
+        let slab = mesh_chunk(&slab, &alone());
+        let cube_levels = shade_levels(&cube, top(&cube), palette::STONE);
+        let slab_levels = shade_levels(&slab, top(&slab), palette::STONE);
+
+        assert!(cube_levels.into_iter().any(|level| level > 0));
+        assert_eq!(
+            slab_levels, [0; VERTICES_PER_QUAD],
+            "the empty lower half of a top slab must not occlude the corner below it"
+        );
     }
 
     #[test]
