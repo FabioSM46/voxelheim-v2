@@ -211,11 +211,101 @@ mod tests {
         assert!(SOURCE.contains("falling = in.uv_b.x;"));
     }
 
+    /// Reads a `const <name>: f32 = <value>;` out of the shader source.
+    ///
+    /// The shader is the one declaration of these numbers and this reads it rather than
+    /// restating it — a second copy in Rust would be a second answer, and the whole
+    /// reason `SOURCE` is included here is that there is only ever one.
+    fn shader_const(name: &str) -> f32 {
+        let needle = format!("const {name}: f32 = ");
+        let start = SOURCE
+            .find(&needle)
+            .unwrap_or_else(|| panic!("the shader declares no {name}"))
+            + needle.len();
+        let rest = &SOURCE[start..];
+        let end = rest.find(';').expect("unterminated const");
+        rest[..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a float: {error}"))
+    }
+
+    /// **This test used to pin `RIPPLE_DEPTH` at 0.08, and 0.08 was the defect.**
+    ///
+    /// #598 set one amplitude for all three waters and argued it as a ceiling: visible
+    /// motion, and still the same colour as before it moved. On a translucent blue
+    /// surface at play distance it was not visible at all, and a river was
+    /// indistinguishable from a lake — which is what #655 reported. So the ceiling is
+    /// still a ceiling; what changed is that there are three numbers under it and they
+    /// must be ordered.
+    ///
+    /// **The order is the claim, not the values.** Still water is the quiet one, a
+    /// current is louder, a fall is loudest — that ordering is what makes the three
+    /// readable as three things, and it is what a later retune must not accidentally
+    /// invert. The bound above it keeps a retune from answering "make it visible" with
+    /// a surface that is no longer water.
     #[test]
-    fn the_ripple_stays_inside_the_brightness_budget() {
-        // The one number the issue fixes: at most 8% either way, so still water is the
-        // same colour it was before it shimmered.
-        assert!(SOURCE.contains("const RIPPLE_DEPTH: f32 = 0.08;"));
+    fn the_three_waters_are_ordered_and_bounded() {
+        let still = shader_const("STILL_DEPTH");
+        let running = shader_const("RUN_DEPTH");
+        let falling = shader_const("FALL_DEPTH");
+        assert!(
+            still < running && running < falling,
+            "the three ripple depths must rise from still to falling, got {still} / {running} / {falling}"
+        );
+        assert!(
+            falling <= 0.5,
+            "the loudest water may not push its own colour by more than half, got {falling}"
+        );
+        assert!(
+            still <= 0.08,
+            "still water must stay at or under the 0.08 #598 argued for, got {still}"
+        );
+    }
+
+    /// The half that is not brightness, which the issue asks for by name.
+    ///
+    /// A crest pulled toward white is foam; a crest that is only brighter is the same
+    /// surface under a stronger lamp. Still water has none of it, and that absence is
+    /// itself one of the three differences — a lake does not foam.
+    #[test]
+    fn only_moving_water_foams_and_a_fall_foams_most() {
+        let running = shader_const("RUN_FOAM");
+        let falling = shader_const("FALL_FOAM");
+        assert!(
+            running > 0.0 && falling > running,
+            "foam must rise from a current to a fall, got {running} / {falling}"
+        );
+        assert!(
+            falling < 1.0,
+            "foam may not replace the water's colour outright, got {falling}"
+        );
+        assert!(
+            !SOURCE.contains("STILL_FOAM"),
+            "still water must have no foam constant at all; its absence is the rule"
+        );
+        assert!(
+            SOURCE.contains("foam = 0.0;"),
+            "the still branch must set foam to zero explicitly"
+        );
+    }
+
+    /// The shape of the pattern, which is the difference that actually carries the three
+    /// apart: swell, streaks along a current, and columns down a fall.
+    ///
+    /// Both stretches are bounded above for a reason worth keeping: past about five the
+    /// pattern stops varying along the direction it travels, and a band that does not
+    /// vary cannot be seen to move — so an over-stretched streak is a *less* legible
+    /// current, not a more legible one.
+    #[test]
+    fn moving_water_is_stretched_along_the_way_it_moves() {
+        for name in ["RUN_STRETCH", "FALL_STRETCH"] {
+            let stretch = shader_const(name);
+            assert!(
+                stretch > 1.0 && stretch <= 5.0,
+                "{name} must stretch the pattern without flattening it, got {stretch}"
+            );
+        }
     }
 
     #[test]

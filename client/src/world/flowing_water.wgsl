@@ -39,9 +39,44 @@ const STILL_DRIFT: f32 = 0.06;
 // Blocks per second a falling column streaks along -Y. Faster than any horizontal
 // flow, because a waterfall is the one place the eye expects speed.
 const FALL_SPEED: f32 = 5.0;
-// The most the ripple may push the water's brightness, either way. 8% is the ceiling
-// the issue sets: visible motion, and still the same colour as before it moved.
-const RIPPLE_DEPTH: f32 = 0.08;
+
+// ── The three waters ──────────────────────────────────────────────────────────────
+//
+// **Until #655 there was one number here for all three, and it was 0.08.** Eight per
+// cent of brightness, on a translucent blue surface, at play distance: a river was not
+// distinguishable from a lake, which is what the issue reported. Worse, the falling
+// branch had never once run — the server wrote only water *sources*, so no block in the
+// world carried the falling bit until #653 gave the automaton a way to make one and
+// #654 wrote falls into the terrain.
+//
+// **Three states have to differ in more than one thing or they read as the same water
+// at three speeds.** So each differs in three: how deep the ripple cuts, how far its
+// crest is pulled toward white, and — the one that actually carries it — the *shape* of
+// the pattern. Still water is isotropic swell. Moving water is stretched along the
+// direction it moves, because that is what a current looks like from above: streaks,
+// not swell. A fall is stretched along the wall it runs down.
+//
+// Amplitudes. Still stays gentle and is if anything quieter than before, because it is
+// the one that should not draw the eye; the other two are where the range went.
+const STILL_DEPTH: f32 = 0.06;
+const RUN_DEPTH: f32 = 0.20;
+const FALL_DEPTH: f32 = 0.34;
+
+// How far the crest of the pattern is pulled toward white. **This is the half that is
+// not brightness**, and the acceptance criterion asks for it by name: brightness alone
+// is a lit surface changing exposure, where a whitened crest is foam. Still water gets
+// none — a lake has no foam — which is itself part of what separates the three.
+const RUN_FOAM: f32 = 0.12;
+const FALL_FOAM: f32 = 0.28;
+
+// How much longer a streak is than it is wide. The ripple is sampled in a basis whose
+// first axis lies along the direction of travel, and that axis is divided by this — so
+// the pattern varies slowly along the flow and quickly across it, which is a streak.
+// Both are kept modest: past about five the pattern stops varying along the flow at
+// all, and a band that does not vary cannot be seen to move.
+const RUN_STRETCH: f32 = 3.5;
+const FALL_STRETCH: f32 = 3.0;
+
 // Radians of the coarse octave per block. About fourteen blocks a wave, which is a
 // lake-sized ripple rather than a texture.
 const RIPPLE_SCALE: f32 = 0.45;
@@ -78,21 +113,53 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 #endif
 
     let world = in.world_position.xyz;
-    var point = world.xz - flow * (FLOW_SPEED * flowing_water.time);
-    if dot(flow, flow) == 0.0 {
-        // Still water: a slow diagonal shimmer that belongs to no direction.
-        point = world.xz + vec2<f32>(-STILL_DRIFT, STILL_DRIFT) * flowing_water.time;
-    }
+    let time = flowing_water.time;
+
+    // Which of the three this fragment is, and the sample point, the depth and the foam
+    // that go with it. One branch chain and no second material: the state is per-vertex
+    // data the mesher wrote from block ids the server chose.
+    var point: vec2<f32>;
+    var depth: f32;
+    var foam: f32;
+
     if falling > 0.5 {
-        // A waterfall is read down its own wall: one axis across the face, one down it.
-        point = vec2<f32>(world.x + world.z, world.y + FALL_SPEED * flowing_water.time);
+        // A fall is read down its own wall: the vertical axis is the stretched one, so
+        // the water breaks into columns rather than into ripples, and the whole pattern
+        // travels down it.
+        point = vec2<f32>((world.y + FALL_SPEED * time) / FALL_STRETCH, world.x + world.z);
+        depth = FALL_DEPTH;
+        foam = FALL_FOAM;
+    } else if dot(flow, flow) > 0.0 {
+        // A current, in the basis it runs in: `along` down the flow, `across` at right
+        // angles to it. Subtracting the travelled distance from `along` is what makes
+        // the pattern appear to move forwards; dividing it by the stretch is what makes
+        // it a streak rather than a swell.
+        let direction = normalize(flow);
+        let speed = FLOW_SPEED * length(flow);
+        let along = dot(world.xz, direction) - speed * time;
+        let across = dot(world.xz, vec2<f32>(-direction.y, direction.x));
+        point = vec2<f32>(along / RUN_STRETCH, across);
+        depth = RUN_DEPTH;
+        foam = RUN_FOAM;
+    } else {
+        // Still water: a slow diagonal shimmer that belongs to no direction, and no
+        // foam, because a lake has none.
+        point = world.xz + vec2<f32>(-STILL_DRIFT, STILL_DRIFT) * time;
+        depth = STILL_DEPTH;
+        foam = 0.0;
     }
 
-    let brightness = 1.0 + RIPPLE_DEPTH * ripple(point);
-    pbr_input.material.base_color = vec4<f32>(
+    let wave = ripple(point);
+    let brightness = 1.0 + depth * wave;
+    // Only the crest foams. `max(wave, 0.0)` rather than `abs`, so a trough stays water
+    // instead of turning the pattern into a row of white bars at twice the frequency.
+    let crest = foam * max(wave, 0.0);
+    let colour = mix(
         pbr_input.material.base_color.rgb * brightness,
-        pbr_input.material.base_color.a,
+        vec3<f32>(1.0, 1.0, 1.0),
+        crest,
     );
+    pbr_input.material.base_color = vec4<f32>(colour, pbr_input.material.base_color.a);
 
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
