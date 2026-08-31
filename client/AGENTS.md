@@ -492,6 +492,30 @@ where the two shapes before #634 cost 96, while the opaque half fell by 24 — t
 the sweep and the ground under it gained the faces that cube was culling.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 
+**The queue does not notice, and #652 is where that was measured instead of argued.** Meshing runs
+on `AsyncComputeTaskPool`, so a mesh that takes longer is throughput and not a hitch; the readings
+that would show a cost anyone pays are `MeshStats::queued`, `MeshStats::in_flight` and how long a
+chunk waits between arriving and having a mesh entity. `measure_a_planted_join` and
+`measure_a_planted_walk` stream one terrain three ways — no plants, bushes as the opaque cube they
+were before #634, and the world as it ships — and the three answers are one answer. Over a join of
+343 chunks, optimized, peak `queued` is 153..165 and peak `in_flight` 332..340 **for every
+planting**, and the last mesh entity lands 415..681 ms after the burst, again for every planting.
+Over a walk of four crossings, peak `queued` is 4..20 and peak `in_flight` 49..77 whichever plants
+are standing. Unoptimized — where a chunk meshes eleven times slower — the three still coincide.
+**The queue depths are set by `MAX_JOBS_PER_FRAME` and the rate chunks arrive at, not by how long a
+mesh takes**, which is why they do not move: the same finding #642 made about
+`MAX_APPLIED_PER_FRAME`, one stage earlier. The cover pass itself is about 0.2 ms of a 6.5 ms chunk
+optimized and 0.55 ms of 72 ms unoptimized, isolated against an empty chunk by
+`measure_what_a_planted_chunk_costs_to_mesh` because on terrain this broken it is inside the
+run-to-run spread.
+
+**A shaped plant costs the sweep nothing at all**, and since #652 that is asserted rather than
+counted: the opaque and water buffers over ground carrying twelve flowers and nine bushes are
+*byte-identical* to the buffers over the same ground carrying none, because `is_opaque` is false for
+both shapes and a mask arm that reads "see-through" cannot tell them from the air they replace. The
+cube-bush row is the one where that is false, and it has to be — an opaque cube is swept, and it
+culls the grass face under it.
+
 **`palette.rs` answers two questions and they are not the same question.** `is_solid` is "does
 this stop a body and can it be aimed at" — `solid_at`, the raycast, the camera boom. `is_opaque`
 is "does this hide what is behind it" — the mesher, and only the mesher. Water answers no to both,

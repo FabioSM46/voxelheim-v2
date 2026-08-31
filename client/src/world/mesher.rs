@@ -445,12 +445,18 @@ const BUSH_CROWN_JITTER: f32 = 0.1;
 /// Test-only for the reason [`palette::PALETTE`] is: production code emits the quads
 /// rather than counting them, and a constant nothing reads is a claim nothing checks.
 /// Here it is read by the assertions that pin the geometry.
+///
+/// `pub(super)` rather than private since #652: `render.rs`'s measurement harness
+/// grows plants into its terrain fixture and states what that terrain's cover half
+/// must cost, and a second literal `11` written down over there would be exactly the
+/// hand-copied number this constant exists to stop. Still `#[cfg(test)]` — nothing
+/// outside a test may read it, because nothing outside a test counts quads.
 #[cfg(test)]
-const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
+pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
 /// How many quads one bush contributes: three clumps of six faces each.
 #[cfg(test)]
-const QUADS_PER_BUSH: usize = 18;
+pub(super) const QUADS_PER_BUSH: usize = 18;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///

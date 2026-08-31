@@ -703,7 +703,7 @@ mod tests {
     use crate::net::{BlockCoord, SessionParams, WorldInbox, WorldUpdate};
     use crate::world::{
         BlockId, DecodeTimeBudget, MAX_DECODE_BACKLOG, MAX_DECODE_TIME_PER_FRAME,
-        MAX_DECODES_PER_FRAME, Neighbours, palette,
+        MAX_DECODES_PER_FRAME, Neighbours, mesher, palette,
     };
 
     const SIZE: u16 = 32;
@@ -2287,13 +2287,134 @@ mod tests {
         (y * size + z) * size + x
     }
 
+    /// What a measurement's surface chunks grow on top of their grass, and the whole of
+    /// how #652 attributes the cover half's cost.
+    ///
+    /// Three plantings rather than two, because "with plants" and "without plants" cannot
+    /// separate *shape* from *presence*: a bush was an ordinary opaque cube before #634,
+    /// so the world before that change had the same plants standing in the same voxels
+    /// and paid the **sweep** for them instead of the cover pass. [`Planting::CubeBushes`]
+    /// is that world, and it is the only honest "before" this harness can build without
+    /// resurrecting deleted geometry.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Planting {
+        /// No plants at all — the control the cover half is attributed against, and what
+        /// every measurement written before #652 streamed.
+        Bare,
+        /// Flowers as they are, bushes as the opaque cube they were before #634: solid,
+        /// swept, merged with their neighbours, and culling the grass face beneath.
+        ///
+        /// **Not a faithful pre-#647 flower**, which was eight quads to today's eleven —
+        /// that shape is gone and this harness does not rebuild it. So the distance from
+        /// here to [`Planting::Planted`] is #634's bush and nothing else, and the three
+        /// quads a flower gained sit inside *both* of those numbers.
+        CubeBushes,
+        /// The world as it ships: a bush is three unmerged clumps, a flower is a stem, a
+        /// pair of leaves and a corolla.
+        Planted,
+    }
+
+    /// How many plants of each kind every surface chunk carries.
+    ///
+    /// **Taken from the generated meadow chunk #634 and #647 reported against** — twelve
+    /// flowers and nine bushes — so this fixture costs what that chunk costs while
+    /// staying a fixture. It *is* a fixture: the world generator is the server's, and a
+    /// client measurement that needed a live session could not live in `cargo test`. Any
+    /// report quoting a number from here has to say which of the two it is.
+    ///
+    /// **Exact per chunk, not an average**, and that is the whole reason [`plant_at`]
+    /// permutes an index instead of thresholding a hash. A hash gets the density right
+    /// across the world and wrong on any one chunk: the first draft of this fixture put
+    /// 23 flowers and 5 bushes in the chunk the per-chunk measurement reads, which
+    /// under-weights the bush by nearly half — the one shape the whole issue is about.
+    const FLOWERS_PER_CHUNK: usize = 12;
+    const BUSHES_PER_CHUNK: usize = 9;
+
+    /// How many columns a chunk's surface has. A power of two, which is what lets the
+    /// permutation in [`plant_at`] be a permutation.
+    const COLUMNS: usize = (SIZE as usize) * (SIZE as usize);
+
+    /// The plant standing on this chunk-local column of the chunk at `(cx, cz)`, if any.
+    ///
+    /// The column's index is run through a **permutation** of `0..COLUMNS` — xor by a
+    /// per-chunk word, multiply by an odd number, add another, all modulo a power of two
+    /// — and the first [`FLOWERS_PER_CHUNK`] slots grow a flower while the next
+    /// [`BUSHES_PER_CHUNK`] grow a bush. Since a permutation hits every slot exactly
+    /// once, every chunk grows exactly that many of each, in places that move from chunk
+    /// to chunk. Derived from nothing but coordinates, so a chunk carries the same plants
+    /// wherever the walk below reaches it and two runs mesh identical geometry.
+    fn plant_at(cx: i32, cz: i32, x: usize, z: usize, planting: Planting) -> Option<BlockId> {
+        if planting == Planting::Bare {
+            return None;
+        }
+        let mut hash = (i64::from(cx) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (i64::from(cz) as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0x94D0_49BB_1331_11EB);
+        hash ^= hash >> 31;
+
+        let mask = COLUMNS - 1;
+        let index = z * usize::from(SIZE) + x;
+        let slot = (index ^ (hash as usize & mask))
+            .wrapping_mul(599)
+            .wrapping_add((hash >> 32) as usize)
+            & mask;
+
+        match slot {
+            slot if slot < FLOWERS_PER_CHUNK => Some(match slot % 3 {
+                0 => palette::FLOWER_RED,
+                1 => palette::FLOWER_YELLOW,
+                _ => palette::FLOWER_BLUE,
+            }),
+            slot if slot < FLOWERS_PER_CHUNK + BUSHES_PER_CHUNK => Some(match planting {
+                Planting::Planted => palette::BUSH,
+                // The pre-#634 bush: opaque, so the sweep draws it and the grass under
+                // it loses the top face a shaped bush leaves in place.
+                _ => palette::LEAVES,
+            }),
+            _ => None,
+        }
+    }
+
+    /// How many plants of each kind one surface chunk actually grew — counted, never
+    /// assumed, so the paragraph above [`FLOWERS_PER_CHUNK`] is a claim something reads.
+    fn plant_census(cx: i32, cz: i32, planting: Planting) -> (usize, usize) {
+        let size = usize::from(SIZE);
+        let (mut flowers, mut bushes) = (0, 0);
+        for z in 0..size {
+            for x in 0..size {
+                match plant_at(cx, cz, x, z, planting) {
+                    Some(palette::BUSH | palette::LEAVES) => bushes += 1,
+                    Some(_) => flowers += 1,
+                    None => {}
+                }
+            }
+        }
+        (flowers, bushes)
+    }
+
+    /// The fixture's plants standing one block off the floor of an otherwise empty
+    /// chunk: the cover pass with no sweep at all in the number.
+    fn cover_only_runs(cx: i32, cz: i32) -> Vec<u16> {
+        let size = usize::from(SIZE);
+        let mut blocks = vec![palette::AIR; size * size * size];
+        for z in 0..size {
+            for x in 0..size {
+                if let Some(plant) = plant_at(cx, cz, x, z, Planting::Planted) {
+                    blocks[at(size, x, 1, z)] = plant;
+                }
+            }
+        }
+        encode_runs(&blocks)
+    }
+
     /// A chunk shaped like ground a player walks over: a ridged stone surface under a
-    /// grass skin, with air above it.
+    /// grass skin, with air above it and whatever `planting` grows on it.
     ///
     /// Deliberately not flat and deliberately not solid. A solid chunk is two `u16` on
     /// the wire and six quads on screen, and measuring against one would understate
     /// every cost here by an order of magnitude.
-    fn terrain_runs(cx: i32, cz: i32) -> Vec<u16> {
+    fn terrain_runs(cx: i32, cz: i32, planting: Planting) -> Vec<u16> {
         let size = usize::from(SIZE);
         let mut blocks = vec![palette::AIR; size * size * size];
         for z in 0..size {
@@ -2307,18 +2428,21 @@ mod tests {
                     blocks[at(size, x, y, z)] = palette::STONE;
                 }
                 blocks[at(size, x, height - 1, z)] = palette::GRASS;
+                if let Some(plant) = plant_at(cx, cz, x, z, planting) {
+                    blocks[at(size, x, height, z)] = plant;
+                }
             }
         }
         encode_runs(&blocks)
     }
 
     /// One column of the streamed volume: bedrock below, one surface chunk, sky above.
-    fn column(cx: i32, cz: i32, radius: i32) -> Vec<(ChunkCoord, Vec<u16>)> {
+    fn column(cx: i32, cz: i32, radius: i32, planting: Planting) -> Vec<(ChunkCoord, Vec<u16>)> {
         (-radius..=radius)
             .map(|cy| {
                 let runs = match cy {
                     ..=-1 => solid_chunk(palette::STONE),
-                    0 => terrain_runs(cx, cz),
+                    0 => terrain_runs(cx, cz, planting),
                     _ => solid_chunk(palette::AIR),
                 };
                 (coord(cx, cy, cz), runs)
@@ -2328,14 +2452,19 @@ mod tests {
 
     /// The chunks one chunk-boundary crossing streams at the server's default view
     /// distance of 3 — a 7 x 7 slab, 49 chunks, in `View.MoveTo`'s order.
-    fn boundary_slab() -> Vec<(ChunkCoord, Vec<u16>)> {
-        (-3..=3).flat_map(|cz| column(0, cz, 3)).collect()
+    ///
+    /// `cx` is *which* crossing it is: the walk below steps it, so every slab is terrain
+    /// the session has not seen and the store grows the way it does while walking.
+    fn boundary_slab(cx: i32, planting: Planting) -> Vec<(ChunkCoord, Vec<u16>)> {
+        (-3..=3)
+            .flat_map(|cz| column(cx, cz, 3, planting))
+            .collect()
     }
 
     /// The chunks a join streams at the same view distance: the whole 7 x 7 x 7 volume.
-    fn join_volume() -> Vec<(ChunkCoord, Vec<u16>)> {
+    fn join_volume(planting: Planting) -> Vec<(ChunkCoord, Vec<u16>)> {
         (-3..=3)
-            .flat_map(|cx| (-3..=3).flat_map(move |cz| column(cx, cz, 3)))
+            .flat_map(|cx| (-3..=3).flat_map(move |cz| column(cx, cz, 3, planting)))
             .collect()
     }
 
@@ -2396,27 +2525,48 @@ mod tests {
         elapsed.as_secs_f64() * 1000.0
     }
 
-    /// Streams `burst` in one frame under `budget`, reports what every frame cost, and
-    /// returns what the drain left behind.
-    fn drain_burst(
-        what: &str,
-        budget: DecodeTimeBudget,
-        burst: Vec<(ChunkCoord, Vec<u16>)>,
-    ) -> MeshStats {
-        let chunks = burst.len();
-        let mut app = instrumented_world(budget);
-        app.update();
+    /// What one drain is worth reporting, beyond what [`MeshStats`] already carries.
+    ///
+    /// **The queue depths cannot be read at the end, and that is why they are here.** A
+    /// settled world has `queued` and `in_flight` at zero by definition, so the depth
+    /// that means anything is the widest one any frame of the drain saw — which is the
+    /// reading #652 asked for, and the only one that can answer whether the queue backs
+    /// up. The two mesh times are the other half of that question: how long the burst
+    /// took to put its first mesh entity and its last one in the world.
+    #[derive(Debug, Clone, Copy)]
+    struct Drain {
+        stats: MeshStats,
+        frames: usize,
+        /// The frame the last payload became voxels on. This is the half of "how long
+        /// until the world is there" that the expansion budget can move; the frames
+        /// after it belong to the mesher and the task pool.
+        expanded_on: Option<usize>,
+        peak_queued: usize,
+        peak_in_flight: usize,
+        /// Wall clock from this burst being pushed to its first new mesh entity, and to
+        /// its last. `None` when the burst added no mesh at all.
+        first_mesh: Option<Duration>,
+        last_mesh: Option<Duration>,
+        spent: Duration,
+        worst: Duration,
+        worst_ingest: Duration,
+    }
 
-        for (coord, runs) in burst {
-            push(&mut app, WorldUpdate::Chunk { coord, runs });
-        }
-
-        let deadline = Instant::now() + PATIENCE;
+    /// Pumps `app` until nothing is outstanding, printing what every frame cost.
+    ///
+    /// `held` is how many chunks the store must hold once the burst has expanded, and
+    /// the mesh times are measured against the meshed count *on entry* rather than
+    /// against zero — the walk below drains several bursts through one app, and a
+    /// cumulative counter would report the first crossing's meshes for every later one.
+    fn drain(app: &mut App, held: usize) -> Drain {
+        let pushed = Instant::now();
+        let deadline = pushed + PATIENCE;
+        let already_meshed = stats(app).meshed_chunks;
         let (mut frame, mut worst, mut spent) = (0usize, Duration::ZERO, Duration::ZERO);
         let mut worst_ingest = Duration::ZERO;
-        // The frame the last payload became voxels on. This is the half of "how long
-        // until the world is there" that the expansion budget can move; the frames after
-        // it belong to the mesher and the task pool.
+        let (mut peak_queued, mut peak_in_flight) = (0usize, 0usize);
+        let (mut first_mesh, mut last_mesh) = (None, None);
+        let mut meshed = already_meshed;
         let mut expanded_on = None;
         loop {
             let began = Instant::now();
@@ -2424,12 +2574,20 @@ mod tests {
             let total = began.elapsed();
             let phases = app.world().resource::<Phases>();
             let (ingest, jobs, apply) = (phases.ingest, phases.jobs, phases.apply);
-            let seen = stats(&app);
+            let seen = stats(app);
             frame += 1;
             spent += total;
             worst = worst.max(total);
             worst_ingest = worst_ingest.max(ingest);
-            if expanded_on.is_none() && seen.decode_backlog == 0 && seen.chunks_held == chunks {
+            peak_queued = peak_queued.max(seen.queued);
+            peak_in_flight = peak_in_flight.max(seen.in_flight);
+            if seen.meshed_chunks > meshed {
+                meshed = seen.meshed_chunks;
+                let elapsed = pushed.elapsed();
+                first_mesh.get_or_insert(elapsed);
+                last_mesh = Some(elapsed);
+            }
+            if expanded_on.is_none() && seen.decode_backlog == 0 && seen.chunks_held == held {
                 expanded_on = Some(frame);
             }
             println!(
@@ -2453,20 +2611,56 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        let seen = stats(&app);
-        println!(
-            "{what}: {chunks} chunks, all expanded by frame {:?}, settled after {frame} \
-             frames, {:.1} ms of main schedule in all\n  worst frame {:.3} ms (worst \
-             ingest {:.3} ms); {} held, {} meshed, {} quads, refused {}, evicted {}",
+        Drain {
+            stats: stats(app),
+            frames: frame,
             expanded_on,
-            ms(spent),
-            ms(worst),
-            ms(worst_ingest),
+            peak_queued,
+            peak_in_flight,
+            first_mesh,
+            last_mesh,
+            spent,
+            worst,
+            worst_ingest,
+        }
+    }
+
+    /// Streams `burst` in one frame under `budget`, reports what every frame cost, and
+    /// returns what the drain left behind.
+    fn drain_burst(
+        what: &str,
+        budget: DecodeTimeBudget,
+        burst: Vec<(ChunkCoord, Vec<u16>)>,
+    ) -> Drain {
+        let chunks = burst.len();
+        let mut app = instrumented_world(budget);
+        app.update();
+
+        for (coord, runs) in burst {
+            push(&mut app, WorldUpdate::Chunk { coord, runs });
+        }
+
+        let drained = drain(&mut app, chunks);
+        let seen = drained.stats;
+        println!(
+            "{what}: {chunks} chunks, all expanded by frame {:?}, settled after {} \
+             frames, {:.1} ms of main schedule in all\n  worst frame {:.3} ms (worst \
+             ingest {:.3} ms); {} held, {} meshed, {} quads, refused {}, evicted {}\n  \
+             peak queued {}, peak in flight {}, first mesh {:.1} ms, last mesh {:.1} ms",
+            drained.expanded_on,
+            drained.frames,
+            ms(drained.spent),
+            ms(drained.worst),
+            ms(drained.worst_ingest),
             seen.chunks_held,
             seen.meshed_chunks,
             seen.total_quads,
             seen.decode_refused,
             seen.decode_evicted,
+            drained.peak_queued,
+            drained.peak_in_flight,
+            ms(drained.first_mesh.unwrap_or_default()),
+            ms(drained.last_mesh.unwrap_or_default()),
         );
 
         // The acceptance criteria, checked rather than printed.
@@ -2478,26 +2672,26 @@ mod tests {
         assert_eq!(seen.decode_refused, 0, "{what}: updates were refused");
         assert_eq!(seen.decode_evicted, 0, "{what}: chunks were evicted");
         assert!(seen.total_quads > 0, "{what}: the burst meshed nothing");
-        seen
+        drained
     }
 
     /// The bound may change how long a burst takes to drain; it may not change what the
     /// burst leaves behind. Asserted across the runs in [`COMPARED`] rather than left to
     /// whoever reads the printed lines.
-    fn same_world(outcomes: &[MeshStats]) {
+    fn same_world(outcomes: &[Drain]) {
         // `windows(2)` over one outcome compares nothing and passes anyway.
         assert_eq!(outcomes.len(), COMPARED.len(), "a bound went unmeasured");
         for pair in outcomes.windows(2) {
             assert_eq!(
-                pair[0].chunks_held, pair[1].chunks_held,
+                pair[0].stats.chunks_held, pair[1].stats.chunks_held,
                 "chunks held differ"
             );
             assert_eq!(
-                pair[0].meshed_chunks, pair[1].meshed_chunks,
+                pair[0].stats.meshed_chunks, pair[1].stats.meshed_chunks,
                 "meshed chunks differ"
             );
             assert_eq!(
-                pair[0].total_quads, pair[1].total_quads,
+                pair[0].stats.total_quads, pair[1].stats.total_quads,
                 "quad totals differ"
             );
         }
@@ -2511,11 +2705,14 @@ mod tests {
         // reasons about; `ChunkStore::insert` is the neighbour-staleness scan that
         // follows it, and the point of separating them is that only one of the two was
         // ever in the argument for the number.
-        let slab = boundary_slab();
+        // `Planting::Bare`, which is what this terrain was before #652 gave it plants:
+        // the number this measurement recorded for #629 is about the expansion budget,
+        // and re-basing it on a different world would silently retire that reading.
+        let slab = boundary_slab(0, Planting::Bare);
         println!("a boundary crossing is {} chunks", slab.len());
         println!(
             "  a surface chunk is {} runs on the wire; a solid or empty one is 1",
-            terrain_runs(0, 0).len() / 2
+            terrain_runs(0, 0, Planting::Bare).len() / 2
         );
 
         // Warm the allocator so the first chunk is not measured cold.
@@ -2564,7 +2761,7 @@ mod tests {
             outcomes.push(drain_burst(
                 &format!("one boundary crossing, {label}"),
                 budget,
-                boundary_slab(),
+                boundary_slab(0, Planting::Bare),
             ));
         }
         same_world(&outcomes);
@@ -2580,9 +2777,261 @@ mod tests {
             outcomes.push(drain_burst(
                 &format!("a join, {label}"),
                 budget,
-                join_volume(),
+                join_volume(Planting::Bare),
             ));
         }
         same_world(&outcomes);
+    }
+
+    // -----------------------------------------------------------------
+    // What the cover half costs the pipeline (#652)
+    // -----------------------------------------------------------------
+    //
+    // #634 doubled a chunk's mesh time and said so, and #652 asks the narrower question
+    // that number does not answer: meshing runs on `AsyncComputeTaskPool`, so a mesh
+    // that takes twice as long is throughput and not a hitch, and what a player can feel
+    // is the **queue** — whether `queued` and `in_flight` back up while joining or
+    // walking, and how long a chunk waits between arriving and having a mesh entity.
+    //
+    //     cargo test --release -- --ignored --nocapture measure_
+    //
+    // Everything the harness at the top of this section cannot see applies here
+    // unchanged: no display, no render app, so the GPU upload that follows
+    // `Assets<Mesh>::add` is not in any number below. What it *can* see is the whole of
+    // what the main schedule does, which is where a hitch would have to live.
+    //
+    // The three [`Planting`]s are the before, the after and the control, and the terrain
+    // is a **fixture** rather than generated: densities from the meadow chunk #634 and
+    // #647 measured, geometry from this file.
+
+    /// Every planting, in the order a report reads them.
+    const PLANTINGS: [Planting; 3] = [Planting::Bare, Planting::CubeBushes, Planting::Planted];
+
+    /// How many crossings one walk makes. Four, because the reading wanted is a range
+    /// across crossings and one crossing is a number.
+    const CROSSINGS: i32 = 4;
+
+    /// How many times each join is repeated, for the same reason. A join is also the
+    /// burst most exposed to whatever else the machine is doing while it runs.
+    const JOINS: usize = 3;
+
+    /// How many times one chunk is meshed for a per-chunk reading.
+    const MESH_REPEATS: usize = 64;
+
+    /// Meshes `chunk` [`MESH_REPEATS`] times and answers with the mesh and the fastest,
+    /// median and slowest of the runs.
+    ///
+    /// The mesh each repeat produced is dropped **after** the stopwatch stops: freeing
+    /// three vectors is not meshing, and on the planted rows it is not a small share of
+    /// what would otherwise be counted.
+    fn time_meshing(chunk: &VoxelChunk) -> (ChunkMesh, [Duration; 3]) {
+        // Warm the allocator, so the first repeat is not measured cold.
+        drop(mesh_chunk(chunk, &Neighbours::default()));
+
+        let mut times = Vec::with_capacity(MESH_REPEATS);
+        for _ in 0..MESH_REPEATS {
+            let began = Instant::now();
+            let built = mesh_chunk(chunk, &Neighbours::default());
+            times.push(began.elapsed());
+            drop(built);
+        }
+        times.sort_unstable();
+        let spread = [times[0], times[MESH_REPEATS / 2], times[MESH_REPEATS - 1]];
+        (mesh_chunk(chunk, &Neighbours::default()), spread)
+    }
+
+    /// One row of the per-chunk report: what it cost and what it drew.
+    fn print_meshing(what: &str, mesh: &ChunkMesh, [fast, median, slow]: [Duration; 3]) {
+        println!(
+            "  {what}: {:.3}..{:.3} ms (median {:.3}) | quads: opaque {} water {} cover {} \
+             — {} in all",
+            ms(fast),
+            ms(slow),
+            ms(median),
+            mesh.opaque.quad_count(),
+            mesh.water.quad_count(),
+            mesh.cover.quad_count(),
+            mesh.quad_count(),
+        );
+    }
+
+    /// The ranges #652 asked to be reported as ranges.
+    fn report_ranges(what: &str, drains: &[Drain]) {
+        let span = |pick: fn(&Drain) -> f64| {
+            drains
+                .iter()
+                .map(pick)
+                .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+        };
+        let (queued_lo, queued_hi) = span(|d| d.peak_queued as f64);
+        let (flight_lo, flight_hi) = span(|d| d.peak_in_flight as f64);
+        let (first_lo, first_hi) = span(|d| ms(d.first_mesh.unwrap_or_default()));
+        let (last_lo, last_hi) = span(|d| ms(d.last_mesh.unwrap_or_default()));
+        let (frames_lo, frames_hi) = span(|d| d.frames as f64);
+        let (worst_lo, worst_hi) = span(|d| ms(d.worst));
+        println!(
+            "{what} over {} drains:\n  peak queued {queued_lo:.0}..{queued_hi:.0}, peak in \
+             flight {flight_lo:.0}..{flight_hi:.0}\n  first mesh {first_lo:.1}..{first_hi:.1} \
+             ms, last mesh {last_lo:.1}..{last_hi:.1} ms\n  settled in \
+             {frames_lo:.0}..{frames_hi:.0} frames, worst frame {worst_lo:.3}..{worst_hi:.3} ms",
+            drains.len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_what_a_planted_chunk_costs_to_mesh() {
+        // The per-chunk number #634 and #647 reported, re-derivable: how long one surface
+        // chunk spends inside `mesh_chunk`, and what its three halves cost in quads.
+        //
+        // Meshed against [`Neighbours::default`] — no neighbours known — so a border face
+        // is emitted rather than culled. That over-draws every row by the same six walls,
+        // and the cover half reads no neighbour at all, so the difference between the
+        // rows is the plant and nothing else.
+        //
+        // **This terrain is far more broken than generated ground**, deliberately: #629
+        // chose a surface whose height moves under almost every column, which is why its
+        // opaque half runs to thousands of quads where a meadow chunk's runs to hundreds.
+        // The cover half's *absolute* cost is the same either way — a plant is a plant —
+        // but its **share** of a chunk is understated here, so read the last two rows for
+        // what the cover pass costs and not the ratio between the first three.
+        let (flowers, bushes) = plant_census(0, 0, Planting::Planted);
+        assert_eq!(
+            (flowers, bushes),
+            (FLOWERS_PER_CHUNK, BUSHES_PER_CHUNK),
+            "the fixture does not grow the density it says it grows"
+        );
+        println!(
+            "one 32³ surface chunk, meshed {MESH_REPEATS} times; every chunk grows \
+             {flowers} flowers and {bushes} bushes, the generated meadow chunk #634 \
+             measured"
+        );
+
+        let mut meshes = Vec::new();
+        for planting in PLANTINGS {
+            let chunk =
+                VoxelChunk::from_runs(&terrain_runs(0, 0, planting), SIZE.into()).expect("valid");
+            let (mesh, spread) = time_meshing(&chunk);
+            print_meshing(&format!("{planting:?}"), &mesh, spread);
+
+            // What the fixture must cost, read from the mesher's own constants rather
+            // than written down again here — a second literal is the thing those
+            // constants exist to stop.
+            let expected = match planting {
+                Planting::Bare => 0,
+                Planting::CubeBushes => flowers * mesher::QUADS_PER_COVER,
+                Planting::Planted => {
+                    flowers * mesher::QUADS_PER_COVER + bushes * mesher::QUADS_PER_BUSH
+                }
+            };
+            assert_eq!(
+                mesh.cover.quad_count(),
+                expected,
+                "{planting:?}: the fixture's cover half is not what its plants cost"
+            );
+            meshes.push(mesh);
+        }
+
+        // #647's evidence, in the strongest form this fixture can give it. A shaped plant
+        // fills nothing and hides nothing, so the sweep over ground that carries plants
+        // produces the *same bytes* as the sweep over ground that carries none — not a
+        // matching quad count, the buffers themselves. The cube bush is the row where
+        // that is false, and it is false by construction: it is opaque, so it is swept
+        // and it culls the grass face under it.
+        assert_eq!(
+            meshes[0].opaque, meshes[2].opaque,
+            "a shaped plant moved the opaque half"
+        );
+        assert_eq!(
+            meshes[0].water, meshes[2].water,
+            "a shaped plant moved the water half"
+        );
+        assert_ne!(
+            meshes[0].opaque, meshes[1].opaque,
+            "a cube bush left the sweep alone"
+        );
+
+        // And the cover pass on its own, which is the number the rows above cannot
+        // resolve: the same plants in an otherwise empty chunk, against an empty chunk
+        // with no plants at all. The difference is `build_cover` and nothing else.
+        let empty = VoxelChunk::from_runs(&solid_chunk(palette::AIR), SIZE.into()).expect("valid");
+        let (mesh, spread) = time_meshing(&empty);
+        print_meshing("air, no plants", &mesh, spread);
+
+        let meadow = VoxelChunk::from_runs(&cover_only_runs(0, 0), SIZE.into()).expect("valid");
+        let (mesh, spread) = time_meshing(&meadow);
+        print_meshing("air, plants only", &mesh, spread);
+        assert_eq!(
+            mesh.opaque.quad_count(),
+            0,
+            "the cover-only chunk swept something"
+        );
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_a_planted_join() {
+        // A join: the whole 7 x 7 x 7 view volume in one burst, under the shipping
+        // budget, [`JOINS`] times per planting. Every run is in one process on one
+        // build — a before and an after taken from two `cargo test` invocations minutes
+        // apart compare the machine's mood as much as the code.
+        for planting in PLANTINGS {
+            let drains: Vec<Drain> = (0..JOINS)
+                .map(|run| {
+                    drain_burst(
+                        &format!("a join, {planting:?}, run {run}"),
+                        DecodeTimeBudget(MAX_DECODE_TIME_PER_FRAME),
+                        join_volume(planting),
+                    )
+                })
+                .collect();
+            report_ranges(&format!("a join, {planting:?}"), &drains);
+        }
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_a_planted_walk() {
+        // A walk: [`CROSSINGS`] chunk-boundary crossings through one app, each streaming
+        // the slab the server sends for one step, each drained before the next.
+        //
+        // **Nothing is unloaded behind the player**, which is the one way this is not a
+        // walk: the store keeps growing, so the neighbour-staleness scan and the stats
+        // sum both cost more each crossing than they would in a session. That is the
+        // conservative direction — it can only make the later crossings look worse.
+        for planting in PLANTINGS {
+            let mut app = instrumented_world(DecodeTimeBudget(MAX_DECODE_TIME_PER_FRAME));
+            app.update();
+
+            let mut held = 0;
+            let mut drains = Vec::new();
+            for cx in 0..CROSSINGS {
+                let slab = boundary_slab(cx, planting);
+                held += slab.len();
+                for (coord, runs) in slab {
+                    push(&mut app, WorldUpdate::Chunk { coord, runs });
+                }
+                let drained = drain(&mut app, held);
+                println!(
+                    "  crossing {cx}, {planting:?}: settled in {} frames, peak queued {}, \
+                     peak in flight {}, first mesh {:.1} ms, last mesh {:.1} ms, worst \
+                     frame {:.3} ms, {} held, {} meshed, {} quads",
+                    drained.frames,
+                    drained.peak_queued,
+                    drained.peak_in_flight,
+                    ms(drained.first_mesh.unwrap_or_default()),
+                    ms(drained.last_mesh.unwrap_or_default()),
+                    ms(drained.worst),
+                    drained.stats.chunks_held,
+                    drained.stats.meshed_chunks,
+                    drained.stats.total_quads,
+                );
+                assert_eq!(drained.stats.chunks_held, held, "a crossing lost a chunk");
+                assert_eq!(drained.stats.decode_refused, 0, "updates were refused");
+                assert_eq!(drained.stats.decode_evicted, 0, "chunks were evicted");
+                drains.push(drained);
+            }
+            report_ranges(&format!("a walk, {planting:?}"), &drains);
+        }
     }
 }
