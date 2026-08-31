@@ -137,9 +137,22 @@ type waterMeasurement struct {
 	durations []int64
 }
 
+// runWaterToFixedPoint steps until a full retry window passes with no writes and no
+// scan work outstanding.
+//
+// **An empty schedule stopped being what a fixed point looks like with #717.** A
+// voxel whose neighbourhood crosses the fixture's residency edge now stays scheduled
+// by design, retried every [WaterResidencyRetryDelay] ticks and writing nothing,
+// because in a live world the missing chunk can arrive; in this eight-chunk fixture
+// it never does. Quiet is therefore a window: long enough that every deferred voxel
+// has been retried at least once and every settling write would have come due, so a
+// world silent through it has nothing left to say. The numbers recorded above
+// predate this stop rule; a re-recorded settling count includes the quiet window.
 func runWaterToFixedPoint(t testing.TB, sim *Sim, start uint64) waterMeasurement {
 	t.Helper()
 	const maxTicks = 10_000
+	quietWindow := int(WaterResidencyRetryDelay + WaterTickDelay + 1)
+	quiet := 0
 	measurement := waterMeasurement{lastTick: start, durations: make([]int64, 0, 256)}
 	for range maxTicks {
 		measurement.lastTick++
@@ -148,7 +161,12 @@ func runWaterToFixedPoint(t testing.TB, sim *Sim, start uint64) waterMeasurement
 		measurement.durations = append(measurement.durations, time.Since(started).Nanoseconds())
 		measurement.ticks++
 		measurement.changes += len(changes)
-		if waterIdle(sim) {
+		if len(changes) == 0 {
+			quiet++
+		} else {
+			quiet = 0
+		}
+		if quiet >= quietWindow && waterScansDrained(sim) {
 			return measurement
 		}
 	}
@@ -170,10 +188,10 @@ func runWaterWindow(t testing.TB, sim *Sim, start uint64, ticks int) waterMeasur
 	return measurement
 }
 
-func waterIdle(sim *Sim) bool {
+func waterScansDrained(sim *Sim) bool {
 	sim.mu.Lock()
 	defer sim.mu.Unlock()
-	return len(sim.pendingWater) == 0 && sim.waterDue.Len() == 0 && len(sim.waterScanCarry.indices) == 0 && len(sim.unstableWater) == 0
+	return len(sim.waterScanCarry.indices) == 0 && len(sim.unstableWater) == 0
 }
 
 func storedDeltaCounts(t testing.TB, store *world.Store, measured []world.Coord) ([]int, int) {
