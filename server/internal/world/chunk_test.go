@@ -188,6 +188,13 @@ func TestTheWaterFamilyCarriesAppendedIDsAndOneExhaustiveClassification(t *testi
 				t.Errorf("Placeable(%d) = true, want false for water", block)
 			}
 		}
+		for _, step := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+			wantFeeds := water && (facts.dx == 0 && facts.dz == 0 || facts.dx == step[0] && facts.dz == step[1])
+			if got := WaterFeedsToward(block, step[0], step[1]); got != wantFeeds {
+				t.Errorf("WaterFeedsToward(%d, %d, %d) = %t, want %t",
+					block, step[0], step[1], got, wantFeeds)
+			}
+		}
 	}
 
 	appended := []Block{
@@ -200,7 +207,7 @@ func TestTheWaterFamilyCarriesAppendedIDsAndOneExhaustiveClassification(t *testi
 		}
 	}
 	unknown := Block(65535)
-	if IsWater(unknown) || Fluid(unknown) || WaterLevel(unknown) != 0 {
+	if IsWater(unknown) || Fluid(unknown) || WaterLevel(unknown) != 0 || WaterFeedsToward(unknown, 1, 0) {
 		t.Errorf("unknown block %d was classified as water", unknown)
 	}
 	if dx, dz := CurrentOf(unknown); dx != 0 || dz != 0 {
