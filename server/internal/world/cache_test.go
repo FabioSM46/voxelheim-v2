@@ -303,3 +303,73 @@ func TestNewCacheFallsBackToDefaults(t *testing.T) {
 		t.Errorf("Seed() = %d, want 1", cache.Seed())
 	}
 }
+
+// The residency has to hold the view volume, and before #666 nothing said so.
+//
+// At the default view distance of 3 it did by luck — 343 chunks against 1024 — and the
+// flag was free to move without it. At 8 the volume is 4913 against the same 1024, and
+// the server evicts what it is about to need: measured, 1576 ticks over 10 ms in 104
+// seconds with the client's meshed-chunk count frozen.
+func TestTheResidencyHoldsTheViewVolume(t *testing.T) {
+	t.Parallel()
+
+	for distance := 0; distance <= LargestViewDistanceHeld(); distance++ {
+		volume := ChunksInView(distance)
+		capacity := CacheCapacityFor(distance)
+		if capacity < volume {
+			t.Errorf("view distance %d covers %d chunks and is given a residency of %d",
+				distance, volume, capacity)
+		}
+		if capacity < DefaultCacheCapacity {
+			t.Errorf("view distance %d is given %d, under the floor of %d",
+				distance, capacity, DefaultCacheCapacity)
+		}
+	}
+}
+
+// The residency holds several separated sessions, not one.
+//
+// **This is the half the first version of #666 got wrong**, and a review caught it: a
+// formula sized for one session collapses the moment two players walk apart, which is the
+// same defect one player-count down. What it is deliberately *not* sized for is the
+// server's player cap — see [cacheWorkingSets], where the arithmetic for a hundred players
+// is written out and rejected.
+func TestTheResidencyHoldsSeveralSeparatedSessions(t *testing.T) {
+	t.Parallel()
+
+	for distance := 0; distance <= LargestViewDistanceHeld(); distance++ {
+		together := ChunksInView(distance) * cacheWorkingSets
+		if got := CacheCapacityFor(distance); got < together {
+			t.Errorf("view distance %d needs %d chunks for %d separated sessions, given %d",
+				distance, together, cacheWorkingSets, got)
+		}
+	}
+	if got := ChunksInView(3); got != 343 {
+		t.Errorf("view distance 3 covers %d chunks, want 343", got)
+	}
+	if got := CacheCapacityFor(0); got < DefaultCacheCapacity {
+		t.Errorf("the smallest view distance is given %d, under the floor of %d",
+			got, DefaultCacheCapacity)
+	}
+}
+
+// The ceiling is a real edge, not decoration: the protocol allows a view distance this
+// server cannot hold, and the refusal has to name the largest one it can.
+func TestTheCeilingRefusesAViewDistanceThatCannotBeHeld(t *testing.T) {
+	t.Parallel()
+
+	largest := LargestViewDistanceHeld()
+	if CacheCapacityFor(largest) > MaxCacheCapacity {
+		t.Fatalf("the largest held distance %d needs %d, over the ceiling of %d",
+			largest, CacheCapacityFor(largest), MaxCacheCapacity)
+	}
+	if CacheCapacityFor(largest+1) <= MaxCacheCapacity {
+		t.Fatalf("distance %d also fits, so %d is not the largest", largest+1, largest)
+	}
+	// The protocol's own ceiling is past what any residency here holds, which is the
+	// whole reason a refusal exists rather than a clamp.
+	if ChunksInView(16) <= MaxCacheCapacity {
+		t.Errorf("the protocol ceiling of 16 covers %d chunks, which now fits; the refusal is dead code",
+			ChunksInView(16))
+	}
+}

@@ -279,6 +279,10 @@ func TestOptionsValidate(t *testing.T) {
 		"tick rate far past a byte":  func(o *options) { o.tickRate = 1000 },
 		"view distance past the cap": func(o *options) { o.viewDistance = protocol.MaxViewDistance + 1 },
 		"view distance far past it":  func(o *options) { o.viewDistance = 1000 },
+		// The new refusal: inside the contract's ceiling and outside this server's.
+		"view distance the cache cannot hold": func(o *options) {
+			o.viewDistance = uint(world.LargestViewDistanceHeld()) + 1
+		},
 
 		// A zero deadline is not "no deadline" for a server: it is the flag the whole
 		// issue exists to remove, spelled as a number.
@@ -316,7 +320,13 @@ func TestOptionsValidate(t *testing.T) {
 	// Boundaries are accepted, so the check is a range and not an accident.
 	for _, mutate := range []func(*options){
 		func(o *options) { o.tickRate = 1; o.viewDistance = 0 },
-		func(o *options) { o.tickRate = 255; o.viewDistance = protocol.MaxViewDistance },
+		// **Not protocol.MaxViewDistance any more, and the change is the point of #666.**
+		// The contract's ceiling is 16, which asks for 33³ = 35937 chunks; no residency
+		// this server sizes itself to holds that, so the flag is refused at startup
+		// rather than accepted into a server that thrashes. The largest a boundary case
+		// may use is therefore the largest the cache can hold, which
+		// [world.LargestViewDistanceHeld] answers rather than this test restating.
+		func(o *options) { o.tickRate = 255; o.viewDistance = uint(world.LargestViewDistanceHeld()) },
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
 		func(o *options) { o.stormPeriod = 0 },
 		func(o *options) { o.nextStorm = "2030-01-02T03:04:05Z" },

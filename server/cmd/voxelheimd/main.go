@@ -202,6 +202,20 @@ func (o options) validate() error {
 	if _, err := ticket.WorldIDFor(o.worldName); err != nil {
 		return fmt.Errorf("invalid -world-name: %w", err)
 	}
+
+	// **A view distance the residency cannot hold is refused here rather than run.** The
+	// protocol's ceiling is 16, which asks for 33³ = 35937 chunks; the cache is an LRU
+	// and a volume larger than it evicts what it is about to need, so the server runs,
+	// answers nothing usefully, and spends every tick regenerating. See
+	// [world.CacheCapacityFor] for the measurement at distance 8. The arithmetic is in
+	// the message because an operator should not have to solve a cubic to pick a number.
+	if needed := world.CacheCapacityFor(int(o.viewDistance)); needed > world.MaxCacheCapacity {
+		return fmt.Errorf(
+			"view distance %d needs a residency of %d chunks (%d in view plus headroom) "+
+				"and this server holds at most %d; the largest it can hold is %d",
+			o.viewDistance, needed, world.ChunksInView(int(o.viewDistance)),
+			world.MaxCacheCapacity, world.LargestViewDistanceHeld())
+	}
 	return o.validateTicketKeySource()
 }
 
@@ -435,7 +449,7 @@ func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error)
 		// Loud, because it is the mode in which an evening's digging disappears. Chosen
 		// explicitly by an empty -world-dir; the flag's default is a real directory.
 		log.Warn("no world directory; this world is ephemeral and every edit will be lost on exit")
-		return world.NewCache(seed, world.DefaultWorkers, world.DefaultCacheCapacity), nil
+		return world.NewCache(seed, world.DefaultWorkers, world.CacheCapacityFor(int(opts.viewDistance))), nil
 	}
 
 	store, err := world.OpenStore(opts.worldDir, seed)
@@ -444,7 +458,7 @@ func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error)
 	}
 	log.Info("world directory opened", "world_dir", store.Dir(), "format_version", world.StoreVersion)
 
-	return world.NewPersistentCache(store, world.DefaultWorkers, world.DefaultCacheCapacity), nil
+	return world.NewPersistentCache(store, world.DefaultWorkers, world.CacheCapacityFor(int(opts.viewDistance))), nil
 }
 
 // listen starts the server's transport, which is encrypted and has no alternative.
