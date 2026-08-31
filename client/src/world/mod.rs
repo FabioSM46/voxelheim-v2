@@ -744,13 +744,13 @@ fn shift(coord: ChunkCoord, offset: [i32; 3]) -> Option<ChunkCoord> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BorderGeometry {
-    opaque: bool,
+    opaque_masks: [u8; 6],
     water_level: u8,
 }
 
 impl BorderGeometry {
     fn differs_for_face(self, other: Self, axis: usize) -> bool {
-        self.opaque != other.opaque
+        self.opaque_masks[axis * 2..axis * 2 + 2] != other.opaque_masks[axis * 2..axis * 2 + 2]
             || (self.water_level != other.water_level
                 && (axis != 1 || self.water_level == 0 || other.water_level == 0))
     }
@@ -763,7 +763,7 @@ fn border_geometry(
 ) -> BorderGeometry {
     let Some(chunk) = chunk else {
         return BorderGeometry {
-            opaque: false,
+            opaque_masks: [0; 6],
             water_level: 0,
         };
     };
@@ -786,7 +786,9 @@ fn border_geometry(
         }
     }
     BorderGeometry {
-        opaque: palette::is_opaque(block),
+        opaque_masks: std::array::from_fn(|slot| {
+            palette::opaque_face_mask(block, slot / 2, slot % 2 == 1)
+        }),
         water_level,
     }
 }
@@ -2267,10 +2269,10 @@ mod tests {
     #[test]
     fn an_edit_that_leaves_a_border_voxel_solid_marks_nobody() {
         // The other control, and the one the review on legacy PR 66 found missing. A neighbour's
-        // mesh depends on which of this chunk's boundary voxels are *solid* and on
-        // nothing else, so stone becoming grass on a shared wall changes nothing across
-        // it — the neighbour would be remeshed into a byte-identical mesh. The edited
-        // chunk still remeshes, because colour is its own.
+        // mesh depends on the occupancy of this chunk's boundary voxels and on nothing
+        // else, so one full cube becoming another on a shared wall changes nothing
+        // across it — the neighbour would be remeshed into a byte-identical mesh. The
+        // edited chunk still remeshes, because colour is its own.
         //
         // The corner is in the list deliberately: it is where the old behaviour was
         // most expensive, marking three chunks for an edit none of them can see.
@@ -2302,6 +2304,32 @@ mod tests {
                 remeshed: 2
             },
             "the guard swallowed an edit that does change the seam"
+        );
+    }
+
+    #[test]
+    fn changing_a_border_shapes_occupied_half_marks_the_neighbour() {
+        let pos = at(31, 5, 5);
+        let mut store = store_with_stone_at(coord(0, 0, 0));
+
+        for block in [palette::SLATE_SLAB_BOTTOM, palette::SLATE_SLAB_TOP] {
+            assert_eq!(
+                store.apply_block(pos, block, SIZE),
+                BlockApplied::Rewritten {
+                    coord: coord(0, 0, 0),
+                    remeshed: 2,
+                },
+                "shape {block} did not invalidate the chunk that reads its partial face"
+            );
+        }
+        assert_eq!(
+            store
+                .take_changes()
+                .into_iter()
+                .filter(|change| { *change == ChunkChange::NeighbourChanged(coord(1, 0, 0)) })
+                .count(),
+            2,
+            "full -> bottom and bottom -> top both move the shared half-grid"
         );
     }
 
