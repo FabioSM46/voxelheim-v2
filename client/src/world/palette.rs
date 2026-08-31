@@ -159,6 +159,22 @@ pub struct BlockShape {
     pub material: BlockId,
 }
 
+/// One axis-aligned piece of a block shape, in half-block coordinates.
+///
+/// The server carries the same bounds as floats in local voxel coordinates. Keeping
+/// this mirror on the exact `0..=2` half-grid makes every comparison integer while
+/// still describing the only boundaries slabs and stairs use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlockBounds {
+    pub min: [u8; 3],
+    pub max: [u8; 3],
+}
+
+const FULL_BLOCK_BOUNDS: BlockBounds = BlockBounds {
+    min: [0, 0, 0],
+    max: [2, 2, 2],
+};
+
 /// Decodes geometry and material; unknown ids fail closed as solid cubes.
 pub const fn shape_of(block: BlockId) -> BlockShape {
     let mut shape = BlockShape {
@@ -206,6 +222,111 @@ pub const fn shape_of(block: BlockId) -> BlockShape {
 /// Whether `block` is a solid slab/stair rather than a full cube or plant shape.
 pub const fn is_architectural_shape(block: BlockId) -> bool {
     !matches!(shape_of(block).kind, ShapeKind::Cube)
+}
+
+/// The occupied pieces of a solid block, mirroring the server's
+/// `world.CollisionBounds` exactly.
+pub fn collision_bounds(block: BlockId) -> ([BlockBounds; 2], usize) {
+    let mut bounds = [BlockBounds::default(); 2];
+    if !is_solid(block) {
+        return (bounds, 0);
+    }
+
+    let shape = shape_of(block);
+    match shape.kind {
+        ShapeKind::Cube => {
+            bounds[0] = FULL_BLOCK_BOUNDS;
+            (bounds, 1)
+        }
+        ShapeKind::Slab => {
+            bounds[0] = if shape.half == ShapeHalf::Top {
+                BlockBounds {
+                    min: [0, 1, 0],
+                    max: [2, 2, 2],
+                }
+            } else {
+                BlockBounds {
+                    min: [0, 0, 0],
+                    max: [2, 1, 2],
+                }
+            };
+            (bounds, 1)
+        }
+        ShapeKind::Stair => {
+            bounds[0] = if shape.half == ShapeHalf::Top {
+                BlockBounds {
+                    min: [0, 1, 0],
+                    max: [2, 2, 2],
+                }
+            } else {
+                BlockBounds {
+                    min: [0, 0, 0],
+                    max: [2, 1, 2],
+                }
+            };
+            bounds[1] = if shape.half == ShapeHalf::Top {
+                BlockBounds {
+                    min: [0, 0, 0],
+                    max: [2, 1, 2],
+                }
+            } else {
+                BlockBounds {
+                    min: [0, 1, 0],
+                    max: [2, 2, 2],
+                }
+            };
+            match shape.facing {
+                ShapeFacing::North => bounds[1].max[2] = 1,
+                ShapeFacing::East => bounds[1].min[0] = 1,
+                ShapeFacing::South => bounds[1].min[2] = 1,
+                ShapeFacing::West => bounds[1].max[0] = 1,
+            }
+            (bounds, 2)
+        }
+    }
+}
+
+/// Whether one of the eight half-block cells is occupied by `block`.
+pub fn occupies_half(block: BlockId, half: [u8; 3]) -> bool {
+    if half.iter().any(|coordinate| *coordinate >= 2) {
+        return false;
+    }
+    let (bounds, count) = collision_bounds(block);
+    bounds[..count].iter().any(|bounds| {
+        (0..3).all(|axis| half[axis] >= bounds.min[axis] && half[axis] < bounds.max[axis])
+    })
+}
+
+/// Which of the four half-cells on one voxel face hide the chunk across it.
+///
+/// Bits are ordered with the first in-plane axis varying fastest. This is the
+/// border signature `ChunkStore` compares when a neighbour revision changes: a
+/// bottom slab becoming a top slab must remesh the chunk beside it even though both
+/// answers are broadly "opaque".
+pub fn opaque_face_mask(block: BlockId, axis: usize, positive: bool) -> u8 {
+    if !is_opaque(block) || axis >= 3 {
+        return 0;
+    }
+    let u = (axis + 1) % 3;
+    let v = (axis + 2) % 3;
+    let mut mask = 0;
+    for j in 0..2 {
+        for i in 0..2 {
+            let mut half = [0u8; 3];
+            half[axis] = u8::from(positive);
+            half[u] = i;
+            half[v] = j;
+            if occupies_half(block, half) {
+                mask |= 1 << (j * 2 + i);
+            }
+        }
+    }
+    mask
+}
+
+/// Whether the ordinary greedy cube sweep owns this block.
+pub fn is_greedy_opaque(block: BlockId) -> bool {
+    is_opaque(block) && !is_architectural_shape(block)
 }
 
 const COVER_FAMILY: [BlockId; 3] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE];
@@ -888,6 +1009,76 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn slate_shape_bounds_are_the_servers_half_block_collision_boxes() {
+        let lower = BlockBounds {
+            min: [0, 0, 0],
+            max: [2, 1, 2],
+        };
+        let upper = BlockBounds {
+            min: [0, 1, 0],
+            max: [2, 2, 2],
+        };
+        assert_eq!(
+            collision_bounds(SLATE_SLAB_BOTTOM),
+            ([lower, BlockBounds::default()], 1)
+        );
+        assert_eq!(
+            collision_bounds(SLATE_SLAB_TOP),
+            ([upper, BlockBounds::default()], 1)
+        );
+
+        let directional = [
+            BlockBounds {
+                min: [0, 0, 0],
+                max: [2, 2, 1],
+            },
+            BlockBounds {
+                min: [1, 0, 0],
+                max: [2, 2, 2],
+            },
+            BlockBounds {
+                min: [0, 0, 1],
+                max: [2, 2, 2],
+            },
+            BlockBounds {
+                min: [0, 0, 0],
+                max: [1, 2, 2],
+            },
+        ];
+        for (offset, direction) in directional.into_iter().enumerate() {
+            let bottom = SLATE_STAIR_NORTH_BOTTOM + offset as BlockId;
+            let top = SLATE_STAIR_NORTH_TOP + offset as BlockId;
+            let mut bottom_high = direction;
+            bottom_high.min[1] = 1;
+            let mut top_low = direction;
+            top_low.max[1] = 1;
+            assert_eq!(collision_bounds(bottom), ([lower, bottom_high], 2));
+            assert_eq!(collision_bounds(top), ([upper, top_low], 2));
+        }
+
+        assert_eq!(collision_bounds(AIR).1, 0);
+        assert_eq!(collision_bounds(FLOWER_RED).1, 0);
+        assert_eq!(
+            collision_bounds(BlockId::MAX),
+            ([FULL_BLOCK_BOUNDS, BlockBounds::default()], 1)
+        );
+    }
+
+    #[test]
+    fn face_masks_distinguish_the_halves_and_orientations_a_neighbour_mesh_reads() {
+        assert_eq!(opaque_face_mask(STONE, 0, false), 0b1111);
+        assert_eq!(opaque_face_mask(FLOWER_RED, 0, false), 0);
+        assert_eq!(opaque_face_mask(SLATE_SLAB_BOTTOM, 0, false), 0b0101);
+        assert_eq!(opaque_face_mask(SLATE_SLAB_TOP, 0, false), 0b1010);
+        assert_eq!(opaque_face_mask(SLATE_SLAB_BOTTOM, 1, false), 0b1111);
+        assert_eq!(opaque_face_mask(SLATE_SLAB_BOTTOM, 1, true), 0);
+        assert_ne!(
+            opaque_face_mask(SLATE_STAIR_NORTH_BOTTOM, 0, false),
+            opaque_face_mask(SLATE_STAIR_SOUTH_BOTTOM, 0, false)
+        );
     }
 
     #[test]
