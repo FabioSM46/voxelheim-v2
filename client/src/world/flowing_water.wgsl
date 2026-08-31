@@ -170,27 +170,27 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Only the crest foams. `max(wave, 0.0)` rather than `abs`, so a trough stays water
     // instead of turning the pattern into a row of white bars at twice the frequency.
     let crest = foam * max(wave, 0.0);
+
+    // Depth still acts on the diffuse base colour, where it cannot scale the specular
+    // highlight the standard material computes. Foam takes the other path: emissive is
+    // added after direct and ambient lighting inside `apply_pbr_lighting`, so a small
+    // crest survives night without turning the whole lit result — specular included —
+    // up and down. At noon this term is small beside the sun; in darkness it is the
+    // scattering cue that keeps moving water from becoming a flat pane. This emits no
+    // light into the world; it changes only the colour of this surface.
+    let colour = pbr_input.material.base_color.rgb * brightness;
+    pbr_input.material.base_color = vec4<f32>(colour, pbr_input.material.base_color.a);
+    pbr_input.material.emissive = vec4<f32>(
+        pbr_input.material.emissive.rgb + vec3<f32>(1.0, 1.0, 1.0) * crest,
+        pbr_input.material.emissive.a,
+    );
+
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
     } else {
         out.color = pbr_input.material.base_color;
     }
-
-    // Apply the moving pattern after lighting. Before #673 both operations changed
-    // `base_color` above `apply_pbr_lighting`, so night multiplied the ripple and foam
-    // back towards zero and moving water became a flat pane. The ambient floor keeps
-    // the brightness modulation legible in darkness; moving the crest here also lets
-    // foam scatter towards white independently of the directional light. That means a
-    // crest remains visible in shadow, deliberately: water that still reads as moving
-    // at night is the property this pass owns, while the sky remains the only light.
-    let colour = mix(
-        out.color.rgb * brightness,
-        vec3<f32>(1.0, 1.0, 1.0),
-        crest,
-    );
-    out.color = vec4<f32>(colour, out.color.a);
-
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

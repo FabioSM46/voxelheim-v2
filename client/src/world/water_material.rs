@@ -7,8 +7,8 @@
 //! and a low `perceptual_roughness` so a lake catches a highlight. None of that is
 //! reproduced here. [`FlowingWaterExtension`] is a `MaterialExtension`, so Bevy composes
 //! the standard PBR fragment shader with one of ours and the base half keeps answering
-//! for lighting, fog, tonemapping and alpha exactly as it did — the extension changes
-//! the lit colour's brightness and foam before post-processing, and nothing else.
+//! for lighting, fog, tonemapping and alpha exactly as it did — the extension modulates
+//! diffuse brightness and gives moving foam a small emissive term, and nothing else.
 //!
 //! ## Nothing is decided here
 //!
@@ -337,32 +337,41 @@ mod tests {
         );
     }
 
-    /// The ripple belongs to the surface rather than to the light falling on it.
+    /// Moving foam belongs to the surface rather than to the light falling on it.
     ///
-    /// Before #673 the shader changed `base_color` and then passed that colour through
-    /// PBR lighting. At night the light term multiplied the whole pattern back towards
-    /// zero, so the river became flat. Keep both the brightness and the foam after the
-    /// lighting call; moving either one back above it recreates the defect while every
-    /// headless gate still accepts the WGSL.
+    /// Before #673 both halves changed `base_color`, so night multiplied the foam back
+    /// towards zero and a river became flat. Brightness remains a diffuse modulation —
+    /// moving it after lighting would also scale the specular highlight — while the
+    /// crest enters PBR through its emissive channel, which that function adds after
+    /// direct and ambient light. Keep the two paths separate.
     #[test]
-    fn the_ripple_and_foam_are_applied_after_lighting() {
+    fn moving_foam_uses_the_post_lighting_emissive_path() {
+        let diffuse = SOURCE
+            .find("pbr_input.material.base_color.rgb * brightness")
+            .expect("ripple brightness must remain a diffuse modulation");
+        let emissive = SOURCE
+            .find("pbr_input.material.emissive =")
+            .expect("moving foam must enter the emissive channel");
         let lighting = SOURCE
             .find("out.color = apply_pbr_lighting(pbr_input);")
             .expect("the shader must retain standard PBR lighting");
-        let modulation = SOURCE
-            .find("out.color.rgb * brightness")
-            .expect("the lit colour must carry the ripple brightness");
-        let foam = SOURCE
-            .find("vec3<f32>(1.0, 1.0, 1.0),\n        crest,")
-            .expect("the lit colour must carry the foam crest");
+        let statement_end = emissive
+            + SOURCE[emissive..]
+                .find(';')
+                .expect("the emissive assignment must end");
+        let statement = &SOURCE[emissive..statement_end];
 
         assert!(
-            lighting < modulation && lighting < foam,
-            "ripple and foam must be applied after lighting so they survive at night"
+            diffuse < lighting && emissive < lighting,
+            "diffuse and emissive inputs must be set before standard PBR evaluates them"
         );
         assert!(
-            !SOURCE.contains("pbr_input.material.base_color.rgb * brightness"),
-            "modulating base_color before lighting makes the ripple disappear at night"
+            statement.contains("vec3<f32>(1.0, 1.0, 1.0)") && statement.contains("crest"),
+            "the white foam crest must be the emissive contribution"
+        );
+        assert!(
+            !SOURCE.contains("out.color.rgb * brightness"),
+            "ripple brightness after lighting would also scale the specular highlight"
         );
     }
 
