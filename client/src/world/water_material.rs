@@ -7,8 +7,8 @@
 //! and a low `perceptual_roughness` so a lake catches a highlight. None of that is
 //! reproduced here. [`FlowingWaterExtension`] is a `MaterialExtension`, so Bevy composes
 //! the standard PBR fragment shader with one of ours and the base half keeps answering
-//! for lighting, fog, tonemapping and alpha exactly as it did — the extension changes
-//! the colour's brightness on its way in, and nothing else.
+//! for lighting, fog, tonemapping and alpha exactly as it did — the extension modulates
+//! diffuse brightness and gives moving foam a small emissive term, and nothing else.
 //!
 //! ## Nothing is decided here
 //!
@@ -334,6 +334,44 @@ mod tests {
         assert!(
             SOURCE.contains("foam = 0.0;"),
             "the still branch must set foam to zero explicitly"
+        );
+    }
+
+    /// Moving foam belongs to the surface rather than to the light falling on it.
+    ///
+    /// Before #673 both halves changed `base_color`, so night multiplied the foam back
+    /// towards zero and a river became flat. Brightness remains a diffuse modulation —
+    /// moving it after lighting would also scale the specular highlight — while the
+    /// crest enters PBR through its emissive channel, which that function adds after
+    /// direct and ambient light. Keep the two paths separate.
+    #[test]
+    fn moving_foam_uses_the_post_lighting_emissive_path() {
+        let diffuse = SOURCE
+            .find("pbr_input.material.base_color.rgb * brightness")
+            .expect("ripple brightness must remain a diffuse modulation");
+        let emissive = SOURCE
+            .find("pbr_input.material.emissive =")
+            .expect("moving foam must enter the emissive channel");
+        let lighting = SOURCE
+            .find("out.color = apply_pbr_lighting(pbr_input);")
+            .expect("the shader must retain standard PBR lighting");
+        let statement_end = emissive
+            + SOURCE[emissive..]
+                .find(';')
+                .expect("the emissive assignment must end");
+        let statement = &SOURCE[emissive..statement_end];
+
+        assert!(
+            diffuse < lighting && emissive < lighting,
+            "diffuse and emissive inputs must be set before standard PBR evaluates them"
+        );
+        assert!(
+            statement.contains("vec3<f32>(1.0, 1.0, 1.0)") && statement.contains("crest"),
+            "the white foam crest must be the emissive contribution"
+        );
+        assert!(
+            !SOURCE.contains("out.color.rgb * brightness"),
+            "ripple brightness after lighting would also scale the specular highlight"
         );
     }
 

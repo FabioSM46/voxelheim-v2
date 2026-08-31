@@ -3,7 +3,7 @@
 //
 // Shading only. The surface stays exactly where `mesher.rs` put it — the level the
 // server sent — and nothing here displaces a vertex, so what moves on the screen is
-// light and never geometry.
+// colour and never geometry.
 //
 // Three inputs, all of them per-vertex and all of them derived from block ids the
 // server chose:
@@ -170,12 +170,20 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Only the crest foams. `max(wave, 0.0)` rather than `abs`, so a trough stays water
     // instead of turning the pattern into a row of white bars at twice the frequency.
     let crest = foam * max(wave, 0.0);
-    let colour = mix(
-        pbr_input.material.base_color.rgb * brightness,
-        vec3<f32>(1.0, 1.0, 1.0),
-        crest,
-    );
+
+    // Depth still acts on the diffuse base colour, where it cannot scale the specular
+    // highlight the standard material computes. Foam takes the other path: emissive is
+    // added after direct and ambient lighting inside `apply_pbr_lighting`, so a small
+    // crest survives night without turning the whole lit result — specular included —
+    // up and down. At noon this term is small beside the sun; in darkness it is the
+    // scattering cue that keeps moving water from becoming a flat pane. This emits no
+    // light into the world; it changes only the colour of this surface.
+    let colour = pbr_input.material.base_color.rgb * brightness;
     pbr_input.material.base_color = vec4<f32>(colour, pbr_input.material.base_color.a);
+    pbr_input.material.emissive = vec4<f32>(
+        pbr_input.material.emissive.rgb + vec3<f32>(1.0, 1.0, 1.0) * crest,
+        pbr_input.material.emissive.a,
+    );
 
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
