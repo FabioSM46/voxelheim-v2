@@ -384,6 +384,14 @@ func TestPlacingIntoFlowingWaterReplacesIt(t *testing.T) {
 
 	h, chunks := editWorld(t)
 	player, _ := h.join(1, [3]float32{0.5, 200, 0.5})
+	// The fixture sits on a chunk border, and since #717 a water voxel with an unread
+	// neighbour is deferred rather than decided from fabricated blocks. This test is
+	// about the edit, not the residency frontier, so the one chunk the neighbourhood
+	// crosses into is made resident — and only that one: the chunks under the player
+	// stay unread, because unread is what stands the fixture's floor up.
+	if _, _, err := chunks.Get(context.Background(), world.Coord{Y: 6, Z: -1}); err != nil {
+		t.Fatalf("compose the bordering chunk: %v", err)
+	}
 	giveBlock(t, h, player, chunks, world.Stone)
 
 	target := [3]int32{3, 200, 0}
@@ -601,7 +609,25 @@ func TestBreakingPutsNothingInThePackAndLeavesTheYieldOnTheGround(t *testing.T) 
 
 	h, chunks := editWorld(t)
 	player, _ := h.join(1, [3]float32{0.5, 200, 0.5})
+	// The shelf sits on a chunk border, and since #717 a water voxel with an unread
+	// neighbour is deferred rather than decided from fabricated blocks. This test is
+	// about the yield, not the residency frontier, so the chunks the neighbourhood
+	// crosses into are made resident. Composing the player's own chunk turns the
+	// unread-is-solid ground under their feet into generated air, so a real block is
+	// put back where they stand — and the shelf drops one level below the feet, so
+	// that same block is what the freed water spreads against instead of flooding the
+	// collector's cell and ferrying them out of pickup range on its current.
+	for _, coord := range []world.Coord{{Y: 6, Z: -1}, {X: -1, Y: 6, Z: -1}, {Y: 6}} {
+		if _, _, err := chunks.Get(context.Background(), coord); err != nil {
+			t.Fatalf("compose bordering chunk %+v: %v", coord, err)
+		}
+	}
+	if err := chunks.Apply(context.Background(), 0, 199, 0, world.Stone, nil); err != nil {
+		t.Fatalf("floor the player: %v", err)
+	}
 	target, floor := dropShelf(t, player)
+	target[1]--
+	floor[1]--
 	if err := chunks.Apply(context.Background(), int64(floor[0]), int64(floor[1]), int64(floor[2]), world.Stone, nil); err != nil {
 		t.Fatalf("prepare the shelf under the drop: %v", err)
 	}

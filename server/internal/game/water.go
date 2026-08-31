@@ -197,51 +197,47 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 
 		here, ok := s.waterBlockLocked(at, world.Stone)
 		if !ok {
+			// The voxel's own chunk is not resident: there is no water here to decide
+			// and nothing to lose. This is the one drop whose recovery story is real —
+			// when the chunk is composed again the cache marks it, `UnstableWater`
+			// scans it, and *its own* water is what that scan schedules.
 			delete(s.pendingWater, at)
 			continue
 		}
-		above, _ := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y + 1, z: at.z}, world.Stone)
 
-		// **The one neighbour whose absence cannot be defaulted, since #653.** Every
-		// other read here falls back to a block that makes [world.NextWater] answer
-		// conservatively: Stone above is not water, and Stone on a side carries no
-		// water level, so an unread neighbour supplies nothing and starts nothing.
-		// Below had the same property while the rule's only use for it was "is this
-		// water unsupported" — Air meant drain, and draining a cell that was already
-		// Air wrote nothing.
+		// **A voxel is decided only from a neighbourhood that was actually read
+		// (#717).** Every fabricated fallback is a lie [world.NextWater] believes,
+		// and each was tried: Stone above a side hid a falling column from the
+		// anti-cone rule and rebuilt the pre-#653 widening cone at every residency
+		// seam; a fabricated Air below would pour a waterfall into ground that may be
+		// solid, and Stone below would hold up water that has nothing under it.
 		//
-		// It stopped having it the moment a cell over a void became the head of a
-		// fall. Air below now *enables* a write rather than suppressing one, so a
-		// fabricated Air under a chunk nobody has loaded would pour a waterfall into
-		// ground that may be solid. Defaulting to Stone instead would only move the
-		// lie: unsupported water over an unloaded chunk would then spread rather than
-		// drain.
-		//
-		// So this voxel is not decided at all. Dropped from the schedule rather than
-		// retried, exactly as an [world.ErrNotResident] *write* is below and for the
-		// same reason: when that chunk is composed the cache marks it, `UnstableWater`
-		// scans it, and the neighbourhood — this voxel included — is scheduled again
-		// from a world that can be read.
-		below, belowResident := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
-		if !belowResident {
-			delete(s.pendingWater, at)
-			continue
+		// Dropping the voxel instead was the previous answer, and its recovery story
+		// was one-sided: composing the *missing* chunk scans that chunk's own water,
+		// which does not include a voxel one chunk over and need not reach it — a
+		// fall descending toward a residency seam was truncated there and hung in the
+		// air for ever. So an unreadable neighbourhood defers the voxel: rescheduled
+		// at [WaterResidencyRetryDelay], it is examined again until the world around
+		// it can be read. The retry is what makes the deferral safe, and the deferral
+		// is what makes every block below a real read.
+		readable := true
+		read := func(v waterVoxel, absent world.Block) world.Block {
+			block, resident := s.waterBlockLocked(v, absent)
+			readable = readable && resident
+			return block
 		}
-		// The four sides, and what each of them is standing on. The second half is
-		// what tells [world.NextWater] that a side is a column on its way down rather
-		// than water spread across a floor — see the measurement at that function.
-		//
-		// Both default to Stone when the chunk is not resident, and the two defaults
-		// mean opposite-looking things that are the same thing: an unread *side* is
-		// Stone, which carries no water level and so feeds nothing; an unread block
-		// *under* a side is Stone, which reads as support, so a side that is real
-		// water feeds exactly as it did before #653. Neither default can invent a
-		// fall — that is what the residency guard on `below` above is for.
+		above := read(waterVoxel{x: at.x, y: at.y + 1, z: at.z}, world.Stone)
+		below := read(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
 		var sides, sidesAbove [4]world.Block
 		for i, offset := range [4]waterVoxel{{x: 1}, {x: -1}, {z: 1}, {z: -1}} {
 			side := waterVoxel{x: at.x + offset.x, y: at.y, z: at.z + offset.z}
-			sides[i], _ = s.waterBlockLocked(side, world.Stone)
-			sidesAbove[i], _ = s.waterBlockLocked(waterVoxel{x: side.x, y: side.y + 1, z: side.z}, world.Stone)
+			sides[i] = read(side, world.Stone)
+			sidesAbove[i] = read(waterVoxel{x: side.x, y: side.y + 1, z: side.z}, world.Stone)
+		}
+		if !readable {
+			delete(s.pendingWater, at)
+			s.scheduleWaterLocked(at, worldTick+WaterResidencyRetryDelay)
+			continue
 		}
 
 		next := world.NextWater(here, above, below, sides, sidesAbove)
@@ -267,10 +263,26 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 				Block: next,
 			})
 		case errors.Is(err, world.ErrNotResident):
+			// Evicted between the read and the write: deferred like an unreadable
+			// neighbour. If the chunk never comes back, the retry finds the own-chunk
+			// read failing above and hands the voxel to the composition scan.
 			delete(s.pendingWater, at)
+			s.scheduleWaterLocked(at, worldTick+WaterResidencyRetryDelay)
 		case errors.Is(err, errWaterReadChanged):
+			// Somebody wrote this voxel between the read and the write — a player
+			// edit applies through the cache without this lock. Decide it again from
+			// what stands there now. **Doing nothing here stranded the voxel for
+			// ever (#717)**: its heap entry was already popped, and a map entry with
+			// no heap row behind it blocks every future push, because
+			// [Sim.scheduleWaterLocked] only pushes a due that beats the map. Frozen
+			// mid-drain water is what that looked like on screen.
+			delete(s.pendingWater, at)
+			s.scheduleWaterLocked(at, worldTick+WaterTickDelay)
 		default:
 			s.log.Error("water change did not finish cleanly", "pos", [3]int64{at.x, at.y, at.z}, "error", err)
+			// An error is not a decision. Same strand as above, same repair.
+			delete(s.pendingWater, at)
+			s.scheduleWaterLocked(at, worldTick+WaterResidencyRetryDelay)
 		}
 	}
 	return changes

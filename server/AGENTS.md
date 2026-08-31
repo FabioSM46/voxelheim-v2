@@ -2668,6 +2668,21 @@ Recorded here so the next reader does not mistake them for oversights:
   encoded heading and keeps spreading by level. This is deliberately cardinal and local — not a
   finite-volume simulation — but it prevents one river source from feeding upstream and sideways
   curtains while its current carries the swimmer somewhere else.
+- **A water voxel is decided only from a neighbourhood that was actually read, and no scheduler
+  path strands it (#717).** Floating sheets and mid-air truncated falls were never the automaton's
+  answer — `NextWater`'s fixed point over the reported seed-1 cascades is clean — they were
+  non-fixed-point states the scheduler froze. Three freeze paths existed: a voxel over a
+  non-resident chunk was *dropped* on a recovery story that was one-sided (composing the missing
+  chunk scans that chunk's own water, which never reaches a voxel one chunk over); a write losing
+  its guarded compare left a `pendingWater` entry with no heap row, which blocks every future push;
+  and non-resident neighbour reads were fabricated as Stone, which hid falling columns from the
+  anti-cone rule and rebuilt the pre-#653 widening cone at every residency seam. Now an unreadable
+  neighbourhood defers the voxel — rescheduled at `WaterResidencyRetryDelay`, examined again when
+  the world can be read — and every write-error arm reschedules. The one legitimate drop remains
+  the voxel whose *own* chunk is unread, because its chunk's composition scan really does own it.
+  The price, paid knowingly: water at a residency frontier polls every two seconds until the
+  frontier moves, and "empty schedule" is no longer what quiescence looks like in a fixture whose
+  missing chunks never arrive (see `runWaterToFixedPoint`).
 - **Moving water is a target the swimmer's own target is added to, never a force accumulated
   across ticks.** `FlowDirection` (`internal/game/current.go`) reads one voxel and its five
   neighbours and answers a unit horizontal direction plus a falling flag: a `WaterCurrent*` id

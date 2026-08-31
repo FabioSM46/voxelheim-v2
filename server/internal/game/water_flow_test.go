@@ -180,6 +180,21 @@ func TestANonResidentNeighbourNeitherReceivesNorSupportsWater(t *testing.T) {
 	if got := cache.Len(); got != 1 {
 		t.Fatalf("water pass generated a neighbour: cache has %d chunks, want 1", got)
 	}
+
+	// And the two halves part ways on the schedule (#717): the voxel whose *own*
+	// chunk is unread is dropped — its chunk's composition scan is what brings it
+	// back — while the voxel that could be read but not decided is deferred, because
+	// nothing else will ever return for it.
+	sim.mu.Lock()
+	_, deferred := sim.pendingWater[at]
+	_, dropped := sim.pendingWater[waterVoxel{x: -1, y: 0, z: 10}]
+	sim.mu.Unlock()
+	if !deferred {
+		t.Fatal("the undecidable voxel left the schedule; dropped is how #717's water froze")
+	}
+	if dropped {
+		t.Fatal("the voxel in the unread chunk stayed scheduled; its composition scan owns it")
+	}
 }
 
 func TestTheSameWaterScheduleProducesTheSameWorld(t *testing.T) {
@@ -258,9 +273,12 @@ func BenchmarkWaterTick(b *testing.B) {
 		}
 	}
 
+	// Interior voxels only: a target on the chunk face reads a side from a chunk the
+	// fixture never makes resident, and since #717 that defers the voxel instead of
+	// deciding it, which would turn this into a benchmark of the retry path.
 	targets := make([]waterVoxel, 0, WaterChangesPerTick)
-	for x := int64(0); x < 32 && len(targets) < WaterChangesPerTick; x++ {
-		for z := int64(0); z < 32 && len(targets) < WaterChangesPerTick; z++ {
+	for x := int64(1); x < 31 && len(targets) < WaterChangesPerTick; x++ {
+		for z := int64(1); z < 31 && len(targets) < WaterChangesPerTick; z++ {
 			targets = append(targets, waterVoxel{x: x, y: 30, z: z})
 		}
 	}
@@ -284,14 +302,19 @@ func BenchmarkWaterTick(b *testing.B) {
 	}
 }
 
-// The other half of the residency guard: a voxel skipped because the chunk under it
-// could not be read must come back when that chunk can be.
+// The other half of the residency guard: a voxel deferred because the chunk under it
+// could not be read must decide itself once that chunk can be — with nobody's help.
 //
-// The guard drops the voxel rather than retrying it, and that is only correct if
-// something schedules it again. This walks the whole round trip rather than trusting
-// the argument: skip, compose the chunk below, drain the composition scan the way
-// `waterScanLoop` does, and require the voxel to be decided from the real blocks.
-func TestAVoxelSkippedForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
+// **The old contract dropped the voxel, and its recovery story was not true (#717).**
+// Composing the chunk below scans that chunk's *own* water; a voxel one chunk up is
+// not in that scan and, unless the composed chunk happens to hold water on its top
+// face, nothing the scan schedules ever reaches the dropped voxel. The first version
+// of this test only passed by queueing a scan of the voxel's own chunk by hand — a
+// scan nothing performs at runtime — and a fall descending toward a residency seam
+// hung truncated in the air for ever. The deferral makes the round trip real: the
+// voxel stays scheduled, retries after [WaterResidencyRetryDelay], and is decided
+// from real blocks the first time every read answers.
+func TestAVoxelDeferredForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
 	t.Parallel()
 
 	sim, cache := newWaterSim(t)
@@ -309,14 +332,19 @@ func TestAVoxelSkippedForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
 		t.Fatalf("a voxel over an unread chunk became %d, want it left as Air", got)
 	}
 	sim.mu.Lock()
-	_, stillPending := sim.pendingWater[at]
+	due, stillPending := sim.pendingWater[at]
 	sim.mu.Unlock()
-	if stillPending {
-		t.Fatal("the skipped voxel stayed on the schedule; it is meant to be dropped and re-scheduled by the scan")
+	if !stillPending {
+		t.Fatal("the deferred voxel left the schedule; dropped is how #717's falls froze in the air")
+	}
+	if due <= 1 || due > 1+WaterResidencyRetryDelay {
+		t.Fatalf("the deferred voxel is due at tick %d, want a bounded retry within %d ticks",
+			due, WaterResidencyRetryDelay)
 	}
 
-	// The chunk below arrives. This is what the cache does on composition and what
-	// `waterScanLoop` turns into a scan.
+	// The chunk below arrives, delivered exactly as the runtime delivers it: composed,
+	// and its own water scanned. Deliberately nothing scans the voxel's chunk again —
+	// the retry is the whole of the recovery.
 	below := world.ChunkOf(at.x, at.y-1, at.z)
 	chunk, _, err := cache.Get(context.Background(), below)
 	if err != nil {
@@ -327,16 +355,9 @@ func TestAVoxelSkippedForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
 			t.Fatalf("QueueUnstableWater: %v", err)
 		}
 	}
-	// And the voxel's own chunk is scanned too, which is what actually reaches it: the
-	// source beside it is water on this chunk's boundary, so the scan schedules its
-	// neighbourhood.
-	if err := sim.QueueUnstableWater(context.Background(), world.Coord{},
-		[]int{world.Index(world.Local(at.x+1), world.Local(at.y), world.Local(at.z))}); err != nil {
-		t.Fatalf("QueueUnstableWater: %v", err)
-	}
 
 	decided := false
-	for tick := uint64(2); tick <= 2+4*WaterTickDelay; tick++ {
+	for tick := uint64(2); tick <= 2+WaterResidencyRetryDelay+4*WaterTickDelay; tick++ {
 		sim.Step(tick)
 		if waterBlockAt(t, cache, at) != world.Air {
 			decided = true
@@ -362,9 +383,10 @@ func TestAVoxelSkippedForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
 
 // There is no world floor to strand water on: everything under a column's surface is
 // generated ground, all the way down, so a water voxel never has an unreadable chunk
-// under it for want of one existing. The residency guard therefore cannot delete a
-// voxel forever — a point worth pinning rather than reasoning about, because the guard
-// is the one path that drops work.
+// under it for want of one existing. A deferred voxel's retry therefore always has a
+// chunk that *can* arrive — a point worth pinning rather than reasoning about, because
+// since #717 the residency guard parks work instead of dropping it, and a park with no
+// possible arrival would poll for ever.
 func TestNothingUnderTheSurfaceIsEverAir(t *testing.T) {
 	t.Parallel()
 
@@ -524,5 +546,97 @@ func TestTheScheduleIsTakenInDueOrderThenBottomUp(t *testing.T) {
 		if order[i] != at {
 			t.Fatalf("entry %d is %+v, want %+v (full order %+v)", i, order[i], at, order)
 		}
+	}
+}
+
+// racingWaterWorld is a resident chunk whose next guarded write loses: `race` runs
+// once, between the simulation's read and its compare, the way a player edit applies
+// through the cache without the simulation lock.
+type racingWaterWorld struct {
+	chunk *world.Chunk
+	race  func()
+}
+
+func (w *racingWaterWorld) Peek(coord world.Coord) (*world.Chunk, error) {
+	if coord != w.chunk.Coord {
+		return nil, world.ErrNotResident
+	}
+	return w.chunk, nil
+}
+
+func (w *racingWaterWorld) ApplyResidentGuarded(x, y, z int64, block world.Block, allow func(world.Block) error) error {
+	if w.race != nil {
+		race := w.race
+		w.race = nil
+		race()
+	}
+	if err := allow(w.chunk.At(world.Local(x), world.Local(y), world.Local(z))); err != nil {
+		return err
+	}
+	w.chunk.Set(world.Local(x), world.Local(y), world.Local(z), block)
+	return nil
+}
+
+// A write that loses its guarded compare is decided again from the world as it now
+// is — it does not stand, and it does not strand.
+//
+// **The empty errWaterReadChanged arm was a permanent freeze (#717).** The voxel's
+// heap entry was already popped when the compare failed, and a map entry with no heap
+// row behind it blocks every future push — [Sim.scheduleWaterLocked] only pushes a due
+// that beats the map, and later dues never do. Not even a composition scan could
+// revive the voxel, so whatever water stood there stopped answering the automaton for
+// the rest of the process: frozen mid-drain sheets and columns, on screen, for ever.
+func TestALostGuardedWriteIsDecidedAgainFromTheNewWorld(t *testing.T) {
+	t.Parallel()
+
+	cache := world.NewCache(73, 1, 1)
+	sim, err := NewSim(DefaultTickRate, 1, testWorldSeed, NewCacheTerrain(cache), cache, testEntityIDs(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	water := &racingWaterWorld{chunk: world.NewChunk(world.Coord{})}
+	if err := sim.ConfigureWater(water); err != nil {
+		t.Fatalf("ConfigureWater: %v", err)
+	}
+
+	// A source over air: the pass will decide the air below it into a fall, and the
+	// racer will have placed Stone there first.
+	source := waterVoxel{x: 16, y: 20, z: 16}
+	target := waterVoxel{x: 16, y: 19, z: 16}
+	water.chunk.Set(int(source.x), int(source.y), int(source.z), world.Water)
+	water.race = func() {
+		water.chunk.Set(int(target.x), int(target.y), int(target.z), world.Stone)
+	}
+	scheduleWaterNow(sim, target)
+
+	if changes := sim.Step(1); len(changes) != 0 {
+		t.Fatalf("the lost write still reported %+v, want no changes", changes)
+	}
+	if got := water.chunk.At(int(target.x), int(target.y), int(target.z)); got != world.Stone {
+		t.Fatalf("the racer's block is %d, want the Stone it placed to stand", got)
+	}
+	sim.mu.Lock()
+	due, pending := sim.pendingWater[target]
+	sim.mu.Unlock()
+	if !pending {
+		t.Fatal("the voxel left the schedule after the lost write; that strand is the #717 freeze")
+	}
+	if due != 1+WaterTickDelay {
+		t.Fatalf("the voxel is due at tick %d, want re-decided at %d", due, 1+WaterTickDelay)
+	}
+
+	// Re-examined, the voxel is decided from the racer's world — Stone is not water's
+	// to change — and the schedule empties instead of holding a dead entry.
+	for tick := uint64(2); tick <= 2+2*WaterTickDelay; tick++ {
+		sim.Step(tick)
+	}
+	if got := water.chunk.At(int(target.x), int(target.y), int(target.z)); got != world.Stone {
+		t.Fatalf("re-deciding the voxel produced %d, want the Stone left alone", got)
+	}
+	sim.mu.Lock()
+	_, pending = sim.pendingWater[target]
+	sim.mu.Unlock()
+	if pending {
+		t.Fatal("the re-decided voxel is still pending; the retry must settle")
 	}
 }
