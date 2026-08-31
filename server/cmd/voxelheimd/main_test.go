@@ -203,6 +203,7 @@ func validOptions() options {
 		tickRate:         20,
 		viewDistance:     3,
 		maxPlayers:       session.DefaultConcurrentSessions,
+		terrainMemoryMiB: world.DefaultTerrainMemoryMiB,
 		handshakeTimeout: session.DefaultHandshakeTimeout,
 		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
@@ -290,9 +291,14 @@ func TestOptionsValidate(t *testing.T) {
 		"player limit above the intended scale": func(o *options) {
 			o.maxPlayers = session.MaxConcurrentSessions + 1
 		},
+		"terrain memory 0": func(o *options) { o.terrainMemoryMiB = 0 },
 		// The new refusal: inside the contract's ceiling and outside this server's.
 		"view distance the cache cannot hold": func(o *options) {
-			o.viewDistance = uint(world.LargestViewDistanceHeld()) + 1
+			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance)) + 1
+		},
+		"one session does not fit the terrain budget": func(o *options) {
+			o.terrainMemoryMiB = world.MemoryMiBFor(
+				uint64(world.CacheWorkingSetFor(int(o.viewDistance)))) - 1
 		},
 
 		// A zero deadline is not "no deadline" for a server: it is the flag the whole
@@ -344,7 +350,7 @@ func TestOptionsValidate(t *testing.T) {
 		// [world.LargestViewDistanceHeld] answers rather than this test restating.
 		func(o *options) {
 			o.tickRate = 255
-			o.viewDistance = uint(world.LargestViewDistanceHeld())
+			o.viewDistance = uint(world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance))
 		},
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
 		func(o *options) { o.stormPeriod = 0 },
@@ -392,6 +398,22 @@ func TestOptionsValidateReportsTheValueGiven(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "45s") {
 		t.Errorf("error %q does not mention the value the operator gave", err)
+	}
+
+	opts = validOptions()
+	opts.terrainMemoryMiB = world.MemoryMiBFor(
+		uint64(world.CacheWorkingSetFor(int(opts.viewDistance)))) - 1
+	err = opts.validate()
+	if err == nil {
+		t.Fatal("validate accepted a budget smaller than one working set")
+	}
+	for _, want := range []string{
+		"max players 100", "48 MiB", "0 chunks", "distance 3", "514 chunks",
+		"343 in view", "49 MiB",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("memory refusal %q does not contain %q", err, want)
+		}
 	}
 }
 

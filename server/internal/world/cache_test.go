@@ -304,72 +304,81 @@ func TestNewCacheFallsBackToDefaults(t *testing.T) {
 	}
 }
 
-// The residency has to hold the view volume, and before #666 nothing said so.
-//
-// At the default view distance of 3 it did by luck — 343 chunks against 1024 — and the
-// flag was free to move without it. At 8 the volume is 4913 against the same 1024, and
-// the server evicts what it is about to need: measured, 1576 ticks over 10 ms in 104
-// seconds with the client's meshed-chunk count frozen.
-func TestTheResidencyHoldsTheViewVolume(t *testing.T) {
+func TestTheDefaultResidencyIsUnchanged(t *testing.T) {
 	t.Parallel()
 
-	for distance := 0; distance <= LargestViewDistanceHeld(); distance++ {
-		volume := ChunksInView(distance)
-		capacity := CacheCapacityFor(distance)
-		if capacity < volume {
-			t.Errorf("view distance %d covers %d chunks and is given a residency of %d",
-				distance, volume, capacity)
-		}
-		if capacity < DefaultCacheCapacity {
-			t.Errorf("view distance %d is given %d, under the floor of %d",
-				distance, capacity, DefaultCacheCapacity)
-		}
+	if got := CacheCapacityFor(3, 100, DefaultTerrainMemoryMiB); got != 2056 {
+		t.Fatalf("default residency = %d chunks, want the existing 2056", got)
 	}
 }
 
-// The residency holds several separated sessions, not one.
-//
-// **This is the half the first version of #666 got wrong**, and a review caught it: a
-// formula sized for one session collapses the moment two players walk apart, which is the
-// same defect one player-count down. What it is deliberately *not* sized for is the
-// server's player cap — see [cacheWorkingSets], where the arithmetic for a hundred players
-// is written out and rejected.
-func TestTheResidencyHoldsSeveralSeparatedSessions(t *testing.T) {
+func TestTheBudgetBuysWholeWorkingSetsWithoutPretendingTheUnionFits(t *testing.T) {
 	t.Parallel()
 
-	for distance := 0; distance <= LargestViewDistanceHeld(); distance++ {
-		together := ChunksInView(distance) * cacheWorkingSets
-		if got := CacheCapacityFor(distance); got < together {
-			t.Errorf("view distance %d needs %d chunks for %d separated sessions, given %d",
-				distance, together, cacheWorkingSets, got)
-		}
+	workingSet := CacheWorkingSetFor(3)
+	if workingSet != 514 {
+		t.Fatalf("default working set = %d chunks, want 514", workingSet)
 	}
-	if got := ChunksInView(3); got != 343 {
-		t.Errorf("view distance 3 covers %d chunks, want 343", got)
+	capacity := CacheCapacityFor(3, 100, DefaultTerrainMemoryMiB)
+	if capacity%workingSet != 0 {
+		t.Errorf("capacity %d is not a whole number of %d-chunk working sets", capacity, workingSet)
 	}
-	if got := CacheCapacityFor(0); got < DefaultCacheCapacity {
-		t.Errorf("the smallest view distance is given %d, under the floor of %d",
-			got, DefaultCacheCapacity)
+	if capacity < workingSet || capacity >= workingSet*100 {
+		t.Errorf("capacity %d should hold one set but not all 100 separated sets", capacity)
 	}
 }
 
-// The ceiling is a real edge, not decoration: the protocol allows a view distance this
-// server cannot hold, and the refusal has to name the largest one it can.
-func TestTheCeilingRefusesAViewDistanceThatCannotBeHeld(t *testing.T) {
+func TestThePlayerLimitBoundsAWellFundedResidency(t *testing.T) {
 	t.Parallel()
 
-	largest := LargestViewDistanceHeld()
-	if CacheCapacityFor(largest) > MaxCacheCapacity {
-		t.Fatalf("the largest held distance %d needs %d, over the ceiling of %d",
-			largest, CacheCapacityFor(largest), MaxCacheCapacity)
+	workingSet := CacheWorkingSetFor(3)
+	budget := MemoryMiBFor(uint64(workingSet * 1000))
+	if got := CacheCapacityFor(3, 100, budget); got != workingSet*100 {
+		t.Errorf("100-player residency = %d, want %d", got, workingSet*100)
 	}
-	if CacheCapacityFor(largest+1) <= MaxCacheCapacity {
+	if got := CacheCapacityFor(3, 1000, budget); got != workingSet*1000 {
+		t.Errorf("1000-player residency = %d, want %d", got, workingSet*1000)
+	}
+}
+
+func TestTheBudgetNamesTheCollapseBoundary(t *testing.T) {
+	t.Parallel()
+
+	largest := LargestViewDistanceHeld(DefaultTerrainMemoryMiB, 16)
+	if got := CacheCapacityFor(largest, 100, DefaultTerrainMemoryMiB); got < CacheWorkingSetFor(largest) {
+		t.Fatalf("largest held distance %d has capacity %d below its working set", largest, got)
+	}
+	if got := CacheCapacityFor(largest+1, 100, DefaultTerrainMemoryMiB); got >= CacheWorkingSetFor(largest+1) {
 		t.Fatalf("distance %d also fits, so %d is not the largest", largest+1, largest)
 	}
-	// The protocol's own ceiling is past what any residency here holds, which is the
-	// whole reason a refusal exists rather than a clamp.
-	if ChunksInView(16) <= MaxCacheCapacity {
-		t.Errorf("the protocol ceiling of 16 covers %d chunks, which now fits; the refusal is dead code",
-			ChunksInView(16))
+
+	needed := MemoryMiBFor(uint64(CacheWorkingSetFor(3)))
+	if got := CacheCapacityFor(3, 100, needed-1); got != 0 {
+		t.Errorf("budget below one working set yields %d chunks, want collapse", got)
+	}
+	if got := CacheCapacityFor(3, 100, needed); got < CacheWorkingSetFor(3) {
+		t.Errorf("quoted %d MiB requirement still yields only %d chunks", needed, got)
+	}
+}
+
+func TestAnExtremeBudgetCannotWrapTheResidency(t *testing.T) {
+	t.Parallel()
+
+	workingSet := CacheWorkingSetFor(3)
+	want := workingSet * 100
+	if got := CacheCapacityFor(3, 100, ^uint64(0)); got != want {
+		t.Errorf("residency with the largest budget = %d, want player bound %d", got, want)
+	}
+}
+
+func TestLargestViewDistanceHeldStopsAtTheCallersCeiling(t *testing.T) {
+	t.Parallel()
+
+	const ceiling = 16
+	if got := LargestViewDistanceHeld(^uint64(0), ceiling); got != ceiling {
+		t.Errorf("largest distance with an unlimited budget = %d, want ceiling %d", got, ceiling)
+	}
+	if got := LargestViewDistanceHeld(^uint64(0), -1); got != 0 {
+		t.Errorf("largest distance with a negative ceiling = %d, want 0", got)
 	}
 }

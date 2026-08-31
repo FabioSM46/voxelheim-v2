@@ -544,6 +544,13 @@ package can avoid the import would create two truths to keep in step for no bene
   registry counts, including one still silent at the hello and one choosing a character, because
   both consume a socket and a session goroutine.
 
+  **The terrain budget is related and deliberately not equivalent.**
+  `-terrain-memory-mib` charges 96 KiB per resident chunk and `world.CacheCapacityFor` keeps no
+  more separated working sets than the player ceiling allows, but a budget need not hold every
+  admitted player separated at once. Their union exceeding the cache is ordinary LRU degradation;
+  one session's own view plus headroom exceeding it is the collapse #666 measured and is refused
+  at startup. The default 193 MiB preserves #666's 2056-entry residency.
+
 ## Item drops, and the entity shape the rest of the world will reuse
 
 A drop is the first thing in this simulation that is not a player. It lives in `Sim.drops`,
@@ -2435,6 +2442,7 @@ flags decide is the part worth writing down.
 | `-tick-rate` | authoritative simulation ticks per second (1..255) |
 | `-view-distance` | the chunk streaming radius, in chunks (0..16) |
 | `-max-players` | the maximum concurrent sessions (100..1000). A connection past it receives `SERVER_FULL` |
+| `-terrain-memory-mib` | the memory budget for resident terrain, charged at 96 KiB per chunk. A budget below one complete working set is refused at startup |
 | `-handshake-timeout` | how long a new connection may say nothing before it is closed |
 | `-character-timeout` | how long an admitted account may take to choose a character. The one window a person is inside; must be at least the handshake timeout |
 | `-idle-timeout` | how long a welcomed session may say nothing. Must be at least the handshake timeout |
@@ -2613,8 +2621,6 @@ Recorded here so the next reader does not mistake them for oversights:
   can compare, and both are a change to the delivery contract rather than to this code. **It
   predates item drops** — the same reorder was reachable between a placement on the read loop and a
   mined break's insertion on the mining worker. Found by the review on legacy PR 89.
-- **The chunk cache is bounded by count, not by memory.** 1024 chunks is roughly 70 MiB with their
-  encoded payloads; a smaller machine or a larger `ChunkSize` would want a byte budget instead.
 - **Players do not collide with each other.** Only with terrain. Entity-versus-entity collision
   needs a broadphase and a decision about who yields, and neither belongs in a walking skeleton.
 - **Snapshot fan-out is O(sessions × entities), and every snapshot is complete.** No spatial index,
