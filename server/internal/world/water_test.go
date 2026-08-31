@@ -342,20 +342,23 @@ func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 			wantTop := col.waterSurface
 			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 				nextX, nextZ := x+step[0], z+step[1]
-				higher := columnAt(waterSeed, nextX, nextZ)
-				if !higher.river || higher.waterSurface <= col.waterSurface {
+				if !riverAt(waterSeed, nextX, nextZ) {
+					continue
+				}
+				surface := riverSurfaceAt(waterSeed, nextX, nextZ)
+				if surface < seaLevel || surface <= col.waterSurface {
 					continue
 				}
 				higherEdges++
-				drop := higher.waterSurface - col.waterSurface
+				drop := surface - col.waterSurface
 				if drop%riverTerraceStep != 0 {
 					t.Fatalf("adjacent channels (%d, %d) at %d and (%d, %d) at %d differ by %d, not a whole %d-block terrace",
-						x, z, col.waterSurface, nextX, nextZ, higher.waterSurface, drop, riverTerraceStep)
+						x, z, col.waterSurface, nextX, nextZ, surface, drop, riverTerraceStep)
 				}
-				dx, dz := CurrentOf(higher.waterBlock)
-				if int64(dx) == -step[0] && int64(dz) == -step[1] {
+				current := waterCurrentBlock(riverCurrentAt(waterSeed, nextX, nextZ))
+				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
 					feedingEdges++
-					wantTop = max(wantTop, higher.waterSurface)
+					wantTop = max(wantTop, surface)
 				} else {
 					rejectedEdges++
 				}
@@ -405,14 +408,17 @@ func TestTheSeedOneCascadeRejectsSidewaysTerraceCurtains(t *testing.T) {
 			oldTop, wantTop := col.waterSurface, col.waterSurface
 			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 				nextX, nextZ := x+step[0], z+step[1]
-				higher := columnAt(seed, nextX, nextZ)
-				if !higher.river || higher.waterSurface <= col.waterSurface {
+				if !riverAt(seed, nextX, nextZ) {
 					continue
 				}
-				oldTop = max(oldTop, higher.waterSurface)
-				dx, dz := CurrentOf(higher.waterBlock)
-				if int64(dx) == -step[0] && int64(dz) == -step[1] {
-					wantTop = max(wantTop, higher.waterSurface)
+				surface := riverSurfaceAt(seed, nextX, nextZ)
+				if surface < seaLevel || surface <= col.waterSurface {
+					continue
+				}
+				oldTop = max(oldTop, surface)
+				current := waterCurrentBlock(riverCurrentAt(seed, nextX, nextZ))
+				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
+					wantTop = max(wantTop, surface)
 				}
 			}
 			if col.fallSurface != wantTop {
