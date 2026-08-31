@@ -211,11 +211,148 @@ mod tests {
         assert!(SOURCE.contains("falling = in.uv_b.x;"));
     }
 
+    /// Reads a `const <name>: f32 = <value>;` out of the shader source.
+    ///
+    /// The shader is the one declaration of these numbers and this reads it rather than
+    /// restating it — a second copy in Rust would be a second answer, and the whole
+    /// reason `SOURCE` is included here is that there is only ever one.
+    fn shader_const(name: &str) -> f32 {
+        let needle = format!("const {name}: f32 = ");
+        let start = SOURCE
+            .find(&needle)
+            .unwrap_or_else(|| panic!("the shader declares no {name}"))
+            + needle.len();
+        let rest = &SOURCE[start..];
+        let end = rest.find(';').expect("unterminated const");
+        rest[..end]
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a float: {error}"))
+    }
+
+    /// **This test used to pin `RIPPLE_DEPTH` at 0.08, and 0.08 was the defect.**
+    ///
+    /// #598 set one amplitude for all three waters and argued it as a ceiling: visible
+    /// motion, and still the same colour as before it moved. On a translucent blue
+    /// surface at play distance it was not visible at all, and a river was
+    /// indistinguishable from a lake — which is what #655 reported. So the ceiling is
+    /// still a ceiling; what changed is that there are three numbers under it and they
+    /// must be ordered.
+    ///
+    /// **The order is the claim, not the values.** Still water is the quiet one, a
+    /// current is louder, a fall is loudest — that ordering is what makes the three
+    /// readable as three things, and it is what a later retune must not accidentally
+    /// invert. The bound above it keeps a retune from answering "make it visible" with
+    /// a surface that is no longer water.
+    ///
+    /// **The bound is a bound on the rendered push only because `ripple` is normalised**,
+    /// and that is the conditional this test does not itself carry: the shader computes
+    /// `1.0 + depth * ripple(point)`, so a depth bounds the brightness shift exactly when
+    /// |ripple| <= 1. It does — the divisor on `ripple`'s last line proves it — and
+    /// [`the_ripple_is_normalised_and_the_depths_depend_on_it`] is what keeps that true,
+    /// which is why the two tests are worth reading together.
     #[test]
-    fn the_ripple_stays_inside_the_brightness_budget() {
-        // The one number the issue fixes: at most 8% either way, so still water is the
-        // same colour it was before it shimmered.
-        assert!(SOURCE.contains("const RIPPLE_DEPTH: f32 = 0.08;"));
+    fn the_three_waters_are_ordered_and_bounded() {
+        let still = shader_const("STILL_DEPTH");
+        let running = shader_const("RUN_DEPTH");
+        let falling = shader_const("FALL_DEPTH");
+        assert!(
+            still < running && running < falling,
+            "the three ripple depths must rise from still to falling, got {still} / {running} / {falling}"
+        );
+        assert!(
+            falling <= 0.5,
+            "the loudest water may not push its own colour by more than half, got {falling}"
+        );
+        assert!(
+            still <= 0.08,
+            "still water must stay at or under the 0.08 #598 argued for, got {still}"
+        );
+    }
+
+    /// The one thing every depth constant above silently depends on: `ripple` returns a
+    /// value in [-1, 1], so a depth *is* the brightness shift rather than merely scaling
+    /// an unknown.
+    ///
+    /// The proof is arithmetic and lives in the shader: a product of two sines is at most
+    /// one, a sine is at most one, so the weighted sum is at most the sum of the weights —
+    /// and the last line divides by exactly that. **What this test guards is the divisor.**
+    /// Adding a third octave without adding its weight there makes `ripple` return more
+    /// than one, and `FALL_DEPTH` alone would then drive brightness negative. That is a
+    /// silent break: the surface would still render, just wrongly, on the one code path
+    /// CI has no device to exercise.
+    ///
+    /// Read out of the source rather than restated, like every other number here. The
+    /// shader is not clamped on purpose — a clamp would keep a broken `ripple` looking
+    /// plausible, which is the opposite of what this repository wants from a broken
+    /// invariant.
+    #[test]
+    fn the_ripple_is_normalised_and_the_depths_depend_on_it() {
+        let weight = shader_const("OCTAVE_WEIGHT");
+        assert!(
+            (0.0..1.0).contains(&weight),
+            "the second octave must weigh less than the first, got {weight}"
+        );
+        // Every octave in the numerator must appear in the divisor. Two octaves today:
+        // the unit-weight coarse term and OCTAVE_WEIGHT's fine one.
+        assert!(
+            SOURCE.contains("(coarse + fine * OCTAVE_WEIGHT) / (1.0 + OCTAVE_WEIGHT)"),
+            "ripple must divide by the sum of its octave weights, or it is no longer \
+             bounded by one and every depth constant above it stops being a bound"
+        );
+        // And exactly two octaves: a third term would need its weight in that divisor,
+        // and this is what notices one arriving without it.
+        assert_eq!(
+            SOURCE.matches("let coarse").count() + SOURCE.matches("let fine").count(),
+            2,
+            "ripple gained or lost an octave; its divisor and the depth constants both \
+             have to move with it"
+        );
+    }
+
+    /// The half that is not brightness, which the issue asks for by name.
+    ///
+    /// A crest pulled toward white is foam; a crest that is only brighter is the same
+    /// surface under a stronger lamp. Still water has none of it, and that absence is
+    /// itself one of the three differences — a lake does not foam.
+    #[test]
+    fn only_moving_water_foams_and_a_fall_foams_most() {
+        let running = shader_const("RUN_FOAM");
+        let falling = shader_const("FALL_FOAM");
+        assert!(
+            running > 0.0 && falling > running,
+            "foam must rise from a current to a fall, got {running} / {falling}"
+        );
+        assert!(
+            falling < 1.0,
+            "foam may not replace the water's colour outright, got {falling}"
+        );
+        assert!(
+            !SOURCE.contains("STILL_FOAM"),
+            "still water must have no foam constant at all; its absence is the rule"
+        );
+        assert!(
+            SOURCE.contains("foam = 0.0;"),
+            "the still branch must set foam to zero explicitly"
+        );
+    }
+
+    /// The shape of the pattern, which is the difference that actually carries the three
+    /// apart: swell, streaks along a current, and columns down a fall.
+    ///
+    /// Both stretches are bounded above for a reason worth keeping: past about five the
+    /// pattern stops varying along the direction it travels, and a band that does not
+    /// vary cannot be seen to move — so an over-stretched streak is a *less* legible
+    /// current, not a more legible one.
+    #[test]
+    fn moving_water_is_stretched_along_the_way_it_moves() {
+        for name in ["RUN_STRETCH", "FALL_STRETCH"] {
+            let stretch = shader_const(name);
+            assert!(
+                stretch > 1.0 && stretch <= 5.0,
+                "{name} must stretch the pattern without flattening it, got {stretch}"
+            );
+        }
     }
 
     #[test]

@@ -2345,6 +2345,23 @@ Recorded here so the next reader does not mistake them for oversights:
   specialization of ours, for the same four floats. The opaque half still carries neither, which
   is `SurfaceMesh`'s all-or-nothing rule: the buffers are filled for every vertex of a surface
   whose faces carry a flow and empty for one whose faces do not.
+
+  **Three waters, and since #655 they read as three.** #598 gave all of them one amplitude —
+  `RIPPLE_DEPTH = 0.08`, argued as a ceiling so that moving water was still the same colour it
+  had been. On a translucent blue surface at play distance that was not visible at all, and a
+  river could not be told from a lake. The falling branch was worse off still: it had never once
+  run, because the server wrote only water *sources* until #653 gave the flow automaton a way to
+  make a fall and #654 wrote falls into the terrain.
+  Each state now differs from the others in three ways, not one — how deep the ripple cuts, how
+  far its crest is pulled toward white, and the *shape* of the pattern. The third is the one that
+  carries it: still water is isotropic swell, a current is stretched along the way it runs, and a
+  fall is stretched down the wall it falls on. Foam is the half that is not brightness, which is
+  the difference between water moving and water under a stronger lamp; still water has none, and
+  that absence is one of the three differences rather than an omission.
+  The numbers live in the WGSL and nowhere else. `water_material.rs`'s tests read them back out
+  of `SOURCE` rather than restating them, and what they pin is the *ordering* — still quieter
+  than a current, a current quieter than a fall — because that is what makes three things
+  readable as three, and it is what a retune must not invert by accident.
   Greedy meshing merges quads across blocks, so a texture there is a different problem with
   different costs — seams across merged quads, an atlas, a per-chunk material decision — and none
   of it is on the table. Item-only swatches live in `player/items.rs` beside the rows that name
