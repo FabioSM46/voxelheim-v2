@@ -9,11 +9,17 @@ func TestNextWaterTruthTable(t *testing.T) {
 	t.Parallel()
 
 	sourceSides := [4]Block{Water, Air, Air, Air}
+	// A side only hands water on if it is standing on something, so every row that is
+	// not *about* a falling side leaves this unset and gets ground under all four.
+	// See [NextWater]: it is what stops a waterfall spraying sideways at every level
+	// of its descent.
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
 	tests := []struct {
 		name         string
 		here         Block
 		above, below Block
 		sides        [4]Block
+		sidesAbove   [4]Block
 		want         Block
 	}{
 		{name: "plain source is permanent", here: Water, below: Air, want: Water},
@@ -22,9 +28,36 @@ func TestNextWaterTruthTable(t *testing.T) {
 		{name: "ice is unchanged", here: Ice, above: Water, below: Air, want: Ice},
 		{name: "source above air falls", here: Air, above: Water, below: Air, want: WaterFlow7},
 		{name: "flow above flow falls", here: WaterFlow2, above: WaterFlow1, below: Stone, want: WaterFlow7},
-		{name: "unsupported flow drains", here: WaterFlow6, below: Air, sides: sourceSides, want: Air},
-		{name: "low flow below drains", here: WaterFlow6, below: WaterFlow6, sides: sourceSides, want: Air},
-		{name: "air over a drop remains air", here: Air, below: Air, sides: sourceSides, want: Air},
+		// The three rows #653 changed, and each of them recorded the defect rather
+		// than a rule: with a side still able to feed it, a cell over a void is the
+		// head of a fall and not a cell to drain. Their unfed twins follow each one,
+		// so the drain arm keeps a negative control at every position it owns.
+		{name: "unsupported flow with a feed falls", here: WaterFlow6, below: Air, sides: sourceSides, want: WaterFlow7},
+		{name: "unsupported flow with no feed drains", here: WaterFlow6, below: Air, want: Air},
+		{name: "a fall pours into the partial flow below it", here: WaterFlow6, below: WaterFlow6, sides: sourceSides, want: WaterFlow7},
+		{name: "a partial flow below with no feed drains", here: WaterFlow6, below: WaterFlow6, want: Air},
+		{name: "air over a drop beside water becomes a fall", here: Air, below: Air, sides: sourceSides, want: WaterFlow7},
+		{name: "air over a drop with no feed remains air", here: Air, below: Air, want: Air},
+		// The threshold is the spread rule's own: level 2 is the last that leaves a
+		// neighbour anything, so it is the last that may start a fall — and the lip it
+		// starts carries that neighbour's level less one, never a full seven. A fall
+		// whose lip answered seven whatever fed it re-fed its own supplier and the
+		// whole spread oscillated; see [NextWater].
+		{name: "a level-two side starts a thin fall", here: Air, below: Air, sides: [4]Block{WaterFlow2}, want: WaterFlow1},
+		{name: "a level-one side starts nothing", here: Air, below: Air, sides: [4]Block{WaterFlow1}, want: Air},
+		{name: "a fall's lip thins with its supply", here: Air, below: Air, sides: [4]Block{WaterFlow5}, want: WaterFlow4},
+		// And the column under a lip is full, from the arm at the top: that is where a
+		// fall's one full-strength answer comes from.
+		{name: "the column under a lip is full", here: Air, above: WaterFlow4, below: Air, want: WaterFlow7},
+		// A side that is itself over a void is a column on its way down, and it hands
+		// on nothing. Without this the wet cone around a fall widened about six blocks
+		// per block of descent; the measurement is at [NextWater].
+		{name: "a falling side feeds nothing", here: Air, below: Stone,
+			sides: [4]Block{WaterFlow7}, sidesAbove: [4]Block{Water, Air, Air, Air}, want: Air},
+		{name: "the same side, standing on ground, feeds", here: Air, below: Stone,
+			sides: [4]Block{WaterFlow7}, sidesAbove: grounded, want: WaterFlow6},
+		{name: "a side over a partial flow is falling too", here: Air, below: Stone,
+			sides: [4]Block{Water}, sidesAbove: [4]Block{WaterFlow3, Air, Air, Air}, want: Air},
 		{name: "source spreads seven", here: Air, below: Stone, sides: sourceSides, want: WaterFlow7},
 		{name: "level one spreads nowhere", here: Air, below: Stone, sides: [4]Block{WaterFlow1}, want: Air},
 		{name: "level six spreads five", here: Air, below: Stone, sides: [4]Block{WaterFlow6}, want: WaterFlow5},
@@ -35,9 +68,13 @@ func TestNextWaterTruthTable(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := NextWater(test.here, test.above, test.below, test.sides); got != test.want {
-				t.Errorf("NextWater(%d, %d, %d, %v) = %d, want %d",
-					test.here, test.above, test.below, test.sides, got, test.want)
+			sidesAbove := test.sidesAbove
+			if sidesAbove == ([4]Block{}) {
+				sidesAbove = grounded
+			}
+			if got := NextWater(test.here, test.above, test.below, test.sides, sidesAbove); got != test.want {
+				t.Errorf("NextWater(%d, %d, %d, %v, %v) = %d, want %d",
+					test.here, test.above, test.below, test.sides, sidesAbove, got, test.want)
 			}
 		})
 	}
@@ -52,7 +89,8 @@ func TestNextWaterNeverCreatesASource(t *testing.T) {
 		for _, above := range inputs {
 			for _, below := range inputs {
 				sides := [4]Block{Water, WaterFlow7, WaterCurrentZPos, Air}
-				got := NextWater(here, above, below, sides)
+				grounded := [4]Block{Stone, Stone, Stone, Stone}
+				got := NextWater(here, above, below, sides, grounded)
 				if waterSource(got) && got != here {
 					t.Fatalf("NextWater created source %d from here=%d above=%d below=%d", got, here, above, below)
 				}
@@ -86,7 +124,7 @@ func TestAClosedFlowingBasinDrainsWithoutASource(t *testing.T) {
 				if z+1 < len(basin) {
 					sides[3] = basin[z+1][x]
 				}
-				next[z][x] = NextWater(basin[z][x], Air, Stone, sides)
+				next[z][x] = NextWater(basin[z][x], Air, Stone, sides, [4]Block{Stone, Stone, Stone, Stone})
 			}
 		}
 		basin = next
@@ -130,6 +168,8 @@ func TestUnstableWaterFindsOnlyAirBoundariesAndFaces(t *testing.T) {
 func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 	t.Parallel()
 
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+
 	for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
 		for _, tc := range []struct {
 			name  string
@@ -142,7 +182,7 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 			{"under water", Water, Grass, [4]Block{Air, Air, Air, Air}},
 			{"over nothing", Air, Air, [4]Block{Air, Air, Air, Air}},
 		} {
-			if got := NextWater(flower, tc.above, tc.below, tc.sides); got != flower {
+			if got := NextWater(flower, tc.above, tc.below, tc.sides, grounded); got != flower {
 				t.Errorf("%s: NextWater(%d, ...) = %d, want the flower left alone", tc.name, flower, got)
 			}
 		}
@@ -150,10 +190,10 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 
 	// Air in the same neighbourhood still flows, so the arm above is about cover
 	// rather than about having stopped the automaton.
-	if got := NextWater(Air, Air, Grass, [4]Block{Air, Air, Air, Air}); got != Air {
+	if got := NextWater(Air, Air, Grass, [4]Block{Air, Air, Air, Air}, grounded); got != Air {
 		t.Errorf("dry air = %d, want Air", got)
 	}
-	if got := NextWater(Air, Air, Grass, [4]Block{Water, Air, Air, Air}); got == Air {
+	if got := NextWater(Air, Air, Grass, [4]Block{Water, Air, Air, Air}, grounded); got == Air {
 		t.Error("air beside a source stayed air; the automaton is no longer flowing")
 	}
 	// And cover carries no water level, so a flower beside a flow feeds it nothing.
@@ -171,15 +211,17 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
 	t.Parallel()
 
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+
 	// An equivalence rather than a table of levels: swapping a flower onto an empty side
 	// changes nothing, for every water id and in every position.
 	for _, here := range []Block{Water, WaterFlow1, WaterFlow4, WaterFlow7, WaterCurrentXPos} {
 		for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
 			for position := 1; position < 4; position++ {
 				sides := [4]Block{Water, Air, Air, Air}
-				want := NextWater(here, Air, Grass, sides)
+				want := NextWater(here, Air, Grass, sides, grounded)
 				sides[position] = flower
-				if got := NextWater(here, Air, Grass, sides); got != want {
+				if got := NextWater(here, Air, Grass, sides, grounded); got != want {
 					t.Errorf("NextWater(%d, ...) with %d on side %d = %d, want %d as with air",
 						here, flower, position, got, want)
 				}
@@ -188,17 +230,185 @@ func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
 	}
 
 	// And the levels, so two equally wrong answers cannot satisfy the equivalence.
-	if got := NextWater(Water, Air, Grass, [4]Block{FlowerRed, FlowerYellow, FlowerBlue, Air}); got != Water {
+	if got := NextWater(Water, Air, Grass, [4]Block{FlowerRed, FlowerYellow, FlowerBlue, Air}, grounded); got != Water {
 		t.Errorf("a source ringed by flowers became %d, want it left alone", got)
 	}
-	if got := NextWater(WaterFlow4, Air, Grass, [4]Block{Water, FlowerRed, FlowerYellow, FlowerBlue}); got != WaterFlow7 {
+	if got := NextWater(WaterFlow4, Air, Grass, [4]Block{Water, FlowerRed, FlowerYellow, FlowerBlue}, grounded); got != WaterFlow7 {
 		t.Errorf("a flow beside a source and three flowers = %d, want %d", got, WaterFlow7)
 	}
-	if got := NextWater(WaterFlow7, Air, FlowerRed, [4]Block{Water, Air, Air, Air}); got != WaterFlow7 {
+	if got := NextWater(WaterFlow7, Air, FlowerRed, [4]Block{Water, Air, Air, Air}, grounded); got != WaterFlow7 {
 		t.Errorf("water standing on a flower = %d, want it to keep level 7", got)
 	}
-	// The drain arm's negative control: it does fire with nothing below.
-	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Water, Air, Air, Air}); got != Air {
-		t.Errorf("water over nothing = %d, want it to drain", got)
+	// The drain arm's negative control: it does fire with nothing below and nothing
+	// on any side to feed a fall. The feed is what the check has to exclude since
+	// #653 — with a source beside it the same cell is a waterfall, not a leak.
+	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Air, Air, Air, Air}, grounded); got != Air {
+		t.Errorf("water over nothing, fed by nothing = %d, want it to drain", got)
+	}
+	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Water, Air, Air, Air}, grounded); got != WaterFlow7 {
+		t.Errorf("water over nothing beside a source = %d, want it to keep falling", got)
+	}
+}
+
+// A pool on a ledge, which before #653 was a fixed point of [NextWater]: it settled in
+// one step with zero changes, and no water ever left it. The three things asserted here
+// are the three halves of "water either rests in a container or falls" — it spills, the
+// spill is stable, and it drains completely once nothing feeds it.
+//
+// Two dimensions rather than three, because a fall is a question about `below` and one
+// horizontal axis; the other two sides are held at Stone so the fixture says only what
+// it means to. `flowWorld` is the smallest thing that can ask [NextWater] the question
+// it is documented to answer, and it is deliberately not an ECS, a chunk or a cache.
+type flowWorld struct {
+	cells  [][]Block // [x][y]
+	width  int
+	height int
+}
+
+func newFlowWorld(width, height int) *flowWorld {
+	cells := make([][]Block, width)
+	for x := range cells {
+		cells[x] = make([]Block, height)
+	}
+	return &flowWorld{cells: cells, width: width, height: height}
+}
+
+// at answers Stone outside the fixture, so the walls hold water in and the floor holds
+// it up — an out-of-bounds Air would be a second, undeclared drop.
+func (w *flowWorld) at(x, y int) Block {
+	if x < 0 || x >= w.width || y < 0 || y >= w.height {
+		return Stone
+	}
+	return w.cells[x][y]
+}
+
+// step advances every cell once and reports how many changed.
+func (w *flowWorld) step() int {
+	next := newFlowWorld(w.width, w.height)
+	changed := 0
+	for x := range w.width {
+		for y := range w.height {
+			sides := [4]Block{w.at(x+1, y), w.at(x-1, y), Stone, Stone}
+			sidesAbove := [4]Block{w.at(x+1, y+1), w.at(x-1, y+1), Stone, Stone}
+			got := NextWater(w.at(x, y), w.at(x, y+1), w.at(x, y-1), sides, sidesAbove)
+			next.cells[x][y] = got
+			if got != w.cells[x][y] {
+				changed++
+			}
+		}
+	}
+	w.cells = next.cells
+	return changed
+}
+
+// settle runs to a fixed point and reports the steps it took, or -1 if it never reached
+// one. A cap rather than a loop: a rule that oscillates must fail this test rather than
+// hang it.
+func (w *flowWorld) settle(cap int) int {
+	for step := 1; step <= cap; step++ {
+		if w.step() == 0 {
+			return step
+		}
+	}
+	return -1
+}
+
+func (w *flowWorld) waterCount() int {
+	count := 0
+	for x := range w.width {
+		for y := range w.height {
+			if IsWater(w.cells[x][y]) {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// ledgePool builds the fixture: a floor at y=0, a three-high ledge over x<=2, and a
+// source pool standing on top of it. Everything right of the ledge is open air down to
+// the floor — which is the drop nothing used to fall down.
+//
+//	y3 SSS...
+//	y2 ###...
+//	y1 ###...
+//	y0 ######
+func ledgePool(withSource bool) *flowWorld {
+	w := newFlowWorld(6, 6)
+	for x := range w.width {
+		for y := range w.height {
+			switch {
+			case y == 0, x <= 2 && y <= 2:
+				w.cells[x][y] = Stone
+			default:
+				w.cells[x][y] = Air
+			}
+		}
+	}
+	if withSource {
+		for x := range 3 {
+			w.cells[x][3] = Water
+		}
+	}
+	return w
+}
+
+func TestAPoolOnALedgeSpillsAndFalls(t *testing.T) {
+	t.Parallel()
+
+	w := ledgePool(true)
+	steps := w.settle(64)
+	if steps < 0 {
+		t.Fatal("the ledge never settled; the rule oscillates")
+	}
+
+	// It spilled: there is water off the ledge.
+	if got := w.at(3, 3); !IsWater(got) {
+		t.Errorf("the cell beside the pool is %d, want water spilling into it", got)
+	}
+	// It fell: the water reached the floor, three blocks down and past the lip.
+	if got := w.at(3, 1); !IsWater(got) {
+		t.Errorf("the cell at the foot of the fall is %d, want water that arrived there", got)
+	}
+	// And it is a fall rather than a source that moved: nothing outside the pool is a
+	// source, which TestNextWaterNeverCreatesASource holds in general and this holds
+	// on the one fixture where it would be visible.
+	for x := 3; x < w.width; x++ {
+		for y := range w.height {
+			if waterSource(w.at(x, y)) {
+				t.Errorf("a source appeared off the ledge at (%d, %d)", x, y)
+			}
+		}
+	}
+
+	// **Stable, and that is the claim the old drain arm existed to protect.** A rule
+	// that created water over a void and then drained it would pass every assertion
+	// above and flicker forever; settling to zero changes above already says it does
+	// not, and one more step says the fixed point is a fixed point.
+	if changed := w.step(); changed != 0 {
+		t.Errorf("%d cells changed after the world had settled; the rule flickers", changed)
+	}
+}
+
+func TestAFallDrainsCompletelyWhenItsFeedStops(t *testing.T) {
+	t.Parallel()
+
+	w := ledgePool(true)
+	if steps := w.settle(64); steps < 0 {
+		t.Fatal("the ledge never settled")
+	}
+	if w.waterCount() <= 3 {
+		t.Fatalf("only %d water cells after settling; the fall never formed", w.waterCount())
+	}
+
+	// Take the source away, the way breaking the bank of a river does.
+	for x := range 3 {
+		w.cells[x][3] = Air
+	}
+	if steps := w.settle(64); steps < 0 {
+		t.Fatal("the drained ledge never settled")
+	}
+	if got := w.waterCount(); got != 0 {
+		t.Errorf("%d water cells left after the feed stopped, want the fall gone entirely", got)
 	}
 }

@@ -133,14 +133,50 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 			continue
 		}
 		above, _ := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y + 1, z: at.z}, world.Stone)
-		below, _ := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
-		sides := [4]world.Block{}
-		sides[0], _ = s.waterBlockLocked(waterVoxel{x: at.x + 1, y: at.y, z: at.z}, world.Stone)
-		sides[1], _ = s.waterBlockLocked(waterVoxel{x: at.x - 1, y: at.y, z: at.z}, world.Stone)
-		sides[2], _ = s.waterBlockLocked(waterVoxel{x: at.x, y: at.y, z: at.z + 1}, world.Stone)
-		sides[3], _ = s.waterBlockLocked(waterVoxel{x: at.x, y: at.y, z: at.z - 1}, world.Stone)
 
-		next := world.NextWater(here, above, below, sides)
+		// **The one neighbour whose absence cannot be defaulted, since #653.** Every
+		// other read here falls back to a block that makes [world.NextWater] answer
+		// conservatively: Stone above is not water, and Stone on a side carries no
+		// water level, so an unread neighbour supplies nothing and starts nothing.
+		// Below had the same property while the rule's only use for it was "is this
+		// water unsupported" — Air meant drain, and draining a cell that was already
+		// Air wrote nothing.
+		//
+		// It stopped having it the moment a cell over a void became the head of a
+		// fall. Air below now *enables* a write rather than suppressing one, so a
+		// fabricated Air under a chunk nobody has loaded would pour a waterfall into
+		// ground that may be solid. Defaulting to Stone instead would only move the
+		// lie: unsupported water over an unloaded chunk would then spread rather than
+		// drain.
+		//
+		// So this voxel is not decided at all. Dropped from the schedule rather than
+		// retried, exactly as an [world.ErrNotResident] *write* is below and for the
+		// same reason: when that chunk is composed the cache marks it, `UnstableWater`
+		// scans it, and the neighbourhood — this voxel included — is scheduled again
+		// from a world that can be read.
+		below, belowResident := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
+		if !belowResident {
+			delete(s.pendingWater, at)
+			continue
+		}
+		// The four sides, and what each of them is standing on. The second half is
+		// what tells [world.NextWater] that a side is a column on its way down rather
+		// than water spread across a floor — see the measurement at that function.
+		//
+		// Both default to Stone when the chunk is not resident, and the two defaults
+		// mean opposite-looking things that are the same thing: an unread *side* is
+		// Stone, which carries no water level and so feeds nothing; an unread block
+		// *under* a side is Stone, which reads as support, so a side that is real
+		// water feeds exactly as it did before #653. Neither default can invent a
+		// fall — that is what the residency guard on `below` above is for.
+		var sides, sidesAbove [4]world.Block
+		for i, offset := range [4]waterVoxel{{x: 1}, {x: -1}, {z: 1}, {z: -1}} {
+			side := waterVoxel{x: at.x + offset.x, y: at.y, z: at.z + offset.z}
+			sides[i], _ = s.waterBlockLocked(side, world.Stone)
+			sidesAbove[i], _ = s.waterBlockLocked(waterVoxel{x: side.x, y: side.y + 1, z: side.z}, world.Stone)
+		}
+
+		next := world.NextWater(here, above, below, sides, sidesAbove)
 		if next == here {
 			delete(s.pendingWater, at)
 			continue
