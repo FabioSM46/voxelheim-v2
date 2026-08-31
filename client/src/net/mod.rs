@@ -2022,10 +2022,25 @@ fn drain_session_events(
 
             Ok(SessionEvent::LeaveCancellation(result)) => {
                 if result.accepted {
+                    let Some(suspended) = leaving.suspended.as_deref_mut() else {
+                        warn!(
+                            "leave cancellation was accepted without a suspended gameplay sender"
+                        );
+                        let _ = channels.commands.send(NetCommand::Disconnect);
+                        *state = ConnectionState::Disconnected;
+                        commands.remove_resource::<Outbound>();
+                        commands.remove_resource::<Session>();
+                        commands.remove_resource::<Identity>();
+                        commands.remove_resource::<CharacterChoice>();
+                        commands.remove_resource::<LeaveCountdown>();
+                        commands.remove_resource::<LeaveCancellation>();
+                        commands.remove_resource::<SuspendedOutbound>();
+                        commands.remove_resource::<Rejoining>();
+                        inboxes.wards.clear();
+                        break;
+                    };
+                    commands.insert_resource(suspended.0.sibling());
                     *state = ConnectionState::Connected;
-                    if let Some(suspended) = leaving.suspended.as_deref_mut() {
-                        commands.insert_resource(suspended.0.sibling());
-                    }
                     commands.remove_resource::<SuspendedOutbound>();
                     commands.remove_resource::<LeaveCancellation>();
                     commands.remove_resource::<LeaveCountdown>();
@@ -5339,7 +5354,9 @@ mod tests {
         let (mut app, events) = app_with_manual_link(ConnectionState::Leaving {
             seconds_remaining: Some(7),
         });
+        let (outbound, _sent) = Outbound::to_a_test(1);
         app.insert_resource(LeaveCancellation::Pending);
+        app.insert_resource(SuspendedOutbound(outbound));
         app.insert_resource(Session(params()));
         app.insert_resource(Rejoining);
         app.insert_resource(LeaveCountdown {
@@ -5356,7 +5373,33 @@ mod tests {
 
         assert_eq!(state(&app), ConnectionState::Connected);
         assert!(app.world().contains_resource::<Session>());
+        assert!(app.world().contains_resource::<Outbound>());
+        assert!(!app.world().contains_resource::<SuspendedOutbound>());
         assert!(!app.world().contains_resource::<LeaveCountdown>());
+        assert!(!app.world().contains_resource::<LeaveCancellation>());
+        assert!(!app.world().contains_resource::<Rejoining>());
+    }
+
+    #[test]
+    fn an_accepted_cancellation_without_a_suspended_sender_ends_the_session() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Leaving {
+            seconds_remaining: Some(7),
+        });
+        app.insert_resource(LeaveCancellation::Pending);
+        app.insert_resource(Session(params()));
+        app.insert_resource(Rejoining);
+
+        events
+            .send(SessionEvent::LeaveCancellation(codec::LeaveCancelResult {
+                accepted: true,
+                remaining_ms: 0,
+            }))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(state(&app), ConnectionState::Disconnected);
+        assert!(!app.world().contains_resource::<Session>());
+        assert!(!app.world().contains_resource::<Outbound>());
         assert!(!app.world().contains_resource::<LeaveCancellation>());
         assert!(!app.world().contains_resource::<Rejoining>());
     }
