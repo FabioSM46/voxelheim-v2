@@ -301,7 +301,7 @@ func serveDeps(t *testing.T) (*world.Cache, *game.Sim, *session.Registry) {
 	chunks := testChunks()
 	// The registry is the identity source as well as the broadcast target, exactly as it
 	// is in main: one counter names players and drops alike.
-	peers := session.NewRegistry()
+	peers := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(20, serveConfig().ViewDistance, serveConfig().WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -861,7 +861,7 @@ func TestServeEndsWhenClientSendsAServerPayload(t *testing.T) {
 func TestRegistryAssignsIdentitiesAndClosesEverything(t *testing.T) {
 	t.Parallel()
 
-	reg := session.NewRegistry()
+	reg := session.NewRegistry(3)
 	if got := reg.Count(); got != 0 {
 		t.Fatalf("a new registry holds %d sessions", got)
 	}
@@ -870,7 +870,10 @@ func TestRegistryAssignsIdentitiesAndClosesEverything(t *testing.T) {
 	ids := make(map[uint64]bool, 3)
 	for i := range conns {
 		conns[i] = newFakeConn()
-		id := reg.Add(conns[i])
+		id, admitted := reg.Add(conns[i])
+		if !admitted {
+			t.Fatalf("connection %d was refused before the registry reached its limit", i)
+		}
 		if id == 0 {
 			t.Fatal("entity id 0 was assigned; ids must be non-zero so that a zero value is never a valid identity")
 		}
@@ -881,6 +884,9 @@ func TestRegistryAssignsIdentitiesAndClosesEverything(t *testing.T) {
 	}
 	if got := reg.Count(); got != 3 {
 		t.Fatalf("Count = %d, want 3", got)
+	}
+	if id, admitted := reg.Add(newFakeConn()); admitted || id != 0 {
+		t.Fatalf("a fourth connection was admitted as %d past a limit of 3", id)
 	}
 
 	reg.CloseAll()
@@ -899,6 +905,51 @@ func TestRegistryAssignsIdentitiesAndClosesEverything(t *testing.T) {
 		t.Fatalf("Count = %d after removing every session, want 0", got)
 	}
 	reg.Remove(9999) // unknown ids are a no-op so cleanup paths stay simple
+}
+
+// The capacity check and insertion are one operation. Session workers arrive in
+// parallel in production; checking Count before Add would let every contender see
+// the same free slot and oversubscribe the process.
+func TestRegistryAdmissionIsAtomicAtTheLimit(t *testing.T) {
+	t.Parallel()
+
+	const limit = 7
+	reg := session.NewRegistry(limit)
+	start := make(chan struct{})
+	var contenders sync.WaitGroup
+	var admittedMu sync.Mutex
+	admitted := make([]uint64, 0, limit)
+
+	for range 64 {
+		contenders.Add(1)
+		go func() {
+			defer contenders.Done()
+			<-start
+			id, ok := reg.Add(newFakeConn())
+			if !ok {
+				return
+			}
+			admittedMu.Lock()
+			admitted = append(admitted, id)
+			admittedMu.Unlock()
+		}()
+	}
+	close(start)
+	contenders.Wait()
+
+	if got := len(admitted); got != limit {
+		t.Fatalf("%d contenders were admitted, want exactly %d", got, limit)
+	}
+	if got := reg.Count(); got != limit {
+		t.Fatalf("registry holds %d sessions, want exactly %d", got, limit)
+	}
+	seen := make(map[uint64]bool, limit)
+	for _, id := range admitted {
+		if id == 0 || seen[id] {
+			t.Fatalf("admitted identities are not unique non-zero values: %v", admitted)
+		}
+		seen[id] = true
+	}
 }
 
 func welcomeFrom(t *testing.T, env *vnet.Envelope) *vnet.ServerWelcome {

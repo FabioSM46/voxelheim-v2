@@ -523,7 +523,7 @@ func TestRegistryResendChunkSendsTheRegeneratedChunkWhole(t *testing.T) {
 		t.Fatalf("initial MoveTo: %v", err)
 	}
 
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(session.DefaultConcurrentSessions)
 	registry.Subscribe(1, streamer.View(), wake.wake, func([]byte) bool { return true })
 	if got := registry.ResendChunk(coord); got != 1 {
 		t.Fatalf("ResendChunk scheduled %d sessions, want 1", got)

@@ -52,7 +52,7 @@ func TestBroadcastChunkReachesExactlyTheSessionsHoldingTheChunk(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			reg := session.NewRegistry()
+			reg := session.NewRegistry(session.DefaultConcurrentSessions)
 			view := session.NewView(0)
 			for _, coord := range tc.loaded {
 				view.MarkLoaded(coord)
@@ -105,7 +105,7 @@ func TestBroadcastChunkReachesExactlyTheSessionsHoldingTheChunk(t *testing.T) {
 func TestUnsubscribeStopsBroadcastsBeforeTheQueueCanBeClosed(t *testing.T) {
 	t.Parallel()
 
-	reg := session.NewRegistry()
+	reg := session.NewRegistry(session.DefaultConcurrentSessions)
 	coord := world.Coord{X: 0, Y: 0, Z: 0}
 	view := session.NewView(0)
 	view.MarkLoaded(coord)
@@ -275,7 +275,7 @@ func editDeps(t *testing.T, cfg session.Config) (*world.Cache, *game.Sim, *sessi
 	t.Helper()
 
 	chunks := world.NewCache(cfg.WorldSeed, 4, 512)
-	peers := session.NewRegistry()
+	peers := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)

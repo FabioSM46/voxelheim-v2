@@ -62,7 +62,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	camp := openStructureStore(t, dir)
 	clock := openClockStore(t, dir)
 	explored := openExplorationStore(t, dir)
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -874,7 +874,7 @@ func TestAnEphemeralWorldKeepsItsClockInMemoryOnly(t *testing.T) {
 	}
 
 	chunks := world.NewCache(1, 4, 512)
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(game.DefaultTickRate, 1, testConfig().WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log)
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)

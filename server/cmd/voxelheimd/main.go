@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/certs"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
@@ -83,6 +84,7 @@ type options struct {
 	registrationKeyFile string
 	tickRate            uint
 	viewDistance        uint
+	maxPlayers          uint
 	handshakeTimeout    time.Duration
 	characterTimeout    time.Duration
 	idleTimeout         time.Duration
@@ -129,6 +131,8 @@ func parseFlags() options {
 			"this file or from "+registrationKeyEnv+", and never from both")
 	flag.UintVar(&opts.tickRate, "tick-rate", game.DefaultTickRate, "authoritative simulation ticks per second (1..255)")
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
+	flag.UintVar(&opts.maxPlayers, "max-players", session.DefaultConcurrentSessions,
+		"maximum concurrent sessions (100..1000); a connection past it receives SERVER_FULL")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
 		"how long a new connection may say nothing before it is closed; it gets no reply, having sent nothing to reply to")
 	flag.DurationVar(&opts.characterTimeout, "character-timeout", session.DefaultCharacterTimeout,
@@ -171,6 +175,9 @@ func (o options) validate() error {
 		return fmt.Errorf("tick rate must be in 1..%d, got %d", math.MaxUint8, o.tickRate)
 	case o.viewDistance > protocol.MaxViewDistance:
 		return fmt.Errorf("view distance must be at most %d, got %d", protocol.MaxViewDistance, o.viewDistance)
+	case o.maxPlayers < session.MinConcurrentSessions || o.maxPlayers > session.MaxConcurrentSessions:
+		return fmt.Errorf("max players must be in %d..%d, got %d",
+			session.MinConcurrentSessions, session.MaxConcurrentSessions, o.maxPlayers)
 	case o.stormPeriod < 0:
 		return fmt.Errorf("storm period must not be negative, got %s", o.stormPeriod)
 	}
@@ -338,7 +345,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// players are named by the registry as connections arrive, and every other entity —
 	// an item on the ground, and in time whatever else the world owns — is named by the
 	// same counter, so no id ever means two things at once.
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(int(opts.maxPlayers))
 
 	// Who is live, one level up from the connections: entity ids name a session,
 	// players outlive one. Built here rather than inside Serve because it is shared by
@@ -425,6 +432,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		"tick_rate", cfg.TickRate,
 		"chunk_size", cfg.ChunkSize,
 		"view_distance", cfg.ViewDistance,
+		"max_players", opts.maxPlayers,
 		"world_seed", cfg.WorldSeed,
 		"world_dir", opts.worldDir,
 		"handshake_timeout", opts.handshakeTimeout.String(),
@@ -1183,7 +1191,20 @@ func (s *server) acceptLoop(ctx context.Context, workers *sync.WaitGroup) {
 		}
 		backoff = minAcceptBackoff
 
-		entityID := s.registry.Add(conn)
+		entityID, admitted := s.registry.Add(conn)
+		if !admitted {
+			detail := fmt.Sprintf("server holds at most %d concurrent sessions", s.registry.Limit())
+			connectionLog := s.log.With("remote_addr", conn.RemoteAddr())
+			if wErr := conn.WriteFrame(protocol.EncodeServerReject(vnet.RejectReasonSERVER_FULL, detail)); wErr != nil {
+				connectionLog.Debug("sending the server-full refusal failed", "error", wErr)
+			} else {
+				connectionLog.Info("connection refused", "reason", vnet.RejectReasonSERVER_FULL.String(), "detail", detail)
+			}
+			if cErr := conn.Close(); cErr != nil {
+				connectionLog.Debug("closing a refused connection failed", "error", cErr)
+			}
+			continue
+		}
 		sessionLog := s.log.With("entity_id", entityID, "remote_addr", conn.RemoteAddr())
 		sessionLog.Info("connection accepted")
 

@@ -72,7 +72,7 @@ func (r *warningRecorder) snapshot() []protocol.StormWarning {
 func newStormHarness(t *testing.T) (*server, *warningRecorder) {
 	t.Helper()
 	chunks := world.NewCache(1, 1, 16)
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(game.DefaultTickRate, 1, 1, game.NewCacheTerrain(chunks), chunks,
 		registry.NextID, discard())
 	if err != nil {

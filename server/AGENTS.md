@@ -537,6 +537,12 @@ package can avoid the import would create two truths to keep in step for no bene
   channel is a panic in a goroutine and takes the process with it. Both halves are
   load-bearing: the send must stay inside the registry's lock, and the unsubscribe must stay
   ahead of the close. `TestBroadcastsRunSafelyWhileSessionsArriveAndLeave` fails on either.
+- **The session ceiling is admission, not identity.** `-max-players` accepts 100..1000 and
+  `Registry.Add` checks and inserts under the same lock, so two accepts cannot both take the last
+  slot. A connection past it receives `ServerReject.SERVER_FULL` and is closed; it is never given
+  an entity id and never reaches the ticket or character phases. Every connection already in the
+  registry counts, including one still silent at the hello and one choosing a character, because
+  both consume a socket and a session goroutine.
 
 ## Item drops, and the entity shape the rest of the world will reuse
 
@@ -2428,6 +2434,7 @@ flags decide is the part worth writing down.
 | `-registration-key-file` | a file holding the registration key. The key is never a flag; `VOXELHEIM_REGISTRATION_KEY` is the other source, and never both |
 | `-tick-rate` | authoritative simulation ticks per second (1..255) |
 | `-view-distance` | the chunk streaming radius, in chunks (0..16) |
+| `-max-players` | the maximum concurrent sessions (100..1000). A connection past it receives `SERVER_FULL` |
 | `-handshake-timeout` | how long a new connection may say nothing before it is closed |
 | `-character-timeout` | how long an admitted account may take to choose a character. The one window a person is inside; must be at least the handshake timeout |
 | `-idle-timeout` | how long a welcomed session may say nothing. Must be at least the handshake timeout |

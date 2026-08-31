@@ -18,7 +18,7 @@ func TestWaterTickBroadcastsTheSameOrderedChangesToEveryHolder(t *testing.T) {
 	if _, _, err := chunks.Get(context.Background(), coord); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	reg := session.NewRegistry()
+	reg := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(20, 0, 1, game.NewCacheTerrain(chunks), chunks, reg.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
