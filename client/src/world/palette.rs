@@ -80,6 +80,39 @@ pub const FLOWER_YELLOW: BlockId = 34;
 /// Blue meadow flowers. Mirrors the server's `world.FlowerBlue`.
 pub const FLOWER_BLUE: BlockId = 35;
 
+// What a castle is built of, mirroring the server's `world.SmoothBlackStone` through
+// `world.DarkGlass` (#680). All eight are ordinary ground here — solid, opaque, and
+// swept as cubes — so no predicate above learns a new arm; what they carry that nothing
+// else does is a **lightness ladder**, and it is the whole reason there are eight rather
+// than three.
+//
+// There are no textures: a material is its colour, and greedy meshing merges faces
+// across neighbours, so two materials a shade apart are one wall. Four of these are
+// near-black and they are half a castle between them, so their sRGB values below are
+// spread rather than crowded — `#17151C`, `#2B2733`, `#443E50`, `#665A78` — and
+// [`SLATE_TILE`] at `#ABB2BC` is the pale roof the whole silhouette reads against.
+/// Trim, thresholds and a hall floor: the darkest id in the palette.
+pub const SMOOTH_BLACK_STONE: BlockId = 36;
+/// Rough dark stone — a castle's plinth, footings and rubble.
+pub const BASALT: BlockId = 37;
+/// Dressed dark stone: the wall, and a quarter of the reference build on its own.
+pub const BLACK_BRICK: BlockId = 38;
+/// The same wall weathered. Lighter and greyer on purpose — mixed into [`BLACK_BRICK`]
+/// it is what keeps a sixty-block face from reading as one slab of paint.
+pub const BLACK_BRICK_WORN: BlockId = 39;
+/// Pale roof stone: every roof and every spire, and the contrast the silhouette lives on.
+pub const SLATE_TILE: BlockId = 40;
+/// Dark beams, floorboards, doors and bridges.
+pub const DARK_TIMBER: BlockId = 41;
+/// Pale stripped timber: frames, rafters and scaffolding.
+pub const PALE_TIMBER: BlockId = 42;
+/// A window. **Opaque today, and the one id in this palette expected to change class**:
+/// see-through glass needs a translucent pass the mesher does not have, so a pane reads
+/// from outside as the dark hole a window is at any distance. When that pass arrives
+/// [`is_opaque`] is the single function that has to learn about it, exactly as its doc
+/// comment has promised since before this id existed.
+pub const DARK_GLASS: BlockId = 43;
+
 const COVER_FAMILY: [BlockId; 3] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE];
 
 const WATER_FAMILY: [BlockId; 12] = [
@@ -195,7 +228,7 @@ pub fn is_opaque(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 35] = [
+pub const PALETTE: [BlockId; 43] = [
     STONE,
     DIRT,
     GRASS,
@@ -231,6 +264,14 @@ pub const PALETTE: [BlockId; 35] = [
     FLOWER_RED,
     FLOWER_YELLOW,
     FLOWER_BLUE,
+    SMOOTH_BLACK_STONE,
+    BASALT,
+    BLACK_BRICK,
+    BLACK_BRICK_WORN,
+    SLATE_TILE,
+    DARK_TIMBER,
+    PALE_TIMBER,
+    DARK_GLASS,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -332,6 +373,40 @@ const FLOWER_YELLOW_LINEAR: [f32; 3] = [0.806_952, 0.564_712, 0.068_478];
 /// puddle. `#5B76C8`.
 const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 
+/// The darkest thing in the world, and a castle's trim rather than its wall: a line of
+/// it under a sill or along a threshold is what gives a face an edge. `#17151C`.
+const SMOOTH_BLACK_STONE_LINEAR: [f32; 3] = [0.008_568, 0.007_499, 0.011_612];
+
+/// Rough dark stone, violet where [`COAL_ORE_LINEAR`] is blue — the two are close in
+/// lightness and never adjacent, since one is a castle's plinth and the other is a seam
+/// two hundred blocks under it. `#2B2733`.
+const BASALT_LINEAR: [f32; 3] = [0.024_158, 0.020_289, 0.033_105];
+
+/// The dressed wall. `#443E50`.
+const BLACK_BRICK_LINEAR: [f32; 3] = [0.057_805, 0.048_172, 0.080_220];
+
+/// The weathered wall: two steps lighter than [`BLACK_BRICK_LINEAR`] and further into
+/// violet, so a mixed face has a grain instead of a tone. `#665A78`.
+const BLACK_BRICK_WORN_LINEAR: [f32; 3] = [0.132_868, 0.102_242, 0.187_821];
+
+/// Pale cool roof stone. Lighter than [`COBBLESTONE_LINEAR`] and far lighter than any of
+/// the four blacks, because a roof read against a dark wall at distance is the one thing
+/// a castle is recognised by. `#ABB2BC`.
+const SLATE_TILE_LINEAR: [f32; 3] = [0.407_240, 0.445_201, 0.502_886];
+
+/// Dark, red-brown sawn timber — darker than [`LOG_LINEAR`], which is the conifer bark it
+/// must not be mistaken for. `#3E2A1C`.
+const DARK_TIMBER_LINEAR: [f32; 3] = [0.048_172, 0.023_153, 0.011_612];
+
+/// Stripped pale timber: lighter and much less saturated than [`SAND_LINEAR`], which is
+/// the only other pale warm tone in the palette. `#D2C4AE`.
+const PALE_TIMBER_LINEAR: [f32; 3] = [0.644_480, 0.552_011, 0.423_268];
+
+/// A window pane: near-black, and cold where [`SMOOTH_BLACK_STONE_LINEAR`] beside it in a
+/// wall is warm. Hue is the only thing separating the two, because both have to be dark.
+/// `#16202E`.
+const DARK_GLASS_LINEAR: [f32; 3] = [0.008_023, 0.014_444, 0.027_321];
+
 /// The stem every flower stands on, whatever colour its head is. `#3E6B2E`.
 ///
 /// Darker and yellower than [`GRASS_LINEAR`] so a stem is a shape against the ground
@@ -409,6 +484,14 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         FLOWER_RED => FLOWER_RED_LINEAR,
         FLOWER_YELLOW => FLOWER_YELLOW_LINEAR,
         FLOWER_BLUE => FLOWER_BLUE_LINEAR,
+        SMOOTH_BLACK_STONE => SMOOTH_BLACK_STONE_LINEAR,
+        BASALT => BASALT_LINEAR,
+        BLACK_BRICK => BLACK_BRICK_LINEAR,
+        BLACK_BRICK_WORN => BLACK_BRICK_WORN_LINEAR,
+        SLATE_TILE => SLATE_TILE_LINEAR,
+        DARK_TIMBER => DARK_TIMBER_LINEAR,
+        PALE_TIMBER => PALE_TIMBER_LINEAR,
+        DARK_GLASS => DARK_GLASS_LINEAR,
         // `AIR` lands here with everything else, and correctly so: asking for the
         // colour of nothing is a meshing bug, and magenta is how it announces itself
         // instead of hiding as a plausible shade.

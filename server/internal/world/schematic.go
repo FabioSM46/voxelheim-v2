@@ -184,15 +184,32 @@ func SchematicFor(kind BuildingKind) *Schematic {
 
 // schematicLegend maps a layer literal's runes to what the builder writes.
 //
-// Five entries and no more. A rune absent from this map is a typo in a drawing, and
-// [mustSchematic] refuses to build rather than guessing — which is what makes the
-// literals below safe to edit by hand.
+// A rune absent from this map is a typo in a drawing, and [mustSchematic] refuses to
+// build rather than guessing — which is what makes the literals below safe to edit by
+// hand, and what makes the map's size a consequence of the palette rather than a number
+// to keep in step by counting.
+//
+// **The runes are chosen to be told apart at a glance in a wall of them**, which is the
+// only property that matters in a literal sixty rows wide: the five a settlement is made
+// of keep the marks they have always had, and the eight castle materials take a letter
+// each. `K` and `k` are deliberately a pair — in a drawing they are the same wall, and
+// mixing them is what keeps a long face from reading as one slab of paint.
 var schematicLegend = map[rune]Block{
 	'.': keepTerrain,
 	'_': Air,
 	'#': Cobblestone,
 	'P': Planks,
 	'T': Thatch,
+
+	// The castle materials, in the lightness order chunk.go declares them in.
+	'S': SmoothBlackStone,
+	'b': Basalt,
+	'K': BlackBrick,
+	'k': BlackBrickWorn,
+	'R': SlateTile,
+	'D': DarkTimber,
+	'W': PaleTimber,
+	'G': DarkGlass,
 }
 
 // mustSchematic turns layer literals into a [Schematic], and panics on a drawing that

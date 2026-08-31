@@ -375,6 +375,18 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.FlowerRed:    ItemNone,
 		world.FlowerYellow: ItemNone,
 		world.FlowerBlue:   ItemNone,
+
+		// The eight castle materials, and the first family in this table where every
+		// row is ItemNone on purpose: none of them is world.Placeable, so a drop would
+		// be an item nothing could put back.
+		world.SmoothBlackStone: ItemNone,
+		world.Basalt:           ItemNone,
+		world.BlackBrick:       ItemNone,
+		world.BlackBrickWorn:   ItemNone,
+		world.SlateTile:        ItemNone,
+		world.DarkTimber:       ItemNone,
+		world.PaleTimber:       ItemNone,
+		world.DarkGlass:        ItemNone,
 	}
 	// **The same length guard TestBlockExperienceNamesEveryRewardAndExplicitZero has,
 	// and it was missing here.** Without it this loop only checks the rows somebody
@@ -435,6 +447,16 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.FlowerRed:    0,
 		world.FlowerYellow: 0,
 		world.FlowerBlue:   0,
+
+		// And eight more: chipping a castle apart is salvage that yields no salvage.
+		world.SmoothBlackStone: 0,
+		world.Basalt:           0,
+		world.BlackBrick:       0,
+		world.BlackBrickWorn:   0,
+		world.SlateTile:        0,
+		world.DarkTimber:       0,
+		world.PaleTimber:       0,
+		world.DarkGlass:        0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))
