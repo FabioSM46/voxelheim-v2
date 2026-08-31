@@ -327,15 +327,29 @@ func TestTheResidencyHoldsTheViewVolume(t *testing.T) {
 	}
 }
 
-// The default is unchanged, which is what keeps this a guard rather than a retune.
-func TestTheDefaultViewDistanceStillGetsTheDefaultResidency(t *testing.T) {
+// The residency holds several separated sessions, not one.
+//
+// **This is the half the first version of #666 got wrong**, and a review caught it: a
+// formula sized for one session collapses the moment two players walk apart, which is the
+// same defect one player-count down. What it is deliberately *not* sized for is the
+// server's player cap — see [cacheWorkingSets], where the arithmetic for a hundred players
+// is written out and rejected.
+func TestTheResidencyHoldsSeveralSeparatedSessions(t *testing.T) {
 	t.Parallel()
 
-	if got := CacheCapacityFor(3); got != DefaultCacheCapacity {
-		t.Errorf("view distance 3 is given %d, want the unchanged %d", got, DefaultCacheCapacity)
+	for distance := 0; distance <= LargestViewDistanceHeld(); distance++ {
+		together := ChunksInView(distance) * cacheWorkingSets
+		if got := CacheCapacityFor(distance); got < together {
+			t.Errorf("view distance %d needs %d chunks for %d separated sessions, given %d",
+				distance, together, cacheWorkingSets, got)
+		}
 	}
 	if got := ChunksInView(3); got != 343 {
 		t.Errorf("view distance 3 covers %d chunks, want 343", got)
+	}
+	if got := CacheCapacityFor(0); got < DefaultCacheCapacity {
+		t.Errorf("the smallest view distance is given %d, under the floor of %d",
+			got, DefaultCacheCapacity)
 	}
 }
 
