@@ -219,6 +219,28 @@ const DUSK_HORIZON: [f32; 3] = [0.55, 0.22, 0.08];
 /// player can never walk to the horizon or out from under the sky.
 const SKY_BODY_DISTANCE: f32 = 400.0;
 
+/// How far away the dome is drawn, and it must be **further than every body on it**.
+///
+/// **The dome used to be built at [`SKY_BODY_DISTANCE`] exactly, and that is why the sky
+/// was empty.** The sun, the moon and the star field are billboards on a sphere of that
+/// radius; a dome on the same radius is coincident with all three, so which one survives
+/// the depth test is undefined — and in practice the dome won every time. The bodies were
+/// spawned, made visible, placed and given the right alpha, and none of them was ever
+/// drawn. Nothing reported it because nothing was wrong: at the level of the ECS the sky
+/// was correct, which is what made it take a rendered capture to find.
+///
+/// A quarter further out, rather than a hair: the gap has to survive depth precision at
+/// four hundred blocks, and the star field is drawn in the transparent pass, where it is
+/// depth-tested against the dome without writing depth of its own. A margin measured in
+/// float epsilons would be a bug waiting for a different GPU.
+///
+/// It costs nothing else. The dome is unlit, unfogged and drawn at whatever distance it is
+/// given, and the camera's far plane is well beyond both.
+const DOME_DISTANCE: f32 = SKY_BODY_DISTANCE * 1.25;
+
+/// The dome must enclose the bodies, or none of them is drawn. See [`DOME_DISTANCE`].
+const _: () = assert!(DOME_DISTANCE > SKY_BODY_DISTANCE);
+
 /// How many rings the dome is divided into from zenith to nadir, and how many segments
 /// around: 13 x 25 = 325 vertices.
 ///
@@ -912,7 +934,7 @@ fn dome_mesh(sky: Color, horizon: Color) -> Mesh {
             let azimuth = TAU * segment as f32 / DOME_SEGMENTS as f32;
             let (azimuth_sin, azimuth_cos) = azimuth.sin_cos();
             let unit = Vec3::new(radius * azimuth_cos, height, radius * azimuth_sin);
-            positions.push((unit * SKY_BODY_DISTANCE).to_array());
+            positions.push((unit * DOME_DISTANCE).to_array());
             normals.push((-unit).to_array());
         }
     }
@@ -2067,8 +2089,12 @@ mod tests {
         assert_eq!(positions.len(), dome_vertex_count());
         for position in positions {
             let radius = Vec3::from_array(*position).length();
+            // [`DOME_DISTANCE`] and not [`SKY_BODY_DISTANCE`], which is the whole of
+            // the fix: this assertion used to pin the dome to the *same* radius as the
+            // sun, the moon and the stars, so it was passing on a sky in which none of
+            // the three could be drawn.
             assert!(
-                (radius - SKY_BODY_DISTANCE).abs() < 1e-2,
+                (radius - DOME_DISTANCE).abs() < 1e-2,
                 "a vertex sits {radius} from the eye"
             );
         }
@@ -2457,5 +2483,56 @@ mod tests {
                 "the sky reaches the water colour at tick {tick}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dome_encloses_the_sky {
+    use super::*;
+    use bevy::render::mesh::VertexAttributeValues;
+
+    /// The furthest any vertex of a mesh sits from its origin.
+    fn furthest(mesh: &Mesh) -> f32 {
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the mesh carries no float positions");
+        };
+        positions
+            .iter()
+            .map(|p| Vec3::from_array(*p).length())
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// **The dome must enclose every body drawn on it, and this reads the geometry rather
+    /// than the constants.**
+    ///
+    /// The constants were right and the sky was still empty: the dome was built at
+    /// [`SKY_BODY_DISTANCE`] — the same radius as the sun, the moon and the stars — so all
+    /// three were coincident with it and lost the depth test. Asserting `DOME_DISTANCE >
+    /// SKY_BODY_DISTANCE` would not have caught that, because the dome did not use
+    /// `DOME_DISTANCE`; only the built vertices know where the dome actually is.
+    #[test]
+    fn every_body_is_inside_the_dome() {
+        let dome = furthest(&dome_mesh(Color::WHITE, Color::BLACK));
+        let stars = furthest(&star_mesh());
+        let disc = furthest(&disc_mesh());
+
+        assert!(
+            stars < dome,
+            "the star field reaches {stars} and the dome only {dome}; the stars are behind it"
+        );
+        assert!(
+            disc < dome,
+            "a sun or moon disc reaches {disc} and the dome only {dome}; it is behind it"
+        );
+        // Not merely inside: far enough inside that depth precision at this range cannot
+        // put them back on the same plane. See [`DOME_DISTANCE`].
+        assert!(
+            dome - stars > SKY_BODY_DISTANCE * 0.1,
+            "the dome clears the stars by only {}, which is inside the margin the depth \
+             test needs",
+            dome - stars
+        );
     }
 }
