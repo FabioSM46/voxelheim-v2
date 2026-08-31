@@ -566,6 +566,64 @@ impl ChunkStore {
         palette::is_solid(self.block_at(pos, size))
     }
 
+    /// The highest solid voxel in one world column inside `[min_y, max_y)`.
+    ///
+    /// This is the column-sized counterpart to [`Self::solid_at`]. It walks resident
+    /// chunks rather than resolving the same chunk through the hash map once per Y, and
+    /// skips absent chunks wholesale. Precipitation uses it when its shelter cache is
+    /// cold, where hundreds of columns may be queried together after a streamed-world
+    /// change. A chunk this session does not hold still answers air, exactly as
+    /// [`Self::block_at`] does.
+    pub fn highest_solid_y(
+        &self,
+        x: i32,
+        z: i32,
+        min_y: i32,
+        max_y: i32,
+        size: usize,
+    ) -> Option<i32> {
+        if min_y >= max_y {
+            return None;
+        }
+        let size_i32 = i32::try_from(size).ok().filter(|size| *size > 0)?;
+        let cx = x.div_euclid(size_i32);
+        let cz = z.div_euclid(size_i32);
+        let local_x = usize::try_from(x.rem_euclid(size_i32)).ok()?;
+        let local_z = usize::try_from(z.rem_euclid(size_i32)).ok()?;
+        let min_cy = min_y.div_euclid(size_i32);
+        let highest_y = max_y - 1;
+        let max_cy = highest_y.div_euclid(size_i32);
+
+        for cy in (min_cy..=max_cy).rev() {
+            let Some(chunk) = self.chunks.get(&ChunkCoord { cx, cy, cz }) else {
+                continue;
+            };
+            if chunk.size() != size {
+                continue;
+            }
+
+            let first = if cy == min_cy {
+                usize::try_from(min_y.rem_euclid(size_i32)).ok()?
+            } else {
+                0
+            };
+            let last = if cy == max_cy {
+                usize::try_from(highest_y.rem_euclid(size_i32)).ok()?
+            } else {
+                size - 1
+            };
+            let local_y = (first..=last)
+                .rev()
+                .find(|y| palette::is_solid(chunk.block([local_x, *y, local_z])));
+            if let Some(local_y) = local_y {
+                return cy
+                    .checked_mul(size_i32)
+                    .and_then(|origin| origin.checked_add(i32::try_from(local_y).ok()?));
+            }
+        }
+        None
+    }
+
     /// Whether the voxel at this world block coordinate is something the crosshair can
     /// find.
     ///
@@ -2758,6 +2816,34 @@ mod tests {
             !store.solid_at(at(0, 0, 0), 0),
             "and an impossible chunk edge is not a panic"
         );
+    }
+
+    #[test]
+    fn a_column_query_skips_unloaded_chunks_and_returns_the_highest_resident_solid() {
+        let mut lower = air();
+        lower.set(4, 3, 7, palette::STONE);
+        let mut upper = air();
+        upper.set(4, 2, 7, palette::STONE);
+        let mut store = ChunkStore::default();
+        store.insert(coord(0, 0, 0), lower);
+        // cy=1 is deliberately absent. A missing streamed chunk is open sky, not a
+        // lookup failure and not a voxel loop through an all-air substitute.
+        store.insert(coord(0, 2, 0), upper);
+
+        assert_eq!(store.highest_solid_y(4, 7, 0, 96, SIZE), Some(66));
+        assert_eq!(
+            store.highest_solid_y(4, 7, 4, 64, SIZE),
+            None,
+            "the lower roof was outside the requested half-open range"
+        );
+
+        store.unload(coord(0, 2, 0));
+        assert_eq!(
+            store.highest_solid_y(4, 7, 0, 96, SIZE),
+            Some(3),
+            "an unloaded upper chunk left a stale roof behind"
+        );
+        assert_eq!(store.highest_solid_y(4, 7, 0, 96, 0), None);
     }
 
     #[test]
