@@ -1602,6 +1602,15 @@ pub struct LeaveStarted {
     pub remaining_ms: u32,
 }
 
+/// The authoritative answer to one request to stop leaving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeaveCancelResult {
+    /// Only this value may put the client back in play.
+    pub accepted: bool,
+    /// The server-owned time still remaining when cancellation was refused.
+    pub remaining_ms: u32,
+}
+
 /// One world-chat line this client asks the authoritative server to accept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatRequest {
@@ -2357,6 +2366,8 @@ pub enum Message {
     PlayerAppearance(PlayerAppearance),
     /// The server has made this session inert and begun its removal countdown.
     LeaveStarted(LeaveStarted),
+    /// The server accepted or refused the request to stop leaving.
+    LeaveCancelResult(LeaveCancelResult),
     /// One accepted chat line. ECS delivery is intentionally a later issue.
     Chat(ChatMessage),
     /// One live party invitation. ECS delivery is intentionally a later issue.
@@ -2759,6 +2770,8 @@ pub enum DecodeError {
     AppearanceWithoutLevel(u64),
     /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
     LeaveWithoutTime,
+    /// A cancellation answer disagrees with the shape the contract assigns its outcome.
+    LeaveCancelResultShape { accepted: bool, remaining_ms: u32 },
     /// A `MapTile` names a blocks-per-pixel value this contract has no member for. The
     /// absent-field zero is one of them.
     MapTileScale(u8),
@@ -3246,6 +3259,13 @@ impl fmt::Display for DecodeError {
                 )
             }
             Self::LeaveWithoutTime => write!(f, "LeaveStarted carries no time remaining"),
+            Self::LeaveCancelResultShape {
+                accepted,
+                remaining_ms,
+            } => write!(
+                f,
+                "LeaveCancelResult accepted={accepted} carries remaining_ms={remaining_ms}"
+            ),
             Self::MapTileScale(value) => write!(f, "map scale {value} is not 1, 4 or 16"),
             Self::MapTileOffGrid {
                 origin_x,
@@ -3523,6 +3543,23 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }
             Ok(Message::LeaveStarted(LeaveStarted { remaining_ms }))
         }
+        fb::Payload::LeaveCancelResult => {
+            let payload = envelope
+                .payload_as_leave_cancel_result()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let accepted = payload.accepted();
+            let remaining_ms = payload.remaining_ms();
+            if accepted == (remaining_ms != 0) {
+                return Err(DecodeError::LeaveCancelResultShape {
+                    accepted,
+                    remaining_ms,
+                });
+            }
+            Ok(Message::LeaveCancelResult(LeaveCancelResult {
+                accepted,
+                remaining_ms,
+            }))
+        }
         fb::Payload::ChatMessage => {
             let payload = envelope
                 .payload_as_chat_message()
@@ -3733,10 +3770,6 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
-        // V27's server answer is deliberately staged with the contract and server half
-        // of leave cancellation. This build cannot send its request yet, so carrying the
-        // result by name keeps the first half compilable without pretending play resumed.
-        fb::Payload::LeaveCancelResult => Ok(Message::Deferred(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
         // and the ward boundary is its own issue. Validating at the decode boundary is
@@ -5583,6 +5616,22 @@ pub fn encode_leave_request() -> Vec<u8> {
     finish_envelope(builder, fb::Payload::LeaveRequest, payload.as_union_value())
 }
 
+/// Builds the empty request to stop a live leave countdown.
+///
+/// There is no deadline or result for this client to state. The server compares the
+/// request with its own countdown and answers with [`LeaveCancelResult`].
+pub fn encode_leave_cancel_request() -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+
+    let payload =
+        fb::LeaveCancelRequest::create(&mut builder, &fb::LeaveCancelRequestArgs::default());
+    finish_envelope(
+        builder,
+        fb::Payload::LeaveCancelRequest,
+        payload.as_union_value(),
+    )
+}
+
 /// Builds one request to plant a structure.
 ///
 /// No float in it, and therefore no finiteness question: an anchor is three integers and
@@ -6921,6 +6970,24 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::LeaveStarted, payload.as_union_value())
     }
 
+    /// One authoritative answer to a leave cancellation request, including malformed
+    /// combinations for the decoder boundary tests.
+    pub fn encode_leave_cancel_result(accepted: bool, remaining_ms: u32) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload = fb::LeaveCancelResult::create(
+            &mut builder,
+            &fb::LeaveCancelResultArgs {
+                accepted,
+                remaining_ms,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::LeaveCancelResult,
+            payload.as_union_value(),
+        )
+    }
+
     pub fn encode_chat_message(
         sender_entity_id: u64,
         sender_name: Option<&str>,
@@ -7375,13 +7442,13 @@ mod tests {
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_leave_started, encode_loot_closed,
-        encode_loot_state, encode_map_explored, encode_map_tile, encode_marker_list,
-        encode_mine_progress, encode_mob_hit, encode_party_invite, encode_player_appearance,
-        encode_player_appearance_with_worn, encode_player_appearance_without_level,
-        encode_resident_appearance, encode_server_character_list, encode_server_reject,
-        encode_server_welcome, encode_storm_warning, encode_vendor_closed, encode_vendor_state,
-        encode_wards_nearby,
+        encode_inventory_state_with_durability, encode_leave_cancel_result, encode_leave_started,
+        encode_loot_closed, encode_loot_state, encode_map_explored, encode_map_tile,
+        encode_marker_list, encode_mine_progress, encode_mob_hit, encode_party_invite,
+        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_player_appearance_without_level, encode_resident_appearance,
+        encode_server_character_list, encode_server_reject, encode_server_welcome,
+        encode_storm_warning, encode_vendor_closed, encode_vendor_state, encode_wards_nearby,
     };
     use super::*;
 
@@ -7706,10 +7773,9 @@ mod tests {
         // meant "this build has no arm yet" rather than "this contract has no member".
         (fb::Payload::StormWarning, Handling::Consumed),
         (fb::Payload::WardsNearby, Handling::Consumed),
-        // Staged seam: the request belongs to the later client half, and the result is
-        // carried by name until that half gives it state-machine meaning.
+        // V27's request stays intent-only; its result is fully validated and consumed.
         (fb::Payload::LeaveCancelRequest, Handling::ClientOnly),
-        (fb::Payload::LeaveCancelResult, Handling::Deferred),
+        (fb::Payload::LeaveCancelResult, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -11925,6 +11991,45 @@ mod tests {
             decode(&encode_leave_started(0)),
             Err(DecodeError::LeaveWithoutTime)
         );
+    }
+
+    #[test]
+    fn leave_cancellation_carries_only_a_request_and_the_server_s_answer() {
+        let frame = encode_leave_cancel_request();
+        let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+        assert_eq!(envelope.payload_type(), fb::Payload::LeaveCancelRequest);
+        let request = envelope
+            .payload_as_leave_cancel_request()
+            .expect("the payload is a cancellation request");
+        assert_eq!(
+            (request._tab.vtable().num_bytes() - 4) / 2,
+            0,
+            "LeaveCancelRequest must not carry a deadline or outcome"
+        );
+
+        assert_eq!(
+            decode(&encode_leave_cancel_result(true, 0)),
+            Ok(Message::LeaveCancelResult(LeaveCancelResult {
+                accepted: true,
+                remaining_ms: 0,
+            }))
+        );
+        assert_eq!(
+            decode(&encode_leave_cancel_result(false, 7_250)),
+            Ok(Message::LeaveCancelResult(LeaveCancelResult {
+                accepted: false,
+                remaining_ms: 7_250,
+            }))
+        );
+        for (accepted, remaining_ms) in [(true, 1), (false, 0)] {
+            assert_eq!(
+                decode(&encode_leave_cancel_result(accepted, remaining_ms)),
+                Err(DecodeError::LeaveCancelResultShape {
+                    accepted,
+                    remaining_ms,
+                })
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

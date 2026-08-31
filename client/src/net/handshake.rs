@@ -29,10 +29,10 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveStarted, LifeState, LootClosed,
-    LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MobHit, PartyInvite,
-    PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning,
-    VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
+    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveCancelResult, LeaveStarted,
+    LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message, MineProgress,
+    MobHit, PartyInvite, PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot,
+    StormWarning, VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -97,6 +97,8 @@ pub enum Transition {
     ActionRefused(ActionRefused),
     /// The authoritative leave timer for this session.
     Leaving(LeaveStarted),
+    /// The authoritative answer to a request to stop that timer.
+    LeaveCancellation(LeaveCancelResult),
     /// One world-chat line accepted and attributed by the authoritative server.
     Chat(ChatMessage),
     /// One still-live invitation issued by the authoritative server.
@@ -496,6 +498,9 @@ impl Handshake {
             (Phase::Established, Message::LeaveStarted(started)) => {
                 Ok(Transition::Leaving(started))
             }
+            (Phase::Established, Message::LeaveCancelResult(result)) => {
+                Ok(Transition::LeaveCancellation(result))
+            }
             (Phase::Established, Message::Chat(message)) => Ok(Transition::Chat(message)),
             (Phase::Established, Message::PartyInvite(invite)) => {
                 Ok(Transition::PartyInvite(invite))
@@ -545,6 +550,9 @@ impl Handshake {
             (_, Message::ActionRefused(_)) => Err(HandshakeError::Premature("ActionRefused")),
             (_, Message::PlayerAppearance(_)) => Err(HandshakeError::Premature("PlayerAppearance")),
             (_, Message::LeaveStarted(_)) => Err(HandshakeError::Premature("LeaveStarted")),
+            (_, Message::LeaveCancelResult(_)) => {
+                Err(HandshakeError::Premature("LeaveCancelResult"))
+            }
             (_, Message::Chat(_)) => Err(HandshakeError::Premature("ChatMessage")),
             (_, Message::PartyInvite(_)) => Err(HandshakeError::Premature("PartyInvite")),
             (_, Message::LootState(_)) => Err(HandshakeError::Premature("LootState")),
@@ -1563,6 +1571,26 @@ mod tests {
             admitted.established(),
             "leaving remains an established session until the server closes it"
         );
+    }
+
+    #[test]
+    fn a_leave_cancellation_answer_only_belongs_to_an_established_session() {
+        let result = LeaveCancelResult {
+            accepted: true,
+            remaining_ms: 0,
+        };
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::LeaveCancelResult(result)),
+            Err(HandshakeError::Premature("LeaveCancelResult"))
+        );
+
+        let mut admitted = established();
+        assert_eq!(
+            admitted.apply(Message::LeaveCancelResult(result)),
+            Ok(Transition::LeaveCancellation(result))
+        );
+        assert!(admitted.established());
     }
 
     /// The two map payloads a session consumes are carried rather than dropped, and
