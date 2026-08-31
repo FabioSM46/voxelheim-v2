@@ -5252,8 +5252,10 @@ fn the_sky_dome_is_centred_on_the_eye_and_does_not_turn_with_it() {
     // 13 rings of 25 segments: the "few hundred vertices" the gradient is carried on.
     assert_eq!(vertices.len(), 325);
     for (height, _) in &vertices {
+        // The dome sits a quarter beyond the bodies drawn on it since the empty-sky fix;
+        // 400 was the radius it shared with them, and sharing it is what hid them.
         assert!(
-            height.abs() <= 400.0 + 1e-2,
+            height.abs() <= 500.0 + 1e-2,
             "a vertex stood {height} above the eye"
         );
     }
