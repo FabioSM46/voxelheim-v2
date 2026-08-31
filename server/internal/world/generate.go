@@ -440,7 +440,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // under a body may become air, a thin shell of carved voxels beside one becomes rock —
 // and a cave mouth that shell fills in is ground a plant may now root on. Stored deltas
 // in any of those resolve against a different base, so the precondition advances.
-const WorldgenVersion uint32 = 19
+const WorldgenVersion uint32 = 20
 
 // Generate builds the chunk at coord for seed.
 //

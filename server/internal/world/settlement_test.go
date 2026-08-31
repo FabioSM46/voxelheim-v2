@@ -255,13 +255,13 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		got  int
 		want int
 	}{
-		{"capitalRadius", capitalRadius, 56},
-		{"capitalPlotRadius", capitalPlotRadius, 25},
-		{"capitalHutRingRadius", capitalHutRingRadius, 40},
+		{"capitalRadius", capitalRadius, 68},
+		{"capitalPlotRadius", capitalPlotRadius, 46},
+		{"capitalHutRingRadius", capitalHutRingRadius, 61},
 		{"capitalHutCount", capitalHutCount, 6},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 9 is the world it produces",
+			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 20 is the world it produces",
 				c.name, c.got, c.want)
 		}
 	}
@@ -273,15 +273,15 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		originX, originY, originZ int64
 		facing                    Facing
 	}{
-		{BuildingKeep, 106, 64, 101, FacingPlusZ},
-		{BuildingHall, 135, 64, 105, FacingMinusX},
-		{BuildingSmithy, 90, 64, 119, FacingPlusX},
-		{BuildingHut, 133, 64, 142, FacingMinusZ},
-		{BuildingHut, 93, 64, 142, FacingMinusZ},
-		{BuildingHut, 73, 64, 108, FacingPlusX},
-		{BuildingHut, 93, 64, 73, FacingPlusZ},
-		{BuildingHut, 133, 64, 73, FacingPlusZ},
-		{BuildingHut, 153, 64, 108, FacingMinusX},
+		{BuildingKeep, 85, 64, 80, FacingPlusZ},
+		{BuildingHall, 156, 64, 105, FacingMinusX},
+		{BuildingSmithy, 72, 64, 130, FacingPlusX},
+		{BuildingHut, 143, 64, 160, FacingMinusZ},
+		{BuildingHut, 82, 64, 160, FacingMinusZ},
+		{BuildingHut, 52, 64, 108, FacingPlusX},
+		{BuildingHut, 82, 64, 55, FacingPlusZ},
+		{BuildingHut, 143, 64, 55, FacingPlusZ},
+		{BuildingHut, 174, 64, 108, FacingMinusX},
 	}
 	if len(s.Buildings) != len(want) {
 		t.Fatalf("the capital has %d buildings, want %d", len(s.Buildings), len(want))
@@ -1544,7 +1544,13 @@ func TestSettlementWardsExactlyTheColumnsItsPlateauDiscTouches(t *testing.T) {
 	}
 
 	// Exactly tangent belongs to the plateau; one block into the blend does not.
-	tangent := Settlement{CentreX: 8, CentreZ: 0, Radius: capitalRadius}
+	//
+	// **The centre is derived from the radius rather than written beside it.** `8` was
+	// exactly tangent to column 2 while [capitalRadius] was 56 and meant nothing once
+	// #682 moved it to 68, which is a test that fails for a reason unrelated to what it
+	// checks. Column 2's nearest block is x=64, so the tangent centre is 64 − r whatever
+	// r becomes.
+	tangent := Settlement{CentreX: 2*ChunkSize - capitalRadius, CentreZ: 0, Radius: capitalRadius}
 	if !tangent.WardsColumn(Column{CX: 2, CZ: 0}) {
 		t.Error("a column whose nearest block is exactly Radius away is not warded")
 	}
@@ -1802,6 +1808,16 @@ func TestASettlementIsBuiltOutOfTheThreeBlocksItsIssueAppended(t *testing.T) {
 // a column already spends, because the four-cell lookup is hashes until something is
 // actually near, and because a plateau *removes* work: no tree roots inside a radius and
 // nothing is carved in the top six blocks of it.
+//
+// **#682 grew the keep from 12,348 cells to 269,892 — twenty-two times — and this
+// benchmark did not move.** Median of five runs at 200 iterations: 6.18 ms before and
+// 5.95 ms after in the capital, against 6.17 ms and 6.08 ms in open country, whose code
+// path this change does not touch. The capital chunk got *faster* by less than the
+// control drifted, which is the only honest way to read it: the growth is under the
+// noise. It is under the noise for a reason worth keeping — 70% of that drawing is
+// `keepTerrain`, and [visitSchematic] skips one with a `continue` on a uint16 compare,
+// so the extra quarter-million cells are the cheapest loop in the generator against a
+// chunk that already spends six milliseconds on noise, caves and water.
 func BenchmarkGenerateInACapital(b *testing.B) {
 	s, ok := SettlementAt(settlementTestSeed, settlementCellOf(originColumnX), settlementCellOf(originColumnZ))
 	if !ok {
