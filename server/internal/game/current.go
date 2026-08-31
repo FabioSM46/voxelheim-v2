@@ -37,11 +37,11 @@ var flowNeighbours = [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
 //     counted as zero — a wall is not somewhere to flow, and counting it as empty
 //     would push the swimmer into it — and [world.Ice] is skipped by that same test,
 //     being the lid rather than the water. A full source neighbour is counted like any
-//     other fluid, and the sign is the whole reason: level 8 against a lower level is a
-//     negative term, so a source to the east pushes *west* — away from it, which is the
-//     one direction a spring can send water. Skipping it read that sign backwards, and
-//     it cost the case the skip was written for: a flow whose only gradient is the
-//     source beside it summed to nothing and stood still, so water never left a spring.
+//     other fluid when it can feed this voxel, and the sign is the whole reason: level
+//     8 against a lower level is a negative term, so a source to the east pushes
+//     *west* — away from it. Plain water feeds every side. A current source feeds only
+//     the neighbour it points toward; counting it anywhere else would animate and push
+//     a spill the authoritative automaton cannot create.
 //   - Plain [world.Water] is a source and has no direction at all.
 //
 // The vertical is a flag rather than a magnitude, and it belongs to exactly one case:
@@ -75,6 +75,9 @@ func FlowDirection(terrain Terrain, x, y, z int64) (dx, dy, dz float64) {
 	for _, step := range flowNeighbours {
 		neighbour, ok := terrain.Block(x+step[0], y, z+step[1])
 		if !ok || world.Solid(neighbour) {
+			continue
+		}
+		if world.IsWater(neighbour) && !world.WaterFeedsToward(neighbour, int(-step[0]), int(-step[1])) {
 			continue
 		}
 		drop := float64(level - world.WaterLevel(neighbour))

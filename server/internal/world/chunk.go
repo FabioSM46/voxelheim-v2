@@ -224,6 +224,22 @@ func CurrentOf(b Block) (dx, dz int) {
 	}
 }
 
+// WaterFeedsToward reports whether water in b supplies the adjacent voxel at the
+// cardinal offset (dx, dz) from itself. Plain and flowing water have no encoded
+// direction and may feed every side; a generator-authored current feeds only the
+// side its id names. Non-water feeds nothing.
+//
+// This is the one server-side interpretation of a current as a source. Worldgen,
+// the runtime automaton and player current physics all use it so a direction cannot
+// remain merely an animation and movement hint while water spreads elsewhere.
+func WaterFeedsToward(b Block, dx, dz int) bool {
+	if !IsWater(b) {
+		return false
+	}
+	cx, cz := CurrentOf(b)
+	return cx == 0 && cz == 0 || cx == dx && cz == dz
+}
+
 // Solid reports whether a block stops movement.
 //
 // **The palette owns this question, not the collision.** `Terrain.Solid` used to

@@ -99,6 +99,49 @@ func TestNextWaterNeverCreatesASource(t *testing.T) {
 	}
 }
 
+// A river source is full like a lake source but not isotropic like one. The side
+// order is NextWater's contract: +x, -x, +z, -z relative to the receiving cell.
+func TestCurrentSourcesFeedOnlyTheNeighbourTheyPointToward(t *testing.T) {
+	t.Parallel()
+
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+	for _, test := range []struct {
+		name        string
+		source      Block
+		feedingSide int
+	}{
+		{name: "positive x", source: WaterCurrentXPos, feedingSide: 1},
+		{name: "negative x", source: WaterCurrentXNeg, feedingSide: 0},
+		{name: "positive z", source: WaterCurrentZPos, feedingSide: 3},
+		{name: "negative z", source: WaterCurrentZNeg, feedingSide: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			for side := range 4 {
+				sides := [4]Block{}
+				sides[side] = test.source
+				want := Air
+				if side == test.feedingSide {
+					want = WaterFlow7
+				}
+				for _, here := range []Block{Air, WaterFlow7} {
+					if got := NextWater(here, Air, Stone, sides, grounded); got != want {
+						t.Errorf("source on side %d with here %d produced %d, want %d", side, here, got, want)
+					}
+				}
+			}
+		})
+	}
+
+	for side := range 4 {
+		sides := [4]Block{}
+		sides[side] = Water
+		if got := NextWater(Air, Air, Stone, sides, grounded); got != WaterFlow7 {
+			t.Errorf("plain source on side %d produced %d, want %d", side, got, WaterFlow7)
+		}
+	}
+}
+
 func TestAClosedFlowingBasinDrainsWithoutASource(t *testing.T) {
 	t.Parallel()
 
