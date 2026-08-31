@@ -152,10 +152,14 @@ func testWorldServer(t *testing.T, tr transport.Transport, dir string) *server {
 }
 
 func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, players *persist.Store) *server {
+	return newTestServerWithLimit(t, tr, chunks, players, session.DefaultConcurrentSessions)
+}
+
+func newTestServerWithLimit(t *testing.T, tr transport.Transport, chunks *world.Cache, players *persist.Store, limit int) *server {
 	t.Helper()
 
 	cfg := testConfig()
-	registry := session.NewRegistry()
+	registry := session.NewRegistry(limit)
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
@@ -188,7 +192,7 @@ func newTestServer(t *testing.T, tr transport.Transport, chunks *world.Cache, pl
 // validOptions is a configuration every field of which passes validate.
 //
 // The cases below mutate the single field under test rather than building a literal
-// each time. With five validated flags, a literal that omits one is a case that
+// each time. With validated flags, a literal that omits one is a case that
 // passes for a reason it did not mean — an omitted duration is zero, and zero is now
 // a refusal of its own.
 func validOptions() options {
@@ -198,6 +202,7 @@ func validOptions() options {
 		ticketKey:        testTicketKey(),
 		tickRate:         20,
 		viewDistance:     3,
+		maxPlayers:       session.DefaultConcurrentSessions,
 		handshakeTimeout: session.DefaultHandshakeTimeout,
 		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
@@ -279,6 +284,12 @@ func TestOptionsValidate(t *testing.T) {
 		"tick rate far past a byte":  func(o *options) { o.tickRate = 1000 },
 		"view distance past the cap": func(o *options) { o.viewDistance = protocol.MaxViewDistance + 1 },
 		"view distance far past it":  func(o *options) { o.viewDistance = 1000 },
+		"player limit below the intended scale": func(o *options) {
+			o.maxPlayers = session.MinConcurrentSessions - 1
+		},
+		"player limit above the intended scale": func(o *options) {
+			o.maxPlayers = session.MaxConcurrentSessions + 1
+		},
 		// The new refusal: inside the contract's ceiling and outside this server's.
 		"view distance the cache cannot hold": func(o *options) {
 			o.viewDistance = uint(world.LargestViewDistanceHeld()) + 1
@@ -319,14 +330,22 @@ func TestOptionsValidate(t *testing.T) {
 
 	// Boundaries are accepted, so the check is a range and not an accident.
 	for _, mutate := range []func(*options){
-		func(o *options) { o.tickRate = 1; o.viewDistance = 0 },
+		func(o *options) {
+			o.tickRate = 1
+			o.viewDistance = 0
+			o.maxPlayers = session.MinConcurrentSessions
+		},
+		func(o *options) { o.maxPlayers = session.MaxConcurrentSessions },
 		// **Not protocol.MaxViewDistance any more, and the change is the point of #666.**
 		// The contract's ceiling is 16, which asks for 33³ = 35937 chunks; no residency
 		// this server sizes itself to holds that, so the flag is refused at startup
 		// rather than accepted into a server that thrashes. The largest a boundary case
 		// may use is therefore the largest the cache can hold, which
 		// [world.LargestViewDistanceHeld] answers rather than this test restating.
-		func(o *options) { o.tickRate = 255; o.viewDistance = uint(world.LargestViewDistanceHeld()) },
+		func(o *options) {
+			o.tickRate = 255
+			o.viewDistance = uint(world.LargestViewDistanceHeld())
+		},
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
 		func(o *options) { o.stormPeriod = 0 },
 		func(o *options) { o.nextStorm = "2030-01-02T03:04:05Z" },
@@ -698,6 +717,65 @@ func TestAcceptLoopRetriesTransientErrors(t *testing.T) {
 		t.Fatal("the accept loop did not exit after the context was cancelled")
 	}
 
+	srv.registry.CloseAll()
+	workers.Wait()
+}
+
+// The connection beyond the operator's ceiling receives the contract's SERVER_FULL
+// answer. Dropping it would leave the client with no reason it can show, and checking the
+// count outside Registry.Add would let two accepts both observe the last slot as free.
+func TestAConnectionPastTheSessionLimitIsRefusedWithAReason(t *testing.T) {
+	t.Parallel()
+
+	first := newBlockingConn()
+	refused := newScriptedConn("past-limit")
+	tr := newQueueTransport(first, refused)
+	srv := newTestServerWithLimit(t, tr, world.NewCache(testConfig().WorldSeed, 1, 64), nil, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var workers sync.WaitGroup
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		srv.acceptLoop(ctx, &workers)
+	}()
+
+	env := nextReply(t, refused)
+	if got := env.PayloadType(); got != vnet.PayloadServerReject {
+		t.Fatalf("connection past the limit got %s, want ServerReject", got)
+	}
+	var reject vnet.ServerReject
+	tbl := new(flatbuffers.Table)
+	if !env.Payload(tbl) {
+		t.Fatal("server-full refusal has no payload")
+	}
+	reject.Init(tbl.Bytes, tbl.Pos)
+	if got := reject.Reason(); got != vnet.RejectReasonSERVER_FULL {
+		t.Errorf("reason = %s, want SERVER_FULL", got)
+	}
+	if detail := string(reject.Detail()); !strings.Contains(detail, "1 concurrent session") {
+		t.Errorf("detail %q does not state the configured limit", detail)
+	}
+	select {
+	case <-refused.done:
+	case <-time.After(2 * time.Second):
+		t.Error("the refused connection was left open")
+	}
+	if got := srv.registry.Count(); got != 1 {
+		t.Errorf("registry holds %d sessions after the refusal, want only the admitted one", got)
+	}
+
+	cancel()
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close transport: %v", err)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("accept loop did not stop")
+	}
 	srv.registry.CloseAll()
 	workers.Wait()
 }

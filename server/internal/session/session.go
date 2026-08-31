@@ -31,6 +31,15 @@ import (
 // tick, shallow enough that a client which has stopped reading is noticed.
 const outboundQueue = 32
 
+// The operator-facing session ceiling. The project is built for realms rather than
+// private two-slot listeners, so the accepted range is stated here beside the registry
+// that enforces it instead of being copied into the flag parser.
+const (
+	MinConcurrentSessions     = 100
+	DefaultConcurrentSessions = 100
+	MaxConcurrentSessions     = 1000
+)
+
 // Config carries the authoritative session parameters announced in
 // ServerWelcome. Every field is the server's decision.
 type Config struct {
@@ -1873,6 +1882,7 @@ var errLeaveRequested = errors.New("session: leave requested")
 // and the tick loop stays out of it.
 type Registry struct {
 	nextID atomic.Uint64
+	limit  int
 
 	mu    sync.Mutex
 	conns map[uint64]transport.Conn
@@ -1886,9 +1896,13 @@ type peer struct {
 	send func(frame []byte) bool
 }
 
-// NewRegistry returns an empty registry.
-func NewRegistry() *Registry {
+// NewRegistry returns an empty registry which admits at most limit concurrent
+// connections. The command validates the operator-facing range before constructing it;
+// tests may use a smaller positive limit to exercise the edge without opening a hundred
+// connections.
+func NewRegistry(limit int) *Registry {
 	return &Registry{
+		limit: limit,
 		conns: make(map[uint64]transport.Conn),
 		peers: make(map[uint64]peer),
 	}
@@ -1904,19 +1918,27 @@ func NewRegistry() *Registry {
 // game, and game is handed a function.
 func (r *Registry) NextID() uint64 { return r.nextID.Add(1) }
 
-// Add registers conn and returns the entity id the server assigns it.
+// Add registers conn and returns the entity id the server assigns it. The boolean is
+// false when the registry is full; the connection was not registered and zero is
+// returned, preserving zero as "no entity".
 //
 // Identities are minted here and never read from the wire. An id a client can
 // choose is an id a client can claim from someone else, and no amount of
 // validation downstream fixes that.
-func (r *Registry) Add(conn transport.Conn) uint64 {
-	id := r.NextID()
-
+func (r *Registry) Add(conn transport.Conn) (uint64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.conns) >= r.limit {
+		return 0, false
+	}
+
+	id := r.NextID()
 	r.conns[id] = conn
-	return id
+	return id, true
 }
+
+// Limit is the maximum number of concurrent connections this registry admits.
+func (r *Registry) Limit() int { return r.limit }
 
 // Remove forgets a session. Calling it for an unknown id is a no-op, so a
 // caller's cleanup path never needs to know whether Add succeeded.

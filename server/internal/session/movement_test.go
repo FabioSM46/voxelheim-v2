@@ -641,7 +641,7 @@ func TestSessionWalksThePlayerAndStreamsWhereItWalks(t *testing.T) {
 	cfg.Spawn = openCountrySpawn(cfg.WorldSeed)
 
 	chunks := world.NewCache(cfg.WorldSeed, 4, 512)
-	peers := session.NewRegistry()
+	peers := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard())
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)

@@ -49,7 +49,7 @@ func TestAWardReplacementDoesNotDelayTheSnapshot(t *testing.T) {
 
 	const seed = int64(773)
 	cache := world.NewCache(seed, 1, 8)
-	peers := NewRegistry()
+	peers := NewRegistry(DefaultConcurrentSessions)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sim, err := game.NewSim(20, 1, seed, game.NewCacheTerrain(cache), cache, peers.NextID, log)
 	if err != nil {
@@ -118,7 +118,7 @@ func TestACrossingSnapshotIsNotHeldForItsStreamCentre(t *testing.T) {
 
 	const seed = int64(773)
 	cache := world.NewCache(seed, 1, 8)
-	peers := NewRegistry()
+	peers := NewRegistry(DefaultConcurrentSessions)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sim, err := game.NewSim(20, 1, seed, game.NewCacheTerrain(cache), cache, peers.NextID, log)
 	if err != nil {
@@ -189,7 +189,7 @@ func TestABlockedWardSendDoesNotStopPositions(t *testing.T) {
 
 	const seed = int64(773)
 	cache := world.NewCache(seed, 1, 8)
-	peers := NewRegistry()
+	peers := NewRegistry(DefaultConcurrentSessions)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	sim, err := game.NewSim(20, 1, seed, game.NewCacheTerrain(cache), cache, peers.NextID, log)
 	if err != nil {
