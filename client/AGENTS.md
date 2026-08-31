@@ -483,6 +483,14 @@ the cover half hang off it as children, which is also why unloading needed no ne
 `despawn` takes descendants. A chunk in the middle of a lake gets the parent with no mesh of its
 own, because an empty opaque mesh is a draw call that renders nothing.
 
+**The water flow attribute mirrors which sources the server lets feed a voxel.** A plain `Water`
+source contributes its full level from every side; a `WaterCurrent*` contributes only when it
+points from its own voxel into the flowing voxel being meshed. `palette::water_feeds_toward` is the
+client mirror of the server's predicate, and `mesher::flow_at` applies it before summing the level
+gradient. The attribute remains a rendering hint — the server decides the block and the swimmer's
+motion — but showing a current from a source the automaton rejects would make a lateral water wall
+look physically real after the authoritative geometry was corrected.
+
 **The third is cover, and it is split by pipeline rather than by alpha.** A stem, a petal and a
 leaf are single planes, so the cover material is `cull_mode: None` and `double_sided` — and a
 material is a pipeline, so it is an entity. It is otherwise `AlphaMode::Opaque`, which keeps it out
