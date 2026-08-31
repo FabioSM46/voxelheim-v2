@@ -2362,6 +2362,13 @@ Recorded here so the next reader does not mistake them for oversights:
   of `SOURCE` rather than restating them, and what they pin is the *ordering* — still quieter
   than a current, a current quieter than a fall — because that is what makes three things
   readable as three, and it is what a retune must not invert by accident.
+  **Since #673 the two halves of the pattern take two lighting paths.** Ripple depth still
+  modulates `base_color` before `apply_pbr_lighting`, so it changes the diffuse water and never the
+  specular highlight the standard material computes. Foam enters `StandardMaterial.emissive`
+  instead, which PBR adds after direct and ambient lighting: at noon it is small beside the sun,
+  and at night it remains the scattering cue that says a current or fall is moving. It emits no
+  light into the world. The depth and foam constants did not move — their ordering and daylight
+  look were already the right ones — only foam's path through lighting did.
   Greedy meshing merges quads across blocks, so a texture there is a different problem with
   different costs — seams across merged quads, an atlas, a per-chunk material decision — and none
   of it is on the table. Item-only swatches live in `player/items.rs` beside the rows that name
