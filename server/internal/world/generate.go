@@ -427,11 +427,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // there was not one bush and not one flower in the taiga; they now carry their own
 // per-climate switches at one column in 128 and one drift column in fifteen.
 // Terrain heights, underground materials, every tree in every climate and every
-// plains column stay byte-identical — TestPlainsLowCoverIsUnchanged pins the last
-// of those against the digest measured before the change. Selected taiga grass
-// columns nevertheless gain a foliage or flower block above their surface, so a
-// stored delta there would resolve against ground version 16 left as air.
-const WorldgenVersion uint32 = 17
+// #654 moves water: a terrace step now carries the fall that pours down it, written as
+// flowing water rather than left as three blocks of open air against the upper pool, and
+// a channel column no longer fills the carved rock beneath it to its own terrace. Both
+// change generated blocks, so both carry this.
+const WorldgenVersion uint32 = 18
 
 // Generate builds the chunk at coord for seed.
 //
@@ -512,6 +512,15 @@ type column struct {
 	waterSurface  int
 	waterBlock    Block
 
+	// fallSurface is the top of the water in this column once the channel beside it is
+	// counted: [waterSurface] where nothing pours in, and the higher neighbour's terrace
+	// where one does. Everything between the two is flowing water rather than source —
+	// see [riverFallTopAt] for why a fall must not be permanent.
+	//
+	// Never below [waterSurface], so [column.fillAt] may test it first and reach the
+	// source rule underneath.
+	fallSurface int
+
 	// settlement is whether this column stands inside a settlement's radius, where
 	// the surface is the plateau exactly.
 	//
@@ -542,8 +551,10 @@ func columnAt(seed, worldX, worldZ int64) column {
 	// gravel on top of two blocks of sand under three of water. See [beachAt], which
 	// stays the plain band rule.
 	waterBlock := Water
+	fallSurface := waterSurface
 	if river {
 		waterBlock = waterCurrentBlock(riverCurrentAt(seed, worldX, worldZ))
+		fallSurface = riverFallTopAt(seed, worldX, worldZ, waterSurface)
 	}
 
 	return column{
@@ -554,6 +565,7 @@ func columnAt(seed, worldX, worldZ int64) column {
 		beach:         !river && beachAt(surface, climate),
 		standingWater: standingWater,
 		waterSurface:  waterSurface,
+		fallSurface:   fallSurface,
 		waterBlock:    waterBlock,
 		settlement:    settled,
 	}

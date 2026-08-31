@@ -266,8 +266,20 @@ func TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand(t *testing.T) {
 					t.Fatalf("the channel at (%d, %d) holds %d at y=%d, want %d", x, z, got, y, want)
 				}
 			}
-			if got := col.voxelAt(waterSeed, x, int64(surface)+1, z); got != Air {
-				t.Fatalf("the channel at (%d, %d) holds %d one block over its terrace %d", x, z, got, surface)
+			// Over its own terrace: air, unless the channel next door stands higher and
+			// pours in, in which case the fall #654 paints stands there instead. The
+			// column's own [column.fallSurface] is which of the two, and it is never
+			// below its terrace.
+			overTerrace := col.voxelAt(waterSeed, x, int64(surface)+1, z)
+			switch {
+			case col.fallSurface > surface:
+				if overTerrace != WaterFlow7 {
+					t.Fatalf("the channel at (%d, %d) is poured into from %d but holds %d over its terrace %d, want %d",
+						x, z, col.fallSurface, overTerrace, surface, WaterFlow7)
+				}
+			case overTerrace != Air:
+				t.Fatalf("the channel at (%d, %d) holds %d one block over its terrace %d with nothing pouring in",
+					x, z, overTerrace, surface)
 			}
 
 			// A terrace step between two sampled channel columns. The samples are
@@ -313,14 +325,14 @@ const minimumTerraceSteps = 20
 // falling water; what generation guarantees is that there is somewhere to pour — the
 // lower terrace's water is not raised to meet the higher one, and the higher channel's
 // wall is not extended to close the gap.
-func TestATerraceStepIsAFallOverOpenAir(t *testing.T) {
+func TestATerraceStepCarriesItsFall(t *testing.T) {
 	t.Parallel()
 
 	// A contiguous window, because this is the one claim needing true adjacency: a
 	// sample every eight blocks reports a slope as a cliff. Smaller than the statistics
 	// window for the same reason it is contiguous — 65536 columns, each resolving its
 	// neighbour.
-	const scanSize = 256
+	const scanSize = 512
 
 	pairs, steps, maxDrop := 0, 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
@@ -347,18 +359,32 @@ func TestATerraceStepIsAFallOverOpenAir(t *testing.T) {
 						x, z, col.waterSurface, nextX, nextZ, next.waterSurface, drop, riverTerraceStep)
 				}
 
-				// The lower column, over its own water and under the higher one's, must
-				// be open air for the fall to land in.
+				// The lower column, over its own water and under the higher one's, holds
+				// the fall. **This assertion used to require Air there**, which recorded
+				// the defect #654 fixed rather than a rule: three blocks of the upper
+				// pool's face stood against open air, and the comment at [riverSurfaceAt]
+				// said the flow automaton would pour it. Before #653 the automaton could
+				// not pour anything; now the terrain carries the answer, so the same
+				// voxels are checked and the block they must hold has changed.
+				//
+				// Flowing and not source, which is the half that matters: a painted
+				// source would be a pillar of water standing for ever, where flowing
+				// water drains the moment the channel above stops feeding it.
 				lower, lowerX, lowerZ := next, nextX, nextZ
 				higher := col
 				if drop < 0 {
 					lower, lowerX, lowerZ, higher = col, x, z, next
 				}
 				for y := lower.waterSurface + 1; y <= higher.waterSurface; y++ {
-					if got := lower.voxelAt(waterSeed, lowerX, int64(y), lowerZ); got != Air {
-						t.Fatalf("the fall from %d onto (%d, %d) at %d meets %d at y=%d, not the air it needs",
-							higher.waterSurface, lowerX, lowerZ, lower.waterSurface, got, y)
+					if got := lower.voxelAt(waterSeed, lowerX, int64(y), lowerZ); got != WaterFlow7 {
+						t.Fatalf("the fall from %d onto (%d, %d) at %d holds %d at y=%d, want %d",
+							higher.waterSurface, lowerX, lowerZ, lower.waterSurface, got, y, WaterFlow7)
 					}
+				}
+				// And nothing above the fall: the water stops at the higher terrace.
+				if got := lower.voxelAt(waterSeed, lowerX, int64(lower.fallSurface)+1, lowerZ); got != Air {
+					t.Fatalf("the fall onto (%d, %d) holds %d one block over its top %d, want Air",
+						lowerX, lowerZ, got, lower.fallSurface)
 				}
 			}
 		}
@@ -637,8 +663,15 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	t.Parallel()
 
-	const scanSize = 256
-	wetColumns, riverColumns, carvedInBand, riverCarvedInBand := 0, 0, 0, 0
+	// **The band this checks stops at [caveWaterLevel] for a channel since #654.** A sea
+	// or a basin still fills every carved voxel under it to its own surface, which is the
+	// case #593 was written for and is what the first branch below holds. A channel does
+	// not: its terrace can stand two hundred blocks up, and filling the rock beneath it to
+	// that height put source water against every cave mouth that opened into dry ground.
+	// The second branch holds the new rule rather than leaving it merely unasserted, so
+	// putting the old fill back fails here rather than only in a measurement.
+	const scanSize = 512
+	wetColumns, riverColumns, carvedInBand, riverCarvedAbove := 0, 0, 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
@@ -653,29 +686,51 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 				if !col.carvedAt(waterSeed, x, y, z) {
 					continue
 				}
-				carvedInBand++
+				got := col.voxelAt(waterSeed, x, y, z)
 				if col.river {
-					riverCarvedInBand++
+					riverCarvedAbove++
+					if got != Air {
+						t.Fatalf("channel column (%d, %d), terrace %d, fills carved rock at y=%d with %d; a channel carries no aquifer",
+							x, z, col.waterSurface, y, got)
+					}
+					continue
 				}
-				if got := col.voxelAt(waterSeed, x, y, z); got == Air {
+				carvedInBand++
+				if got == Air {
 					t.Fatalf("standing-water column (%d, %d), surface %d, leaves carved Air at y=%d",
 						x, z, col.waterSurface, y)
 				}
 			}
+			// And below the dry-world level every column still fills, channel or not:
+			// that rule is untouched.
+			for y := int64(caveWaterLevel - 3); y <= int64(caveWaterLevel); y++ {
+				if !col.carvedAt(waterSeed, x, y, z) {
+					continue
+				}
+				if got := col.voxelAt(waterSeed, x, y, z); got == Air {
+					t.Fatalf("column (%d, %d) leaves carved Air at y=%d, under caveWaterLevel %d",
+						x, z, y, caveWaterLevel)
+				}
+			}
 		}
 	}
+	if riverColumns == 0 || riverCarvedAbove == 0 {
+		t.Fatalf("the sample held %d channel columns and %d carved voxels above caveWaterLevel under one; the new rule was never exercised",
+			riverColumns, riverCarvedAbove)
+	}
+
 	if wetColumns == 0 {
-		t.Fatal("the 256x256 sample contains no column standing in water")
+		t.Fatal("the sample contains no column standing in water")
 	}
-	if carvedInBand == 0 {
-		t.Fatal("the 256x256 sample contains no standing-water column carved between caveWaterLevel and seaLevel")
-	}
-	if riverColumns == 0 || riverCarvedInBand == 0 {
-		t.Fatalf("the 256x256 sample contains %d river columns and %d carved river voxels in the hydrostatic band; both must be non-zero",
-			riverColumns, riverCarvedInBand)
-	}
-	t.Logf("measured %d wet columns, including %d river columns, and %d carved river voxels in the hydrostatic band",
-		wetColumns, riverColumns, riverCarvedInBand)
+	// `carvedInBand` is reported rather than required. The band it counts is the eleven
+	// blocks between [caveWaterLevel] and [seaLevel], and only a sea or basin column can
+	// be carved inside it — a thin slice that this window happens not to contain now that
+	// channels are counted separately. That branch is exercised by
+	// [TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel], which requires all three of
+	// the fill rules to fire; what must be exercised *here* is the rule this test was
+	// rewritten for.
+	t.Logf("measured %d wet columns, including %d channel columns; %d carved voxels filled under a body and %d left dry under a channel",
+		wetColumns, riverColumns, carvedInBand, riverCarvedAbove)
 }
 
 // A shore is sand, on both sides of the water line, and only where a climate has
@@ -791,4 +846,72 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 		}
 	}
 	return 0, 0, 0, false
+}
+
+// The containment invariant, which this repository did not have and which is the part of
+// #654 that stops the defect coming back.
+//
+// **A source is permanent — [NextWater]'s first arm returns it unchanged for ever — so a
+// source with open air beside it is water that nothing holds and nothing can correct.**
+// Flowing water is deliberately not covered: it is the automaton's, it drains when its
+// feed stops, and a fall has air beside it by construction. So the property is about the
+// one class of voxel that can never be wrong for only a moment.
+//
+// **A share and not a count, and a ceiling and not zero, and both are deliberate.** The
+// share, because the three seeds below hold very different amounts of water and a count
+// would be a statement about how wet a window is. The ceiling, because the residue is
+// real and named: a cave carved through the bank of a body opens a face the column rule
+// cannot see, since [column.caveFillAt] answers for one column and a bank belongs to the
+// next one. Measured over the same 128x128 window, y 20..110:
+//
+//	seed          sources   exposed   share
+//	1               34423       214   0.62%
+//	0x5EED          41770        63   0.15%
+//	7              114578       339   0.30%
+//
+// Before #654 the same window at seed 1 held 1655 exposed water voxels of 39062 — 4.2% —
+// so one percent is a ceiling the fix clears by a factor of at least one and a half and
+// the defect exceeds by a factor of four. What it is really guarding is a regression of
+// the kind #654 removed: putting the channel aquifer back takes seed 1 from 214 to
+// thousands, and this fails long before anybody runs a measurement.
+func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
+	t.Parallel()
+
+	// One percent, from the measurement in the comment above.
+	const exposedCeiling = 1
+
+	for _, seed := range []int64{1, 0x5EED, 7} {
+		exposed, sources := 0, 0
+		var worst [3]int64
+		for x := int64(-64); x < 64; x++ {
+			for z := int64(1040); z < 1168; z++ {
+				col := columnAt(seed, x, z)
+				for y := int64(20); y <= 110; y++ {
+					if !waterSource(col.voxelAt(seed, x, y, z)) {
+						continue
+					}
+					sources++
+					for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+						nx, nz := x+step[0], z+step[1]
+						if columnAt(seed, nx, nz).voxelAt(seed, nx, y, nz) == Air {
+							if exposed == 0 {
+								worst = [3]int64{x, y, z}
+							}
+							exposed++
+							break
+						}
+					}
+				}
+			}
+		}
+		if sources == 0 {
+			t.Fatalf("seed %d: the window holds no source water, so nothing was checked", seed)
+		}
+		if exposed*100 > sources*exposedCeiling {
+			t.Errorf("seed %d: %d of %d source voxels stand against open air (%.2f%%), over the %d%% ceiling; first at %v",
+				seed, exposed, sources, float64(exposed)*100/float64(sources), exposedCeiling, worst)
+		}
+		t.Logf("seed %d: %d of %d source voxels exposed (%.2f%%)",
+			seed, exposed, sources, float64(exposed)*100/float64(sources))
+	}
 }
