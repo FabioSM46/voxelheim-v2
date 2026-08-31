@@ -9,11 +9,17 @@ func TestNextWaterTruthTable(t *testing.T) {
 	t.Parallel()
 
 	sourceSides := [4]Block{Water, Air, Air, Air}
+	// A side only hands water on if it is standing on something, so every row that is
+	// not *about* a falling side leaves this unset and gets ground under all four.
+	// See [NextWater]: it is what stops a waterfall spraying sideways at every level
+	// of its descent.
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
 	tests := []struct {
 		name         string
 		here         Block
 		above, below Block
 		sides        [4]Block
+		sidesAbove   [4]Block
 		want         Block
 	}{
 		{name: "plain source is permanent", here: Water, below: Air, want: Water},
@@ -43,6 +49,15 @@ func TestNextWaterTruthTable(t *testing.T) {
 		// And the column under a lip is full, from the arm at the top: that is where a
 		// fall's one full-strength answer comes from.
 		{name: "the column under a lip is full", here: Air, above: WaterFlow4, below: Air, want: WaterFlow7},
+		// A side that is itself over a void is a column on its way down, and it hands
+		// on nothing. Without this the wet cone around a fall widened about six blocks
+		// per block of descent; the measurement is at [NextWater].
+		{name: "a falling side feeds nothing", here: Air, below: Stone,
+			sides: [4]Block{WaterFlow7}, sidesAbove: [4]Block{Water, Air, Air, Air}, want: Air},
+		{name: "the same side, standing on ground, feeds", here: Air, below: Stone,
+			sides: [4]Block{WaterFlow7}, sidesAbove: grounded, want: WaterFlow6},
+		{name: "a side over a partial flow is falling too", here: Air, below: Stone,
+			sides: [4]Block{Water}, sidesAbove: [4]Block{WaterFlow3, Air, Air, Air}, want: Air},
 		{name: "source spreads seven", here: Air, below: Stone, sides: sourceSides, want: WaterFlow7},
 		{name: "level one spreads nowhere", here: Air, below: Stone, sides: [4]Block{WaterFlow1}, want: Air},
 		{name: "level six spreads five", here: Air, below: Stone, sides: [4]Block{WaterFlow6}, want: WaterFlow5},
@@ -53,9 +68,13 @@ func TestNextWaterTruthTable(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if got := NextWater(test.here, test.above, test.below, test.sides); got != test.want {
-				t.Errorf("NextWater(%d, %d, %d, %v) = %d, want %d",
-					test.here, test.above, test.below, test.sides, got, test.want)
+			sidesAbove := test.sidesAbove
+			if sidesAbove == ([4]Block{}) {
+				sidesAbove = grounded
+			}
+			if got := NextWater(test.here, test.above, test.below, test.sides, sidesAbove); got != test.want {
+				t.Errorf("NextWater(%d, %d, %d, %v, %v) = %d, want %d",
+					test.here, test.above, test.below, test.sides, sidesAbove, got, test.want)
 			}
 		})
 	}
@@ -70,7 +89,8 @@ func TestNextWaterNeverCreatesASource(t *testing.T) {
 		for _, above := range inputs {
 			for _, below := range inputs {
 				sides := [4]Block{Water, WaterFlow7, WaterCurrentZPos, Air}
-				got := NextWater(here, above, below, sides)
+				grounded := [4]Block{Stone, Stone, Stone, Stone}
+				got := NextWater(here, above, below, sides, grounded)
 				if waterSource(got) && got != here {
 					t.Fatalf("NextWater created source %d from here=%d above=%d below=%d", got, here, above, below)
 				}
@@ -104,7 +124,7 @@ func TestAClosedFlowingBasinDrainsWithoutASource(t *testing.T) {
 				if z+1 < len(basin) {
 					sides[3] = basin[z+1][x]
 				}
-				next[z][x] = NextWater(basin[z][x], Air, Stone, sides)
+				next[z][x] = NextWater(basin[z][x], Air, Stone, sides, [4]Block{Stone, Stone, Stone, Stone})
 			}
 		}
 		basin = next
@@ -148,6 +168,8 @@ func TestUnstableWaterFindsOnlyAirBoundariesAndFaces(t *testing.T) {
 func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 	t.Parallel()
 
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+
 	for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
 		for _, tc := range []struct {
 			name  string
@@ -160,7 +182,7 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 			{"under water", Water, Grass, [4]Block{Air, Air, Air, Air}},
 			{"over nothing", Air, Air, [4]Block{Air, Air, Air, Air}},
 		} {
-			if got := NextWater(flower, tc.above, tc.below, tc.sides); got != flower {
+			if got := NextWater(flower, tc.above, tc.below, tc.sides, grounded); got != flower {
 				t.Errorf("%s: NextWater(%d, ...) = %d, want the flower left alone", tc.name, flower, got)
 			}
 		}
@@ -168,10 +190,10 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 
 	// Air in the same neighbourhood still flows, so the arm above is about cover
 	// rather than about having stopped the automaton.
-	if got := NextWater(Air, Air, Grass, [4]Block{Air, Air, Air, Air}); got != Air {
+	if got := NextWater(Air, Air, Grass, [4]Block{Air, Air, Air, Air}, grounded); got != Air {
 		t.Errorf("dry air = %d, want Air", got)
 	}
-	if got := NextWater(Air, Air, Grass, [4]Block{Water, Air, Air, Air}); got == Air {
+	if got := NextWater(Air, Air, Grass, [4]Block{Water, Air, Air, Air}, grounded); got == Air {
 		t.Error("air beside a source stayed air; the automaton is no longer flowing")
 	}
 	// And cover carries no water level, so a flower beside a flow feeds it nothing.
@@ -189,15 +211,17 @@ func TestTheFlowAutomatonLeavesGroundCoverAlone(t *testing.T) {
 func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
 	t.Parallel()
 
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+
 	// An equivalence rather than a table of levels: swapping a flower onto an empty side
 	// changes nothing, for every water id and in every position.
 	for _, here := range []Block{Water, WaterFlow1, WaterFlow4, WaterFlow7, WaterCurrentXPos} {
 		for _, flower := range []Block{FlowerRed, FlowerYellow, FlowerBlue} {
 			for position := 1; position < 4; position++ {
 				sides := [4]Block{Water, Air, Air, Air}
-				want := NextWater(here, Air, Grass, sides)
+				want := NextWater(here, Air, Grass, sides, grounded)
 				sides[position] = flower
-				if got := NextWater(here, Air, Grass, sides); got != want {
+				if got := NextWater(here, Air, Grass, sides, grounded); got != want {
 					t.Errorf("NextWater(%d, ...) with %d on side %d = %d, want %d as with air",
 						here, flower, position, got, want)
 				}
@@ -206,22 +230,22 @@ func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
 	}
 
 	// And the levels, so two equally wrong answers cannot satisfy the equivalence.
-	if got := NextWater(Water, Air, Grass, [4]Block{FlowerRed, FlowerYellow, FlowerBlue, Air}); got != Water {
+	if got := NextWater(Water, Air, Grass, [4]Block{FlowerRed, FlowerYellow, FlowerBlue, Air}, grounded); got != Water {
 		t.Errorf("a source ringed by flowers became %d, want it left alone", got)
 	}
-	if got := NextWater(WaterFlow4, Air, Grass, [4]Block{Water, FlowerRed, FlowerYellow, FlowerBlue}); got != WaterFlow7 {
+	if got := NextWater(WaterFlow4, Air, Grass, [4]Block{Water, FlowerRed, FlowerYellow, FlowerBlue}, grounded); got != WaterFlow7 {
 		t.Errorf("a flow beside a source and three flowers = %d, want %d", got, WaterFlow7)
 	}
-	if got := NextWater(WaterFlow7, Air, FlowerRed, [4]Block{Water, Air, Air, Air}); got != WaterFlow7 {
+	if got := NextWater(WaterFlow7, Air, FlowerRed, [4]Block{Water, Air, Air, Air}, grounded); got != WaterFlow7 {
 		t.Errorf("water standing on a flower = %d, want it to keep level 7", got)
 	}
 	// The drain arm's negative control: it does fire with nothing below and nothing
 	// on any side to feed a fall. The feed is what the check has to exclude since
 	// #653 — with a source beside it the same cell is a waterfall, not a leak.
-	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Air, Air, Air, Air}); got != Air {
+	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Air, Air, Air, Air}, grounded); got != Air {
 		t.Errorf("water over nothing, fed by nothing = %d, want it to drain", got)
 	}
-	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Water, Air, Air, Air}); got != WaterFlow7 {
+	if got := NextWater(WaterFlow7, Air, Air, [4]Block{Water, Air, Air, Air}, grounded); got != WaterFlow7 {
 		t.Errorf("water over nothing beside a source = %d, want it to keep falling", got)
 	}
 }
@@ -265,7 +289,8 @@ func (w *flowWorld) step() int {
 	for x := range w.width {
 		for y := range w.height {
 			sides := [4]Block{w.at(x+1, y), w.at(x-1, y), Stone, Stone}
-			got := NextWater(w.at(x, y), w.at(x, y+1), w.at(x, y-1), sides)
+			sidesAbove := [4]Block{w.at(x+1, y+1), w.at(x-1, y+1), Stone, Stone}
+			got := NextWater(w.at(x, y), w.at(x, y+1), w.at(x, y-1), sides, sidesAbove)
 			next.cells[x][y] = got
 			if got != w.cells[x][y] {
 				changed++

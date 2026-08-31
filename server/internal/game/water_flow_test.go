@@ -282,3 +282,112 @@ func BenchmarkWaterTick(b *testing.B) {
 		}
 	}
 }
+
+// The other half of the residency guard: a voxel skipped because the chunk under it
+// could not be read must come back when that chunk can be.
+//
+// The guard drops the voxel rather than retrying it, and that is only correct if
+// something schedules it again. This walks the whole round trip rather than trusting
+// the argument: skip, compose the chunk below, drain the composition scan the way
+// `waterScanLoop` does, and require the voxel to be decided from the real blocks.
+func TestAVoxelSkippedForResidencyIsDecidedOnceItsGroundArrives(t *testing.T) {
+	t.Parallel()
+
+	sim, cache := newWaterSim(t)
+	// y = 0 is the bottom layer of chunk Y=0, so its `below` lives in chunk Y=-1,
+	// which newWaterSim does not make resident.
+	at := waterVoxel{x: 4, y: 0, z: 12}
+	setWaterFixtureBlock(t, cache, at, world.Air)
+	setWaterFixtureBlock(t, cache, waterVoxel{x: 5, y: 0, z: 12}, world.Water)
+	scheduleWaterNow(sim, at)
+
+	if changes := sim.Step(1); len(changes) != 0 {
+		t.Fatalf("with the ground unread the pass produced %+v, want no writes", changes)
+	}
+	if got := waterBlockAt(t, cache, at); got != world.Air {
+		t.Fatalf("a voxel over an unread chunk became %d, want it left as Air", got)
+	}
+	sim.mu.Lock()
+	_, stillPending := sim.pendingWater[at]
+	sim.mu.Unlock()
+	if stillPending {
+		t.Fatal("the skipped voxel stayed on the schedule; it is meant to be dropped and re-scheduled by the scan")
+	}
+
+	// The chunk below arrives. This is what the cache does on composition and what
+	// `waterScanLoop` turns into a scan.
+	below := world.ChunkOf(at.x, at.y-1, at.z)
+	chunk, _, err := cache.Get(context.Background(), below)
+	if err != nil {
+		t.Fatalf("compose the chunk below: %v", err)
+	}
+	for _, composed := range cache.TakeWaterCompositions() {
+		if err := sim.QueueUnstableWater(context.Background(), composed.Coord, world.UnstableWater(composed)); err != nil {
+			t.Fatalf("QueueUnstableWater: %v", err)
+		}
+	}
+	// And the voxel's own chunk is scanned too, which is what actually reaches it: the
+	// source beside it is water on this chunk's boundary, so the scan schedules its
+	// neighbourhood.
+	if err := sim.QueueUnstableWater(context.Background(), world.Coord{},
+		[]int{world.Index(world.Local(at.x+1), world.Local(at.y), world.Local(at.z))}); err != nil {
+		t.Fatalf("QueueUnstableWater: %v", err)
+	}
+
+	decided := false
+	for tick := uint64(2); tick <= 2+4*WaterTickDelay; tick++ {
+		sim.Step(tick)
+		if waterBlockAt(t, cache, at) != world.Air {
+			decided = true
+			break
+		}
+	}
+	if !decided {
+		t.Fatal("the voxel was never decided after its ground became readable")
+	}
+	if got := waterBlockAt(t, cache, at); got != world.WaterFlow7 {
+		t.Errorf("the voxel became %d, want %d spread from the source beside it", got, world.WaterFlow7)
+	}
+	// **That it was decided at all is the proof it was decided from a real read**: the
+	// guard makes an unread chunk below the one thing that stops this voxel being
+	// written, so a write here cannot have come from a fallback. What is actually under
+	// it at this column is an aquifer rather than stone — either supports water, and
+	// neither is Air, which is the case [TestNothingUnderTheSurfaceIsEverAir] rules out
+	// generally.
+	if got := chunk.At(world.Local(at.x), world.Local(at.y-1), world.Local(at.z)); got == world.Air {
+		t.Fatalf("the chunk below composed to Air under the voxel, which the generator never produces")
+	}
+}
+
+// There is no world floor to strand water on: everything under a column's surface is
+// generated ground, all the way down, so a water voxel never has an unreadable chunk
+// under it for want of one existing. The residency guard therefore cannot delete a
+// voxel forever — a point worth pinning rather than reasoning about, because the guard
+// is the one path that drops work.
+func TestNothingUnderTheSurfaceIsEverAir(t *testing.T) {
+	t.Parallel()
+
+	cache := world.NewCache(73, 4, 16)
+	for _, coord := range []world.Coord{{}, {Y: -1}, {Y: -4}, {X: 3, Y: -2, Z: -5}} {
+		chunk, _, err := cache.Get(context.Background(), coord)
+		if err != nil {
+			t.Fatalf("Get %+v: %v", coord, err)
+		}
+		originX, originY, originZ := coord.Origin()
+		for x := range world.ChunkSize {
+			for z := range world.ChunkSize {
+				surface := world.GeneratedColumnTop(73, originX+int64(x), originZ+int64(z))
+				for y := range world.ChunkSize {
+					worldY := originY + int64(y)
+					if worldY >= int64(surface) {
+						continue
+					}
+					if got := chunk.At(x, y, z); got == world.Air {
+						t.Fatalf("air at (%d, %d, %d), %d below the column top",
+							originX+int64(x), worldY, originZ+int64(z), int64(surface)-worldY)
+					}
+				}
+			}
+		}
+	}
+}

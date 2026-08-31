@@ -1,6 +1,7 @@
 package world
 
-// NextWater returns the self-only next block from exactly six neighbours.
+// NextWater returns the self-only next block from its six neighbours and the four
+// blocks above its four horizontal ones.
 //
 // **The first arm is "this cell is not water's to decide", and ground cover joins it.**
 // It was written as source-or-solid while the only non-solid ids were water and air,
@@ -12,7 +13,7 @@ package world
 // real choice.** game.allowPlacement lets a placement displace cover, so flooding was
 // the symmetric answer; but a placement happens once, an automaton runs for as long
 // as there is water, and nothing regrows a flower. Water goes around.
-func NextWater(here Block, above, below Block, sides [4]Block) Block {
+func NextWater(here Block, above, below Block, sides, sidesAbove [4]Block) Block {
 	if waterSource(here) || Solid(here) || Cover(here) {
 		return here
 	}
@@ -21,21 +22,42 @@ func NextWater(here Block, above, below Block, sides [4]Block) Block {
 		return WaterFlow7
 	}
 
+	// **A side with water above it is a column on its way down, and it hands on
+	// nothing.** Without this the cell under a fall is full — from the arm above — and
+	// a full cell fed its unsupported neighbour, whose own column was then full and fed
+	// the next one out, so the wet cone widened for as long as the fall was tall.
+	// Measured on a plain cliff with one five-by-five pool at the lip, counting only
+	// water standing on nothing:
+	//
+	//	height   without this test   with it
+	//	     2    154, reach 12       154, reach 6
+	//	     4   1460, reach 24       308, reach 6
+	//	     8   7972, reach 48       616, reach 6
+	//	    16  32078, reach 51*     1232, reach 6
+	//	    32  82830, reach 51*     2464, reach 6
+	//	                             (* the measuring window ran out, not the water)
+	//
+	// Every one of those is a `BlockUpdate` to every client watching the chunk. With
+	// the test the total is linear in the height and the reach is a constant six —
+	// the spread rule's own range — rather than growing with the drop.
+	//
+	// **"Has water above it" and not "has nothing under it", which was the first
+	// attempt and does not work.** A falling column's cell stands on the next cell of
+	// the same column, which is full water and therefore reads as support; every cell
+	// of a fall looked grounded and the cone was unchanged to the voxel. What is above
+	// a cell is the question that separates the two, and it is answerable locally.
+	//
+	// The *lip* of a fall has air above it, so it is not falling and it does spread —
+	// which is how water reaches the edge of a shelf and how a fall gets its width.
+	// The bottom of a fall is not falling either, so a plunge pool spreads normally.
 	maxSide := 0
-	for _, side := range sides {
+	for i, side := range sides {
+		if IsWater(sidesAbove[i]) {
+			continue
+		}
 		maxSide = max(maxSide, WaterLevel(side))
 	}
 
-	// **A cell over a void that a side can still feed is the head of a fall.** Until
-	// #653 a drain arm stood here and was asked first, so a cell with nothing under it
-	// could never take water from a neighbour — and the only other way to make water
-	// over a void is to have water directly above, which by the same argument could
-	// never have got there. **No water in this world could begin to fall.** A pool on a
-	// ledge was a fixed point: measured, it settled in one step with zero changes, and
-	// not one voxel of the WaterFlow family existed anywhere in generated terrain.
-	//
-	// What is left of that arm is its unfed half, which was always right: water with
-	// nothing under it and nothing beside it to supply it drains.
 	if unsupported(below) && maxSide < 2 {
 		return Air
 	}
