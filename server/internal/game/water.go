@@ -133,7 +133,32 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 			continue
 		}
 		above, _ := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y + 1, z: at.z}, world.Stone)
-		below, _ := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
+
+		// **The one neighbour whose absence cannot be defaulted, since #653.** Every
+		// other read here falls back to a block that makes [world.NextWater] answer
+		// conservatively: Stone above is not water, and Stone on a side carries no
+		// water level, so an unread neighbour supplies nothing and starts nothing.
+		// Below had the same property while the rule's only use for it was "is this
+		// water unsupported" — Air meant drain, and draining a cell that was already
+		// Air wrote nothing.
+		//
+		// It stopped having it the moment a cell over a void became the head of a
+		// fall. Air below now *enables* a write rather than suppressing one, so a
+		// fabricated Air under a chunk nobody has loaded would pour a waterfall into
+		// ground that may be solid. Defaulting to Stone instead would only move the
+		// lie: unsupported water over an unloaded chunk would then spread rather than
+		// drain.
+		//
+		// So this voxel is not decided at all. Dropped from the schedule rather than
+		// retried, exactly as an [world.ErrNotResident] *write* is below and for the
+		// same reason: when that chunk is composed the cache marks it, `UnstableWater`
+		// scans it, and the neighbourhood — this voxel included — is scheduled again
+		// from a world that can be read.
+		below, belowResident := s.waterBlockLocked(waterVoxel{x: at.x, y: at.y - 1, z: at.z}, world.Air)
+		if !belowResident {
+			delete(s.pendingWater, at)
+			continue
+		}
 		sides := [4]world.Block{}
 		sides[0], _ = s.waterBlockLocked(waterVoxel{x: at.x + 1, y: at.y, z: at.z}, world.Stone)
 		sides[1], _ = s.waterBlockLocked(waterVoxel{x: at.x - 1, y: at.y, z: at.z}, world.Stone)
