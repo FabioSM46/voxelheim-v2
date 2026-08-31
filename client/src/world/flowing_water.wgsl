@@ -88,6 +88,22 @@ const OCTAVE_WEIGHT: f32 = 0.35;
 
 // Two octaves of sine, in [-1, 1]. No texture, no hash table, no asset — the whole
 // pattern is four sines of the sample point.
+//
+// **The range is exact, it is proved by the last line, and every depth constant above
+// depends on it.** `coarse` is a product of two sines, so |coarse| <= 1; `fine` is one
+// sine, so |fine| <= 1; therefore |coarse + fine * OCTAVE_WEIGHT| <= 1 + OCTAVE_WEIGHT,
+// and dividing by exactly that is what closes it at one. Nothing here clamps, and that
+// is deliberate: with |ripple| <= 1 the fragment below cannot leave its range —
+// brightness stays in [1 - FALL_DEPTH, 1 + FALL_DEPTH] and the foam crest in
+// [0, FALL_FOAM] — so a clamp would protect nothing that holds and would hide the one
+// thing that could break it.
+//
+// **What could break it is adding an octave.** A third term without a matching divisor
+// makes this return more than one, and the depths above silently stop being the bound
+// they are documented as: at |ripple| = 3, `FALL_DEPTH` alone would drive brightness
+// negative. So the divisor is not decoration and it is not optional —
+// `the_ripple_is_normalised_and_the_depths_depend_on_it` in `water_material.rs` fails if
+// this line stops naming every octave weight in the sum above it.
 fn ripple(point: vec2<f32>) -> f32 {
     let coarse = sin(point.x * RIPPLE_SCALE)
         * sin(point.y * RIPPLE_SCALE * 1.3 + point.x * 0.21);

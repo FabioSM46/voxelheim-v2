@@ -244,6 +244,13 @@ mod tests {
     /// readable as three things, and it is what a later retune must not accidentally
     /// invert. The bound above it keeps a retune from answering "make it visible" with
     /// a surface that is no longer water.
+    ///
+    /// **The bound is a bound on the rendered push only because `ripple` is normalised**,
+    /// and that is the conditional this test does not itself carry: the shader computes
+    /// `1.0 + depth * ripple(point)`, so a depth bounds the brightness shift exactly when
+    /// |ripple| <= 1. It does — the divisor on `ripple`'s last line proves it — and
+    /// [`the_ripple_is_normalised_and_the_depths_depend_on_it`] is what keeps that true,
+    /// which is why the two tests are worth reading together.
     #[test]
     fn the_three_waters_are_ordered_and_bounded() {
         let still = shader_const("STILL_DEPTH");
@@ -260,6 +267,46 @@ mod tests {
         assert!(
             still <= 0.08,
             "still water must stay at or under the 0.08 #598 argued for, got {still}"
+        );
+    }
+
+    /// The one thing every depth constant above silently depends on: `ripple` returns a
+    /// value in [-1, 1], so a depth *is* the brightness shift rather than merely scaling
+    /// an unknown.
+    ///
+    /// The proof is arithmetic and lives in the shader: a product of two sines is at most
+    /// one, a sine is at most one, so the weighted sum is at most the sum of the weights —
+    /// and the last line divides by exactly that. **What this test guards is the divisor.**
+    /// Adding a third octave without adding its weight there makes `ripple` return more
+    /// than one, and `FALL_DEPTH` alone would then drive brightness negative. That is a
+    /// silent break: the surface would still render, just wrongly, on the one code path
+    /// CI has no device to exercise.
+    ///
+    /// Read out of the source rather than restated, like every other number here. The
+    /// shader is not clamped on purpose — a clamp would keep a broken `ripple` looking
+    /// plausible, which is the opposite of what this repository wants from a broken
+    /// invariant.
+    #[test]
+    fn the_ripple_is_normalised_and_the_depths_depend_on_it() {
+        let weight = shader_const("OCTAVE_WEIGHT");
+        assert!(
+            (0.0..1.0).contains(&weight),
+            "the second octave must weigh less than the first, got {weight}"
+        );
+        // Every octave in the numerator must appear in the divisor. Two octaves today:
+        // the unit-weight coarse term and OCTAVE_WEIGHT's fine one.
+        assert!(
+            SOURCE.contains("(coarse + fine * OCTAVE_WEIGHT) / (1.0 + OCTAVE_WEIGHT)"),
+            "ripple must divide by the sum of its octave weights, or it is no longer \
+             bounded by one and every depth constant above it stops being a bound"
+        );
+        // And exactly two octaves: a third term would need its weight in that divisor,
+        // and this is what notices one arriving without it.
+        assert_eq!(
+            SOURCE.matches("let coarse").count() + SOURCE.matches("let fine").count(),
+            2,
+            "ripple gained or lost an octave; its divisor and the depth constants both \
+             have to move with it"
         );
     }
 
