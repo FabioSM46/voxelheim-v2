@@ -584,6 +584,25 @@ fn apply_finished_meshes(
 /// Writes only on a change, because `ResMut` marks the resource changed on every
 /// `DerefMut` — and the status line uses change detection to avoid rebuilding its
 /// string every frame.
+///
+/// **The sum was named as a suspect, and #651 priced it.** #642 left a finding it did not
+/// act on: with the decode spike metered away, the worst join frame was owned by none of
+/// the three world systems, and what was left was "the command flush, `refresh_mesh_stats`
+/// and Bevy's own scheduling". This system is the only one of those three that lives in
+/// this repository, and it is the one whose cost grows with the *world* rather than with
+/// the burst — it walks every meshed chunk once a frame, for as long as the session lasts.
+/// So it is now stamped by the harness at the foot of this file rather than argued about.
+/// Over a 343-chunk join settling into 146 meshed chunks it costs a **median of
+/// 0.0024–0.0038 ms** a frame, 0.002–0.005 ms on the worst frame of the join, and
+/// 0.010–0.022 ms on the worst frame it ever had. That is about a fiftieth of one percent
+/// of a 60 Hz frame — and it is the same figure in both build profiles, because summing a
+/// few hundred `usize` is not work an optimizer has much to do with.
+///
+/// **So the paragraph above stands as written, and the counter stays derived.** The trade
+/// it describes — one sum a frame against a class of drift bug that survives any missed
+/// update path — was made without a number, and the number favours it by three orders of
+/// magnitude. What would reopen it is a view distance putting a hundred times more chunks
+/// in the store, and `MAX_DECODE_BACKLOG`'s own arithmetic binds well before that.
 fn refresh_mesh_stats(
     jobs: Res<MeshJobs>,
     store: Res<ChunkStore>,
@@ -2244,9 +2263,13 @@ mod tests {
     // The measurement harness (#629)
     // -----------------------------------------------------------------
     //
-    // Two `#[ignore]`d measurements, so `cargo test` never times anything and CI never
-    // goes red because a runner was busy, and so the numbers in the constants below
-    // stay re-derivable rather than becoming folklore:
+    // Every measurement in this file is `#[ignore]`d, so `cargo test` never times
+    // anything and CI never goes red because a runner was busy, and so the numbers in the
+    // constants below stay re-derivable rather than becoming folklore. **There is
+    // deliberately no count of them here**: this comment said "two" from #629 until #651,
+    // by which point #652 had added three more — a hand-kept tally of a set that grows is
+    // wrong from the next change onward, and the `measure_` prefix in the command below is
+    // the only enumeration that cannot fall behind.
     //
     //     cargo test --release -- --ignored --nocapture measure_
     //
@@ -2468,13 +2491,20 @@ mod tests {
             .collect()
     }
 
-    /// Where a frame went, stamped around the three world systems.
+    /// Where a frame went, stamped around the four world systems.
+    ///
+    /// Four since #651, not three: [`refresh_mesh_stats`] was named in #642's parting
+    /// finding as one of the candidates for the remainder, and a candidate that is never
+    /// stamped can only ever be argued about. It sums over every meshed chunk once a
+    /// frame, so it is the one system here whose cost grows with the *world* rather than
+    /// with the burst — which is exactly the shape that hides inside a "remainder".
     #[derive(Resource, Default)]
     struct Phases {
         mark: Option<Instant>,
         ingest: Duration,
         jobs: Duration,
         apply: Duration,
+        stats: Duration,
     }
 
     fn phase_begin(mut phases: ResMut<Phases>) {
@@ -2493,9 +2523,22 @@ mod tests {
 
     fn phase_apply_end(mut phases: ResMut<Phases>) {
         phases.apply = phases.mark.take().unwrap_or_else(Instant::now).elapsed();
+        phases.mark = Some(Instant::now());
     }
 
-    /// [`world_with_budget`] with a stopwatch around each of the three world systems.
+    fn phase_stats_end(mut phases: ResMut<Phases>) {
+        phases.stats = phases.mark.take().unwrap_or_else(Instant::now).elapsed();
+    }
+
+    /// [`world_with_budget`] with a stopwatch around each of the four world systems.
+    ///
+    /// **The `before` on `phase_apply_end` is load-bearing, and #651 added it.** That
+    /// stamp used to say only `.after(apply_finished_meshes)`, which left it unordered
+    /// against [`refresh_mesh_stats`] — the two share no conflicting parameter, so the
+    /// multi-threaded executor was free to run them at the same time and the `apply`
+    /// reading then contained however much of the stats sum happened to have run by
+    /// then. That is tolerable while the stats sum is not a number anybody reads. It is
+    /// not tolerable once it is the number under examination.
     fn instrumented_world(budget: DecodeTimeBudget) -> App {
         let mut app = world_with_budget(budget);
         app.init_resource::<Phases>().add_systems(
@@ -2508,10 +2551,78 @@ mod tests {
                 phase_jobs_end
                     .after(start_mesh_jobs)
                     .before(apply_finished_meshes),
-                phase_apply_end.after(apply_finished_meshes),
+                phase_apply_end
+                    .after(apply_finished_meshes)
+                    .before(refresh_mesh_stats),
+                phase_stats_end
+                    .after(refresh_mesh_stats)
+                    .before(log_when_meshing_settles),
             ),
         );
         app
+    }
+
+    /// One frame's cost, split into the four stamped systems and everything else.
+    ///
+    /// **"Everything else" is a residue, not a system**, and naming it is the whole
+    /// point: it is what `app.update()` cost minus what the four stamped systems cost,
+    /// so it carries the command flush at every sync point,
+    /// [`log_when_meshing_settles`], `MinimalPlugins`' time and frame-count systems, the
+    /// asset plugin's event pumps, and the executor's own per-system overhead. A real
+    /// client adds render extraction to that list, and this harness cannot see it — the
+    /// note at the head of this section applies here word for word.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct FrameSplit {
+        total: Duration,
+        ingest: Duration,
+        jobs: Duration,
+        apply: Duration,
+        stats: Duration,
+    }
+
+    impl FrameSplit {
+        /// What the four stamped systems cost between them.
+        fn measured(&self) -> Duration {
+            self.ingest + self.jobs + self.apply + self.stats
+        }
+
+        /// `saturating_sub`, because the four spans are stamped from inside the schedule
+        /// and the total from outside it. On a frame where every stamped system is
+        /// sub-microsecond the two clocks can disagree by less than their own
+        /// resolution, and `Duration` subtraction panics rather than reporting anything.
+        fn remainder(&self) -> Duration {
+            self.total.saturating_sub(self.measured())
+        }
+
+        /// Each part's share of the frame as a percentage, in schedule order, remainder
+        /// last.
+        fn shares(&self) -> [f64; 5] {
+            let total = self.total.as_secs_f64().max(f64::MIN_POSITIVE);
+            let pct = |part: Duration| part.as_secs_f64() / total * 100.0;
+            [
+                pct(self.ingest),
+                pct(self.jobs),
+                pct(self.apply),
+                pct(self.stats),
+                pct(self.remainder()),
+            ]
+        }
+    }
+
+    /// One line of attribution, the way #642 reported the frame it was about.
+    fn print_split(what: &str, split: &FrameSplit) {
+        let [ingest, jobs, apply, stats, rest] = split.shares();
+        println!(
+            "  {what}: {:.3} ms = ingest {:.3} ({ingest:.0}%) | jobs {:.3} ({jobs:.0}%) | \
+             apply {:.3} ({apply:.0}%) | stats {:.3} ({stats:.0}%) | everything else \
+             {:.3} ({rest:.0}%)",
+            ms(split.total),
+            ms(split.ingest),
+            ms(split.jobs),
+            ms(split.apply),
+            ms(split.stats),
+            ms(split.remainder()),
+        );
     }
 
     /// The two bounds each burst is drained under: the count on its own, which is what
@@ -2550,6 +2661,15 @@ mod tests {
         spent: Duration,
         worst: Duration,
         worst_ingest: Duration,
+        /// How the worst frame of the drain divided up (#651). `worst` is this split's
+        /// `total`; the split is what says who spent it.
+        worst_split: FrameSplit,
+        /// The median and the worst of [`refresh_mesh_stats`] over every frame of the
+        /// drain. The median is what the system costs a frame that is doing nothing
+        /// else; the worst is the most it ever cost while the world was growing under
+        /// it.
+        stats_median: Duration,
+        stats_worst: Duration,
     }
 
     /// Pumps `app` until nothing is outstanding, printing what every frame cost.
@@ -2568,15 +2688,28 @@ mod tests {
         let (mut first_mesh, mut last_mesh) = (None, None);
         let mut meshed = already_meshed;
         let mut expanded_on = None;
+        let mut worst_split = FrameSplit::default();
+        let mut stats_times = Vec::new();
         loop {
             let began = Instant::now();
             app.update();
             let total = began.elapsed();
             let phases = app.world().resource::<Phases>();
-            let (ingest, jobs, apply) = (phases.ingest, phases.jobs, phases.apply);
+            let split = FrameSplit {
+                total,
+                ingest: phases.ingest,
+                jobs: phases.jobs,
+                apply: phases.apply,
+                stats: phases.stats,
+            };
+            let (ingest, jobs, apply) = (split.ingest, split.jobs, split.apply);
             let seen = stats(app);
             frame += 1;
             spent += total;
+            if total > worst_split.total {
+                worst_split = split;
+            }
+            stats_times.push(split.stats);
             worst = worst.max(total);
             worst_ingest = worst_ingest.max(ingest);
             peak_queued = peak_queued.max(seen.queued);
@@ -2592,11 +2725,14 @@ mod tests {
             }
             println!(
                 "  frame {frame:>3}: total {:>8.3} | ingest {:>7.3} | jobs {:>6.3} | \
-                 apply {:>6.3} | backlog {:>4} queued {:>3} in flight {:>3} meshed {:>3}",
+                 apply {:>6.3} | stats {:>6.3} | rest {:>7.3} | backlog {:>4} queued \
+                 {:>3} in flight {:>3} meshed {:>3}",
                 ms(total),
                 ms(ingest),
                 ms(jobs),
                 ms(apply),
+                ms(split.stats),
+                ms(split.remainder()),
                 seen.decode_backlog,
                 seen.queued,
                 seen.in_flight,
@@ -2611,6 +2747,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
 
+        stats_times.sort_unstable();
         Drain {
             stats: stats(app),
             frames: frame,
@@ -2622,6 +2759,9 @@ mod tests {
             spent,
             worst,
             worst_ingest,
+            worst_split,
+            stats_median: stats_times[stats_times.len() / 2],
+            stats_worst: *stats_times.last().expect("a drain runs at least one frame"),
         }
     }
 
@@ -2632,15 +2772,33 @@ mod tests {
         budget: DecodeTimeBudget,
         burst: Vec<(ChunkCoord, Vec<u16>)>,
     ) -> Drain {
-        let chunks = burst.len();
         let mut app = instrumented_world(budget);
         app.update();
+        drain_burst_in(&mut app, what, 0, burst)
+    }
+
+    /// [`drain_burst`] on an app the caller keeps, and the whole of what #651 needed
+    /// that [`drain_burst`] could not give it.
+    ///
+    /// The measurement there has to pump the *settled* world after the burst has drained
+    /// — that is where [`refresh_mesh_stats`] is at its most expensive and every other
+    /// world system at its cheapest — and `drain_burst` drops its app on the way out.
+    /// `held_before` is how many chunks the store already held, so the conservation
+    /// assertion below stays exact on an app that has drained a burst already.
+    fn drain_burst_in(
+        app: &mut App,
+        what: &str,
+        held_before: usize,
+        burst: Vec<(ChunkCoord, Vec<u16>)>,
+    ) -> Drain {
+        let chunks = burst.len();
+        let held = held_before + chunks;
 
         for (coord, runs) in burst {
-            push(&mut app, WorldUpdate::Chunk { coord, runs });
+            push(app, WorldUpdate::Chunk { coord, runs });
         }
 
-        let drained = drain(&mut app, chunks);
+        let drained = drain(app, held);
         let seen = drained.stats;
         println!(
             "{what}: {chunks} chunks, all expanded by frame {:?}, settled after {} \
@@ -2662,11 +2820,12 @@ mod tests {
             ms(drained.first_mesh.unwrap_or_default()),
             ms(drained.last_mesh.unwrap_or_default()),
         );
+        print_split("worst frame", &drained.worst_split);
 
         // The acceptance criteria, checked rather than printed.
         assert_eq!(
-            seen.chunks_held, chunks,
-            "{what}: {chunks} chunks streamed, {} held",
+            seen.chunks_held, held,
+            "{what}: {chunks} chunks streamed onto {held_before} already held, {} held",
             seen.chunks_held
         );
         assert_eq!(seen.decode_refused, 0, "{what}: updates were refused");
@@ -3032,6 +3191,203 @@ mod tests {
                 drains.push(drained);
             }
             report_ranges(&format!("a walk, {planting:?}"), &drains);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // What owns the join frame now (#651)
+    // -----------------------------------------------------------------
+    //
+    // #642 fixed the walking hitch and left a finding it did not act on: with the decode
+    // spike metered away, the worst *unoptimized* join frame was no longer owned by any
+    // of the three world systems, and what was left was named as "the command flush,
+    // `refresh_mesh_stats`, and Bevy's own scheduling". That was three candidates and a
+    // shrug, taken in a build where #642 had already measured chunk expansion costing ten
+    // times what it costs optimized — so the first question is whether the remainder
+    // survived #650 giving this crate `opt-level = 1` and its dependencies `3`.
+    //
+    //     cargo test -- --ignored --nocapture measure_what_owns_the_join_frame
+    //     cargo test --release -- --ignored --nocapture measure_what_owns_the_join_frame
+    //
+    // **Two methods, because "everything else" is not an attribution.** The first is
+    // subtraction: [`Phases`] gained a fourth stamp so `refresh_mesh_stats` is measured
+    // rather than suspected, and [`FrameSplit::remainder`] is what the frame cost minus
+    // the four. The second is the control that turns that residue into a claim — an
+    // **idle baseline** on the settled world, [`IDLE_FRAMES`] frames with the burst fully
+    // drained, every chunk meshed and nothing outstanding. Those frames run the same
+    // schedule, the same command flush and the same executor, and do no join work at all.
+    // A remainder that matches the idle frame is the floor the app pays for existing; a
+    // remainder materially above it is join work hiding in an unstamped system, and would
+    // be the thing to go and find.
+    //
+    // Everything the harness at the top of this section cannot see applies unchanged, and
+    // it bites hardest here: there is no render app, so nothing below contains render
+    // extraction, and the residue this measures is the *main schedule's* floor rather
+    // than a frame's. A conclusion drawn from it is a conclusion about this repository's
+    // systems, which is precisely the question the issue asks.
+
+    // **What it answered, on one 16-core Linux desktop, three joins per planting per
+    // profile.** A wall clock on one machine is a reading and not a bound; what is claimed
+    // is the shape, not the milliseconds.
+    //
+    // | | dev (`opt-level` 1 / deps 3) | release |
+    // | --- | --- | --- |
+    // | worst join frame | 1.715..2.401 ms | 1.395..2.370 ms |
+    // | `ingest_world_updates` on it | 1.363..2.078 ms, 79..90% | 0.268..2.064 ms, 19..87% |
+    // | `start_mesh_jobs` | 0.025..0.139 ms | 0.042..0.101 ms |
+    // | `apply_finished_meshes` | 0.049..0.079 ms | 0.020..0.100 ms |
+    // | `refresh_mesh_stats` | 0.003..0.005 ms | 0.002..0.005 ms |
+    // | everything else | 0.094..0.191 ms | 0.101..0.161 ms |
+    // | a settled idle frame, in all | 0.102..0.160 ms | 0.074..0.161 ms |
+    // | `refresh_mesh_stats`, median over a whole drain | 0.0029..0.0038 ms | 0.0024..0.0036 ms |
+    //
+    // **The remainder #642 was chasing is not there, and the reason is #650.** That
+    // finding was taken in a build with `opt-level = 0` for this crate *and* every
+    // dependency, where #642 had already measured chunk expansion costing ten times what
+    // it costs optimized. Under the profile #650 shipped the two columns above have
+    // stopped being different games: the worst join frame is the same 1.4..2.4 ms band in
+    // both, because in both it is the frame `ingest_world_updates` spends its 2 ms slice
+    // on. The dev-to-release factor on this frame is about **1.0..1.1**, not ten.
+    //
+    // **And the residue is the floor, measured against the control rather than inferred.**
+    // Everything outside the four stamped systems is 0.094..0.191 ms on the worst join
+    // frame — and a *settled idle frame*, doing no join work whatsoever, is 0.074..0.161 ms
+    // in total, of which 0.051..0.115 ms is itself residue. The join adds nothing to it
+    // that can be told apart from the app existing. There is no unstamped system here with
+    // a material share, so there is nothing here to reduce.
+    //
+    // **Two frames in twelve were not the expansion frame at all, and they are the most
+    // useful rows in the run.** Once per profile the worst frame of a drain landed
+    // mid-mesh: 2.034 ms in the dev run with 1.951 ms of residue, and 1.395 ms in the
+    // release run with 1.063 ms. On both, the four stamped systems together cost under a
+    // tenth of a millisecond — `ingest` 0.006 ms on the dev one — while 230-odd meshing
+    // tasks were in flight on `AsyncComputeTaskPool`. **Nothing in this repository ran on
+    // those frames.** A main thread waiting on sixteen cores that are all meshing is the
+    // executor and the operating system, exactly the answer #642 guessed at, and it is not
+    // addressable by a change to any system named above.
+
+    /// How many idle frames a baseline is taken over.
+    ///
+    /// Four seconds of 60 Hz, which is enough that the median is a median rather than a
+    /// sample and enough that a stray scheduler hiccup lands in the worst without moving
+    /// it.
+    const IDLE_FRAMES: usize = 240;
+
+    /// Pumps `app` with nothing outstanding and answers the median and the worst of those
+    /// frames, ranked by total.
+    ///
+    /// Two warm-up frames first: the frame immediately after a burst drains still carries
+    /// the last of its change detection, and it is not an idle frame however idle the
+    /// queues say the world is.
+    fn idle_baseline(app: &mut App, frames: usize) -> (FrameSplit, FrameSplit) {
+        app.update();
+        app.update();
+
+        let mut splits: Vec<FrameSplit> = (0..frames)
+            .map(|_| {
+                let began = Instant::now();
+                app.update();
+                let total = began.elapsed();
+                let phases = app.world().resource::<Phases>();
+                FrameSplit {
+                    total,
+                    ingest: phases.ingest,
+                    jobs: phases.jobs,
+                    apply: phases.apply,
+                    stats: phases.stats,
+                }
+            })
+            .collect();
+        splits.sort_unstable_by_key(|split| split.total);
+        (splits[frames / 2], splits[frames - 1])
+    }
+
+    /// The attribution #651 asked for, as ranges over repeated runs.
+    fn report_attribution(what: &str, drains: &[Drain], idle: &[FrameSplit]) {
+        let span = |pick: fn(&Drain) -> f64| {
+            drains
+                .iter()
+                .map(pick)
+                .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+        };
+        let idle_span = |pick: fn(&FrameSplit) -> f64| {
+            idle.iter()
+                .map(pick)
+                .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+        };
+        let (total_lo, total_hi) = span(|d| ms(d.worst_split.total));
+        let (ingest_lo, ingest_hi) = span(|d| ms(d.worst_split.ingest));
+        let (jobs_lo, jobs_hi) = span(|d| ms(d.worst_split.jobs));
+        let (apply_lo, apply_hi) = span(|d| ms(d.worst_split.apply));
+        let (stats_lo, stats_hi) = span(|d| ms(d.worst_split.stats));
+        let (rest_lo, rest_hi) = span(|d| ms(d.worst_split.remainder()));
+        let (share_lo, share_hi) = span(|d| d.worst_split.shares()[4]);
+        let (median_lo, median_hi) = span(|d| ms(d.stats_median));
+        let (worst_lo, worst_hi) = span(|d| ms(d.stats_worst));
+        let (idle_lo, idle_hi) = idle_span(|s| ms(s.total));
+        let (idle_stats_lo, idle_stats_hi) = idle_span(|s| ms(s.stats));
+        println!(
+            "{what} — the worst join frame over {} runs:\n  \
+             total {total_lo:.3}..{total_hi:.3} ms\n  \
+             ingest_world_updates {ingest_lo:.3}..{ingest_hi:.3} | start_mesh_jobs \
+             {jobs_lo:.3}..{jobs_hi:.3} | apply_finished_meshes \
+             {apply_lo:.3}..{apply_hi:.3} | refresh_mesh_stats \
+             {stats_lo:.3}..{stats_hi:.3}\n  \
+             everything else {rest_lo:.3}..{rest_hi:.3} ms — \
+             {share_lo:.0}..{share_hi:.0}% of the frame\n  \
+             refresh_mesh_stats across the whole drain: median \
+             {median_lo:.4}..{median_hi:.4} ms, worst {worst_lo:.4}..{worst_hi:.4} ms\n  \
+             a settled idle frame: {idle_lo:.3}..{idle_hi:.3} ms in all, of which \
+             refresh_mesh_stats is {idle_stats_lo:.4}..{idle_stats_hi:.4} ms",
+            drains.len(),
+        );
+    }
+
+    #[test]
+    #[ignore = "a measurement, not an assertion — cargo test --release -- --ignored --nocapture"]
+    fn measure_what_owns_the_join_frame() {
+        // The join #642 measured and the join that ships. `Bare` is the world every
+        // number in #629 and #642 was taken on, so it is the only row comparable with
+        // them; `Planted` is what a player actually joins into since #634 and #647, and
+        // it is the row that says whether the answer survives the plants.
+        for planting in [Planting::Bare, Planting::Planted] {
+            let mut drains = Vec::new();
+            let mut idles = Vec::new();
+            for run in 0..JOINS {
+                let mut app = instrumented_world(DecodeTimeBudget(MAX_DECODE_TIME_PER_FRAME));
+                app.update();
+                let drained = drain_burst_in(
+                    &mut app,
+                    &format!("a join, {planting:?}, run {run}"),
+                    0,
+                    join_volume(planting),
+                );
+
+                // The control: the same app, the same schedule, the same command flush,
+                // with the join already in the world and no work outstanding.
+                let settled = drained.stats;
+                let (median, worst) = idle_baseline(&mut app, IDLE_FRAMES);
+                println!(
+                    "  idle on the settled world — {} chunks held, {} meshed, {} quads",
+                    settled.chunks_held, settled.meshed_chunks, settled.total_quads,
+                );
+                print_split("median idle frame", &median);
+                print_split("worst idle frame ", &worst);
+
+                // Idling is not a world event, and the counters say so rather than the
+                // paragraph above saying it. Conservation across the baseline, held to
+                // the same standard the burst is: nothing arrived, nothing left, nothing
+                // was refused or evicted while the stopwatch ran.
+                assert_eq!(
+                    stats(&app),
+                    settled,
+                    "{planting:?}: idling changed the world"
+                );
+
+                drains.push(drained);
+                idles.push(median);
+            }
+            report_attribution(&format!("a join, {planting:?}"), &drains, &idles);
         }
     }
 }
