@@ -49,7 +49,7 @@ use bevy::prelude::*;
 use super::Weather;
 use super::camera::WorldCamera;
 use super::sky;
-use crate::net::{BlockCoord, Session, WeatherKind};
+use crate::net::{Session, WeatherKind};
 use crate::world::ChunkStore;
 
 /// How many quads the volume holds, drawn or not.
@@ -233,9 +233,8 @@ impl PrecipitationShelter {
             {
                 self.scans += 1;
             }
-            *column = (bounds.min_y..bounds.max_y)
-                .rev()
-                .find(|roof_y| store.solid_at(BlockCoord { x, y: *roof_y, z }, bounds.chunk_size))
+            *column = store
+                .highest_solid_y(x, z, bounds.min_y, bounds.max_y, bounds.chunk_size)
                 .map_or(ColumnShelter::Open, ColumnShelter::Roof);
         }
 
@@ -355,7 +354,7 @@ pub(super) struct PrecipitationInputs<'w> {
     store: Option<Res<'w, ChunkStore>>,
     time: Res<'w, Time>,
     visuals: Option<Res<'w, PrecipitationVisuals>>,
-    shelter: ResMut<'w, PrecipitationShelter>,
+    shelter: Option<ResMut<'w, PrecipitationShelter>>,
 }
 
 pub(super) fn draw_precipitation(
@@ -373,18 +372,23 @@ pub(super) fn draw_precipitation(
         store,
         time,
         visuals,
-        mut shelter,
+        shelter,
     } = read;
+    let (Some(visuals), Ok((mut visibility, mut material))) = (visuals, volume.single_mut()) else {
+        return;
+    };
+    let Some(mut shelter) = shelter else {
+        if *visibility != Visibility::Hidden {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
     // Observe changes even while the sky is clear. Bevy advances this system's change
     // tick after every run, so postponing the read until rain returned would miss edits
     // made during dry weather and revive old exposure answers.
     if store.as_ref().is_some_and(|store| store.is_changed()) {
         shelter.invalidate();
     }
-    let (Some(visuals), Ok((mut visibility, mut material))) = (visuals, volume.single_mut()) else {
-        return;
-    };
-
     let drawn = drawn_weather(&weather, session.as_deref(), store.as_deref(), &eyes);
     let Some((kind, intensity, eye)) = drawn else {
         // Guarded, because `Mut` marks a component changed on every `DerefMut` and a clear
@@ -650,7 +654,7 @@ mod tests {
 
     use super::*;
     use crate::net::{
-        ChunkCoord, EntityState, SessionParams, Snapshot, SnapshotInbox, WeatherState,
+        BlockCoord, ChunkCoord, EntityState, SessionParams, Snapshot, SnapshotInbox, WeatherState,
     };
     use crate::player::PlayerPlugin;
     use crate::world::{VoxelChunk, palette};
@@ -1139,6 +1143,21 @@ mod tests {
         tick += 1;
         deliver(&mut app, tick, weather_of(WeatherKind::Rain, 0));
         app.update();
+        assert_eq!(volume(&mut app).0, Visibility::Hidden);
+    }
+
+    /// Startup owns the shelter resource, but the draw system is total while Bevy is
+    /// applying that deferred command or if another presentation system removes it.
+    #[test]
+    fn a_missing_shelter_resource_hides_the_volume_instead_of_failing_the_system() {
+        let mut app = headless_player(false);
+        deliver(&mut app, 1, weather_of(WeatherKind::Rain, 255));
+        app.update();
+        assert_eq!(volume(&mut app).0, Visibility::Visible);
+
+        app.world_mut().remove_resource::<PrecipitationShelter>();
+        app.update();
+
         assert_eq!(volume(&mut app).0, Visibility::Hidden);
     }
 
