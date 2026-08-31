@@ -115,3 +115,82 @@ rustls = { version = "0.23.43", default-features = false, features = ["ring", "s
 # instead — hand-written client code contains no `unsafe`, and in particular
 # net/codec.rs uses the verifying `root_as_envelope`, never
 # `root_as_envelope_unchecked`.
+
+# ── Build profiles ─────────────────────────────────────────────────────────────
+#
+# Until #650 this file declared no `[profile.*]` section at all, so `cargo run` and
+# `cargo test` used Cargo's stock `dev` profile: `opt-level = 0` for this crate **and
+# for every dependency**, Bevy included. #642 measured what that costs on one
+# operation — expanding and storing one chunk was 0.026–0.044 ms in an optimized build
+# and 0.26–0.46 ms in an unoptimized one. A factor of ten between two builds of the
+# same source, before a second machine enters the picture.
+#
+# The cost lands on judgement rather than on patience. A frame budget tuned against the
+# slow column over-corrects for the fast one, and a regression only the slow column can
+# see is indistinguishable from a real one until somebody builds twice — which is why
+# every number in `world/mod.rs`'s budget argument had to be carried in two columns,
+# and why the walking hitch in #629 was reported by somebody playing the game rather
+# than by a profiler.
+#
+# **Why two stanzas, and why they carry different numbers.** They answer two halves of
+# the build that are priced differently. Dependencies are compiled once and then
+# cached, so `opt-level = 3` there is paid on a cold build and never again — and that
+# is the half carrying Bevy, whose scheduling, transform propagation and render
+# extraction run every frame in code this crate does not own. This crate is recompiled
+# on every edit, so it takes `opt-level = 1` instead: enough that the hot loops the
+# client does own — `VoxelChunk::from_runs`, the greedy mesher — stop being a different
+# game from the one that ships, and cheap enough that the edit-rebuild-look loop this
+# profile exists to protect stays short.
+#
+# Bevy documents this exact pair as its recommended development setup. The reasoning
+# above is why it applies here rather than the fact that it is recommended: an engine
+# crate that runs per frame and a game crate that is rebuilt per edit want different
+# answers, and Cargo's per-package override is the only thing that lets one profile
+# give both.
+#
+# **Measured on one 16-core Linux desktop, three runs each, reported as ranges.** A
+# wall clock on one machine is a reading and not a bound; what is being claimed is the
+# direction and the rough size, not the seconds.
+#
+# | | stock dev | this profile |
+# | --- | --- | --- |
+# | incremental rebuild, one line in `client/src/` | 7.42–7.45 s | **5.42–5.68 s** |
+# | `cargo test --workspace --locked`, binaries warm | 10.69–10.84 s | **1.81–1.87 s** |
+# | expanding + storing one chunk (#642's measurement) | 0.283–0.289 ms | **0.046–0.069 ms** |
+# | clean debug build | 141–170 s | 298–338 s |
+# | `target/` after that build | 5.89 GiB | 7.02 GiB |
+# | the whole ci.yml client gate sequence, cold | 302 s | 525 s |
+#
+# **The first row is the one that decides this, and it goes the right way.** The
+# edit-rebuild loop got *shorter*, by about two seconds in seven: this crate at
+# `opt-level = 1` costs a little more to codegen and the linker is handed a much
+# smaller pile of unoptimized dependency code, and the second effect is larger than the
+# first. The test suite is the other number a developer actually waits on, and it is
+# five and a half times faster.
+#
+# **What it costs is the cold build, and only the cold build**: 1.7x on the full gate
+# sequence, paid on a fresh checkout, a toolchain bump or a lockfile change. On CI that
+# is a cache miss, which is the case `client-cache.yml` exists to make rare; the
+# `client` job's 25-minute budget is what this has to stay inside, and it is the number
+# to re-measure if that job ever runs close to it.
+#
+# **Where the chunk figure lands, stated rather than rounded off.** 0.046–0.069 ms is
+# not the 0.026–0.044 ms of a release build, because this crate is at `opt-level = 1`
+# and not 3. It is a fifth of what it was and within about a factor of two of what
+# ships, which is close enough that a measurement taken here is about the code. It is
+# not close enough to quote as a release number, and no number taken under this profile
+# may be.
+#
+# **What would have to change for this to be revisited.** If the cold build ever
+# threatens the CI budget, `opt-level = 2` on dependencies is the first thing to try —
+# most of the win, materially less codegen. If a debugger session through Bevy's own
+# frames is ever needed, `opt-level = 3` there is what makes those frames unreadable,
+# and the fix is a one-line local override rather than a change here.
+#
+# The release profile is deliberately absent: nothing here changes what ships, and
+# `--release` remains the build every number quoted as "optimized" comes from.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
