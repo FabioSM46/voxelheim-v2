@@ -288,8 +288,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 19 {
-		t.Fatalf("WorldgenVersion = %d, want 19 after a carved voxel and the water beside it were made to agree", WorldgenVersion)
+	if WorldgenVersion != 20 {
+		t.Fatalf("WorldgenVersion = %d, want 20 after the capital's keep grew from 21 across to 63 and the plateau, the plot ring and the hut ring all moved out behind it", WorldgenVersion)
 	}
 }
 

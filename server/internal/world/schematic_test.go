@@ -2,36 +2,56 @@ package world
 
 import "testing"
 
-// everySchematic is the four drawings, named, so a failure says which one.
+// everySchematic is the four drawings, named, so a failure says which one, and each
+// with the block its footing course is laid in.
+//
+// **The footing was a literal `Cobblestone` in the doorway test until #682**, which was
+// true of four drawings built from a settlement's three materials and stopped being true
+// the moment one of them was a castle. It is named per drawing rather than read off the
+// picture on purpose: reading `s.At(0, 0, 0)` and then checking the ring against it
+// asserts that a drawing agrees with itself, and would pass a keep whose footing had
+// been drawn in thatch.
 func everySchematic() []struct {
-	kind BuildingKind
-	s    *Schematic
+	kind    BuildingKind
+	s       *Schematic
+	footing Block
 } {
-	kinds := []BuildingKind{BuildingHut, BuildingSmithy, BuildingHall, BuildingKeep}
+	kinds := []struct {
+		kind    BuildingKind
+		footing Block
+	}{
+		{BuildingHut, Cobblestone},
+		{BuildingSmithy, Cobblestone},
+		{BuildingHall, Cobblestone},
+		{BuildingKeep, Basalt},
+	}
 	out := make([]struct {
-		kind BuildingKind
-		s    *Schematic
+		kind    BuildingKind
+		s       *Schematic
+		footing Block
 	}, 0, len(kinds))
-	for _, kind := range kinds {
+	for _, k := range kinds {
 		out = append(out, struct {
-			kind BuildingKind
-			s    *Schematic
-		}{kind, SchematicFor(kind)})
+			kind    BuildingKind
+			s       *Schematic
+			footing Block
+		}{k.kind, SchematicFor(k.kind), k.footing})
 	}
 	return out
 }
 
-// TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean is the drawings' own
-// contract: a voxel is terrain left alone, air, or one of the three materials a
-// settlement is built out of.
+// TestEverySchematicHoldsOnlyTheThingsADrawingCanMean is the drawings' own contract: a
+// voxel is terrain left alone, air, one of the three materials a settlement is built out
+// of, or one of the eight a castle is.
 //
 // **The set is written out here rather than derived from [schematicLegend], and that
 // difference is the whole test.** Reading the legend and then checking every voxel
 // against it asserts that a map agrees with itself: adding `'X': Water` to the legend
-// and building a wall out of water passes such a test without a murmur. The five
-// blocks below are the independent statement — the one a reviewer can check against
-// the issue rather than against the code under test.
-func TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean(t *testing.T) {
+// and building a wall out of water passes such a test without a murmur. The blocks
+// below are the independent statement — the one a reviewer can check against the issue
+// rather than against the code under test. It is why this list grew by hand when the
+// palette did, and that cost is the point of it.
+func TestEverySchematicHoldsOnlyTheThingsADrawingCanMean(t *testing.T) {
 	t.Parallel()
 
 	allowed := map[Block]bool{
@@ -40,6 +60,16 @@ func TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean(t *testing.T) {
 		Cobblestone: true,
 		Planks:      true,
 		Thatch:      true,
+
+		// #680's eight, spent by the keep and by nothing else yet.
+		Basalt:           true,
+		BlackBrick:       true,
+		BlackBrickWorn:   true,
+		SmoothBlackStone: true,
+		SlateTile:        true,
+		DarkTimber:       true,
+		PaleTimber:       true,
+		DarkGlass:        true,
 	}
 
 	for _, drawing := range everySchematic() {
@@ -52,7 +82,7 @@ func TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean(t *testing.T) {
 		}
 		for _, block := range s.Voxels {
 			if !allowed[block] {
-				t.Fatalf("%v holds block %d, which is not one of the five a drawing may mean", drawing.kind, block)
+				t.Fatalf("%v holds block %d, which is not one of the things a drawing may mean", drawing.kind, block)
 			}
 		}
 	}
@@ -131,7 +161,7 @@ func TestEverySchematicIsTheSizeItsIssueAsksFor(t *testing.T) {
 		BuildingHut:    {7, 5, 7},
 		BuildingSmithy: {9, 6, 9},
 		BuildingHall:   {13, 8, 13},
-		BuildingKeep:   {21, 28, 21},
+		BuildingKeep:   {63, 68, 63},
 	}
 	for _, drawing := range everySchematic() {
 		got := [3]int{drawing.s.W, drawing.s.H, drawing.s.D}
@@ -184,24 +214,26 @@ func TestTheDrawingsSayWhatTheirCommentsSayTheySay(t *testing.T) {
 		{BuildingHall, 1, 7, 2, Air, "the ridge is inset by two on x"},
 		{BuildingHall, 2, 7, 1, Air, "and by two on z"},
 
-		{BuildingKeep, 1, 0, 1, Cobblestone, "the curtain wall is two courses thick"},
-		{BuildingKeep, 2, 0, 2, Air, "and the courtyard begins at the third"},
-		{BuildingKeep, 10, 0, 20, Air, "the gate"},
-		{BuildingKeep, 10, 3, 20, Cobblestone, "the lintel that closes it"},
-		{BuildingKeep, 0, 6, 10, Cobblestone, "the parapet"},
-		{BuildingKeep, 1, 6, 10, Air, "and the wall walk inside it"},
-		{BuildingKeep, 10, 6, 10, Cobblestone, "the second floor's slab"},
-		{BuildingKeep, 6, 6, 10, Air, "the stairwell through it"},
-		{BuildingKeep, 6, 3, 9, Cobblestone, "a tread of the first flight"},
-		{BuildingKeep, 10, 12, 10, Cobblestone, "the third floor's slab"},
-		{BuildingKeep, 14, 9, 10, Cobblestone, "a tread of the second flight"},
-		{BuildingKeep, 10, 16, 5, Planks, "the string course under the eaves"},
-		{BuildingKeep, 10, 17, 4, Planks, "the eaves, oversailing the keep by one"},
-		{BuildingKeep, 10, 19, 10, Thatch, "the cap"},
-		{BuildingKeep, 0, 23, 0, Cobblestone, "the north-west tower shaft above the main roof"},
-		{BuildingKeep, 10, 20, 18, Planks, "the bridge deck between the front towers"},
-		{BuildingKeep, 5, 24, 5, Planks, "the north-west capital oversailing inward"},
-		{BuildingKeep, 2, 27, 2, Thatch, "the north-west tower cap"},
+		// The keep, and one fixed point per material it is drawn in — which is what
+		// makes this the cheapest check that #680's palette is actually being spent
+		// rather than merely declared.
+		{BuildingKeep, 0, 0, 0, Basalt, "the footing course"},
+		{BuildingKeep, 31, 0, 62, Air, "the gate"},
+		{BuildingKeep, 31, 8, 62, SmoothBlackStone, "the lintel that closes it"},
+		{BuildingKeep, 0, 3, 31, BlackBrickWorn, "the weathered band low on the curtain"},
+		{BuildingKeep, 0, 6, 31, SmoothBlackStone, "the curtain's string course"},
+		{BuildingKeep, 0, 13, 31, BlackBrick, "the parapet"},
+		{BuildingKeep, 1, 13, 31, Air, "and the wall walk inside it"},
+		{BuildingKeep, 0, 15, 30, Air, "a crenel cut through that parapet"},
+		{BuildingKeep, 8, 2, 4, DarkGlass, "a window on the west wing's back wall"},
+		{BuildingKeep, 8, 4, 4, PaleTimber, "the lintel over that window"},
+		{BuildingKeep, 16, 6, 22, DarkTimber, "the west wing's first-floor slab"},
+		{BuildingKeep, 8, 2, 33, DarkTimber, "a tread of the first flight"},
+		{BuildingKeep, 8, 3, 33, Air, "and the headroom over that tread"},
+		{BuildingKeep, 31, 20, 25, DarkTimber, "the bridge deck over the inner court"},
+		{BuildingKeep, 31, 21, 25, Air, "the bridge's own room"},
+		{BuildingKeep, 16, 28, 22, SlateTile, "the west wing's roof"},
+		{BuildingKeep, 50, 67, 12, SlateTile, "the great spire's point"},
 	} {
 		s := SchematicFor(tc.kind)
 		if got := s.At(tc.x, tc.y, tc.z); got != tc.want {
@@ -260,18 +292,18 @@ func TestEveryDrawingPutsItsDoorwayOnThePlusZFace(t *testing.T) {
 			if x >= lo && x <= hi {
 				continue
 			}
-			if got := s.At(x, 0, front); got != Cobblestone {
-				t.Errorf("%v's front wall holds block %d at x=%d, want the footing course's cobble", drawing.kind, got, x)
+			if got := s.At(x, 0, front); got != drawing.footing {
+				t.Errorf("%v's front wall holds block %d at x=%d, want its footing block %d", drawing.kind, got, x, drawing.footing)
 			}
 		}
 		for x := range s.W {
-			if got := s.At(x, 0, 0); got != Cobblestone {
+			if got := s.At(x, 0, 0); got != drawing.footing {
 				t.Errorf("%v's back wall holds block %d at x=%d; the doorway is on +Z and nowhere else", drawing.kind, got, x)
 			}
 		}
 		for z := range s.D {
 			for _, x := range []int{0, s.W - 1} {
-				if got := s.At(x, 0, z); got != Cobblestone {
+				if got := s.At(x, 0, z); got != drawing.footing {
 					t.Errorf("%v's side wall holds block %d at (%d, %d); the doorway is on +Z and nowhere else", drawing.kind, got, x, z)
 				}
 			}
@@ -306,9 +338,9 @@ func TestEveryAnchorIsWhereItsBuildingPutsIt(t *testing.T) {
 			{X: 3, Y: 0, Z: 9, Kind: AnchorTrader},
 		},
 		BuildingKeep: {
-			{X: 8, Y: 0, Z: 18, Kind: AnchorGuard},
-			{X: 12, Y: 0, Z: 18, Kind: AnchorGuard},
-			{X: 10, Y: 0, Z: 13, Kind: AnchorCarpenter},
+			{X: 29, Y: 0, Z: 59, Kind: AnchorGuard},
+			{X: 33, Y: 0, Z: 59, Kind: AnchorGuard},
+			{X: 16, Y: 0, Z: 22, Kind: AnchorCarpenter},
 		},
 	}
 
@@ -757,37 +789,44 @@ func TestEveryRoomADrawingHasIsReachableFromItsDoorway(t *testing.T) {
 	}
 }
 
-// TestTheCastleHasThreeFloorsAWallWalkAndATowerBridgeAndYouCanWalkToAllOfThem is the
-// other half: the test above says nothing is sealed, and a castle with no upper floors
-// at all satisfies that perfectly. So the landmarks are named — each a coordinate the
-// drawing's own comment promises, each standable and reachable on foot from outside the
-// gate. The bridge and both rooms it joins are the second half of #555: naming all three
-// prevents a decorative span that a player can see but cannot enter.
-func TestTheCastleHasThreeFloorsAWallWalkAndATowerBridgeAndYouCanWalkToAllOfThem(t *testing.T) {
+// TestTheKeepHasNineFloorsAWallWalkAndABridgedCourtAndYouCanWalkToAllOfThem is the
+// other half: the test above says nothing is sealed, and a castle whose upper floors are
+// all solid masonry satisfies that perfectly. So the landmarks are named — each a
+// coordinate the drawing's own comment promises, each standable and reachable on foot
+// from outside the gate.
+//
+// **The wall walk is read on all four sides on purpose, and it is the one that nearly
+// was not true.** Four corner towers stand on that ring, and until a slot was cut through
+// each of them at walk height the walk was three dead ends and one stair — a state in
+// which every other assertion here passes.
+func TestTheKeepHasNineFloorsAWallWalkAndABridgedCourtAndYouCanWalkToAllOfThem(t *testing.T) {
 	t.Parallel()
 
 	s := SchematicFor(BuildingKeep)
-	reached := walkSchematic(s, [3]int{10, 0, 20})
+	reached := walkSchematic(s, [3]int{31, 0, 62})
 
 	for _, tc := range []struct {
 		x, y, z int
 		what    string
 	}{
-		{10, 0, 10, "the keep's ground floor"},
-		{10, 7, 10, "the keep's second floor"},
-		{10, 13, 10, "the keep's third floor"},
-		{6, 4, 9, "the first flight of stairs"},
-		{14, 10, 10, "the second flight of stairs"},
-		{2, 4, 9, "the courtyard stair to the wall walk"},
-		{1, 6, 10, "the wall walk, west side"},
-		{19, 6, 10, "the wall walk, east side"},
-		{10, 6, 1, "the wall walk, back"},
-		{10, 6, 19, "the wall walk, front"},
-		{10, 15, 15, "the upper stair through the keep's eaves"},
-		{6, 20, 16, "the upper stair's bridge landing"},
-		{10, 21, 18, "the elevated bridge"},
-		{2, 21, 18, "the south-west tower room"},
-		{18, 21, 18, "the south-east tower room"},
+		{31, 0, 59, "the gate passage"},
+		{20, 0, 50, "the bailey"},
+		{16, 0, 22, "the west wing's ground floor"},
+		{16, 7, 22, "the west wing's first floor"},
+		{16, 14, 22, "the west wing's second floor"},
+		{16, 21, 22, "the west wing's third floor"},
+		{46, 0, 22, "the east keep's ground floor"},
+		{46, 7, 22, "the east keep's first floor"},
+		{46, 14, 22, "the east keep's second floor"},
+		{46, 21, 22, "the east keep's third floor"},
+		{46, 28, 22, "the east keep's fourth floor"},
+		{8, 3, 33, "a tread of the west wing's first flight"},
+		{2, 7, 36, "the bailey stair to the wall walk"},
+		{1, 13, 30, "the wall walk, west"},
+		{61, 13, 30, "the wall walk, east"},
+		{31, 13, 1, "the wall walk, back"},
+		{31, 13, 61, "the wall walk, front, through the gatehouse"},
+		{31, 21, 25, "the bridge over the inner court"},
 	} {
 		if !standableCell(s, tc.x, tc.y, tc.z) {
 			t.Errorf("%s at (%d, %d, %d) is not somewhere a body can stand", tc.what, tc.x, tc.y, tc.z)
@@ -799,35 +838,50 @@ func TestTheCastleHasThreeFloorsAWallWalkAndATowerBridgeAndYouCanWalkToAllOfThem
 	}
 }
 
-// TestTheCastleHasFourTowersWithCorbelledCapitals pins the silhouette rather than a
-// count of blocks. Each tower has a cobble shaft above the keep's y=19 cap, a plank
-// course that reaches one block inward beyond that shaft, and a thatch finial at y=27.
-// Reading the four corners separately is what makes "multiple towers" mean four
-// structures rather than four samples from one structure.
-func TestTheCastleHasFourTowersWithCorbelledCapitals(t *testing.T) {
+// TestTheKeepsFourSpiresRiseFromCorbelledShafts pins the silhouette rather than a count
+// of blocks. Each spired tower has a dressed shaft carried above the mass it stands in, a
+// smooth capital that oversails that shaft by one block, and a slate point — and the four
+// are read separately, which is what makes "four towers" mean four structures rather than
+// four samples from one.
+//
+// **The taper is asserted at both ends, because a spire that never narrows is a chimney.**
+// The course above the capital is still the shaft's full width; two blocks off the axis
+// near the point is not slate at all.
+func TestTheKeepsFourSpiresRiseFromCorbelledShafts(t *testing.T) {
 	t.Parallel()
 
 	s := SchematicFor(BuildingKeep)
 	for _, tower := range []struct {
-		name             string
-		shaftX, shaftZ   int
-		corbelX, corbelZ int
-		finialX, finialZ int
+		name                  string
+		cx, cz, r, shaft, tip int
 	}{
-		{"north-west", 0, 0, 5, 5, 2, 2},
-		{"north-east", 20, 0, 15, 5, 18, 2},
-		{"south-west", 0, 20, 5, 15, 2, 18},
-		{"south-east", 20, 20, 15, 15, 18, 18},
+		{"north-west", 10, 12, 6, 40, 56},
+		{"south-west", 20, 32, 5, 34, 48},
+		{"north-east", 50, 12, 7, 46, 67},
+		{"south-east", 42, 32, 6, 40, 58},
 	} {
-		if got := s.At(tower.shaftX, 23, tower.shaftZ); got != Cobblestone {
-			t.Errorf("%s tower shaft is block %d above the main roof, want cobblestone", tower.name, got)
+		if got := s.At(tower.cx, tower.shaft-4, tower.cz); got != BlackBrick {
+			t.Errorf("the %s tower's shaft is block %d below its capital, want dressed brick", tower.name, got)
 		}
-		if got := s.At(tower.corbelX, 24, tower.corbelZ); got != Planks {
-			t.Errorf("%s tower's inward corbel is block %d, want planks", tower.name, got)
+		if got := s.At(tower.cx+tower.r+1, tower.shaft, tower.cz); got != SmoothBlackStone {
+			t.Errorf("the %s tower's capital is block %d where it oversails the shaft, want smooth stone", tower.name, got)
 		}
-		if got := s.At(tower.finialX, 27, tower.finialZ); got != Thatch {
-			t.Errorf("%s tower finial is block %d at the castle's top course, want thatch", tower.name, got)
+		if got := s.At(tower.cx+tower.r, tower.shaft+1, tower.cz); got != SlateTile {
+			t.Errorf("the %s tower's spire is block %d at its full width, want slate", tower.name, got)
 		}
+		if got := s.At(tower.cx, tower.tip, tower.cz); got != SlateTile {
+			t.Errorf("the %s tower's point is block %d, want slate", tower.name, got)
+		}
+		if got := s.At(tower.cx+2, tower.tip-1, tower.cz); got == SlateTile {
+			t.Errorf("the %s tower is still %d blocks wide a course below its point; it has not tapered", tower.name, 2)
+		}
+	}
+
+	// The north-east spire is the tallest thing in the capital, and it reaches the last
+	// course of the drawing — which is what makes the height of this schematic a
+	// statement rather than padding.
+	if got := s.At(50, s.H-1, 12); got != SlateTile {
+		t.Errorf("the drawing's top course holds block %d over the great spire, want slate", got)
 	}
 }
 
@@ -835,7 +889,7 @@ func TestTheCastleHasFourTowersWithCorbelledCapitals(t *testing.T) {
 // that answers them.
 //
 // **Written out rather than ranged over, for the reason
-// TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean writes its five out.**
+// TestEverySchematicHoldsOnlyTheThingsADrawingCanMean writes its own out.**
 // Ranging over [schematicLegend] and checking that each value is a block asserts that a
 // map agrees with itself; the pairs below are the statement a reviewer can check against
 // #680's table without reading the code under test. The length guard is what makes a
