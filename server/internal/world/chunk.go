@@ -185,7 +185,138 @@ const (
 	// the single function that has to learn about it; its doc comment has said so since
 	// before this block existed.
 	DarkGlass Block = 43
+
+	// Geometry lives in the existing uint16 id, so RLE, wire and deltas need no second
+	// field. All variants use SlateTile's material.
+	//
+	// A stair's direction names its high half. Bottom stairs occupy the lower half of
+	// the voxel plus the upper half on that side; top stairs are the vertical mirror.
+	SlateSlabBottom Block = 44
+	SlateSlabTop    Block = 45
+
+	SlateStairNorthBottom Block = 46
+	SlateStairEastBottom  Block = 47
+	SlateStairSouthBottom Block = 48
+	SlateStairWestBottom  Block = 49
+	SlateStairNorthTop    Block = 50
+	SlateStairEastTop     Block = 51
+	SlateStairSouthTop    Block = 52
+	SlateStairWestTop     Block = 53
 )
+
+// ShapeKind is the geometry a block occupies inside its voxel.
+type ShapeKind uint8
+
+const (
+	ShapeCube ShapeKind = iota
+	ShapeSlab
+	ShapeStair
+)
+
+// ShapeHalf names which vertical half anchors a slab or stair.
+type ShapeHalf uint8
+
+const (
+	ShapeBottom ShapeHalf = iota
+	ShapeTop
+)
+
+// ShapeFacing names the high horizontal half of a stair.
+type ShapeFacing uint8
+
+const (
+	ShapeNorth ShapeFacing = iota
+	ShapeEast
+	ShapeSouth
+	ShapeWest
+)
+
+// BlockShape is the geometry and shared base material carried by one block id.
+type BlockShape struct {
+	Kind     ShapeKind
+	Half     ShapeHalf
+	Facing   ShapeFacing
+	Material Block
+}
+
+// BlockBounds is one axis-aligned piece of a block's collision shape, in local
+// voxel coordinates. Min is inclusive and Max is exclusive on every axis.
+type BlockBounds struct {
+	Min [3]float64
+	Max [3]float64
+}
+
+var fullBlockBounds = BlockBounds{Max: [3]float64{1, 1, 1}}
+
+// ShapeOf decodes the geometry and base material carried by b.
+//
+// Unknown ids fail closed as full cubes, matching Solid: an older server must stop a
+// body at a block it does not understand rather than reinterpret it as empty space.
+func ShapeOf(b Block) BlockShape {
+	shape := BlockShape{Kind: ShapeCube, Material: b}
+	switch b {
+	case SlateSlabBottom:
+		shape.Kind = ShapeSlab
+		shape.Material = SlateTile
+	case SlateSlabTop:
+		shape.Kind = ShapeSlab
+		shape.Half = ShapeTop
+		shape.Material = SlateTile
+	case SlateStairNorthBottom, SlateStairEastBottom, SlateStairSouthBottom, SlateStairWestBottom:
+		shape.Kind = ShapeStair
+		shape.Facing = ShapeFacing(b - SlateStairNorthBottom)
+		shape.Material = SlateTile
+	case SlateStairNorthTop, SlateStairEastTop, SlateStairSouthTop, SlateStairWestTop:
+		shape.Kind = ShapeStair
+		shape.Half = ShapeTop
+		shape.Facing = ShapeFacing(b - SlateStairNorthTop)
+		shape.Material = SlateTile
+	}
+	return shape
+}
+
+// CollisionBounds returns zero boxes for passable blocks, one for slabs/cubes and
+// two for stairs. Every authoritative moving body consumes this one definition.
+func CollisionBounds(b Block) ([2]BlockBounds, int) {
+	var bounds [2]BlockBounds
+	if !Solid(b) {
+		return bounds, 0
+	}
+
+	shape := ShapeOf(b)
+	switch shape.Kind {
+	case ShapeSlab:
+		if shape.Half == ShapeTop {
+			bounds[0] = BlockBounds{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}}
+		} else {
+			bounds[0] = BlockBounds{Max: [3]float64{1, 0.5, 1}}
+		}
+		return bounds, 1
+	case ShapeStair:
+		if shape.Half == ShapeTop {
+			bounds[0] = BlockBounds{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}}
+			bounds[1] = BlockBounds{Max: [3]float64{1, 0.5, 1}}
+		} else {
+			bounds[0] = BlockBounds{Max: [3]float64{1, 0.5, 1}}
+			bounds[1] = BlockBounds{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}}
+		}
+
+		switch shape.Facing {
+		case ShapeNorth:
+			bounds[1].Max[2] = 0.5
+		case ShapeEast:
+			bounds[1].Min[0] = 0.5
+		case ShapeSouth:
+			bounds[1].Min[2] = 0.5
+		case ShapeWest:
+			bounds[1].Max[0] = 0.5
+		}
+		return bounds, 2
+	default:
+		bounds[0] = fullBlockBounds
+		return bounds, 1
+	}
+}
 
 // IsWater reports whether b is any source, flowing level or generator-authored
 // current in the water family.

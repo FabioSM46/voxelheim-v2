@@ -130,7 +130,17 @@ var handMiningTimes = map[world.Block]time.Duration{
 	// A roof tile is a roof tile: quicker than the wall under it and slower than
 	// thatch, which is what the two roofs of this world are meant to feel like beside
 	// each other.
-	world.SlateTile: 1500 * time.Millisecond,
+	world.SlateTile:             1500 * time.Millisecond,
+	world.SlateSlabBottom:       1500 * time.Millisecond,
+	world.SlateSlabTop:          1500 * time.Millisecond,
+	world.SlateStairNorthBottom: 1500 * time.Millisecond,
+	world.SlateStairEastBottom:  1500 * time.Millisecond,
+	world.SlateStairSouthBottom: 1500 * time.Millisecond,
+	world.SlateStairWestBottom:  1500 * time.Millisecond,
+	world.SlateStairNorthTop:    1500 * time.Millisecond,
+	world.SlateStairEastTop:     1500 * time.Millisecond,
+	world.SlateStairSouthTop:    1500 * time.Millisecond,
+	world.SlateStairWestTop:     1500 * time.Millisecond,
 
 	// The two timbers take the plank's time, because that is what they are: sawn wood,
 	// told apart here by colour and nothing else.
@@ -199,12 +209,22 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		// than unhelped for the reason the thatch is under the axe: every block a
 		// hand can break has exactly one implement for it, and that invariant is
 		// worth more than the taste question of what one breaks a window with.
-		world.SmoothBlackStone: {},
-		world.Basalt:           {},
-		world.BlackBrick:       {},
-		world.BlackBrickWorn:   {},
-		world.SlateTile:        {},
-		world.DarkGlass:        {},
+		world.SmoothBlackStone:      {},
+		world.Basalt:                {},
+		world.BlackBrick:            {},
+		world.BlackBrickWorn:        {},
+		world.SlateTile:             {},
+		world.SlateSlabBottom:       {},
+		world.SlateSlabTop:          {},
+		world.SlateStairNorthBottom: {},
+		world.SlateStairEastBottom:  {},
+		world.SlateStairSouthBottom: {},
+		world.SlateStairWestBottom:  {},
+		world.SlateStairNorthTop:    {},
+		world.SlateStairEastTop:     {},
+		world.SlateStairSouthTop:    {},
+		world.SlateStairWestTop:     {},
+		world.DarkGlass:             {},
 	},
 	ItemAxe: {
 		world.Log:    {},

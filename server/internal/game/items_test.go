@@ -376,17 +376,27 @@ func TestDropTableCoversEveryBlockOutcome(t *testing.T) {
 		world.FlowerYellow: ItemNone,
 		world.FlowerBlue:   ItemNone,
 
-		// The eight castle materials, and the first family in this table where every
-		// row is ItemNone on purpose: none of them is world.Placeable, so a drop would
+		// The castle materials and shaped slate variants: every row is ItemNone on
+		// purpose. None is world.Placeable, so a drop would
 		// be an item nothing could put back.
-		world.SmoothBlackStone: ItemNone,
-		world.Basalt:           ItemNone,
-		world.BlackBrick:       ItemNone,
-		world.BlackBrickWorn:   ItemNone,
-		world.SlateTile:        ItemNone,
-		world.DarkTimber:       ItemNone,
-		world.PaleTimber:       ItemNone,
-		world.DarkGlass:        ItemNone,
+		world.SmoothBlackStone:      ItemNone,
+		world.Basalt:                ItemNone,
+		world.BlackBrick:            ItemNone,
+		world.BlackBrickWorn:        ItemNone,
+		world.SlateTile:             ItemNone,
+		world.SlateSlabBottom:       ItemNone,
+		world.SlateSlabTop:          ItemNone,
+		world.SlateStairNorthBottom: ItemNone,
+		world.SlateStairEastBottom:  ItemNone,
+		world.SlateStairSouthBottom: ItemNone,
+		world.SlateStairWestBottom:  ItemNone,
+		world.SlateStairNorthTop:    ItemNone,
+		world.SlateStairEastTop:     ItemNone,
+		world.SlateStairSouthTop:    ItemNone,
+		world.SlateStairWestTop:     ItemNone,
+		world.DarkTimber:            ItemNone,
+		world.PaleTimber:            ItemNone,
+		world.DarkGlass:             ItemNone,
 	}
 	// **The same length guard TestBlockExperienceNamesEveryRewardAndExplicitZero has,
 	// and it was missing here.** Without it this loop only checks the rows somebody
@@ -448,15 +458,25 @@ func TestBlockExperienceNamesEveryRewardAndExplicitZero(t *testing.T) {
 		world.FlowerYellow: 0,
 		world.FlowerBlue:   0,
 
-		// And eight more: chipping a castle apart is salvage that yields no salvage.
-		world.SmoothBlackStone: 0,
-		world.Basalt:           0,
-		world.BlackBrick:       0,
-		world.BlackBrickWorn:   0,
-		world.SlateTile:        0,
-		world.DarkTimber:       0,
-		world.PaleTimber:       0,
-		world.DarkGlass:        0,
+		// Castle blocks: chipping one apart is salvage that yields no salvage.
+		world.SmoothBlackStone:      0,
+		world.Basalt:                0,
+		world.BlackBrick:            0,
+		world.BlackBrickWorn:        0,
+		world.SlateTile:             0,
+		world.SlateSlabBottom:       0,
+		world.SlateSlabTop:          0,
+		world.SlateStairNorthBottom: 0,
+		world.SlateStairEastBottom:  0,
+		world.SlateStairSouthBottom: 0,
+		world.SlateStairWestBottom:  0,
+		world.SlateStairNorthTop:    0,
+		world.SlateStairEastTop:     0,
+		world.SlateStairSouthTop:    0,
+		world.SlateStairWestTop:     0,
+		world.DarkTimber:            0,
+		world.PaleTimber:            0,
+		world.DarkGlass:             0,
 	}
 	if len(blockExperience) != len(want) {
 		t.Fatalf("block experience has %d rows, want %d explicit decisions", len(blockExperience), len(want))

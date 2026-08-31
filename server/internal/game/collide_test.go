@@ -1,6 +1,7 @@
 package game
 
 import (
+	"math"
 	"testing"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -28,6 +29,77 @@ func (w scriptedTerrain) Solid(x, y, z int64) bool {
 }
 
 func (w scriptedTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+type blockTerrain struct{ blocks map[[3]int64]world.Block }
+
+func (w blockTerrain) Block(x, y, z int64) (world.Block, bool) {
+	if y <= 0 {
+		return world.Stone, true
+	}
+	return w.blocks[[3]int64{x, y, z}], true
+}
+
+func (w blockTerrain) Solid(x, y, z int64) bool {
+	block, _ := w.Block(x, y, z)
+	return world.Solid(block)
+}
+
+func (w blockTerrain) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+func TestPlayerWalksUpBothRisersOfAnAuthoritativeStairWithoutJumping(t *testing.T) {
+	t.Parallel()
+
+	terrain := blockTerrain{blocks: map[[3]int64]world.Block{
+		{1, 1, 0}: world.SlateStairEastBottom,
+	}}
+	pos := [3]float64{0.5, 1, 0.5}
+
+	first, blocked := moveAndCollideWithStep(terrain, playerBody, pos, [3]float64{0.6, 0, 0}, playerStepHeight)
+	if blocked[0] {
+		t.Fatal("the lower stair riser blocked ordinary walking")
+	}
+	if math.Abs(first[1]-1.5) > collisionSkin {
+		t.Fatalf("feet after the lower riser = %.6f, want 1.5", first[1])
+	}
+
+	second, blocked := moveAndCollideWithStep(terrain, playerBody, first, [3]float64{0.6, 0, 0}, playerStepHeight)
+	if blocked[0] {
+		t.Fatal("the upper stair riser blocked ordinary walking")
+	}
+	if math.Abs(second[1]-2) > collisionSkin {
+		t.Fatalf("feet after the upper riser = %.6f, want 2", second[1])
+	}
+	if overlaps(terrain, playerBox(second)) {
+		t.Fatal("the climbed body overlaps the stair")
+	}
+}
+
+func TestPlayerStepsOntoBottomSlabButNotThroughAFullCube(t *testing.T) {
+	t.Parallel()
+
+	start := [3]float64{0.5, 1, 0.5}
+	for _, tc := range []struct {
+		name    string
+		block   world.Block
+		wantY   float64
+		blocked bool
+	}{
+		{name: "bottom slab", block: world.SlateSlabBottom, wantY: 1.5},
+		{name: "full cube", block: world.SlateTile, wantY: 1, blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			terrain := blockTerrain{blocks: map[[3]int64]world.Block{{1, 1, 0}: tc.block}}
+			got, blocked := moveAndCollideWithStep(terrain, playerBody, start, [3]float64{0.6, 0, 0}, playerStepHeight)
+			if blocked[0] != tc.blocked {
+				t.Errorf("horizontal blocked = %v, want %v", blocked[0], tc.blocked)
+			}
+			if math.Abs(got[1]-tc.wantY) > collisionSkin {
+				t.Errorf("feet y = %.6f, want %.1f", got[1], tc.wantY)
+			}
+		})
+	}
+}
 
 // solidAt returns a predicate matching exactly the listed voxels.
 func solidAt(voxels ...[3]int64) func(x, y, z int64) bool {
