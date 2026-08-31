@@ -86,7 +86,12 @@ jobs:
   # only drift through a red gate.
   client:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Moved with ci.yml's client job, and it has to be: this workflow runs the same
+    # cargo commands and always runs them cold, because it exists to *create* the
+    # cache the gate reads. If it timed out, develop would hold no Rust cache and
+    # every pull request would pay the cold build the gate is budgeted against.
+    # See the reasoning at ci.yml's client job.
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: client
