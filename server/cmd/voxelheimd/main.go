@@ -85,6 +85,7 @@ type options struct {
 	tickRate            uint
 	viewDistance        uint
 	maxPlayers          uint
+	terrainMemoryMiB    uint64
 	handshakeTimeout    time.Duration
 	characterTimeout    time.Duration
 	idleTimeout         time.Duration
@@ -133,6 +134,8 @@ func parseFlags() options {
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
 	flag.UintVar(&opts.maxPlayers, "max-players", session.DefaultConcurrentSessions,
 		"maximum concurrent sessions (100..1000); a connection past it receives SERVER_FULL")
+	flag.Uint64Var(&opts.terrainMemoryMiB, "terrain-memory-mib", world.DefaultTerrainMemoryMiB,
+		"memory budget for resident terrain chunks, in MiB; one chunk is budgeted as 96 KiB")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
 		"how long a new connection may say nothing before it is closed; it gets no reply, having sent nothing to reply to")
 	flag.DurationVar(&opts.characterTimeout, "character-timeout", session.DefaultCharacterTimeout,
@@ -178,6 +181,8 @@ func (o options) validate() error {
 	case o.maxPlayers < session.MinConcurrentSessions || o.maxPlayers > session.MaxConcurrentSessions:
 		return fmt.Errorf("max players must be in %d..%d, got %d",
 			session.MinConcurrentSessions, session.MaxConcurrentSessions, o.maxPlayers)
+	case o.terrainMemoryMiB == 0:
+		return errors.New("terrain memory must be greater than zero MiB")
 	case o.stormPeriod < 0:
 		return fmt.Errorf("storm period must not be negative, got %s", o.stormPeriod)
 	}
@@ -210,18 +215,16 @@ func (o options) validate() error {
 		return fmt.Errorf("invalid -world-name: %w", err)
 	}
 
-	// **A view distance the residency cannot hold is refused here rather than run.** The
-	// protocol's ceiling is 16, which asks for 33³ = 35937 chunks; the cache is an LRU
-	// and a volume larger than it evicts what it is about to need, so the server runs,
-	// answers nothing usefully, and spends every tick regenerating. See
-	// [world.CacheCapacityFor] for the measurement at distance 8. The arithmetic is in
-	// the message because an operator should not have to solve a cubic to pick a number.
-	if needed := world.CacheCapacityFor(int(o.viewDistance)); needed > world.MaxCacheCapacity {
+	workingSet := world.CacheWorkingSetFor(int(o.viewDistance))
+	capacity := world.CacheCapacityFor(int(o.viewDistance), int(o.maxPlayers), o.terrainMemoryMiB)
+	if capacity < workingSet {
 		return fmt.Errorf(
-			"view distance %d needs a residency of %d chunks (%d in view plus headroom) "+
-				"and this server holds at most %d; the largest it can hold is %d",
-			o.viewDistance, needed, world.ChunksInView(int(o.viewDistance)),
-			world.MaxCacheCapacity, world.LargestViewDistanceHeld())
+			"max players %d with a terrain memory budget of %d MiB gives a residency of %d chunks, "+
+				"but one view distance %d session needs %d chunks (%d in view plus headroom), about %d MiB; "+
+				"the largest view distance this budget can hold is %d",
+			o.maxPlayers, o.terrainMemoryMiB, capacity, o.viewDistance, workingSet,
+			world.ChunksInView(int(o.viewDistance)), world.MemoryMiBFor(uint64(workingSet)),
+			world.LargestViewDistanceHeld(o.terrainMemoryMiB, protocol.MaxViewDistance))
 	}
 	return o.validateTicketKeySource()
 }
@@ -433,6 +436,8 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		"chunk_size", cfg.ChunkSize,
 		"view_distance", cfg.ViewDistance,
 		"max_players", opts.maxPlayers,
+		"terrain_memory_mib", opts.terrainMemoryMiB,
+		"resident_chunks", chunks.Capacity(),
 		"world_seed", cfg.WorldSeed,
 		"world_dir", opts.worldDir,
 		"handshake_timeout", opts.handshakeTimeout.String(),
@@ -457,7 +462,8 @@ func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error)
 		// Loud, because it is the mode in which an evening's digging disappears. Chosen
 		// explicitly by an empty -world-dir; the flag's default is a real directory.
 		log.Warn("no world directory; this world is ephemeral and every edit will be lost on exit")
-		return world.NewCache(seed, world.DefaultWorkers, world.CacheCapacityFor(int(opts.viewDistance))), nil
+		return world.NewCache(seed, world.DefaultWorkers,
+			world.CacheCapacityFor(int(opts.viewDistance), int(opts.maxPlayers), opts.terrainMemoryMiB)), nil
 	}
 
 	store, err := world.OpenStore(opts.worldDir, seed)
@@ -466,7 +472,8 @@ func openWorld(opts options, seed int64, log *slog.Logger) (*world.Cache, error)
 	}
 	log.Info("world directory opened", "world_dir", store.Dir(), "format_version", world.StoreVersion)
 
-	return world.NewPersistentCache(store, world.DefaultWorkers, world.CacheCapacityFor(int(opts.viewDistance))), nil
+	return world.NewPersistentCache(store, world.DefaultWorkers,
+		world.CacheCapacityFor(int(opts.viewDistance), int(opts.maxPlayers), opts.terrainMemoryMiB)), nil
 }
 
 // listen starts the server's transport, which is encrypted and has no alternative.
