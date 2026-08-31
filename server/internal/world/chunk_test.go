@@ -395,3 +395,51 @@ func TestTheFlowerBlocksAreCoverAndNotGround(t *testing.T) {
 	}
 
 }
+
+// The eight materials a castle is built of, and the one classification that is new
+// about them: they are ordinary ground that no player may place.
+//
+// **World-only is a decision and this test is where it is written down.** Every other
+// non-placeable id in this palette is non-placeable for a structural reason — placing
+// air is breaking, and there is no such thing as a piece of water — so `Placeable`
+// answering no about them says nothing anybody has to keep true. These eight are the
+// first ids refused because nobody has made an item for them yet, which is a choice
+// that could be reversed in one line by somebody who did not know it was a choice.
+//
+// The ids are written out rather than counted, for the reason
+// TestBlockIDsStayAppendOnly writes its nine out: a stored world's deltas name blocks
+// by number, so a renumbering has to fail here rather than in somebody's save.
+func TestTheCastleMaterialsAreAppendedWorldOnlyGround(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		block Block
+		id    Block
+		name  string
+	}{
+		{SmoothBlackStone, 36, "SmoothBlackStone"},
+		{Basalt, 37, "Basalt"},
+		{BlackBrick, 38, "BlackBrick"},
+		{BlackBrickWorn, 39, "BlackBrickWorn"},
+		{SlateTile, 40, "SlateTile"},
+		{DarkTimber, 41, "DarkTimber"},
+		{PaleTimber, 42, "PaleTimber"},
+		{DarkGlass, 43, "DarkGlass"},
+	} {
+		if tc.block != tc.id {
+			t.Errorf("%s has id %d, want %d", tc.name, tc.block, tc.id)
+		}
+		if !Solid(tc.block) {
+			t.Errorf("%s is not solid; a wall a body walks through is not a wall", tc.name)
+		}
+		if Cover(tc.block) {
+			t.Errorf("%s is cover; it fills its voxel", tc.name)
+		}
+		if Fluid(tc.block) || IsWater(tc.block) {
+			t.Errorf("%s is in the water family", tc.name)
+		}
+		if Placeable(tc.block) {
+			t.Errorf("%s is placeable; the eight are world-only until an item exists", tc.name)
+		}
+	}
+}

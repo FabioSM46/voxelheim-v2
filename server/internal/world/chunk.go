@@ -145,6 +145,46 @@ const (
 	FlowerRed    Block = 33
 	FlowerYellow Block = 34
 	FlowerBlue   Block = 35
+
+	// What a castle is built of. Appended for the reason every id above was: each of
+	// them already crosses the wire inside chunk runs and lives in a played-in world's
+	// deltas, and an insertion would renumber the lot.
+	//
+	// **The list is a measurement rather than a taste.** It is what the reference build
+	// #680 names — Creepy Blackstone Castle, surveyed block by block — reduced to the
+	// families that paint 90% of it. Nothing here was invented to round the set out, and
+	// the reference's stairs, slabs and walls are absent because every id in this palette
+	// is a full cube.
+	//
+	// **They are ordered by lightness, and that ordering is the design.** There are no
+	// textures: a material is its colour and nothing else, and greedy meshing merges
+	// faces across neighbours, so two materials that are close read as one wall. Four of
+	// these are shades of near-black and they are half a castle between them, so they are
+	// spread across a usable range rather than crowded at the bottom of one — see the
+	// sRGB values in client/src/world/palette.rs, which are the other half of this
+	// decision and are pinned to these ids by scripts/test/block-palette-parity.test.sh.
+	//
+	// **All eight are world-only: none is [Placeable].** They exist so the world can be
+	// built of them; an item, a recipe and a stonecutter for each is a separate piece of
+	// work, and an item nobody can spend is an inventory row nobody wanted. Each is
+	// breakable with a stated hardness — see handMiningTimes — and each yields nothing,
+	// which blockDrops records as an explicit ItemNone rather than an absent row.
+	SmoothBlackStone Block = 36
+	Basalt           Block = 37
+	BlackBrick       Block = 38
+	BlackBrickWorn   Block = 39
+	SlateTile        Block = 40
+	DarkTimber       Block = 41
+	PaleTimber       Block = 42
+
+	// The window, and the one id here that is expected to change class later. It is
+	// opaque today because a see-through block needs a translucent pass in the mesher
+	// and the water material is the only one there is — so a window reads from outside
+	// as the dark hole a window is at this distance, which is what the reference's black
+	// stained glass reads as anyway. When that pass arrives, `is_opaque` on the client is
+	// the single function that has to learn about it; its doc comment has said so since
+	// before this block existed.
+	DarkGlass Block = 43
 )
 
 // IsWater reports whether b is any source, flowing level or generator-authored
@@ -246,6 +286,12 @@ func Fluid(b Block) bool {
 // as a piece of water to hold. No member of the family has an item or a drop. Ice is
 // placeable because it is ordinary ground: it is mined, it drops itself, and it can
 // be put back.
+//
+// **And the eight castle materials are absent for a third reason again**: not because
+// placing one would mean something else, and not because there is no such thing as a
+// piece of one, but because no player has ever held one. They are world-only by
+// decision — worldgen builds with them, breaking one yields nothing, and the item and
+// the recipe that would change that are work this palette deliberately did not do.
 func Placeable(b Block) bool {
 	switch b {
 	case Stone, Dirt, Grass, Snow, Log, Leaves, Sand, Sandstone, Gravel, Ice,

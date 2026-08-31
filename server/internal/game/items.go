@@ -504,6 +504,22 @@ var blockDrops = map[world.Block]ItemID{
 	world.FlowerRed:    ItemNone,
 	world.FlowerYellow: ItemNone,
 	world.FlowerBlue:   ItemNone,
+
+	// The eight castle materials: breakable, and every one of them an explicit
+	// ItemNone. **They are world-only by decision, not by omission** — world.Placeable
+	// refuses all eight, so there is no item that places one, and a drop that nothing
+	// could place would be an inventory row nobody can spend. The rows are here rather
+	// than absent because an absent row would say the same thing while looking like
+	// somebody forgot, and because a block that is breakable has to state what breaking
+	// it yields.
+	world.SmoothBlackStone: ItemNone,
+	world.Basalt:           ItemNone,
+	world.BlackBrick:       ItemNone,
+	world.BlackBrickWorn:   ItemNone,
+	world.SlateTile:        ItemNone,
+	world.DarkTimber:       ItemNone,
+	world.PaleTimber:       ItemNone,
+	world.DarkGlass:        ItemNone,
 }
 
 // blockExperience is the lifetime progress a successful break earns. It mirrors every
@@ -552,6 +568,18 @@ var blockExperience = map[world.Block]uint16{
 	world.FlowerRed:    0,
 	world.FlowerYellow: 0,
 	world.FlowerBlue:   0,
+
+	// And eight more, for the reason the settlement's three are zero: chipping a
+	// castle apart is salvage rather than a lesson, and it yields nothing to salvage
+	// either. The rows exist because an absent one is a registry error.
+	world.SmoothBlackStone: 0,
+	world.Basalt:           0,
+	world.BlackBrick:       0,
+	world.BlackBrickWorn:   0,
+	world.SlateTile:        0,
+	world.DarkTimber:       0,
+	world.PaleTimber:       0,
+	world.DarkGlass:        0,
 }
 
 func itemByID(id ItemID) (itemDefinition, bool) {

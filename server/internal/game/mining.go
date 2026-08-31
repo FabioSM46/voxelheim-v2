@@ -115,6 +115,31 @@ var handMiningTimes = map[world.Block]time.Duration{
 	world.FlowerRed:    300 * time.Millisecond,
 	world.FlowerYellow: 300 * time.Millisecond,
 	world.FlowerBlue:   300 * time.Millisecond,
+
+	// What a castle is made of, and the top of the table on purpose: dressed dark
+	// stone is the hardest thing a hand meets, half again the cobblestone a hut is
+	// built of, because a keep is meant to be a job rather than a detour. The four
+	// stones are not one number — a wall that has already lost its polish comes apart
+	// faster than one that has not, which is the one place in this table where a
+	// material's *state* is worth a second of somebody's time.
+	world.BlackBrick:       3500 * time.Millisecond,
+	world.SmoothBlackStone: 3 * time.Second,
+	world.Basalt:           3 * time.Second,
+	world.BlackBrickWorn:   2500 * time.Millisecond,
+
+	// A roof tile is a roof tile: quicker than the wall under it and slower than
+	// thatch, which is what the two roofs of this world are meant to feel like beside
+	// each other.
+	world.SlateTile: 1500 * time.Millisecond,
+
+	// The two timbers take the plank's time, because that is what they are: sawn wood,
+	// told apart here by colour and nothing else.
+	world.DarkTimber: 800 * time.Millisecond,
+	world.PaleTimber: 800 * time.Millisecond,
+
+	// And the window goes at the speed of the leaves, which is the fastest anything
+	// but a flower comes away at. Breaking a pane is not quarrying.
+	world.DarkGlass: 400 * time.Millisecond,
 }
 
 // handMiningTicksFor is [handMiningTimes] in the ticks Step counts, at one rate.
@@ -169,6 +194,17 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.Sandstone:   {},
 		world.Ice:         {},
 		world.Cobblestone: {},
+
+		// The castle's masonry, its roof and its windows. The glass is here rather
+		// than unhelped for the reason the thatch is under the axe: every block a
+		// hand can break has exactly one implement for it, and that invariant is
+		// worth more than the taste question of what one breaks a window with.
+		world.SmoothBlackStone: {},
+		world.Basalt:           {},
+		world.BlackBrick:       {},
+		world.BlackBrickWorn:   {},
+		world.SlateTile:        {},
+		world.DarkGlass:        {},
 	},
 	ItemAxe: {
 		world.Log:    {},
@@ -193,6 +229,10 @@ var toolFamilies = map[ItemID]map[world.Block]struct{}{
 		world.FlowerRed:    {},
 		world.FlowerYellow: {},
 		world.FlowerBlue:   {},
+
+		// The castle's two timbers, beside the planks they are the same thing as.
+		world.DarkTimber: {},
+		world.PaleTimber: {},
 	},
 }
 

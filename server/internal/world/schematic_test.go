@@ -830,3 +830,59 @@ func TestTheCastleHasFourTowersWithCorbelledCapitals(t *testing.T) {
 		}
 	}
 }
+
+// The eight runes the castle materials answer to, stated independently of the map
+// that answers them.
+//
+// **Written out rather than ranged over, for the reason
+// TestEverySchematicHoldsOnlyTheFiveThingsADrawingCanMean writes its five out.**
+// Ranging over [schematicLegend] and checking that each value is a block asserts that a
+// map agrees with itself; the pairs below are the statement a reviewer can check against
+// #680's table without reading the code under test. The length guard is what makes a
+// rune added and left unnamed here a failure rather than a silent thirteenth entry — a
+// drawing rune that means something nobody wrote down is exactly the typo the legend
+// exists to refuse.
+func TestTheCastleRunesNameTheCastleMaterials(t *testing.T) {
+	t.Parallel()
+
+	want := map[rune]Block{
+		'.': keepTerrain,
+		'_': Air,
+		'#': Cobblestone,
+		'P': Planks,
+		'T': Thatch,
+		'S': SmoothBlackStone,
+		'b': Basalt,
+		'K': BlackBrick,
+		'k': BlackBrickWorn,
+		'R': SlateTile,
+		'D': DarkTimber,
+		'W': PaleTimber,
+		'G': DarkGlass,
+	}
+
+	if len(schematicLegend) != len(want) {
+		t.Fatalf("the legend has %d runes and this test names %d", len(schematicLegend), len(want))
+	}
+	for r, block := range want {
+		got, known := schematicLegend[r]
+		if !known {
+			t.Errorf("rune %q is not in the legend", r)
+			continue
+		}
+		if got != block {
+			t.Errorf("rune %q writes block %d, want %d", r, got, block)
+		}
+	}
+
+	// Two runes meaning the same block would make a drawing ambiguous to read back,
+	// which is the direction a legend can drift in without any single entry looking
+	// wrong.
+	seen := make(map[Block]rune, len(want))
+	for r, block := range want {
+		if first, dup := seen[block]; dup {
+			t.Errorf("runes %q and %q both write block %d", first, r, block)
+		}
+		seen[block] = r
+	}
+}
