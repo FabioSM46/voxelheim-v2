@@ -331,6 +331,11 @@ type Sim struct {
 	waterWorld    WaterWorld
 	pendingWater  map[waterVoxel]uint64
 	unstableWater chan unstableWaterBatch
+	// waterScanCarry is the tail of a composition scan a tick had no budget for.
+	// See [WaterScansPerTick]: a scan is spread over ticks rather than taken whole.
+	waterScanCarry unstableWaterBatch
+	// waterDue is pendingWater in the order it will be examined. See [waterDueQueue].
+	waterDue waterDueQueue
 
 	// byIdentity is the live player behind each identity, and it exists for exactly one
 	// question: what entity id does this structure's owner hold *right now*.
