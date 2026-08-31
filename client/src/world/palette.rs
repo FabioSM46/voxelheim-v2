@@ -193,6 +193,18 @@ pub fn current_of(block: BlockId) -> (i8, i8) {
     }
 }
 
+/// Whether water in `block` supplies the adjacent voxel at `(x, z)` from itself.
+///
+/// This mirrors the server's `WaterFeedsToward`: still and flowing water may feed
+/// every cardinal side, while a current source feeds only the side encoded by its id.
+pub fn water_feeds_toward(block: BlockId, x: i8, z: i8) -> bool {
+    if !is_water(block) {
+        return false;
+    }
+    let current = current_of(block);
+    current == (0, 0) || current == (x, z)
+}
+
 /// Whether a block stops a body and can be aimed at.
 ///
 /// The predicate everything outside the mesher asks — the aiming ray, the camera boom,
@@ -757,11 +769,25 @@ mod tests {
             assert!(is_water(block));
             assert_eq!(water_level(block), 8);
             assert_eq!(current_of(block), current);
+
+            for toward in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                assert_eq!(
+                    water_feeds_toward(block, toward.0, toward.1),
+                    current == toward,
+                    "current {block} feeding {toward:?}"
+                );
+            }
+        }
+        for block in [WATER, WATER_FLOW1, WATER_FLOW7] {
+            for (x, z) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                assert!(water_feeds_toward(block, x, z));
+            }
         }
         for block in [AIR, STONE, BUSH, FLOWER_RED, BlockId::MAX] {
             assert!(!is_water(block));
             assert_eq!(water_level(block), 0);
             assert_eq!(current_of(block), (0, 0));
+            assert!(!water_feeds_toward(block, 1, 0));
         }
     }
 }

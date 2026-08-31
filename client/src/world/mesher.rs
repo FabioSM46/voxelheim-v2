@@ -1241,9 +1241,10 @@ const HORIZONTAL_STEPS: [(usize, isize); 4] = [(0, -1), (0, 1), (2, -1), (2, 1)]
 /// neighbour and towards none that is deeper. Plain `Water` is a source and a source
 /// is still.
 ///
-/// Two neighbours contribute nothing, for the same reason: they are not somewhere
-/// this water can go. A **solid** neighbour is a wall, and a **source** neighbour
-/// (plain water or a current, both full height) is the body this trickle came out of.
+/// A solid neighbour contributes nothing because it is a wall. A source contributes
+/// its full level only when it feeds this voxel: plain water feeds every side, while a
+/// current feeds only the side it points toward. This is the server automaton's rule,
+/// mirrored here so the shader never shows a lateral spill the simulation rejects.
 /// Air is not skipped — it is level 0, the steepest drop there is, which is what makes
 /// water pour off a ledge rather than sit on it.
 ///
@@ -1272,10 +1273,17 @@ fn flow_at(chunk: &VoxelChunk, neighbours: &Neighbours, cell: [usize; 3]) -> Wat
         if palette::is_solid(neighbour) {
             continue;
         }
-        let neighbour_level = palette::water_level(neighbour);
-        if neighbour_level == 8 {
+        let toward_here = match axis {
+            0 => (-(step as i8), 0),
+            2 => (0, -(step as i8)),
+            _ => unreachable!("horizontal flow uses only x and z"),
+        };
+        if palette::is_water(neighbour)
+            && !palette::water_feeds_toward(neighbour, toward_here.0, toward_here.1)
+        {
             continue;
         }
+        let neighbour_level = palette::water_level(neighbour);
         let drop = f32::from(level) - f32::from(neighbour_level);
         sum[axis / 2] += drop * step as f32;
     }
@@ -3014,23 +3022,8 @@ mod tests {
     }
 
     #[test]
-    fn a_wall_and_a_source_are_not_places_the_water_can_go() {
-        // A solid neighbour is a wall; a source neighbour is the body this trickle came
-        // out of. Neither contributes, so a voxel with nothing else around it is still
-        // rather than pushed into one of them.
-        let penned = flow_of(
-            palette::WATER_FLOW4,
-            [
-                palette::STONE,
-                palette::WATER,
-                palette::ICE,
-                palette::WATER_CURRENT_XPOS,
-            ],
-            palette::AIR,
-        );
-        assert_eq!(penned.vector(), [0.0, 0.0]);
-
-        // And a wall on one side does not make the water climb the other: the open side
+    fn a_wall_is_not_somewhere_water_can_go() {
+        // A wall on one side does not make the water climb the other: the open side
         // is what it runs down.
         let against_a_wall = flow_of(
             palette::WATER_FLOW4,
@@ -3043,6 +3036,49 @@ mod tests {
             palette::AIR,
         );
         assert_eq!(against_a_wall.vector(), [1.0, 0.0]);
+    }
+
+    #[test]
+    fn a_source_contributes_only_where_it_feeds() {
+        let plain = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(plain.vector(), [-1.0, 0.0], "lake water feeds every side");
+
+        let feeding_current = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER_CURRENT_XNEG,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(feeding_current.vector(), [-1.0, 0.0]);
+
+        let passing_current = flow_of(
+            palette::WATER_FLOW4,
+            [
+                palette::WATER_FLOW4,
+                palette::WATER_CURRENT_ZPOS,
+                palette::WATER_FLOW4,
+                palette::WATER_FLOW4,
+            ],
+            palette::AIR,
+        );
+        assert_eq!(
+            passing_current.vector(),
+            [0.0, 0.0],
+            "a southbound source east of the voxel does not feed it"
+        );
     }
 
     #[test]
@@ -3094,8 +3130,8 @@ mod tests {
         west.set(SIZE - 1, 1, 1, palette::WATER);
         assert_eq!(
             super::flow_at(&chunk, &across(0, false, west), [0, 1, 1]).vector(),
-            [0.0, 0.0],
-            "a source across the border is skipped, and nothing else pushes"
+            [1.0, 0.0],
+            "a plain source across the border feeds east, into this voxel and onward"
         );
     }
 
