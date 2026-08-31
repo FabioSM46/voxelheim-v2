@@ -1,6 +1,7 @@
 package game
 
 import (
+	"container/heap"
 	"context"
 	"log/slog"
 	"slices"
@@ -479,5 +480,49 @@ func TestTheWaterScheduleIsOrderedAndStaleEntriesAreSkipped(t *testing.T) {
 	sim.mu.Unlock()
 	if front.due != 1 {
 		t.Errorf("the front of the queue is due at %d, want the earliest at 1", front.due)
+	}
+}
+
+// The schedule is taken in due order first and bottom-up second, and both halves matter.
+//
+// **This ordering is a deliberate change from what the rebuild did, not an accident of
+// the data structure.** [Sim.advanceWaterLocked] used to collect everything due and sort
+// it by [compareWaterVoxels] alone — the due tick played no part, because with no cap
+// every due voxel was examined on the same tick and the question never arose. Under
+// [WaterVoxelsPerTick] it arises on every tick, and the answer has to be due-first or a
+// voxel can be starved indefinitely by lower ones arriving behind it.
+func TestTheScheduleIsTakenInDueOrderThenBottomUp(t *testing.T) {
+	t.Parallel()
+
+	sim, _ := newWaterSim(t)
+	sim.mu.Lock()
+	defer sim.mu.Unlock()
+
+	// High in y and due early, against low in y and due late. Under the old spatial-only
+	// order the low one would have been examined first; under this one the early one is.
+	early := waterVoxel{x: 0, y: 90, z: 0}
+	late := waterVoxel{x: 0, y: 10, z: 0}
+	sim.scheduleWaterLocked(late, 9)
+	sim.scheduleWaterLocked(early, 3)
+
+	// And two at the same due tick, where the spatial order is the one that decides.
+	lower := waterVoxel{x: 5, y: 20, z: 5}
+	higher := waterVoxel{x: 5, y: 40, z: 5}
+	sim.scheduleWaterLocked(higher, 3)
+	sim.scheduleWaterLocked(lower, 3)
+
+	var order []waterVoxel
+	for sim.waterDue.Len() > 0 {
+		order = append(order, heap.Pop(&sim.waterDue).(waterDueEntry).at)
+	}
+
+	want := []waterVoxel{lower, higher, early, late}
+	if len(order) != len(want) {
+		t.Fatalf("the queue gave %d entries, want %d", len(order), len(want))
+	}
+	for i, at := range want {
+		if order[i] != at {
+			t.Fatalf("entry %d is %+v, want %+v (full order %+v)", i, order[i], at, order)
+		}
 	}
 }

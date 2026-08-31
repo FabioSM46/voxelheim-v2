@@ -127,10 +127,22 @@ type waterDueEntry struct {
 // 51 -> 129 ms and climbing while the client still drew 300 frames a second. A cap on the
 // work is only safe once taking N items does not cost the length of the queue.
 //
-// The order is preserved exactly: due tick first, then [compareWaterVoxels], which is y
-// before x before z. Water settles downward and the lower voxel is decided first; a
-// cheaper order — insertion — would have been a change to what the automaton answers,
-// not only to how fast it answers it.
+// **The order changed, deliberately, and the bound is why.** The rebuild sorted by
+// [compareWaterVoxels] alone — y before x before z — and ignored the due tick entirely,
+// because with no cap everything due was examined on the same tick and the order among
+// due ticks could not matter. This queue orders by **due tick first** and then by that
+// same spatial comparison, so two voxels due at different ticks are now examined in the
+// order they became due rather than in the order of their coordinates.
+//
+// That is not a cost of the queue; it is what makes the cap safe. Under a bound, pure
+// spatial order starves: a voxel high in y waits behind every lower one that keeps
+// arriving, for as long as water keeps being scheduled, and nothing guarantees it is ever
+// reached. Ordering by due tick is what bounds how long a scheduled voxel waits, and the
+// spatial order is kept underneath it so that within one tick's worth of work the lower
+// voxel is still decided first — which is the half the automaton's rules actually reason
+// about, since water settles downward.
+//
+// [TestTheScheduleIsTakenInDueOrderThenBottomUp] pins both halves.
 type waterDueQueue []waterDueEntry
 
 func (q waterDueQueue) Len() int { return len(q) }
