@@ -29,6 +29,14 @@
 //! whatever the sky above the surface is doing. That is the same override `player/sky.rs`
 //! applies to the fog, read through the same [`sky::submerged_at`] so there is one answer to
 //! "is the eye under water" rather than two.
+//!
+//! ## Roofs are per column
+//!
+//! Falling weather asks whether a solid voxel stands above each quad. The answer is cached
+//! across the fixed 25x25 block footprint and invalidated by every streamed-world change;
+//! one frame therefore walks each used column at most once, while an edit, arrival or unload
+//! cannot leave an old roof behind. Sand does not use this answer: its source is horizontal
+//! and needs a direction rule of its own.
 
 use std::f32::consts::TAU;
 
@@ -41,7 +49,7 @@ use bevy::prelude::*;
 use super::Weather;
 use super::camera::WorldCamera;
 use super::sky;
-use crate::net::{Session, WeatherKind};
+use crate::net::{BlockCoord, Session, WeatherKind};
 use crate::world::ChunkStore;
 
 /// How many quads the volume holds, drawn or not.
@@ -57,6 +65,14 @@ pub(super) const PRECIP_QUADS: usize = 600;
 /// horizontal spread in front of them, and sixteen blocks of height is already more than a
 /// drop falling at [`RAIN_FALL_SPEED`] crosses in a second.
 const VOLUME: Vec3 = Vec3::new(24.0, 16.0, 24.0);
+
+/// How many block columns the moving volume can overlap on either horizontal axis.
+///
+/// A 24-block half-open span crosses at most 25 integer columns when the eye is between
+/// block boundaries. The cache is an inline array of that exact footprint: no hash table,
+/// no growth and no allocation while weather is being drawn.
+const SHELTER_SIDE: usize = VOLUME.x as usize + 1;
+const SHELTER_COLUMNS: usize = SHELTER_SIDE * SHELTER_SIDE;
 
 /// A rain streak, in blocks: narrow and long, so it reads as motion rather than as a dot.
 const RAIN_SIZE: Vec2 = Vec2::new(0.04, 0.5);
@@ -122,6 +138,111 @@ pub(super) struct PrecipitationVisuals {
     sand: Handle<StandardMaterial>,
 }
 
+/// The highest solid voxel in one cached world column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnShelter {
+    Unmeasured,
+    Open,
+    Roof(i32),
+}
+
+/// Bounds covered by [`PrecipitationShelter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShelterBounds {
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    max_y: i32,
+    chunk_size: usize,
+}
+
+/// Shared, bounded shelter work for the camera-centred precipitation volume.
+///
+/// A column is walked from the top of the streamed view down only the first time a quad
+/// uses it. Later quads and later frames reuse the highest solid voxel. Any store change
+/// clears the answers, so a block edit, chunk arrival or unload is visible on the next
+/// draw. Moving the volume onto a different block footprint clears them too.
+#[derive(Resource, Debug)]
+struct PrecipitationShelter {
+    bounds: Option<ShelterBounds>,
+    columns: [ColumnShelter; SHELTER_COLUMNS],
+    #[cfg(test)]
+    scans: usize,
+}
+
+impl Default for PrecipitationShelter {
+    fn default() -> Self {
+        Self {
+            bounds: None,
+            columns: [ColumnShelter::Unmeasured; SHELTER_COLUMNS],
+            #[cfg(test)]
+            scans: 0,
+        }
+    }
+}
+
+impl PrecipitationShelter {
+    fn prepare(&mut self, eye: Vec3, chunk_size: usize, view_distance: u8) {
+        let size = i32::try_from(chunk_size).expect("the protocol's chunk size fits i32");
+        let eye_y = eye.y.floor() as i32;
+        let top_chunk = eye_y
+            .div_euclid(size)
+            .saturating_add(i32::from(view_distance));
+        let bounds = ShelterBounds {
+            min_x: (eye.x - VOLUME.x * 0.5).floor() as i32,
+            min_y: (eye.y - VOLUME.y * 0.5).floor() as i32,
+            min_z: (eye.z - VOLUME.z * 0.5).floor() as i32,
+            // The server streams a cube around the player. Its upper chunk face is the
+            // farthest roof this client can know about, and makes every walk finite even
+            // at the protocol's maximum view distance.
+            max_y: top_chunk.saturating_add(1).saturating_mul(size),
+            chunk_size,
+        };
+
+        if self.bounds != Some(bounds) {
+            self.bounds = Some(bounds);
+            self.columns.fill(ColumnShelter::Unmeasured);
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.bounds = None;
+        self.columns.fill(ColumnShelter::Unmeasured);
+    }
+
+    fn is_sheltered(&mut self, store: &ChunkStore, centre: Vec3) -> bool {
+        let Some(bounds) = self.bounds else {
+            return false;
+        };
+        let x = centre.x.floor() as i32;
+        let y = centre.y.floor() as i32;
+        let z = centre.z.floor() as i32;
+        let Some(local_x) = x.checked_sub(bounds.min_x).map(|value| value as usize) else {
+            return false;
+        };
+        let Some(local_z) = z.checked_sub(bounds.min_z).map(|value| value as usize) else {
+            return false;
+        };
+        if local_x >= SHELTER_SIDE || local_z >= SHELTER_SIDE {
+            return false;
+        }
+
+        let column = &mut self.columns[local_z * SHELTER_SIDE + local_x];
+        if *column == ColumnShelter::Unmeasured {
+            #[cfg(test)]
+            {
+                self.scans += 1;
+            }
+            *column = (bounds.min_y..bounds.max_y)
+                .rev()
+                .find(|roof_y| store.solid_at(BlockCoord { x, y: *roof_y, z }, bounds.chunk_size))
+                .map_or(ColumnShelter::Open, ColumnShelter::Roof);
+        }
+
+        matches!(*column, ColumnShelter::Roof(roof_y) if roof_y >= y)
+    }
+}
+
 impl PrecipitationVisuals {
     /// Which material draws `kind`.
     ///
@@ -172,6 +293,7 @@ pub(super) fn create_visuals(
         Visibility::Hidden,
     ));
     commands.insert_resource(visuals);
+    commands.insert_resource(PrecipitationShelter::default());
 }
 
 /// One material per kind: unlit, blended, and drawn from both faces.
@@ -233,6 +355,7 @@ pub(super) struct PrecipitationInputs<'w> {
     store: Option<Res<'w, ChunkStore>>,
     time: Res<'w, Time>,
     visuals: Option<Res<'w, PrecipitationVisuals>>,
+    shelter: ResMut<'w, PrecipitationShelter>,
 }
 
 pub(super) fn draw_precipitation(
@@ -250,7 +373,14 @@ pub(super) fn draw_precipitation(
         store,
         time,
         visuals,
+        mut shelter,
     } = read;
+    // Observe changes even while the sky is clear. Bevy advances this system's change
+    // tick after every run, so postponing the read until rain returned would miss edits
+    // made during dry weather and revive old exposure answers.
+    if store.as_ref().is_some_and(|store| store.is_changed()) {
+        shelter.invalidate();
+    }
     let (Some(visuals), Ok((mut visibility, mut material))) = (visuals, volume.single_mut()) else {
         return;
     };
@@ -284,6 +414,21 @@ pub(super) fn draw_precipitation(
         Some(VertexAttributeValues::Float32x3(existing)) => existing,
         _ => Vec::new(),
     };
+    let column_shelter = match (kind, session.as_deref(), store.as_deref()) {
+        (
+            WeatherKind::Rain | WeatherKind::Snow | WeatherKind::Blizzard,
+            Some(session),
+            Some(store),
+        ) => {
+            shelter.prepare(
+                eye.translation,
+                usize::from(session.0.chunk_size),
+                session.0.view_distance,
+            );
+            Some((store, &mut *shelter))
+        }
+        _ => None,
+    };
     write_positions(
         &mut positions,
         kind,
@@ -291,6 +436,7 @@ pub(super) fn draw_precipitation(
         time.elapsed_secs(),
         eye.translation,
         eye.rotation,
+        column_shelter,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
 }
@@ -356,6 +502,7 @@ fn write_positions(
     elapsed: f32,
     eye: Vec3,
     look: Quat,
+    mut shelter: Option<(&ChunkStore, &mut PrecipitationShelter)>,
 ) {
     into.clear();
     into.reserve(PRECIP_QUADS * 4);
@@ -384,6 +531,20 @@ fn write_positions(
         );
         let local = (seed * VOLUME + travelled(kind, seed, elapsed)).rem_euclid(VOLUME);
         let centre = eye + local - corner;
+
+        let falls_from_sky = matches!(
+            kind,
+            WeatherKind::Rain | WeatherKind::Snow | WeatherKind::Blizzard
+        );
+        if falls_from_sky
+            && shelter
+                .as_mut()
+                .is_some_and(|(store, cache)| cache.is_sheltered(store, centre))
+        {
+            let hidden = centre.to_array();
+            into.extend_from_slice(&[hidden; 4]);
+            continue;
+        }
 
         into.extend_from_slice(&[
             (centre - half_right - half_up).to_array(),
@@ -608,8 +769,69 @@ mod tests {
             elapsed,
             Vec3::ZERO,
             Quat::IDENTITY,
+            None,
         );
         into
+    }
+
+    fn roof_store(block: crate::world::BlockId, covered_x: std::ops::Range<usize>) -> ChunkStore {
+        let mut chunk = VoxelChunk::all_air(usize::from(SIZE));
+        for x in covered_x {
+            for z in 0..usize::from(SIZE) {
+                chunk.set(x, 16, z, block);
+            }
+        }
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            chunk,
+        );
+        store
+    }
+
+    fn sheltered_positions(
+        kind: WeatherKind,
+        eye: Vec3,
+        store: &ChunkStore,
+        cache: &mut PrecipitationShelter,
+    ) -> Vec<[f32; 3]> {
+        cache.prepare(eye, usize::from(SIZE), 0);
+        let mut into = Vec::new();
+        write_positions(
+            &mut into,
+            kind,
+            255,
+            0.0,
+            eye,
+            Quat::IDENTITY,
+            Some((store, cache)),
+        );
+        into
+    }
+
+    fn positions_at(kind: WeatherKind, eye: Vec3) -> Vec<[f32; 3]> {
+        let mut into = Vec::new();
+        write_positions(&mut into, kind, 255, 0.0, eye, Quat::IDENTITY, None);
+        into
+    }
+
+    fn quad_area(positions: &[[f32; 3]], quad: usize) -> f32 {
+        let corners = &positions[quad * 4..quad * 4 + 4];
+        (Vec3::from(corners[1]) - Vec3::from(corners[0]))
+            .cross(Vec3::from(corners[3]) - Vec3::from(corners[0]))
+            .length()
+    }
+
+    fn quad_centre(positions: &[[f32; 3]], quad: usize) -> Vec3 {
+        positions[quad * 4..quad * 4 + 4]
+            .iter()
+            .map(|corner| Vec3::from(*corner))
+            .sum::<Vec3>()
+            * 0.25
     }
 
     /// The renderer extracts one copy, but the next frame still needs the CPU copy to
@@ -945,6 +1167,206 @@ mod tests {
         assert_eq!(volume(&mut dry).0, Visibility::Visible);
     }
 
+    /// Shelter is a per-quad physical question: a roof removes only falling weather
+    /// below it, while the same column remains snowy or rainy above the roof line.
+    #[test]
+    fn a_solid_roof_stops_every_falling_kind_below_it_and_not_above_it() {
+        let eye = Vec3::new(15.5, 16.0, 15.5);
+        let store = roof_store(palette::STONE, 0..usize::from(SIZE));
+
+        for kind in [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Blizzard] {
+            let open = positions_at(kind, eye);
+            let mut cache = PrecipitationShelter::default();
+            let sheltered = sheltered_positions(kind, eye, &store, &mut cache);
+            let mut below = 0;
+            let mut above = 0;
+
+            for quad in 0..PRECIP_QUADS {
+                assert!(
+                    quad_area(&open, quad) > 0.0,
+                    "{kind:?} quad {quad} began hidden"
+                );
+                if quad_centre(&open, quad).y.floor() as i32 <= 16 {
+                    below += 1;
+                    assert_eq!(
+                        quad_area(&sheltered, quad),
+                        0.0,
+                        "{kind:?} quad {quad} passed through the roof"
+                    );
+                } else {
+                    above += 1;
+                    assert!(
+                        quad_area(&sheltered, quad) > 0.0,
+                        "{kind:?} quad {quad} above the roof was hidden"
+                    );
+                }
+            }
+            assert!(
+                below > 0 && above > 0,
+                "{kind:?} did not exercise both sides"
+            );
+        }
+    }
+
+    /// A covered eye is not a covered volume. The open half beside it remains visible,
+    /// which is what lets a player inside see rain through a doorway or courtyard.
+    #[test]
+    fn an_open_neighbouring_column_stays_rainy_when_the_camera_is_covered() {
+        let eye = Vec3::new(15.5, 16.0, 15.5);
+        let store = roof_store(palette::STONE, 0..16);
+        let open = positions_at(WeatherKind::Rain, eye);
+        let mut cache = PrecipitationShelter::default();
+        let sheltered = sheltered_positions(WeatherKind::Rain, eye, &store, &mut cache);
+        let mut covered = 0;
+        let mut uncovered = 0;
+
+        for quad in 0..PRECIP_QUADS {
+            let centre = quad_centre(&open, quad);
+            if centre.y.floor() as i32 > 16 {
+                continue;
+            }
+            if (centre.x.floor() as i32) < 16 {
+                covered += 1;
+                assert_eq!(quad_area(&sheltered, quad), 0.0);
+            } else {
+                uncovered += 1;
+                assert!(quad_area(&sheltered, quad) > 0.0);
+            }
+        }
+        assert!(covered > 0 && uncovered > 0);
+    }
+
+    /// The shelter predicate is solidity, not visibility or merely occupying a voxel.
+    /// Water and flowers stop no body and no weather; a solid pane does both even if a
+    /// future translucent pass changes whether terrain can be seen through it.
+    #[test]
+    fn only_solid_cover_is_a_roof() {
+        let eye = Vec3::new(15.5, 16.0, 15.5);
+        let below = Vec3::new(15.5, 15.5, 15.5);
+        for block in [palette::AIR, palette::WATER, palette::FLOWER_RED] {
+            let store = roof_store(block, 0..usize::from(SIZE));
+            let mut cache = PrecipitationShelter::default();
+            cache.prepare(eye, usize::from(SIZE), 0);
+            assert!(
+                !cache.is_sheltered(&store, below),
+                "non-solid block {block} stopped precipitation"
+            );
+        }
+        for block in [palette::STONE, palette::BUSH, palette::DARK_GLASS] {
+            let store = roof_store(block, 0..usize::from(SIZE));
+            let mut cache = PrecipitationShelter::default();
+            cache.prepare(eye, usize::from(SIZE), 0);
+            assert!(
+                cache.is_sheltered(&store, below),
+                "solid block {block} did not stop precipitation"
+            );
+        }
+    }
+
+    /// Store mutations invalidate both cached open sky and cached roofs. This is the
+    /// path used for block edits, chunk replacement/arrival and unload alike.
+    #[test]
+    fn roof_edits_do_not_leave_stale_column_exposure() {
+        let eye = Vec3::new(15.5, 16.0, 15.5);
+        let below = Vec3::new(15.5, 15.5, 15.5);
+        let mut store = roof_store(palette::AIR, 0..usize::from(SIZE));
+        let mut cache = PrecipitationShelter::default();
+        cache.prepare(eye, usize::from(SIZE), 0);
+        assert!(!cache.is_sheltered(&store, below));
+
+        let roof = BlockCoord {
+            x: 15,
+            y: 16,
+            z: 15,
+        };
+        store.apply_block(roof, palette::STONE, usize::from(SIZE));
+        cache.invalidate();
+        cache.prepare(eye, usize::from(SIZE), 0);
+        assert!(cache.is_sheltered(&store, below));
+
+        store.apply_block(roof, palette::AIR, usize::from(SIZE));
+        cache.invalidate();
+        cache.prepare(eye, usize::from(SIZE), 0);
+        assert!(!cache.is_sheltered(&store, below));
+    }
+
+    /// The ECS path observes `ChunkStore` change ticks itself; callers do not have to
+    /// remember to reach into the presentation cache when an authoritative edit lands.
+    #[test]
+    fn the_draw_system_invalidates_cached_exposure_after_an_edit() {
+        let mut app = headless_player(false);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+        deliver(&mut app, 1, weather_of(WeatherKind::Rain, 255));
+        app.update();
+        app.update();
+
+        let before = positions(&mut app);
+        let quad = (0..PRECIP_QUADS)
+            .find(|quad| {
+                let centre = quad_centre(&before, *quad);
+                let block = centre.floor().as_ivec3();
+                (0..i32::from(SIZE)).contains(&block.x)
+                    && (64..95).contains(&block.y)
+                    && (0..i32::from(SIZE)).contains(&block.z)
+            })
+            .expect("the volume overlaps the held chunk");
+        let centre = quad_centre(&before, quad).floor().as_ivec3();
+        let roof = BlockCoord {
+            x: centre.x,
+            y: centre.y + 1,
+            z: centre.z,
+        };
+        assert!(quad_area(&before, quad) > 0.0);
+
+        app.world_mut().resource_mut::<ChunkStore>().apply_block(
+            roof,
+            palette::STONE,
+            usize::from(SIZE),
+        );
+        app.update();
+        assert_eq!(
+            quad_area(&positions(&mut app), quad),
+            0.0,
+            "the cached open column survived a roof edit"
+        );
+
+        app.world_mut().resource_mut::<ChunkStore>().apply_block(
+            roof,
+            palette::AIR,
+            usize::from(SIZE),
+        );
+        app.update();
+        assert!(
+            quad_area(&positions(&mut app), quad) > 0.0,
+            "the cached roof survived its removal"
+        );
+    }
+
+    /// Six hundred quads share no more than the fixed 25x25 column budget, and a second
+    /// rewrite over the same footprint walks no voxels at all.
+    #[test]
+    fn shelter_work_is_bounded_and_shared_across_frames() {
+        let eye = Vec3::new(15.5, 16.0, 15.5);
+        let store = roof_store(palette::AIR, 0..usize::from(SIZE));
+        let mut cache = PrecipitationShelter::default();
+        let first = sheltered_positions(WeatherKind::Blizzard, eye, &store, &mut cache);
+        assert_eq!(first.len(), PRECIP_QUADS * 4);
+        assert!(cache.scans > 0 && cache.scans <= SHELTER_COLUMNS);
+
+        let scans = cache.scans;
+        let second = sheltered_positions(WeatherKind::Blizzard, eye, &store, &mut cache);
+        assert_eq!(second, first);
+        assert_eq!(cache.scans, scans, "the same columns were walked twice");
+
+        let sand = sheltered_positions(
+            WeatherKind::Sandstorm,
+            eye,
+            &roof_store(palette::STONE, 0..usize::from(SIZE)),
+            &mut cache,
+        );
+        assert_eq!(sand, positions_at(WeatherKind::Sandstorm, eye));
+    }
+
     /// What one frame of the volume costs, measured rather than asserted.
     ///
     /// `#[ignore]`, so CI never runs it: a wall-clock assertion on a shared runner is a
@@ -958,8 +1380,11 @@ mod tests {
     fn the_rewrite_costs() {
         const FRAMES: u32 = 10_000;
         let mut into = Vec::new();
+        let store = roof_store(palette::AIR, 0..usize::from(SIZE));
+        let mut shelter = PrecipitationShelter::default();
+        shelter.prepare(Vec3::ZERO, usize::from(SIZE), 0);
         // One call outside the loop, so the measurement is of the steady state rather than
-        // of the one allocation the buffer ever makes.
+        // of the one allocation the buffer ever makes or the first column walks.
         write_positions(
             &mut into,
             WeatherKind::Rain,
@@ -967,6 +1392,7 @@ mod tests {
             0.0,
             Vec3::ZERO,
             Quat::IDENTITY,
+            Some((&store, &mut shelter)),
         );
 
         let started = Instant::now();
@@ -978,6 +1404,7 @@ mod tests {
                 frame as f32 / 60.0,
                 Vec3::ZERO,
                 Quat::IDENTITY,
+                Some((&store, &mut shelter)),
             );
             std::hint::black_box(&into);
         }
