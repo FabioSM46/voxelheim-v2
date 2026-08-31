@@ -281,8 +281,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 17 {
-		t.Fatalf("WorldgenVersion = %d, want 17 after the taiga floor gained bushes and flowers", WorldgenVersion)
+	if WorldgenVersion != 18 {
+		t.Fatalf("WorldgenVersion = %d, want 18 after a terrace step gained its fall and a channel stopped filling the rock beneath it", WorldgenVersion)
 	}
 }
 
