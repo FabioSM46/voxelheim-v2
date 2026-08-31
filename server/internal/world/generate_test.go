@@ -83,6 +83,13 @@ var (
 	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
 	goldenPlainsCoord     = Coord{X: 3, Y: 2, Z: 64}
 	goldenRiverCoord      = Coord{X: 197, Y: 1, Z: -61}
+
+	// bodyCaveMouthCoord holds a cave mouth in the bed of a lake — a carved voxel above
+	// [caveWaterLevel] that the run from its own column's ground reaches, and so the one
+	// case a body still fills after #660. It is not a golden fixture; see
+	// [TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel], which is the only thing that
+	// generates it.
+	bodyCaveMouthCoord = Coord{X: 161, Y: 1, Z: -61}
 )
 
 // TestGenerateMatchesTheGoldenChunk is the determinism contract, and the reason
@@ -281,8 +288,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 18 {
-		t.Fatalf("WorldgenVersion = %d, want 18 after a terrace step gained its fall and a channel stopped filling the rock beneath it", WorldgenVersion)
+	if WorldgenVersion != 19 {
+		t.Fatalf("WorldgenVersion = %d, want 19 after a carved voxel and the water beside it were made to agree", WorldgenVersion)
 	}
 }
 
@@ -431,8 +438,14 @@ func TestVerticallyStackedChunksAgree(t *testing.T) {
 //
 // **Carving is a feature that removes rather than adds, so it is the one the
 // default branch has to know about.** Air where the terrain function says stone is
-// either a cave or the bug this function exists to catch, and only caveAt can tell
-// the two apart.
+// either a cave or the bug this function exists to catch, and only the carve rule can
+// tell the two apart.
+//
+// **The carve rule and not the carve field, since #660.** [caveAt] is the two noise
+// fields alone; [column.carvedAt] is those with the settlement exemption and the bank
+// rule applied, and the bank rule leaves rock standing where the fields would have
+// hollowed it out. Reading the field here would report every one of those as terrain
+// that something carved away.
 func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 	t.Helper()
 
@@ -445,7 +458,7 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 	for y := range ChunkSize {
 		worldY := originY + int64(y)
 		got, terrain := c.At(x, y, z), col.blockAt(int(worldY))
-		carved := caveAt(seed, worldX, worldY, worldZ, surface)
+		carved := col.carvedAt(seed, worldX, worldY, worldZ)
 		if carved && got != col.caveFillAt(int(worldY)) && got != Log && got != Leaves {
 			t.Fatalf("carved voxel (%d, %d, %d) is block %d rather than the %d the cave fill puts there",
 				worldX, worldY, worldZ, got, col.caveFillAt(int(worldY)))
@@ -669,7 +682,8 @@ func TestSurfaceBlocksFollowTheirClimateAndAltitude(t *testing.T) {
 	treeSeed, rootZ, treeSurface, _ := findIsolatedEastBorderPlant(t, &plantSpeciesTable[0])
 	treeCoord := ChunkOf(ChunkSize-1, int64(treeSurface), rootZ)
 	treeChunk := Generate(treeSeed, treeCoord)
-	wantTreeSurface := columnAt(treeSeed, ChunkSize-1, rootZ).blockAt(treeSurface)
+	treeCol := columnAt(treeSeed, ChunkSize-1, rootZ)
+	wantTreeSurface := treeCol.blockAt(treeSurface)
 	if got := treeChunk.At(Local(ChunkSize-1), Local(int64(treeSurface)), Local(rootZ)); got != wantTreeSurface {
 		t.Fatalf("tree-bearing surface at (%d, %d) is block %d, want its unchanged ground %d",
 			ChunkSize-1, rootZ, got, wantTreeSurface)
@@ -927,7 +941,8 @@ func TestATreeCrossingAChunkBorderIsCompleteInEitherGenerationOrder(t *testing.T
 			features := [2]int{}
 			for pos, block := range want {
 				worldX, worldY, worldZ := pos[0], pos[1], pos[2]
-				if columnAt(seed, worldX, worldZ).blockAt(int(worldY)) != Air {
+				rootCol := columnAt(seed, worldX, worldZ)
+				if rootCol.blockAt(int(worldY)) != Air {
 					continue // foliage clipped honestly by a neighbouring slope
 				}
 				var chunk *Chunk
