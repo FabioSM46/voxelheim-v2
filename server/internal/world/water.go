@@ -572,7 +572,7 @@ func standingWaterSurface(surface, riverSurface int, river bool) (height int, ok
 // runs. See [column.waterBlock].
 //
 // The caller has already established that the terrain here is air.
-func (c column) fillAt(worldY int) Block {
+func (c *column) fillAt(worldY int) Block {
 	if !c.standingWater || worldY > c.fallSurface {
 		return Air
 	}
@@ -625,11 +625,60 @@ func (c column) fillAt(worldY int) Block {
 // is the obvious idea: emitting the deep fill as [WaterFlow7] so it drains itself turned
 // 4457 changes into 413847, because a body that drains and is re-fed from the sources
 // beside it churns instead of settling. The fill is source or it is absent.
-func (c column) caveFillAt(worldY int) Block {
+// **A body reaches a carved voxel only where the carved run reaches it, and that is
+// the wet half of #660.** The rule above answers for one column, so a pocket sealed
+// inside the rock under a lake filled to the lake's surface with nothing joining the
+// two — and where a cave then ran sideways out of that pocket, the wall of source
+// water stood against open air for as long as the world ran. [column.bodyFloor] is the
+// last solid block under this column's own ground, so `worldY > c.bodyFloor` is "the
+// space the body opens into". One downward scan per water column, no neighbour read.
+//
+// **The other candidate was the four-neighbour containment test, and it was measured
+// and rejected.** Written as the issue describes it — a carved voxel takes the body's
+// water only where none of its four neighbours is air at that height — it costs
+// nothing worth measuring, because it is reached only by a carved voxel a body has
+// already filled: BenchmarkGenerate 3.90…4.08 ms against a 3.81…3.90 ms baseline,
+// inside the noise. What it does not do is work. A pocket is a *blob* of water, and a
+// one-step test on the unadjusted neighbour peels its outermost shell and exposes the
+// next one, so it converges on nothing:
+//
+//	source water standing against open air, 128x128 columns, y 20..110
+//
+//	                                    seed 1        seed 0x5EED   seed 7
+//	as #654 left it                     214/34423     63/41770      339/114578
+//	the four-neighbour test             214/34423     58/41711      296/114239
+//	the carved-run rule here            214/34423      4/41534        0/111425
+//	  and the bank rule beside it         2/34423      4/41534        0/111425
+//
+// Rows one, three and four are re-derivable from this tree by running
+// [TestNoSourceWaterStandsAgainstOpenAir] with the last line of [column.carvedAt] held
+// at `true`, which is the bank rule off. Row two is not: the four-neighbour test was
+// written to be measured and then deleted, so that row is a record of why it is not
+// here rather than a number anybody can check. Its rejection rests on the paragraph
+// above it, which is an argument rather than a reading.
+//
+// The connectivity rule is the fixed point that test is trying to reach, one scan at a
+// time, and it reaches it directly. It also removes the sealed pocket that filled for
+// no reason, which is a defect nobody had named.
+//
+// **Neither candidate moves seed 1, and that is what the classification found.** All
+// 214 of its exposed voxels are a *channel's own open water* — [column.fillAt]'s, in
+// the river where it belongs — standing beside a cave carved through the bank next to
+// it. Nothing may be done to that water. The answer is done to the carve instead, and
+// it lives in [column.carvedAt]: the residue of 2 and 4 is what no carving rule can
+// reach, a bank column whose ground is a block below the water beside it and which
+// holds no water of its own.
+func (c *column) caveFillAt(worldY int) Block {
 	if c.standingWater && worldY <= c.waterSurface {
 		// A body fills the rock beneath it; a channel does not, above the dry-world
 		// level. See the paragraph on #654 above for the measurement that chose this.
-		if !c.river || worldY <= caveWaterLevel {
+		//
+		// Above that level the body reaches only what the carved run reaches: see
+		// [column.bodyFloor] and the #660 paragraph above.
+		if worldY <= caveWaterLevel {
+			return c.waterBlock
+		}
+		if !c.river && worldY > c.bodyFloor {
 			return c.waterBlock
 		}
 	}
@@ -637,4 +686,63 @@ func (c column) caveFillAt(worldY int) Block {
 		return Water
 	}
 	return Air
+}
+
+// bankWater is the open water one column stands in: the band (floor, top] that
+// [column.fillAt] fills above that column's own ground, and therefore the water a
+// carve in the column beside it would open a face into.
+//
+// **The zero value holds nothing and needs no flag to say so**: no height is both
+// above zero and at or below it, so a dry column's band is empty by arithmetic rather
+// than by a bool somebody has to remember to read.
+//
+// int32 rather than int, because [column] carries four of these and is copied once per
+// voxel — see the note on that field.
+type bankWater struct {
+	floor int32
+	top   int32
+}
+
+// bankWaterAt resolves that band for one column, and what it deliberately does not
+// resolve is the whole point of it existing.
+//
+// It is asked for columns nobody is generating — the ring just outside a chunk — so it
+// may not be [columnAt]: the gravel patch, the beach, the river current and the fall
+// above it say nothing about whether water stands here, and [riverCurrentAt] alone
+// costs four field samples and two smoothed heights. What is left is the climate and
+// the shape, which is the part no column can be resolved without.
+// bankWatersAt resolves the four bands one column reads, in the order
+// [column.waterStandsBesideAt] walks them.
+func bankWatersAt(seed, worldX, worldZ int64) [4]bankWater {
+	return [4]bankWater{
+		bankWaterAt(seed, worldX+1, worldZ),
+		bankWaterAt(seed, worldX-1, worldZ),
+		bankWaterAt(seed, worldX, worldZ+1),
+		bankWaterAt(seed, worldX, worldZ-1),
+	}
+}
+
+func bankWaterAt(seed, worldX, worldZ int64) bankWater {
+	surface, riverSurface, river, _ := shapeAt(seed, worldX, worldZ, ClimateAt(seed, worldX, worldZ))
+	top, ok := standingWaterSurface(surface, riverSurface, river)
+	if !ok {
+		return bankWater{}
+	}
+	return bankWater{floor: int32(surface), top: int32(top)}
+}
+
+// waterStandsBesideAt reports whether one of the four horizontally adjacent columns
+// stands open water at this height — the water a carve here would open a face into.
+//
+// Four comparisons against bands [columnAt] has already resolved, so the per-voxel
+// price of the bank rule is four comparisons and not one field sample. See
+// [column.carvedAt].
+func (c *column) waterStandsBesideAt(worldY int64) bool {
+	y := int32(worldY)
+	for _, bank := range c.banks {
+		if y > bank.floor && y <= bank.top {
+			return true
+		}
+	}
+	return false
 }

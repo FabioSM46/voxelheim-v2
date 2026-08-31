@@ -569,13 +569,24 @@ func plainsLowCoverDigest() (digest uint64, bushes, flowers int) {
 // one. The digest folds each rooted column's coordinates, its row, the bush's
 // single-or-pair bit and the flower's colour, so a moved column, a swapped row, a
 // re-shaped clump or a re-coloured drift all change it.
+//
+// **They moved once, at #660, by exactly three columns, and the cause is not the
+// draw.** The bank rule refuses a carve that would open a face into the water standing
+// in the column beside it, and three columns in this 512x512 window had a cave mouth
+// in a river bank at exactly the height of the channel's water: (−183, −247),
+// (−157, −244) and (−156, −244), all plains, each with a terrace band beside it. Their
+// ground stopped being a hole, so [plantAtColumn]'s last refusal stopped firing and one
+// bush and two flowers root where nothing could before. The claim above is unharmed —
+// every one of the 3107 columns that rooted still roots, and none moved row or colour —
+// but a digest cannot say "and three more", so the numbers are re-measured and the
+// reason is written down here rather than left to look like drift.
 func TestPlainsLowCoverIsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	const (
-		wantDigest  = uint64(0x3708fdb1cd354970)
-		wantBushes  = 3107
-		wantFlowers = 1425
+		wantDigest  = uint64(0x9f589a8663b340a5)
+		wantBushes  = 3108
+		wantFlowers = 1427
 	)
 	digest, bushes, flowers := plainsLowCoverDigest()
 	if digest != wantDigest || bushes != wantBushes || flowers != wantFlowers {
