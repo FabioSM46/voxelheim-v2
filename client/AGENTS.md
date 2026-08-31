@@ -80,7 +80,7 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the six graphics values and the frame-rate readout — each with its bound, its step and the default it starts from — plus which tab each belongs to, which is what a reset is scoped by | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — and the frame-rate readout; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
@@ -2077,7 +2077,7 @@ Recorded here so the next reader does not mistake them for oversights:
   literal address in the service's `-discord-redirect-uri` avoids it entirely, which is what its
   own default does.
 - **The settings screen is not every setting, and what it leaves out each has a reason.**
-  #179's second half landed in #247 — the six graphics values, the four-corner frame-rate
+  #179's second half landed in #247 — the original six graphics values, the four-corner frame-rate
   readout, the two tabs and one reset per tab — so what remains outside is deliberate:
   *cursor capture*, which belongs to the camera-control issue this file has named for a
   while and that still does not exist; *audio*, of which there is none; and *shadows,

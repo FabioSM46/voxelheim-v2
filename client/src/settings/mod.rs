@@ -25,7 +25,9 @@ mod store;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use bevy::window::{PresentMode, PrimaryWindow};
+use bevy::window::{
+    Monitor, MonitorSelection, PresentMode, PrimaryMonitor, PrimaryWindow, WindowMode,
+};
 use bevy::winit::{UpdateMode, WinitSettings};
 
 use crate::net::MAX_VIEW_DISTANCE;
@@ -42,40 +44,63 @@ pub struct SettingsPlugin {
     /// directory — in which case the settings are still adjustable, they simply do not
     /// survive the process.
     file: Option<PathBuf>,
+    settings: Settings,
+    complaints: Vec<String>,
 }
 
 impl SettingsPlugin {
     /// The settings file this process's environment names.
     pub fn from_environment() -> Self {
-        Self {
-            file: store::settings_path(&store::default_environment()),
-        }
+        Self::from_file(store::settings_path(&store::default_environment()))
     }
 
     /// A plugin whose file is `path`, for a test that must not read the developer's own
     /// settings — the reason `net`'s `Environment::rooted_at` exists one directory over.
     #[cfg(test)]
     fn at(path: PathBuf) -> Self {
-        Self { file: Some(path) }
+        Self::from_file(Some(path))
+    }
+
+    fn from_file(file: Option<PathBuf>) -> Self {
+        let (settings, complaints) = match &file {
+            Some(path) => store::load(path),
+            None => (Settings::default(), Vec::new()),
+        };
+        Self {
+            file,
+            settings,
+            complaints,
+        }
+    }
+
+    /// The mode the primary window is created in. A named monitor is resolved on update,
+    /// after winit has created its monitor entities.
+    pub fn initial_window_mode(&self) -> WindowMode {
+        self.settings.window_mode().bevy(MonitorSelection::Primary)
     }
 }
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        let (settings, complaints) = match &self.file {
-            Some(path) => store::load(path),
-            None => (Settings::default(), Vec::new()),
-        };
-        for complaint in complaints {
+        for complaint in &self.complaints {
             warn!("{complaint}");
         }
 
         app.insert_resource(SettingsFile {
             path: self.file.clone(),
-            written: settings.clone(),
+            written: self.settings.clone(),
         })
-        .insert_resource(settings)
-        .add_systems(Update, (save_when_changed, apply_to_the_display));
+        .insert_resource(self.settings.clone())
+        .init_resource::<MonitorChoices>()
+        .add_systems(
+            Update,
+            (
+                refresh_monitor_choices,
+                save_when_changed,
+                apply_to_the_display,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -100,7 +125,7 @@ pub enum Tab {
     /// The mouse sensitivity and the key bindings. What the screen opens on.
     #[default]
     Controls,
-    /// The six graphics values and the frame-rate readout.
+    /// The eight graphics values and the frame-rate readout.
     Graphics,
 }
 
@@ -465,6 +490,8 @@ impl Bindings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Knob {
     LookSensitivity,
+    WindowMode,
+    Monitor,
     RenderDistance,
     FieldOfView,
     Brightness,
@@ -473,8 +500,10 @@ pub enum Knob {
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 6] = [
+pub const KNOBS: [Knob; 8] = [
     Knob::LookSensitivity,
+    Knob::WindowMode,
+    Knob::Monitor,
     Knob::RenderDistance,
     Knob::FieldOfView,
     Knob::Brightness,
@@ -487,6 +516,8 @@ impl Knob {
     pub const fn label(self) -> &'static str {
         match self {
             Self::LookSensitivity => "Mouse sensitivity",
+            Self::WindowMode => "Window mode",
+            Self::Monitor => "Monitor",
             Self::RenderDistance => "Render distance",
             Self::FieldOfView => "Field of view",
             Self::Brightness => "Brightness",
@@ -497,17 +528,272 @@ impl Knob {
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so a seventh knob has to say where it belongs before it builds —
+    /// No wildcard arm, so a ninth knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
             Self::LookSensitivity => Tab::Controls,
-            Self::RenderDistance
+            Self::WindowMode
+            | Self::Monitor
+            | Self::RenderDistance
             | Self::FieldOfView
             | Self::Brightness
             | Self::FogStart
             | Self::FrameCap => Tab::Graphics,
         }
+    }
+}
+
+/// The two window modes this client offers. The closed enum is the bound,
+/// [`WINDOW_MODE_STEP`] is one press, and [`DEFAULT_WINDOW_MODE`] is the initial value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    BorderlessFullscreen,
+    Windowed,
+}
+
+const WINDOW_MODES: [DisplayMode; 2] = [DisplayMode::BorderlessFullscreen, DisplayMode::Windowed];
+const WINDOW_MODE_STEP: i32 = 1;
+const DEFAULT_WINDOW_MODE: DisplayMode = DisplayMode::BorderlessFullscreen;
+
+impl DisplayMode {
+    /// What the screen and settings file call this mode.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BorderlessFullscreen => "borderless",
+            Self::Windowed => "windowed",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        WINDOW_MODES.into_iter().find(|mode| mode.name() == name)
+    }
+
+    fn bevy(self, monitor: MonitorSelection) -> WindowMode {
+        match self {
+            Self::BorderlessFullscreen => WindowMode::BorderlessFullscreen(monitor),
+            Self::Windowed => WindowMode::Windowed,
+        }
+    }
+}
+
+/// Which attached display the player chose.
+///
+/// `Specific` holds an opaque, settings-file-safe identity. It survives while a monitor is
+/// absent; resolution to a Bevy entity stays separate so a fallback cannot rewrite it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorPreference {
+    Primary,
+    Specific(String),
+}
+
+const DEFAULT_MONITOR: MonitorPreference = MonitorPreference::Primary;
+const MONITOR_STEP: i32 = 1;
+
+/// One display currently reported by the operating system.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MonitorChoice {
+    entity: Entity,
+    identity: String,
+    label: String,
+    primary: bool,
+}
+
+/// The dynamic bound of the monitor knob.
+///
+/// The primary choice is always present. Every other choice comes from a live [`Monitor`]
+/// component, so the screen cannot offer a bare index or a display that does not exist.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct MonitorChoices {
+    attached: Vec<MonitorChoice>,
+}
+
+impl MonitorChoices {
+    fn preferences(&self) -> Vec<MonitorPreference> {
+        let mut preferences = vec![MonitorPreference::Primary];
+        preferences.extend(
+            self.attached
+                .iter()
+                .filter(|choice| !choice.primary)
+                .map(|choice| MonitorPreference::Specific(choice.identity.clone())),
+        );
+        preferences
+    }
+
+    fn moved(&self, current: &MonitorPreference, steps: i32) -> MonitorPreference {
+        let choices = self.preferences();
+        let current = match current {
+            MonitorPreference::Primary => 0,
+            MonitorPreference::Specific(identity) => self
+                .attached
+                .iter()
+                .find(|choice| choice.identity == *identity)
+                .and_then(|choice| {
+                    if choice.primary {
+                        Some(0)
+                    } else {
+                        choices.iter().position(|candidate| candidate == current)
+                    }
+                })
+                .unwrap_or(0),
+        };
+        let moved = (current as i64)
+            .saturating_add(i64::from(steps).saturating_mul(i64::from(MONITOR_STEP)))
+            .clamp(0, choices.len().saturating_sub(1) as i64) as usize;
+        choices[moved].clone()
+    }
+
+    fn label(&self, selected: &MonitorPreference) -> String {
+        match selected {
+            MonitorPreference::Primary => self
+                .attached
+                .iter()
+                .find(|choice| choice.primary)
+                .map(|choice| format!("primary - {}", choice.label))
+                .unwrap_or_else(|| "primary".to_owned()),
+            MonitorPreference::Specific(identity) => self
+                .attached
+                .iter()
+                .find(|choice| choice.identity == *identity)
+                .map(|choice| choice.label.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} (unavailable)",
+                        monitor_name_from_identity(identity)
+                            .unwrap_or_else(|| "display".to_owned())
+                    )
+                }),
+        }
+    }
+
+    fn selection(&self, selected: &MonitorPreference) -> MonitorSelection {
+        match selected {
+            MonitorPreference::Primary => MonitorSelection::Primary,
+            MonitorPreference::Specific(identity) => self
+                .attached
+                .iter()
+                .find(|choice| choice.identity == *identity)
+                .map(|choice| MonitorSelection::Entity(choice.entity))
+                // A missing monitor changes only the applied value. The resource still
+                // holds `Specific`, so `save_when_changed` has nothing to erase.
+                .unwrap_or(MonitorSelection::Primary),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn named(names: &[&str]) -> Self {
+        Self {
+            attached: names
+                .iter()
+                .enumerate()
+                .map(|(index, name)| MonitorChoice {
+                    entity: Entity::from_raw_u32(index as u32 + 1).unwrap(),
+                    identity: monitor_identity(
+                        Some(name),
+                        1920,
+                        1080,
+                        index as i32 * 1920,
+                        0,
+                        false,
+                    ),
+                    label: format!("{name} (1920x1080 at {},0)", index * 1920),
+                    primary: index == 0,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Builds a settings-file-safe identity for one attached monitor.
+fn monitor_identity(
+    name: Option<&str>,
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    duplicate_name: bool,
+) -> String {
+    let encoded_name: String = name
+        .unwrap_or_default()
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if !encoded_name.is_empty() && !duplicate_name {
+        format!("name:{encoded_name}")
+    } else {
+        format!("display:{encoded_name}:{width}:{height}:{x}:{y}")
+    }
+}
+
+/// Whether `identity` is one this module could have produced.
+fn valid_monitor_identity(identity: &str) -> bool {
+    let mut fields = identity.split(':');
+    let kind = fields.next();
+    let valid_name = fields.next().is_some_and(|name| {
+        name.len() % 2 == 0
+            && name.as_bytes().iter().all(u8::is_ascii_hexdigit)
+            && decode_hex(name).is_some_and(|bytes| String::from_utf8(bytes).is_ok())
+    });
+    if kind == Some("name") {
+        return valid_name && fields.next().is_none();
+    }
+    let valid = kind == Some("display")
+        && valid_name
+        && fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|value| value > 0)
+        && fields
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|value| value > 0)
+        && fields
+            .next()
+            .and_then(|value| value.parse::<i32>().ok())
+            .is_some()
+        && fields
+            .next()
+            .and_then(|value| value.parse::<i32>().ok())
+            .is_some();
+    valid && fields.next().is_none()
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).ok()?;
+            u8::from_str_radix(text, 16).ok()
+        })
+        .collect()
+}
+
+fn monitor_name_from_identity(identity: &str) -> Option<String> {
+    let encoded = identity.split(':').nth(1)?;
+    let decoded = decode_hex(encoded)?;
+    let name = String::from_utf8(decoded).ok()?;
+    Some(ascii_monitor_name(Some(&name)))
+}
+
+fn ascii_monitor_name(name: Option<&str>) -> String {
+    let shown: String = name
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_graphic() || character == ' ' {
+                character
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if shown.is_empty() {
+        "unnamed display".to_owned()
+    } else {
+        shown
     }
 }
 
@@ -587,6 +873,8 @@ const NO_FRAME_CAP: u16 = 0;
 pub struct Settings {
     look_sensitivity: f32,
     bindings: Bindings,
+    window_mode: DisplayMode,
+    monitor: MonitorPreference,
     readout_shown: bool,
     readout_corner: Corner,
     render_distance: u8,
@@ -602,6 +890,8 @@ impl Default for Settings {
         Self {
             look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
             bindings: Bindings::default(),
+            window_mode: DEFAULT_WINDOW_MODE,
+            monitor: DEFAULT_MONITOR,
             readout_shown: false,
             readout_corner: Corner::default(),
             render_distance: DEFAULT_RENDER_DISTANCE,
@@ -623,6 +913,16 @@ impl Settings {
     /// Which key answers for each control.
     pub const fn bindings(&self) -> &Bindings {
         &self.bindings
+    }
+
+    /// Whether the window is borderless fullscreen or decorated and resizable.
+    pub const fn window_mode(&self) -> DisplayMode {
+        self.window_mode
+    }
+
+    /// Which attached display the window should use.
+    pub const fn monitor(&self) -> &MonitorPreference {
+        &self.monitor
     }
 
     /// Whether the frame-rate readout is on screen.
@@ -669,8 +969,14 @@ impl Settings {
         self.fog_start
     }
 
-    /// Moves `knob` by `steps` of its own size, stopping at its bounds.
+    /// Moves a fixed-bound `knob` by `steps` of its own size.
+    #[cfg(test)]
     pub fn adjust(&mut self, knob: Knob, steps: i32) {
+        self.adjust_with_monitors(knob, steps, &MonitorChoices::default());
+    }
+
+    /// Moves `knob` by `steps` of its own size, stopping at its current bounds.
+    pub fn adjust_with_monitors(&mut self, knob: Knob, steps: i32, monitors: &MonitorChoices) {
         // A step at a time rather than a multiplication, so no integer has to become a
         // float, then snapped to the grid `places` describes. **The snap is what makes a
         // step reversible**: `0.003 + 0.0005 - 0.0005` is not `0.003` in `f32`, so without
@@ -698,6 +1004,18 @@ impl Settings {
                     4,
                 );
             }
+            Knob::WindowMode => {
+                let current = WINDOW_MODES
+                    .iter()
+                    .position(|mode| *mode == self.window_mode)
+                    .unwrap_or_default() as i64;
+                let moved = current
+                    .saturating_add(i64::from(steps).saturating_mul(i64::from(WINDOW_MODE_STEP)))
+                    .clamp(0, WINDOW_MODES.len().saturating_sub(1) as i64)
+                    as usize;
+                self.window_mode = WINDOW_MODES[moved];
+            }
+            Knob::Monitor => self.monitor = monitors.moved(&self.monitor, steps),
             Knob::RenderDistance => {
                 self.render_distance = step_u8(
                     self.render_distance,
@@ -738,9 +1056,17 @@ impl Settings {
     }
 
     /// What the settings screen prints beside `knob`.
+    #[cfg(test)]
     pub fn reading(&self, knob: Knob) -> String {
+        self.reading_with_monitors(knob, &MonitorChoices::default())
+    }
+
+    /// What the settings screen prints beside `knob`, with the attached monitor names.
+    pub fn reading_with_monitors(&self, knob: Knob, monitors: &MonitorChoices) -> String {
         match knob {
             Knob::LookSensitivity => format!("{:.4}", self.look_sensitivity),
+            Knob::WindowMode => self.window_mode.name().to_owned(),
+            Knob::Monitor => monitors.label(&self.monitor),
             Knob::RenderDistance => format!("{} chunks", self.render_distance),
             Knob::FieldOfView => format!("{:.0} deg", self.field_of_view),
             Knob::Brightness => format!("{:.2}x", self.brightness),
@@ -795,6 +1121,8 @@ impl Settings {
                         .unwrap_or_default();
             }
             Tab::Graphics => {
+                self.window_mode = defaults.window_mode;
+                self.monitor = defaults.monitor;
                 self.readout_shown = defaults.readout_shown;
                 self.readout_corner = defaults.readout_corner;
                 self.render_distance = defaults.render_distance;
@@ -855,6 +1183,66 @@ fn step_frame_cap(current: u16, steps: i32) -> u16 {
     cap
 }
 
+/// Rebuilds the dynamic monitor bound from the entities winit currently exposes.
+fn refresh_monitor_choices(
+    monitors: Query<(Entity, &Monitor, Has<PrimaryMonitor>)>,
+    mut choices: ResMut<MonitorChoices>,
+) {
+    let found: Vec<_> = monitors
+        .iter()
+        .map(|(entity, monitor, primary)| {
+            (
+                entity,
+                monitor.name.clone(),
+                monitor.physical_width,
+                monitor.physical_height,
+                monitor.physical_position,
+                primary,
+            )
+        })
+        .collect();
+    let mut attached: Vec<MonitorChoice> = found
+        .iter()
+        .map(|(entity, name, width, height, position, primary)| {
+            let duplicate_name = name.as_ref().is_some_and(|name| {
+                found
+                    .iter()
+                    .filter(|(_, candidate, ..)| candidate.as_ref() == Some(name))
+                    .count()
+                    > 1
+            });
+            let identity = monitor_identity(
+                name.as_deref(),
+                *width,
+                *height,
+                position.x,
+                position.y,
+                duplicate_name,
+            );
+            let name = ascii_monitor_name(name.as_deref());
+            MonitorChoice {
+                entity: *entity,
+                identity,
+                label: format!(
+                    "{name} ({}x{} at {},{})",
+                    width, height, position.x, position.y
+                ),
+                primary: *primary,
+            }
+        })
+        .collect();
+    attached.sort_by(|left, right| {
+        right
+            .primary
+            .cmp(&left.primary)
+            .then_with(|| left.label.cmp(&right.label))
+            .then_with(|| left.identity.cmp(&right.identity))
+    });
+    if choices.attached != attached {
+        choices.attached = attached;
+    }
+}
+
 /// Writes the settings back to their file when, and only when, they have moved.
 fn save_when_changed(settings: Res<Settings>, mut file: ResMut<SettingsFile>) {
     if !settings.is_changed() || file.written == *settings {
@@ -871,7 +1259,7 @@ fn save_when_changed(settings: Res<Settings>, mut file: ResMut<SettingsFile>) {
     file.written = settings.clone();
 }
 
-/// Pushes the three settings that live in somebody else's component rather than being read
+/// Pushes the five settings that live in somebody else's component rather than being read
 /// out of this resource every frame.
 ///
 /// The camera is queried by `Camera3d` rather than by `player/camera.rs`'s own marker,
@@ -880,20 +1268,27 @@ fn save_when_changed(settings: Res<Settings>, mut file: ResMut<SettingsFile>) {
 /// resource is "there is no window to pace", not a panic.
 fn apply_to_the_display(
     settings: Res<Settings>,
+    monitors: Res<MonitorChoices>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut projections: Query<&mut Projection, With<Camera3d>>,
     winit: Option<ResMut<WinitSettings>>,
 ) {
-    if !settings.is_changed() {
+    if !settings.is_changed() && !monitors.is_changed() {
         return;
     }
 
+    let window_mode = settings
+        .window_mode()
+        .bevy(monitors.selection(settings.monitor()));
     let present_mode = if settings.vsync() {
         PresentMode::Fifo
     } else {
         PresentMode::AutoNoVsync
     };
     for mut window in &mut windows {
+        if window.mode != window_mode {
+            window.mode = window_mode;
+        }
         if window.present_mode != present_mode {
             window.present_mode = present_mode;
         }
@@ -933,6 +1328,8 @@ mod tests {
         assert!((settings.look_sensitivity() - DEFAULT_LOOK_SENSITIVITY).abs() < f32::EPSILON);
         assert!((settings.fog_start() - DEFAULT_FOG_START).abs() < f32::EPSILON);
         assert!((settings.field_of_view() - DEFAULT_FIELD_OF_VIEW).abs() < f32::EPSILON);
+        assert_eq!(settings.window_mode(), DisplayMode::BorderlessFullscreen);
+        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
         assert_eq!(settings.render_distance(), DEFAULT_RENDER_DISTANCE);
         assert_eq!(settings.frame_cap(), NO_FRAME_CAP);
         assert!(settings.vsync());
@@ -977,15 +1374,16 @@ mod tests {
 
     #[test]
     fn every_knob_stops_at_both_of_its_bounds() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
         for knob in KNOBS {
             let mut low = Settings::default();
-            low.adjust(knob, -10_000);
+            low.adjust_with_monitors(knob, -10_000, &monitors);
             let mut high = Settings::default();
-            high.adjust(knob, 10_000);
+            high.adjust_with_monitors(knob, 10_000, &monitors);
             let mut lower = low.clone();
-            lower.adjust(knob, -1);
+            lower.adjust_with_monitors(knob, -1, &monitors);
             let mut higher = high.clone();
-            higher.adjust(knob, 1);
+            higher.adjust_with_monitors(knob, 1, &monitors);
             assert_eq!(low, lower, "{knob:?} kept falling past its floor");
             assert_eq!(high, higher, "{knob:?} kept climbing past its ceiling");
         }
@@ -1040,17 +1438,18 @@ mod tests {
     /// which no other assertion here would notice.
     #[test]
     fn every_knob_belongs_to_a_tab_and_every_tab_has_a_reset_of_its_own() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
         for tab in Tab::ALL {
             let mut moved = Settings::default();
             for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
-                moved.adjust(knob, 3);
+                moved.adjust_with_monitors(knob, 3, &monitors);
             }
             assert_ne!(moved, Settings::default(), "{tab:?} moved no knob at all");
             moved.reset(tab);
             for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
                 assert_eq!(
-                    moved.reading(knob),
-                    Settings::default().reading(knob),
+                    moved.reading_with_monitors(knob, &monitors),
+                    Settings::default().reading_with_monitors(knob, &monitors),
                     "{knob:?} survived its own tab's reset"
                 );
             }
@@ -1065,6 +1464,7 @@ mod tests {
     fn a_reset_puts_back_its_own_tab_and_touches_no_other() {
         let moved = || {
             let mut settings = Settings::default();
+            let monitors = MonitorChoices::named(&["Main display", "Side display"]);
             settings.adjust(Knob::LookSensitivity, 4);
             settings
                 .rebind(Control::Forward, KeyCode::F6)
@@ -1074,6 +1474,8 @@ mod tests {
             settings.adjust(Knob::Brightness, -2);
             settings.adjust(Knob::FogStart, 2);
             settings.adjust(Knob::FrameCap, 3);
+            settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
+            settings.adjust_with_monitors(Knob::Monitor, 1, &monitors);
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
@@ -1085,6 +1487,8 @@ mod tests {
         let mut after = moved();
         after.reset(Tab::Graphics);
         assert_eq!(after.render_distance(), DEFAULT_RENDER_DISTANCE);
+        assert_eq!(after.window_mode(), DEFAULT_WINDOW_MODE);
+        assert_eq!(after.monitor(), &DEFAULT_MONITOR);
         assert_eq!(after.frame_cap(), NO_FRAME_CAP);
         assert!(after.vsync());
         assert!(!after.readout_shown());
@@ -1117,6 +1521,8 @@ mod tests {
         assert_eq!(after.vsync(), before.vsync());
         assert_eq!(after.readout_shown(), before.readout_shown());
         assert_eq!(after.readout_corner(), before.readout_corner());
+        assert_eq!(after.window_mode(), before.window_mode());
+        assert_eq!(after.monitor(), before.monitor());
     }
 
     /// **A reset is a whole assignment or nothing**, which is why it goes through
@@ -1303,6 +1709,93 @@ mod tests {
                 .count();
             assert_eq!(mentions, 0, "the server's view distance reached a setting");
         }
+    }
+
+    fn monitor(name: &str, width: u32, x: i32) -> Monitor {
+        Monitor {
+            name: Some(name.to_owned()),
+            physical_height: 1080,
+            physical_width: width,
+            physical_position: IVec2::new(x, 0),
+            refresh_rate_millihertz: Some(60_000),
+            scale_factor: 1.0,
+            video_modes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_missing_saved_monitor_falls_back_without_erasing_the_choice() {
+        let scratch = store::Scratch::new("settings-monitor-fallback");
+        let path = scratch.join("settings");
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, SettingsPlugin::at(path.clone())));
+        app.world_mut()
+            .spawn((monitor("Main display", 1920, 0), PrimaryMonitor));
+        let side = app
+            .world_mut()
+            .spawn(monitor("Side display", 2560, 1920))
+            .id();
+        let window = app
+            .world_mut()
+            .spawn((Window::default(), PrimaryWindow))
+            .id();
+
+        app.update();
+        assert_eq!(
+            app.world().entity(window).get::<Window>().unwrap().mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+        );
+
+        let choices = app.world().resource::<MonitorChoices>().clone();
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust_with_monitors(Knob::Monitor, 1, &choices);
+        let saved = app.world().resource::<Settings>().monitor().clone();
+        assert!(matches!(saved, MonitorPreference::Specific(_)));
+        app.update();
+        assert_eq!(
+            app.world().entity(window).get::<Window>().unwrap().mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Entity(side))
+        );
+
+        app.world_mut().entity_mut(side).despawn();
+        app.update();
+        assert_eq!(
+            app.world().entity(window).get::<Window>().unwrap().mode,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            "a disconnected display did not fall back to the primary"
+        );
+        assert_eq!(
+            app.world().resource::<Settings>().monitor(),
+            &saved,
+            "the fallback erased the preference instead of only changing the applied monitor"
+        );
+        let (reloaded, complaints) = store::load(&path);
+        assert_eq!(complaints, Vec::<String>::new(), "{complaints:?}");
+        assert_eq!(
+            reloaded.monitor(),
+            &saved,
+            "falling back rewrote the saved preference"
+        );
+    }
+
+    #[test]
+    fn the_initial_window_uses_the_saved_mode_before_the_first_update() {
+        let scratch = store::Scratch::new("settings-initial-window-mode");
+        let path = scratch.join("settings");
+        let monitors = MonitorChoices::default();
+        let mut settings = Settings::default();
+        settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
+        store::save(&path, &settings).expect("save a window mode");
+
+        assert_eq!(
+            SettingsPlugin::at(path).initial_window_mode(),
+            WindowMode::Windowed
+        );
+        assert_eq!(
+            SettingsPlugin::from_file(None).initial_window_mode(),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+        );
     }
 
     #[test]
