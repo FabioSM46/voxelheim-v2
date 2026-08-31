@@ -1730,7 +1730,7 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	}
 
 	delta := [3]float64{p.vel[0] * dt, p.vel[1] * dt, p.vel[2] * dt}
-	pos, blocked := moveAndCollide(terrain, playerBody, p.pos, delta)
+	pos, blocked := moveAndCollideWithStep(terrain, playerBody, p.pos, delta, playerStepHeight)
 	p.pos = pos
 
 	// The ground is "a downward move that was stopped". Deriving it from the collision

@@ -95,6 +95,7 @@ func TestARestartServesTheEditedWorld(t *testing.T) {
 	ctx := context.Background()
 	edits := map[[3]int64]Block{
 		{5, 6, 7}:      Snow,
+		{6, 6, 7}:      SlateStairWestTop, // geometry and orientation remain one stored id
 		{0, 0, 0}:      Air,
 		{31, 6, 31}:    Dirt,
 		{-1, 1000, -1}: Stone, // negative coordinates, and a chunk high above the surface
@@ -141,6 +142,9 @@ func TestARestartServesTheEditedWorld(t *testing.T) {
 	}
 	if got := chunk.At(5, 6, 7); got != Snow {
 		t.Errorf("the reloaded chunk holds %d at (5,6,7), want Snow", got)
+	}
+	if got := chunk.At(6, 6, 7); got != SlateStairWestTop {
+		t.Errorf("the reloaded chunk holds %d at (6,6,7), want west-facing top stair", got)
 	}
 }
 

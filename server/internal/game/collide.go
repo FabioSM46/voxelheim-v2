@@ -27,6 +27,11 @@ const maxSubStep = 0.25
 // tick starting from a position that is genuinely outside the world's solids.
 const collisionSkin = 1e-4
 
+// playerStepHeight is the largest ledge ordinary walking climbs without a jump.
+// It is exactly one half-block: enough for each riser of a stair and a bottom slab,
+// while a full cube still intersects the raised body and remains a wall.
+const playerStepHeight = 0.5
+
 // worldLimit is the arithmetic edge of the world, in blocks.
 //
 // Beyond it a float32 cannot address individual blocks (2²⁴ is where the spacing
@@ -72,6 +77,12 @@ type Terrain interface {
 	// chunk already stops the body where it stands, and calling it water as well
 	// would let a player swim upward through terrain that has not arrived.
 	Fluid(x, y, z int64) bool
+}
+
+// collisionBlockReader is the memoized resident lookup CacheTerrain offers only
+// to collision. Other Terrain implementations need only the public contract.
+type collisionBlockReader interface {
+	collisionBlock(x, y, z int64) (world.Block, bool)
 }
 
 // CacheTerrain reads the chunks the server has already generated.
@@ -175,6 +186,13 @@ func (t *CacheTerrain) cachedBlock(x, y, z int64) (world.Block, bool) {
 	return t.memoChunk.At(world.Local(x), world.Local(y), world.Local(z)), true
 }
 
+// collisionBlock exposes the memoized read only to this package's collision path.
+// Terrain.Block deliberately performs a fresh Peek for mining's residency contract;
+// a body sweep instead wants the same revision-guarded memo Terrain.Solid uses.
+func (t *CacheTerrain) collisionBlock(x, y, z int64) (world.Block, bool) {
+	return t.cachedBlock(x, y, z)
+}
+
 // box is an axis-aligned bounding box in world blocks, as [min, max) per axis.
 //
 // Half-open on purpose: a box whose max face sits exactly on an integer does not
@@ -262,6 +280,13 @@ func boxDistance(a, b box) float64 {
 // who is falling and walking forward touches the ground on the tick they arrive at
 // it, rather than sliding one tick further through the air.
 func moveAndCollide(t Terrain, bd body, pos, delta [3]float64) (out [3]float64, blocked [3]bool) {
+	return moveAndCollideWithStep(t, bd, pos, delta, 0)
+}
+
+// moveAndCollideWithStep is moveAndCollide with an optional grounded step-up.
+// Only the player supplies a non-zero height: drops and projectiles do not climb,
+// and mobs retain their deliberate jump-based step rule.
+func moveAndCollideWithStep(t Terrain, bd body, pos, delta [3]float64, stepHeight float64) (out [3]float64, blocked [3]bool) {
 	b := bd.boxAt(pos)
 
 	// Already inside something, before moving at all. Two ways to get here and both
@@ -276,17 +301,51 @@ func moveAndCollide(t Terrain, bd body, pos, delta [3]float64) (out [3]float64, 
 		return pos, [3]bool{true, true, true}
 	}
 
-	for _, axis := range [3]int{1, 0, 2} {
-		b, blocked[axis] = slideAxis(t, b, axis, delta[axis])
+	b, blocked[1] = slideAxis(t, b, 1, delta[1])
+	grounded := (blocked[1] && delta[1] < 0) || supported(t, b)
+	for _, axis := range [2]int{0, 2} {
+		before := b
+		ordinary, hit := slideAxis(t, before, axis, delta[axis])
+		if hit && grounded && stepHeight > 0 {
+			if stepped, steppedHit, ok := stepAxis(t, before, axis, delta[axis], stepHeight, ordinary); ok {
+				b, blocked[axis] = stepped, steppedHit
+				continue
+			}
+		}
+		b, blocked[axis] = ordinary, hit
 	}
 	return bd.positionOf(b), blocked
+}
+
+// supported reports whether a surface sits immediately below b. It covers the
+// zero-vertical-delta case used by deterministic collision tests and ticks where
+// gravity rounded away, without allowing an airborne body to step up a wall.
+func supported(t Terrain, b box) bool {
+	return overlaps(t, b.translate(1, -2*collisionSkin))
+}
+
+// stepAxis tries the same horizontal movement from exactly one riser higher.
+// The raised route must make more progress than the ordinary collision did; this
+// rejects ceilings and full cubes while accepting either half of a stair.
+func stepAxis(t Terrain, b box, axis int, delta, height float64, ordinary box) (stepped box, blocked, ok bool) {
+	raised, blockedUp := slideAxis(t, b, 1, height)
+	if blockedUp {
+		return b, false, false
+	}
+	stepped, blocked = slideAxis(t, raised, axis, delta)
+	ordinaryDistance := math.Abs(ordinary.min[axis] - b.min[axis])
+	steppedDistance := math.Abs(stepped.min[axis] - b.min[axis])
+	if steppedDistance <= ordinaryDistance+collisionSkin {
+		return b, false, false
+	}
+	return stepped, blocked, true
 }
 
 // slideAxis moves the box along one axis, stopping at the first solid face.
 //
 // Precondition: b overlaps nothing. moveAndCollide establishes it, and each call
 // here preserves it — a sub-step that would overlap is replaced by a stop short of
-// the face it hit. That precondition is what makes the snapping below exact: the
+// the face it hit. That precondition is what makes the collision refinement below exact: the
 // only voxels a sub-step can newly touch are the ones in the layer its leading face
 // crossed into, because the other two axes did not move and one sub-step is shorter
 // than a block.
@@ -311,7 +370,7 @@ func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 		// sub-step land there with no collision detected and therefore no skin applied.
 		//
 		// Testing a skin ahead means a landing that would be flush is treated as the hit
-		// it is about to become, and the snap below leaves the same gap every detected
+		// it is about to become, and the search below leaves the same gap every detected
 		// collision leaves. Found by the first thing that had to climb out of the state
 		// rather than merely stand in it.
 		probe := moved
@@ -325,14 +384,26 @@ func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 			continue
 		}
 
-		// The layer's near boundary is where the box stops.
-		if step > 0 {
-			boundary := math.Floor(moved.max[axis])
-			b = b.translate(axis, boundary-collisionSkin-b.max[axis])
-		} else {
-			boundary := math.Floor(moved.min[axis]) + 1
-			b = b.translate(axis, boundary+collisionSkin-b.min[axis])
+		// A shaped block may have a face at a half coordinate, so the old integer
+		// snap is no longer a complete answer. Bisect only the colliding sub-step;
+		// twenty divisions leave far less than collisionSkin of uncertainty.
+		clear, colliding := 0.0, 1.0
+		for range 20 {
+			mid := (clear + colliding) / 2
+			candidate := b.translate(axis, step*mid)
+			candidateProbe := candidate
+			if step > 0 {
+				candidateProbe.max[axis] += collisionSkin
+			} else {
+				candidateProbe.min[axis] -= collisionSkin
+			}
+			if overlaps(t, candidateProbe) {
+				colliding = mid
+			} else {
+				clear = mid
+			}
 		}
+		b = b.translate(axis, step*clear)
 		return b, true
 	}
 
@@ -344,7 +415,47 @@ func overlaps(t Terrain, b box) bool {
 	if b.beyondTheWorld() {
 		return true
 	}
-	return anyVoxel(b, func(x, y, z int64) bool { return t.Solid(x, y, z) })
+	return anyVoxel(b, func(x, y, z int64) bool {
+		if !t.Solid(x, y, z) {
+			return false
+		}
+		var block world.Block
+		var resident bool
+		if reader, ok := t.(collisionBlockReader); ok {
+			block, resident = reader.collisionBlock(x, y, z)
+		} else {
+			block, resident = t.Block(x, y, z)
+		}
+		if !resident {
+			return true
+		}
+		// A Terrain implementation may deliberately provide synthetic solidity
+		// without manufacturing a block id (many deterministic fixtures do). Keep
+		// that contract as a full cube; only a resident shaped solid refines it.
+		if !world.Solid(block) {
+			return true
+		}
+		bounds, count := world.CollisionBounds(block)
+		for i := range count {
+			shape := box{
+				min: [3]float64{float64(x) + bounds[i].Min[0], float64(y) + bounds[i].Min[1], float64(z) + bounds[i].Min[2]},
+				max: [3]float64{float64(x) + bounds[i].Max[0], float64(y) + bounds[i].Max[1], float64(z) + bounds[i].Max[2]},
+			}
+			if boxesOverlap(b, shape) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func boxesOverlap(a, b box) bool {
+	for axis := range 3 {
+		if a.max[axis] <= b.min[axis] || a.min[axis] >= b.max[axis] {
+			return false
+		}
+	}
+	return true
 }
 
 // overlapsFluid reports whether any voxel a body swims in intersects the box.
