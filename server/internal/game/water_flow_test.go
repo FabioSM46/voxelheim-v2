@@ -391,3 +391,93 @@ func TestNothingUnderTheSurfaceIsEverAir(t *testing.T) {
 		}
 	}
 }
+
+// One composition scan must not be taken whole, however big it is.
+//
+// **This is the walking stutter, reduced to a test.** A chunk composed inside a lake
+// hands the simulation thousands of voxels at once; before #665 one tick scheduled every
+// one of them and examined every voxel they scheduled, which measured 24.5 ms on an
+// authoritative tick whose whole period is 50 ms. The bound is on the work, so the test
+// is on the work: how many voxels one pass may touch, not how long it took, because a
+// wall clock on a shared machine is a reading and this is a promise.
+func TestOneCompositionScanIsSpreadOverTicks(t *testing.T) {
+	t.Parallel()
+
+	sim, cache := newWaterSim(t)
+	// A slab of water with air beside it, so every voxel of it is genuinely unstable
+	// and the scan is the size of the slab rather than of what happens to be wet.
+	indices := make([]int, 0, world.ChunkSize*world.ChunkSize)
+	for z := range world.ChunkSize {
+		for x := range world.ChunkSize {
+			at := waterVoxel{x: int64(x), y: 20, z: int64(z)}
+			setWaterFixtureBlock(t, cache, at, world.Water)
+			setWaterFixtureBlock(t, cache, waterVoxel{x: at.x, y: at.y + 1, z: at.z}, world.Air)
+			indices = append(indices, world.Index(x, 20, z))
+		}
+	}
+	if len(indices) <= WaterScansPerTick {
+		t.Fatalf("the fixture is %d voxels, which is not more than one tick's budget of %d",
+			len(indices), WaterScansPerTick)
+	}
+	if err := sim.QueueUnstableWater(context.Background(), world.Coord{}, indices); err != nil {
+		t.Fatalf("QueueUnstableWater: %v", err)
+	}
+
+	// The tick that receives the scan may schedule at most its budget, and the schedule
+	// it leaves behind is what the following ticks work through.
+	sim.Step(1)
+	sim.mu.Lock()
+	carried := len(sim.waterScanCarry.indices)
+	sim.mu.Unlock()
+	if carried == 0 {
+		t.Fatalf("the whole %d-voxel scan was taken in one tick; nothing was carried", len(indices))
+	}
+	if taken := len(indices) - carried; taken > WaterScansPerTick {
+		t.Errorf("one tick scheduled %d voxels of the scan, over the budget of %d",
+			taken, WaterScansPerTick)
+	}
+
+	// And it does drain: the carry empties over ticks rather than being dropped.
+	for tick := uint64(2); tick <= 200; tick++ {
+		sim.Step(tick)
+		sim.mu.Lock()
+		carried = len(sim.waterScanCarry.indices)
+		sim.mu.Unlock()
+		if carried == 0 {
+			return
+		}
+	}
+	t.Fatalf("the scan still had %d voxels outstanding after 200 ticks", carried)
+}
+
+// The schedule is taken from in order and in bounded pieces, and a voxel rescheduled
+// earlier than it was queued does not get examined twice.
+func TestTheWaterScheduleIsOrderedAndStaleEntriesAreSkipped(t *testing.T) {
+	t.Parallel()
+
+	sim, _ := newWaterSim(t)
+	sim.mu.Lock()
+	// Queued far in the future, then pulled forward: the far entry is left behind in the
+	// queue and must not be acted on when its turn comes.
+	at := waterVoxel{x: 3, y: 4, z: 5}
+	sim.scheduleWaterLocked(at, 500)
+	sim.scheduleWaterLocked(at, 1)
+	queued := sim.waterDue.Len()
+	scheduled := sim.pendingWater[at]
+	sim.mu.Unlock()
+
+	if queued != 2 {
+		t.Fatalf("the queue holds %d entries for one rescheduled voxel, want both kept", queued)
+	}
+	if scheduled != 1 {
+		t.Fatalf("the schedule says tick %d, want the earlier 1", scheduled)
+	}
+
+	// The heap orders by due tick first, so the earlier entry is the one at the front.
+	sim.mu.Lock()
+	front := sim.waterDue[0]
+	sim.mu.Unlock()
+	if front.due != 1 {
+		t.Errorf("the front of the queue is due at %d, want the earliest at 1", front.due)
+	}
+}

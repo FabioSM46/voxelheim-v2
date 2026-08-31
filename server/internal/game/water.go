@@ -2,10 +2,10 @@ package game
 
 import (
 	"cmp"
+	"container/heap"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -104,7 +104,53 @@ func (s *Sim) scheduleWaterLocked(at waterVoxel, due uint64) {
 	}
 	if old, exists := s.pendingWater[at]; !exists || due < old {
 		s.pendingWater[at] = due
+		heap.Push(&s.waterDue, waterDueEntry{at: at, due: due})
 	}
+}
+
+// waterDueEntry is one scheduled voxel and the tick it is due on.
+type waterDueEntry struct {
+	at  waterVoxel
+	due uint64
+}
+
+// waterDueQueue orders the schedule by due tick and then in space, and is what replaced
+// rebuilding that order from scratch every tick.
+//
+// **The rebuild was the scaling defect behind the walking stutter, and it hid behind the
+// very thing that caused the stutter.** [Sim.advanceWaterLocked] used to iterate the
+// whole of [Sim.pendingWater] and sort it on every tick. That is O(n log n) per tick, and
+// it was invisible only because the unbounded drain emptied the schedule every tick, so n
+// was near zero — at the price of the 24 ms spike. Bounding the drain without fixing this
+// made it far worse rather than better: measured, a 128-voxel budget let the schedule
+// grow, the per-tick rebuild grew with it, the drain slowed further, and the tick went
+// 51 -> 129 ms and climbing while the client still drew 300 frames a second. A cap on the
+// work is only safe once taking N items does not cost the length of the queue.
+//
+// The order is preserved exactly: due tick first, then [compareWaterVoxels], which is y
+// before x before z. Water settles downward and the lower voxel is decided first; a
+// cheaper order — insertion — would have been a change to what the automaton answers,
+// not only to how fast it answers it.
+type waterDueQueue []waterDueEntry
+
+func (q waterDueQueue) Len() int { return len(q) }
+
+func (q waterDueQueue) Less(i, j int) bool {
+	if q[i].due != q[j].due {
+		return q[i].due < q[j].due
+	}
+	return compareWaterVoxels(q[i].at, q[j].at) < 0
+}
+
+func (q waterDueQueue) Swap(i, j int) { q[i], q[j] = q[j], q[i] }
+
+func (q *waterDueQueue) Push(x any) { *q = append(*q, x.(waterDueEntry)) }
+
+func (q *waterDueQueue) Pop() any {
+	old := *q
+	last := old[len(old)-1]
+	*q = old[:len(old)-1]
+	return last
 }
 
 func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
@@ -113,19 +159,29 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 	}
 	s.drainUnstableWaterLocked(worldTick)
 
-	due := make([]waterVoxel, 0)
-	for at, atTick := range s.pendingWater {
-		if atTick <= worldTick {
-			due = append(due, at)
-		}
-	}
-	slices.SortFunc(due, compareWaterVoxels)
-
-	changes := make([]WaterChange, 0, min(len(due), WaterChangesPerTick))
-	for _, at := range due {
-		if len(changes) == WaterChangesPerTick {
+	changes := make([]WaterChange, 0, WaterChangesPerTick)
+	examined := 0
+	for s.waterDue.Len() > 0 {
+		// Two caps, and the second one is the one that binds. See
+		// [WaterVoxelsPerTick]: a voxel that does not change is deleted below and costs
+		// the same seven reads as one that does, so bounding the changes alone bounds
+		// nothing on the pass that dominates this — a chunk composition, where almost
+		// nothing changes and there are thousands of them.
+		if len(changes) == WaterChangesPerTick || examined == WaterVoxelsPerTick {
 			break
 		}
+		if s.waterDue[0].due > worldTick {
+			break
+		}
+		entry := heap.Pop(&s.waterDue).(waterDueEntry)
+		at := entry.at
+		// A voxel rescheduled earlier than it was pushed leaves its old entry behind.
+		// The map is the authority on when a voxel is due, so an entry that disagrees
+		// with it is stale and costs nothing but this comparison.
+		if scheduled, ok := s.pendingWater[at]; !ok || scheduled != entry.due {
+			continue
+		}
+		examined++
 
 		here, ok := s.waterBlockLocked(at, world.Stone)
 		if !ok {
@@ -208,20 +264,38 @@ func (s *Sim) advanceWaterLocked(worldTick uint64) []WaterChange {
 	return changes
 }
 
+// drainUnstableWaterLocked schedules as much of the pending composition scans as this
+// tick has budget for, and keeps the rest.
+//
+// **It used to drain the whole channel, and that was half the stutter.** A scan of a
+// water-heavy chunk carries thousands of indices and each schedules seven neighbours, so
+// one tick could do fifty thousand map operations before a single voxel was examined.
+// See [WaterScansPerTick] for the measurement and for why the bound is a count.
+//
+// The tail of a part-taken batch is kept in [Sim.waterScanCarry] rather than pushed back
+// on the channel: a channel put under the simulation lock is a place to deadlock, and a
+// scan half-scheduled twice would schedule its first half twice.
 func (s *Sim) drainUnstableWaterLocked(worldTick uint64) {
-	for {
-		select {
-		case batch := <-s.unstableWater:
-			for _, index := range batch.indices {
-				if index < 0 || index >= world.ChunkVolume {
-					continue
-				}
-				x, y, z := waterWorldPosition(batch.coord, index)
-				s.scheduleWaterAroundLocked(waterVoxel{x: x, y: y, z: z}, worldTick)
+	budget := WaterScansPerTick
+	for budget > 0 {
+		if len(s.waterScanCarry.indices) == 0 {
+			select {
+			case batch := <-s.unstableWater:
+				s.waterScanCarry = batch
+			default:
+				return
 			}
-		default:
-			return
 		}
+		take := min(budget, len(s.waterScanCarry.indices))
+		for _, index := range s.waterScanCarry.indices[:take] {
+			if index < 0 || index >= world.ChunkVolume {
+				continue
+			}
+			x, y, z := waterWorldPosition(s.waterScanCarry.coord, index)
+			s.scheduleWaterAroundLocked(waterVoxel{x: x, y: y, z: z}, worldTick)
+		}
+		s.waterScanCarry.indices = s.waterScanCarry.indices[take:]
+		budget -= take
 	}
 }
 

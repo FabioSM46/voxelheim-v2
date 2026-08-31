@@ -8,6 +8,39 @@ const (
 
 	// WaterChangesPerTick is 32 decodes/frame * 60 fps / 20 ticks/s.
 	WaterChangesPerTick = 32 * 60 / 20
+
+	// WaterScansPerTick is how many voxels of a composition scan may be scheduled in
+	// one tick, and WaterVoxelsPerTick is how many may be *examined*.
+	//
+	// **[WaterChangesPerTick] bounded the writes and nothing bounded the reads, and the
+	// reads are the cost.** A chunk composed inside a lake hands `world.UnstableWater`
+	// six faces of water — measured over one walk, a scan carried a median of 1856
+	// voxels, a 90th percentile of 4076 and a worst of 7134 — and every one of them
+	// scheduled its seven neighbours, each then examined with a [world.NextWater] that
+	// reads seven blocks. The changes cap never bound any of it: a voxel that does not
+	// change is deleted and the loop continues, and on a composition scan almost none
+	// of them change. Measured on the authoritative tick at view distance 3:
+	//
+	//	p50 0.09 ms   p90 0.13 ms   max 24.5 ms, one to three ticks in every hundred
+	//
+	// A tick that long is a tick with no snapshot in it, so the character stops while
+	// the client keeps drawing — which is why this was reported as a stutter with no
+	// frame-rate loss, and why three issues looking at the client found nothing.
+	//
+	// **A count and not a wall-clock slice, which is the opposite of what the client
+	// did in #642 and is deliberate.** There the items varied by an order of magnitude
+	// and a count could not bound them, so the budget became a duration. Here every
+	// examined voxel costs the same seven reads, so a count bounds the work exactly —
+	// and it keeps the simulation deterministic. A duration would make how much world
+	// advances in one tick depend on how busy the machine was, which is a property an
+	// authoritative server should never buy for smoothness.
+	//
+	// 512 each, from the measurement above: a worst-case 7134-voxel scan is scheduled
+	// over fourteen ticks and examined over roughly twenty, so it settles in about a
+	// second instead of inside one tick. That second is the latency this bound is paid
+	// with, and it is invisible: nothing in that scan was going to change anyway.
+	WaterScansPerTick  = 512
+	WaterVoxelsPerTick = 512
 )
 
 // Movement constants — the authoritative numbers, and the only copy on this side.
