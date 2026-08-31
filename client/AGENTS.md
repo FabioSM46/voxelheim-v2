@@ -260,6 +260,28 @@ main schedule, and become one entity each. These rules hold that pipeline togeth
   it cost are at its declaration; the measurement is re-runnable with
   `cargo test --release -- --ignored --nocapture measure_`, and `DecodeTimeBudget` is why
   the suite's own burst assertions still count rather than time.
+
+- **And that budget is still the whole of the join frame — #651 went looking for what else
+  was and found nothing here.** #642 fixed the walking hitch and left a finding it did not act
+  on: with the decode spike metered away, the worst join frame was owned by none of the three
+  world systems, and the remainder was "the command flush, `refresh_mesh_stats` and Bevy's own
+  scheduling". That reading was taken in a build with `opt-level = 0` for this crate *and*
+  every dependency. Under the profile #650 shipped it is gone. `measure_what_owns_the_join_frame`
+  stamps a fourth system — `refresh_mesh_stats`, the one candidate that was ours — and prices
+  the residue against an **idle baseline** on the settled world, which is the control that turns
+  "everything else" from a subtraction into a claim. The worst join frame is **1.7–2.4 ms
+  dev and 1.4–2.4 ms release**, a factor of about 1.0–1.1 rather than #642's ten, and in five
+  runs of six per profile it is the frame `ingest_world_updates` spends its 2 ms slice on
+  (79–90% of it). `refresh_mesh_stats` costs **0.002–0.005 ms** there and a median of
+  0.0024–0.0038 ms across a whole drain, over 146 meshed chunks — a fiftieth of a percent of a
+  60 Hz frame, so the derived counter stays derived. Everything outside the four systems is
+  0.09–0.19 ms, and a settled idle frame doing no join work is 0.07–0.16 ms in total: **the
+  join adds nothing to the residue that can be told apart from the app existing.** The two
+  frames in twelve that were *not* the expansion frame are the useful ones — 1.0–2.0 ms of
+  residue while the four stamped systems cost under a tenth of a millisecond and 230 meshing
+  tasks were in flight — which is the executor and the operating system, not a system here.
+  **So #651 changed no production code, deliberately**, and that was the outcome its
+  acceptance criteria named rather than a shortfall.
 - **The queue that metering created has a ceiling, and the ceiling is derived.**
   `MAX_DECODE_BACKLOG` is one whole join — `(2 · 8 + 1)³` = 4 913 updates — at a view
   distance the *client* chooses, never `ServerWelcome.view_distance`, because sizing the
