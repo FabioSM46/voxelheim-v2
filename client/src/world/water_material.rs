@@ -8,7 +8,7 @@
 //! reproduced here. [`FlowingWaterExtension`] is a `MaterialExtension`, so Bevy composes
 //! the standard PBR fragment shader with one of ours and the base half keeps answering
 //! for lighting, fog, tonemapping and alpha exactly as it did — the extension changes
-//! the colour's brightness on its way in, and nothing else.
+//! the lit colour's brightness and foam before post-processing, and nothing else.
 //!
 //! ## Nothing is decided here
 //!
@@ -334,6 +334,35 @@ mod tests {
         assert!(
             SOURCE.contains("foam = 0.0;"),
             "the still branch must set foam to zero explicitly"
+        );
+    }
+
+    /// The ripple belongs to the surface rather than to the light falling on it.
+    ///
+    /// Before #673 the shader changed `base_color` and then passed that colour through
+    /// PBR lighting. At night the light term multiplied the whole pattern back towards
+    /// zero, so the river became flat. Keep both the brightness and the foam after the
+    /// lighting call; moving either one back above it recreates the defect while every
+    /// headless gate still accepts the WGSL.
+    #[test]
+    fn the_ripple_and_foam_are_applied_after_lighting() {
+        let lighting = SOURCE
+            .find("out.color = apply_pbr_lighting(pbr_input);")
+            .expect("the shader must retain standard PBR lighting");
+        let modulation = SOURCE
+            .find("out.color.rgb * brightness")
+            .expect("the lit colour must carry the ripple brightness");
+        let foam = SOURCE
+            .find("vec3<f32>(1.0, 1.0, 1.0),\n        crest,")
+            .expect("the lit colour must carry the foam crest");
+
+        assert!(
+            lighting < modulation && lighting < foam,
+            "ripple and foam must be applied after lighting so they survive at night"
+        );
+        assert!(
+            !SOURCE.contains("pbr_input.material.base_color.rgb * brightness"),
+            "modulating base_color before lighting makes the ripple disappear at night"
         );
     }
 

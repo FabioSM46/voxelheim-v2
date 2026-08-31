@@ -3,7 +3,7 @@
 //
 // Shading only. The surface stays exactly where `mesher.rs` put it — the level the
 // server sent — and nothing here displaces a vertex, so what moves on the screen is
-// light and never geometry.
+// colour and never geometry.
 //
 // Three inputs, all of them per-vertex and all of them derived from block ids the
 // server chose:
@@ -170,19 +170,27 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // Only the crest foams. `max(wave, 0.0)` rather than `abs`, so a trough stays water
     // instead of turning the pattern into a row of white bars at twice the frequency.
     let crest = foam * max(wave, 0.0);
-    let colour = mix(
-        pbr_input.material.base_color.rgb * brightness,
-        vec3<f32>(1.0, 1.0, 1.0),
-        crest,
-    );
-    pbr_input.material.base_color = vec4<f32>(colour, pbr_input.material.base_color.a);
-
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
     } else {
         out.color = pbr_input.material.base_color;
     }
+
+    // Apply the moving pattern after lighting. Before #673 both operations changed
+    // `base_color` above `apply_pbr_lighting`, so night multiplied the ripple and foam
+    // back towards zero and moving water became a flat pane. The ambient floor keeps
+    // the brightness modulation legible in darkness; moving the crest here also lets
+    // foam scatter towards white independently of the directional light. That means a
+    // crest remains visible in shadow, deliberately: water that still reads as moving
+    // at night is the property this pass owns, while the sky remains the only light.
+    let colour = mix(
+        out.color.rgb * brightness,
+        vec3<f32>(1.0, 1.0, 1.0),
+        crest,
+    );
+    out.color = vec4<f32>(colour, out.color.a);
+
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }
