@@ -110,6 +110,14 @@ struct TabButton(Tab);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct TabPanel(Tab);
 
+/// The fixed left-hand column of a settings row.
+#[derive(Component)]
+struct RowLabel;
+
+/// The fixed right-hand column containing a row's buttons and readings.
+#[derive(Component)]
+struct RowControls;
+
 /// What pressing a control on this screen means.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsAction {
@@ -138,11 +146,40 @@ enum Reading {
     Notice,
 }
 
+/// The narrowest supported viewport, in logical pixels.
+const MIN_VIEWPORT_WIDTH: f32 = 800.0;
+
+/// The padding on each side of the panel.
+const PANEL_PADDING: f32 = 24.0;
+
 /// The width of one column of rows, in logical pixels.
-const COLUMN: f32 = 300.0;
+const COLUMN: f32 = 700.0;
+
+/// The fixed width of a row label, in logical pixels.
+const ROW_LABEL_WIDTH: f32 = 160.0;
 
 /// The width of a stepper's `-` or `+` button, in logical pixels.
 const STEP_BUTTON: f32 = 30.0;
+
+/// The fixed width of a knob reading, in logical pixels.
+const READING_WIDTH: f32 = 440.0;
+
+/// The gap between neighbouring controls in one row.
+const CONTROL_GAP: f32 = 6.0;
+
+/// The width reserved for a complete stepper: both buttons, both gaps and its reading.
+const STEPPER_WIDTH: f32 = 2.0 * STEP_BUTTON + 2.0 * CONTROL_GAP + READING_WIDTH;
+
+/// The separation between the label and control columns.
+const ROW_COLUMN_GAP: f32 = COLUMN - ROW_LABEL_WIDTH - STEPPER_WIDTH;
+
+const _: () = {
+    assert!(ROW_COLUMN_GAP > 0.0, "the two row columns must not overlap");
+    assert!(
+        COLUMN + 2.0 * PANEL_PADDING <= MIN_VIEWPORT_WIDTH,
+        "the settings panel must fit its narrowest supported viewport"
+    );
+};
 
 /// The height of every control on this screen, in logical pixels.
 const ROW_HEIGHT: f32 = 28.0;
@@ -169,7 +206,8 @@ const CONTENT_ROWS: usize = 12;
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
 
 /// Font size for a row's label and its reading.
-const ROW_FONT: FontSize = FontSize::Px(15.0);
+const ROW_FONT_SIZE: f32 = 15.0;
+const ROW_FONT: FontSize = FontSize::Px(ROW_FONT_SIZE);
 
 /// What a tab's reset button says.
 ///
@@ -208,7 +246,7 @@ fn spawn_settings_screen(mut commands: Commands) {
                         display: Display::Flex,
                         flex_direction: FlexDirection::Column,
                         row_gap: Val::Px(10.0),
-                        padding: UiRect::all(Val::Px(24.0)),
+                        padding: UiRect::all(Val::Px(PANEL_PADDING)),
                         border_radius: BorderRadius::all(Val::Px(8.0)),
                         ..default()
                     },
@@ -447,26 +485,40 @@ fn spawn_row(
             display: Display::Flex,
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            justify_content: JustifyContent::SpaceBetween,
+            column_gap: Val::Px(ROW_COLUMN_GAP),
             height: Val::Px(ROW_HEIGHT),
             ..default()
         })
         .with_children(|row| {
             row.spawn((
+                RowLabel,
                 Text::new(label.to_owned()),
                 TextFont {
                     font_size: ROW_FONT,
                     ..default()
                 },
                 TextColor(Color::srgb(0.78, 0.80, 0.84)),
+                TextLayout::no_wrap(),
+                Node {
+                    width: Val::Px(ROW_LABEL_WIDTH),
+                    flex_shrink: 0.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
             ));
-            row.spawn(Node {
-                display: Display::Flex,
-                flex_direction: FlexDirection::Row,
-                align_items: AlignItems::Center,
-                column_gap: Val::Px(6.0),
-                ..default()
-            })
+            row.spawn((
+                RowControls,
+                Node {
+                    width: Val::Px(STEPPER_WIDTH),
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Row,
+                    flex_shrink: 0.0,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::FlexEnd,
+                    column_gap: Val::Px(CONTROL_GAP),
+                    ..default()
+                },
+            ))
             .with_children(fill);
         });
 }
@@ -481,9 +533,11 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
             ..default()
         },
         TextColor(Color::WHITE),
+        TextLayout::no_wrap().with_justify(Justify::Center),
         Node {
-            width: Val::Px(72.0),
-            justify_content: JustifyContent::Center,
+            width: Val::Px(READING_WIDTH),
+            flex_shrink: 0.0,
+            overflow: Overflow::clip(),
             ..default()
         },
     ));
@@ -538,6 +592,7 @@ fn spawn_button(
             ..default()
         },
         TextColor(Color::WHITE),
+        TextLayout::no_wrap().with_justify(Justify::Center),
     );
     match face {
         Face::Fixed(_) => button.with_child(text),
@@ -804,7 +859,8 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Knob;
+    use crate::settings::{Corner, Knob};
+    use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
         let mut app = App::new();
@@ -918,6 +974,11 @@ mod tests {
             .find(|(reading, _)| **reading == wanted)
             .map(|(_, text)| text.0.clone())
             .unwrap_or_else(|| panic!("no reading for {wanted:?}"))
+    }
+
+    /// Exact width under Bevy's embedded monospace FiraMono font.
+    fn row_text_width(value: &str) -> f32 {
+        value.chars().count() as f32 * DEFAULT_FONT_ADVANCE_EM * ROW_FONT_SIZE
     }
 
     #[test]
@@ -1188,6 +1249,126 @@ mod tests {
             );
             assert!(rows > 0, "{tab:?} draws nothing at all");
         }
+    }
+
+    /// The horizontal contract: the whole panel fits at the supported narrow viewport,
+    /// and every row gives its label and complete stepper separate fixed columns.
+    #[test]
+    fn the_wider_row_columns_fit_inside_an_800_pixel_viewport() {
+        assert_eq!(ROW_LABEL_WIDTH + ROW_COLUMN_GAP + STEPPER_WIDTH, COLUMN);
+        assert_eq!(
+            STEPPER_WIDTH,
+            2.0 * STEP_BUTTON + 2.0 * CONTROL_GAP + READING_WIDTH,
+            "the control column does not budget both buttons and both gaps"
+        );
+        let mut app = screen_app();
+        assert_eq!(marker_node::<TabContent>(&mut app).width, Val::Px(COLUMN));
+        let world = app.world_mut();
+        let expected_rows: usize = Tab::ALL.into_iter().map(|tab| rows_of(tab).len()).sum();
+
+        let mut labels = world.query::<(&RowLabel, &Text, &Node, &TextLayout)>();
+        assert_eq!(labels.iter(world).count(), expected_rows);
+        for (_, text, node, layout) in labels.iter(world) {
+            assert_eq!(node.width, Val::Px(ROW_LABEL_WIDTH));
+            assert_eq!(node.flex_shrink, 0.0);
+            assert_eq!(node.overflow, Overflow::clip());
+            assert_eq!(layout.linebreak, LineBreak::NoWrap);
+            assert!(
+                row_text_width(&text.0) <= ROW_LABEL_WIDTH,
+                "built-in row label {:?} outgrew its column",
+                text.0
+            );
+        }
+
+        let mut controls = world.query::<(&RowControls, &Node)>();
+        assert_eq!(controls.iter(world).count(), expected_rows);
+        for (_, node) in controls.iter(world) {
+            assert_eq!(node.width, Val::Px(STEPPER_WIDTH));
+            assert_eq!(node.flex_shrink, 0.0);
+            assert_eq!(node.column_gap, Val::Px(CONTROL_GAP));
+        }
+    }
+
+    /// Every value with a model-owned bound fits in the reading area at both ends of that
+    /// bound. The monitor is deliberately excluded: hardware owns its name, so it follows
+    /// the clipped overflow policy asserted separately below.
+    #[test]
+    fn every_bounded_graphics_reading_fits_complete_on_one_line() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let mut values = Vec::new();
+        for knob in KNOBS
+            .into_iter()
+            .filter(|knob| knob.tab() == Tab::Graphics && *knob != Knob::Monitor)
+        {
+            for steps in [-10_000, 10_000] {
+                let mut settings = Settings::default();
+                settings.adjust_with_monitors(knob, steps, &monitors);
+                values.push(settings.reading_with_monitors(knob, &monitors));
+            }
+        }
+        values.extend(["on", "off"].into_iter().map(str::to_owned));
+        let mut corner = Corner::TopLeft;
+        for _ in 0..4 {
+            values.push(corner.name().to_owned());
+            corner = corner.next();
+        }
+
+        for value in values {
+            assert!(
+                row_text_width(&value) <= READING_WIDTH,
+                "bounded graphics reading {value:?} outgrew its column"
+            );
+        }
+
+        let mut app = screen_app();
+        let world = app.world_mut();
+        let mut readings = world.query::<(&Reading, &Node, &TextLayout)>();
+        for (reading, node, layout) in readings.iter(world) {
+            if *reading == Reading::Notice {
+                continue;
+            }
+            assert_eq!(layout.linebreak, LineBreak::NoWrap, "{reading:?} may wrap");
+            if matches!(reading, Reading::Knob(_)) {
+                assert_eq!(node.width, Val::Px(READING_WIDTH));
+                assert_eq!(node.overflow, Overflow::clip());
+            }
+        }
+    }
+
+    /// A normal full monitor description is visible intact. A hardware name has no bound,
+    /// so an exceptional one keeps its full model value but is deterministically clipped
+    /// by the fixed-width, single-line reading node instead of growing into nearby rows.
+    #[test]
+    fn monitor_readings_are_complete_normally_and_clip_unbounded_names_on_one_line() {
+        let mut app = screen_app();
+        let normal = "primary - Main display (1920x1080 at 0,0)";
+        assert_eq!(reading_of(&mut app, Reading::Knob(Knob::Monitor)), normal);
+        assert!(row_text_width(normal) <= READING_WIDTH);
+
+        let long_name = "External-monitor-name-".repeat(32);
+        *app.world_mut().resource_mut::<MonitorChoices>() =
+            MonitorChoices::named(&[long_name.as_str()]);
+        app.update();
+
+        let world = app.world_mut();
+        let mut readings = world.query::<(&Reading, &Text, &Node, &TextLayout)>();
+        let (_, text, node, layout) = readings
+            .iter(world)
+            .find(|(reading, _, _, _)| **reading == Reading::Knob(Knob::Monitor))
+            .expect("the monitor row has a reading");
+        assert!(
+            text.0.contains(&long_name),
+            "the model value was abbreviated"
+        );
+        assert!(
+            row_text_width(&text.0) > READING_WIDTH,
+            "the overflow fixture unexpectedly fits"
+        );
+        assert_eq!(node.width, Val::Px(READING_WIDTH));
+        assert_eq!(node.flex_shrink, 0.0);
+        assert_eq!(node.overflow, Overflow::clip());
+        assert_eq!(layout.linebreak, LineBreak::NoWrap);
+        assert_eq!(layout.justify, Justify::Center);
     }
 
     /// The consume control has one row on the Controls tab, and the screen rebinds it and
