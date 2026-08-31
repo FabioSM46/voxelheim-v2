@@ -15,6 +15,100 @@ func TestBlockIDsStayAppendOnly(t *testing.T) {
 	}
 }
 
+func TestSlateShapesCarryEveryOrientationInAppendOnlyIDs(t *testing.T) {
+	t.Parallel()
+
+	want := []struct {
+		block  Block
+		id     Block
+		kind   ShapeKind
+		half   ShapeHalf
+		facing ShapeFacing
+	}{
+		{SlateSlabBottom, 44, ShapeSlab, ShapeBottom, ShapeNorth},
+		{SlateSlabTop, 45, ShapeSlab, ShapeTop, ShapeNorth},
+		{SlateStairNorthBottom, 46, ShapeStair, ShapeBottom, ShapeNorth},
+		{SlateStairEastBottom, 47, ShapeStair, ShapeBottom, ShapeEast},
+		{SlateStairSouthBottom, 48, ShapeStair, ShapeBottom, ShapeSouth},
+		{SlateStairWestBottom, 49, ShapeStair, ShapeBottom, ShapeWest},
+		{SlateStairNorthTop, 50, ShapeStair, ShapeTop, ShapeNorth},
+		{SlateStairEastTop, 51, ShapeStair, ShapeTop, ShapeEast},
+		{SlateStairSouthTop, 52, ShapeStair, ShapeTop, ShapeSouth},
+		{SlateStairWestTop, 53, ShapeStair, ShapeTop, ShapeWest},
+	}
+	for _, tc := range want {
+		if tc.block != tc.id {
+			t.Errorf("shape block id = %d, want appended id %d", tc.block, tc.id)
+		}
+		shape := ShapeOf(tc.block)
+		if shape.Kind != tc.kind || shape.Half != tc.half || shape.Facing != tc.facing {
+			t.Errorf("ShapeOf(%d) = %+v, want kind %d half %d facing %d",
+				tc.block, shape, tc.kind, tc.half, tc.facing)
+		}
+		if shape.Material != SlateTile {
+			t.Errorf("ShapeOf(%d).Material = %d, want the one slate material %d",
+				tc.block, shape.Material, SlateTile)
+		}
+		if !Solid(tc.block) {
+			t.Errorf("Solid(%d) = false: a shaped surface must still stop a body", tc.block)
+		}
+	}
+
+	for _, block := range []Block{Air, Stone, SlateTile, Block(^uint16(0))} {
+		shape := ShapeOf(block)
+		if shape.Kind != ShapeCube || shape.Material != block {
+			t.Errorf("ShapeOf(%d) = %+v, want a cube of the original material", block, shape)
+		}
+	}
+}
+
+func TestSlateCollisionBoundsMatchTheEncodedHalfAndFacing(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		block Block
+		want  []BlockBounds
+	}{
+		{SlateSlabBottom, []BlockBounds{{Max: [3]float64{1, 0.5, 1}}}},
+		{SlateSlabTop, []BlockBounds{{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}}}},
+		{SlateStairNorthBottom, []BlockBounds{
+			{Max: [3]float64{1, 0.5, 1}},
+			{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 0.5}},
+		}},
+		{SlateStairEastBottom, []BlockBounds{
+			{Max: [3]float64{1, 0.5, 1}},
+			{Min: [3]float64{0.5, 0.5, 0}, Max: [3]float64{1, 1, 1}},
+		}},
+		{SlateStairSouthTop, []BlockBounds{
+			{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}},
+			{Min: [3]float64{0, 0, 0.5}, Max: [3]float64{1, 0.5, 1}},
+		}},
+		{SlateStairWestTop, []BlockBounds{
+			{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}},
+			{Max: [3]float64{0.5, 0.5, 1}},
+		}},
+	}
+	for _, tc := range cases {
+		got, count := CollisionBounds(tc.block)
+		if count != len(tc.want) {
+			t.Errorf("CollisionBounds(%d) count = %d, want %d", tc.block, count, len(tc.want))
+			continue
+		}
+		for i, want := range tc.want {
+			if got[i] != want {
+				t.Errorf("CollisionBounds(%d)[%d] = %+v, want %+v", tc.block, i, got[i], want)
+			}
+		}
+	}
+
+	if _, count := CollisionBounds(Air); count != 0 {
+		t.Errorf("CollisionBounds(Air) count = %d, want 0", count)
+	}
+	if got, count := CollisionBounds(Block(65535)); count != 1 || got[0] != fullBlockBounds {
+		t.Errorf("unknown collision bounds = %+v count %d, want one full cube", got, count)
+	}
+}
+
 // The palette's two answers about water, which every consumer outside this package
 // reads instead of comparing ids of its own.
 //

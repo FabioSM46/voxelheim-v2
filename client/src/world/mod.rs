@@ -1666,6 +1666,25 @@ mod tests {
     }
 
     #[test]
+    fn architectural_shape_ids_survive_the_wire_runs_unchanged() {
+        let shapes = [
+            palette::SLATE_SLAB_BOTTOM,
+            palette::SLATE_SLAB_TOP,
+            palette::SLATE_STAIR_NORTH_BOTTOM,
+            palette::SLATE_STAIR_EAST_BOTTOM,
+            palette::SLATE_STAIR_SOUTH_BOTTOM,
+            palette::SLATE_STAIR_WEST_BOTTOM,
+            palette::SLATE_STAIR_NORTH_TOP,
+            palette::SLATE_STAIR_EAST_TOP,
+            palette::SLATE_STAIR_SOUTH_TOP,
+            palette::SLATE_STAIR_WEST_TOP,
+        ];
+        let blocks: Vec<_> = shapes.into_iter().cycle().take(VOLUME).collect();
+        let chunk = VoxelChunk::from_runs(&encode_runs(&blocks), SIZE).expect("valid shape ids");
+        assert_eq!(chunk.blocks, blocks);
+    }
+
+    #[test]
     fn the_alternating_worst_case_round_trips() {
         // Two values per voxel: the largest payload the format can produce, and the
         // one that proves the decoder does not assume runs are long.

@@ -113,6 +113,101 @@ pub const PALE_TIMBER: BlockId = 42;
 /// comment has promised since before this id existed.
 pub const DARK_GLASS: BlockId = 43;
 
+// Geometry and orientation live in the existing id; every variant uses [`SLATE_TILE`].
+// That keeps chunk RLE, deltas and the wire unchanged.
+pub const SLATE_SLAB_BOTTOM: BlockId = 44;
+pub const SLATE_SLAB_TOP: BlockId = 45;
+pub const SLATE_STAIR_NORTH_BOTTOM: BlockId = 46;
+pub const SLATE_STAIR_EAST_BOTTOM: BlockId = 47;
+pub const SLATE_STAIR_SOUTH_BOTTOM: BlockId = 48;
+pub const SLATE_STAIR_WEST_BOTTOM: BlockId = 49;
+pub const SLATE_STAIR_NORTH_TOP: BlockId = 50;
+pub const SLATE_STAIR_EAST_TOP: BlockId = 51;
+pub const SLATE_STAIR_SOUTH_TOP: BlockId = 52;
+pub const SLATE_STAIR_WEST_TOP: BlockId = 53;
+
+/// Geometry one block occupies inside its voxel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Cube,
+    Slab,
+    Stair,
+}
+
+/// The vertical half a slab or stair is anchored to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeHalf {
+    Bottom,
+    Top,
+}
+
+/// The high horizontal half of a stair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeFacing {
+    North,
+    East,
+    South,
+    West,
+}
+
+/// Geometry and base material recovered from one block id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockShape {
+    pub kind: ShapeKind,
+    pub half: ShapeHalf,
+    pub facing: ShapeFacing,
+    pub material: BlockId,
+}
+
+/// Decodes geometry and material; unknown ids fail closed as solid cubes.
+pub const fn shape_of(block: BlockId) -> BlockShape {
+    let mut shape = BlockShape {
+        kind: ShapeKind::Cube,
+        half: ShapeHalf::Bottom,
+        facing: ShapeFacing::North,
+        material: block,
+    };
+    match block {
+        SLATE_SLAB_BOTTOM => {
+            shape.kind = ShapeKind::Slab;
+            shape.material = SLATE_TILE;
+        }
+        SLATE_SLAB_TOP => {
+            shape.kind = ShapeKind::Slab;
+            shape.half = ShapeHalf::Top;
+            shape.material = SLATE_TILE;
+        }
+        SLATE_STAIR_NORTH_BOTTOM..=SLATE_STAIR_WEST_BOTTOM => {
+            shape.kind = ShapeKind::Stair;
+            shape.facing = match block - SLATE_STAIR_NORTH_BOTTOM {
+                0 => ShapeFacing::North,
+                1 => ShapeFacing::East,
+                2 => ShapeFacing::South,
+                _ => ShapeFacing::West,
+            };
+            shape.material = SLATE_TILE;
+        }
+        SLATE_STAIR_NORTH_TOP..=SLATE_STAIR_WEST_TOP => {
+            shape.kind = ShapeKind::Stair;
+            shape.half = ShapeHalf::Top;
+            shape.facing = match block - SLATE_STAIR_NORTH_TOP {
+                0 => ShapeFacing::North,
+                1 => ShapeFacing::East,
+                2 => ShapeFacing::South,
+                _ => ShapeFacing::West,
+            };
+            shape.material = SLATE_TILE;
+        }
+        _ => {}
+    }
+    shape
+}
+
+/// Whether `block` is a solid slab/stair rather than a full cube or plant shape.
+pub const fn is_architectural_shape(block: BlockId) -> bool {
+    !matches!(shape_of(block).kind, ShapeKind::Cube)
+}
+
 const COVER_FAMILY: [BlockId; 3] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE];
 
 const WATER_FAMILY: [BlockId; 12] = [
@@ -214,7 +309,7 @@ pub fn water_feeds_toward(block: BlockId, x: i8, z: i8) -> bool {
 /// stopping anything either, and the aiming ray is the one caller that wants it
 /// anyway — which is why that ray asks `ChunkStore::targetable_at` instead of this.
 pub fn is_solid(block: BlockId) -> bool {
-    block != AIR && !is_water(block) && !is_cover(block)
+    is_architectural_shape(block) || (block != AIR && !is_water(block) && !is_cover(block))
 }
 
 /// Whether a block hides what is behind it.
@@ -240,7 +335,7 @@ pub fn is_opaque(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 43] = [
+pub const PALETTE: [BlockId; 53] = [
     STONE,
     DIRT,
     GRASS,
@@ -284,6 +379,16 @@ pub const PALETTE: [BlockId; 43] = [
     DARK_TIMBER,
     PALE_TIMBER,
     DARK_GLASS,
+    SLATE_SLAB_BOTTOM,
+    SLATE_SLAB_TOP,
+    SLATE_STAIR_NORTH_BOTTOM,
+    SLATE_STAIR_EAST_BOTTOM,
+    SLATE_STAIR_SOUTH_BOTTOM,
+    SLATE_STAIR_WEST_BOTTOM,
+    SLATE_STAIR_NORTH_TOP,
+    SLATE_STAIR_EAST_TOP,
+    SLATE_STAIR_SOUTH_TOP,
+    SLATE_STAIR_WEST_TOP,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -419,6 +524,19 @@ const PALE_TIMBER_LINEAR: [f32; 3] = [0.644_480, 0.552_011, 0.423_268];
 /// `#16202E`.
 const DARK_GLASS_LINEAR: [f32; 3] = [0.008_023, 0.014_444, 0.027_321];
 
+// Ten geometry ids, one material. Separate aliases keep the id-to-colour parity
+// check exhaustive without pretending each orientation owns a distinct swatch.
+const SLATE_SLAB_BOTTOM_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_SLAB_TOP_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_NORTH_BOTTOM_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_EAST_BOTTOM_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_SOUTH_BOTTOM_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_WEST_BOTTOM_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_NORTH_TOP_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_EAST_TOP_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_SOUTH_TOP_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+const SLATE_STAIR_WEST_TOP_LINEAR: [f32; 3] = SLATE_TILE_LINEAR;
+
 /// The stem every flower stands on, whatever colour its head is. `#3E6B2E`.
 ///
 /// Darker and yellower than [`GRASS_LINEAR`] so a stem is a shape against the ground
@@ -504,6 +622,16 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         DARK_TIMBER => DARK_TIMBER_LINEAR,
         PALE_TIMBER => PALE_TIMBER_LINEAR,
         DARK_GLASS => DARK_GLASS_LINEAR,
+        SLATE_SLAB_BOTTOM => SLATE_SLAB_BOTTOM_LINEAR,
+        SLATE_SLAB_TOP => SLATE_SLAB_TOP_LINEAR,
+        SLATE_STAIR_NORTH_BOTTOM => SLATE_STAIR_NORTH_BOTTOM_LINEAR,
+        SLATE_STAIR_EAST_BOTTOM => SLATE_STAIR_EAST_BOTTOM_LINEAR,
+        SLATE_STAIR_SOUTH_BOTTOM => SLATE_STAIR_SOUTH_BOTTOM_LINEAR,
+        SLATE_STAIR_WEST_BOTTOM => SLATE_STAIR_WEST_BOTTOM_LINEAR,
+        SLATE_STAIR_NORTH_TOP => SLATE_STAIR_NORTH_TOP_LINEAR,
+        SLATE_STAIR_EAST_TOP => SLATE_STAIR_EAST_TOP_LINEAR,
+        SLATE_STAIR_SOUTH_TOP => SLATE_STAIR_SOUTH_TOP_LINEAR,
+        SLATE_STAIR_WEST_TOP => SLATE_STAIR_WEST_TOP_LINEAR,
         // `AIR` lands here with everything else, and correctly so: asking for the
         // colour of nothing is a meshing bug, and magenta is how it announces itself
         // instead of hiding as a plausible shade.
@@ -647,17 +775,22 @@ mod tests {
     }
 
     #[test]
-    fn every_non_water_palette_colour_is_distinct() {
-        // Two ids that render the same colour would make the landscape unreadable
-        // while every test still passed. Water ids deliberately share one material.
-        let colours: Vec<[f32; 4]> = PALETTE
+    fn every_non_water_material_colour_is_distinct() {
+        // Two materials that render the same colour would make the landscape unreadable
+        // while every test still passed. Water ids and slate's geometry variants
+        // deliberately share one material each.
+        let materials: Vec<(BlockId, [f32; 4])> = PALETTE
             .iter()
             .filter(|block| !is_water(**block))
-            .map(|block| linear_rgba(*block))
+            .map(|block| (shape_of(*block).material, linear_rgba(*block)))
             .collect();
-        for (i, a) in colours.iter().enumerate() {
-            for b in &colours[i + 1..] {
-                assert_ne!(a, b, "two palette entries share a colour");
+        for (i, (a_material, a_colour)) in materials.iter().enumerate() {
+            for (b_material, b_colour) in &materials[i + 1..] {
+                if a_material == b_material {
+                    assert_eq!(a_colour, b_colour, "one material has two colours");
+                } else {
+                    assert_ne!(a_colour, b_colour, "two materials share a colour");
+                }
             }
         }
     }
@@ -665,7 +798,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=FLOWER_BLUE {
+        for block in 1..=SLATE_STAIR_WEST_TOP {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
@@ -687,6 +820,72 @@ mod tests {
                 unknown,
                 linear_rgba(known),
                 "the fallback must not be mistakable for a real block"
+            );
+        }
+    }
+
+    #[test]
+    fn slate_shapes_carry_every_orientation_and_one_material() {
+        let blocks = [
+            SLATE_SLAB_BOTTOM,
+            SLATE_SLAB_TOP,
+            SLATE_STAIR_NORTH_BOTTOM,
+            SLATE_STAIR_EAST_BOTTOM,
+            SLATE_STAIR_SOUTH_BOTTOM,
+            SLATE_STAIR_WEST_BOTTOM,
+            SLATE_STAIR_NORTH_TOP,
+            SLATE_STAIR_EAST_TOP,
+            SLATE_STAIR_SOUTH_TOP,
+            SLATE_STAIR_WEST_TOP,
+        ];
+        let facings = [
+            ShapeFacing::North,
+            ShapeFacing::North,
+            ShapeFacing::North,
+            ShapeFacing::East,
+            ShapeFacing::South,
+            ShapeFacing::West,
+            ShapeFacing::North,
+            ShapeFacing::East,
+            ShapeFacing::South,
+            ShapeFacing::West,
+        ];
+        for (offset, block) in blocks.into_iter().enumerate() {
+            assert_eq!(block, 44 + offset as BlockId);
+            let kind = if offset < 2 {
+                ShapeKind::Slab
+            } else {
+                ShapeKind::Stair
+            };
+            let half = if offset == 1 || offset >= 6 {
+                ShapeHalf::Top
+            } else {
+                ShapeHalf::Bottom
+            };
+            assert_eq!(
+                shape_of(block),
+                BlockShape {
+                    kind,
+                    half,
+                    facing: facings[offset],
+                    material: SLATE_TILE,
+                }
+            );
+            assert!(is_architectural_shape(block));
+            assert!(is_solid(block));
+            assert_eq!(linear_rgba(block), linear_rgba(SLATE_TILE));
+        }
+
+        for block in [AIR, STONE, SLATE_TILE, BlockId::MAX] {
+            assert!(!is_architectural_shape(block));
+            assert_eq!(
+                shape_of(block),
+                BlockShape {
+                    kind: ShapeKind::Cube,
+                    half: ShapeHalf::Bottom,
+                    facing: ShapeFacing::North,
+                    material: block,
+                }
             );
         }
     }

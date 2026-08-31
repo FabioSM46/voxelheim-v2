@@ -1240,10 +1240,10 @@ func TestBreakingAFlowerLeavesNothingBehind(t *testing.T) {
 	}
 }
 
-// The castle's eight materials: a stated hand time each, and exactly one implement.
+// The castle materials and shaped slate variants: a stated hand time each, and exactly one implement.
 //
 // **The invariant this pins is the one [toolFamilies] names — every block a hand can
-// break has exactly one implement for it — and eight blocks added at once is precisely
+// break has exactly one implement for it — and a whole family added at once is precisely
 // when it drifts.** A block put in handMiningTimes and forgotten in toolFamilies is
 // merely unhelped, which is the fail-closed direction and is why nothing else would have
 // caught it; a block put in two families is four times faster with either, which is the
@@ -1264,6 +1264,16 @@ func TestTheCastleMaterialsCarryTheirHandTimesAndOneImplement(t *testing.T) {
 		{world.Basalt, 3 * time.Second, ItemPickaxe},
 		{world.BlackBrickWorn, 2500 * time.Millisecond, ItemPickaxe},
 		{world.SlateTile, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateSlabBottom, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateSlabTop, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairNorthBottom, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairEastBottom, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairSouthBottom, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairWestBottom, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairNorthTop, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairEastTop, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairSouthTop, 1500 * time.Millisecond, ItemPickaxe},
+		{world.SlateStairWestTop, 1500 * time.Millisecond, ItemPickaxe},
 		{world.DarkGlass, 400 * time.Millisecond, ItemPickaxe},
 		{world.DarkTimber, 800 * time.Millisecond, ItemAxe},
 		{world.PaleTimber, 800 * time.Millisecond, ItemAxe},
