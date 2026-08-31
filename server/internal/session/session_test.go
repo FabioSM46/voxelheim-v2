@@ -354,6 +354,26 @@ type fakeConn struct {
 	done      chan struct{}
 }
 
+// delayedCancelConn models a cancellation whose bytes left the peer before the
+// deadline but whose read completes after it. A socket deadline bounds waiting for
+// bytes; once ReadFrame has them, parsing and scheduling can still cross the instant.
+// Serve's post-read clock check is what gives that race to the countdown.
+type delayedCancelConn struct {
+	*fakeConn
+	delay time.Duration
+}
+
+func (f *delayedCancelConn) ReadFrame() ([]byte, error) {
+	frame, err := f.fakeConn.ReadFrame()
+	if err != nil {
+		return nil, err
+	}
+	if vnet.GetRootAsEnvelope(frame, 0).PayloadType() == vnet.PayloadLeaveCancelRequest {
+		time.Sleep(f.delay)
+	}
+	return frame, nil
+}
+
 func newFakeConn() *fakeConn {
 	return &fakeConn{
 		in:   make(chan []byte, 4),
@@ -1150,6 +1170,104 @@ func TestEveryInWorldEndingUsesTheAuthoritativeLeaveLinger(t *testing.T) {
 				t.Errorf("simulation holds %d players after leave, want 0", got)
 			}
 		})
+	}
+}
+
+func TestAcceptedLeaveCancellationKeepsTheSessionAndBodyLive(t *testing.T) {
+	const linger = 120 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	chunks, sim, peers := serveDeps(t)
+	conn := newFakeConn()
+	done := make(chan error, 1)
+	timeouts := longTimeouts()
+	timeouts.Leave = linger
+	go func() {
+		done <- session.Serve(ctx, conn, serveConfig(), timeouts, chunks, sim, peers, ephemeralIdentities(), 3, discard())
+	}()
+
+	conn.in <- hello(1)
+	chooseCharacter(t, conn, "Eivor")
+	_ = nextFrameOfKind(t, conn, vnet.PayloadServerWelcome)
+	_ = nextFrameOfKind(t, conn, vnet.PayloadInventoryState)
+	conn.in <- protocol.EncodeLeaveRequest()
+	_ = nextFrameOfKind(t, conn, vnet.PayloadLeaveStarted)
+
+	conn.in <- protocol.EncodeLeaveCancelRequest()
+	frame := nextFrameOfKind(t, conn, vnet.PayloadLeaveCancelResult)
+	table := payloadTable(t, vnet.GetRootAsEnvelope(frame, 0))
+	result := new(vnet.LeaveCancelResult)
+	result.Init(table.Bytes, table.Pos)
+	if !result.Accepted() || result.RemainingMs() != 0 {
+		t.Fatalf("cancellation result = accepted %t, remaining %dms; want accepted with no countdown", result.Accepted(), result.RemainingMs())
+	}
+
+	time.Sleep(linger + 40*time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("Serve returned %v at the cancelled leave deadline", err)
+	default:
+	}
+	if got := sim.Count(); got != 1 {
+		t.Fatalf("simulation holds %d players after accepted cancellation, want 1", got)
+	}
+
+	cancel()
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v during cleanup", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not stop during cleanup")
+	}
+}
+
+func TestLeaveDeadlineWinsWhileCancellationIsInFlight(t *testing.T) {
+	const linger = 60 * time.Millisecond
+
+	chunks, sim, peers := serveDeps(t)
+	base := newFakeConn()
+	conn := &delayedCancelConn{fakeConn: base, delay: 2 * linger}
+	done := make(chan error, 1)
+	timeouts := longTimeouts()
+	timeouts.Leave = linger
+	go func() {
+		done <- session.Serve(context.Background(), conn, serveConfig(), timeouts, chunks, sim, peers, ephemeralIdentities(), 3, discard())
+	}()
+
+	base.in <- hello(1)
+	chooseCharacter(t, base, "Eivor")
+	_ = nextFrameOfKind(t, base, vnet.PayloadServerWelcome)
+	_ = nextFrameOfKind(t, base, vnet.PayloadInventoryState)
+	base.in <- protocol.EncodeLeaveRequest()
+	_ = nextFrameOfKind(t, base, vnet.PayloadLeaveStarted)
+	base.in <- protocol.EncodeLeaveCancelRequest()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v after the countdown won", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not finish after the leave deadline")
+	}
+	if got := sim.Count(); got != 0 {
+		t.Fatalf("simulation holds %d players after the deadline, want 0", got)
+	}
+	for {
+		select {
+		case frame := <-base.out:
+			if vnet.GetRootAsEnvelope(frame, 0).PayloadType() == vnet.PayloadLeaveCancelResult {
+				t.Fatal("server accepted a cancellation after its leave deadline")
+			}
+		default:
+			return
+		}
 	}
 }
 

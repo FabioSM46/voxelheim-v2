@@ -278,11 +278,15 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // because MobState.kind is *refused* when the receiver cannot name it while a refusal
 // reason is read as Unknown. Ask what the receiver does with the value it does not
 // recognise, not which way it travelled.
-func TestProtocolV26NamesTheFimbulvetr(t *testing.T) {
+//
+// **V27 appends authoritative leave cancellation.** LeaveCancelRequest travels client
+// to server, so a V26 server would close the session on a tag it cannot name. The result
+// travels back and would be safely droppable alone; the request is the bump owed.
+func TestProtocolV27AddsAuthoritativeLeaveCancellation(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 26 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 26", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 27 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 27", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -340,6 +344,9 @@ func TestProtocolV26NamesTheFimbulvetr(t *testing.T) {
 		// is what moved the version, and it is not in this union at all.
 		vnet.PayloadStormWarning,
 		vnet.PayloadWardsNearby,
+		// V27's request asks; its result is the only answer that resumes play.
+		vnet.PayloadLeaveCancelRequest,
+		vnet.PayloadLeaveCancelResult,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -1108,6 +1115,40 @@ func TestTheLeavingExchangeCarriesOnlyTheServersDecision(t *testing.T) {
 	started.Init(table.Bytes, table.Pos)
 	if got := started.RemainingMs(); got != 10_000 {
 		t.Errorf("RemainingMs = %d, want 10000", got)
+	}
+
+	cancel, err := Decode(EncodeLeaveCancelRequest())
+	if err != nil {
+		t.Fatalf("Decode LeaveCancelRequest: %v", err)
+	}
+	if cancel.Kind != vnet.PayloadLeaveCancelRequest || cancel.LeaveCancelRequest == nil {
+		t.Fatalf("decoded cancellation = %+v, want an empty LeaveCancelRequest", cancel)
+	}
+
+	for _, test := range []struct {
+		name      string
+		accepted  bool
+		remaining time.Duration
+	}{
+		{name: "accepted", accepted: true},
+		{name: "refused", remaining: 4 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			frame := EncodeLeaveCancelResult(test.accepted, test.remaining)
+			env := vnet.GetRootAsEnvelope(frame, 0)
+			if env.PayloadType() != vnet.PayloadLeaveCancelResult {
+				t.Fatalf("cancellation result is %s, want %s", env.PayloadType(), vnet.PayloadLeaveCancelResult)
+			}
+			table := payloadTable(t, env)
+			result := new(vnet.LeaveCancelResult)
+			result.Init(table.Bytes, table.Pos)
+			if got := result.Accepted(); got != test.accepted {
+				t.Errorf("Accepted = %t, want %t", got, test.accepted)
+			}
+			if got := result.RemainingMs(); got != uint32(test.remaining/time.Millisecond) {
+				t.Errorf("RemainingMs = %d, want %d", got, test.remaining/time.Millisecond)
+			}
+		})
 	}
 }
 

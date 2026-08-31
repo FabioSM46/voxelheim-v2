@@ -572,10 +572,11 @@ type Player struct {
 	haveTick  bool
 	lastTick  uint32
 
-	// leaving is the irrevocable server-owned linger state. The body remains a live
+	// leaving is the server-owned linger state. The body remains a live
 	// simulation entity — gravity, damage, snapshots and interaction all continue —
 	// but no client intent may change it. It is guarded by sim.mu with the intents it
-	// disables and is cleared only by removing this Player from the simulation.
+	// disables. A live session may clear it through CancelLeaving; a disconnected one
+	// has no route to make that request and stays inert until removal.
 	leaving bool
 
 	// The life the server owns. See vitals.go and progression.go, which are where every
@@ -993,6 +994,28 @@ func (p *Player) BeginLeaving() {
 	p.mineCompleting = false
 	p.pendingSwing = nil
 	p.blocking = false
+}
+
+// CancelLeaving makes future client intent live again when this body is still in its
+// server-owned linger. It restores no cleared action: only input received after the
+// authoritative acknowledgement may act, so pressing cancel cannot replay movement,
+// mining or combat intent held before the leave began.
+//
+// The bool is the decision the session puts on the wire. False leaves every field
+// untouched, which is what a refused cancellation promises.
+func (p *Player) CancelLeaving() bool {
+	if p == nil {
+		return false
+	}
+
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	if !p.leaving {
+		return false
+	}
+
+	p.leaving = false
+	return true
 }
 
 // cannotActLocked distinguishes a corpse from a lingering live body while giving every

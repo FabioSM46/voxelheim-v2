@@ -199,6 +199,7 @@ type Message struct {
 	Consume            *ConsumeRequest
 	DropItem           *DropItemRequest
 	LeaveRequest       *LeaveRequest
+	LeaveCancelRequest *LeaveCancelRequest
 	SelectCharacter    *SelectCharacterRequest
 	CreateCharacter    *CreateCharacterRequest
 	Chat               *ChatRequest
@@ -216,6 +217,10 @@ type Message struct {
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
 // is the authority boundary: the server owns how long the character remains.
 type LeaveRequest struct{}
+
+// LeaveCancelRequest is an intentionally empty request to resume the same live
+// session. The server's clock and player state decide whether it succeeds.
+type LeaveCancelRequest struct{}
 
 // ChatRequest is display text copied verbatim from one client request. Whether the
 // server accepts, rate-limits or delivers it is a simulation decision.
@@ -1621,6 +1626,15 @@ func Decode(frame []byte) (msg Message, err error) {
 		var request vnet.LeaveRequest
 		request.Init(table.Bytes, table.Pos)
 		msg.LeaveRequest = &LeaveRequest{}
+
+	case vnet.PayloadLeaveCancelRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.LeaveCancelRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.LeaveCancelRequest = &LeaveCancelRequest{}
 
 	case vnet.PayloadSelectCharacterRequest:
 		table, tErr := unionPayload(env, msg.Kind)
@@ -3207,6 +3221,17 @@ func EncodeLeaveRequest() []byte {
 	return finishEnvelope(b, vnet.PayloadLeaveRequest, request)
 }
 
+// EncodeLeaveCancelRequest builds the empty request to resume a live session.
+// Production servers never send one; tests use this encoder to speak as a client.
+func EncodeLeaveCancelRequest() []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.LeaveCancelRequestStart(b)
+	request := vnet.LeaveCancelRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadLeaveCancelRequest, request)
+}
+
 // EncodeLeaveStarted acknowledges the server-owned linger duration.
 func EncodeLeaveStarted(remaining time.Duration) []byte {
 	b := flatbuffers.NewBuilder(128)
@@ -3216,6 +3241,19 @@ func EncodeLeaveStarted(remaining time.Duration) []byte {
 	started := vnet.LeaveStartedEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadLeaveStarted, started)
+}
+
+// EncodeLeaveCancelResult reports the server's decision. An accepted result has no
+// countdown; a refusal carries the authoritative time that is still running.
+func EncodeLeaveCancelResult(accepted bool, remaining time.Duration) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.LeaveCancelResultStart(b)
+	vnet.LeaveCancelResultAddAccepted(b, accepted)
+	vnet.LeaveCancelResultAddRemainingMs(b, uint32(remaining/time.Millisecond))
+	result := vnet.LeaveCancelResultEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadLeaveCancelResult, result)
 }
 
 // EncodeChunkResendRequest builds one ask for a chunk the client has lost. The server

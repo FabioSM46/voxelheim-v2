@@ -670,11 +670,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		return nil
 	}
 
-	// armRead bounds the read that follows it. The zero Time clears the deadline,
-	// which is what a zero duration asks for.
-	armRead := func(window time.Duration) error {
+	// armRead bounds the read that follows it. A normal phase supplies a relative
+	// window; a leave supplies its absolute deadline so later frames cannot extend it.
+	// The zero Time clears the deadline, which is what a zero duration asks for.
+	armRead := func(window time.Duration, deadline time.Time) error {
 		var at time.Time
-		if window > 0 {
+		if !deadline.IsZero() {
+			at = deadline
+		} else if window > 0 {
 			at = time.Now().Add(window)
 		}
 		if sErr := conn.SetReadDeadline(at); sErr != nil {
@@ -696,7 +699,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		case phaseInWorld:
 			window = timeouts.Idle
 		}
-		if aErr := armRead(window); aErr != nil {
+		var leaveDeadline time.Time
+		if !leavingAt.IsZero() {
+			leaveDeadline = leavingAt.Add(timeouts.Leave)
+		}
+		if aErr := armRead(window, leaveDeadline); aErr != nil {
 			// Setting a deadline fails on a connection that has already been closed,
 			// which is a disconnect noticed one call early rather than a fault.
 			if transport.IsDisconnect(aErr) {
@@ -713,9 +720,13 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			if transport.IsTimeout(rErr) {
 				switch current {
 				case phaseInWorld:
-					log.Info("session idle",
-						"silent_for", time.Since(lastFrame).Round(time.Millisecond).String(),
-						"idle_timeout", timeouts.Idle.String())
+					if !leavingAt.IsZero() {
+						log.Info("leave countdown elapsed")
+					} else {
+						log.Info("session idle",
+							"silent_for", time.Since(lastFrame).Round(time.Millisecond).String(),
+							"idle_timeout", timeouts.Idle.String())
+					}
 				case phaseCharacter:
 					// Nothing is written back here either, and for the same reason: the
 					// client was answered with a character list and then said nothing, so
@@ -737,7 +748,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			}
 			return fmt.Errorf("session: read: %w", rErr)
 		}
-		lastFrame = time.Now()
+		now := time.Now()
+		lastFrame = now
+		// A frame that left the socket before the deadline but reached the decision after
+		// it still loses. Checking before decode makes the server's clock, not scheduling
+		// luck in the handler, the authority on the race.
+		if !leaveDeadline.IsZero() && !now.Before(leaveDeadline) {
+			log.Info("leave countdown elapsed while a frame was in flight")
+			return nil
+		}
 
 		msg, dErr := protocol.Decode(frame)
 		if dErr != nil {
@@ -745,6 +764,45 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// a stream whose framing we can no longer trust.
 			log.Warn("closing connection on undecodable frame", "error", dErr, "bytes", len(frame))
 			return fmt.Errorf("session: decode: %w", dErr)
+		}
+
+		if !leavingAt.IsZero() {
+			// Every gameplay message after LeaveStarted remains inert. The only message
+			// with lifecycle meaning is the explicit cancel request, and even it asks:
+			// Player.CancelLeaving plus the result frame are the authoritative answer.
+			if msg.Kind != vnet.PayloadLeaveCancelRequest {
+				if inertWhileLeaving(msg.Kind) {
+					continue
+				}
+				return fmt.Errorf("session: %w: client sent %s during leave", protocol.ErrMalformed, msg.Kind)
+			}
+			if msg.LeaveCancelRequest == nil {
+				return fmt.Errorf("session: %w: LeaveCancelRequest has no payload", protocol.ErrMalformed)
+			}
+
+			remaining := time.Until(leaveDeadline)
+			if remaining <= 0 {
+				log.Info("leave countdown won the cancellation race")
+				return nil
+			}
+			if !player.CancelLeaving() {
+				// Defensive consistency path: if the simulation cannot resume the body, the
+				// session keeps the deadline and tells the peer it is still leaving.
+				if remaining < time.Millisecond {
+					return nil
+				}
+				if sErr := enqueue(protocol.EncodeLeaveCancelResult(false, remaining)); sErr != nil {
+					return fmt.Errorf("session: announce refused leave cancellation: %w", sErr)
+				}
+				continue
+			}
+
+			leavingAt = time.Time{}
+			if sErr := enqueue(protocol.EncodeLeaveCancelResult(true, 0)); sErr != nil {
+				return fmt.Errorf("session: announce leave cancellation: %w", sErr)
+			}
+			log.Info("character resumed play")
+			continue
 		}
 
 		if current == phaseHello {
@@ -954,7 +1012,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 					return fmt.Errorf("session: announce the leave: %w", sErr)
 				}
 				log.Info("character is leaving", "linger", timeouts.Leave.String())
-				return nil
+				continue
 			}
 			return hErr
 		}
@@ -963,6 +1021,42 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			log.Info("session stopping: server is shutting down")
 			return nil
 		}
+	}
+}
+
+// inertWhileLeaving names every gameplay intent an admitted session may normally send.
+// They are decoded so malformed bytes still fail, then discarded without reaching any
+// handler while the body is inert. Handshake and server-only messages stay protocol
+// violations: leaving changes agency, not the direction or phase rules of the wire.
+func inertWhileLeaving(kind vnet.Payload) bool {
+	switch kind {
+	case vnet.PayloadPlayerInput,
+		vnet.PayloadBlockEditRequest,
+		vnet.PayloadChunkResendRequest,
+		vnet.PayloadMineRequest,
+		vnet.PayloadInventoryMoveRequest,
+		vnet.PayloadAttackRequest,
+		vnet.PayloadBlockRequest,
+		vnet.PayloadPlaceStructureRequest,
+		vnet.PayloadRemoveStructureRequest,
+		vnet.PayloadCraftRequest,
+		vnet.PayloadRepairRequest,
+		vnet.PayloadConsumeRequest,
+		vnet.PayloadDropItemRequest,
+		vnet.PayloadChatRequest,
+		vnet.PayloadPartyRequest,
+		vnet.PayloadLootOpenRequest,
+		vnet.PayloadLootTakeRequest,
+		vnet.PayloadLootTakeAllRequest,
+		vnet.PayloadMapTileRequest,
+		vnet.PayloadMarkerPlaceRequest,
+		vnet.PayloadMarkerRemoveRequest,
+		vnet.PayloadNpcInteractRequest,
+		vnet.PayloadTradeRequest,
+		vnet.PayloadLeaveRequest:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1858,6 +1952,12 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			return fmt.Errorf("session: %w: LeaveRequest has no admitted player or payload", protocol.ErrMalformed)
 		}
 		return errLeaveRequested
+
+	case vnet.PayloadLeaveCancelRequest:
+		if player == nil || msg.LeaveCancelRequest == nil {
+			return fmt.Errorf("session: %w: LeaveCancelRequest has no admitted player or payload", protocol.ErrMalformed)
+		}
+		return fmt.Errorf("session: %w: LeaveCancelRequest has no leave countdown", protocol.ErrMalformed)
 
 	case vnet.PayloadClientHello:
 		return fmt.Errorf("session: %w: second %s on an admitted session", protocol.ErrMalformed, msg.Kind)

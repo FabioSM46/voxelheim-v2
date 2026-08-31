@@ -397,14 +397,16 @@ table DropItemRequest {
 /// A player asking to leave the world. Client -> server, and intent only.
 ///
 /// Empty deliberately. The server owns the ten-second linger, so the client cannot
-/// name a duration, an end time, or a cancellation. Once accepted, every later input
-/// from this session is inert and the character remains in the simulation until the
-/// server's countdown expires. Closing the socket instead reaches the same server-side
-/// transition without this message, which is the feature's security boundary.
+/// name a duration, an end time, or an outcome. Once accepted, every later gameplay
+/// input from this session is inert and the character remains in the simulation until
+/// the server's countdown expires or it accepts a `LeaveCancelRequest`. Closing the
+/// socket still reaches the non-cancellable server-side transition without this message:
+/// keeping the body in the world after the socket is gone is the feature's security
+/// boundary, not making a live session's request irreversible.
 table LeaveRequest {
 }
 
-/// The server acknowledging that this session's irrevocable leave has begun.
+/// The server acknowledging that this session's leave countdown has begun.
 /// Server -> client.
 ///
 /// `remaining_ms` is the server-owned window at the moment this frame is produced. The
@@ -414,6 +416,31 @@ table LeaveRequest {
 /// Decoder invariant: `remaining_ms` is non-zero. Zero would announce a countdown that
 /// has already ended while the session still exists.
 table LeaveStarted {
+  remaining_ms: uint;
+}
+
+/// A live client asking to resume the same character before its leave countdown ends.
+/// Client -> server, and intent only.
+///
+/// Empty deliberately: it names no duration, deadline or outcome. The server compares
+/// arrival with its own deadline and decides whether the body becomes controllable again.
+/// Closing the socket cannot produce this message, so the disconnect path remains a
+/// non-cancellable linger and the security boundary above is unchanged.
+table LeaveCancelRequest {
+}
+
+/// The authoritative answer to a `LeaveCancelRequest`. Server -> client.
+///
+/// `accepted` alone decides whether play resumed. A client keeps input inert and keeps
+/// drawing its countdown when this is false; pressing Esc is never enough. On refusal,
+/// `remaining_ms` refreshes that display from the server's clock. On acceptance it is
+/// zero because there is no countdown left to describe.
+///
+/// Decoder invariants:
+///   - `accepted == true` requires `remaining_ms == 0`
+///   - `accepted == false` requires `remaining_ms != 0`
+table LeaveCancelResult {
+  accepted: bool;
   remaining_ms: uint;
 }
 
