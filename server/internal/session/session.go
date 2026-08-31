@@ -353,6 +353,19 @@ func placementSpawn(cfg Config, self Resolved) [3]float32 {
 // noticed, which is how a warning stops being read.
 func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeouts, chunks *world.Cache, sim *game.Sim, peers *Registry, identities *Identities, entityID uint64, log *slog.Logger) (err error) {
 	out := make(chan []byte, outboundQueue)
+	// The fast lane, and the whole of #668. A snapshot is small and is worthless a tick
+	// later; a chunk payload is large and is worth exactly as much whenever it lands.
+	// Sharing one FIFO made the first wait for the second: measured with a player at the
+	// controls, a snapshot was enqueued behind a median of 11 chunk frames and a worst of
+	// 31 — one less than the whole queue — and the client saw its newest position go 321
+	// ms stale against a 50 ms cadence. `player/interpolate.rs` does not extrapolate, by
+	// design, so the character simply stops while the screen keeps up at 240 fps. That is
+	// the reported stutter, and it is an ordering defect rather than a capacity one: only
+	// two snapshots were dropped across the session that produced those numbers.
+	//
+	// **A bigger queue would have made it worse**, which is why this is a second lane and
+	// not a tuned number: more room ahead of the snapshot is more frames it waits behind.
+	priority := make(chan []byte, outboundQueue)
 	// Snapshots cross a one-entry, newest-wins handoff instead of entering out on the
 	// tick goroutine. The authoritative column travels beside each frame, so the session
 	// can wait for streaming to reach that centre and put WardsNearby immediately before
@@ -390,16 +403,54 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for frame := range out {
+		write := func(frame []byte) {
 			if writeFailure != nil {
 				// Keep draining: the reader must never block on a dead writer.
-				continue
+				return
 			}
 			if wErr := conn.WriteFrame(frame); wErr != nil {
 				writeFailure = wErr
 				// Closing here is what unblocks this session's reader, which then
-				// closes out and lets this goroutine finish.
+				// closes both lanes and lets this goroutine finish.
 				_ = conn.Close()
+			}
+		}
+
+		// Local copies, because these are set to nil as each lane closes and the
+		// closures below still hold the originals. Sharing the variables would be a
+		// data race on a channel every producer sends to.
+		fast, bulk := priority, out
+		for fast != nil || bulk != nil {
+			// The fast lane first, and unconditionally: this is the ordering the whole
+			// issue is about. A non-blocking check ahead of the blocking select is what
+			// makes it a priority rather than a coin toss — Go's select chooses
+			// uniformly among ready cases, so without this a snapshot behind a full
+			// queue of chunks would still wait for about half of them.
+			if fast != nil {
+				select {
+				case frame, ok := <-fast:
+					if !ok {
+						fast = nil
+						continue
+					}
+					write(frame)
+					continue
+				default:
+				}
+			}
+			select {
+			case frame, ok := <-fast:
+				if !ok {
+					fast = nil
+					continue
+				}
+				write(frame)
+			case frame, ok := <-bulk:
+				if !ok {
+					bulk = nil
+					continue
+				}
+				write(frame)
 			}
 		}
 	}()
@@ -447,7 +498,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		peers.Unsubscribe(entityID)
 		stopStreaming()
 		streaming.Wait()
+		// Both lanes, and after the same wait: the rule at [Registry.Unsubscribe] is that a
+		// lane may only be closed once nothing can still send to it, and adding a second
+		// lane added a second channel that rule has to cover rather than a second rule.
 		close(out)
+		close(priority)
 		wg.Wait() // also publishes writeFailure to this goroutine
 
 		// The read loop's question, asked on the other side of the session. A peer that
@@ -557,9 +612,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// non-blocking snapshot contract: a full outbound queue drops one stale tick,
 	// while the WardsNearby frame before it uses enqueue because a replacement list
 	// is not superseded until another authoritative trigger occurs.
+	// Onto the fast lane since #668, and it is the only thing on it. What may overtake a
+	// chunk payload is exactly what a later frame makes worthless, and a player's
+	// position is the whole of that set here: a BlockUpdate, a WardsNearby and a chunk
+	// are each worth the same whenever they land, and reordering them against each other
+	// would change what the client is told rather than when.
 	offerSnapshot := func(frame []byte) bool {
 		select {
-		case out <- frame:
+		case priority <- frame:
 			return true
 		default:
 			return false
@@ -833,7 +893,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			streaming.Add(1)
 			go func() {
 				defer streaming.Done()
-				followSnapshotsAndWards(sctx, admitted.PlayerID(), sim, int32(cfg.ViewDistance), wardCenters, snapshots, enqueue, offerSnapshot, log)
+				followSnapshots(sctx, snapshots, offerSnapshot, log)
+			}()
+
+			// The wards, from a goroutine of their own since #669: nothing that blocks on
+			// the bulk lane may share a loop with the player's position. See [followWards].
+			streaming.Add(1)
+			go func() {
+				defer streaming.Done()
+				followWards(sctx, admitted.PlayerID(), sim, int32(cfg.ViewDistance), wardCenters, enqueue, log)
 			}()
 
 			// Follow the player from its own goroutine. Two reasons, and the second is

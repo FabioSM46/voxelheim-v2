@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,35 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-func TestWardWorkerOrdersEveryReplacementAheadOfSnapshots(t *testing.T) {
+// startWorkers runs the two loops #669 split apart, as Serve does.
+func startWorkers(
+	ctx context.Context,
+	t *testing.T,
+	sim *game.Sim,
+	centers chan world.Column,
+	snapshots chan snapshotAt,
+	send func([]byte) error,
+	offer func([]byte) bool,
+) {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go followSnapshots(ctx, snapshots, offer, log)
+	go followWards(ctx, identity.PlayerID{1}, sim, 1, centers, send, log)
+}
+
+// **This test asserted the defect, and it is the third in this repository to do so.**
+//
+// It was `TestWardWorkerOrdersEveryReplacementAheadOfSnapshots`, and it required a
+// WardsNearby to precede every snapshot. Holding a position until the ward list for its
+// column could go out first is what stopped the character dead for 196–245 ms on every
+// chunk boundary crossed — measured with a player at the controls, against a frame rate
+// that never moved. The ordering was worth exactly one translucent wall drawn a tick
+// late, and it was being paid for with the thing the player actually feels.
+//
+// So the requirement is inverted: a ward replacement must not delay a position. What is
+// still required is that the replacement happens at all, on a centre change and on a
+// revision change, which is the other half of what the old test covered.
+func TestAWardReplacementDoesNotDelayTheSnapshot(t *testing.T) {
 	t.Parallel()
 
 	const seed = int64(773)
@@ -30,35 +59,61 @@ func TestWardWorkerOrdersEveryReplacementAheadOfSnapshots(t *testing.T) {
 	playerID := identity.PlayerID{1}
 	centers := make(chan world.Column)
 	snapshots := make(chan snapshotAt, 1)
-	sent := make(chan []byte, 8)
+	wards := make(chan []byte, 8)
+	positions := make(chan []byte, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go followSnapshotsAndWards(ctx, playerID, sim, 1, centers, snapshots,
-		func(frame []byte) error { sent <- frame; return nil },
-		func(frame []byte) bool { sent <- frame; return true }, log)
+	startWorkers(ctx, t, sim, centers, snapshots,
+		func(frame []byte) error { wards <- frame; return nil },
+		func(frame []byte) bool { positions <- frame; return true })
+	_ = playerID
+	_ = log
 
-	// A tick may win the race with initial streaming. Its snapshot waits until MoveTo
-	// publishes the centre, then the empty full replacement is the first frame out.
-	snapshots <- snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{}), center: world.Column{CX: 0, CZ: 0}}
+	// A position with no centre published at all — the case the gate used to hold
+	// indefinitely — goes straight out.
+	snapshots <- snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{}), center: world.Column{CX: 9, CZ: 9}}
+	select {
+	case <-positions:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a snapshot was not released without a matching stream centre")
+	}
+
+	// And the ward replacement still happens, on the centre change.
 	centers <- world.Column{CX: 0, CZ: 0}
-	wantPayloads(t, sent, vnet.PayloadWardsNearby, vnet.PayloadEntitySnapshot)
+	select {
+	case frame := <-wards:
+		if got := vnet.GetRootAsEnvelope(frame, 0).PayloadType(); got != vnet.PayloadWardsNearby {
+			t.Fatalf("the centre change sent %s, want a ward replacement", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a centre change sent no ward replacement")
+	}
 
-	// A runestone rebuild while the player stands still is noticed on the next snapshot.
+	// A runestone raised while the player stands still is still noticed, now by the
+	// worker's own poll rather than by riding on a snapshot.
 	if err := sim.RestoreStructures([]game.Structure{{
-		Kind: vnet.StructureKindRunestone, Anchor: [3]int32{0, 63, 0}, Facing: vnet.FacingNorth, Owner: playerID,
+		Kind: vnet.StructureKindRunestone, Anchor: [3]int32{0, 63, 0}, Facing: vnet.FacingNorth, Owner: identity.PlayerID{1},
 	}}); err != nil {
 		t.Fatalf("RestoreStructures: %v", err)
 	}
-	snapshots <- snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{Tick: 2}), center: world.Column{CX: 0, CZ: 0}}
-	wantPayloads(t, sent, vnet.PayloadWardsNearby, vnet.PayloadEntitySnapshot)
-
-	// A border crossing is itself a trigger; it does not wait for another tick.
-	centers <- world.Column{CX: 4, CZ: -3}
-	wantPayloads(t, sent, vnet.PayloadWardsNearby)
+	select {
+	case frame := <-wards:
+		if got := vnet.GetRootAsEnvelope(frame, 0).PayloadType(); got != vnet.PayloadWardsNearby {
+			t.Fatalf("the revision change sent %s, want a ward replacement", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a ward revision change was never noticed")
+	}
 }
 
-func TestWardWorkerHoldsACrossingSnapshotUntilItsStreamCenterArrives(t *testing.T) {
+// The crossing case, which is the reported stutter reduced to a test.
+//
+// This was `TestWardWorkerHoldsACrossingSnapshotUntilItsStreamCenterArrives` and it
+// required the hold. The simulation crosses a boundary before the streamer does, exactly
+// as Step orders it; the position for the new column must go out on that tick, not on
+// whichever later tick the chunks finish leaving.
+func TestACrossingSnapshotIsNotHeldForItsStreamCentre(t *testing.T) {
 	t.Parallel()
 
 	const seed = int64(773)
@@ -71,32 +126,31 @@ func TestWardWorkerHoldsACrossingSnapshotUntilItsStreamCenterArrives(t *testing.
 	}
 
 	centers := make(chan world.Column)
-	// Unbuffered here so the send below acknowledges that the worker has consumed the
-	// crossing snapshot into its local pending slot before the matching centre exists.
 	snapshots := make(chan snapshotAt)
-	sent := make(chan []byte, 8)
+	wards := make(chan []byte, 8)
+	positions := make(chan []byte, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go followSnapshotsAndWards(ctx, identity.PlayerID{1}, sim, 1, centers, snapshots,
-		func(frame []byte) error { sent <- frame; return nil },
-		func(frame []byte) bool { sent <- frame; return true }, log)
+	startWorkers(ctx, t, sim, centers, snapshots,
+		func(frame []byte) error { wards <- frame; return nil },
+		func(frame []byte) bool { positions <- frame; return true })
 
 	centers <- world.Column{CX: 0, CZ: 0}
-	wantPayloads(t, sent, vnet.PayloadWardsNearby)
+	select {
+	case <-wards:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the initial ward replacement never arrived")
+	}
 
-	// The simulation has crossed first, as Step orders it, but MoveTo has not yet
-	// completed. The new snapshot cannot be released under the old centre's ward list.
+	// The streamer has not reached this column and may not for hundreds of milliseconds.
 	next := world.Column{CX: 1, CZ: 0}
 	snapshots <- snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{Tick: 2}), center: next}
 	select {
-	case frame := <-sent:
-		t.Fatalf("crossing snapshot escaped before its stream centre as %s", vnet.GetRootAsEnvelope(frame, 0).PayloadType())
-	default:
+	case <-positions:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the crossing snapshot was held for its stream centre; that is the stutter")
 	}
-
-	centers <- next
-	wantPayloads(t, sent, vnet.PayloadWardsNearby, vnet.PayloadEntitySnapshot)
 }
 
 func TestSnapshotHandoffKeepsOnlyTheNewestTick(t *testing.T) {
@@ -123,7 +177,14 @@ func TestSnapshotHandoffKeepsOnlyTheNewestTick(t *testing.T) {
 	}
 }
 
-func TestWardWorkerDropsPendingSnapshotForNewestWhileWardSendIsBackpressured(t *testing.T) {
+// A ward send stuck on the bulk lane must not stop positions.
+//
+// This was `TestWardWorkerDropsPendingSnapshotForNewestWhileWardSendIsBackpressured`,
+// which described what the shared loop did when [sendWards] blocked: the pending position
+// was replaced by newer ones and none of them went anywhere. Since the two run apart, a
+// blocked ward send is invisible to the position, and that is the property worth pinning —
+// it is the one that makes "nothing can delay a position" structural rather than careful.
+func TestABlockedWardSendDoesNotStopPositions(t *testing.T) {
 	t.Parallel()
 
 	const seed = int64(773)
@@ -137,78 +198,37 @@ func TestWardWorkerDropsPendingSnapshotForNewestWhileWardSendIsBackpressured(t *
 
 	centers := make(chan world.Column)
 	snapshots := make(chan snapshotAt, 1)
-	sent := make(chan []byte, 8)
-	secondWardStarted := make(chan struct{})
-	releaseSecondWard := make(chan struct{})
-	wardCount := 0
+	positions := make(chan []byte, 8)
+	wardBlocked := make(chan struct{})
+	releaseWard := make(chan struct{})
+	var once sync.Once
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go followSnapshotsAndWards(ctx, identity.PlayerID{1}, sim, 1, centers, snapshots,
+	startWorkers(ctx, t, sim, centers, snapshots,
 		func(frame []byte) error {
-			if vnet.GetRootAsEnvelope(frame, 0).PayloadType() == vnet.PayloadWardsNearby {
-				wardCount++
-				if wardCount == 2 {
-					close(secondWardStarted)
-					<-releaseSecondWard
-				}
-			}
-			sent <- frame
+			once.Do(func() { close(wardBlocked) })
+			<-releaseWard
 			return nil
 		},
-		func(frame []byte) bool { sent <- frame; return true }, log)
+		func(frame []byte) bool { positions <- frame; return true })
 
 	centers <- world.Column{CX: 0, CZ: 0}
-	wantPayloads(t, sent, vnet.PayloadWardsNearby)
-	next := world.Column{CX: 1, CZ: 0}
-	if !offerLatestSnapshot(snapshots, snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{Tick: 1}), center: next}) {
-		t.Fatal("the first crossing snapshot was refused")
-	}
-	centers <- next
 	select {
-	case <-secondWardStarted:
-	case <-time.After(time.Second):
-		t.Fatal("the crossing ward send never reached backpressure")
+	case <-wardBlocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the ward send never started")
 	}
-	for _, tick := range []uint32{2, 3} {
-		if !offerLatestSnapshot(snapshots, snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{Tick: tick}), center: next}) {
-			t.Fatalf("snapshot tick %d was refused", tick)
-		}
-	}
-	close(releaseSecondWard)
-	wantPayloads(t, sent, vnet.PayloadWardsNearby)
 
-	select {
-	case frame := <-sent:
-		envelope := vnet.GetRootAsEnvelope(frame, 0)
-		if envelope.PayloadType() != vnet.PayloadEntitySnapshot {
-			t.Fatalf("frame after wards = %s, want EntitySnapshot", envelope.PayloadType())
-		}
-		table := new(flatbuffers.Table)
-		if !envelope.Payload(table) {
-			t.Fatal("the released snapshot payload is absent")
-		}
-		var snapshot vnet.EntitySnapshot
-		snapshot.Init(table.Bytes, table.Pos)
-		if snapshot.ServerTick() != 3 {
-			t.Fatalf("backpressure released tick %d, want newest tick 3", snapshot.ServerTick())
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the newest snapshot was not released")
-	}
-}
-
-func wantPayloads(t *testing.T, frames <-chan []byte, want ...vnet.Payload) {
-	t.Helper()
-	for i, expected := range want {
+	// With the ward worker parked inside its send, three ticks of position still land.
+	for tick := uint32(1); tick <= 3; tick++ {
+		snapshots <- snapshotAt{frame: protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{Tick: tick}), center: world.Column{CX: 0, CZ: 0}}
 		select {
-		case frame := <-frames:
-			got := vnet.GetRootAsEnvelope(frame, 0).PayloadType()
-			if got != expected {
-				t.Fatalf("frame %d = %s, want %s", i, got, expected)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("timed out waiting for frame %d (%s)", i, expected)
+		case <-positions:
+		case <-time.After(2 * time.Second):
+			close(releaseWard)
+			t.Fatalf("position for tick %d was stopped by a blocked ward send", tick)
 		}
 	}
+	close(releaseWard)
 }
