@@ -318,14 +318,11 @@ func TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand(t *testing.T) {
 // acceptance criterion; the window measures hundreds.
 const minimumTerraceSteps = 20
 
-// Where two adjacent channel columns stand at different terraces the difference is a
-// whole number of steps, and the higher one's water faces air over the lower one.
-//
-// **That air is the whole of what the generator owes a waterfall.** Nothing here paints
-// falling water; what generation guarantees is that there is somewhere to pour — the
-// lower terrace's water is not raised to meet the higher one, and the higher channel's
-// wall is not extended to close the gap.
-func TestATerraceStepCarriesItsFall(t *testing.T) {
+// A lower terrace carries only the falls whose higher source points into it. A height
+// difference alone says where water *could* fall; the source's current says whether
+// that edge is downstream. Treating all four higher neighbours as suppliers turns a
+// terraced course into the broad water curtains this test rejects.
+func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 	t.Parallel()
 
 	// A contiguous window, because this is the one claim needing true adjacency: a
@@ -334,69 +331,114 @@ func TestATerraceStepCarriesItsFall(t *testing.T) {
 	// neighbour.
 	const scanSize = 512
 
-	pairs, steps, maxDrop := 0, 0, 0
+	channels, higherEdges, feedingEdges, rejectedEdges := 0, 0, 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
 			if !col.river {
 				continue
 			}
-			for _, step := range [2][2]int64{{1, 0}, {0, 1}} {
+			channels++
+			wantTop := col.waterSurface
+			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 				nextX, nextZ := x+step[0], z+step[1]
-				next := columnAt(waterSeed, nextX, nextZ)
-				if !next.river {
+				if !riverAt(waterSeed, nextX, nextZ) {
 					continue
 				}
-				pairs++
-				drop := col.waterSurface - next.waterSurface
-				if drop == 0 {
+				surface := riverSurfaceAt(waterSeed, nextX, nextZ)
+				if surface < seaLevel || surface <= col.waterSurface {
 					continue
 				}
-				steps++
-				maxDrop = max(maxDrop, absInt(drop))
-				if absInt(drop)%riverTerraceStep != 0 {
+				higherEdges++
+				drop := surface - col.waterSurface
+				if drop%riverTerraceStep != 0 {
 					t.Fatalf("adjacent channels (%d, %d) at %d and (%d, %d) at %d differ by %d, not a whole %d-block terrace",
-						x, z, col.waterSurface, nextX, nextZ, next.waterSurface, drop, riverTerraceStep)
+						x, z, col.waterSurface, nextX, nextZ, surface, drop, riverTerraceStep)
 				}
+				current := waterCurrentBlock(riverCurrentAt(waterSeed, nextX, nextZ))
+				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
+					feedingEdges++
+					wantTop = max(wantTop, surface)
+				} else {
+					rejectedEdges++
+				}
+			}
 
-				// The lower column, over its own water and under the higher one's, holds
-				// the fall. **This assertion used to require Air there**, which recorded
-				// the defect #654 fixed rather than a rule: three blocks of the upper
-				// pool's face stood against open air, and the comment at [riverSurfaceAt]
-				// said the flow automaton would pour it. Before #653 the automaton could
-				// not pour anything; now the terrain carries the answer, so the same
-				// voxels are checked and the block they must hold has changed.
-				//
-				// Flowing and not source, which is the half that matters: a painted
-				// source would be a pillar of water standing for ever, where flowing
-				// water drains the moment the channel above stops feeding it.
-				lower, lowerX, lowerZ := next, nextX, nextZ
-				higher := col
-				if drop < 0 {
-					lower, lowerX, lowerZ, higher = col, x, z, next
+			if col.fallSurface != wantTop {
+				t.Fatalf("fall top at (%d, %d) = %d, want highest feeding terrace %d",
+					x, z, col.fallSurface, wantTop)
+			}
+			for y := col.waterSurface + 1; y <= wantTop; y++ {
+				if got := col.voxelAt(waterSeed, x, int64(y), z); got != WaterFlow7 {
+					t.Fatalf("downstream fall onto (%d, %d) holds %d at y=%d, want %d",
+						x, z, got, y, WaterFlow7)
 				}
-				for y := lower.waterSurface + 1; y <= higher.waterSurface; y++ {
-					if got := lower.voxelAt(waterSeed, lowerX, int64(y), lowerZ); got != WaterFlow7 {
-						t.Fatalf("the fall from %d onto (%d, %d) at %d holds %d at y=%d, want %d",
-							higher.waterSurface, lowerX, lowerZ, lower.waterSurface, got, y, WaterFlow7)
-					}
-				}
-				// And nothing above the fall: the water stops at the higher terrace.
-				if got := lower.voxelAt(waterSeed, lowerX, int64(lower.fallSurface)+1, lowerZ); got != Air {
-					t.Fatalf("the fall onto (%d, %d) holds %d one block over its top %d, want Air",
-						lowerX, lowerZ, got, lower.fallSurface)
-				}
+			}
+			if got := col.voxelAt(waterSeed, x, int64(wantTop)+1, z); got != Air {
+				t.Fatalf("fall onto (%d, %d) holds %d one block over its top %d, want Air",
+					x, z, got, wantTop)
 			}
 		}
 	}
 
-	if pairs == 0 {
-		t.Fatal("no two adjacent channel columns in the window, so no step was checked")
+	if channels == 0 || higherEdges == 0 || feedingEdges == 0 || rejectedEdges == 0 {
+		t.Fatalf("window measured channels=%d higher edges=%d feeding=%d rejected=%d; every directional case must be present",
+			channels, higherEdges, feedingEdges, rejectedEdges)
 	}
-	if steps == 0 {
-		t.Error("every adjacent pair of channel columns in the window stands at one level: the river is still a canal")
+	t.Logf("measured %d channels and %d higher terrace edges: %d feed this column, %d point elsewhere",
+		channels, higherEdges, feedingEdges, rejectedEdges)
+}
+
+// The seed-one cascade reported in #696, bounded around the two captured player
+// positions. This keeps the concrete defect behind the general sweep above: the old
+// rule raised a lower column to the highest terrace on any side, while the directional
+// rule keeps only the height supplied across a downstream edge.
+func TestTheSeedOneCascadeRejectsSidewaysTerraceCurtains(t *testing.T) {
+	t.Parallel()
+
+	const seed int64 = 1
+	channels, keptFalls, shortenedCurtains, removedFallVoxels := 0, 0, 0, 0
+	for z := int64(208); z < 288; z++ {
+		for x := int64(384); x < 448; x++ {
+			col := columnAt(seed, x, z)
+			if !col.river {
+				continue
+			}
+			channels++
+			oldTop, wantTop := col.waterSurface, col.waterSurface
+			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				nextX, nextZ := x+step[0], z+step[1]
+				if !riverAt(seed, nextX, nextZ) {
+					continue
+				}
+				surface := riverSurfaceAt(seed, nextX, nextZ)
+				if surface < seaLevel || surface <= col.waterSurface {
+					continue
+				}
+				oldTop = max(oldTop, surface)
+				current := waterCurrentBlock(riverCurrentAt(seed, nextX, nextZ))
+				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
+					wantTop = max(wantTop, surface)
+				}
+			}
+			if col.fallSurface != wantTop {
+				t.Fatalf("seed-one cascade fall top at (%d, %d) = %d, want %d", x, z, col.fallSurface, wantTop)
+			}
+			if wantTop > col.waterSurface {
+				keptFalls++
+			}
+			if oldTop > wantTop {
+				shortenedCurtains++
+				removedFallVoxels += oldTop - wantTop
+			}
+		}
 	}
-	t.Logf("measured %d adjacent channel pairs, %d of them a terrace step, tallest %d blocks", pairs, steps, maxDrop)
+	if channels == 0 || keptFalls == 0 || shortenedCurtains == 0 {
+		t.Fatalf("reported cascade measured channels=%d kept falls=%d shortened curtains=%d; all three must be present",
+			channels, keptFalls, shortenedCurtains)
+	}
+	t.Logf("reported cascade: %d channel columns, %d downstream falls kept, %d sideways curtains shortened by %d fall voxels",
+		channels, keptFalls, shortenedCurtains, removedFallVoxels)
 }
 
 // Every channel column runs the way its own field and its own slope point, and the
@@ -884,7 +926,9 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 // #654 that stops the defect coming back.
 //
 // **A source is permanent — [NextWater]'s first arm returns it unchanged for ever — so a
-// source with open air beside it is water that nothing holds and nothing can correct.**
+// source facing open air along a side it feeds is water that nothing holds and nothing
+// can correct.** Plain Water feeds every side; a current feeds only its encoded downstream
+// side. Air beside a current on another side is an ordinary river surface, not a leak.
 // Flowing water is deliberately not covered: it is the automaton's, it drains when its
 // feed stops, and a fall has air beside it by construction. So the property is about the
 // one class of voxel that can never be wrong for only a moment.
@@ -913,7 +957,7 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 // which exceeds it by 84. What it is really guarding is a regression of the kind #654
 // and #660 removed: putting the channel aquifer back takes seed 1 from 2 to thousands,
 // and this fails long before anybody runs a measurement.
-func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
+func TestNoSourceWaterFeedsOpenAir(t *testing.T) {
 	t.Parallel()
 
 	// Five in ten thousand, from the measurement in the comment above. Per ten thousand
@@ -928,11 +972,15 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 			for z := int64(1040); z < 1168; z++ {
 				col := columnAt(seed, x, z)
 				for y := int64(20); y <= 110; y++ {
-					if !waterSource(col.voxelAt(seed, x, y, z)) {
+					block := col.voxelAt(seed, x, y, z)
+					if !waterSource(block) {
 						continue
 					}
 					sources++
 					for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+						if !WaterFeedsToward(block, int(step[0]), int(step[1])) {
+							continue
+						}
 						nx, nz := x+step[0], z+step[1]
 						neighbour := columnAt(seed, nx, nz)
 						if neighbour.voxelAt(seed, nx, y, nz) == Air {
@@ -950,10 +998,10 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 			t.Fatalf("seed %d: the window holds no source water, so nothing was checked", seed)
 		}
 		if exposed*10000 > sources*exposedCeiling {
-			t.Errorf("seed %d: %d of %d source voxels stand against open air (%.3f%%), over the %d-in-10000 ceiling; first at %v",
+			t.Errorf("seed %d: %d of %d source voxels feed open air (%.3f%%), over the %d-in-10000 ceiling; first at %v",
 				seed, exposed, sources, float64(exposed)*100/float64(sources), exposedCeiling, worst)
 		}
-		t.Logf("seed %d: %d of %d source voxels exposed (%.3f%%)",
+		t.Logf("seed %d: %d of %d source voxels feed open air (%.3f%%)",
 			seed, exposed, sources, float64(exposed)*100/float64(sources))
 	}
 }

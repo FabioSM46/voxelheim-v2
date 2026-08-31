@@ -171,12 +171,20 @@ func TestFlowDirectionReadsTheWaterAndNothingElse(t *testing.T) {
 			reason: "the equal three cancel, so a spring with nothing else around it still sends its water west",
 		},
 		{
-			name: "a river current neighbour counts as the source it is",
+			name: "a river current neighbour feeds the gradient when it points into the voxel",
+			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
+				east: world.WaterCurrentXNeg, west: world.WaterFlow3, north: world.WaterFlow3, south: world.WaterFlow3,
+			}), fill: world.Air},
+			want:   [3]float64{-1, 0, 0},
+			reason: "the east source points west into this voxel, so its full level pushes the spill onward",
+		},
+		{
+			name: "a river current neighbour outside its downstream edge is ignored",
 			table: blockTable{blocks: around(world.WaterFlow3, map[[3]int64]world.Block{
 				east: world.WaterCurrentZPos, west: world.WaterFlow3, north: world.WaterFlow3, south: world.WaterFlow3,
 			}), fill: world.Air},
-			want:   [3]float64{-1, 0, 0},
-			reason: "it is level 8 like any other full voxel; the direction in its id is its own, not the spill's",
+			want:   [3]float64{0, 0, 0},
+			reason: "the east source points south, so it supplies no water and creates no westward current here",
 		},
 		{
 			name: "a source on either side leaves nowhere to go",
