@@ -6,6 +6,27 @@ const (
 	// WaterTickDelay is the flow settling delay.
 	WaterTickDelay uint64 = 5
 
+	// WaterResidencyRetryDelay is how long a water voxel waits before being examined
+	// again when part of its neighbourhood could not be read — a non-resident chunk
+	// beside it, or a chunk evicted between the read and the write.
+	//
+	// **Deferred and retried, never decided from fabricated blocks and never dropped
+	// (#717).** Both alternatives were tried and both froze water in the air. A
+	// fabricated read is a lie [world.NextWater] believes: Stone above a side hid a
+	// falling column from the anti-cone rule and rebuilt the pre-#653 widening cone at
+	// every residency seam. And a dropped voxel stayed dropped: composing the missing
+	// chunk scans that chunk's own water, which does not include a voxel one chunk
+	// over, so a fall truncated at a seam hung there for ever.
+	//
+	// Forty ticks is two seconds. The frontier this polls is thin — water voxels whose
+	// eleven-block neighbourhood crosses into a chunk nobody has resident — and each
+	// retry costs one pop, eleven reads and one push against the same
+	// [WaterVoxelsPerTick] budget every examination pays, so the amortised cost of a
+	// thousand-voxel frontier is under two examinations a tick. Shorter would poll
+	// chunks that are not coming; at the [WaterTickDelay] of 5 the same frontier would
+	// spend a fifth of the examination budget standing still.
+	WaterResidencyRetryDelay uint64 = 40
+
 	// WaterChangesPerTick is 32 decodes/frame * 60 fps / 20 ticks/s.
 	WaterChangesPerTick = 32 * 60 / 20
 
