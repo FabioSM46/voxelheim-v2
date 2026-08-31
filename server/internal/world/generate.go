@@ -431,7 +431,16 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // flowing water rather than left as three blocks of open air against the upper pool, and
 // a channel column no longer fills the carved rock beneath it to its own terrace. Both
 // change generated blocks, so both carry this.
-const WorldgenVersion uint32 = 18
+// 18 → 19: #660 makes a carved voxel and the water beside it agree, which is the last of
+// the three ways generation wrote water nothing holds. A body reaches a carved voxel only
+// where the carved run reaches it, so a pocket sealed in the rock under a lake is air
+// rather than a permanent source; and a carve that would open a face into a neighbouring
+// column's standing water is refused, so the rock at a lake shore or a river bank stays.
+// Terrain heights are byte-identical and nothing above ground moves, but carved voxels
+// under a body may become air, a thin shell of carved voxels beside one becomes rock —
+// and a cave mouth that shell fills in is ground a plant may now root on. Stored deltas
+// in any of those resolve against a different base, so the precondition advances.
+const WorldgenVersion uint32 = 19
 
 // Generate builds the chunk at coord for seed.
 //
@@ -443,14 +452,59 @@ func Generate(seed int64, coord Coord) *Chunk {
 	originX, originY, originZ := coord.Origin()
 	var columns [ChunkSize][ChunkSize]column
 
+	// **Two passes over the columns, and the second one is what the bank rule costs
+	// here rather than four times over.** Every column needs the standing water of
+	// its four horizontal neighbours (see [column.carvedAt]), and inside a chunk
+	// those neighbours are columns this loop has already resolved — a shape carries
+	// its own band, for nothing, in [column.bank]. Only the ring of columns just
+	// outside the chunk has to be resolved on its own, and a ring is 128 columns to
+	// the chunk's 1024. Asking [columnAt] here would pay 4096 [bankWaterAt] for the
+	// same answer; with [placeTrees]'s footprint scan paying its own on top, that
+	// measured 6.5 ms per chunk against the 4.0 ms this costs and a 3.9 ms baseline.
+	for z := range ChunkSize {
+		for x := range ChunkSize {
+			// One height and one climate per column, not per voxel: both are the
+			// expensive part and neither depends on y.
+			columns[x][z] = columnShapeAt(seed, originX+int64(x), originZ+int64(z))
+		}
+	}
+
+	// The four edges of that ring, indexed along the axis they run down. Corners are
+	// absent because no column asks for one: the rule reads the four columns sharing
+	// a face, never the four sharing an edge.
+	var westward, eastward, northward, southward [ChunkSize]bankWater
+	for i := range ChunkSize {
+		westward[i] = bankWaterAt(seed, originX-1, originZ+int64(i))
+		eastward[i] = bankWaterAt(seed, originX+ChunkSize, originZ+int64(i))
+		northward[i] = bankWaterAt(seed, originX+int64(i), originZ-1)
+		southward[i] = bankWaterAt(seed, originX+int64(i), originZ+ChunkSize)
+	}
+	bandAt := func(x, z int) bankWater {
+		switch {
+		case x < 0:
+			return westward[z]
+		case x >= ChunkSize:
+			return eastward[z]
+		case z < 0:
+			return northward[x]
+		case z >= ChunkSize:
+			return southward[x]
+		}
+		return columns[x][z].bank()
+	}
+
 	for z := range ChunkSize {
 		for x := range ChunkSize {
 			worldX := originX + int64(x)
 			worldZ := originZ + int64(z)
 
-			// One height and one climate per column, not per voxel: both are the
-			// expensive part and neither depends on y.
-			col := columnAt(seed, worldX, worldZ)
+			col := columns[x][z]
+			col.banks = [4]bankWater{
+				bandAt(x+1, z), bandAt(x-1, z),
+				bandAt(x, z+1), bandAt(x, z-1),
+			}
+			// Written back, so everything downstream — the trees, the settlements —
+			// holds the same column [columnAt] would have handed it.
 			columns[x][z] = col
 
 			for y := range ChunkSize {
@@ -521,6 +575,17 @@ type column struct {
 	// source rule underneath.
 	fallSurface int
 
+	// banks is the open water the four horizontally adjacent columns stand in, and
+	// bodyFloor is the last solid block under this column's own body. They are the two
+	// halves of one rule — a carved voxel and the water beside it must agree — and each
+	// is resolved once per column because both would otherwise be a neighbour read per
+	// voxel. See [column.carvedAt] and [column.caveFillAt].
+	//
+	// bodyFloor is meaningful only beside [standingWater]; its zero for a dry column
+	// says nothing and nothing reads it there.
+	banks     [4]bankWater
+	bodyFloor int
+
 	// settlement is whether this column stands inside a settlement's radius, where
 	// the surface is the plateau exactly.
 	//
@@ -542,6 +607,35 @@ type column struct {
 // it need it: heightAt to know whether this column may hold a basin, and blockAt to
 // know what its ground is made of.
 func columnAt(seed, worldX, worldZ int64) column {
+	col := columnShapeAt(seed, worldX, worldZ)
+	col.banks = bankWatersAt(seed, worldX, worldZ)
+	return col
+}
+
+// bank is the open water this column stands in, as a neighbour reads it.
+//
+// **It is [bankWaterAt]'s answer, arrived at from a column that has already been
+// resolved**, which is what lets [Generate] fill a chunk's interior bands for
+// nothing. The two are the same two numbers out of [standingWaterSurface], so they
+// cannot disagree by construction; TestAColumnCarriesTheSameBankItResolvesAlone is
+// the pin that says so anyway.
+func (c *column) bank() bankWater {
+	if !c.standingWater {
+		return bankWater{}
+	}
+	return bankWater{floor: int32(c.surface), top: int32(c.waterSurface)}
+}
+
+// columnShapeAt is [columnAt] without the four neighbouring bands: everything about a
+// column that is a function of its own coordinate alone.
+//
+// **A column with no bands answers [column.waterStandsBesideAt] false everywhere,
+// which is the pre-#660 carve, so only a caller that fills them in itself may hold
+// one.** There are two, and both exist to keep four [bankWaterAt] off a scan that does
+// not need them: [Generate] fills the bands from columns it has already resolved, and
+// [plantAtColumnIn] resolves them at the one refusal that reads them. Anything else
+// wants [columnAt].
+func columnShapeAt(seed, worldX, worldZ int64) column {
 	climate := ClimateAt(seed, worldX, worldZ)
 	surface, riverSurface, river, settled := shapeAt(seed, worldX, worldZ, climate)
 	waterSurface, standingWater := standingWaterSurface(surface, riverSurface, river)
@@ -557,7 +651,7 @@ func columnAt(seed, worldX, worldZ int64) column {
 		fallSurface = riverFallTopAt(seed, worldX, worldZ, waterSurface)
 	}
 
-	return column{
+	col := column{
 		surface:       surface,
 		climate:       climate,
 		gravel:        gravelAt(seed, worldX, worldZ, surface, climate),
@@ -569,26 +663,85 @@ func columnAt(seed, worldX, worldZ int64) column {
 		waterBlock:    waterBlock,
 		settlement:    settled,
 	}
+
+	// The downward scan is paid only by a column that has a body to be part of, and
+	// it costs one [column.carveFieldAt] for the overwhelming majority of them: a
+	// lake bed that is not itself carved ends the run at the first step.
+	if standingWater {
+		col.bodyFloor = col.carveRunFloor(seed, worldX, worldZ)
+	}
+	return col
 }
 
-// carvedAt is [caveAt] with this column's settlement exemption applied.
+// carveFieldAt is [caveAt] with this column's settlement exemption applied.
 //
 // **A settlement's foundations are the one place carving is refused for a reason that
 // is not about the cave system.** Inside a radius the surface *is* the plateau, so
 // "above Plateau − settlementCaveClearance" is exactly "shallower than that many
 // blocks", and the exemption costs one field read and one subtraction on a path that
-// otherwise pays two fbm3D sums. Every caller that holds a column goes through here;
-// [caveAt] itself stays the plain carve field, which is what caves_test.go measures.
-func (c column) carvedAt(seed, worldX, worldY, worldZ int64) bool {
+// otherwise pays two fbm3D sums. [caveAt] itself stays the plain carve field, which is
+// what caves_test.go measures.
+//
+// **It is separate from [column.carvedAt] so that [column.carveRunFloor] has something
+// to ask.** That scan produces `bodyFloor`, the bank rule refuses a carve on the
+// strength of a fill that reads `bodyFloor`, and asking the refined answer while
+// building it would be circular. Refusing a carve only ever raises the floor, so this
+// run is the longest there could be — the safe direction, since the extra water it
+// admits stands against rock the bank rule has already left in place.
+func (c *column) carveFieldAt(seed, worldX, worldY, worldZ int64) bool {
 	if c.settlement && int64(c.surface)-worldY < settlementCaveClearance {
 		return false
 	}
 	return caveAt(seed, worldX, worldY, worldZ, c.surface)
 }
 
+// carvedAt is [column.carveFieldAt] with the bank rule applied: a carve that would
+// open a face into the water standing in a neighbouring column is refused, and the
+// rock stays.
+//
+// **This is the dry half of #660, and it is the half neither candidate rule in that
+// issue reaches.** The wet half — a pocket the carved run never reaches, filled
+// because [column.caveFillAt] answers for one column — is drained there, and the whole
+// account of both is in that function's #660 paragraph. What is left over is the shape
+// seed 1 is made of: the water is the *channel's own*, sitting in the river where it
+// belongs, and the air is a cave carved through the bank beside it. Nothing may be done
+// to that water, so the answer is done to the carve.
+//
+// It costs four comparisons on a voxel the carve field has already accepted, and it is
+// asked last, so the overwhelming majority of voxels never reach it.
+func (c *column) carvedAt(seed, worldX, worldY, worldZ int64) bool {
+	if !c.carveFieldAt(seed, worldX, worldY, worldZ) {
+		return false
+	}
+	// Only a voxel this column would leave as air can breach anything: one that holds
+	// the body's own water is the body, not a hole in it.
+	if c.caveFillAt(int(worldY)) != Air {
+		return true
+	}
+	return !c.waterStandsBesideAt(worldY)
+}
+
+// carveRunFloor is the last solid block under this column's own ground: the floor of
+// the unbroken carved run that reaches the surface, and therefore the floor of the
+// space a body of standing water above actually opens into.
+//
+// Water reaches a carved voxel at y exactly when y > carveRunFloor. A column whose
+// surface is not carved answers with the surface itself, which is every column with no
+// cave mouth in its bed — one call, and the loop below never turns.
+//
+// The scan is bounded by the carve field, which stops at [caveMaxDepth] by
+// construction, so no bound of its own is needed.
+func (c *column) carveRunFloor(seed, worldX, worldZ int64) int {
+	floor := c.surface
+	for c.carveFieldAt(seed, worldX, int64(floor), worldZ) {
+		floor--
+	}
+	return floor
+}
+
 // carvedTop is [carvedColumnTop] for a caller that already resolved the column, so the
 // settlement exemption applies to it too.
-func (c column) carvedTop(seed, worldX, worldZ int64) int {
+func (c *column) carvedTop(seed, worldX, worldZ int64) int {
 	top := c.surface
 	for c.carvedAt(seed, worldX, int64(top), worldZ) {
 		top--
@@ -610,7 +763,7 @@ func (c column) carvedTop(seed, worldX, worldZ int64) int {
 // what says "this is a shore" and a bar of gravel there says nothing. Neither can
 // reach an altitude override — both bands sit near the sea line, forty blocks under
 // stoneLine — so nothing here can put sand on a mountain.
-func (c column) blockAt(worldY int) Block {
+func (c *column) blockAt(worldY int) Block {
 	block := blockAt(worldY, c.surface, c.climate)
 	depth := c.surface - worldY
 	if depth < 0 {
@@ -639,7 +792,12 @@ func (c column) blockAt(worldY int) Block {
 //
 // Plants are not here: they are placed over the finished terrain by placeTrees,
 // after every column in the chunk has been composed.
-func (c column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
+// **A pointer receiver, and it is chosen by measurement.** [column] gained four
+// [bankWater] bands at #660 and this runs once per voxel — 32768 times a chunk — so the
+// copy a value receiver takes is what those bands really cost: 4.4 ms per chunk against
+// 4.0 for identical work through a pointer, on a 3.9 ms baseline. Every method on
+// [column] takes one for that reason.
+func (c *column) voxelAt(seed, worldX, worldY, worldZ int64) Block {
 	block := c.blockAt(int(worldY))
 	switch {
 	case block == Air:
@@ -984,7 +1142,7 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 	}
 
 	var surface Block
-	surfaceRead := false
+	surfaceRead, banksRead := false, false
 	for i := range table {
 		species := &table[i]
 		denominator := species.denominator(col.climate)
@@ -1028,6 +1186,18 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 
 		// blockAt describes terrain before carving, so only this final question
 		// can tell that a cave mouth removed otherwise valid ground.
+		//
+		// **The four bands are resolved here rather than carried in, and that is a
+		// measurement rather than a preference.** [column.carvedAt] is the one plant
+		// refusal that reads them and it is the last of seven, so a column reaching
+		// this line is rare — while [placeTrees] scans (ChunkSize + 2·footprint)²
+		// columns for every chunk. Resolving four neighbours for each of those cost
+		// 1.0 ms of a 3.9 ms chunk; resolving them here costs nothing measurable.
+		// [placeTrees] and [visitPlant] therefore hand over a [columnShapeAt].
+		if !banksRead {
+			col.banks = bankWatersAt(seed, worldX, worldZ)
+			banksRead = true
+		}
 		if col.carvedAt(seed, worldX, int64(col.surface), worldZ) {
 			continue
 		}
@@ -1038,7 +1208,7 @@ func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col colum
 }
 
 func visitPlant(seed, rootX, rootZ int64, visit func(x, y, z int64, block Block)) {
-	visitPlantAtColumn(seed, rootX, rootZ, columnAt(seed, rootX, rootZ), visit)
+	visitPlantAtColumn(seed, rootX, rootZ, columnShapeAt(seed, rootX, rootZ), visit)
 }
 
 func visitPlantAtColumn(seed, rootX, rootZ int64, col column, visit func(x, y, z int64, block Block)) {
@@ -1227,7 +1397,9 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 			if rootX >= originX && rootX < originX+ChunkSize && rootZ >= originZ && rootZ < originZ+ChunkSize {
 				col = columns[int(rootX-originX)][int(rootZ-originZ)]
 			} else {
-				col = columnAt(seed, rootX, rootZ)
+				// No bands: [plantAtColumnIn] resolves them for the few columns
+				// that reach its carve test. See the note there.
+				col = columnShapeAt(seed, rootX, rootZ)
 			}
 
 			visitPlantAtColumn(seed, rootX, rootZ, col, func(worldX, worldY, worldZ int64, block Block) {

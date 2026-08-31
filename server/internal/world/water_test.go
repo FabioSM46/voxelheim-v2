@@ -600,13 +600,24 @@ func findSubmergedColumn(climate Climate) (x, z int64, found bool) {
 
 // Underground water follows two hydrostatic surfaces: caveWaterLevel under dry
 // ground, and the standing surface of a sea, basin or river column. It reaches only
-// carved terrain in either case.
+// carved terrain in either case, and since #660 only the carved terrain the carved
+// run itself reaches.
+//
+// **The chunk moved off the golden water fixture at #660, and that is what the narrowed
+// rule cost.** The standing-water arm needs a carved voxel above [caveWaterLevel] that
+// a body still fills, which now means a cave mouth in the bed of a lake — the case #593
+// was written for, rare rather than universal: of 968 carved voxels in that band over a
+// 192x192 window at seed 1, 55 are reached by the run and 913 are sealed pockets that
+// are now air. The golden water chunk holds none of the 55, so this sweeps
+// [bodyCaveMouthCoord], which holds 145 of them beside 718 deep and 778 dry voxels.
+// Dropping the assertion instead would have left #593 with no coverage at all on the
+// day it stopped being everywhere.
 func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 	t.Parallel()
 
 	deep, standing, dry := 0, 0, 0
-	chunk := Generate(waterSeed, goldenWaterCoord)
-	originX, originY, originZ := goldenWaterCoord.Origin()
+	chunk := Generate(waterSeed, bodyCaveMouthCoord)
+	originX, originY, originZ := bodyCaveMouthCoord.Origin()
 
 	for z := range ChunkSize {
 		for x := range ChunkSize {
@@ -619,8 +630,14 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 				}
 				carved := col.carvedAt(waterSeed, worldX, worldY, worldZ)
 				got := chunk.At(x, y, z)
+				// **A body reaches only what the carved run reaches, since #660.**
+				// Below caveWaterLevel the aquifer fills every carved voxel whatever
+				// stands above it; above that line the water is the body's own, and a
+				// pocket the run from this column's ground never reaches is sealed rock
+				// holding air. See [column.bodyFloor].
+				body := col.standingWater && worldY <= int64(col.waterSurface)
 				wantWater := worldY <= caveWaterLevel ||
-					col.standingWater && worldY <= int64(col.waterSurface)
+					body && worldY > int64(col.bodyFloor)
 
 				switch {
 				case !carved:
@@ -632,7 +649,7 @@ func TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel(t *testing.T) {
 					// that channel's water and carries its current, one under dry ground
 					// is an aquifer with no direction, and both are source water.
 					want := Water
-					if col.standingWater && worldY <= int64(col.waterSurface) {
+					if body {
 						want = col.waterBlock
 					}
 					if got != want {
@@ -664,14 +681,20 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	t.Parallel()
 
 	// **The band this checks stops at [caveWaterLevel] for a channel since #654.** A sea
-	// or a basin still fills every carved voxel under it to its own surface, which is the
-	// case #593 was written for and is what the first branch below holds. A channel does
+	// or a basin still fills the carved voxels under it, which is the case #593 was
+	// written for and is what the first branch below holds. A channel does
 	// not: its terrace can stand two hundred blocks up, and filling the rock beneath it to
 	// that height put source water against every cave mouth that opened into dry ground.
 	// The second branch holds the new rule rather than leaving it merely unasserted, so
 	// putting the old fill back fails here rather than only in a measurement.
+	//
+	// **Which carved voxels a body fills narrowed at #660, and the sea-and-basin branch
+	// says so in both directions.** The fill reaches what the carved run from this
+	// column's own ground reaches; a pocket sealed inside the rock below it is air, and
+	// asserting that it is filled would be asserting the defect back into place.
 	const scanSize = 512
 	wetColumns, riverColumns, carvedInBand, riverCarvedAbove := 0, 0, 0, 0
+	reachedInBand, sealedInBand := 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
@@ -696,9 +719,18 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 					continue
 				}
 				carvedInBand++
-				if got == Air {
-					t.Fatalf("standing-water column (%d, %d), surface %d, leaves carved Air at y=%d",
-						x, z, col.waterSurface, y)
+				if y > int64(col.bodyFloor) {
+					reachedInBand++
+					if got == Air {
+						t.Fatalf("standing-water column (%d, %d), surface %d, leaves carved Air at y=%d where its own carved run reaches",
+							x, z, col.waterSurface, y)
+					}
+					continue
+				}
+				sealedInBand++
+				if got != Air {
+					t.Fatalf("standing-water column (%d, %d), surface %d, fills a pocket at y=%d with %d that its carved run never reaches",
+						x, z, col.waterSurface, y, got)
 				}
 			}
 			// And below the dry-world level every column still fills, channel or not:
@@ -729,8 +761,8 @@ func TestStandingWaterLeavesNoCarvedAirBelowItsSurface(t *testing.T) {
 	// [TestCaveWaterStandsOnlyInCarvedVoxelsBelowItsLevel], which requires all three of
 	// the fill rules to fire; what must be exercised *here* is the rule this test was
 	// rewritten for.
-	t.Logf("measured %d wet columns, including %d channel columns; %d carved voxels filled under a body and %d left dry under a channel",
-		wetColumns, riverColumns, carvedInBand, riverCarvedAbove)
+	t.Logf("measured %d wet columns, including %d channel columns; %d carved voxels under a body (%d reached by its run, %d sealed) and %d left dry under a channel",
+		wetColumns, riverColumns, carvedInBand, reachedInBand, sealedInBand, riverCarvedAbove)
 }
 
 // A shore is sand, on both sides of the water line, and only where a climate has
@@ -860,25 +892,34 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 // **A share and not a count, and a ceiling and not zero, and both are deliberate.** The
 // share, because the three seeds below hold very different amounts of water and a count
 // would be a statement about how wet a window is. The ceiling, because the residue is
-// real and named: a cave carved through the bank of a body opens a face the column rule
-// cannot see, since [column.caveFillAt] answers for one column and a bank belongs to the
-// next one. Measured over the same 128x128 window, y 20..110:
+// real and named. Measured over the same 128x128 window, y 20..110:
 //
-//	seed          sources   exposed   share
-//	1               34423       214   0.62%
-//	0x5EED          41770        63   0.15%
-//	7              114578       339   0.30%
+//	seed          sources   exposed   share      exposed at #654   share
+//	1               34423         2   0.006%                 214   0.62%
+//	0x5EED          41534         4   0.010%                  63   0.15%
+//	7              111425         0   0.000%                 339   0.30%
 //
-// Before #654 the same window at seed 1 held 1655 exposed water voxels of 39062 — 4.2% —
-// so one percent is a ceiling the fix clears by a factor of at least one and a half and
-// the defect exceeds by a factor of four. What it is really guarding is a regression of
-// the kind #654 removed: putting the channel aquifer back takes seed 1 from 214 to
-// thousands, and this fails long before anybody runs a measurement.
+// **#654's residue was the bank, and #660 is what closed it.** Every one of those 214,
+// 63 and 339 had a *carved* voxel as the air beside it, and both halves of #660 aim at
+// that: [column.caveFillAt] drains the pocket the carved run never reached, and
+// [column.carvedAt] refuses the carve that would breach a wall of standing water. What
+// is left is six voxels across three seeds and none is a carved face — it is a bank
+// column whose *ground* sits a block below the water beside it and which stands no water
+// of its own, so there is no carve to refuse and no fill to drain. That is a channel
+// edge, not a cave.
+//
+// Five in ten thousand is a ceiling the fix clears by a factor of five and #654's
+// residue exceeds by twelve; before #654 the same window at seed 1 held 1655 of 39062,
+// which exceeds it by 84. What it is really guarding is a regression of the kind #654
+// and #660 removed: putting the channel aquifer back takes seed 1 from 2 to thousands,
+// and this fails long before anybody runs a measurement.
 func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 	t.Parallel()
 
-	// One percent, from the measurement in the comment above.
-	const exposedCeiling = 1
+	// Five in ten thousand, from the measurement in the comment above. Per ten thousand
+	// rather than per hundred because the worst seed is now 0.01% and a ceiling stated in
+	// whole percent would be a hundred times the thing it bounds.
+	const exposedCeiling = 5
 
 	for _, seed := range []int64{1, 0x5EED, 7} {
 		exposed, sources := 0, 0
@@ -893,7 +934,8 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 					sources++
 					for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 						nx, nz := x+step[0], z+step[1]
-						if columnAt(seed, nx, nz).voxelAt(seed, nx, y, nz) == Air {
+						neighbour := columnAt(seed, nx, nz)
+						if neighbour.voxelAt(seed, nx, y, nz) == Air {
 							if exposed == 0 {
 								worst = [3]int64{x, y, z}
 							}
@@ -907,11 +949,118 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 		if sources == 0 {
 			t.Fatalf("seed %d: the window holds no source water, so nothing was checked", seed)
 		}
-		if exposed*100 > sources*exposedCeiling {
-			t.Errorf("seed %d: %d of %d source voxels stand against open air (%.2f%%), over the %d%% ceiling; first at %v",
+		if exposed*10000 > sources*exposedCeiling {
+			t.Errorf("seed %d: %d of %d source voxels stand against open air (%.3f%%), over the %d-in-10000 ceiling; first at %v",
 				seed, exposed, sources, float64(exposed)*100/float64(sources), exposedCeiling, worst)
 		}
-		t.Logf("seed %d: %d of %d source voxels exposed (%.2f%%)",
+		t.Logf("seed %d: %d of %d source voxels exposed (%.3f%%)",
 			seed, exposed, sources, float64(exposed)*100/float64(sources))
+	}
+}
+
+// The bank rule, asserted where it fires rather than only through the share above.
+//
+// **A share that has fallen is evidence the defect is gone; it is not evidence the rule
+// is there.** Removing every cave from the world would pass the sweep too. So this one
+// counts the carves the rule actually refuses, fails if it finds none, and checks what
+// stands in their place: the refusal has to leave the column's own ground, not air and
+// not water, or it has traded one wall nothing holds for another.
+//
+// **The total is what must be non-zero, not each seed**, and the counts say why: 202 at
+// seed 1 and none at the other two. Seed 1's residue after #654 was 214 voxels of
+// *channel* water beside a carved bank, which only a refused carve can answer; seed 7's
+// 339 and all but four of seed 0x5EED's 63 were the other half of #660, a pocket sealed
+// under a lake, and draining one leaves the cave beside it opening into nothing that
+// needs a wall. A window can be closed by the fill rule alone and reach this test with
+// no carve left to refuse.
+func TestACarveDoesNotBreachTheWallOfAStandingBody(t *testing.T) {
+	t.Parallel()
+
+	total := 0
+	for _, seed := range []int64{1, 0x5EED, 7} {
+		refused := 0
+		for x := int64(-64); x < 64; x++ {
+			for z := int64(1040); z < 1168; z++ {
+				col := columnAt(seed, x, z)
+				for y := int64(20); y <= 110; y++ {
+					if !col.carveFieldAt(seed, x, y, z) || col.carvedAt(seed, x, y, z) {
+						continue
+					}
+					refused++
+
+					// The rule, stated from its two preconditions rather than read back
+					// out of the function that applies it.
+					if fill := col.caveFillAt(int(y)); fill != Air {
+						t.Fatalf("seed %d: the carve at (%d, %d, %d) was refused, but this column would have filled it with %d",
+							seed, x, y, z, fill)
+					}
+					if !col.waterStandsBesideAt(y) {
+						t.Fatalf("seed %d: the carve at (%d, %d, %d) was refused with no water standing beside it",
+							seed, x, y, z)
+					}
+					if got := col.voxelAt(seed, x, y, z); got == Air || IsWater(got) {
+						t.Fatalf("seed %d: the refused carve at (%d, %d, %d) left %d rather than this column's ground",
+							seed, x, y, z, got)
+					}
+				}
+			}
+		}
+		total += refused
+		t.Logf("seed %d: %d carves refused at a water wall", seed, refused)
+	}
+	if total == 0 {
+		t.Fatal("no seed holds a carve the bank rule refuses, so nothing was checked")
+	}
+}
+
+// TestAColumnCarriesTheSameBankItResolvesAlone pins the shortcut [Generate] takes.
+//
+// **There are two ways to obtain a column's water band and a chunk uses both**:
+// [bankWaterAt] resolves one from a coordinate, and [column.bank] reads one off a column
+// already resolved. The second is why a chunk pays 128 of the first instead of 4096, and
+// if the two ever disagreed a chunk's interior would carve by one rule and its border by
+// another — silently, and only where water happens to stand.
+//
+// The second half is the same claim about the whole composition: below a column's own
+// surface, where no plant and no building reaches, [Generate]'s voxels must be exactly
+// the ones [columnAt] composes. That is the region the bank rule moves.
+func TestAColumnCarriesTheSameBankItResolvesAlone(t *testing.T) {
+	t.Parallel()
+
+	wet := 0
+	for x := int64(-64); x < 64; x++ {
+		for z := int64(1040); z < 1168; z++ {
+			col := columnShapeAt(waterSeed, x, z)
+			if got, want := col.bank(), bankWaterAt(waterSeed, x, z); got != want {
+				t.Fatalf("column (%d, %d) carries band %+v, but resolving it alone gives %+v", x, z, got, want)
+			}
+			if col.standingWater {
+				wet++
+			}
+		}
+	}
+	if wet == 0 {
+		t.Fatal("the window holds no column standing in water, so the non-empty band was never compared")
+	}
+
+	for _, coord := range []Coord{goldenWaterCoord, bodyCaveMouthCoord} {
+		chunk := Generate(waterSeed, coord)
+		originX, originY, originZ := coord.Origin()
+		for z := range ChunkSize {
+			for x := range ChunkSize {
+				worldX, worldZ := originX+int64(x), originZ+int64(z)
+				col := columnAt(waterSeed, worldX, worldZ)
+				for y := range ChunkSize {
+					worldY := originY + int64(y)
+					if worldY > int64(col.surface) {
+						continue // above the ground, where a plant or a roof may stand
+					}
+					if got, want := chunk.At(x, y, z), col.voxelAt(waterSeed, worldX, worldY, worldZ); got != want {
+						t.Fatalf("chunk %+v voxel (%d, %d, %d) is %d, but the column composes %d",
+							coord, worldX, worldY, worldZ, got, want)
+					}
+				}
+			}
+		}
 	}
 }
