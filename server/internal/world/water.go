@@ -647,8 +647,15 @@ func (c *column) fillAt(worldY int) Block {
 //	                                    seed 1        seed 0x5EED   seed 7
 //	as #654 left it                     214/34423     63/41770      339/114578
 //	the four-neighbour test             214/34423     58/41711      296/114239
-//	the carved-run rule here              0/34423      0/41534        0/111425
+//	the carved-run rule here            214/34423      4/41534        0/111425
 //	  and the bank rule beside it         2/34423      4/41534        0/111425
+//
+// Rows one, three and four are re-derivable from this tree by running
+// [TestNoSourceWaterStandsAgainstOpenAir] with the last line of [column.carvedAt] held
+// at `true`, which is the bank rule off. Row two is not: the four-neighbour test was
+// written to be measured and then deleted, so that row is a record of why it is not
+// here rather than a number anybody can check. Its rejection rests on the paragraph
+// above it, which is an argument rather than a reading.
 //
 // The connectivity rule is the fixed point that test is trying to reach, one scan at a
 // time, and it reaches it directly. It also removes the sealed pocket that filled for
