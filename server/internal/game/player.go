@@ -825,9 +825,9 @@ func (s *Sim) joinCharacter(
 	}
 
 	joinSpawn := [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
-	pos, yaw, health, hunger, experience, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), starterSlots()
+	pos, yaw, health, hunger, experience, silver, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), uint32(0), starterSlots()
 	if resume != nil {
-		pos, yaw, health, hunger, experience, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, restoredSlots(resume.Slots)
+		pos, yaw, health, hunger, experience, silver, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, resume.Silver, restoredSlots(resume.Slots)
 	}
 
 	p := &Player{
@@ -849,7 +849,7 @@ func (s *Sim) joinCharacter(
 		// A composite literal for the reason newStarterInventory returns one: the struct
 		// carries a mutex, which `go vet`'s copylocks check refuses to see assigned from
 		// a variable.
-		inventory: inventory{slots: slots},
+		inventory: inventory{slots: slots, silver: silver},
 		pos:       pos,
 		spawn:     joinSpawn,
 		yaw:       yaw,

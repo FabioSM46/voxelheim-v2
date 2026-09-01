@@ -144,6 +144,7 @@ func livingRecord() persist.Record {
 		Health:     game.PlayerMaxHealth,
 		Hunger:     41,
 		Experience: 725,
+		Silver:     2468,
 	}
 }
 
@@ -256,6 +257,9 @@ func TestResolveAPlayer(t *testing.T) {
 		}
 		if resolved.Life.Experience != 725 {
 			t.Errorf("the resumed life has experience %d, want the stored 725", resolved.Life.Experience)
+		}
+		if resolved.Life.Silver != 2468 {
+			t.Errorf("the resumed life has silver %d, want the stored 2468", resolved.Life.Silver)
 		}
 		if resolved.ID != testPlayerID(account) {
 			t.Error("a resumed player has a different player id")

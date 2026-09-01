@@ -812,7 +812,7 @@ func (i *Identities) recall(character persist.Character) (*game.Life, bool, erro
 	// rather than slot by slot.
 	life := game.Life{
 		Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger,
-		Experience: rec.Experience, Slots: rec.Slots,
+		Experience: rec.Experience, Silver: rec.Silver, Slots: rec.Slots,
 	}
 	if vErr := life.Validate(); vErr != nil {
 		return nil, false, i.refuseRecord(character, vErr)
@@ -1017,6 +1017,7 @@ func (i *Identities) writeLife(character persist.CharacterID, life game.Life) er
 		Health:     life.Health,
 		Hunger:     life.Hunger,
 		Experience: life.Experience,
+		Silver:     life.Silver,
 		Slots:      life.Slots,
 	})
 }
