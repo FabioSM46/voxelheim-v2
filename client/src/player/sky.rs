@@ -407,7 +407,12 @@ impl SkyClock {
     /// `the_clock_re_anchors_across_midnight_without_jumping` is what pins that. It is also
     /// why refusing an anchor lower than the current reading would be a bug rather than a
     /// guard: once a day, the lower value is the correct one.
-    fn ticks_at(&self, now: Instant, tick_rate: u8, day_length_ticks: u32) -> Option<f32> {
+    pub(crate) fn ticks_at(
+        &self,
+        now: Instant,
+        tick_rate: u8,
+        day_length_ticks: u32,
+    ) -> Option<f32> {
         let anchor = self.0?;
         let elapsed = now.saturating_duration_since(anchor.at).as_secs_f32();
         let advanced = anchor.tick_of_day as f32 + elapsed * f32::from(tick_rate);
@@ -598,7 +603,7 @@ fn sun_position(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
 ///
 /// **Extracted from [`sun_position`] rather than copied out of it**, so one azimuth is one
 /// expression and the disc and the light cannot drift apart.
-fn sun_phase(clock: &WorldClock, tick_of_day: f32) -> f32 {
+pub(crate) fn sun_phase(clock: &WorldClock, tick_of_day: f32) -> f32 {
     let day_length = clock.day_length_ticks as f32;
     let night_length = (clock.night_end_ticks - clock.night_start_ticks) as f32;
     let daylight = day_length - night_length;
