@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 
 use crate::net::{
-    EntityState, ItemDropState, MobAction, MobKind, MobState, MountKind, ProjectileKind,
+    CastState, EntityState, ItemDropState, MobAction, MobKind, MobState, MountKind, ProjectileKind,
     ProjectileState, Snapshot, StructureState,
 };
 
@@ -110,6 +110,13 @@ pub struct SnapshotBuffer {
 }
 
 impl SnapshotBuffer {
+    /// The recipient cast in the newest accepted snapshot; absence stops its bar.
+    pub fn self_cast(&self) -> Option<CastState> {
+        self.latest
+            .as_ref()
+            .and_then(|latest| latest.snapshot.self_cast)
+    }
+
     /// Drops every answer from a session that has ended.
     pub(super) fn clear(&mut self) {
         self.previous = None;

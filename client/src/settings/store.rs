@@ -22,8 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DisplayMode, MonitorPreference, Settings, key_from_name, key_name,
-    valid_monitor_identity,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    key_from_name, key_name, valid_monitor_identity,
 };
 
 /// The environment variable naming the XDG data directory.
@@ -183,6 +183,10 @@ fn render(settings: &Settings) -> String {
     // silently, and only for a value that landed a fraction away from a round number.
     // `every_setting_survives_a_restart` is what caught it.
     out.push_str(&format!("look-sensitivity {}\n", settings.look_sensitivity));
+    out.push_str(&format!(
+        "default-mount {}\n",
+        settings.default_mount.map_or("none", DefaultMount::name)
+    ));
     out.push_str(&format!("window-mode {}\n", settings.window_mode.name()));
     match &settings.monitor {
         MonitorPreference::Primary => out.push_str("monitor primary\n"),
@@ -250,6 +254,13 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "look-sensitivity" => match value.parse::<f32>() {
                 Ok(parsed) if parsed.is_finite() => settings.look_sensitivity = parsed,
                 _ => refuse("a mouse sensitivity"),
+            },
+            "default-mount" => match value {
+                "none" => settings.default_mount = None,
+                name => match DefaultMount::from_name(name) {
+                    Some(parsed) => settings.default_mount = Some(parsed),
+                    None => refuse("a default mount or none"),
+                },
             },
             "window-mode" => match DisplayMode::from_name(value) {
                 Some(parsed) => settings.window_mode = parsed,
@@ -430,6 +441,7 @@ mod tests {
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
+        settings.set_default_mount(DefaultMount::Grey);
         for (control, key) in [
             (Control::Forward, KeyCode::F6),
             (Control::Menu, KeyCode::KeyG),
