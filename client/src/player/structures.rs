@@ -2028,7 +2028,7 @@ mod tests {
         stacks[0] = slot_zero;
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
         (app, sent)
     }
 

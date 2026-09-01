@@ -2143,7 +2143,7 @@ mod tests {
         };
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
         (app, sent)
     }
 
@@ -2236,7 +2236,7 @@ mod tests {
         stacks[0] = stack;
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
     }
 
     /// One blade at the given wear, whichever blade it is.

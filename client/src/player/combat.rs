@@ -365,7 +365,7 @@ mod tests {
         stacks[0] = slot_zero;
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
     }
 
     /// One of an item, which is every stack these tests need except a blade.
@@ -688,7 +688,7 @@ mod tests {
         stacks[0] = blade();
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
 
         app.update();
 

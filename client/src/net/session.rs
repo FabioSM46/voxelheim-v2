@@ -160,6 +160,10 @@ pub(super) enum Choice {
 /// and flattening them here used to throw that distinction away. The naming remains
 /// about what *happened* rather than about what should be displayed.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Snapshot is the hot-path event and remains inline; V27 adds sparse mount and cast projections"
+)]
 pub(super) enum SessionEvent {
     /// The socket is up and `ClientHello` is on the wire.
     Handshaking,
