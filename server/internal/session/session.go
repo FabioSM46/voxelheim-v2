@@ -1058,6 +1058,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadMarkerRemoveRequest,
 		vnet.PayloadNpcInteractRequest,
 		vnet.PayloadTradeRequest,
+		vnet.PayloadPlayerTradeRequest,
 		vnet.PayloadLeaveRequest:
 		return true
 	default:
@@ -2005,6 +2006,36 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		refusal := protocol.ActionRefused{Action: vnet.RefusedActionTrade, Reason: reason}
 		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
 			return fmt.Errorf("session: send trade refusal: %w", sErr)
+		}
+		return nil
+
+	case vnet.PayloadPlayerTradeRequest:
+		if player == nil || msg.PlayerTrade == nil {
+			log.Debug("player trade arrived with no player to attribute it to; discarding")
+			return nil
+		}
+
+		request := *msg.PlayerTrade
+		reason, tradeErr := player.PlayerTrade(request)
+		if tradeErr == nil {
+			return nil
+		}
+		log.Debug("refusing player trade",
+			"reason", tradeErr.Error(),
+			"code", reason.String(),
+			"action", request.Action.String(),
+			"target_entity_id", request.TargetEntityID,
+			"trade_slot", request.TradeSlot,
+			"pack_slot", request.PackSlot,
+			"revision", request.Revision,
+			"client_tick", request.ClientTick,
+		)
+		if reason == vnet.RefusalReasonUnknown {
+			return nil
+		}
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionPlayerTrade, Reason: reason}
+		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+			return fmt.Errorf("session: send player trade refusal: %w", sErr)
 		}
 		return nil
 

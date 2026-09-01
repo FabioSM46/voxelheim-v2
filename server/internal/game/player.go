@@ -161,6 +161,8 @@ type Sim struct {
 	byName            map[string]*Player
 	partyInviteTicks  uint64
 	partyOfflineTicks uint64
+	tradeReopenTicks  uint64
+	tradeCooldowns    map[playerTradePair]uint64
 	currentTick       uint64
 
 	// tickOfDay is where the world stands in its day, and it is always less than
@@ -445,6 +447,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		byName:               make(map[string]*Player),
 		partyInviteTicks:     uint64(ticksFor(PartyInviteTTL, tickRate)),
 		partyOfflineTicks:    uint64(ticksFor(PartyOfflineGrace, tickRate)),
+		tradeReopenTicks:     uint64(ticksFor(TradeReopenCooldown, tickRate)),
+		tradeCooldowns:       make(map[playerTradePair]uint64),
 		drops:                make(map[uint64]*itemDrop),
 		projectiles:          make(map[uint64]*projectile),
 		projectileOwners:     make(map[uint64]*Player),
@@ -677,6 +681,13 @@ type Player struct {
 	vendorDirty    bool
 	vendorClosures []uint64
 
+	// A player-to-player trade is one server-owned value referenced by both live
+	// participants. The reference and all queued presentation are session-only: Join
+	// starts them empty and Record never sees them.
+	trade               *playerTrade
+	playerTradeClosures []protocol.PlayerTradeClosed
+	playerTradeRefusals []vnet.RefusalReason
+
 	// The newest landed monster blows this session has not been told about yet. Unlike a
 	// snapshot, an event is not superseded by the next tick, so a full outbound queue
 	// leaves these pending until offerMobHitsLocked gets one through. The bounded queue
@@ -697,6 +708,10 @@ type Player struct {
 	// buying at a stall is not looting a body, and one must never silence the other.
 	haveTradeTick bool
 	lastTradeTick uint32
+	// Player trading is an independent intent stream: changing an offer must not make
+	// a vendor purchase with the same client tick stale, or vice versa.
+	havePlayerTradeTick bool
+	lastPlayerTradeTick uint32
 
 	// described is every entity this session has been told the appearance of, against
 	// the tick it was last visible on. **This player is the viewer here, not the
@@ -953,6 +968,7 @@ func (s *Sim) Leave(p *Player) {
 		s.rememberTapExperienceLocked(characterKeyOf(p.playerID, p.name), p.experience)
 		s.markPartyMemberOfflineLocked(p)
 		s.clearInvitesFromLocked(p.entityID)
+		p.closePlayerTradeLocked(vnet.PlayerTradeCloseReasonDisconnected)
 		p.setMiningLocked(nil)
 		p.mineCompleting = false
 		p.mineReset = nil
@@ -1301,6 +1317,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		p.offerInventoryLocked()
 		p.offerLootLocked()
 		p.offerVendorLocked()
+		p.offerPlayerTradeLocked()
 		p.offerMobHitsLocked()
 	}
 

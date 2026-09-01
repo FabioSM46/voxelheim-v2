@@ -103,6 +103,15 @@ const (
 	// deterministic and independent of scheduler timing.
 	PartyOfflineGrace = 10 * time.Minute
 
+	// TradeReach is the fixed maximum separation between two player collision boxes
+	// for the whole lifetime of a player trade. Unlike ordinary interaction reach it
+	// is deliberately unaffected by weather.
+	TradeReach = 8.0
+
+	// TradeReopenCooldown prevents one participant from immediately reopening a trade
+	// the other just cancelled. NewSim converts it once to authoritative ticks.
+	TradeReopenCooldown = 5 * time.Second
+
 	// PartyShareRadius is how near an online party member must stand to share a kill.
 	// Thirty-two blocks is twice the draugr's sixteen-block aggro range, so everybody
 	// spread across one fight counts, and well inside the default streamed view.
