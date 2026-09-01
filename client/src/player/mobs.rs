@@ -212,8 +212,8 @@ const AGGRO_MARKER_HEIGHT: f32 = 0.34;
 const AGGRO_MARKER_GAP: f32 = 0.20;
 const AGGRO_MARKER_COLOUR: Color = Color::srgb(0.92, 0.08, 0.06);
 
-/// A restrained amber wash for a corpse the server says this recipient may open.
-const LOOTABLE_COLOUR: Color = Color::srgb(0.58, 0.47, 0.24);
+/// A warm amber wash for a corpse the server says this recipient may open.
+const LOOTABLE_COLOUR: Color = Color::srgb(0.64, 0.52, 0.27);
 
 /// The undead grey a draugr is drawn in.
 const DRAUGR_BODY_COLOUR: Color = Color::srgb(0.36, 0.40, 0.38);
@@ -2191,6 +2191,25 @@ mod tests {
         let eye_material = materials.get(&eyes.material).expect("eye material is live");
         assert_eq!(eye_material.base_color, VARGR_EYE_COLOUR);
         assert_eq!(eye_material.emissive, VARGR_EYE_EMISSIVE);
+    }
+
+    #[test]
+    fn the_lootable_wash_is_brighter_but_still_restrained() {
+        fn relative_luminance(colour: Color) -> f32 {
+            let linear = colour.to_linear();
+            0.2126 * linear.red + 0.7152 * linear.green + 0.0722 * linear.blue
+        }
+
+        let previous = relative_luminance(Color::srgb(0.58, 0.47, 0.24));
+        let current = relative_luminance(LOOTABLE_COLOUR);
+        let increase = current / previous - 1.0;
+
+        assert_eq!(LOOTABLE_COLOUR, Color::srgb(0.64, 0.52, 0.27));
+        assert!(
+            (0.12..=0.30).contains(&increase),
+            "the lootable wash changed relative luminance by {:.1}%, want 12-30%",
+            increase * 100.0
+        );
     }
 
     #[test]
