@@ -2858,6 +2858,25 @@ mod tests {
     }
 
     #[test]
+    fn the_default_rung_needs_at_most_sixty_three_squares() {
+        let aligned = MapScreen {
+            open: true,
+            centre: IVec2::ZERO,
+            ..MapScreen::default()
+        };
+        assert_eq!(aligned.tiles_in_view().len(), 8 * 6);
+
+        // Moving one block off both grid axes makes each half-open viewport cross one
+        // additional tile boundary. This is the cold-opening cost the server's burst
+        // must admit before a refill is needed.
+        let unaligned = MapScreen {
+            centre: IVec2::ONE,
+            ..aligned
+        };
+        assert_eq!(unaligned.tiles_in_view().len(), 9 * 7);
+    }
+
+    #[test]
     fn a_viewport_no_window_could_have_is_asked_nothing() {
         let screen = MapScreen {
             open: true,
@@ -3072,6 +3091,53 @@ mod tests {
             *app.world().resource::<Painted>(),
             first,
             "a drawn square is something new to draw"
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct PictureEdits(usize);
+
+    fn count_picture_edits(
+        mut events: MessageReader<AssetEvent<Image>>,
+        picture: Res<MapPicture>,
+        mut edits: ResMut<PictureEdits>,
+    ) {
+        for event in events.read() {
+            if matches!(event, AssetEvent::Modified { id } if *id == picture.0.id()) {
+                edits.0 += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn every_tile_arriving_in_one_frame_costs_one_composition() {
+        let (mut app, _frames) = app();
+        app.init_resource::<PictureEdits>()
+            .add_systems(Update, count_picture_edits.after(paint_the_map));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        app.world_mut().resource_mut::<MapScreen>().centre = IVec2::ONE;
+        app.update();
+        app.world_mut().resource_mut::<PictureEdits>().0 = 0;
+
+        let screen = screen_of(&mut app);
+        let keys = screen.tiles_in_view();
+        assert_eq!(keys.len(), 63, "exercise the whole unaligned default view");
+        for key in keys {
+            app.world_mut()
+                .resource_mut::<MapInbox>()
+                .push(MapEvent::Tile(tile(
+                    key.origin_x,
+                    key.origin_z,
+                    key.scale.wire(),
+                )));
+        }
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<PictureEdits>().0,
+            1,
+            "the frame rewrites the texture once, not once per arriving tile"
         );
     }
 
