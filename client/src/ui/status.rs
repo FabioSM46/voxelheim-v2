@@ -645,6 +645,13 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::NotAVendor
         | RefusalReason::NotEnoughSilver
         | RefusalReason::VendorDoesNotWant
+        // V28's player-trade reasons are decoded at the protocol boundary, but their
+        // presentation belongs to the later player-trade UI. They remain silent here.
+        | RefusalReason::AlreadyTrading
+        | RefusalReason::TradeNotOpen
+        | RefusalReason::TradeSlotTaken
+        | RefusalReason::NothingToOffer
+        | RefusalReason::TradeCooldown
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing

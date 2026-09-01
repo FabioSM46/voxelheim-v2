@@ -74,6 +74,13 @@ pub use codec::{
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[allow(unused_imports)]
 pub use codec::{CastKind, CastState, LearnedMounts, MountKind, MountRequest, MountState};
+// V28's player-trade protocol surface, ahead of the presentation consumer. The
+// authoritative state is decoded here; no client system decides a trade outcome.
+#[allow(unused_imports)]
+pub use codec::{
+    PLAYER_TRADE_SLOTS, PlayerTradeAction, PlayerTradeCloseReason, PlayerTradeClosed,
+    PlayerTradeRequest, PlayerTradeSlot, PlayerTradeState,
+};
 // V25's settlement surface, ahead of the consumers that read it: the resident window is
 // #458 and the vendor window is #459. Named here for the reason the block above is —
 // so neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
@@ -97,6 +104,8 @@ pub use codec::{
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
 pub use codec::encode_block_request;
+#[allow(unused_imports)] // V28 outbound encoder precedes the player-trade UI.
+pub use codec::encode_player_trade_request;
 #[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
 pub use codec::{
     encode_attack_request, encode_block_edit_request, encode_chat_request,
