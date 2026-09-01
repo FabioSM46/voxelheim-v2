@@ -1,7 +1,3 @@
-//! The complete presentation of one server-owned player trade.
-//!
-//! It rebuilds from [`PlayerTradeWindow`] and emits only revisioned intent.
-
 use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
@@ -24,7 +20,7 @@ struct TradeRoot;
 
 #[derive(Component)]
 struct TradePress {
-    click: Option<PlayerTradeClick>,
+    click: PlayerTradeClick,
     locked: bool,
 }
 
@@ -36,7 +32,7 @@ struct SilverFieldText;
 
 #[derive(Resource, Debug, Default)]
 struct SilverDraft {
-    revision: u32,
+    seed: Option<(u64, u32)>,
     line: String,
     focused: bool,
 }
@@ -106,25 +102,20 @@ fn rebuild_window(
     for root in &roots {
         commands.entity(root).despawn_related::<Children>();
         let (Some(state), Some(session)) = (window.state(), session.as_deref()) else {
+            *draft = SilverDraft::default();
             continue;
         };
-        if draft.revision != state.revision || window.is_changed() {
-            draft.revision = state.revision;
+        let seed = (state.partner_entity_id, state.my_silver);
+        if draft.seed != Some(seed) {
+            draft.seed = Some(seed);
             draft.line = state.my_silver.to_string();
             draft.focused = false;
         }
 
         commands.entity(root).with_children(|root| {
-            root.spawn((
-                Text::new(format!(
-                    "Trade with {} | revision {}",
-                    state.partner_name, state.revision
-                )),
-                TextFont {
-                    font_size: FontSize::Px(22.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
+            root.spawn(trade_text(
+                format!("Trade with {}", state.partner_name),
+                22.0,
             ));
             root.spawn(Node {
                 width: Val::Percent(100.0),
@@ -171,14 +162,7 @@ fn rebuild_window(
                 spawn_button(buttons, "Cancel", PlayerTradeClick::Cancel, false);
             });
 
-            root.spawn((
-                Text::new("Pack"),
-                TextFont {
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
+            root.spawn(trade_text("Pack", 18.0));
             let equipment_first = session.0.inventory_slots - session.0.equipment_slots;
             root.spawn((
                 Node {
@@ -207,10 +191,10 @@ fn rebuild_window(
                     spawn_stack_cell(
                         grid,
                         stack,
-                        Some(TradePress {
-                            click: Some(PlayerTradeClick::OfferPackSlot(slot)),
+                        TradePress {
+                            click: PlayerTradeClick::OfferPackSlot(slot),
                             locked: state.my_confirmed || offered || empty,
-                        }),
+                        },
                         offered,
                         liveries.as_deref(),
                     );
@@ -220,10 +204,7 @@ fn rebuild_window(
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one column is one authoritative offer plus its heading, silver and lock state"
-)]
+#[allow(clippy::too_many_arguments, reason = "offer")]
 fn spawn_offer_column(
     columns: &mut ChildSpawnerCommands<'_>,
     heading: &str,
@@ -248,14 +229,7 @@ fn spawn_offer_column(
             BackgroundColor(if confirmed { CONFIRMED } else { Color::NONE }),
         ))
         .with_children(|column| {
-            column.spawn((
-                Text::new(heading.to_owned()),
-                TextFont {
-                    font_size: FontSize::Px(17.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
+            column.spawn(trade_text(heading, 17.0));
             column
                 .spawn(Node {
                     display: Display::Flex,
@@ -267,10 +241,10 @@ fn spawn_offer_column(
                     for trade_slot in 0..PLAYER_TRADE_SLOTS as u8 {
                         let entry = offer.iter().find(|entry| entry.trade_slot == trade_slot);
                         let stack = entry.map(trade_stack);
-                        let press = mine.then_some(TradePress {
-                            click: Some(PlayerTradeClick::ClearOfferSlot(trade_slot)),
-                            locked: confirmed || entry.is_none(),
-                        });
+                        let press = TradePress {
+                            click: PlayerTradeClick::ClearOfferSlot(trade_slot),
+                            locked: !mine || confirmed || entry.is_none(),
+                        };
                         spawn_stack_cell(slots, stack, press, false, liveries);
                     }
                 });
@@ -288,25 +262,24 @@ fn spawn_offer_column(
                     ))
                     .with_child((
                         SilverFieldText,
-                        Text::new(format!("Silver: {silver_line}")),
-                        TextFont {
-                            font_size: FontSize::Px(15.0),
-                            ..default()
-                        },
-                        TextColor(Color::WHITE),
+                        trade_text(format!("Silver: {silver_line}"), 15.0),
                         FocusPolicy::Pass,
                     ));
             } else {
-                column.spawn((
-                    Text::new(format!("Silver: {silver}")),
-                    TextFont {
-                        font_size: FontSize::Px(15.0),
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                ));
+                column.spawn(trade_text(format!("Silver: {silver}"), 15.0));
             }
         });
+}
+
+fn trade_text(text: impl Into<String>, size: f32) -> (Text, TextFont, TextColor) {
+    (
+        Text::new(text),
+        TextFont {
+            font_size: FontSize::Px(size),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+    )
 }
 
 fn trade_stack(slot: &PlayerTradeSlot) -> InventoryStack {
@@ -321,20 +294,22 @@ fn trade_stack(slot: &PlayerTradeSlot) -> InventoryStack {
 fn spawn_stack_cell(
     parent: &mut ChildSpawnerCommands<'_>,
     stack: Option<InventoryStack>,
-    press: Option<TradePress>,
+    press: TradePress,
     offered: bool,
     liveries: Option<&Liveries>,
 ) {
     let style = stack_style(stack);
-    let locked = press.as_ref().is_some_and(|press| press.locked);
-    let press = press.unwrap_or(TradePress {
-        click: None,
-        locked: true,
+    let locked = press.locked;
+    let details = stack.map_or(style.count.clone(), |stack| {
+        if stack.max_durability > 0 {
+            format!(
+                "{}  {}/{}",
+                style.count, stack.durability, stack.max_durability
+            )
+        } else {
+            style.count.clone()
+        }
     });
-    let durability = stack
-        .filter(|stack| stack.max_durability > 0)
-        .map(|stack| format!("{}/{}", stack.durability, stack.max_durability))
-        .unwrap_or_default();
     parent
         .spawn((
             press,
@@ -353,30 +328,10 @@ fn spawn_stack_cell(
                     .with_children(|host| icon::spawn(host, icon, liveries));
             }
             cell.spawn((
-                Text::new(style.count),
-                TextFont {
-                    font_size: FontSize::Px(14.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
+                trade_text(details, 12.0),
                 Node {
                     position_type: PositionType::Absolute,
                     right: Val::Px(2.0),
-                    bottom: Val::Px(1.0),
-                    ..default()
-                },
-                FocusPolicy::Pass,
-            ));
-            cell.spawn((
-                Text::new(durability),
-                TextFont {
-                    font_size: FontSize::Px(9.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.82, 0.84, 0.88)),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(2.0),
                     bottom: Val::Px(1.0),
                     ..default()
                 },
@@ -393,10 +348,7 @@ fn spawn_button(
 ) {
     parent
         .spawn((
-            TradePress {
-                click: Some(click),
-                locked,
-            },
+            TradePress { click, locked },
             Button,
             Node {
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
@@ -404,20 +356,12 @@ fn spawn_button(
             },
             BackgroundColor(if locked { LOCKED } else { BUTTON }),
         ))
-        .with_child((
-            Text::new(label.to_owned()),
-            TextFont {
-                font_size: FontSize::Px(16.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        ));
+        .with_child(trade_text(label, 16.0));
 }
 
 fn edit_silver(
     window: Res<PlayerTradeWindow>,
     mut draft: ResMut<SilverDraft>,
-    mouse: Option<Res<ButtonInput<MouseButton>>>,
     mut keys: MessageReader<KeyboardInput>,
     mut fields: Query<(&Interaction, &mut BackgroundColor), With<SilverField>>,
     mut labels: Query<&mut Text, With<SilverFieldText>>,
@@ -454,11 +398,6 @@ fn edit_silver(
                 Some(TextEdit::Cancelled) | None => {}
             }
         }
-        if mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left))
-            && *interaction != Interaction::Pressed
-        {
-            submit = true;
-        }
     }
     if submit {
         draft.focused = false;
@@ -472,7 +411,6 @@ fn edit_silver(
 }
 
 fn click_controls(
-    draft: Res<SilverDraft>,
     mut buttons: Query<(&TradePress, &Interaction, &mut BackgroundColor), Changed<Interaction>>,
     mut clicks: MessageWriter<PlayerTradeClick>,
 ) {
@@ -480,12 +418,8 @@ fn click_controls(
         if !press.locked {
             colour.0 = button_colour(interaction);
         }
-        if *interaction == Interaction::Pressed
-            && !press.locked
-            && !draft.is_changed()
-            && let Some(click) = press.click
-        {
-            clicks.write(click);
+        if *interaction == Interaction::Pressed && !press.locked {
+            clicks.write(press.click);
         }
     }
 }
@@ -577,33 +511,24 @@ mod tests {
         let world = app.world_mut();
         let mut presses = world.query::<(&TradePress, &BackgroundColor)>();
         let drawn: Vec<_> = presses.iter(world).collect();
+        let count = |kind: fn(PlayerTradeClick) -> bool| {
+            drawn.iter().filter(|(press, _)| kind(press.click)).count()
+        };
         assert_eq!(
-            drawn
-                .iter()
-                .filter(|(press, _)| matches!(
-                    press.click,
-                    Some(PlayerTradeClick::ClearOfferSlot(_))
-                ))
-                .count(),
-            5
+            count(|click| matches!(click, PlayerTradeClick::ClearOfferSlot(_))),
+            10
         );
         assert_eq!(
-            drawn
-                .iter()
-                .filter(|(press, _)| matches!(
-                    press.click,
-                    Some(PlayerTradeClick::OfferPackSlot(_))
-                ))
-                .count(),
+            count(|click| matches!(click, PlayerTradeClick::OfferPackSlot(_))),
             24
         );
         assert!(drawn.iter().any(|(press, colour)| {
-            press.click == Some(PlayerTradeClick::OfferPackSlot(9)) && colour.0 == LOCKED
+            press.click == PlayerTradeClick::OfferPackSlot(9) && colour.0 == LOCKED
         }));
         let mut texts = world.query::<&Text>();
         let text: Vec<_> = texts.iter(world).map(|text| text.0.as_str()).collect();
-        assert!(text.contains(&"Trade with Eirik | revision 4"));
+        assert!(text.contains(&"Trade with Eirik"));
         assert!(text.contains(&"Silver: 12") && text.contains(&"Silver: 23"));
-        assert!(text.contains(&"5/10"));
+        assert!(text.iter().any(|line| line.contains("5/10")));
     }
 }

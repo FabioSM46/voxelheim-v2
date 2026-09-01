@@ -1,7 +1,3 @@
-//! The latest complete player-trade view the server sent.
-//!
-//! Server states replace the view wholesale; UI presses emit intent and edit nothing.
-
 use bevy::prelude::*;
 
 use super::{ApplyInputMode, ApplySnapshots, InputCadence, InputMode, SelfVitals};
@@ -10,10 +6,10 @@ use crate::net::{
     PlayerTradeInbox, PlayerTradeRequest, PlayerTradeState, Session, encode_player_trade_request,
 };
 
-/// The one player trade this session can currently see.
 #[derive(Resource, Debug, Default)]
 pub struct PlayerTradeWindow {
     current: Option<PlayerTradeState>,
+    locally_cancelled_partner: Option<u64>,
 }
 
 impl PlayerTradeWindow {
@@ -25,11 +21,11 @@ impl PlayerTradeWindow {
     pub(crate) fn from_server(state: PlayerTradeState) -> Self {
         Self {
             current: Some(state),
+            locally_cancelled_partner: None,
         }
     }
 }
 
-/// One gesture made inside the player-trade window.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerTradeClick {
     OfferPackSlot(u8),
@@ -39,7 +35,6 @@ pub enum PlayerTradeClick {
     Cancel,
 }
 
-/// A matching authoritative close, with the name that was on screen before it closed.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct PlayerTradeEnded {
     pub partner_name: String,
@@ -68,7 +63,6 @@ impl Plugin for PlayerTradePlugin {
     }
 }
 
-/// Applies every server answer in wire order and keeps no state past its session.
 fn reconcile_player_trade(
     mut inbox: ResMut<PlayerTradeInbox>,
     session: Option<Res<Session>>,
@@ -80,10 +74,20 @@ fn reconcile_player_trade(
     for event in inbox.take() {
         match event {
             PlayerTradeEvent::State(state) => {
+                if window.locally_cancelled_partner == Some(state.partner_entity_id) {
+                    continue;
+                }
+                window.locally_cancelled_partner = None;
                 window.current = Some(state);
-                set_mode(&mut mode, InputMode::Trade);
+                if matches!(*mode, InputMode::Playing | InputMode::Trade) {
+                    set_mode(&mut mode, InputMode::Trade);
+                }
             }
             PlayerTradeEvent::Closed(closed) => {
+                if window.locally_cancelled_partner == Some(closed.partner_entity_id) {
+                    window.locally_cancelled_partner = None;
+                    continue;
+                }
                 if window
                     .current
                     .as_ref()
@@ -107,7 +111,6 @@ fn reconcile_player_trade(
     }
 }
 
-/// Turns UI gestures into requests against exactly the revision currently on screen.
 fn send_player_trade_intents(
     cadence: Res<InputCadence>,
     vitals: Res<SelfVitals>,
@@ -117,29 +120,12 @@ fn send_player_trade_intents(
     mut clicks: MessageReader<PlayerTradeClick>,
 ) {
     let clicks: Vec<PlayerTradeClick> = clicks.read().copied().collect();
-    let Some(state) = window.current.as_ref() else {
-        return;
-    };
-
-    if vitals.dead() {
-        close_locally(&mut window, &mut mode);
+    if window.current.is_none() {
         return;
     }
 
-    // The UI applies Escape first; server close and death already removed the state above.
-    if *mode != InputMode::Trade {
-        if let Some(mut outbound) = outbound {
-            send(
-                &mut outbound,
-                state,
-                PlayerTradeAction::Cancel,
-                0,
-                0,
-                0,
-                cadence.client_tick,
-            );
-        }
-        window.current = None;
+    if vitals.dead() {
+        close_locally(&mut window, &mut mode);
         return;
     }
 
@@ -150,6 +136,9 @@ fn send_player_trade_intents(
         let Some(state) = window.current.as_ref() else {
             break;
         };
+        if *mode != InputMode::Trade && click != PlayerTradeClick::Cancel {
+            continue;
+        }
         let request = match click {
             PlayerTradeClick::Cancel => Some((PlayerTradeAction::Cancel, 0, 0, 0)),
             PlayerTradeClick::Confirm if !state.my_confirmed => {
@@ -189,7 +178,10 @@ fn send_player_trade_intents(
             cadence.client_tick,
         );
         if action == PlayerTradeAction::Cancel {
-            close_locally(&mut window, &mut mode);
+            let partner_entity_id = state.partner_entity_id;
+            window.current = None;
+            window.locally_cancelled_partner = Some(partner_entity_id);
+            set_mode(&mut mode, InputMode::Playing);
         }
     }
 }
@@ -227,6 +219,7 @@ fn close_locally(window: &mut ResMut<'_, PlayerTradeWindow>, mode: &mut ResMut<'
     if window.current.is_some() {
         window.current = None;
     }
+    window.locally_cancelled_partner = None;
     if **mode == InputMode::Trade {
         **mode = InputMode::Playing;
     }
@@ -473,12 +466,13 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_trade_sends_cancel_but_death_does_not() {
+    fn explicit_cancel_sends_once_and_ignores_late_state_but_death_sends_nothing() {
         let mut app = app();
         let (outbound, frames) = Outbound::to_a_test(4);
         app.insert_resource(outbound);
         push(&mut app, PlayerTradeEvent::State(state(11, 3)));
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.world_mut().write_message(PlayerTradeClick::Cancel);
         app.update();
         assert_eq!(
             frames.try_iter().collect::<Vec<_>>(),
@@ -494,6 +488,21 @@ mod tests {
         );
 
         push(&mut app, PlayerTradeEvent::State(state(11, 4)));
+        assert!(
+            app.world()
+                .resource::<PlayerTradeWindow>()
+                .state()
+                .is_none(),
+            "late state stays dismissed"
+        );
+        push(
+            &mut app,
+            PlayerTradeEvent::Closed(PlayerTradeClosed {
+                partner_entity_id: 11,
+                reason: PlayerTradeCloseReason::Cancelled,
+            }),
+        );
+        push(&mut app, PlayerTradeEvent::State(state(11, 5)));
         app.insert_resource(SelfVitals::from_server(crate::net::PlayerVitals {
             health: 0,
             life_state: crate::net::LifeState::Dead,
