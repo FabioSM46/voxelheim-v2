@@ -196,6 +196,17 @@ pub enum HandshakeError {
     /// of zero says the server keeps none, and a snapshot's tick of day is then not
     /// read at all rather than being checked against zero — which nothing could satisfy.
     TickOfDay { day_length: u32, got: u32 },
+    /// The absolute and wrapped halves of a declared world clock disagree.
+    ///
+    /// Neither half is repaired or preferred: deriving one from the other would hide the
+    /// only evidence that the server captured two different simulation instants.
+    WorldClockPair {
+        day_length: u32,
+        tick_of_day: u32,
+        world_tick: u64,
+    },
+    /// A server that declared no clock nevertheless sent absolute world time.
+    ClocklessWorldTick(u64),
     /// A snapshot states this session's own death twice and the two statements disagree.
     ///
     /// `self_vitals.life_state` and `dead_players` are one fact written once each way, and
@@ -258,6 +269,23 @@ impl fmt::Display for HandshakeError {
             Self::TickOfDay { day_length, got } => write!(
                 f,
                 "EntitySnapshot has tick_of_day {got}, want less than the {day_length}-tick day announced by ServerWelcome"
+            ),
+            Self::WorldClockPair {
+                day_length,
+                tick_of_day,
+                world_tick,
+            } => {
+                let remainder = world_tick
+                    .checked_rem(u64::from(*day_length))
+                    .unwrap_or(*world_tick);
+                write!(
+                    f,
+                    "EntitySnapshot has world_tick {world_tick}, whose remainder in the {day_length}-tick day is {remainder}, but tick_of_day is {tick_of_day}"
+                )
+            }
+            Self::ClocklessWorldTick(got) => write!(
+                f,
+                "EntitySnapshot has world_tick {got}, want 0 because ServerWelcome declared no world clock"
             ),
             Self::OwnDeathDisagrees {
                 vitals_say_dead,
@@ -447,6 +475,17 @@ impl Handshake {
                         day_length: self.clock.day_length_ticks,
                         got: snapshot.tick_of_day,
                     })
+                } else if self.clock.declared()
+                    && snapshot.world_tick % u64::from(self.clock.day_length_ticks)
+                        != u64::from(snapshot.tick_of_day)
+                {
+                    Err(HandshakeError::WorldClockPair {
+                        day_length: self.clock.day_length_ticks,
+                        tick_of_day: snapshot.tick_of_day,
+                        world_tick: snapshot.world_tick,
+                    })
+                } else if !self.clock.declared() && snapshot.world_tick != 0 {
+                    Err(HandshakeError::ClocklessWorldTick(snapshot.world_tick))
                 } else if vitals_say_dead != snapshot.dead_players.contains(&entity_id) {
                     Err(HandshakeError::OwnDeathDisagrees {
                         vitals_say_dead,
@@ -879,6 +918,7 @@ mod tests {
             let _ = handshake.apply(Message::Welcome(params_with_clock()));
             let snapshot = Snapshot {
                 tick_of_day,
+                world_tick: u64::from(tick_of_day),
                 ..snapshot()
             };
 
@@ -914,6 +954,57 @@ mod tests {
         assert_eq!(
             handshake.apply(Message::Snapshot(snapshot.clone())),
             Ok(Transition::Snapshot(snapshot))
+        );
+    }
+
+    /// The absolute clock and its wrapped projection are one fact stated twice. This
+    /// layer owns the check because it alone holds the day length from the welcome.
+    #[test]
+    fn the_absolute_and_wrapped_world_clock_must_agree() {
+        for (world_tick, accepted) in [
+            (7 * 24_000 + 3_456, true),
+            (7 * 24_000 + 3_455, false),
+            (8 * 24_000 + 3_456, true),
+        ] {
+            let mut handshake = Handshake::new();
+            let _ = handshake.apply(Message::CharacterList(character_list()));
+            assert!(handshake.chose());
+            let _ = handshake.apply(Message::Welcome(params_with_clock()));
+            let snapshot = Snapshot {
+                tick_of_day: 3_456,
+                world_tick,
+                ..snapshot()
+            };
+
+            let applied = handshake.apply(Message::Snapshot(snapshot.clone()));
+            if accepted {
+                assert_eq!(applied, Ok(Transition::Snapshot(snapshot)));
+            } else {
+                assert_eq!(
+                    applied,
+                    Err(HandshakeError::WorldClockPair {
+                        day_length: 24_000,
+                        tick_of_day: 3_456,
+                        world_tick,
+                    })
+                );
+            }
+        }
+    }
+
+    /// No declared clock means both wire fields are zero. Accepting a non-zero absolute
+    /// half would let presentation advance from state the welcome explicitly withheld.
+    #[test]
+    fn a_clockless_server_carries_no_absolute_world_time() {
+        let mut handshake = established();
+        let snapshot = Snapshot {
+            world_tick: 1,
+            ..snapshot()
+        };
+
+        assert_eq!(
+            handshake.apply(Message::Snapshot(snapshot)),
+            Err(HandshakeError::ClocklessWorldTick(1))
         );
     }
 

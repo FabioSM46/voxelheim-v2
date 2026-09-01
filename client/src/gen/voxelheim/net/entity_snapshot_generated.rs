@@ -43,6 +43,7 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_WEATHER: ::flatbuffers::VOffsetT = 34;
     pub const VT_MOUNTS: ::flatbuffers::VOffsetT = 36;
     pub const VT_SELF_CAST: ::flatbuffers::VOffsetT = 38;
+    pub const VT_WORLD_TICK: ::flatbuffers::VOffsetT = 40;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -59,6 +60,7 @@ impl<'a> EntitySnapshot<'a> {
         args: &'args EntitySnapshotArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
+        builder.add_world_tick(args.world_tick);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
         if let Some(x) = args.self_cast {
             builder.add_self_cast(x);
@@ -506,6 +508,29 @@ impl<'a> EntitySnapshot<'a> {
             )
         }
     }
+    /// How many authoritative ticks this world has lived through, across every restart.
+    /// This is the absolute half of `tick_of_day`: when the welcome declares a clock,
+    /// `world_tick % day_length_ticks == tick_of_day`. A receiver refuses the whole frame
+    /// when the pair disagrees rather than deriving or wrapping either half, because the
+    /// disagreement is the only evidence that the server emitted a non-atomic clock.
+    ///
+    /// A clockless server carries zero. Unlike `server_tick`, this value is persisted world
+    /// time rather than process uptime, so every client connected to the same world derives
+    /// the same multi-day presentation and a restart resumes it instead of beginning again.
+    ///
+    /// Appended in V29. An older server's absent scalar would read as a fresh world's zero,
+    /// which is a plausible but false lunar phase; the protocol version therefore moves.
+    #[inline]
+    pub fn world_tick(&self) -> u64 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u64>(EntitySnapshot::VT_WORLD_TICK, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -533,6 +558,7 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<WeatherState>("weather", Self::VT_WEATHER, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<MountState>>>>("mounts", Self::VT_MOUNTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<CastState>>("self_cast", Self::VT_SELF_CAST, false)?
+     .visit_field::<u64>("world_tick", Self::VT_WORLD_TICK, false)?
      .finish();
         Ok(())
     }
@@ -574,6 +600,7 @@ pub struct EntitySnapshotArgs<'a> {
         >,
     >,
     pub self_cast: Option<::flatbuffers::WIPOffset<CastState<'a>>>,
+    pub world_tick: u64,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -597,6 +624,7 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             weather: None,
             mounts: None,
             self_cast: None,
+            world_tick: 0,
         }
     }
 }
@@ -766,6 +794,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
             );
     }
     #[inline]
+    pub fn add_world_tick(&mut self, world_tick: u64) {
+        self.fbb_
+            .push_slot::<u64>(EntitySnapshot::VT_WORLD_TICK, world_tick, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -805,6 +838,7 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("weather", &self.weather());
         ds.field("mounts", &self.mounts());
         ds.field("self_cast", &self.self_cast());
+        ds.field("world_tick", &self.world_tick());
         ds.finish()
     }
 }

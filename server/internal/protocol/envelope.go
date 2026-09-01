@@ -1080,6 +1080,15 @@ type EntitySnapshot struct {
 	// from the world underneath it.
 	TickOfDay uint32
 
+	// WorldTick is the persisted absolute half of TickOfDay. A declared clock satisfies
+	// WorldTick % Welcome.DayLengthTicks == TickOfDay; the session-aware client validates
+	// that pair before exposing the snapshot. Zero belongs to a clockless server.
+	//
+	// It rides here rather than beside ServerTick because the two count different things:
+	// ServerTick orders one process's snapshots and may wrap or restart, while WorldTick
+	// names one moment of a persisted world for every connected client.
+	WorldTick uint64
+
 	// PartyLeaderEntityID is zero when the recipient has no party or the party's
 	// leader is offline. A non-zero leader may be the recipient itself, so it need
 	// not occur in PartyMembers.
@@ -2892,6 +2901,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.EntitySnapshotAddSelfVitals(b, vitalsOffset)
 	vnet.EntitySnapshotAddStructures(b, structuresOffset)
 	vnet.EntitySnapshotAddTickOfDay(b, s.TickOfDay)
+	vnet.EntitySnapshotAddWorldTick(b, s.WorldTick)
 	if deadOffset != 0 {
 		vnet.EntitySnapshotAddDeadPlayers(b, deadOffset)
 	}

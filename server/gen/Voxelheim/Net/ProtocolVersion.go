@@ -209,6 +209,12 @@ import "strconv"
 // / frame. `PlayerTradeState` and `PlayerTradeClosed` ride in the same bump so the server
 // / and client halves of player trading consume one settled contract rather than moving
 // / this number again.
+// /
+// / **V29 appends `EntitySnapshot.world_tick`.** A V28 server leaves that scalar at zero,
+// / which is indistinguishable from the first tick of a world and would restart an
+// / eight-day lunar phase every time a V29 client connected. The version therefore moves
+// / even though FlatBuffers can decode the older table: the two peers would otherwise
+// / assign different celestial state to the same snapshot after a clean handshake.
 type ProtocolVersion uint16
 
 const (
@@ -217,7 +223,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 28
+	ProtocolVersionCurrent ProtocolVersion = 29
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

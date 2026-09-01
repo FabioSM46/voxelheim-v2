@@ -5,8 +5,9 @@
 //! The sun used to be a constant in `world/render.rs`, spawned beside the terrain
 //! meshes because a constant has to be spawned somewhere and that is where the
 //! environment was. It is not a constant any more: it is a function of
-//! `EntitySnapshot.tick_of_day`, and a snapshot arrives in exactly one place. Everything
-//! in this module's parent is the same shape — bodies, mobs, drops, structures, vitals
+//! `EntitySnapshot.world_tick`, validated against `tick_of_day`, and a snapshot arrives in
+//! exactly one place. Everything in this module's parent is the same shape — bodies, mobs,
+//! drops, structures, vitals
 //! and the camera are all *what the newest accepted snapshot said, drawn* — while
 //! `world/` is the other pipeline entirely, fed by `WorldInbox` and ending in meshes.
 //!
@@ -357,9 +358,9 @@ pub(super) struct SkyVisuals {
 
 /// Where the world's day is right now, as the newest **accepted** snapshot left it.
 ///
-/// Two numbers and no boundaries: the boundaries live on [`Session`] and are read from
-/// there, so there is exactly one copy of them in the client. This is only the anchor the
-/// time of day is advanced from.
+/// One persisted tick and no boundaries: the boundaries live on [`Session`] and are read
+/// from there, so there is exactly one copy of them in the client. This is only the anchor
+/// world time is advanced from.
 ///
 /// **Nothing but an accepted snapshot moves it.** `SnapshotBuffer::accept` is the one
 /// wrap-aware test of whether a snapshot is newer than the newest held, and
@@ -369,18 +370,18 @@ pub(super) struct SkyVisuals {
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
 pub struct SkyClock(Option<Anchor>);
 
-/// One `(tick_of_day, arrival)` pair: the time of day the server named, and the instant the
-/// net thread decoded the frame that named it.
+/// One `(world_tick, arrival)` pair: the persisted instant the server named, and the
+/// instant the net thread decoded the frame that named it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
-    tick_of_day: u32,
+    world_tick: u64,
     at: Instant,
 }
 
 impl SkyClock {
-    /// Records the time of day an accepted snapshot carried.
-    pub fn anchor(&mut self, tick_of_day: u32, at: Instant) {
-        self.0 = Some(Anchor { tick_of_day, at });
+    /// Records the persisted world time an accepted snapshot carried.
+    pub fn anchor(&mut self, world_tick: u64, at: Instant) {
+        self.0 = Some(Anchor { world_tick, at });
     }
 
     /// Where the day is at `now`, in ticks, or `None` before the first snapshot.
@@ -401,21 +402,25 @@ impl SkyClock {
     /// not a number this code can promise. Out of a 24 000-tick day even the bad case moves
     /// the sun by a fraction of a degree.
     ///
-    /// **A numerically smaller anchor is not a step backwards.** The advance above is taken
-    /// modulo the day, so a client whose own extrapolation has already crossed midnight
-    /// reads 12 where the next snapshot says 12, and the new anchor is continuous with it —
-    /// `the_clock_re_anchors_across_midnight_without_jumping` is what pins that. It is also
-    /// why refusing an anchor lower than the current reading would be a bug rather than a
-    /// guard: once a day, the lower value is the correct one.
+    /// **Midnight does not make the anchor smaller.** The persisted `world_tick` continues
+    /// through the boundary; only the modulo projection returned here wraps. A client whose
+    /// extrapolation crossed midnight therefore reads 12 where a 24_012 absolute anchor
+    /// projects to 12, and `the_clock_re_anchors_across_midnight_without_jumping` pins it.
     pub(crate) fn ticks_at(
         &self,
         now: Instant,
         tick_rate: u8,
         day_length_ticks: u32,
     ) -> Option<f32> {
+        if day_length_ticks == 0 {
+            return None;
+        }
         let anchor = self.0?;
         let elapsed = now.saturating_duration_since(anchor.at).as_secs_f32();
-        let advanced = anchor.tick_of_day as f32 + elapsed * f32::from(tick_rate);
+        // Reduce the integer before converting it to f32. Converting the absolute u64
+        // first would eventually lose individual ticks even though one day fits exactly.
+        let tick_of_day = (anchor.world_tick % u64::from(day_length_ticks)) as f32;
+        let advanced = tick_of_day + elapsed * f32::from(tick_rate);
         Some(advanced.rem_euclid(day_length_ticks as f32))
     }
 }
@@ -2430,9 +2435,8 @@ mod tests {
     ///
     /// The case that looks alarming and is not. By the time the server's first
     /// post-midnight snapshot arrives, this client's own extrapolation has already crossed
-    /// the boundary, so the low `tick_of_day` it carries is the value the clock had reached
-    /// anyway. Pinned because the obvious "guard" — refusing an anchor below the current
-    /// reading — would break exactly this, once every day.
+    /// the boundary, so the absolute `world_tick` it carries projects to the value the
+    /// clock had reached anyway.
     #[test]
     fn the_clock_re_anchors_across_midnight_without_jumping() {
         let mut sky = SkyClock::default();
@@ -2447,12 +2451,13 @@ mod tests {
             "extrapolated past midnight to {before}"
         );
 
-        // The snapshot the server stamped at that instant carries a low tick of day, and
-        // it is **honoured**. Twenty rather than the twelve the extrapolation reached, so
+        // The snapshot the server stamped at that instant carries an absolute tick whose
+        // day projection is low, and it is **honoured**. Twenty rather than the twelve
+        // the extrapolation reached, so
         // that the assertion can tell "the anchor was taken" from "the old one happened to
         // extrapolate here anyway" — the two are indistinguishable at an equal value, which
         // is what makes the obvious version of this test pass against a broken clock.
-        sky.anchor(20, arrival);
+        sky.anchor(24_020, arrival);
         let after = sky.ticks_at(arrival, 20, 24_000).expect("anchored");
         assert!(
             (after - 20.0).abs() < 1e-3,

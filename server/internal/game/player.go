@@ -1586,12 +1586,12 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			DeadPlayers:     visibleDead,
 			BlockingPlayers: visibleBlocking,
 			Mounts:          visibleMounts,
-			// The world's own time, the same for every recipient and the one field in
-			// here that is not about an entity. Always less than DayLengthTicks, which
-			// is what the welcome announced and what the client checks it against —
-			// the invariant holds because advanceClockLocked above is the only thing
-			// that writes it and RestoreClock refuses anything outside the day.
+			// The world's own time, captured as one pair while the simulation lock is
+			// held. The wrapped half drives one day; the persisted absolute half lets
+			// every client agree on presentation spanning several days and survive a
+			// restart. advanceClockLocked and RestoreClock keep the modulo invariant.
 			TickOfDay: s.tickOfDay,
+			WorldTick: s.worldTick,
 			// PartyMembers deliberately excludes this viewer and every offline roster entry.
 			// PartyRoster carries the stable complete order; its first entry remains the
 			// leader even when PartyLeaderEntityID is zero because that leader is offline.

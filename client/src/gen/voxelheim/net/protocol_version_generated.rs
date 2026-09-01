@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 28;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 29;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -225,6 +225,12 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// frame. `PlayerTradeState` and `PlayerTradeClosed` ride in the same bump so the server
 /// and client halves of player trading consume one settled contract rather than moving
 /// this number again.
+///
+/// **V29 appends `EntitySnapshot.world_tick`.** A V28 server leaves that scalar at zero,
+/// which is indistinguishable from the first tick of a world and would restart an
+/// eight-day lunar phase every time a V29 client connected. The version therefore moves
+/// even though FlatBuffers can decode the older table: the two peers would otherwise
+/// assign different celestial state to the same snapshot after a clean handshake.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -235,10 +241,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(28);
+    pub const Current: Self = Self(29);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 28;
+    pub const ENUM_MAX: u16 = 29;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
