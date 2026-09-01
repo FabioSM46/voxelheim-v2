@@ -401,13 +401,13 @@ func TestAV6DirectoryIsSetAsideAndNotMigrated(t *testing.T) {
 	}
 }
 
-func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
+func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T) {
 	t.Parallel()
 
 	worldDir := t.TempDir()
 	players := filepath.Join(worldDir, playersDirName)
 	if err := os.MkdirAll(players, 0o755); err != nil {
-		t.Fatalf("creating the v7 players directory: %v", err)
+		t.Fatalf("creating players: %v", err)
 	}
 
 	id := CharacterID(7)
@@ -427,6 +427,15 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	name := id.String() + recordFileExt
 	if err := os.WriteFile(filepath.Join(players, name), old, 0o600); err != nil {
 		t.Fatalf("writing the v7 record: %v", err)
+	}
+	refusedID := CharacterID(9)
+	refused := want
+	refused.Character, refused.Owner, refused.Name = refusedID, testID(9), "Eir"
+	refused.Slots[3] = protocol.InventoryStack{ItemID: previousSilverItemID, Count: 37}
+	refusedBytes := encodeRecordLayout(refused, previousStoreVersion, previousInventorySlots)
+	refusedName := refusedID.String() + recordFileExt
+	if err := os.WriteFile(filepath.Join(players, refusedName), refusedBytes, 0o600); err != nil {
+		t.Fatalf("writing the v7 silver record: %v", err)
 	}
 	currentID := CharacterID(8)
 	current := Record{
@@ -463,6 +472,9 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	if got.Slots[protocol.InventorySlots-1] != (protocol.InventoryStack{}) {
 		t.Errorf("the inserted off-hand tail is %+v, want empty", got.Slots[protocol.InventorySlots-1])
 	}
+	if _, found, loadErr := store.Load(refusedID); loadErr != nil || found {
+		t.Fatalf("loading the refused silver record: found %v, err %v", found, loadErr)
+	}
 	gotCurrent, found, err := store.Load(currentID)
 	if err != nil || !found {
 		t.Fatalf("loading the preserved current character: found %v, err %v", found, err)
@@ -498,6 +510,10 @@ func TestAV7DirectoryIsKeptAndMigratedWithAnEmptyOffHand(t *testing.T) {
 	}
 	if !bytes.Equal(kept, old) {
 		t.Error("the v7 record changed while it was kept aside")
+	}
+	keptRefused, err := os.ReadFile(filepath.Join(aside, refusedName))
+	if err != nil || !bytes.Equal(keptRefused, refusedBytes) {
+		t.Errorf("the refused silver record was not kept byte-for-byte: %v", err)
 	}
 	keptCurrent, err := os.ReadFile(filepath.Join(aside, currentName))
 	if err != nil {

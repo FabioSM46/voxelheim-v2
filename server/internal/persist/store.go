@@ -120,13 +120,16 @@ import (
 // **9 adds silver after the fixed slot table.** It is a character value like experience,
 // but it occupies no slot. There is no v8 migration: a v8 record can carry silver as an
 // ItemSilver stack, and silently turning that stack into a purse would repair stored data
-// the game is required to refuse. The stable worldgen bump selects a new default players
-// directory; explicit older directories are kept beside the new one unchanged.
+// the game must refuse. The same rule limits v7 migration to records without that stack;
+// other bytes stay aside. Stable worldgen starts a new default directory.
 const StoreVersion uint32 = 9
 
 const (
 	previousStoreVersion   uint32 = 7
 	previousInventorySlots int    = 39
+
+	// Historical persisted wire id, not a second item registry.
+	previousSilverItemID uint16 = 35
 )
 
 // On-disk layout, little-endian throughout, one file per character.
@@ -430,10 +433,9 @@ func (s *Store) Unreadable() []string {
 // of their account and cannot say which character it was; a v3 record cannot say what
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
 // nothing about experience; a v6 record has no worn-equipment slots — so there is no
-// migration for those formats. V7 is the one lossless exception: its 39 positions map
-// directly to this format's first 39 and the new off-hand tail is empty. If current
-// records share the directory with v7 records, they are copied byte-for-byte into the
-// replacement before the original directory is kept aside.
+// migration for those formats. V7 maps losslessly to the first 39 slots only when it has
+// no historical silver stack; otherwise it stays in the directory kept aside. Current
+// records sharing that directory are copied byte-for-byte into the replacement.
 //
 // The timestamp in the name is the same decision Quarantine records and not decoration:
 // a fixed name would be destroyed by the second run that found something to move, which
@@ -487,7 +489,7 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 					continue
 				}
 				record, decodeErr := decodeV7Record(data)
-				if decodeErr == nil {
+				if decodeErr == nil && v7RecordHasNoSilverStack(record) {
 					migrations = append(migrations, migration{name: entry.Name(), record: record})
 				}
 			}
@@ -889,6 +891,15 @@ func decodeRecord(data []byte) (Record, error) {
 
 func decodeV7Record(data []byte) (Record, error) {
 	return decodeRecordLayout(data, previousStoreVersion, previousInventorySlots)
+}
+
+func v7RecordHasNoSilverStack(rec Record) bool {
+	for _, stack := range rec.Slots[:previousInventorySlots] {
+		if stack.ItemID == previousSilverItemID {
+			return false
+		}
+	}
+	return true
 }
 
 func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
