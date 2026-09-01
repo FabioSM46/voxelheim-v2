@@ -329,15 +329,16 @@ pub struct ChunkMesh {
     /// unequal water levels. Equal water and water against solid blocks stay hidden.
     pub water: SurfaceMesh,
     /// Every plant, grown one voxel at a time by [`build_cover`]: a flower's stem, leaves
-    /// and corolla, and a bush's clumps of foliage.
+    /// and corolla, and a bush's foliage, twigs and flower specks.
     ///
     /// **The third surface, and it is not produced by the sweep at all.** The sweep
     /// exists to merge coplanar faces of adjacent voxels, and a plant has none to merge:
-    /// a flower is a cross of blades under a corolla and a bush is three overlapping
-    /// clumps, both inside a voxel nothing else is drawn in. Two of either side by side
-    /// are two plants — which is the point for the bush, since being merged into its
-    /// neighbour is exactly what made a row of them one flat slab — so there is nothing a
-    /// mask could join and every reason not to pay for a third one per plane.
+    /// a flower is a cross of blades under a corolla and a bush is overlapping clumps
+    /// with crossed detail ribbons, both inside a voxel nothing else is drawn in. Two of
+    /// either side by side are two plants — which is the point for the bush, since being
+    /// merged into its neighbour is exactly what made a row of them one flat slab — so
+    /// there is nothing a mask could join and every reason not to pay for a third one per
+    /// plane.
     ///
     /// It is its own half rather than more quads in [`Self::opaque`] because its
     /// material differs: a stem, a petal and a leaf are all single planes, so they are
@@ -439,6 +440,23 @@ const BUSH_CROWN_SPAN: f32 = 0.56;
 const BUSH_CROWN_FLOOR: f32 = 0.52;
 const BUSH_CROWN_JITTER: f32 = 0.1;
 
+/// Four woody shoots cross the foliage, each as two double-sided ribbons. Fewer
+/// reads as a fork rather than a bush; more turns the low silhouette into a thicket.
+const BUSH_TWIGS: usize = 4;
+const BUSH_TWIG_HALF_WIDTH: f32 = 0.018;
+const BUSH_TWIG_OUTER: f32 = 0.4;
+const BUSH_TWIG_BASE: f32 = 0.13;
+const BUSH_TWIG_TIP: f32 = 0.76;
+const BUSH_TWIG_TIP_JITTER: f32 = 0.06;
+
+/// Three flower specks sit in the largest gap around the crown. Their crossed
+/// blades are less than half the flower eye's width and height, so they remain
+/// punctuation in the green mass rather than miniature flowers.
+const BUSH_SPECKS: usize = 3;
+const BUSH_SPECK_HALF_WIDTH: f32 = 0.018;
+const BUSH_SPECK_HEIGHT: f32 = 0.04;
+const BUSH_SPECK_FLOOR: f32 = 0.78;
+
 /// How many quads one flower contributes: two stem blades, two leaves,
 /// [`COVER_PETALS`] petals and the eye's two blades.
 ///
@@ -454,9 +472,10 @@ const BUSH_CROWN_JITTER: f32 = 0.1;
 #[cfg(test)]
 pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
-/// How many quads one bush contributes: three clumps of six faces each.
+/// How many quads one bush contributes: three six-face clumps, two ribbons per
+/// twig and two crossed blades per flower speck.
 #[cfg(test)]
-pub(super) const QUADS_PER_BUSH: usize = 18;
+pub(super) const QUADS_PER_BUSH: usize = 18 + BUSH_TWIGS * 2 + BUSH_SPECKS * 2;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1171,7 +1190,7 @@ fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 
 
 /// One bush, filling the voxel whose minimum corner is `floor`.
 ///
-/// Three overlapping clumps and eighteen quads. **The shape has to satisfy two things at
+/// Three overlapping clumps, four woody twigs and three flower specks. **The shape has to satisfy two things at
 /// once**, and they pull in opposite directions: `world.Bush` is `Solid` on the server, so
 /// a body is stopped by the whole cube and anything drawn smaller than it is a wall the
 /// player cannot see — while a cube is exactly what made a cluster of bushes read as one
@@ -1179,12 +1198,12 @@ fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 
 /// axis, and everything that can vary without breaking that span does: the skirt's top,
 /// and the footprint and underside of the body and the crown.
 ///
-/// The skirt owns the floor and the four walls, the crown owns the ceiling, and the
-/// jitter ranges are sized so the three always overlap — a clump that floated free of the
-/// two beside it would be a leaf hanging in the air.
+/// The skirt still owns the floor and four walls and the crown still owns the ceiling;
+/// twigs and specks only add detail. The jitter ranges keep all three clumps overlapping.
 fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let foliage = palette::linear_rgba(palette::BUSH);
     let crown_color = opaque(palette::BUSH_CROWN_LINEAR);
+    let wood = palette::linear_rgba(palette::LOG);
 
     let low = BUSH_INSET;
     let high = 1.0 - BUSH_INSET;
@@ -1213,10 +1232,12 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     // two always meet.
     let slack = high - low - BUSH_BODY_SPAN;
     let body_floor = BUSH_BODY_FLOOR + dial(seed, 1) * BUSH_BODY_JITTER;
+    let body_x = low + dial(seed, 2) * slack;
+    let body_z = low + dial(seed, 3) * slack;
     clump(
         mesh,
-        low + dial(seed, 2) * slack,
-        low + dial(seed, 3) * slack,
+        body_x,
+        body_z,
         BUSH_BODY_SPAN,
         body_floor,
         body_floor + BUSH_BODY_HEIGHT,
@@ -1226,15 +1247,87 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     // The crown: smaller again, reaching the voxel's ceiling, and the lighter of the two
     // tones because it is the half of a bush the sky reaches.
     let crown_slack = high - low - BUSH_CROWN_SPAN;
+    let crown_x = low + dial(seed, 4) * crown_slack;
+    let crown_z = low + dial(seed, 5) * crown_slack;
     clump(
         mesh,
-        low + dial(seed, 4) * crown_slack,
-        low + dial(seed, 5) * crown_slack,
+        crown_x,
+        crown_z,
         BUSH_CROWN_SPAN,
         BUSH_CROWN_FLOOR + dial(seed, 6) * BUSH_CROWN_JITTER,
         high,
         crown_color,
     );
+
+    // Each shoot starts inside the mass and reaches into the open ring around the
+    // smaller crown. Its two crossed ribbons keep the woody line visible from any
+    // walking direction without turning a twig into a solid box.
+    let centre = [floor[0] + 0.5, floor[1], floor[2] + 0.5];
+    let twig_yaw = dial(seed, 7) * std::f32::consts::FRAC_PI_2;
+    for twig in 0..BUSH_TWIGS {
+        let angle = twig_yaw + twig as f32 * std::f32::consts::FRAC_PI_2;
+        let (sin, cos) = angle.sin_cos();
+        let start = [
+            centre[0] + cos * 0.05,
+            floor[1] + BUSH_TWIG_BASE,
+            centre[2] + sin * 0.05,
+        ];
+        let end = [
+            centre[0] + cos * BUSH_TWIG_OUTER,
+            floor[1] + BUSH_TWIG_TIP + dial(seed, 8 + twig as u32) * BUSH_TWIG_TIP_JITTER,
+            centre[2] + sin * BUSH_TWIG_OUTER,
+        ];
+        push_twig(mesh, start, end, BUSH_TWIG_HALF_WIDTH, wood);
+    }
+
+    // The crown leaves 0.4 blocks of horizontal slack in total. Put all three tiny
+    // eyes in its widest outside strip, where the body is already below them and no
+    // foliage can hide them. Their positions and colour rotation still come from seed.
+    let gaps = [
+        (0usize, false, crown_x - low),
+        (0, true, high - (crown_x + BUSH_CROWN_SPAN)),
+        (2, false, crown_z - low),
+        (2, true, high - (crown_z + BUSH_CROWN_SPAN)),
+    ];
+    let &(axis, positive, gap) = gaps
+        .iter()
+        .max_by(|left, right| left.2.total_cmp(&right.2))
+        .expect("a crown has four outside gaps");
+    let strip = if positive {
+        high - gap * 0.5
+    } else {
+        low + gap * 0.5
+    };
+    let flowers = [
+        palette::FLOWER_RED,
+        palette::FLOWER_YELLOW,
+        palette::FLOWER_BLUE,
+    ];
+    for speck in 0..BUSH_SPECKS {
+        let mut base = [
+            floor[0] + low + 0.12 + dial(seed, 12 + speck as u32) * (high - low - 0.24),
+            floor[1] + BUSH_SPECK_FLOOR + dial(seed, 15 + speck as u32) * 0.04,
+            floor[2] + low + 0.12 + dial(seed, 18 + speck as u32) * (high - low - 0.24),
+        ];
+        base[axis] = floor[axis] + strip;
+        let colour = palette::linear_rgba(flowers[(seed as usize + speck) % flowers.len()]);
+        push_blade(
+            mesh,
+            base,
+            BUSH_SPECK_HALF_WIDTH,
+            base[1] + BUSH_SPECK_HEIGHT,
+            0,
+            colour,
+        );
+        push_blade(
+            mesh,
+            base,
+            BUSH_SPECK_HALF_WIDTH,
+            base[1] + BUSH_SPECK_HEIGHT,
+            2,
+            colour,
+        );
+    }
 }
 
 /// A palette tone as the opaque RGBA a vertex carries. The cover half has no alpha of its
@@ -1334,6 +1427,55 @@ fn push_blade(
         color,
         None,
     );
+}
+
+/// Two crossed ribbons around one sloping segment. The cover material is double-sided,
+/// so each ribbon is one quad and the pair reads as a twig from every horizontal view.
+fn push_twig(
+    mesh: &mut SurfaceMesh,
+    start: [f32; 3],
+    end: [f32; 3],
+    half_width: f32,
+    color: [f32; 4],
+) {
+    let direction = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+    let horizontal_length = direction[0].hypot(direction[2]);
+    let side = [
+        -direction[2] / horizontal_length * half_width,
+        0.0,
+        direction[0] / horizontal_length * half_width,
+    ];
+    let length =
+        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
+            .sqrt();
+    let across = [
+        (direction[1] * side[2] - direction[2] * side[1]) / length,
+        (direction[2] * side[0] - direction[0] * side[2]) / length,
+        (direction[0] * side[1] - direction[1] * side[0]) / length,
+    ];
+    let add = |point: [f32; 3], offset: [f32; 3]| {
+        [
+            point[0] + offset[0],
+            point[1] + offset[1],
+            point[2] + offset[2],
+        ]
+    };
+    let sub = |point: [f32; 3], offset: [f32; 3]| {
+        [
+            point[0] - offset[0],
+            point[1] - offset[1],
+            point[2] - offset[2],
+        ]
+    };
+    for offset in [side, across] {
+        let corners = [
+            sub(start, offset),
+            add(start, offset),
+            add(end, offset),
+            sub(end, offset),
+        ];
+        mesh.push_quad(corners, face_normal(corners), color, None);
+    }
 }
 
 /// The six faces of an axis-aligned box, wound the way [`quad_corners`] winds a merged
@@ -3819,7 +3961,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bush_is_three_clumps_that_still_fill_the_voxel_a_body_is_stopped_by() {
+    fn a_bush_has_twigs_specks_and_still_fills_the_voxel_a_body_is_stopped_by() {
         // The constraint the bush has and the flower does not: `world.Bush` is `Solid` on
         // the server, so what is drawn has to span the cube collision uses. It is drawn
         // per voxel now, which means the opaque sweep must stop drawing its cube — and
@@ -3841,9 +3983,63 @@ mod tests {
             BTreeMap::from([
                 (palette::linear_rgba(palette::BUSH).map(f32::to_bits), 12),
                 (tone(palette::BUSH_CROWN_LINEAR), 6),
+                (palette::linear_rgba(palette::LOG).map(f32::to_bits), 8),
+                (
+                    palette::linear_rgba(palette::FLOWER_RED).map(f32::to_bits),
+                    2
+                ),
+                (
+                    palette::linear_rgba(palette::FLOWER_YELLOW).map(f32::to_bits),
+                    2
+                ),
+                (
+                    palette::linear_rgba(palette::FLOWER_BLUE).map(f32::to_bits),
+                    2
+                ),
             ]),
-            "two clumps of foliage under a lighter crown"
+            "foliage, a lighter crown, four woody twigs and three tiny flower specks"
         );
+
+        let repeated = super::mesh_chunk(&chunk, &alone());
+        assert_eq!(mesh.cover, repeated.cover, "a remesh reshuffled the bush");
+
+        let wood = palette::linear_rgba(palette::LOG);
+        let woody: Vec<usize> = (0..mesh.cover.quad_count())
+            .filter(|quad| mesh.cover.colors[quad * VERTICES_PER_QUAD] == wood)
+            .collect();
+        let woody_height =
+            woody
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), quad| {
+                    let (quad_low, quad_high) = quad_extent(&mesh.cover, *quad, 1);
+                    (low.min(quad_low), high.max(quad_high))
+                });
+        assert!(
+            woody_height.0 < 5.2 && woody_height.1 > 5.75,
+            "the woody geometry does not cross the foliage mass: {woody_height:?}"
+        );
+
+        let flower_colours = [
+            palette::linear_rgba(palette::FLOWER_RED),
+            palette::linear_rgba(palette::FLOWER_YELLOW),
+            palette::linear_rgba(palette::FLOWER_BLUE),
+        ];
+        let specks: Vec<usize> = (0..mesh.cover.quad_count())
+            .filter(|quad| flower_colours.contains(&mesh.cover.colors[quad * VERTICES_PER_QUAD]))
+            .collect();
+        assert_eq!(specks.len(), BUSH_SPECKS * 2);
+        for quad in specks {
+            let spans = [0, 1, 2].map(|axis| {
+                let (low, high) = quad_extent(&mesh.cover, quad, axis);
+                high - low
+            });
+            assert!(
+                spans
+                    .into_iter()
+                    .all(|span| span <= BUSH_SPECK_HEIGHT + 1e-5),
+                "flower speck quad {quad} grew to {spans:?}"
+            );
+        }
 
         winding_agrees_with_every_normal(&mesh.cover);
         stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
@@ -3872,8 +4068,8 @@ mod tests {
         // What #634 is for. A bush used to be an ordinary opaque cube, so the greedy
         // sweep merged a cluster of them into one slab with one flat top; `visitBush` on
         // the server grows clusters of up to three, so that was the common case rather
-        // than the corner one. Now each is its own eighteen quads, and the per-voxel
-        // jitter puts their surfaces at different heights.
+        // than the corner one. Now each is its own thirty-two quads, and the per-voxel
+        // jitter puts their foliage and twig surfaces at different heights.
         let mut chunk = air(SIZE);
         chunk.set(4, 5, 6, palette::BUSH);
         chunk.set(5, 5, 6, palette::BUSH);
@@ -3943,7 +4139,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 1280);
+        assert_eq!(mesh.cover.quad_count(), 1728);
     }
 
     #[test]
