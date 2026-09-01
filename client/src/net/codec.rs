@@ -1295,7 +1295,6 @@ pub enum RefusedAction {
     /// [`Self::MineBlock`], which names the same action and is the value a shipped server
     /// may already have sent: both stay, and a receiver names both.
     Mine,
-    Mount,
 }
 
 impl RefusedAction {
@@ -1320,7 +1319,6 @@ impl RefusedAction {
             fb::RefusedAction::Trade => Self::Trade,
             fb::RefusedAction::Edit => Self::Edit,
             fb::RefusedAction::Mine => Self::Mine,
-            fb::RefusedAction::Mount => Self::Mount,
             _ => Self::Unknown,
         }
     }
@@ -1379,18 +1377,6 @@ pub enum RefusalReason {
     /// over: an answer that did would let a client learn who has claimed ground by poking
     /// at it.
     Warded,
-    MountNotLearned,
-    AlreadyMounted,
-    MountNotGrounded,
-    MountIndoors,
-    MountLowCeiling,
-    CastAlreadyInProgress,
-    CastInterruptedByDamage,
-    CastInterruptedByMovement,
-    CastInterruptedByJump,
-    CastInterruptedByDeath,
-    ActionForbiddenWhileMounted,
-    MountAlreadyLearned,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1434,18 +1420,6 @@ impl RefusalReason {
             fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
             fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
             fb::RefusalReason::Warded => Self::Warded,
-            fb::RefusalReason::MountNotLearned => Self::MountNotLearned,
-            fb::RefusalReason::AlreadyMounted => Self::AlreadyMounted,
-            fb::RefusalReason::MountNotGrounded => Self::MountNotGrounded,
-            fb::RefusalReason::MountIndoors => Self::MountIndoors,
-            fb::RefusalReason::MountLowCeiling => Self::MountLowCeiling,
-            fb::RefusalReason::CastAlreadyInProgress => Self::CastAlreadyInProgress,
-            fb::RefusalReason::CastInterruptedByDamage => Self::CastInterruptedByDamage,
-            fb::RefusalReason::CastInterruptedByMovement => Self::CastInterruptedByMovement,
-            fb::RefusalReason::CastInterruptedByJump => Self::CastInterruptedByJump,
-            fb::RefusalReason::CastInterruptedByDeath => Self::CastInterruptedByDeath,
-            fb::RefusalReason::ActionForbiddenWhileMounted => Self::ActionForbiddenWhileMounted,
-            fb::RefusalReason::MountAlreadyLearned => Self::MountAlreadyLearned,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -2012,7 +1986,6 @@ pub enum ResidentRole {
     Cook,
     Trader,
     Guard,
-    Stablemaster,
 }
 
 impl ResidentRole {
@@ -2026,7 +1999,6 @@ impl ResidentRole {
             fb::ResidentRole::Cook => Some(Self::Cook),
             fb::ResidentRole::Trader => Some(Self::Trader),
             fb::ResidentRole::Guard => Some(Self::Guard),
-            fb::ResidentRole::Stablemaster => Some(Self::Stablemaster),
             _ => None,
         }
     }
@@ -7637,17 +7609,17 @@ mod tests {
     /// caller ends the session. Same shape as `MobKind::Villager` one version earlier, and
     /// the same conclusion.
     ///
-    /// **V27 appends leave cancellation.** `LeaveCancelRequest` travels client to server,
-    /// so a V26 server would close the session on the unknown tag. `LeaveCancelResult`
-    /// travels back and is safely deferred by this contract-and-server half; the request
-    /// is the break and the reason for the bump.
+    /// **V27 batches leave cancellation and the stable contract.** `LeaveCancelRequest`,
+    /// `MountRequest` and `DismountRequest` travel client to server, so a V26 server would
+    /// close the session on any unknown tag. Their server-to-client companions are safely
+    /// droppable alone; every request independently owes the bump.
     ///
     /// The rule that generalises, now that eight shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v27_adds_authoritative_leave_cancellation() {
+    fn protocol_v27_batches_leave_cancellation_and_the_stable_contract() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
         assert_eq!(fb::ProtocolVersion::Current.0, 27);
         for (tag, value) in [
@@ -7990,9 +7962,9 @@ mod tests {
         for (action, reason) in [
             (fb::RefusedAction::Unknown, fb::RefusalReason::Unknown),
             (fb::RefusedAction(200), fb::RefusalReason(200)),
-            // A value inside the gap the contract leaves between its two groups, which is
-            // where a reason appended later most plausibly lands.
-            (fb::RefusedAction(6), fb::RefusalReason(63)),
+            // V27 reserves these wire members, but their application consumer belongs to
+            // the dependent client part. Until then both fail closed to `Unknown`.
+            (fb::RefusedAction::Mount, fb::RefusalReason::MountNotLearned),
         ] {
             assert_eq!(
                 decode(&encode_action_refused(action, reason, None)),
@@ -8403,7 +8375,8 @@ mod tests {
         assert_eq!(resident.name, "Ingrid");
         assert_eq!(resident.role, ResidentRole::Smith);
 
-        // Every member the contract names decodes, and the absent-field zero does not.
+        // Every role this part consumes decodes. The absent-field zero, the reserved
+        // Stablemaster consumer and a value beyond this contract all fail closed.
         for (wire, want) in [
             (fb::ResidentRole::Villager, ResidentRole::Villager),
             (fb::ResidentRole::Smith, ResidentRole::Smith),
@@ -8411,11 +8384,14 @@ mod tests {
             (fb::ResidentRole::Cook, ResidentRole::Cook),
             (fb::ResidentRole::Trader, ResidentRole::Trader),
             (fb::ResidentRole::Guard, ResidentRole::Guard),
-            (fb::ResidentRole::Stablemaster, ResidentRole::Stablemaster),
         ] {
             assert_eq!(ResidentRole::from_wire(wire), Some(want));
         }
         assert_eq!(ResidentRole::from_wire(fb::ResidentRole::Unknown), None);
+        assert_eq!(
+            ResidentRole::from_wire(fb::ResidentRole::Stablemaster),
+            None
+        );
         assert_eq!(ResidentRole::from_wire(fb::ResidentRole(8)), None);
 
         // Exactly at the bound is accepted. Bytes, not characters: eleven three-byte
@@ -9318,18 +9294,6 @@ mod tests {
             RefusalReason::NotAVendor,
             RefusalReason::NotEnoughSilver,
             RefusalReason::VendorDoesNotWant,
-            RefusalReason::MountNotLearned,
-            RefusalReason::AlreadyMounted,
-            RefusalReason::MountNotGrounded,
-            RefusalReason::MountIndoors,
-            RefusalReason::MountLowCeiling,
-            RefusalReason::CastAlreadyInProgress,
-            RefusalReason::CastInterruptedByDamage,
-            RefusalReason::CastInterruptedByMovement,
-            RefusalReason::CastInterruptedByJump,
-            RefusalReason::CastInterruptedByDeath,
-            RefusalReason::ActionForbiddenWhileMounted,
-            RefusalReason::MountAlreadyLearned,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -9570,10 +9534,9 @@ mod tests {
     #[test]
     fn a_kind_this_build_has_never_heard_of_is_still_refused() {
         assert_eq!(MobKind::from_wire(fb::MobKind::Unknown), None);
-        // 4 was the first value past the end until V25 named it `Villager`. The test
-        // moved to 5 rather than being deleted, because what it pins is "one past the
-        // contract", not the literal — and this line is the only thing that would have
-        // noticed a member arriving without a decision.
+        // 4 was the first value past the end until V25 named it `Villager`, and 5 until
+        // V27 reserved `Horse`. The test moved to 6 rather than being deleted, because
+        // what it pins is "one past the contract", not the literal.
         assert_eq!(
             MobKind::from_wire(fb::MobKind::Villager),
             Some(MobKind::Villager)

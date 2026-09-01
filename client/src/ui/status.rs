@@ -595,22 +595,7 @@ fn refresh_notice_text(
 /// still holds. It will not survive the issue that gives `TileMisaligned` a surface, and
 /// that test says so rather than the category quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
-    matches!(
-        reason,
-        RefusalReason::TileMisaligned
-            | RefusalReason::MountNotLearned
-            | RefusalReason::AlreadyMounted
-            | RefusalReason::MountNotGrounded
-            | RefusalReason::MountIndoors
-            | RefusalReason::MountLowCeiling
-            | RefusalReason::CastAlreadyInProgress
-            | RefusalReason::CastInterruptedByDamage
-            | RefusalReason::CastInterruptedByMovement
-            | RefusalReason::CastInterruptedByJump
-            | RefusalReason::CastInterruptedByDeath
-            | RefusalReason::ActionForbiddenWhileMounted
-            | RefusalReason::MountAlreadyLearned
-    )
+    matches!(reason, RefusalReason::TileMisaligned)
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
@@ -660,19 +645,6 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::NotAVendor
         | RefusalReason::NotEnoughSilver
         | RefusalReason::VendorDoesNotWant
-        // V27 reserves the stable contract's answers; its UI belongs to the mount work.
-        | RefusalReason::MountNotLearned
-        | RefusalReason::AlreadyMounted
-        | RefusalReason::MountNotGrounded
-        | RefusalReason::MountIndoors
-        | RefusalReason::MountLowCeiling
-        | RefusalReason::CastAlreadyInProgress
-        | RefusalReason::CastInterruptedByDamage
-        | RefusalReason::CastInterruptedByMovement
-        | RefusalReason::CastInterruptedByJump
-        | RefusalReason::CastInterruptedByDeath
-        | RefusalReason::ActionForbiddenWhileMounted
-        | RefusalReason::MountAlreadyLearned
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1321,7 +1293,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 47] = [
+    const EVERY_REASON: [RefusalReason; 35] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1356,19 +1328,6 @@ mod tests {
         RefusalReason::VendorDoesNotWant,
         // V26's one warded-ground reason.
         RefusalReason::Warded,
-        // V27's stable contract; the player-facing surfaces follow in the mount issues.
-        RefusalReason::MountNotLearned,
-        RefusalReason::AlreadyMounted,
-        RefusalReason::MountNotGrounded,
-        RefusalReason::MountIndoors,
-        RefusalReason::MountLowCeiling,
-        RefusalReason::CastAlreadyInProgress,
-        RefusalReason::CastInterruptedByDamage,
-        RefusalReason::CastInterruptedByMovement,
-        RefusalReason::CastInterruptedByJump,
-        RefusalReason::CastInterruptedByDeath,
-        RefusalReason::ActionForbiddenWhileMounted,
-        RefusalReason::MountAlreadyLearned,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1404,18 +1363,6 @@ mod tests {
             RefusalReason::NotEnoughSilver | RefusalReason::VendorDoesNotWant => {
                 RefusedAction::Trade
             }
-            RefusalReason::MountNotLearned
-            | RefusalReason::AlreadyMounted
-            | RefusalReason::MountNotGrounded
-            | RefusalReason::MountIndoors
-            | RefusalReason::MountLowCeiling
-            | RefusalReason::CastAlreadyInProgress
-            | RefusalReason::CastInterruptedByDamage
-            | RefusalReason::CastInterruptedByMovement
-            | RefusalReason::CastInterruptedByJump
-            | RefusalReason::CastInterruptedByDeath
-            | RefusalReason::ActionForbiddenWhileMounted
-            | RefusalReason::MountAlreadyLearned => RefusedAction::Mount,
             _ => RefusedAction::PlaceStructure,
         };
         ActionRefused {
@@ -1425,21 +1372,20 @@ mod tests {
         }
     }
 
-    /// [`EVERY_REASON`] is every reason, and a length is what says so.
+    /// [`EVERY_REASON`] is every reason this UI consumes, and a length is what says so.
     ///
     /// The sweeps in this module are only as good as the list they run over, and nothing
     /// in the language makes that list complete: a `[RefusalReason; N]` compiles perfectly
     /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
     /// V24 and again in V25, and both times every sweep below went on passing over a
-    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count, which is the
-    /// same pin the codec puts on `CLASSIFICATION`.
+    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V27 reserves
+    /// twelve stable reasons whose consumer belongs to the dependent client part.
     #[test]
     fn every_reason_is_in_the_sweep() {
         assert_eq!(
             EVERY_REASON.len(),
-            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len(),
-            "a reason the contract names is missing from EVERY_REASON, so every sweep in \
-             this module is reporting on a subset while reading as if it swept them all"
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 12,
+            "a reason this UI consumes is missing from EVERY_REASON"
         );
 
         // A length on its own would be satisfied by naming one member twice while another

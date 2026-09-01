@@ -2455,26 +2455,26 @@ fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
     }
 }
 
-/// Every role the contract names, so the sweeps below run over all of them.
+/// Every role this renderer consumes, so the sweeps below run over all of them.
 ///
 /// Written out rather than derived, for the reason every list like it here is: one derived
 /// from the same `match` it checks would agree with every hole in that `match`. Its length
 /// is pinned to the contract's own count below, because a fixed-size array of enum values
 /// does not stop compiling when the enum grows — the mistake `EVERY_REASON` cost twice.
-const EVERY_ROLE: [ResidentRole; 7] = [
+const EVERY_ROLE: [ResidentRole; 6] = [
     ResidentRole::Villager,
     ResidentRole::Smith,
     ResidentRole::Carpenter,
     ResidentRole::Cook,
     ResidentRole::Trader,
     ResidentRole::Guard,
-    ResidentRole::Stablemaster,
 ];
 
 /// The list is complete, and every role reads as its own ASCII word.
 ///
-/// `Unknown` is the contract's zero rather than a role — `ResidentRole::from_wire` answers
-/// `None` for it and the session ends — so no plate is ever drawn from it.
+/// `Unknown` and V27's reserved `Stablemaster` are not consumed yet —
+/// `ResidentRole::from_wire` answers `None` for both and the session ends — so no plate
+/// is drawn until the dependent consumer part defines that presentation.
 ///
 /// ASCII is what `client/src/ui/mod.rs` fails the build over, asserted again here because
 /// that scan reads *source* and would not catch a word composed at runtime. Distinctness is
@@ -2484,9 +2484,8 @@ const EVERY_ROLE: [ResidentRole; 7] = [
 fn every_role_is_in_the_sweep_as_its_own_ascii_word() {
     assert_eq!(
         EVERY_ROLE.len(),
-        crate::wire::voxelheim::net::ResidentRole::ENUM_VALUES.len() - 1,
-        "a role the contract names is missing from EVERY_ROLE, so every sweep over it is \
-         reporting on a subset while reading as if it swept them all"
+        crate::wire::voxelheim::net::ResidentRole::ENUM_VALUES.len() - 2,
+        "a role this renderer consumes is missing from EVERY_ROLE"
     );
     for (seen, role) in EVERY_ROLE.iter().enumerate() {
         let word = role_label(*role);
