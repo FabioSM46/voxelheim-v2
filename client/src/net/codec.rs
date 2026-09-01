@@ -2090,6 +2090,7 @@ pub enum ResidentRole {
     Cook,
     Trader,
     Guard,
+    Stablemaster,
 }
 
 impl ResidentRole {
@@ -2103,6 +2104,7 @@ impl ResidentRole {
             fb::ResidentRole::Cook => Some(Self::Cook),
             fb::ResidentRole::Trader => Some(Self::Trader),
             fb::ResidentRole::Guard => Some(Self::Guard),
+            fb::ResidentRole::Stablemaster => Some(Self::Stablemaster),
             _ => None,
         }
     }
@@ -9237,7 +9239,7 @@ mod tests {
         let frame = encode_resident_appearance(
             900,
             Some("Ingrid"),
-            fb::ResidentRole::Smith.0,
+            fb::ResidentRole::Stablemaster.0,
             Some(AppearanceWire::default()),
         );
         let Ok(Message::ResidentAppearance(resident)) = decode(&frame) else {
@@ -9245,10 +9247,10 @@ mod tests {
         };
         assert_eq!(resident.entity_id, 900);
         assert_eq!(resident.name, "Ingrid");
-        assert_eq!(resident.role, ResidentRole::Smith);
+        assert_eq!(resident.role, ResidentRole::Stablemaster);
 
-        // Every role this part consumes decodes. The absent-field zero, the reserved
-        // Stablemaster consumer and a value beyond this contract all fail closed.
+        // Every role this part consumes decodes. The absent-field zero and a value beyond
+        // this contract still fail closed.
         for (wire, want) in [
             (fb::ResidentRole::Villager, ResidentRole::Villager),
             (fb::ResidentRole::Smith, ResidentRole::Smith),
@@ -9256,14 +9258,11 @@ mod tests {
             (fb::ResidentRole::Cook, ResidentRole::Cook),
             (fb::ResidentRole::Trader, ResidentRole::Trader),
             (fb::ResidentRole::Guard, ResidentRole::Guard),
+            (fb::ResidentRole::Stablemaster, ResidentRole::Stablemaster),
         ] {
             assert_eq!(ResidentRole::from_wire(wire), Some(want));
         }
         assert_eq!(ResidentRole::from_wire(fb::ResidentRole::Unknown), None);
-        assert_eq!(
-            ResidentRole::from_wire(fb::ResidentRole::Stablemaster),
-            None
-        );
         assert_eq!(ResidentRole::from_wire(fb::ResidentRole(8)), None);
 
         // Exactly at the bound is accepted. Bytes, not characters: eleven three-byte
