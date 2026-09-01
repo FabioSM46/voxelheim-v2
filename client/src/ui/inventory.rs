@@ -23,11 +23,11 @@ use bevy::prelude::*;
 use bevy::ui::{FocusPolicy, UiSystems};
 use bevy::window::{PrimaryWindow, WindowResized};
 
-use super::icon::{self, DrawnIcon, StackIcon};
+use super::icon::{self, DrawnIcon};
 use super::{
     BUTTON, CELL_EDGE, COUNT_FONT_SIZE, SELECTED_EDGE, SlotCount, TAB_SELECTED, anchor_for,
-    button_colour, cell_node, pointer_in_window, refresh_cell_contents, spawn_cell_contents,
-    stack_style, tooltip_bundle,
+    button_colour, cell_node, pointer_in_window, refresh_cell_contents, silver_icon,
+    spawn_cell_contents, stack_style, tooltip_bundle,
 };
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
@@ -35,7 +35,7 @@ use crate::net::{InventoryStack, Session, StructureKind};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
-    ApplyInventory, CraftClick, ITEM_SILVER, Ingredient, InputMode, Inventory, InventoryClick,
+    ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
     InventoryClickKind, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
     equipment_item_fits, item_label,
 };
@@ -104,16 +104,14 @@ struct InventoryGrabArea;
 #[derive(Component)]
 struct InventoryTabStrip;
 
-/// How much silver the last authoritative state put in this player's slots.
+/// How much silver the last authoritative state put in this player's purse.
 ///
 /// **A child of the window and a sibling of the tab strip, not of either tab panel**, which
 /// is what makes it visible on both halves without either half owning it — the same position
 /// the strip itself holds, and for the same reason.
 ///
-/// It originates nothing. There is no purse, no currency slot and no second count anywhere:
-/// silver is an ordinary stackable item in ordinary slots, and this reads
-/// [`Inventory::count`] over the state the server sent exactly as a recipe's `held/needed`
-/// label does.
+/// It originates nothing. Silver is not an inventory stack: this reads the dedicated
+/// server-owned counter beside the slots and never derives a balance from their contents.
 #[derive(Component)]
 struct SilverReadout;
 
@@ -579,9 +577,7 @@ pub(super) fn spawn_silver_readout(panel: &mut ChildSpawnerCommands<'_>, inset: 
                 .with_children(|host| {
                     // `None` for the liveries: silver wears none, so there is no resource to
                     // reach for and nothing about this picture that could sample one.
-                    if let Some(coin) = silver_icon() {
-                        icon::spawn(host, coin, None);
-                    }
+                    icon::spawn(host, silver_icon(), None);
                 });
             readout.spawn((
                 SilverCount,
@@ -597,28 +593,11 @@ pub(super) fn spawn_silver_readout(panel: &mut ChildSpawnerCommands<'_>, inset: 
         });
 }
 
-/// The coin this readout draws, taken from the one path a pack cell draws its icon with.
-///
-/// Through [`stack_style`] rather than by naming a shape and a colour here, so the coin in
-/// the corner cannot drift from the coin in the slot: both are `player::items`' row for
-/// [`ITEM_SILVER`], read once. `None` is unreachable for an id this build has a row for, and
-/// it is answered by drawing no coin rather than by a panic — a missing row is a version
-/// skew, and the count beside it is still the truth.
-fn silver_icon() -> Option<StackIcon> {
-    stack_style(Some(InventoryStack {
-        item_id: ITEM_SILVER,
-        count: 1,
-        ..Default::default()
-    }))
-    .icon
-}
-
 /// Writes what the last authoritative state holds, and only when it has changed.
 ///
-/// **Every slot, not the pack**: [`Inventory::count`] sums the whole state the server sent,
-/// hotbar and equipment included. No equipment slot can hold silver — the server's registry
-/// names no body location for it — so the sum is simply the total, and reading it this way
-/// is what keeps this client from having a second opinion about which slots money may sit in.
+/// [`Inventory::silver`] is the purse carried beside the complete slot vector. Current
+/// server states never put the reserved silver id in that vector; persisted invalid records
+/// are refused server-side, while this presentation remains faithful to the dedicated count.
 pub(super) fn refresh_silver_readout(
     inventory: Option<Res<Inventory>>,
     mut counts: Query<&mut Text, With<SilverCount>>,
@@ -626,7 +605,7 @@ pub(super) fn refresh_silver_readout(
     let Some(inventory) = inventory else {
         return;
     };
-    let label = inventory.count(ITEM_SILVER).to_string();
+    let label = inventory.silver().to_string();
     for mut text in &mut counts {
         if text.0 != label {
             text.0.clone_from(&label);
@@ -1702,7 +1681,7 @@ mod tests {
     use super::super::{COUNT_PLATE, DrawnCell, FILLED_CELL, drawn_cell, icon};
     use super::*;
     use crate::net::{InventoryStack, RecipeId, SessionParams};
-    use crate::player::{ItemShape, SelectedSlot};
+    use crate::player::{ITEM_SILVER, ItemShape, SelectedSlot};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -1810,22 +1789,12 @@ mod tests {
             .0
     }
 
-    /// A seven-slot state with silver in three of them, one of which is an equipment slot.
+    /// A valid seven-slot state whose money exists only in the dedicated purse.
     ///
-    /// The equipment one is deliberate: the server's registry names no body location for
-    /// silver, so a slot there is unreachable in the running game — and putting one in the
-    /// fixture is what pins that the readout sums the *whole* state rather than the pack,
-    /// which is the direction a later change could narrow without anything noticing.
-    fn silvered_inventory() -> Inventory {
-        let mut stacks = vec![InventoryStack::default(); 7];
-        for (slot, count) in [(0usize, 3u16), (2, 4), (6, 5)] {
-            stacks[slot] = InventoryStack {
-                item_id: ITEM_SILVER,
-                count,
-                ..Default::default()
-            };
-        }
-        Inventory::from_stacks(stacks)
+    /// Every slot is empty deliberately: a non-zero balance must not manufacture a stack
+    /// merely so the existing slot renderer can draw it.
+    fn pursed_inventory() -> Inventory {
+        Inventory::from_state(vec![InventoryStack::default(); 7], 41)
     }
 
     fn silver_readout(app: &mut App) -> Entity {
@@ -3793,18 +3762,25 @@ mod tests {
         assert_eq!(node.bottom, Val::Px(720.0 - 600.0 + TOOLTIP_GAP));
     }
 
-    /// The readout counts every slot the last authoritative state put silver in.
+    /// The readout uses the purse without manufacturing an inventory stack for it.
     ///
-    /// **It is a sum over what the server sent, and nothing else.** There is no purse and no
-    /// currency slot: silver is an ordinary stackable item occupying ordinary slots, so the
-    /// number in the corner is [`Inventory::count`] over the same mirror the cells draw.
+    /// Forty-one beside seven visually empty cells proves the number came from
+    /// `InventoryState.silver`, not from a slot or a client-side reconstruction.
     #[test]
-    fn the_readout_sums_every_slot_holding_silver() {
+    fn the_authoritative_purse_does_not_render_as_an_inventory_stack() {
         let mut app = app();
-        *app.world_mut().resource_mut::<Inventory>() = silvered_inventory();
+        *app.world_mut().resource_mut::<Inventory>() = pursed_inventory();
         app.update();
 
-        assert_eq!(silver_label(&mut app), "12");
+        assert_eq!(silver_label(&mut app), "41");
+        for slot in 0..7 {
+            let cell = drawn(&mut app, slot);
+            assert_eq!(cell.count, "", "slot {slot} drew a currency count");
+            assert!(
+                cell.rectangles.is_empty(),
+                "slot {slot} drew a currency icon"
+            );
+        }
     }
 
     /// A pack with no silver in it reads `0` rather than reading nothing.
@@ -3819,9 +3795,9 @@ mod tests {
         assert_eq!(silver_label(&mut app), "0");
 
         // And it follows the state rather than being written once at spawn.
-        *app.world_mut().resource_mut::<Inventory>() = silvered_inventory();
+        *app.world_mut().resource_mut::<Inventory>() = pursed_inventory();
         app.update();
-        assert_eq!(silver_label(&mut app), "12");
+        assert_eq!(silver_label(&mut app), "41");
     }
 
     /// The readout belongs to the window, so both tabs show it and neither owns it.
@@ -3876,25 +3852,16 @@ mod tests {
         }
     }
 
-    /// The coin in the corner is the coin in a slot: one row, read once.
+    /// The currency icon still comes from the client display row reserved for that purpose.
     ///
-    /// [`silver_icon`] goes through [`stack_style`], so this is the assertion that the corner
-    /// cannot drift from the cell — the failure the item registry exists to make impossible
-    /// and that a hand-written shape and colour here would have reintroduced.
+    /// The server item registry has a reserved hole at 35, while this client keeps one
+    /// presentation row for the coin used by purse and corpse currency surfaces.
     #[test]
-    fn the_corner_draws_the_same_coin_a_slot_does() {
-        let coin = silver_icon().expect("silver has a display row");
+    fn the_purse_coin_uses_the_reserved_display_row() {
+        let coin = silver_icon();
         assert_eq!(coin.shape, ItemShape::Coin);
         assert_eq!(coin.livery, None);
-        assert_eq!(
-            coin,
-            stack_style(Some(InventoryStack {
-                item_id: ITEM_SILVER,
-                count: 99,
-                ..Default::default()
-            }))
-            .icon
-            .expect("a silver slot draws a coin")
-        );
+        let [r, g, b, a] = crate::player::item_linear_rgba(ITEM_SILVER);
+        assert_eq!(coin.colour, Color::linear_rgba(r, g, b, a));
     }
 }

@@ -50,6 +50,7 @@ const HOTBAR_KEYS: [KeyCode; 9] = [
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct Inventory {
     stacks: Vec<InventoryStack>,
+    silver: u32,
 }
 
 impl Inventory {
@@ -74,6 +75,14 @@ impl Inventory {
             .sum()
     }
 
+    /// The server-owned purse from the latest complete state.
+    ///
+    /// Currency is not reconstructed from slots: the server sends this total beside the
+    /// slot vector, and every client surface reads that same answer.
+    pub fn silver(&self) -> u32 {
+        self.silver
+    }
+
     /// One authoritative slot, when the server has sent it.
     pub fn slot(&self, slot: u8) -> Option<InventoryStack> {
         self.stacks.get(usize::from(slot)).copied()
@@ -83,7 +92,13 @@ impl Inventory {
     /// headless tests.
     #[cfg(test)]
     pub(crate) fn from_stacks(stacks: Vec<InventoryStack>) -> Self {
-        Self { stacks }
+        Self { stacks, silver: 0 }
+    }
+
+    /// A complete server-sent state without a socket, including its purse.
+    #[cfg(test)]
+    pub(crate) fn from_state(stacks: Vec<InventoryStack>, silver: u32) -> Self {
+        Self { stacks, silver }
     }
 }
 
@@ -216,6 +231,7 @@ fn ingest_inventory(
         &mut inventory,
         Inventory {
             stacks: state.stacks,
+            silver: state.silver,
         },
     );
     // Any source was chosen against an older complete snapshot. Keeping it would make a
@@ -789,9 +805,13 @@ mod tests {
     }
 
     fn deliver(app: &mut App, stacks: Vec<InventoryStack>) {
+        deliver_state(app, stacks, 0);
+    }
+
+    fn deliver_state(app: &mut App, stacks: Vec<InventoryStack>, silver: u32) {
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks, silver: 0 });
+            .push(InventoryState { stacks, silver });
     }
 
     fn press(app: &mut App, key_code: KeyCode, character: &str) {
@@ -808,17 +828,19 @@ mod tests {
     #[test]
     fn the_newest_inventory_replaces_the_previous_one_whole() {
         let mut app = app(false);
-        deliver(&mut app, slots(&[(0, 1, 3), (1, 2, 4)]));
+        deliver_state(&mut app, slots(&[(0, 1, 3), (1, 2, 4)]), 17);
         app.update();
         assert_eq!(
             app.world().resource::<Inventory>().stacks(),
             slots(&[(0, 1, 3), (1, 2, 4)])
         );
+        assert_eq!(app.world().resource::<Inventory>().silver(), 17);
 
-        deliver(&mut app, slots(&[(2, 2, 1)]));
+        deliver_state(&mut app, slots(&[(2, 2, 1)]), 29);
         app.update();
         let inventory = app.world().resource::<Inventory>();
         assert_eq!(inventory.stacks(), slots(&[(2, 2, 1)]));
+        assert_eq!(inventory.silver(), 29);
         assert_eq!(
             inventory.count(1),
             0,
