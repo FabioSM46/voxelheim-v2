@@ -105,6 +105,11 @@ const (
 	// name is short by design: it is drawn over their head, and a name that needs a
 	// scroll bar is not a name.
 	ResidentNameMaxBytes = 32
+
+	// PlayerTradeSlots is the fixed number of positions in either side of a
+	// player-to-player offer. It is a wire bound rather than an inventory rule:
+	// the simulation still decides whether a particular pack slot may be offered.
+	PlayerTradeSlots = 5
 )
 
 // MapTileScales are the only blocks-per-pixel values this contract has: one pixel
@@ -179,9 +184,10 @@ var ErrMalformed = errors.New("protocol: malformed envelope")
 
 // Message is one decoded envelope.
 //
-// Kind is always set. The payload pointer for that Kind is set only for the
-// payloads this server acts on; the rest are reported by Kind alone, which is
-// enough to answer "you may not send me that".
+// Kind is always set. Payload pointers are set for requests this server acts on and
+// for the server messages this package decodes as the strict Go half of the wire
+// contract. Session direction checks still reject a client that sends one of the
+// latter; decoding it here does not make it a legal client message.
 type Message struct {
 	Kind               vnet.Payload
 	ClientHello        *ClientHello
@@ -212,6 +218,10 @@ type Message struct {
 	MarkerRemove       *MarkerRemoveRequest
 	NpcInteract        *NpcInteractRequest
 	Trade              *TradeRequest
+	PlayerTrade        *PlayerTradeRequest
+	PlayerTradeState   *PlayerTradeState
+	PlayerTradeClosed  *PlayerTradeClosed
+	ActionRefused      *ActionRefused
 	MountRequest       *MountRequest
 	DismountRequest    *DismountRequest
 }
@@ -396,6 +406,50 @@ type TradeRequest struct {
 	Buying     bool
 	Revision   uint32
 	ClientTick uint32
+}
+
+// PlayerTradeRequest is one intent to open or change a player-to-player trade.
+// Only the fields selected by Action have meaning, but they are all copied so the
+// authoritative simulation owns the one decision about the requested state.
+type PlayerTradeRequest struct {
+	Action         vnet.PlayerTradeAction
+	TargetEntityID uint64
+	TradeSlot      uint8
+	PackSlot       uint8
+	Silver         uint32
+	Revision       uint32
+	ClientTick     uint32
+}
+
+// PlayerTradeSlot is one authoritative offered stack. PackSlot is meaningful only
+// when the slot belongs to the recipient's own offer; a partner slot always carries
+// zero there.
+type PlayerTradeSlot struct {
+	TradeSlot     uint8
+	PackSlot      uint8
+	ItemID        uint16
+	Count         uint16
+	Durability    uint16
+	MaxDurability uint16
+}
+
+// PlayerTradeState replaces one recipient's complete view of an open trade.
+type PlayerTradeState struct {
+	PartnerEntityID uint64
+	PartnerName     string
+	Revision        uint32
+	MyOffer         []PlayerTradeSlot
+	TheirOffer      []PlayerTradeSlot
+	MySilver        uint32
+	TheirSilver     uint32
+	MyConfirmed     bool
+	TheirConfirmed  bool
+}
+
+// PlayerTradeClosed explicitly ends the recipient's view of one player trade.
+type PlayerTradeClosed struct {
+	PartnerEntityID uint64
+	Reason          vnet.PlayerTradeCloseReason
 }
 
 // ResidentAppearance is what one resident is called and what they do, sent once as the
@@ -781,9 +835,8 @@ type RemoveStructureRequest struct {
 // correlation id: at most one of a player's actions is in flight per press, and the
 // action code is enough to route the answer.
 //
-// The server never decodes one of these — receiving it is a client sending a payload
-// only a server sends, which the session refuses as a protocol error — so there is no
-// field for it in Message.
+// Decode reads this server message for contract tests and protocol tooling. Receiving
+// it from a client remains a direction error enforced by the session.
 type ActionRefused struct {
 	Action vnet.RefusedAction
 	Reason vnet.RefusalReason
@@ -1921,9 +1974,206 @@ func Decode(frame []byte) (msg Message, err error) {
 			Count: request.Count(), Buying: request.Buying(),
 			Revision: request.Revision(), ClientTick: request.ClientTick(),
 		}
+
+	case vnet.PayloadPlayerTradeRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.PlayerTradeRequest
+		request.Init(table.Bytes, table.Pos)
+		action := request.Action()
+		switch action {
+		case vnet.PlayerTradeActionOpen, vnet.PlayerTradeActionSetItem,
+			vnet.PlayerTradeActionClearItem, vnet.PlayerTradeActionSetSilver,
+			vnet.PlayerTradeActionConfirm, vnet.PlayerTradeActionCancel:
+		default:
+			return Message{}, fmt.Errorf("%w: PlayerTradeRequest action %d is unknown", ErrMalformed, action)
+		}
+		// Every scalar is copied even though Action selects which ones have meaning.
+		// Bounds, ownership, revisions and whether a target exists are authoritative
+		// refusals against simulation state, not framing decisions.
+		msg.PlayerTrade = &PlayerTradeRequest{
+			Action:         action,
+			TargetEntityID: request.TargetEntityId(),
+			TradeSlot:      request.TradeSlot(),
+			PackSlot:       request.PackSlot(),
+			Silver:         request.Silver(),
+			Revision:       request.Revision(),
+			ClientTick:     request.ClientTick(),
+		}
+
+	case vnet.PayloadPlayerTradeState:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var state vnet.PlayerTradeState
+		state.Init(table.Bytes, table.Pos)
+		decoded, dErr := decodePlayerTradeState(&state)
+		if dErr != nil {
+			return Message{}, dErr
+		}
+		msg.PlayerTradeState = decoded
+
+	case vnet.PayloadPlayerTradeClosed:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var closed vnet.PlayerTradeClosed
+		closed.Init(table.Bytes, table.Pos)
+		if closed.PartnerEntityId() == 0 {
+			return Message{}, fmt.Errorf("%w: PlayerTradeClosed partner entity id is absent", ErrMalformed)
+		}
+		msg.PlayerTradeClosed = &PlayerTradeClosed{
+			PartnerEntityID: closed.PartnerEntityId(),
+			Reason:          totalPlayerTradeCloseReason(closed.Reason()),
+		}
+
+	case vnet.PayloadActionRefused:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var refused vnet.ActionRefused
+		refused.Init(table.Bytes, table.Pos)
+		decoded := &ActionRefused{
+			Action: totalRefusedAction(refused.Action()),
+			Reason: totalRefusalReason(refused.Reason()),
+		}
+		if anchor := refused.Anchor(nil); anchor != nil {
+			decoded.Anchor = [3]int32{anchor.X(), anchor.Y(), anchor.Z()}
+			decoded.HasAnchor = true
+		}
+		msg.ActionRefused = decoded
 	}
 
 	return msg, nil
+}
+
+// decodePlayerTradeState copies and validates the complete state before any accessor
+// over the frame can escape Decode. The server does not consume this direction in a
+// session; this is the Go contract boundary used by protocol tooling and tests.
+func decodePlayerTradeState(state *vnet.PlayerTradeState) (*PlayerTradeState, error) {
+	if state.PartnerEntityId() == 0 {
+		return nil, fmt.Errorf("%w: PlayerTradeState partner entity id is absent", ErrMalformed)
+	}
+	partnerName := state.PartnerName()
+	if partnerName == nil {
+		return nil, fmt.Errorf("%w: PlayerTradeState partner name is absent", ErrMalformed)
+	}
+	if !utf8.Valid(partnerName) {
+		return nil, fmt.Errorf("%w: PlayerTradeState partner name is not valid UTF-8", ErrMalformed)
+	}
+	if state.Revision() == 0 {
+		return nil, fmt.Errorf("%w: PlayerTradeState revision is absent", ErrMalformed)
+	}
+
+	// Length cannot distinguish an absent FlatBuffers vector from a present empty one,
+	// so the required-presence rule is read from the vtable before either vector is
+	// decoded. These are fields 3 and 4: 4 + 2*n.
+	table := state.Table()
+	if table.Offset(flatbuffers.VOffsetT(10)) == 0 {
+		return nil, fmt.Errorf("%w: PlayerTradeState my_offer is absent", ErrMalformed)
+	}
+	if table.Offset(flatbuffers.VOffsetT(12)) == 0 {
+		return nil, fmt.Errorf("%w: PlayerTradeState their_offer is absent", ErrMalformed)
+	}
+	if state.MyOfferLength() > PlayerTradeSlots {
+		return nil, fmt.Errorf("%w: PlayerTradeState my_offer has %d entries, at most %d", ErrMalformed, state.MyOfferLength(), PlayerTradeSlots)
+	}
+	if state.TheirOfferLength() > PlayerTradeSlots {
+		return nil, fmt.Errorf("%w: PlayerTradeState their_offer has %d entries, at most %d", ErrMalformed, state.TheirOfferLength(), PlayerTradeSlots)
+	}
+
+	myOffer, err := decodePlayerTradeOffer(state.MyOfferLength(), false, func(slot *vnet.PlayerTradeSlot, index int) bool {
+		return state.MyOffer(slot, index)
+	})
+	if err != nil {
+		return nil, err
+	}
+	theirOffer, err := decodePlayerTradeOffer(state.TheirOfferLength(), true, func(slot *vnet.PlayerTradeSlot, index int) bool {
+		return state.TheirOffer(slot, index)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &PlayerTradeState{
+		PartnerEntityID: state.PartnerEntityId(),
+		PartnerName:     string(partnerName),
+		Revision:        state.Revision(),
+		MyOffer:         myOffer,
+		TheirOffer:      theirOffer,
+		MySilver:        state.MySilver(),
+		TheirSilver:     state.TheirSilver(),
+		MyConfirmed:     state.MyConfirmed(),
+		TheirConfirmed:  state.TheirConfirmed(),
+	}, nil
+}
+
+func decodePlayerTradeOffer(length int, partner bool, read func(*vnet.PlayerTradeSlot, int) bool) ([]PlayerTradeSlot, error) {
+	offer := make([]PlayerTradeSlot, 0, length)
+	var seen [PlayerTradeSlots]bool
+	label := "my_offer"
+	if partner {
+		label = "their_offer"
+	}
+	for index := 0; index < length; index++ {
+		var wire vnet.PlayerTradeSlot
+		if !read(&wire, index) {
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d is absent", ErrMalformed, label, index)
+		}
+		slot := PlayerTradeSlot{
+			TradeSlot:     wire.TradeSlot(),
+			PackSlot:      wire.PackSlot(),
+			ItemID:        wire.ItemId(),
+			Count:         wire.Count(),
+			Durability:    wire.Durability(),
+			MaxDurability: wire.MaxDurability(),
+		}
+		switch {
+		case slot.TradeSlot >= PlayerTradeSlots:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d trade slot %d is outside %d slots", ErrMalformed, label, index, slot.TradeSlot, PlayerTradeSlots)
+		case seen[slot.TradeSlot]:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s repeats trade slot %d", ErrMalformed, label, slot.TradeSlot)
+		case slot.Count == 0:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d count is zero", ErrMalformed, label, index)
+		case slot.MaxDurability == 0 && slot.Durability != 0:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d has durability %d without a maximum", ErrMalformed, label, index, slot.Durability)
+		case slot.MaxDurability != 0 && slot.Durability > slot.MaxDurability:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d durability %d exceeds maximum %d", ErrMalformed, label, index, slot.Durability, slot.MaxDurability)
+		case slot.MaxDurability != 0 && slot.Count != 1:
+			return nil, fmt.Errorf("%w: PlayerTradeState %s entry %d durable count is %d, want 1", ErrMalformed, label, index, slot.Count)
+		case partner && slot.PackSlot != 0:
+			return nil, fmt.Errorf("%w: PlayerTradeState their_offer entry %d exposes pack slot %d", ErrMalformed, index, slot.PackSlot)
+		}
+		seen[slot.TradeSlot] = true
+		offer = append(offer, slot)
+	}
+	return offer, nil
+}
+
+func totalPlayerTradeCloseReason(reason vnet.PlayerTradeCloseReason) vnet.PlayerTradeCloseReason {
+	if _, known := vnet.EnumNamesPlayerTradeCloseReason[reason]; !known {
+		return vnet.PlayerTradeCloseReasonUnknown
+	}
+	return reason
+}
+
+func totalRefusedAction(action vnet.RefusedAction) vnet.RefusedAction {
+	if _, known := vnet.EnumNamesRefusedAction[action]; !known {
+		return vnet.RefusedActionUnknown
+	}
+	return action
+}
+
+func totalRefusalReason(reason vnet.RefusalReason) vnet.RefusalReason {
+	if _, known := vnet.EnumNamesRefusalReason[reason]; !known {
+		return vnet.RefusalReasonUnknown
+	}
+	return reason
 }
 
 // ValidateEntitySnapshot decodes the V27 associations a server-to-client snapshot adds
@@ -3163,6 +3413,23 @@ func EncodeTradeRequest(r TradeRequest) []byte {
 	return finishEnvelope(b, vnet.PayloadTradeRequest, request)
 }
 
+// EncodePlayerTradeRequest builds one player-trade intent verbatim for protocol tests.
+// The authoritative server never sends it; gameplay code decides which fields Action
+// reads and whether their values describe a legal change.
+func EncodePlayerTradeRequest(r PlayerTradeRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.PlayerTradeRequestStart(b)
+	vnet.PlayerTradeRequestAddAction(b, r.Action)
+	vnet.PlayerTradeRequestAddTargetEntityId(b, r.TargetEntityID)
+	vnet.PlayerTradeRequestAddTradeSlot(b, r.TradeSlot)
+	vnet.PlayerTradeRequestAddPackSlot(b, r.PackSlot)
+	vnet.PlayerTradeRequestAddSilver(b, r.Silver)
+	vnet.PlayerTradeRequestAddRevision(b, r.Revision)
+	vnet.PlayerTradeRequestAddClientTick(b, r.ClientTick)
+	request := vnet.PlayerTradeRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadPlayerTradeRequest, request)
+}
+
 // EncodeResidentAppearance builds the message that tells a session what one resident is
 // called and what they do. Sent once, as the entity enters view.
 //
@@ -3235,6 +3502,51 @@ func EncodeVendorClosed(closed VendorClosed) []byte {
 	vnet.VendorClosedAddEntityId(b, closed.EntityID)
 	payload := vnet.VendorClosedEnd(b)
 	return finishEnvelope(b, vnet.PayloadVendorClosed, payload)
+}
+
+// EncodePlayerTradeState builds one complete two-sided state for one recipient.
+// Both vectors and the partner name are always present, even when empty. PackSlot is
+// deliberately forced to zero in TheirOffer so no caller can expose a partner's pack.
+func EncodePlayerTradeState(state PlayerTradeState) []byte {
+	b := flatbuffers.NewBuilder((len(state.MyOffer)+len(state.TheirOffer))*10 + len(state.PartnerName) + 128)
+	partnerName := b.CreateString(state.PartnerName)
+
+	vnet.PlayerTradeStateStartTheirOfferVector(b, len(state.TheirOffer))
+	for index := len(state.TheirOffer) - 1; index >= 0; index-- {
+		slot := state.TheirOffer[index]
+		vnet.CreatePlayerTradeSlot(b, slot.TradeSlot, 0, slot.ItemID, slot.Count, slot.Durability, slot.MaxDurability)
+	}
+	theirOffer := b.EndVector(len(state.TheirOffer))
+
+	vnet.PlayerTradeStateStartMyOfferVector(b, len(state.MyOffer))
+	for index := len(state.MyOffer) - 1; index >= 0; index-- {
+		slot := state.MyOffer[index]
+		vnet.CreatePlayerTradeSlot(b, slot.TradeSlot, slot.PackSlot, slot.ItemID, slot.Count, slot.Durability, slot.MaxDurability)
+	}
+	myOffer := b.EndVector(len(state.MyOffer))
+
+	vnet.PlayerTradeStateStart(b)
+	vnet.PlayerTradeStateAddPartnerEntityId(b, state.PartnerEntityID)
+	vnet.PlayerTradeStateAddPartnerName(b, partnerName)
+	vnet.PlayerTradeStateAddRevision(b, state.Revision)
+	vnet.PlayerTradeStateAddMyOffer(b, myOffer)
+	vnet.PlayerTradeStateAddTheirOffer(b, theirOffer)
+	vnet.PlayerTradeStateAddMySilver(b, state.MySilver)
+	vnet.PlayerTradeStateAddTheirSilver(b, state.TheirSilver)
+	vnet.PlayerTradeStateAddMyConfirmed(b, state.MyConfirmed)
+	vnet.PlayerTradeStateAddTheirConfirmed(b, state.TheirConfirmed)
+	payload := vnet.PlayerTradeStateEnd(b)
+	return finishEnvelope(b, vnet.PayloadPlayerTradeState, payload)
+}
+
+// EncodePlayerTradeClosed explicitly ends one open player trade for a recipient.
+func EncodePlayerTradeClosed(closed PlayerTradeClosed) []byte {
+	b := flatbuffers.NewBuilder(128)
+	vnet.PlayerTradeClosedStart(b)
+	vnet.PlayerTradeClosedAddPartnerEntityId(b, closed.PartnerEntityID)
+	vnet.PlayerTradeClosedAddReason(b, closed.Reason)
+	payload := vnet.PlayerTradeClosedEnd(b)
+	return finishEnvelope(b, vnet.PayloadPlayerTradeClosed, payload)
 }
 
 // EncodeLootClosed explicitly ends one open corpse container.
