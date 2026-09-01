@@ -10,14 +10,14 @@ import (
 
 // Life is everything about one player that outlives their connection: where they
 // stood, which way they faced, how much health and hunger they had, their lifetime
-// experience, purse, and every slot of their pack.
+// experience, purse, learned mounts, and every slot of their pack.
 //
 // # Why the type lives here and not in the store
 //
 // The store owns bytes; this package owns what those bytes are allowed to mean. Only
 // this package holds the item registry and the per-level health rule, so a record's values
 // can only be judged here — see [Life.Validate], which is the one place that judges
-// them. internal/persist declares the same six values because it has to write them
+// them. internal/persist declares the same seven values because it has to write them
 // down; it deliberately does not re-derive the rules, because a second copy of a rule
 // is a second rule the moment one of them is edited.
 //
@@ -29,13 +29,14 @@ import (
 // [protocol.InventorySlots] of them by construction, so no reader has to check a
 // length and no writer can produce a record with the wrong number of slots.
 type Life struct {
-	Pos        [3]float64
-	Yaw        float64
-	Health     uint16
-	Hunger     uint16
-	Experience uint32
-	Silver     uint32
-	Slots      [protocol.InventorySlots]protocol.InventoryStack
+	Pos           [3]float64
+	Yaw           float64
+	Health        uint16
+	Hunger        uint16
+	Experience    uint32
+	Silver        uint32
+	LearnedMounts LearnedMounts
+	Slots         [protocol.InventorySlots]protocol.InventoryStack
 }
 
 // Validate reports the first way this life is not one the simulation could have
@@ -101,6 +102,9 @@ func (l Life) Validate() error {
 	}
 	if l.Experience > ExperienceCap {
 		return fmt.Errorf("game: stored experience must be in 0..%d, got %d", ExperienceCap, l.Experience)
+	}
+	if err := l.LearnedMounts.Validate(); err != nil {
+		return err
 	}
 
 	for slot, stack := range l.Slots {
@@ -213,7 +217,10 @@ func (p *Player) recordLocked() Life {
 	// describe the same slots differently.
 	state := p.inventory.stateLocked()
 
-	life := Life{Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger, Experience: p.experience, Silver: state.Silver}
+	life := Life{
+		Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger,
+		Experience: p.experience, Silver: state.Silver, LearnedMounts: p.learnedMounts,
+	}
 	copy(life.Slots[:], state.Stacks)
 	return life
 }

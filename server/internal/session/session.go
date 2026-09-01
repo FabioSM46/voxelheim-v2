@@ -891,10 +891,10 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			}
 			player = admitted
 
-			// Welcome first, then the whole inventory before streaming can fill the queue
-			// with chunks — the starter pack, or the restored one, through this one path
-			// either way. Authoritative state is sent once on every join, so a reconnect
-			// never keeps a previous session's local mirror.
+			// Welcome first, then the whole inventory and learned-mount set before streaming
+			// can fill the queue with chunks — the starter pack or restored pack, and the
+			// permanent set, through one path either way. Authoritative state is sent once on
+			// every join, so a reconnect never keeps a previous session's local mirror.
 			// A phase broadcast that happened before this session existed cannot reach it.
 			// Re-state the live phase immediately after the welcome so a late join sees the
 			// same approaching countdown or raging blizzard as everybody already inside.
@@ -906,6 +906,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 
 			if iErr := enqueue(protocol.EncodeInventoryState(admitted.InventoryState())); iErr != nil {
 				return fmt.Errorf("session: send the inventory on join: %w", iErr)
+			}
+			if lErr := enqueue(protocol.EncodeLearnedMounts(admitted.LearnedMountState())); lErr != nil {
+				return fmt.Errorf("session: send the learned mounts on join: %w", lErr)
 			}
 
 			// The map's ledger, in pages, before the streamer exists. Authoritative

@@ -2523,13 +2523,20 @@ Recorded here so the next reader does not mistake them for oversights:
   Raising `JumpImpulse` to cover 5 Hz would change how every jump feels at 20; the honest fix is a
   sub-stepped integrator, and that is its own issue.
 - **A life survives a disconnect; the session around it deliberately does not.** What is written is
-  position, yaw, health and all 40 slots with their durability — `game.Life`, captured by
+  position, yaw, health, the purse, the learned-mount set and all 40 slots with their durability — `game.Life`, captured by
   `Player.Record` and stored by `persist`. What is **not** written is everything that only means
   something inside one connection: the death countdown, the respawn protection window, mining
   progress, a pending swing, the three client-tick ordering guards, and the drops and mobs in the
   world. A returning player therefore arrives with their pack and their health, standing where they
   logged out, settling by falling exactly as a new join does (`onGround` is false either way) — and
   with none of the timers a previous session was part-way through.
+
+  **Learned mounts are a one-byte set, and every unused bit is a refusal.** The three concrete
+  `MountKind` values occupy its low three bits; `game.LearnedMounts.Validate` rejects the rest when
+  the whole life is restored rather than masking a value the store could not explain. Store format
+  10 appends that byte after the purse, and every join sends the complete set once immediately after
+  the inventory, empty included. Cast and current-mount state remain session-only and are not part
+  of this record.
 
   **A record always describes a living player**, which is what makes quitting mid-death neither an
   escape nor a double charge. A player who is dead when their record is taken is written as

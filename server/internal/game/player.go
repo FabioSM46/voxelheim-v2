@@ -622,9 +622,15 @@ type Player struct {
 	regenPoints      uint16
 	hunger           uint16
 	experience       uint32
-	protectionTicks  uint32
-	penaltyApplied   bool
-	spawn            [3]float64
+
+	// learnedMounts is the character's permanent mount set. Unlike cast and mounted
+	// state it outlives this session, so Join restores it and Record writes it back.
+	// Guarded by sim.mu with the rest of the authoritative life.
+	learnedMounts LearnedMounts
+
+	protectionTicks uint32
+	penaltyApplied  bool
+	spawn           [3]float64
 
 	// inventoryDirty records that a pickup changed the slots and the client has not
 	// been told yet. Guarded by sim.mu rather than by the inventory's own lock: it is
@@ -825,9 +831,9 @@ func (s *Sim) joinCharacter(
 	}
 
 	joinSpawn := [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
-	pos, yaw, health, hunger, experience, silver, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), uint32(0), starterSlots()
+	pos, yaw, health, hunger, experience, silver, learnedMounts, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), uint32(0), LearnedMounts(0), starterSlots()
 	if resume != nil {
-		pos, yaw, health, hunger, experience, silver, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, resume.Silver, restoredSlots(resume.Slots)
+		pos, yaw, health, hunger, experience, silver, learnedMounts, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, resume.Silver, resume.LearnedMounts, restoredSlots(resume.Slots)
 	}
 
 	p := &Player{
@@ -856,11 +862,12 @@ func (s *Sim) joinCharacter(
 		// The intent carries the yaw too, because step reads p.current.yaw and writes it
 		// back over p.yaw on the first tick. Without this a restored player would snap to
 		// facing north before their client's first input arrived.
-		current:    intent{yaw: yaw},
-		health:     health,
-		hunger:     hunger,
-		experience: experience,
-		lifeState:  vnet.LifeStateAlive,
+		current:       intent{yaw: yaw},
+		health:        health,
+		hunger:        hunger,
+		experience:    experience,
+		learnedMounts: learnedMounts,
+		lifeState:     vnet.LifeStateAlive,
 		// Not on the ground until a tick says so — for a restored player exactly as for a
 		// new one. The spawn sits a couple of blocks above the surface
 		// (world.SpawnClearance) and a stored position was written wherever the player
