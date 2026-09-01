@@ -29,12 +29,8 @@ const ARROW_FLETCH_THICKNESS: f32 = 0.012;
 const ORB_DIAMETER: f32 = 0.3;
 const TRAIL_OFFSETS: [f32; 2] = [0.22, 0.38];
 const TRAIL_SCALES: [f32; 2] = [0.62, 0.38];
-const HIDDEN_INPUT_MODES: [InputMode; 4] = [
-    InputMode::Inventory,
-    InputMode::Loot,
-    InputMode::Vendor,
-    InputMode::Menu,
-];
+/// Full-screen modes whose UI owns the view instead of the 3D world.
+const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
 const ORB_COLOUR: Color = Color::linear_rgb(0.12, 0.95, 0.32);
 const ORB_EMISSIVE: LinearRgba = LinearRgba::rgb(1.0, 8.0, 2.4);
@@ -484,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_modes_hide_a_body_without_despawning_it() {
+    fn only_full_screen_ui_modes_hide_a_projectile_without_despawning_it() {
         let mut app = headless_player();
         deliver(
             &mut app,
@@ -502,11 +498,29 @@ mod tests {
         app.update();
         assert_eq!(bodies(&mut app)[0].3, Visibility::Visible);
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
-        app.update();
-        let hidden = bodies(&mut app);
-        assert_eq!(hidden.len(), 1);
-        assert_eq!(hidden[0].3, Visibility::Hidden);
+        for mode in [InputMode::Chat, InputMode::Loot, InputMode::Vendor] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            let visible = bodies(&mut app);
+            assert_eq!(visible.len(), 1);
+            assert_eq!(
+                visible[0].3,
+                Visibility::Visible,
+                "the centred {mode:?} panel hid the projectile"
+            );
+        }
+
+        for mode in [InputMode::Inventory, InputMode::Menu] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            let hidden = bodies(&mut app);
+            assert_eq!(hidden.len(), 1);
+            assert_eq!(
+                hidden[0].3,
+                Visibility::Hidden,
+                "the full-screen {mode:?} mode left the projectile drawn"
+            );
+        }
     }
 
     #[test]

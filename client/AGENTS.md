@@ -686,7 +686,8 @@ The client samples the controls, sends what the player is *trying* to do at the 
   so a second read in the other arm would be a second press to whichever arm ran first.
 
   The three answers a take-all can come back as are all the ones the window already knew.
-  A bare corpse is a `LootClosed` and the window goes; a partial one is a `LootState` of the
+  A bare container is a `LootClosed` and the window goes while the corpse remains in the
+  world without its accessible highlight; a partial one is a `LootState` of the
   remainder, which the newest-revision guard accepts precisely because the server spent a
   revision on the entries that did move, beside a `TakeLoot`/`InventoryFull` refusal that
   the status line already had a sentence for. Nothing here removes an entry, closes the

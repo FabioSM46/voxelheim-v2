@@ -178,13 +178,8 @@ const VARGR_COLLAPSE_ROLL: f32 = 1.15;
 /// How far out a vargr's legs slide as they give way, as a multiple of where they stand.
 const VARGR_LEG_SPLAY: f32 = 1.9;
 
-/// Modes whose UI owns the view instead of the 3D world. The same rule drops obey.
-const HIDDEN_INPUT_MODES: [InputMode; 4] = [
-    InputMode::Inventory,
-    InputMode::Loot,
-    InputMode::Vendor,
-    InputMode::Menu,
-];
+/// Full-screen modes whose UI owns the view instead of the 3D world. The same rule drops obey.
+const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
 /// A small planar arrowhead above a mob the server says is hunting this player.
 const AGGRO_MARKER_WIDTH: f32 = 0.30;
@@ -1439,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_mode_hides_the_bodies_without_despawning_them() {
+    fn only_full_screen_ui_modes_hide_bodies_without_despawning_them() {
         let mut app = headless();
         deliver(
             &mut app,
@@ -1451,35 +1446,38 @@ mod tests {
         );
         app.update();
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
-        app.update();
-        {
+        for mode in [InputMode::Chat, InputMode::Loot, InputMode::Vendor] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
             let world = app.world_mut();
             let mut query = world.query_filtered::<&Visibility, With<Mob>>();
             assert!(
                 query
                     .iter(world)
-                    .all(|visibility| *visibility == Visibility::Visible)
+                    .all(|visibility| *visibility == Visibility::Visible),
+                "the centred {mode:?} panel hid the world"
             );
         }
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
-        app.update();
+        for mode in [InputMode::Inventory, InputMode::Menu] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
 
-        let world = app.world_mut();
-        let mut query = world.query_filtered::<&Visibility, With<Mob>>();
-        let drawn: Vec<_> = query.iter(world).copied().collect();
-        assert_eq!(
-            drawn,
-            vec![Visibility::Hidden; 2],
-            "an open pack left a body drawn"
-        );
-        assert_eq!(bodies(&mut app).len(), 2, "hiding despawned a body");
-        assert_eq!(
-            marker_owners(&mut app),
-            vec![(900, Visibility::Inherited)],
-            "the marker must inherit the hidden body rather than draw independently"
-        );
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Visibility, With<Mob>>();
+            let drawn: Vec<_> = query.iter(world).copied().collect();
+            assert_eq!(
+                drawn,
+                vec![Visibility::Hidden; 2],
+                "the full-screen {mode:?} mode left a body drawn"
+            );
+            assert_eq!(bodies(&mut app).len(), 2, "hiding despawned a body");
+            assert_eq!(
+                marker_owners(&mut app),
+                vec![(900, Visibility::Inherited)],
+                "the marker must inherit the hidden body rather than draw independently"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------
