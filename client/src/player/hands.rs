@@ -31,7 +31,7 @@ use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
 use super::livery;
 use super::target::{ApplyMiningFeedback, ApplyTargetInput, BlockTarget, MiningFeedback};
-use super::{HeldItemSurface, InputMode, held_item_surface, stack_item_id};
+use super::{HeldItemSurface, InputMode, LocalMount, held_item_surface, stack_item_id};
 use super::{bundle_strap_linear_rgba, merge_all, rolled_bundle_parts};
 use crate::net::{PLACEHOLDER_APPEARANCE, Session};
 use crate::world::palette;
@@ -177,7 +177,7 @@ fn view_field_of_view(projection: Option<&Projection>) -> f32 {
 /// reads is the **outline**, so the hand is the shape a voxel world draws a hand as — a
 /// block at the end of a narrower arm — and it spends nothing on the channel that renders
 /// as nothing (#396).
-const HAND_SIZE: Vec3 = Vec3::splat(0.024);
+pub(super) const HAND_SIZE: Vec3 = Vec3::splat(0.024);
 
 /// The fist is a cube, which is the whole of what [`fist_mesh`] builds.
 ///
@@ -1909,6 +1909,7 @@ impl Plugin for HandsPlugin {
         livery::register(app);
         app.init_resource::<HandAnimation>()
             .init_resource::<SelfVitals>()
+            .init_resource::<LocalMount>()
             // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
             // because the focused animation tests build this plugin on its own.
             .init_resource::<super::Appearances>()
@@ -2286,6 +2287,9 @@ struct HandSubject<'w> {
     selected: Res<'w, SelectedSlot>,
     session: Option<Res<'w, Session>>,
     appearances: Res<'w, super::Appearances>,
+    mode: Res<'w, InputMode>,
+    view: Res<'w, ViewMode>,
+    mount: Res<'w, LocalMount>,
 }
 
 impl HandSubject<'_> {
@@ -2326,14 +2330,20 @@ type OffHandShieldViewModelQuery<'w, 's> = Query<
 
 fn refresh_held_item(
     subject: HandSubject<'_>,
-    mode: Res<InputMode>,
-    view: Res<ViewMode>,
     mut assets: HandAssets<'_>,
     mut held: HeldItemViewModelQuery<'_, '_>,
     mut shields: OffHandShieldViewModelQuery<'_, '_>,
     vitals: Res<SelfVitals>,
 ) {
-    let (appearance, skin_colour) = subject.read();
+    let (selected, skin_colour) = subject.read();
+    // The saddle composition owns both visible hands. Rebuild this hidden arrangement as
+    // an empty fist while mounted so no selected item shape remains reachable through a
+    // slot or appearance change; the authoritative stack is read again on dismount.
+    let appearance = if subject.mount.mounted() {
+        selected_appearance(None)
+    } else {
+        selected
+    };
     let view_mesh = assets.visuals.mesh.clone();
     // **The view term, and it was missing.** This model is a child of the camera, sitting
     // [`base_translation`] in front of it — a first-person conceit and nothing else. #172
@@ -2346,8 +2356,12 @@ fn refresh_held_item(
     // said: a view toggle that removed the model would rebuild a mesh and a material on a
     // key press, and `animate_view_model` drives a transform on this same entity — so a
     // hidden model is a hidden animation, with nothing further to gate.
-    let visible = if held_item_surface(*mode, *view, subject.session.is_some())
-        == HeldItemSurface::ViewModel
+    let visible = if held_item_surface(
+        *subject.mode,
+        *subject.view,
+        subject.session.is_some(),
+        subject.mount.mounted(),
+    ) == HeldItemSurface::ViewModel
     {
         Visibility::Visible
     } else {
@@ -2474,6 +2488,7 @@ pub(super) fn drawn_item_shape(item_id: u16) -> ItemShape {
 #[derive(SystemParam)]
 struct HandIntent<'w, 's> {
     mode: Res<'w, InputMode>,
+    mount: Res<'w, LocalMount>,
     buttons: Option<Res<'w, ButtonInput<MouseButton>>>,
     target: Res<'w, BlockTarget>,
     feedback: Res<'w, MiningFeedback>,
@@ -2485,7 +2500,7 @@ impl HandIntent<'_, '_> {
     /// Whether gameplay input counts this frame. A mode transition belongs to the UI for
     /// the whole of it, which is how `target::send_block_edits` reads the same thing.
     fn playing(&self) -> bool {
-        *self.mode == InputMode::Playing && !self.mode.is_changed()
+        *self.mode == InputMode::Playing && !self.mode.is_changed() && !self.mount.mounted()
     }
 
     /// **Whether the server says a block is coming apart under this crosshair right now,
@@ -2539,7 +2554,8 @@ impl HandIntent<'_, '_> {
 
     /// Whether a swing request left this client this frame.
     fn swing_sent(&mut self) -> Option<u16> {
-        self.swings.read().next().map(|swing| swing.item_id)
+        let sent = self.swings.read().next().map(|swing| swing.item_id);
+        if self.mount.mounted() { None } else { sent }
     }
 
     /// Whether a consume request left this client this frame.
@@ -2555,7 +2571,8 @@ impl HandIntent<'_, '_> {
     /// It returns a `bool` where the swing returns an id, because there is one eating arc
     /// and nothing to route on. See [`ConsumeSent`].
     fn consume_sent(&mut self) -> bool {
-        self.consumes.read().next().is_some()
+        let sent = self.consumes.read().next().is_some();
+        !self.mount.mounted() && sent
     }
 }
 
@@ -2627,6 +2644,13 @@ fn animate_view_model(
         if *elapsed >= PLACE_BUMP_TIME {
             next_animation.bump_elapsed = None;
         }
+    }
+    // A mount entry is the authoritative cut between the two camera-space
+    // compositions. Clear every in-flight hand arc on that frame: hiding the entity
+    // alone would leave a mining loop or swing advancing behind the reins and make it
+    // reappear part-way through on dismount.
+    if intent.mount.mounted() {
+        next_animation = HandAnimation::default();
     }
     if *animation != next_animation {
         *animation = next_animation;
@@ -2765,7 +2789,8 @@ mod tests {
     use super::super::target::BlockHit;
     use super::*;
     use crate::net::{
-        Appearance as PlayerLook, AppearanceInbox, InventoryStack, PlayerAppearance, SessionParams,
+        Appearance as PlayerLook, AppearanceInbox, InventoryStack, MountKind, MountState,
+        PlayerAppearance, SessionParams, Snapshot, SnapshotInbox,
     };
     use crate::player::items::{ITEM_LOG, ITEM_RAW_COAL, ITEM_RAW_IRON, ITEM_STONE};
     use crate::player::{PlayerPlugin, combat, crafting, structures};
@@ -6760,6 +6785,47 @@ mod tests {
         *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
         app.update();
         assert_eq!(held(&mut app).1, Visibility::Visible);
+    }
+
+    #[test]
+    fn the_authoritative_mount_hides_the_item_and_cancels_every_hand_arc() {
+        let mut app = app();
+        app.insert_resource(HandAnimation {
+            mine_elapsed: Duration::from_secs(1),
+            bump_elapsed: Some(Duration::from_millis(20)),
+            attack: None,
+        });
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 1,
+                mounts: vec![MountState {
+                    entity_id: session().0.entity_id,
+                    mount: MountKind::BrownHorse,
+                }],
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        app.update();
+
+        let (mounted, visibility, _) = held(&mut app);
+        assert_eq!(visibility, Visibility::Hidden);
+        assert_eq!(mounted.shape, None);
+        assert_eq!(
+            *app.world().resource::<HandAnimation>(),
+            HandAnimation::default()
+        );
+
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 2,
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        app.update();
+        assert_eq!(held(&mut app).1, Visibility::Visible);
+        assert_eq!(held(&mut app).0.shape, Some(ItemShape::Block));
     }
 
     #[test]
