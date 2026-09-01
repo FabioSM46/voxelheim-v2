@@ -11,7 +11,7 @@ here.
 | Product Owner | **You** | Ideas, priorities, approve specs, merge PRs |
 | Scrum Master | Claude/OpenCode (`/scrum-master`) or Codex (`$scrum-master`) | Runs ceremonies, drafts specs, creates issues |
 | Developer | Claude/OpenCode (`/dev-issue`) or Codex (`$dev-issue`) | Implements issues, opens PRs, resolves feedback |
-| Reviewer | DeepSeek `deepseek-v4-flash` with max reasoning (auto) + You | Automated code review on every PR |
+| Reviewer | DeepSeek `deepseek-v4-flash` with high reasoning (auto) + You | Automated code review on every PR |
 
 ## The Completion-Driven Cycle
 

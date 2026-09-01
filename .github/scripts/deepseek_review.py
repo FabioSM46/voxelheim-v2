@@ -34,7 +34,8 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 # the context window of the model that replaced it, and was never the thing that bounds a
 # review at all. What bounds it is the **output** budget: the chain of thought is emitted
 # into the same DEEPSEEK_MAX_OUTPUT_TOKENS the verdict has to fit in, and at
-# DEEPSEEK_REASONING_EFFORT=max the reasoning is what exhausts it. A 124,711-character diff
+# At the then-configured DEEPSEEK_REASONING_EFFORT=max, reasoning was what exhausted it. A
+# 124,711-character diff
 # reasoned to the last token of a 384,000-token ceiling and had none left to write a
 # verdict with, after 31 minutes and a full spend (#167) — and then a 60,863-character one
 # did the same in 33 minutes, well inside the cap that run was supposed to be safe under
@@ -209,10 +210,10 @@ DEEPSEEK_MAX_OUTPUT_TOKENS = _read_output_token_budget()
 DEEPSEEK_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "2700"))
 DEEPSEEK_MAX_RETRIES = int(os.environ.get("DEEPSEEK_MAX_RETRIES", "1"))
 
-# Flash at maximum reasoning is the deliberate default: it keeps review depth
-# close to Pro while reducing API cost and synchronous Actions runner time.
+# High reasoning is the deliberate default: it trades some review depth for lower latency
+# and a lower risk of exhausting the shared reasoning/verdict output budget.
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
-DEEPSEEK_REASONING_EFFORT = os.environ.get("DEEPSEEK_REASONING_EFFORT", "max")
+DEEPSEEK_REASONING_EFFORT = os.environ.get("DEEPSEEK_REASONING_EFFORT", "high")
 
 # Stamped into every Mode A review body; round accounting counts only reviews
 # carrying it. GitHub records a standalone review-comment reply as an implicit

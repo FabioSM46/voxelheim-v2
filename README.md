@@ -272,7 +272,7 @@ Every change — feature, bugfix, refactor — flows through the same rigorous l
    OpenCode (`/dev-issue`) implements it in an isolated git worktree on a branch from
    `develop`, runs every quality gate locally, and opens the PR
 3. **CI + AI review** — GitHub Actions runs the change-aware test matrix (`ci-gate`) and
-   DeepSeek (`deepseek-v4-flash`, max reasoning) reviews the diff (one automatic round)
+   DeepSeek (`deepseek-v4-flash`, high reasoning) reviews the diff (one automatic round)
 4. **Labeling** — `pr-labeler.yml` applies `READY TO MERGE` only when the frozen
    acceptance rule holds; `/process-pr <n>` force-cycles feedback when you want it now
 5. **Merge** — a human merges to `develop`. Always. `develop → main` promotions re-run the

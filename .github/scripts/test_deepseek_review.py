@@ -77,7 +77,8 @@ class DiffCapTests(unittest.TestCase):
     nothing.
     """
 
-    # Measured on deepseek-v4-flash at reasoning_effort=max.
+    # These historical cap measurements used reasoning_effort=max. The current high
+    # default changes the ratio and must be measured independently before re-deriving it.
     _OUTPUT_BUDGET_CHARS = 1_481_442  # PR #164 emitted this for a 384,000-token ceiling
     _CEILING_TOKENS = 384_000
     # Diffs that exhausted the budget and returned no verdict. The *smallest* is the one
@@ -344,7 +345,7 @@ class CallDeepSeekContractTests(unittest.TestCase):
         self.assertEqual(
             {
                 "thinking": {"type": "enabled"},
-                "reasoning_effort": "max",
+                "reasoning_effort": "high",
             },
             completions.kwargs["extra_body"],
         )
