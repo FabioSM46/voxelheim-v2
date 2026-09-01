@@ -6,9 +6,9 @@ package world
 // is a field sampled at a coordinate, because terrain is continuous and a field is
 // the only thing that stays seamless across a chunk border. A hut is not continuous:
 // it is a specific arrangement of a hundred and seventy voxels, and the honest way to
-// write one down is to draw it. So this file holds four drawings, one `[]string` per
-// y layer, and the only arithmetic anywhere near them is the quarter turn that points
-// a door at the middle of the village.
+// write one down is to draw it. So every smaller drawing is one `[]string` per y layer,
+// and the only arithmetic anywhere near them is the quarter turn that points a door at
+// the middle of the village.
 //
 // **The four legend runes are the whole of the vocabulary**, and two of them are not
 // blocks: `.` is "leave whatever is there alone" and `_` is air. They are distinct on
@@ -51,6 +51,11 @@ const (
 	AnchorTrader
 	AnchorVillager
 	AnchorGuard
+
+	// The capital's stable: one resident runs it and the three paddock slots are
+	// where the scenic horses stand. The world package still places neither.
+	AnchorStablemaster
+	AnchorPaddock
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -72,6 +77,10 @@ func (a AnchorKind) String() string {
 		return "villager"
 	case AnchorGuard:
 		return "guard"
+	case AnchorStablemaster:
+		return "stablemaster"
+	case AnchorPaddock:
+		return "paddock"
 	default:
 		return "no anchor"
 	}
@@ -118,7 +127,7 @@ func (s *Schematic) At(x, y, z int) Block {
 	return s.Voxels[(y*s.D+z)*s.W+x]
 }
 
-// BuildingKind names one of the four drawings below.
+// BuildingKind names one of the five settlement drawings.
 type BuildingKind uint8
 
 // The buildings. A hut is where somebody lives, a smithy is where the forge is, a
@@ -129,6 +138,7 @@ const (
 	BuildingSmithy
 	BuildingHall
 	BuildingKeep
+	BuildingStable
 )
 
 // String names a building for test failures and diagnostics.
@@ -142,6 +152,8 @@ func (k BuildingKind) String() string {
 		return "hall"
 	case BuildingKeep:
 		return "keep"
+	case BuildingStable:
+		return "stable"
 	default:
 		return "unknown building"
 	}
@@ -167,7 +179,7 @@ const (
 // SchematicFor returns the drawing for a building kind.
 //
 // The returned pointer addresses package state and must be treated as read-only: the
-// four schematics are built once at init and are shared by every settlement in every
+// five schematics are built once at init and are shared by every settlement in every
 // world this process serves.
 func SchematicFor(kind BuildingKind) *Schematic {
 	switch kind {
@@ -177,6 +189,8 @@ func SchematicFor(kind BuildingKind) *Schematic {
 		return hallSchematic
 	case BuildingKeep:
 		return keepSchematic
+	case BuildingStable:
+		return stableSchematic
 	default:
 		return hutSchematic
 	}
@@ -370,8 +384,8 @@ func visitSchematic(b Building, visit func(x, y, z int64, block Block)) {
 	}
 }
 
-// The four drawings. Rows run from the back of the building (z = 0) to its front
-// (z = D−1, where every door is), and each row runs left to right along +X.
+// The three smaller original drawings. Rows run from the back of the building (z = 0)
+// to their front (z = D−1, where every door is), and each row runs left to right along +X.
 
 // hutSchematic is 7×5×7: a cobble footing, plank walls, a thatched roof and one
 // person's worth of floor.

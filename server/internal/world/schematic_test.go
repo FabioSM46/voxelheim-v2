@@ -2,12 +2,12 @@ package world
 
 import "testing"
 
-// everySchematic is the four drawings, named, so a failure says which one, and each
+// everySchematic is the five drawings, named, so a failure says which one, and each
 // with the block its footing course is laid in.
 //
 // **The footing was a literal `Cobblestone` in the doorway test until #682**, which was
-// true of four drawings built from a settlement's three materials and stopped being true
-// the moment one of them was a castle. It is named per drawing rather than read off the
+// true of the four drawings before the keep became a castle and stopped being true at
+// that change. It is named per drawing rather than read off the
 // picture on purpose: reading `s.At(0, 0, 0)` and then checking the ring against it
 // asserts that a drawing agrees with itself, and would pass a keep whose footing had
 // been drawn in thatch.
@@ -24,6 +24,7 @@ func everySchematic() []struct {
 		{BuildingSmithy, Cobblestone},
 		{BuildingHall, Cobblestone},
 		{BuildingKeep, Basalt},
+		{BuildingStable, Cobblestone},
 	}
 	out := make([]struct {
 		kind    BuildingKind
@@ -148,10 +149,10 @@ func TestMustSchematicRefusesADrawingThatIsNotABox(t *testing.T) {
 	}
 }
 
-// TestEverySchematicIsTheSizeItsIssueAsksFor pins the four footprints.
+// TestEverySchematicIsTheSizeItsIssueAsksFor pins the five footprints.
 //
 // Not a restatement of the literals: the sizes are what every other number in
-// settlement.go was chosen against — the ring radii, the plateau radius and the two
+// settlement.go was chosen against — the ring radii, the plateau radius and the
 // compile-time guards that keep buildings from overlapping — so a drawing that grew a
 // row would quietly push a hut into a hall.
 func TestEverySchematicIsTheSizeItsIssueAsksFor(t *testing.T) {
@@ -162,6 +163,7 @@ func TestEverySchematicIsTheSizeItsIssueAsksFor(t *testing.T) {
 		BuildingSmithy: {9, 6, 9},
 		BuildingHall:   {13, 8, 13},
 		BuildingKeep:   {63, 68, 63},
+		BuildingStable: {19, 6, 19},
 	}
 	for _, drawing := range everySchematic() {
 		got := [3]int{drawing.s.W, drawing.s.H, drawing.s.D}
@@ -213,6 +215,14 @@ func TestTheDrawingsSayWhatTheirCommentsSayTheySay(t *testing.T) {
 		{BuildingHall, 10, 7, 10, Thatch, "the ridge's far corner"},
 		{BuildingHall, 1, 7, 2, Air, "the ridge is inset by two on x"},
 		{BuildingHall, 2, 7, 1, Air, "and by two on z"},
+
+		{BuildingStable, 0, 0, 10, Cobblestone, "the paddock side wall"},
+		{BuildingStable, 9, 0, 18, Air, "the paddock gate"},
+		{BuildingStable, 9, 0, 13, Air, "the paddock floor"},
+		{BuildingStable, 0, 1, 4, Planks, "the stable wall"},
+		{BuildingStable, 0, 2, 2, Air, "a stable window"},
+		{BuildingStable, 9, 2, 8, Planks, "the stable doorway lintel"},
+		{BuildingStable, 9, 4, 4, Thatch, "the stable roof"},
 
 		// The keep, and one fixed point per material it is drawn in — which is what
 		// makes this the cheapest check that #680's palette is actually being spent
@@ -342,6 +352,12 @@ func TestEveryAnchorIsWhereItsBuildingPutsIt(t *testing.T) {
 			{X: 33, Y: 0, Z: 59, Kind: AnchorGuard},
 			{X: 16, Y: 0, Z: 22, Kind: AnchorCarpenter},
 		},
+		BuildingStable: {
+			{X: 5, Y: 0, Z: 4, Kind: AnchorStablemaster},
+			{X: 4, Y: 0, Z: 13, Kind: AnchorPaddock},
+			{X: 9, Y: 0, Z: 13, Kind: AnchorPaddock},
+			{X: 14, Y: 0, Z: 13, Kind: AnchorPaddock},
+		},
 	}
 
 	for _, drawing := range everySchematic() {
@@ -406,10 +422,73 @@ func TestEveryAnchorSitsInAirWithSomethingToStandUnderIt(t *testing.T) {
 	for _, kind := range []AnchorKind{
 		AnchorForge, AnchorCampfire, AnchorSmith, AnchorCarpenter,
 		AnchorCook, AnchorTrader, AnchorVillager, AnchorGuard,
+		AnchorStablemaster, AnchorPaddock,
 	} {
 		if seen[kind] == 0 {
 			t.Errorf("no drawing offers a %v slot", kind)
 		}
+	}
+}
+
+// TestTheStableHasOneGateAndFourFloorSlots pins the part of the drawing downstream
+// issues rely on: the paddock is an enclosure rather than four decorative lines, and
+// every entity slot is on one of its two usable floor regions.
+func TestTheStableHasOneGateAndFourFloorSlots(t *testing.T) {
+	t.Parallel()
+
+	s := SchematicFor(BuildingStable)
+	const (
+		stableBack   = 0
+		stableFront  = 8
+		paddockBack  = stableFront + 1
+		paddockFront = 18
+		gateLo       = 8
+		gateHi       = 10
+	)
+
+	// The outer course has exactly one opening: the centred paddock gate on +Z.
+	for x := range s.W {
+		if got := s.At(x, 0, stableBack); got != Cobblestone {
+			t.Errorf("stable back wall at x=%d is block %d, want cobblestone", x, got)
+		}
+		want := Cobblestone
+		if x >= gateLo && x <= gateHi {
+			want = Air
+		}
+		if got := s.At(x, 0, paddockFront); got != want {
+			t.Errorf("paddock front at x=%d is block %d, want %d", x, got, want)
+		}
+	}
+	for z := range s.D {
+		for _, x := range []int{0, s.W - 1} {
+			if got := s.At(x, 0, z); got != Cobblestone {
+				t.Errorf("paddock side at (%d, %d) is block %d, want cobblestone", x, z, got)
+			}
+		}
+	}
+
+	stablemasters, paddockSlots := 0, 0
+	for _, a := range s.Anchors {
+		if a.Y != 0 || s.At(a.X, a.Y, a.Z) != Air {
+			t.Errorf("%v slot at (%d, %d, %d) is not on the floor", a.Kind, a.X, a.Y, a.Z)
+		}
+		switch a.Kind {
+		case AnchorStablemaster:
+			stablemasters++
+			if a.Z <= stableBack || a.Z >= stableFront {
+				t.Errorf("stablemaster slot z=%d is outside the stable floor", a.Z)
+			}
+		case AnchorPaddock:
+			paddockSlots++
+			if a.Z < paddockBack || a.Z >= paddockFront {
+				t.Errorf("paddock slot z=%d is outside the paddock floor", a.Z)
+			}
+		default:
+			t.Errorf("stable carries unexpected %v slot", a.Kind)
+		}
+	}
+	if stablemasters != 1 || paddockSlots != 3 {
+		t.Errorf("stable carries %d stablemaster and %d paddock slots, want 1 and 3", stablemasters, paddockSlots)
 	}
 }
 
@@ -421,7 +500,7 @@ func TestEveryAnchorSitsInAirWithSomethingToStandUnderIt(t *testing.T) {
 // the whole footprint checks both directions at once, because the two sets are the same
 // size.
 //
-// **It runs over a deliberately non-square shape as well as the four drawings**, for
+// **It runs over a deliberately non-square shape as well as the five drawings**, for
 // the reason spelled out on [TestAQuarterTurnIsARotationAndNotAReflection]: every real
 // drawing is square, and a square hides half of what a rotation does.
 func TestRotationIsABijectionOverTheFootprint(t *testing.T) {
@@ -461,9 +540,9 @@ func TestRotationIsABijectionOverTheFootprint(t *testing.T) {
 	}
 }
 
-// TestAQuarterTurnIsARotationAndNotAReflection is the test the four drawings cannot be.
+// TestAQuarterTurnIsARotationAndNotAReflection is the test the five drawings cannot be.
 //
-// **Every schematic in this file is square — 7×7, 9×9, 13×13, 15×15 — and a square is
+// **Every settlement schematic is square — 7×7, 9×9, 13×13, 19×19 or 63×63 — and a square is
 // exactly the shape that cannot tell a rotation from a mirror.** The bijection above
 // accepts a reflection, because a reflection is also a bijection; the doorway test
 // probes the front-centre column, which is a fixed point of the x-mirror for every odd

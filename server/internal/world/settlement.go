@@ -53,9 +53,10 @@ const (
 
 	// The two sizes of settlement, as the radius of flat ground each stands on.
 	//
-	// A capital has to hold a castle, a hall, a smithy and a ring of six huts without
-	// any of them touching; sixty-eight is what that measures out to with the ring at
-	// sixty-one and the largest footprint sixty-three across. A village is under half.
+	// A capital has to hold a castle, a hall, a smithy, a stable and a ring of six huts
+	// without any of them touching; sixty-nine is what that measures out to with the
+	// ring at sixty-three and the largest footprint sixty-three across. A village is
+	// under half.
 	//
 	// **The hut ring is six blocks further out than the guard below would accept, and
 	// the six are not padding.** `capitalHutRingRadius - capitalPlotRadius -
@@ -75,7 +76,12 @@ const (
 	// plot-ring building stood, so [capitalPlotRadius] goes out, the hut ring goes out
 	// behind it, and the plateau goes out behind that. **Four blocks of plateau for
 	// forty-two blocks of castle** — the plateau was never sized by the keep.
-	capitalRadius = 68
+	//
+	// **The stable added nineteen blocks on the plot ring and only one to the plateau.**
+	// Its half-footprint moves that ring from 46 to 50; the hut ring moves from 61 to
+	// 63 behind it, and the outermost hut corner asks for a plateau radius of 69. Each
+	// of the three concentric guards below keeps at least one block of slack.
+	capitalRadius = 69
 	villageRadius = 28
 
 	// settlementBlendBlocks is how far past the radius the plateau eases back into
@@ -150,14 +156,11 @@ const (
 	// bands are still reachable by digging down inside the walls.
 	settlementCaveClearance = 6
 
-	// The capital's plan: a keep in the middle, the hall and the smithy on their own
-	// bearings a short walk out, and the huts on a ring beyond both.
-	// Forty-six rather than the forty-four the guard below would just accept: at 44 the
-	// nearer-axis distance is 38 and `38 − 31 − 6 − 1` is exactly zero, which compiles
-	// and leaves a keep's corner touching a hall's. Forty-six buys the one block of air
-	// between them that makes the two read as separate buildings.
-	capitalPlotRadius    = 46
-	capitalHutRingRadius = 61
+	// The capital's plan: a keep in the middle; the hall, smithy and stable on their own
+	// bearings a short walk out; and the huts on a ring beyond them. Fifty gives the
+	// nineteen-block stable two blocks of slack from the keep on the nearest-axis guard.
+	capitalPlotRadius    = 50
+	capitalHutRingRadius = 63
 	capitalHutCount      = 6
 
 	// capitalSpawnGateClearance is how far outside the castle's gate a session begins:
@@ -228,9 +231,10 @@ const (
 	hutRingClearance      = 5  // ceil(3√2)
 	smithyHalfFootprint   = 4  // smithySchematic is 9 across
 	hallHalfFootprint     = 6  // hallSchematic is 13 across
+	stableHalfFootprint   = 9  // stableSchematic is 19 across
 	largestHalfFootprint  = 31 // keepSchematic is 63 across
 	publicHalfFootprint   = hallHalfFootprint
-	plotRingHalfFootprint = hallHalfFootprint
+	plotRingHalfFootprint = stableHalfFootprint
 )
 
 // plotRingNearestAxis is how far a building on the capital's plot ring stands from the
@@ -246,6 +250,11 @@ const (
 // are — a const expression cannot index a `var` — and
 // [TestTheGuardsBelowDescribeTheActualDrawings] pins it to the table.
 const plotRingNearestAxis = (capitalPlotRadius * 56756) >> fracBits
+
+// One step on the bearing table moves twenty-five blocks on the changing axis at
+// [capitalPlotRadius]. That clears a stable and the next-largest plot building with
+// room to spare, so the stable need only avoid the exact bearings already occupied.
+const plotRingAdjacentAxis = (capitalPlotRadius * 32768) >> fracBits
 
 // **The scan in [settlementShapeAt] reads four cells, and what makes that enough is not
 // this constant.** The comment here used to claim that breaking it would make the scan
@@ -268,17 +277,25 @@ const _ uint64 = settlementCellBlocks/2 - settlementReach
 // silently — and this line is what says so at compile time.
 const _ = uint8(villageCellInset - settlementReach)
 
-// A capital's ring of huts has to stand clear of the hall and the smithy inside it, and
-// the plateau has to be wide enough to hold the ring. Both are compile errors rather than
-// a building with its corner in another building.
-const _ = uint8(capitalRadius - capitalHutRingRadius - hutRingClearance)
-const _ = uint8(capitalHutRingRadius - capitalPlotRadius - plotRingHalfFootprint - hutHalfFootprint)
+// A capital's ring of huts has to stand clear of the three plot buildings inside it,
+// and the plateau has to be wide enough to hold the ring. Every named margin must be
+// at least one; subtracting one in the assertions makes zero a compile-time overflow.
+const (
+	capitalPlateauMargin = capitalRadius - capitalHutRingRadius - hutRingClearance
+	capitalRingMargin    = capitalHutRingRadius - capitalPlotRadius - plotRingHalfFootprint - hutHalfFootprint
+	capitalKeepMargin    = plotRingNearestAxis - largestHalfFootprint - plotRingHalfFootprint - 1
+	capitalPlotMargin    = plotRingAdjacentAxis - stableHalfFootprint - hallHalfFootprint - 1
+)
+
+const _ = uint8(capitalPlateauMargin - 1)
+const _ = uint8(capitalRingMargin - 1)
 
 // And the castle in the middle has to stand clear of that plot ring. The `- 1` makes it
 // a gap rather than a touch: two boxes whose faces are in adjacent columns do not
 // overlap, and a guard that allowed the equal case would allow a hall built against the
 // curtain wall.
-const _ = uint8(plotRingNearestAxis - largestHalfFootprint - plotRingHalfFootprint - 1)
+const _ = uint8(capitalKeepMargin - 1)
+const _ = uint8(capitalPlotMargin - 1)
 
 // **And the same three for a village, which had none of them.** The capital's guards were
 // the only ones, so `villageHutRingRadius` could be raised from 16 to 26 — still under
@@ -902,20 +919,47 @@ func settlementFrom(seed int64, cellX, cellZ int64, site settlementSite) Settlem
 	if site.kind == SettlementCapital {
 		s.Buildings = append(s.Buildings, site.building(BuildingKeep, 0, 0))
 
-		// The hall and the smithy share a ring, so their bearings must differ by at
-		// least a quarter of the circle or their thirteen-block footprints touch.
+		// Three buildings share the plot ring. The hall and smithy retain their
+		// quarter-circle separation. The stable chooses among the bearings that clear
+		// those two and the already-known hut ring: the nearest-axis guards are floors,
+		// so the final discrete plan still has to answer the actual boxes.
 		hall := int(h % uint64(bearings))
 		smithy := hall + 3 + int((h>>8)%uint64(bearings-5))
-		s.Buildings = append(s.Buildings,
-			site.buildingOnRing(BuildingHall, capitalPlotRadius, hall),
-			site.buildingOnRing(BuildingSmithy, capitalPlotRadius, smithy),
-		)
-
+		smithy %= int(bearings)
 		start := int((h >> 16) % uint64(bearings))
+		hallBuilding := site.buildingOnRing(BuildingHall, capitalPlotRadius, hall)
+		smithyBuilding := site.buildingOnRing(BuildingSmithy, capitalPlotRadius, smithy)
+		hutBuildings := make([]Building, 0, capitalHutCount)
 		for i := range capitalHutCount {
-			s.Buildings = append(s.Buildings,
+			hutBuildings = append(hutBuildings,
 				site.buildingOnRing(BuildingHut, capitalHutRingRadius, start+i*int(bearings)/capitalHutCount))
 		}
+
+		stableCandidates := make([]Building, 0, len(settlementBearings))
+		for candidate := range len(settlementBearings) {
+			stable := site.buildingOnRing(BuildingStable, capitalPlotRadius, candidate)
+			if buildingsOverlap(stable, hallBuilding) || buildingsOverlap(stable, smithyBuilding) {
+				continue
+			}
+			clear := true
+			for _, hut := range hutBuildings {
+				if buildingsOverlap(stable, hut) {
+					clear = false
+					break
+				}
+			}
+			if clear {
+				stableCandidates = append(stableCandidates, stable)
+			}
+		}
+		stable := stableCandidates[int((h>>24)%uint64(len(stableCandidates)))]
+		s.Buildings = append(s.Buildings,
+			hallBuilding,
+			smithyBuilding,
+			stable,
+		)
+
+		s.Buildings = append(s.Buildings, hutBuildings...)
 		return s
 	}
 
@@ -932,6 +976,16 @@ func settlementFrom(seed int64, cellX, cellZ int64, site settlementSite) Settlem
 			site.buildingOnRing(BuildingHut, villageHutRingRadius, start+i*int(bearings)/huts))
 	}
 	return s
+}
+
+// buildingsOverlap reports whether two placed footprint boxes share a column. It is
+// used only to choose the stable's bearing: the compile-time guards establish the ring
+// clearances, while this resolves the nearest-axis caveat those guards document.
+func buildingsOverlap(a, b Building) bool {
+	aw, ad := rotatedFootprint(SchematicFor(a.Kind), a.Facing)
+	bw, bd := rotatedFootprint(SchematicFor(b.Kind), b.Facing)
+	return a.OriginX <= b.OriginX+int64(bw)-1 && b.OriginX <= a.OriginX+int64(aw)-1 &&
+		a.OriginZ <= b.OriginZ+int64(bd)-1 && b.OriginZ <= a.OriginZ+int64(ad)-1
 }
 
 // buildingOnRing places one building at a bearing on a ring around the centre.
