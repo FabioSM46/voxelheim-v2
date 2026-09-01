@@ -35,7 +35,10 @@ pub const ENUM_VALUES_PLAYER_TRADE_ACTION: [PlayerTradeAction; 7] = [
 /// to the player who pressed the key, not to the player they addressed.
 ///
 /// Every action also reads `client_tick` for authoritative ordering and staleness:
-///   - `Open` reads `target_entity_id`
+///   - `Open` reads `target_entity_id`. A target that is absent, self, not a player,
+///     out of reach, dead or already trading is refused as `NoSuchPlayer`, so the sender
+///     cannot probe another player's state. The sender's own state may instead produce
+///     `PlayerIsDead` or `AlreadyTrading`; a recently closed pair uses `TradeCooldown`
 ///   - `SetItem` reads `trade_slot`, `pack_slot`, and `revision`
 ///   - `ClearItem` reads `trade_slot` and `revision`
 ///   - `SetSilver` reads `silver` and `revision`
