@@ -82,13 +82,20 @@ const SNOW_SIZE: Vec2 = Vec2::new(0.12, 0.12);
 /// A mote of sand, in blocks: between the two, and square like the flake.
 const SAND_SIZE: Vec2 = Vec2::new(0.08, 0.08);
 
-/// How fast rain falls, in blocks per second.
-const RAIN_FALL_SPEED: f32 = 18.0;
-/// How fast snow falls, in blocks per second.
-const SNOW_FALL_SPEED: f32 = 1.5;
-/// How fast sand crosses the volume, in blocks per second. Horizontal, and only
-/// horizontal: sand does not fall, it is carried.
-const SAND_DRIFT_SPEED: f32 = 12.0;
+/// Calm and driving speeds, in blocks per second. Intensity interpolates between
+/// each pair after the low-strength dead zone described by [`driving_strength`].
+const RAIN_FALL_SPEED: [f32; 2] = [18.0, 27.0];
+const SNOW_FALL_SPEED: [f32; 2] = [1.5, 3.0];
+const SAND_DRIFT_SPEED: [f32; 2] = [12.0, 18.0];
+
+/// A fixed unit bearing in world XZ, so a gust never turns with the camera.
+/// The 3-4-5 triangle gives an exact normal without runtime normalisation.
+const WIND_DIRECTION: Vec3 = Vec3::new(0.6, 0.0, 0.8);
+/// How many blocks per second a full gust adds to falling weather's horizontal travel.
+const WIND_SPEED: f32 = 6.0;
+/// Intensities through this value carry no visible wind lean. The first quarter of
+/// the wire scale is calm; above it the lean grows continuously to [`WIND_SPEED`].
+const CALM_INTENSITY: u8 = 64;
 
 /// How far a flake wanders to either side of where it would have fallen, in blocks, and
 /// how often it completes that wander.
@@ -533,7 +540,7 @@ fn write_positions(
             unit_from(quad as u32 * 3 + 1),
             unit_from(quad as u32 * 3 + 2),
         );
-        let local = (seed * VOLUME + travelled(kind, seed, elapsed)).rem_euclid(VOLUME);
+        let local = (seed * VOLUME + travelled(kind, intensity, seed, elapsed)).rem_euclid(VOLUME);
         let centre = eye + local - corner;
 
         let falls_from_sky = matches!(
@@ -564,31 +571,57 @@ fn write_positions(
 /// Unbounded on purpose: [`write_positions`] takes the result modulo [`VOLUME`], so a quad
 /// that has fallen a mile is a quad that has wrapped through the box a hundred times, and
 /// nothing has to remember that it did.
-fn travelled(kind: WeatherKind, seed: Vec3, elapsed: f32) -> Vec3 {
+fn travelled(kind: WeatherKind, intensity: u8, seed: Vec3, elapsed: f32) -> Vec3 {
+    let driving = driving_strength(intensity);
     match kind {
         // Never reached -- `visible_quads` answers zero and the volume is hidden -- and
         // answered rather than left to a wildcard, so a sixth kind fails to compile here
         // instead of falling through into somebody else's motion.
         WeatherKind::Clear => Vec3::ZERO,
-        WeatherKind::Rain => Vec3::new(0.0, -RAIN_FALL_SPEED * elapsed, 0.0),
-        WeatherKind::Snow | WeatherKind::Blizzard => {
-            let speed = if kind == WeatherKind::Blizzard {
-                SNOW_FALL_SPEED * BLIZZARD_SPEED_FACTOR
-            } else {
-                SNOW_FALL_SPEED
-            };
+        WeatherKind::Rain => {
+            wind_travel(driving, elapsed)
+                + Vec3::new(0.0, -scaled_speed(RAIN_FALL_SPEED, driving) * elapsed, 0.0)
+        }
+        WeatherKind::Snow => {
             // The phase comes out of the seed the starting position did, so a flake's
             // wander is as much its own as where it started -- and it costs no state.
             let phase = TAU * (elapsed * SNOW_DRIFT_HZ + seed.x);
+            wind_travel(driving, elapsed)
+                + Vec3::new(
+                    SNOW_DRIFT_BLOCKS * phase.sin(),
+                    -scaled_speed(SNOW_FALL_SPEED, driving) * elapsed,
+                    SNOW_DRIFT_BLOCKS * (phase + seed.z * TAU).cos(),
+                )
+        }
+        WeatherKind::Blizzard => {
+            let phase = TAU * (elapsed * SNOW_DRIFT_HZ + seed.x);
             Vec3::new(
                 SNOW_DRIFT_BLOCKS * phase.sin(),
-                -speed * elapsed,
+                -SNOW_FALL_SPEED[0] * BLIZZARD_SPEED_FACTOR * elapsed,
                 SNOW_DRIFT_BLOCKS * (phase + seed.z * TAU).cos(),
             )
         }
         // Horizontal, and only horizontal: sand does not fall, it is carried past you.
-        WeatherKind::Sandstorm => Vec3::new(SAND_DRIFT_SPEED * elapsed, 0.0, 0.0),
+        WeatherKind::Sandstorm => {
+            Vec3::new(scaled_speed(SAND_DRIFT_SPEED, driving) * elapsed, 0.0, 0.0)
+                + wind_travel(driving, elapsed)
+        }
     }
+}
+
+/// The share of the calm-to-driving presentation range this intensity occupies.
+/// Low weather remains straight and slow; the remainder is continuous rather than
+/// divided into bands, matching the contract's description of intensity.
+fn driving_strength(intensity: u8) -> f32 {
+    f32::from(intensity.saturating_sub(CALM_INTENSITY)) / f32::from(u8::MAX - CALM_INTENSITY)
+}
+
+fn scaled_speed(range: [f32; 2], driving: f32) -> f32 {
+    range[0] + (range[1] - range[0]) * driving
+}
+
+fn wind_travel(driving: f32, elapsed: f32) -> Vec3 {
+    WIND_DIRECTION * (WIND_SPEED * driving * elapsed)
 }
 
 /// How wide and how tall one quad is, in blocks.
@@ -991,20 +1024,43 @@ mod tests {
         let second = 1.0;
 
         assert_eq!(
-            travelled(WeatherKind::Rain, seed, second),
-            Vec3::new(0.0, -RAIN_FALL_SPEED, 0.0)
+            travelled(WeatherKind::Rain, CALM_INTENSITY, seed, second),
+            Vec3::new(0.0, -RAIN_FALL_SPEED[0], 0.0)
         );
 
-        let snow = travelled(WeatherKind::Snow, seed, second);
-        let blizzard = travelled(WeatherKind::Blizzard, seed, second);
-        assert_eq!(snow.y, -SNOW_FALL_SPEED);
+        let snow = travelled(WeatherKind::Snow, CALM_INTENSITY, seed, second);
+        let blizzard = travelled(WeatherKind::Blizzard, 255, seed, second);
+        assert_eq!(snow.y, -SNOW_FALL_SPEED[0]);
         assert_eq!(blizzard.y, snow.y * BLIZZARD_SPEED_FACTOR);
         // The lateral wander is what separates snow from slow rain, and it is bounded.
         assert!(snow.x != 0.0 || snow.z != 0.0);
         assert!(snow.x.abs() <= SNOW_DRIFT_BLOCKS && snow.z.abs() <= SNOW_DRIFT_BLOCKS);
 
-        let sand = travelled(WeatherKind::Sandstorm, seed, second);
-        assert_eq!(sand, Vec3::new(SAND_DRIFT_SPEED, 0.0, 0.0));
+        let sand = travelled(WeatherKind::Sandstorm, CALM_INTENSITY, seed, second);
+        assert_eq!(sand, Vec3::new(SAND_DRIFT_SPEED[0], 0.0, 0.0));
+    }
+
+    /// Ordinary weather moves faster at the top of the server-owned intensity
+    /// scale than in calm weather. The blizzard keeps its separate fixed rule.
+    #[test]
+    fn ordinary_precipitation_speed_scales_with_intensity() {
+        let seed = Vec3::new(0.25, 0.5, 0.75);
+        for kind in [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Sandstorm] {
+            let calm = travelled(kind, 64, seed, 1.0).length();
+            let driving = travelled(kind, 255, seed, 1.0).length();
+            assert!(driving > calm, "{kind:?}: {driving} <= {calm}");
+        }
+    }
+
+    /// Wind is a stable world-space displacement: low intensity has none, high
+    /// intensity has some, and no camera rotation is an input to the function.
+    #[test]
+    fn wind_lean_is_world_space_and_scales_with_intensity() {
+        assert_eq!(wind_travel(driving_strength(64), 1.0), Vec3::ZERO);
+        let driving = wind_travel(driving_strength(255), 1.0);
+        assert_eq!(driving, WIND_DIRECTION * WIND_SPEED);
+        assert_eq!(driving.y, 0.0);
+        assert!(driving.x != 0.0 && driving.z != 0.0);
     }
 
     /// A rain streak is long in one direction and that direction is down, whatever the

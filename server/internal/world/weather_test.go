@@ -259,3 +259,100 @@ func BenchmarkWeatherAt(b *testing.B) {
 		WeatherAt(climateSeed, uint64(i)*97, int64(i%64)*613, int64(i/64%64)*727)
 	}
 }
+
+// Five real minutes at the default twenty ticks per second are 6000 ticks. The
+// front at this column stays put over that interval; the faster field laid over
+// it must still make the weather rise and fall several times and across enough
+// of the byte range to be visible rather than numerically different.
+func TestAPlayerStandingStillFeelsSeveralGusts(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ticks = 6000
+		x     = 4999
+		z     = -5303
+	)
+	intensities := make([]uint8, ticks)
+	for tick := range uint64(ticks) {
+		kind, intensity := WeatherAt(climateSeed, tick, x, z)
+		if kind == WeatherClear {
+			t.Fatalf("the measured column became clear at tick %d", tick)
+		}
+		intensities[tick] = intensity
+	}
+
+	lowest, highest, maxima, trend := uint8(255), uint8(0), 0, 0
+	for i, intensity := range intensities {
+		lowest = min(lowest, intensity)
+		highest = max(highest, intensity)
+		if i > 0 {
+			switch {
+			case intensity > intensities[i-1]:
+				trend = 1
+			case intensity < intensities[i-1]:
+				if trend > 0 {
+					maxima++
+				}
+				trend = -1
+			}
+		}
+	}
+	if maxima < 3 {
+		t.Errorf("five minutes held only %d local maxima, want at least 3", maxima)
+	}
+	if spread := int(highest) - int(lowest); spread < 96 {
+		t.Errorf("five minutes spanned %d intensity points (%d..%d), want at least 96", spread, lowest, highest)
+	}
+}
+
+// The fast term changes only how hard existing weather falls. Asking the front
+// directly at every tick proves a gust can neither cross the clear threshold nor
+// change the land's answer, while the intensity remains inside non-clear's 1..255.
+func TestAGustNeverStartsOrStopsWeather(t *testing.T) {
+	t.Parallel()
+
+	for _, seed := range weatherSeeds {
+		for i := range 16 {
+			x := int64(i-8) * weatherStepX
+			z := int64(8-i) * weatherStepZ
+			for tick := uint64(0); tick < 6000; tick++ {
+				field := weatherFieldAt(seed, tick, x, z)
+				kind, intensity := WeatherAt(seed, tick, x, z)
+				if field < weatherClearThreshold {
+					if kind != WeatherClear || intensity != 0 {
+						t.Fatalf("seed %d at (%d, %d) tick %d gusted clear field %d into %v/%d", seed, x, z, tick, field, kind, intensity)
+					}
+					continue
+				}
+				wantKind := weatherKindAt(seed, x, z)
+				if kind != wantKind || intensity == 0 {
+					t.Fatalf("seed %d at (%d, %d) tick %d changed non-clear %v into %v/%d", seed, x, z, tick, wantKind, kind, intensity)
+				}
+			}
+		}
+	}
+}
+
+// The measured tail is the tuning criterion behind weatherGustSwing. It is
+// pooled over several worlds and decorrelated columns: driving weather should
+// happen sometimes, but should not be the condition a player sees most often.
+func TestDrivingWeatherIsOccasional(t *testing.T) {
+	t.Parallel()
+
+	driving, weather := 0, 0
+	for _, seed := range weatherSeeds {
+		walkWeatherLattice(seed, func(_, _ int64, _ uint64, kind WeatherKind, intensity uint8) {
+			if kind == WeatherClear {
+				return
+			}
+			weather++
+			if intensity > 255*3/4 {
+				driving++
+			}
+		})
+	}
+	share := float64(driving) / float64(weather)
+	if share < 0.02 || share > 0.15 {
+		t.Errorf("driving weather is %.1f%% of non-clear samples, want occasional 2-15%%", share*100)
+	}
+}
