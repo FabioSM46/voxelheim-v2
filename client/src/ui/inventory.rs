@@ -1220,10 +1220,8 @@ fn rebuild_mount_rows(
         if !changed && children.is_some() {
             continue;
         }
-        if let Some(children) = children {
-            for child in children.iter() {
-                commands.entity(child).despawn();
-            }
+        if children.is_some() {
+            commands.entity(list).despawn_related::<Children>();
         }
         let mounts = learned.as_deref().map_or(&[][..], LearnedMounts::mounts);
         commands.entity(list).with_children(|rows| {

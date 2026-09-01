@@ -1160,7 +1160,6 @@ impl Settings {
         match tab {
             Tab::Controls => {
                 self.look_sensitivity = defaults.look_sensitivity;
-                self.default_mount = defaults.default_mount;
                 self.bindings =
                     Bindings::from_pairs(&CONTROLS.map(|control| (control, control.default_key())))
                         .unwrap_or_default();
@@ -1524,6 +1523,7 @@ mod tests {
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
+            settings.set_default_mount(DefaultMount::Brown);
             settings
         };
 
@@ -1568,6 +1568,7 @@ mod tests {
         assert_eq!(after.readout_corner(), before.readout_corner());
         assert_eq!(after.window_mode(), before.window_mode());
         assert_eq!(after.monitor(), before.monitor());
+        assert_eq!(after.default_mount(), before.default_mount());
     }
 
     /// **A reset is a whole assignment or nothing**, which is why it goes through
