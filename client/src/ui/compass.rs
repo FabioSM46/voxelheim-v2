@@ -33,10 +33,11 @@
 //! visibility, on the root, is the whole of it.
 
 use bevy::prelude::*;
+use bevy::text::LineHeight;
 use bevy::ui::FocusPolicy;
 
 use crate::net::Session;
-use crate::player::{AimCamera, InputMode, LookState, PlayerStats};
+use crate::player::{AimCamera, InputMode, LookState, PlayerStats, SkyClock, sun_phase};
 
 use super::storm::Storm;
 
@@ -81,6 +82,9 @@ const READING_SIZE: f32 = 15.0;
 const LABEL_GAP: f32 = 2.0;
 const READING_GAP: f32 = 3.0;
 
+/// The gap between the strip's right edge and the time reading.
+const TIME_GAP: f32 = 10.0;
+
 /// The strip's backdrop, dark enough to read a white tick against a bright sky.
 const STRIP_BACKGROUND: Color = Color::srgba(0.025, 0.03, 0.04, 0.78);
 
@@ -113,6 +117,10 @@ impl Plugin for CompassUiPlugin {
             // under the reading are a readout of what the server said, so this module has
             // to be buildable on its own without the plugin that fills it in.
             .init_resource::<PlayerStats>()
+            // The world's digital reading consumes the exact anchor the sky does. The
+            // player plugin owns it in the game; initialising it here preserves this
+            // module's headless contract.
+            .init_resource::<SkyClock>()
             .init_resource::<Storm>()
             .add_systems(Startup, spawn_compass)
             .add_systems(
@@ -131,6 +139,7 @@ impl Plugin for CompassUiPlugin {
                     // ordering against a system this module's headless tests never build
                     // would be a no-op there anyway.
                     refresh_coordinates,
+                    refresh_time_reading,
                     refresh_storm_countdown.after(super::storm::IngestStorm),
                     show_compass,
                 ),
@@ -157,6 +166,10 @@ struct CompassPointer;
 /// The numeric heading under the pointer.
 #[derive(Component)]
 struct CompassReading;
+
+/// The world's time of day, read from the same sun phase the sky draws.
+#[derive(Component)]
+struct TimeReading;
 
 /// Where the player stands, in blocks, under the heading.
 #[derive(Component)]
@@ -232,6 +245,42 @@ fn is_cardinal(degrees: u16) -> bool {
 fn center_reading(yaw: f32) -> String {
     let rounded = heading_degrees(yaw).round() as u16 % 360;
     format!("{rounded:03} deg")
+}
+
+/// The displayed minute of the sun's revolution, in `0..1440`.
+///
+/// Daylight and night deliberately cover twelve displayed hours each even when they take
+/// different numbers of ticks. That keeps dawn at 06:00, the sun's zenith at 12:00, dusk
+/// at 18:00 and the middle of the night at 00:00 on every valid server clock.
+fn clock_minute(clock: &crate::net::WorldClock, tick_of_day: f32) -> Option<u16> {
+    if !clock.declared() {
+        return None;
+    }
+    let turn = (sun_phase(clock, tick_of_day) + 0.25).rem_euclid(1.0);
+    Some((turn * 24.0 * 60.0).floor() as u16 % (24 * 60))
+}
+
+/// The twelve-hour reading for one interpolated tick of the authoritative day.
+fn time_reading(clock: &crate::net::WorldClock, tick_of_day: f32) -> Option<String> {
+    let minute_of_day = clock_minute(clock, tick_of_day)?;
+    let hour_24 = minute_of_day / 60;
+    let minute = minute_of_day % 60;
+    let hour_12 = match hour_24 % 12 {
+        0 => 12,
+        hour => hour,
+    };
+    let meridiem = if hour_24 < 12 { "AM" } else { "PM" };
+    Some(format!("{hour_12:02}:{minute:02} {meridiem}"))
+}
+
+/// Reads the current interpolated tick from the same anchor and session clock as the sky.
+fn time_reading_at(sky: &SkyClock, session: &Session, now: std::time::Instant) -> Option<String> {
+    let params = session.0;
+    if !params.clock.declared() {
+        return None;
+    }
+    let tick_of_day = sky.ticks_at(now, params.tick_rate, params.clock.day_length_ticks)?;
+    time_reading(&params.clock, tick_of_day)
 }
 
 /// The block the player is standing in, on the axis `value` measures.
@@ -395,7 +444,34 @@ fn spawn_compass(mut commands: Commands) {
                 FocusPolicy::Pass,
             ));
 
-            // A third child of the same column rather than a second root: `TOP`, the
+            // Absolute and outside `CompassWindow`: it starts at the strip's right edge,
+            // cannot be clipped by the strip, and contributes nothing to the centred
+            // column's width. Adding or removing it therefore cannot move the strip.
+            root.spawn((
+                TimeReading,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(0.0),
+                    left: Val::Percent(50.0),
+                    margin: UiRect::left(Val::Px(STRIP_WIDTH / 2.0 + TIME_GAP)),
+                    height: Val::Px(STRIP_HEIGHT),
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                Text::default(),
+                TextFont {
+                    font_size: FontSize::Px(STRIP_HEIGHT),
+                    ..default()
+                },
+                LineHeight::Px(STRIP_HEIGHT),
+                TextColor(CARDINAL),
+                TextLayout::no_wrap(),
+                TextShadow::default(),
+                FocusPolicy::Pass,
+                Visibility::Hidden,
+            ));
+
+            // The next in-flow child of the same column rather than a second root: `TOP`, the
             // `HUD_LAYER` ordering, the one `Visibility` `show_compass` writes and the
             // pointer-pass guarantee are then stated once, and the column's `row_gap`
             // already puts this a `READING_GAP` under the heading.
@@ -416,7 +492,7 @@ fn spawn_compass(mut commands: Commands) {
                 FocusPolicy::Pass,
             ));
 
-            // The third Text child in this column, after the coordinates. Empty and
+            // The next in-flow Text child in this column, after the coordinates. Empty and
             // hidden until the latest server warning says the storm is within a minute
             // or raging; no local weather state is consulted.
             root.spawn((
@@ -479,6 +555,35 @@ fn refresh_coordinates(
     }
 }
 
+/// Rewrites the time from the sky's interpolated authoritative clock.
+///
+/// The node is individually hidden until both a clock and its first accepted snapshot
+/// exist. Once it does, `Inherited` leaves the root's gameplay visibility as the only
+/// gate, exactly as it is for the strip.
+fn refresh_time_reading(
+    session: Option<Res<Session>>,
+    sky: Res<SkyClock>,
+    mut readings: Query<(&mut Text, &mut Visibility), With<TimeReading>>,
+) {
+    let next = session
+        .as_deref()
+        .and_then(|session| time_reading_at(&sky, session, std::time::Instant::now()));
+    let visibility = if next.is_some() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    let next = next.unwrap_or_default();
+    for (mut text, mut shown) in &mut readings {
+        if text.0 != next {
+            text.0 = next.clone();
+        }
+        if *shown != visibility {
+            *shown = visibility;
+        }
+    }
+}
+
 /// Rewrites the countdown only when its displayed whole second changes.
 ///
 /// `Storm` owns the last server warning and its receive instant. This system reads that
@@ -535,11 +640,23 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::net::{SessionParams, StormPhase, StormWarning};
+    use crate::net::{SessionParams, StormPhase, StormWarning, WorldClock};
+
+    fn default_clock() -> WorldClock {
+        WorldClock {
+            day_length_ticks: 24_000,
+            night_start_ticks: 14_400,
+            night_end_ticks: 21_600,
+        }
+    }
 
     fn session() -> Session {
+        session_with_clock(WorldClock::default())
+    }
+
+    fn session_with_clock(clock: WorldClock) -> Session {
         Session(SessionParams {
-            clock: Default::default(),
+            clock,
             entity_id: 1,
             spawn: [0.0; 3],
             world_seed: 1,
@@ -587,6 +704,13 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query_filtered::<(&Text, &Visibility), With<StormCountdown>>();
         let (text, visibility) = query.single(world).expect("one storm countdown");
+        (text.0.clone(), *visibility)
+    }
+
+    fn displayed_time(app: &mut App) -> (String, Visibility) {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&Text, &Visibility), With<TimeReading>>();
+        let (text, visibility) = query.single(world).expect("one time reading");
         (text.0.clone(), *visibility)
     }
 
@@ -780,6 +904,167 @@ mod tests {
     }
 
     #[test]
+    fn the_default_days_four_solar_anchors_have_the_named_times() {
+        let clock = default_clock();
+        for (tick, expected) in [
+            (21_600.0, "06:00 AM"),
+            (6_000.0, "12:00 PM"),
+            (14_400.0, "06:00 PM"),
+            (18_000.0, "12:00 AM"),
+        ] {
+            assert_eq!(time_reading(&clock, tick).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn a_different_night_split_keeps_dawn_and_the_zenith_on_the_clock_face() {
+        let clock = WorldClock {
+            day_length_ticks: 30_000,
+            night_start_ticks: 12_000,
+            night_end_ticks: 24_000,
+        };
+        // The daylight is 18,000 ticks: its midpoint is 9,000 ticks after dawn,
+        // wrapping to tick 3,000.
+        assert_eq!(time_reading(&clock, 24_000.0).as_deref(), Some("06:00 AM"));
+        assert_eq!(time_reading(&clock, 3_000.0).as_deref(), Some("12:00 PM"));
+    }
+
+    #[test]
+    fn every_tick_of_the_default_day_moves_the_minute_forwards_modulo_midnight() {
+        let clock = default_clock();
+        let mut previous = clock_minute(&clock, 0.0).expect("a declared clock");
+        let mut wraps = 0;
+
+        for tick in 1..clock.day_length_ticks {
+            let minute = clock_minute(&clock, tick as f32).expect("a declared clock");
+            if minute < previous {
+                wraps += 1;
+                assert_eq!(previous, 1_439, "the displayed day wrapped before 11:59 PM");
+                assert_eq!(minute, 0, "the displayed day wrapped past 12:00 AM");
+            } else {
+                assert!(
+                    minute >= previous,
+                    "minute moved backwards at tick {tick}: {previous} -> {minute}"
+                );
+            }
+
+            let text = time_reading(&clock, tick as f32).expect("a declared clock");
+            let (time, meridiem) = text.split_once(' ').expect("time and meridiem");
+            let (hour, minute_text) = time.split_once(':').expect("hour and minute");
+            assert!((1..=12).contains(&hour.parse::<u8>().expect("numeric hour")));
+            assert!(minute_text.parse::<u8>().expect("numeric minute") < 60);
+            assert!(matches!(meridiem, "AM" | "PM"));
+
+            previous = minute;
+        }
+        assert_eq!(wraps, 1, "one displayed day has one midnight");
+    }
+
+    #[test]
+    fn a_world_without_a_clock_has_no_time_reading() {
+        let clock = WorldClock::default();
+        assert_eq!(clock_minute(&clock, 0.0), None);
+        assert_eq!(time_reading(&clock, 0.0), None);
+
+        let mut app = compass_app();
+        assert_eq!(
+            displayed_time(&mut app),
+            (String::new(), Visibility::Hidden)
+        );
+    }
+
+    #[test]
+    fn the_reading_advances_from_the_skys_interpolation_between_snapshots() {
+        let base = Instant::now();
+        let session = session_with_clock(default_clock());
+        let mut sky = SkyClock::default();
+        sky.anchor(5_990, base);
+
+        assert_eq!(
+            time_reading_at(&sky, &session, base).as_deref(),
+            Some("11:59 AM")
+        );
+        assert_eq!(
+            time_reading_at(&sky, &session, base + std::time::Duration::from_secs(1)).as_deref(),
+            Some("12:00 PM")
+        );
+    }
+
+    #[test]
+    fn the_time_is_the_compass_height_and_cannot_move_the_centred_strip() {
+        let mut app = compass_app();
+        let world = app.world_mut();
+
+        let mut roots = world.query_filtered::<(Entity, &Node), With<CompassRoot>>();
+        let (root, root_node) = roots.single(world).expect("one compass root");
+        assert_eq!(root_node.width, Val::Percent(100.0));
+        assert_eq!(root_node.align_items, AlignItems::Center);
+
+        let mut strips = world.query_filtered::<(&ChildOf, &Node), With<CompassWindow>>();
+        let (strip_parent, strip) = strips.single(world).expect("one compass strip");
+        assert_eq!(strip_parent.parent(), root);
+        assert_eq!(strip.position_type, PositionType::Relative);
+        assert_eq!(strip.width, Val::Px(STRIP_WIDTH));
+
+        let mut times =
+            world.query_filtered::<(&ChildOf, &Node, &TextFont, &LineHeight), With<TimeReading>>();
+        let (time_parent, time, font, line_height) = times.single(world).expect("one time reading");
+        assert_eq!(
+            time_parent.parent(),
+            root,
+            "the time is outside the clipped window"
+        );
+        assert_eq!(time.position_type, PositionType::Absolute);
+        assert_eq!(time.left, Val::Percent(50.0));
+        assert_eq!(
+            time.margin.left,
+            Val::Px(STRIP_WIDTH / 2.0 + TIME_GAP),
+            "the reading starts immediately right of the strip"
+        );
+        assert_eq!(time.height, Val::Px(STRIP_HEIGHT));
+        assert_eq!(font.font_size, FontSize::Px(STRIP_HEIGHT));
+        assert_eq!(*line_height, LineHeight::Px(STRIP_HEIGHT));
+
+        // The actual style contract, evaluated at two viewport widths. The strip remains
+        // an in-flow fixed-width child centred by the full-width root; the absolute time
+        // is laid out from that centre and contributes no width to the flex column.
+        for viewport_width in [800.0_f32, 1_920.0] {
+            let strip_left = (viewport_width - STRIP_WIDTH) / 2.0;
+            let strip_centre = strip_left + STRIP_WIDTH / 2.0;
+            let time_left = viewport_width / 2.0 + STRIP_WIDTH / 2.0 + TIME_GAP;
+            assert_eq!(strip_centre, viewport_width / 2.0);
+            assert_eq!(time_left, strip_left + STRIP_WIDTH + TIME_GAP);
+        }
+    }
+
+    #[test]
+    fn the_time_inherits_the_compass_gate_once_the_clock_has_an_anchor() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(session_with_clock(default_clock()))
+            .add_plugins(CompassUiPlugin);
+        app.update();
+        assert_eq!(
+            displayed_time(&mut app),
+            (String::new(), Visibility::Hidden)
+        );
+
+        app.world_mut()
+            .resource_mut::<SkyClock>()
+            .anchor(21_600, Instant::now());
+        app.update();
+        assert_eq!(
+            displayed_time(&mut app),
+            ("06:00 AM".to_owned(), Visibility::Inherited)
+        );
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+        assert_eq!(displayed_time(&mut app).1, Visibility::Inherited);
+    }
+
+    #[test]
     fn the_compass_never_blocks_the_pointer() {
         // Every node, not only the root: `FocusPolicy` is per-node, and a labelled tick
         // with a blocking policy would take the pointer off whatever is under the strip.
@@ -803,6 +1088,14 @@ mod tests {
         // `Text` still brings a `Node` with it. Naming the coordinates node here is what
         // turns that structural fact into an assertion rather than a silently narrower
         // sweep: drop the node and this fails, instead of the walk quietly skipping it.
+        let world = app.world_mut();
+        let mut named = world.query_filtered::<Entity, With<TimeReading>>();
+        let time = named.single(world).expect("one time reading");
+        assert!(
+            found.iter().any(|&(entity, _)| entity == time),
+            "the time reading was not among the nodes walked"
+        );
+
         let world = app.world_mut();
         let mut named = world.query_filtered::<Entity, With<CoordinatesReading>>();
         let coordinates = named.single(world).expect("one coordinates reading");
