@@ -47,6 +47,9 @@ func (p *Player) Consume(req protocol.ConsumeRequest) (ConsumeResult, vnet.Refus
 	if err := p.cannotActLocked(); err != nil {
 		return ConsumeResult{}, vnet.RefusalReasonPlayerIsDead, err
 	}
+	if reason, err := p.mountedActionLocked(); err != nil {
+		return ConsumeResult{}, reason, err
+	}
 	if !p.inventory.mu.TryLock() {
 		return ConsumeResult{}, vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}

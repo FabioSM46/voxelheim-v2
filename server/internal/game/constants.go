@@ -125,6 +125,11 @@ const (
 	// with the one that gives the client prediction.
 	WalkSpeed = 4.3
 
+	// MountSpeed is the horse's authoritative horizontal speed. Mounting is travel,
+	// not a client-side animation: at exactly twice WalkSpeed it changes every
+	// movement outcome while remaining below no creature's registered land speed.
+	MountSpeed = WalkSpeed * 2
+
 	// StarvingSpeedScale is the fraction of WalkSpeed available at zero hunger.
 	// WalkSpeed's 4.3 multiplied by 0.8 is 3.44, which still — barely — outruns
 	// the draugr's 3.2: starvation costs mobility without handing the slowest
@@ -145,6 +150,17 @@ const (
 	// flight. See jumpApex in the tests, which asserts that relationship instead of
 	// pinning the number the integrator happens to produce.
 	JumpImpulse = 9.0
+
+	// MountJumpImpulse clears two blocks without reaching three. Jump height is
+	// v squared over twice Gravity: 11 gives roughly 2.16 blocks, while doubling
+	// JumpImpulse would give a flight-like 5.8 blocks.
+	MountJumpImpulse = 11.0
+
+	// MountClearanceHeight is the vertical room a horse and rider need before the
+	// cast may begin. It is deliberately not a collision-body height: mounted
+	// movement keeps sweeping playerBody, and this one admission check pays for the
+	// larger thing the client will draw without widening every collision path.
+	MountClearanceHeight = 3.0
 
 	// TerminalFallSpeed caps downward velocity, in blocks per second.
 	//

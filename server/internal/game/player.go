@@ -638,6 +638,10 @@ type Player struct {
 	// state it outlives this session, so Join restores it and Record writes it back.
 	// Guarded by sim.mu with the rest of the authoritative life.
 	learnedMounts LearnedMounts
+	// mounted is session-only authoritative state. The zero MountKind is unmounted,
+	// Join never restores it, and every snapshot projects it only while this body is
+	// visible to its recipient.
+	mounted vnet.MountKind
 
 	protectionTicks uint32
 	penaltyApplied  bool
@@ -1317,6 +1321,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// encoder writes no field at all.
 	var visibleDead []uint64
 	var visibleBlocking []uint64
+	var visibleMounts []protocol.MountState
 
 	// At most one encoded appearance per player per tick, built the first time a viewer
 	// turns out not to have been told about them and handed to every viewer after that.
@@ -1341,6 +1346,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		visible = visible[:0]
 		visibleDead = visibleDead[:0]
 		visibleBlocking = visibleBlocking[:0]
+		visibleMounts = visibleMounts[:0]
 		for i, p := range players {
 			inView := withinView(viewer.chunk, p.chunk, s.viewDistance)
 			if inView {
@@ -1356,6 +1362,12 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 				}
 				if p.blocking {
 					visibleBlocking = append(visibleBlocking, p.entityID)
+				}
+				if p.mounted != vnet.MountKindUnknown {
+					visibleMounts = append(visibleMounts, protocol.MountState{
+						EntityID: p.entityID,
+						Mount:    p.mounted,
+					})
 				}
 			}
 
@@ -1533,6 +1545,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			// are the same variable read twice.
 			DeadPlayers:     visibleDead,
 			BlockingPlayers: visibleBlocking,
+			Mounts:          visibleMounts,
 			// The world's own time, the same for every recipient and the one field in
 			// here that is not about an entity. Always less than DayLengthTicks, which
 			// is what the welcome announced and what the client checks it against —
@@ -1678,6 +1691,9 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// there is no momentum out of water, so releasing the controls stops the player on
 	// the same tick and there is no acceleration curve to exploit.
 	speed := WalkSpeed
+	if p.mounted != vnet.MountKindUnknown {
+		speed = MountSpeed
+	}
 	if p.hunger == 0 {
 		speed *= StarvingSpeedScale
 	}
@@ -1734,6 +1750,9 @@ func (p *Player) step(dt float64, terrain Terrain) {
 		p.vel[1] = SwimRiseSpeed
 	case p.current.jump && p.onGround:
 		p.vel[1] = JumpImpulse
+		if p.mounted != vnet.MountKindUnknown {
+			p.vel[1] = MountJumpImpulse
+		}
 	}
 
 	if inWater {

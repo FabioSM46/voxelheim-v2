@@ -1034,6 +1034,8 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 func inertWhileLeaving(kind vnet.Payload) bool {
 	switch kind {
 	case vnet.PayloadPlayerInput,
+		vnet.PayloadMountRequest,
+		vnet.PayloadDismountRequest,
 		vnet.PayloadBlockEditRequest,
 		vnet.PayloadChunkResendRequest,
 		vnet.PayloadMineRequest,
@@ -1206,6 +1208,35 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 		return nil
 
+	case vnet.PayloadMountRequest:
+		if player == nil || msg.MountRequest == nil {
+			log.Debug("mount request arrived with no player or mount; discarding")
+			return nil
+		}
+
+		reason, mErr := player.Mount(msg.MountRequest.Mount)
+		if mErr == nil {
+			return nil
+		}
+		log.Debug("refusing mount request",
+			"reason", mErr.Error(),
+			"code", reason.String(),
+			"mount", msg.MountRequest.Mount.String(),
+		)
+		refusal := protocol.ActionRefused{Action: vnet.RefusedActionMount, Reason: reason}
+		if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+			return fmt.Errorf("session: send mount refusal: %w", sErr)
+		}
+		return nil
+
+	case vnet.PayloadDismountRequest:
+		if player == nil || msg.DismountRequest == nil {
+			log.Debug("dismount request arrived with no player or intent; discarding")
+			return nil
+		}
+		player.Dismount()
+		return nil
+
 	case vnet.PayloadBlockEditRequest:
 		if player == nil || msg.BlockEditRequest == nil {
 			// Unreachable for the same reason as the PlayerInput case above, and stated for
@@ -1241,7 +1272,17 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			// and not on its text — the sentence above is for the operator, this code is
 			// for the player, and the two are separate outputs. The blocking send, for
 			// the reason a placement refusal uses it: nothing later supersedes it.
-			if errors.Is(eErr, game.ErrWarded) {
+			if errors.Is(eErr, game.ErrActionForbiddenWhileMounted) {
+				refusal := protocol.ActionRefused{
+					Action:    vnet.RefusedActionEdit,
+					Reason:    vnet.RefusalReasonActionForbiddenWhileMounted,
+					Anchor:    msg.BlockEditRequest.Pos,
+					HasAnchor: msg.BlockEditRequest.HasPos,
+				}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send mounted edit refusal: %w", sErr)
+				}
+			} else if errors.Is(eErr, game.ErrWarded) {
 				refusal := protocol.ActionRefused{
 					Action:    vnet.RefusedActionEdit,
 					Reason:    vnet.RefusalReasonWarded,
@@ -1339,7 +1380,17 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			// because it is the only one they cannot work out by looking at the block
 			// they aimed at. The silence of every other one is what keeps a forged client
 			// from probing unloaded chunks and Air beyond its view.
-			if errors.Is(mErr, game.ErrWarded) {
+			if errors.Is(mErr, game.ErrActionForbiddenWhileMounted) {
+				refusal := protocol.ActionRefused{
+					Action:    vnet.RefusedActionMine,
+					Reason:    vnet.RefusalReasonActionForbiddenWhileMounted,
+					Anchor:    request.Pos,
+					HasAnchor: request.HasPos,
+				}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send mounted mine refusal: %w", sErr)
+				}
+			} else if errors.Is(mErr, game.ErrWarded) {
 				refusal := protocol.ActionRefused{
 					Action:    vnet.RefusedActionMine,
 					Reason:    vnet.RefusalReasonWarded,
