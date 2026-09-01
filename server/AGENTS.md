@@ -371,6 +371,36 @@ package can avoid the import would create two truths to keep in step for no bene
   yourself writing code that decides whether a client-reported position is plausible, the contract
   has changed underneath you — go and read `schemas/player.fbs` first.
 
+## The first cast, and why a current cannot interrupt it
+
+`internal/game/cast.go` is the one server-owned timed-action primitive. There is no
+production caster in the issue that introduced it: mounting consumes it next, while its tests
+start the contract's reserved `CastKind.Mount` directly rather than inventing a second gameplay
+action merely to exercise an abstraction.
+
+- **One player, one cast, and the tick is the clock.** `CastDuration` is converted once by
+  `NewSim` through `ticksFor`; `activeCast.elapsed` advances only inside `Sim.Step`. Completion
+  runs under `Sim.mu` on the tick that spends the last interval, before movement and before the
+  recipient's snapshot is built. A client receives `self_cast` while it runs and absence on the
+  completion tick; it never counts to the outcome itself.
+- **Progress is a projection, not a second clock.** It is `elapsed * 255 / duration` and a
+  completed cast is removed before projection, so the wire's excluded 255 can never be emitted.
+  The snapshot is per recipient because the contract's cast is too: there is nothing to merge,
+  replay or show to another player.
+- **Intent interrupts; displacement does not.** The common cancellation path reads the accepted
+  `moveX`, `moveZ` and `jump` controls. Yaw and pitch are camera direction and are deliberately
+  absent. Water, a current and a waterfall change velocity and position in `Player.step` without
+  changing those controls, so a still player carried by the world keeps casting.
+- **Four interruptions, one enumerated table.** Damage, horizontal movement, jump and death are
+  the `castInterruption` members, mapped once to the V27 refusal reasons. The active cast retains
+  the `RefusedAction` that began it, so a later caster supplies its own routing without adding a
+  case to any interruption path. A lethal hit resolves as death; a non-lethal landed hit resolves
+  as damage. Zero damage and respawn-protected contact are not hits and interrupt nothing.
+- **An interruption is an event, not a snapshot.** Its `ActionRefused` is offered immediately so
+  it normally precedes the snapshot in which the bar disappears. A full outbound queue retains
+  the immutable frame and the tick retries it before later superseding state; silence is not an
+  answer to why an authoritative cast stopped.
+
 ## Editing the world, and the rules that make it safe
 
 - **A chunk is generated base plus deltas, and the generator never learns about the deltas.**
