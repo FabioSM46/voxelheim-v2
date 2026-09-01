@@ -146,13 +146,13 @@ func TestBossCorpseFreezesPersonalLootAndIsolatesEveryContainer(t *testing.T) {
 	}
 	gotLeader := leaderContainer.entries[0].stack.count
 	gotEligible := eligibleContainer.entries[0].stack.count
-	gotLeaderSilver := leaderContainer.entries[1].stack.count
-	gotEligibleSilver := eligibleContainer.entries[1].stack.count
+	gotLeaderSilver := leaderContainer.silver
+	gotEligibleSilver := eligibleContainer.silver
 	h.sim.mu.Unlock()
 	if gotLeader != wantLeader || gotEligible != wantEligible {
 		t.Fatalf("stable ordered rolls = %d, %d; want %d, %d", gotLeader, gotEligible, wantLeader, wantEligible)
 	}
-	if gotLeaderSilver != wantLeaderSilver || gotEligibleSilver != wantEligibleSilver {
+	if gotLeaderSilver != uint32(wantLeaderSilver) || gotEligibleSilver != uint32(wantEligibleSilver) {
 		t.Fatalf("stable ordered silver rolls = %d, %d; want %d, %d",
 			gotLeaderSilver, gotEligibleSilver, wantLeaderSilver, wantEligibleSilver)
 	}
@@ -188,25 +188,22 @@ func TestBossCorpseFreezesPersonalLootAndIsolatesEveryContainer(t *testing.T) {
 	beforeLeaderCount := c.personal[leaderOwner].entries[0].stack.count
 	h.sim.mu.Unlock()
 	wantNextBones, wantNextSilver := nextRoll()
-	if got := next[0].stack.count; got != wantNextBones {
+	if got := next.entries[0].stack.count; got != wantNextBones {
 		t.Fatalf("opening order advanced loot RNG: next roll %d bones, want %d", got, wantNextBones)
 	}
-	if got := next[1].stack.count; got != wantNextSilver {
+	if got := next.silver; got != uint32(wantNextSilver) {
 		t.Fatalf("opening order advanced loot RNG: next roll %d silver, want %d", got, wantNextSilver)
 	}
 
-	// Two lines to empty rather than one, and each take spends a revision, so the request
-	// that follows has to name the revision the one before it produced.
-	for _, take := range []struct {
-		entryID    uint64
-		revision   uint32
-		clientTick uint32
-	}{{1, 1, 1}, {2, 2, 2}} {
-		if reason, err := reconnected.TakeLoot(protocol.LootTakeRequest{
-			CorpseID: id, EntryID: take.entryID, Revision: take.revision, ClientTick: take.clientTick,
-		}); err != nil {
-			t.Fatalf("kicked character take of entry %d = %s, %v", take.entryID, reason, err)
-		}
+	if reason, err := reconnected.TakeLoot(protocol.LootTakeRequest{
+		CorpseID: id, EntryID: 1, Revision: 1, ClientTick: 1,
+	}); err != nil {
+		t.Fatalf("kicked character take of bones = %s, %v", reason, err)
+	}
+	if reason, err := reconnected.TakeAllLoot(protocol.LootTakeAllRequest{
+		CorpseID: id, Revision: 2, ClientTick: 2,
+	}); err != nil {
+		t.Fatalf("kicked character take of silver = %s, %v", reason, err)
 	}
 	h.sim.mu.Lock()
 	_, corpseStillExists := h.sim.corpses[id]
@@ -219,20 +216,19 @@ func TestBossCorpseFreezesPersonalLootAndIsolatesEveryContainer(t *testing.T) {
 	if afterLeader.revision != beforeLeaderRevision || afterLeader.entries[0].stack.count != beforeLeaderCount {
 		t.Fatalf("other personal container changed to revision %d entries %+v", afterLeader.revision, afterLeader.entries)
 	}
-	if eligibleAfter.revision != 3 || len(eligibleAfter.entries) != 0 {
-		t.Fatalf("looted personal container = revision %d entries %+v", eligibleAfter.revision, eligibleAfter.entries)
+	if eligibleAfter.revision != 3 || !eligibleAfter.empty() {
+		t.Fatalf("looted personal container = revision %d entries %+v silver %d", eligibleAfter.revision, eligibleAfter.entries, eligibleAfter.silver)
 	}
 
-	for _, take := range []struct {
-		entryID    uint64
-		revision   uint32
-		clientTick uint32
-	}{{1, 1, 1}, {2, 2, 2}} {
-		if reason, err := leader.TakeLoot(protocol.LootTakeRequest{
-			CorpseID: id, EntryID: take.entryID, Revision: take.revision, ClientTick: take.clientTick,
-		}); err != nil {
-			t.Fatalf("last personal take of entry %d = %s, %v", take.entryID, reason, err)
-		}
+	if reason, err := leader.TakeLoot(protocol.LootTakeRequest{
+		CorpseID: id, EntryID: 1, Revision: 1, ClientTick: 1,
+	}); err != nil {
+		t.Fatalf("last personal take of bones = %s, %v", reason, err)
+	}
+	if reason, err := leader.TakeAllLoot(protocol.LootTakeAllRequest{
+		CorpseID: id, Revision: 2, ClientTick: 2,
+	}); err != nil {
+		t.Fatalf("last personal take of silver = %s, %v", reason, err)
 	}
 	h.sim.mu.Lock()
 	_, corpseStillExists = h.sim.corpses[id]
@@ -314,7 +310,7 @@ func TestNonKillBossRemovalDiscardsEncounterWithoutRollingLoot(t *testing.T) {
 				t.Fatalf("non-kill removal left mob=%v corpse=%v encounter=%v tap=%v", mobExists, corpseExists, m.encounter != nil, m.firstHit != nil)
 			}
 			wantRNG := newLootRNG(testWorldSeed)
-			if got, want := next[0].stack.count, uint16(1+wantRNG.IntN(2)); got != want {
+			if got, want := next.entries[0].stack.count, uint16(1+wantRNG.IntN(2)); got != want {
 				t.Fatalf("non-kill removal advanced loot RNG: next=%d want=%d", got, want)
 			}
 		})
