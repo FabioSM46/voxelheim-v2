@@ -139,6 +139,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	// position it was about to be compared against.
 	reach := p.reachLocked()
 	actErr := p.cannotActLocked()
+	if actErr == nil {
+		_, actErr = p.mountedActionLocked()
+	}
 	// Read under this lock rather than after it, because the ward map is simulation state
 	// and is rebuilt under exactly this mutex. This first read refuses the request before
 	// it can generate terrain; the post-generation guard below reads again and keeps the
@@ -201,6 +204,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 		// sim.mu -> inventory.mu order; the reverse order would deadlock.
 		p.sim.mu.Lock()
 		actErr := p.cannotActLocked()
+		if actErr == nil {
+			_, actErr = p.mountedActionLocked()
+		}
 		if actErr != nil {
 			p.sim.mu.Unlock()
 			return fmt.Errorf("the player became unable to act while the target chunk was loading: %w", actErr)

@@ -621,6 +621,9 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	if err := p.cannotActLocked(); err != nil {
 		return protocol.InventoryState{}, vnet.RefusalReasonPlayerIsDead, err
 	}
+	if reason, err := p.mountedActionLocked(); err != nil {
+		return protocol.InventoryState{}, reason, err
+	}
 	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, anchor); distance > reach {
 		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
