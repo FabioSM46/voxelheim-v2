@@ -498,8 +498,8 @@ of the back-to-front sort water needs.
 
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
 once and grows a shape inside each one `palette::is_shaped` answers for: a stem, two leaves, a
-five-petal corolla and an eye for each of the three flower ids, three overlapping clumps of foliage
-for a bush. Every vertex stays inside its own voxel, which is the property that lets
+five-petal corolla and an eye for each of the three flower ids, and three overlapping foliage
+clumps with twig and flower detail for a bush. Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
 and for the bush that is the point: it used to be an ordinary opaque cube, so a cluster of them
@@ -517,7 +517,7 @@ would be a **server** change with three enforced consequences, and it is not thi
 
 **The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads and
-a bush is 18. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 294 quads
+a bush is 32. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 420 quads
 where the two shapes before #634 cost 96, while the opaque half fell by 24 — the bush's cube left
 the sweep and the ground under it gained the faces that cube was culling.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
