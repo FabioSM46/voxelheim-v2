@@ -55,6 +55,7 @@ mod constants;
 mod crafting;
 mod drops;
 mod hands;
+mod horse;
 mod interpolate;
 mod inventory;
 mod items;
@@ -298,6 +299,7 @@ impl Plugin for PlayerPlugin {
                 Startup,
                 (
                     drops::create_visuals,
+                    horse::create_visuals,
                     mobs::create_visuals,
                     structures::create_visuals,
                     sky::spawn_sun,
@@ -341,6 +343,12 @@ impl Plugin for PlayerPlugin {
                         // this set writes. It also makes a new drop's cosmetic child
                         // available to the animation system on that same frame.
                         ApplyDeferred,
+                        // Mount state is a sparse complete projection over the bodies
+                        // the flush just made visible. Reconcile the horse child without
+                        // replacing its rider, then expose new leg children to this
+                        // frame's pose systems.
+                        horse::sync_horses,
+                        ApplyDeferred,
                         // After the flush, because the children it writes to are spawned
                         // by a command and a queued spawn is invisible to a query.
                         dress_bodies,
@@ -353,6 +361,7 @@ impl Plugin for PlayerPlugin {
                         // `apply_snapshots` just wrote. Limbs compose below the body's
                         // root, before the death fall composes onto that root.
                         animate_walking_bodies,
+                        horse::animate_gait,
                         pose_body_shields,
                         // **After `apply_snapshots`, which is a declared order and not an
                         // assumption.** That system writes the body's transform wholesale
@@ -1187,7 +1196,7 @@ struct ShieldVisual;
 ///
 /// Stored beside the root transform so the child-animation system consumes the exact
 /// sample that placed the body. It is presentation state only and never leaves the ECS.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
 struct WalkPose {
     phase: f32,
     moving: bool,
@@ -2187,7 +2196,10 @@ fn pose_body_shields(
     mut shields: Query<&mut Transform, With<ShieldVisual>>,
 ) {
     for (body, children) in &bodies {
-        let next = shield_pose(buffer.player_is_blocking(body.0));
+        let mut next = shield_pose(buffer.player_is_blocking(body.0));
+        if buffer.mount_of(body.0).is_some() {
+            next.translation.y += horse::RIDER_LIFT;
+        }
         for child in children {
             if let Ok(mut transform) = shields.get_mut(*child) {
                 *transform = next;
@@ -2573,6 +2585,7 @@ fn animate_walking_bodies(
 ) {
     for (body, walk, children) in &bodies {
         let blocking = buffer.player_is_blocking(body.0);
+        let mounted = buffer.mount_of(body.0).is_some();
         let stride = if walk.moving && !buffer.player_is_dead(body.0) {
             walk.phase.sin() * WALK_SWING
         } else {
@@ -2581,15 +2594,34 @@ fn animate_walking_bodies(
 
         for child in children {
             if let Ok((visual, mut transform)) = parts.get_mut(*child) {
-                apply_walk_transform(visual.0, stride, blocking, &mut transform);
+                apply_walk_transform(visual.0, stride, blocking, mounted, &mut transform);
             } else if let Ok((visual, mut transform)) = armour.get_mut(*child) {
-                apply_walk_transform(visual.0.body_piece(), stride, blocking, &mut transform);
+                apply_walk_transform(
+                    visual.0.body_piece(),
+                    stride,
+                    blocking,
+                    mounted,
+                    &mut transform,
+                );
             };
         }
     }
 }
 
-fn apply_walk_transform(piece: BodyPiece, stride: f32, blocking: bool, transform: &mut Transform) {
+fn apply_walk_transform(
+    piece: BodyPiece,
+    stride: f32,
+    blocking: bool,
+    mounted: bool,
+    transform: &mut Transform,
+) {
+    if mounted {
+        let next = horse::rider_piece_transform(piece, blocking);
+        if *transform != next {
+            *transform = next;
+        }
+        return;
+    }
     let angle = match piece.limb() {
         Some(Limb::LeftArm) if blocking => -1.05,
         Some(Limb::LeftLeg | Limb::RightArm) => stride,

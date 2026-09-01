@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 use bevy::prelude::*;
 
 use crate::net::{
-    EntityState, ItemDropState, MobAction, MobKind, MobState, ProjectileKind, ProjectileState,
-    Snapshot, StructureState,
+    EntityState, ItemDropState, MobAction, MobKind, MobState, MountKind, ProjectileKind,
+    ProjectileState, Snapshot, StructureState,
 };
 
 /// Where an entity should be drawn now.
@@ -206,6 +206,22 @@ impl SnapshotBuffer {
         self.latest
             .as_ref()
             .map_or(&[], |latest| &latest.snapshot.accessible_loot_corpses)
+    }
+
+    /// Which mount the newest complete snapshot puts this player on.
+    ///
+    /// Sparse means absence is the authoritative unmounted answer. This is presentation
+    /// input only: the renderer creates a horse from it and nothing here infers one from
+    /// speed, carries a previous answer forward or sends the value back.
+    pub(super) fn mount_of(&self, entity_id: u64) -> Option<MountKind> {
+        self.latest.as_ref().and_then(|latest| {
+            latest
+                .snapshot
+                .mounts
+                .iter()
+                .find(|mounted| mounted.entity_id == entity_id)
+                .map(|mounted| mounted.mount)
+        })
     }
 
     /// Whether any mob in the newest accepted snapshot is hunting this entity.
