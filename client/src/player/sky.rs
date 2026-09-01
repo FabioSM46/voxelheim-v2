@@ -278,8 +278,15 @@ const SUN_COLOUR: [f32; 3] = [1.0, 0.94, 0.82];
 /// The moon's disc, as sRGB: paler and cooler than the sun, and always full.
 const MOON_COLOUR: [f32; 3] = [0.78, 0.82, 0.90];
 
-/// How many stars the field holds. One mesh, one material, one draw.
-const STAR_COUNT: usize = 600;
+/// How many stars should be visible above any world horizon, within the small variation a
+/// deterministic uniform draw produces.
+const VISIBLE_STAR_COUNT: usize = 600;
+
+/// How many stars the complete celestial shell holds. A sphere has twice the area of the
+/// hemisphere the player can see, so doubling the old hemisphere budget preserves its apparent
+/// density instead of either halving it or putting twice as many stars overhead. They still live
+/// in one mesh, under one material, in one draw.
+const STAR_COUNT: usize = VISIBLE_STAR_COUNT * 2;
 
 /// The seed the star positions are drawn from. **A constant, and deliberately not
 /// `world_seed`** — every world looks up at the same sky.
@@ -293,9 +300,9 @@ const STAR_SIZE_SHARES: [f32; 2] = [0.72, 0.94];
 /// A star's colour, as sRGB. The alpha is not here: it is the night fraction.
 const STAR_COLOUR: [f32; 3] = [0.90, 0.93, 1.0];
 
-/// Where in the day the star field's own hemisphere is directly overhead. The stars are on
-/// the upper hemisphere and the field turns once a day, so the populated half is put where it
-/// is at full alpha: three quarters round, which [`sun_phase`] makes the middle of the night.
+/// Where in the day the star field is in its unrotated orientation. Keeping that orientation at
+/// full alpha preserves the field's original midnight pose while its complete shell turns once a
+/// day: three quarters round, which [`sun_phase`] makes the middle of the night.
 const MIDNIGHT_PHASE: f32 = 0.75;
 
 /// Marks the one directional light this module owns.
@@ -645,8 +652,8 @@ impl ApparentSky {
         Self {
             sun: apparent_sun_direction(clock, tick_of_day),
             night: night_fraction(clock, tick_of_day, RAMP_SECONDS * f32::from(tick_rate)),
-            // About +X, the east-west axis, offset so the populated hemisphere is overhead
-            // at the one hour the field is at full alpha.
+            // About +X, the east-west axis, offset so the field keeps its original orientation
+            // at the one hour it is at full alpha.
             turn: Quat::from_rotation_x(TAU * (sun_phase(clock, tick_of_day) - MIDNIGHT_PHASE)),
         }
     }
@@ -818,14 +825,14 @@ fn star_mesh() -> Mesh {
     let mut quads = Vec::with_capacity(STAR_COUNT);
     for star in 0..STAR_COUNT as u32 {
         // Uniform in height is uniform density on the sphere — Archimedes' hat-box.
-        let height = hash_unit(star * 3);
+        let height = 2.0 * hash_unit(star * 3) - 1.0;
         let azimuth = TAU * hash_unit(star * 3 + 1);
         let radius = (1.0 - height * height).sqrt();
         let (azimuth_sin, azimuth_cos) = azimuth.sin_cos();
         let towards = Vec3::new(radius * azimuth_cos, height, radius * azimuth_sin);
 
         let half = star_size(hash_unit(star * 3 + 2)) * 0.5;
-        // Degenerate only at exactly +Y, where the fallback is as good a tangent basis.
+        // Degenerate only at exactly either pole, where the fallback is as good a tangent basis.
         let right = towards.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
         quads.push((
             towards * SKY_BODY_DISTANCE,
@@ -1964,8 +1971,27 @@ mod tests {
         }
     }
 
-    /// Every star is on the upper hemisphere, at [`SKY_BODY_DISTANCE`], and square-on to an
-    /// eye at the centre — which is what lets the field be one draw that only turns.
+    fn star_directions(mesh: &Mesh) -> Vec<Vec3> {
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the field's positions are three floats each");
+        };
+        positions
+            .chunks_exact(4)
+            .map(|quad| {
+                (quad
+                    .iter()
+                    .map(|corner| Vec3::from_array(*corner))
+                    .sum::<Vec3>()
+                    / 4.0)
+                    .normalize()
+            })
+            .collect()
+    }
+
+    /// Every star is on the complete celestial shell, at [`SKY_BODY_DISTANCE`], and square-on
+    /// to an eye at the centre — which is what lets the field be one draw that only turns.
     #[test]
     fn the_star_field_is_one_shell_of_camera_facing_quads() {
         let mesh = star_mesh();
@@ -1977,16 +2003,14 @@ mod tests {
         assert_eq!(positions.len(), STAR_COUNT * 4);
 
         let largest = STAR_SIZES[2];
+        let mut hemispheres = [0_usize; 2];
         for quad in positions.chunks_exact(4) {
             let corners: Vec<Vec3> = quad
                 .iter()
                 .map(|corner| Vec3::from_array(*corner))
                 .collect();
             let centre: Vec3 = corners.iter().sum::<Vec3>() / 4.0;
-            assert!(
-                centre.y >= -1e-3,
-                "a star sat below the field's own horizon at {centre:?}"
-            );
+            hemispheres[usize::from(centre.y >= 0.0)] += 1;
             assert!(
                 (centre.length() - SKY_BODY_DISTANCE).abs() < largest,
                 "a star sat {} from the eye",
@@ -2000,6 +2024,74 @@ mod tests {
                 "a star was not square-on to the eye"
             );
         }
+        assert!(
+            hemispheres.iter().all(|count| *count > 0),
+            "the shell left one local hemisphere empty: {hemispheres:?}"
+        );
+    }
+
+    /// Turning the field cannot expose the empty half-dome the old local hemisphere carried.
+    /// The sectors are equal-area in height; the angular probes additionally reject a broad gap
+    /// that happens to cross their boundaries instead of leaving one whole sector empty.
+    #[test]
+    fn every_visible_sector_stays_populated_as_the_field_turns() {
+        const AZIMUTH_SECTORS: usize = 12;
+        const HEIGHT_SECTORS: usize = 2;
+        const MAX_PROBE_GAP_DEGREES: f32 = 20.0;
+
+        let directions = star_directions(&star_mesh());
+        for (pose, turn) in [
+            ("midnight", Quat::IDENTITY),
+            ("quarter turn", Quat::from_rotation_x(PI * 0.5)),
+            ("half turn", Quat::from_rotation_x(PI)),
+        ] {
+            let visible: Vec<Vec3> = directions
+                .iter()
+                .map(|direction| turn * *direction)
+                .filter(|direction| direction.y >= 0.0)
+                .collect();
+            let density_error = visible.len().abs_diff(VISIBLE_STAR_COUNT);
+            assert!(
+                density_error <= VISIBLE_STAR_COUNT / 10,
+                "{pose} put {} stars above the horizon, outside the {} +/- 10% budget",
+                visible.len(),
+                VISIBLE_STAR_COUNT
+            );
+
+            let mut sectors = [0_usize; AZIMUTH_SECTORS * HEIGHT_SECTORS];
+            for direction in &visible {
+                let azimuth = ((direction.z.atan2(direction.x) + PI) / TAU * AZIMUTH_SECTORS as f32)
+                    .floor() as usize;
+                let height = (direction.y * HEIGHT_SECTORS as f32).floor() as usize;
+                sectors[height.min(HEIGHT_SECTORS - 1) * AZIMUTH_SECTORS
+                    + azimuth.min(AZIMUTH_SECTORS - 1)] += 1;
+            }
+            assert!(
+                sectors.iter().all(|count| *count > 0),
+                "{pose} left a visible sector empty: {sectors:?}"
+            );
+
+            let mut widest_gap = 0.0_f32;
+            for height_step in 0..5 {
+                let height = (height_step as f32 + 0.5) / 5.0;
+                let radius = (1.0 - height * height).sqrt();
+                for azimuth_step in 0..24 {
+                    let azimuth = TAU * azimuth_step as f32 / 24.0;
+                    let (sin, cos) = azimuth.sin_cos();
+                    let probe = Vec3::new(radius * cos, height, radius * sin);
+                    let nearest = visible
+                        .iter()
+                        .map(|direction| probe.dot(*direction).clamp(-1.0, 1.0).acos())
+                        .fold(f32::INFINITY, f32::min);
+                    widest_gap = widest_gap.max(nearest);
+                }
+            }
+            assert!(
+                widest_gap <= MAX_PROBE_GAP_DEGREES.to_radians(),
+                "{pose} left a {:.1}-degree gap in the visible field",
+                widest_gap.to_degrees()
+            );
+        }
     }
 
     /// The field is the same field every session, and it is not the world's.
@@ -2011,6 +2103,7 @@ mod tests {
             first.attribute(Mesh::ATTRIBUTE_POSITION),
             again.attribute(Mesh::ATTRIBUTE_POSITION)
         );
+        assert_eq!(first.indices(), again.indices());
         // Three size classes, all of them used, and the smallest is the commonest.
         let mut counts = [0_usize; 3];
         for star in 0..STAR_COUNT as u32 {
