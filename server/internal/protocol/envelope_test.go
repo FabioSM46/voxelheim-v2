@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -729,6 +730,261 @@ func TestSettlementRequestsCarryOnlyIntentAndRejectAbsentIdentities(t *testing.T
 			t.Errorf("%s decoded with %v, want ErrMalformed", name, decodeErr)
 		}
 	}
+}
+
+func TestPlayerTradeRequestDecodesEveryActionAndCopiesIntent(t *testing.T) {
+	t.Parallel()
+
+	for _, action := range []vnet.PlayerTradeAction{
+		vnet.PlayerTradeActionOpen,
+		vnet.PlayerTradeActionSetItem,
+		vnet.PlayerTradeActionClearItem,
+		vnet.PlayerTradeActionSetSilver,
+		vnet.PlayerTradeActionConfirm,
+		vnet.PlayerTradeActionCancel,
+	} {
+		want := PlayerTradeRequest{
+			Action: action, TargetEntityID: 71, TradeSlot: 4, PackSlot: 33,
+			Silver: 120, Revision: 9, ClientTick: 44,
+		}
+		message, err := Decode(EncodePlayerTradeRequest(want))
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", action, err)
+		}
+		if message.Kind != vnet.PayloadPlayerTradeRequest || message.PlayerTrade == nil || *message.PlayerTrade != want {
+			t.Errorf("Decode(%s) = %+v, want %+v", action, message, want)
+		}
+	}
+
+	for _, action := range []vnet.PlayerTradeAction{vnet.PlayerTradeActionUnknown, vnet.PlayerTradeAction(200)} {
+		if _, err := Decode(EncodePlayerTradeRequest(PlayerTradeRequest{Action: action})); !errors.Is(err, ErrMalformed) {
+			t.Errorf("Decode(action %d) = %v, want ErrMalformed", action, err)
+		}
+	}
+}
+
+func TestPlayerTradeStateRoundTripsCompleteAndEmptyOffers(t *testing.T) {
+	t.Parallel()
+
+	want := PlayerTradeState{
+		PartnerEntityID: 72,
+		PartnerName:     "Astrid",
+		Revision:        8,
+		MyOffer: []PlayerTradeSlot{
+			{TradeSlot: 0, PackSlot: 12, ItemID: 31, Count: 4},
+			{TradeSlot: 4, PackSlot: 7, ItemID: 8, Count: 1, Durability: 3, MaxDurability: 10},
+		},
+		TheirOffer: []PlayerTradeSlot{
+			// A caller cannot leak this value: the encoder always writes zero for a
+			// partner's pack slot, and the decoded expectation below pins that boundary.
+			{TradeSlot: 2, PackSlot: 99, ItemID: 22, Count: 2},
+		},
+		MySilver: 40, TheirSilver: 90, MyConfirmed: true,
+	}
+	message, err := Decode(EncodePlayerTradeState(want))
+	if err != nil {
+		t.Fatalf("Decode complete state: %v", err)
+	}
+	want.TheirOffer[0].PackSlot = 0
+	if message.Kind != vnet.PayloadPlayerTradeState || message.PlayerTradeState == nil ||
+		!reflect.DeepEqual(*message.PlayerTradeState, want) {
+		t.Fatalf("complete state = %+v, want %+v", message.PlayerTradeState, want)
+	}
+
+	emptyWant := PlayerTradeState{PartnerEntityID: 73, PartnerName: "", Revision: 1}
+	empty, err := Decode(EncodePlayerTradeState(emptyWant))
+	if err != nil {
+		t.Fatalf("Decode empty state: %v", err)
+	}
+	if empty.PlayerTradeState == nil || len(empty.PlayerTradeState.MyOffer) != 0 || len(empty.PlayerTradeState.TheirOffer) != 0 || empty.PlayerTradeState.PartnerName != "" {
+		t.Fatalf("empty state = %+v, want two empty offers and a present empty name", empty.PlayerTradeState)
+	}
+}
+
+func TestPlayerTradeStateRefusesEveryWireInvariantViolation(t *testing.T) {
+	t.Parallel()
+
+	ordinary := PlayerTradeSlot{TradeSlot: 0, PackSlot: 3, ItemID: 31, Count: 2}
+	durable := PlayerTradeSlot{TradeSlot: 1, PackSlot: 4, ItemID: 8, Count: 1, Durability: 3, MaxDurability: 10}
+	valid := PlayerTradeState{
+		PartnerEntityID: 72, PartnerName: "Astrid", Revision: 8,
+		MyOffer:    []PlayerTradeSlot{ordinary, durable},
+		TheirOffer: []PlayerTradeSlot{{TradeSlot: 0, ItemID: 22, Count: 1}},
+	}
+
+	tests := []struct {
+		name  string
+		state PlayerTradeState
+		raw   playerTradeStateWireOptions
+	}{
+		{name: "partner id is zero", state: func() PlayerTradeState { got := valid; got.PartnerEntityID = 0; return got }()},
+		{name: "partner name is absent", state: valid, raw: playerTradeStateWireOptions{omitName: true}},
+		{name: "partner name is not UTF-8", state: func() PlayerTradeState { got := valid; got.PartnerName = string([]byte{0xff}); return got }()},
+		{name: "revision is zero", state: func() PlayerTradeState { got := valid; got.Revision = 0; return got }()},
+		{name: "my offer is absent", state: valid, raw: playerTradeStateWireOptions{omitMyOffer: true}},
+		{name: "their offer is absent", state: valid, raw: playerTradeStateWireOptions{omitTheirOffer: true}},
+		{name: "my offer has six entries", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 0}, {TradeSlot: 1}, {TradeSlot: 2}, {TradeSlot: 3}, {TradeSlot: 4}, {TradeSlot: 0}}
+			for index := range got.MyOffer {
+				got.MyOffer[index].Count = 1
+			}
+			return got
+		}()},
+		{name: "their offer has six entries", state: func() PlayerTradeState {
+			got := valid
+			got.TheirOffer = []PlayerTradeSlot{{TradeSlot: 0}, {TradeSlot: 1}, {TradeSlot: 2}, {TradeSlot: 3}, {TradeSlot: 4}, {TradeSlot: 0}}
+			for index := range got.TheirOffer {
+				got.TheirOffer[index].Count = 1
+			}
+			return got
+		}()},
+		{name: "my offer repeats a trade slot", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{ordinary, ordinary}
+			return got
+		}()},
+		{name: "their offer repeats a trade slot", state: func() PlayerTradeState {
+			got := valid
+			got.TheirOffer = []PlayerTradeSlot{{TradeSlot: 1, Count: 1}, {TradeSlot: 1, Count: 1}}
+			return got
+		}()},
+		{name: "trade slot is five", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 5, Count: 1}}
+			return got
+		}()},
+		{name: "count is zero", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 0}}
+			return got
+		}()},
+		{name: "durability has no maximum", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 0, Count: 1, Durability: 1}}
+			return got
+		}()},
+		{name: "durability exceeds maximum", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 0, Count: 1, Durability: 11, MaxDurability: 10}}
+			return got
+		}()},
+		{name: "durable stack has count two", state: func() PlayerTradeState {
+			got := valid
+			got.MyOffer = []PlayerTradeSlot{{TradeSlot: 0, Count: 2, Durability: 3, MaxDurability: 10}}
+			return got
+		}()},
+		{name: "partner offer exposes a pack slot", state: func() PlayerTradeState {
+			got := valid
+			got.TheirOffer = []PlayerTradeSlot{{TradeSlot: 0, PackSlot: 7, Count: 1}}
+			return got
+		}(), raw: playerTradeStateWireOptions{writeTheirPackSlot: true}},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			frame := encodePlayerTradeStateWire(test.state, test.raw)
+			if _, err := Decode(frame); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Decode = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
+func TestPlayerTradeCloseAndRefusalEnumsDecodeTotally(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []vnet.PlayerTradeCloseReason{
+		vnet.PlayerTradeCloseReasonUnknown,
+		vnet.PlayerTradeCloseReasonCompleted,
+		vnet.PlayerTradeCloseReasonCancelled,
+		vnet.PlayerTradeCloseReasonOutOfReach,
+		vnet.PlayerTradeCloseReasonDied,
+		vnet.PlayerTradeCloseReasonDisconnected,
+		vnet.PlayerTradeCloseReasonFailed,
+	} {
+		message, err := Decode(EncodePlayerTradeClosed(PlayerTradeClosed{PartnerEntityID: 72, Reason: reason}))
+		if err != nil || message.PlayerTradeClosed == nil || message.PlayerTradeClosed.Reason != reason {
+			t.Errorf("close reason %s decoded as %+v, %v", reason, message.PlayerTradeClosed, err)
+		}
+	}
+
+	unknownClose, err := Decode(EncodePlayerTradeClosed(PlayerTradeClosed{PartnerEntityID: 72, Reason: vnet.PlayerTradeCloseReason(200)}))
+	if err != nil || unknownClose.PlayerTradeClosed == nil || unknownClose.PlayerTradeClosed.Reason != vnet.PlayerTradeCloseReasonUnknown {
+		t.Errorf("unknown close reason decoded as %+v, %v; want Unknown", unknownClose.PlayerTradeClosed, err)
+	}
+	if _, err := Decode(EncodePlayerTradeClosed(PlayerTradeClosed{})); !errors.Is(err, ErrMalformed) {
+		t.Errorf("zero partner close decoded with %v, want ErrMalformed", err)
+	}
+
+	unknownRefusal, err := Decode(EncodeActionRefused(ActionRefused{
+		Action: vnet.RefusedAction(200), Reason: vnet.RefusalReason(200),
+	}))
+	if err != nil || unknownRefusal.ActionRefused == nil ||
+		unknownRefusal.ActionRefused.Action != vnet.RefusedActionUnknown ||
+		unknownRefusal.ActionRefused.Reason != vnet.RefusalReasonUnknown {
+		t.Errorf("unknown refusal decoded as %+v, %v; want both enums Unknown", unknownRefusal.ActionRefused, err)
+	}
+}
+
+type playerTradeStateWireOptions struct {
+	omitName           bool
+	omitMyOffer        bool
+	omitTheirOffer     bool
+	writeTheirPackSlot bool
+}
+
+// encodePlayerTradeStateWire can omit required fields and preserve a partner pack slot;
+// the production encoder intentionally cannot produce either malformed shape.
+func encodePlayerTradeStateWire(state PlayerTradeState, options playerTradeStateWireOptions) []byte {
+	b := flatbuffers.NewBuilder(256)
+	var name flatbuffers.UOffsetT
+	if !options.omitName {
+		name = b.CreateString(state.PartnerName)
+	}
+	var theirOffer flatbuffers.UOffsetT
+	if !options.omitTheirOffer {
+		vnet.PlayerTradeStateStartTheirOfferVector(b, len(state.TheirOffer))
+		for index := len(state.TheirOffer) - 1; index >= 0; index-- {
+			slot := state.TheirOffer[index]
+			packSlot := uint8(0)
+			if options.writeTheirPackSlot {
+				packSlot = slot.PackSlot
+			}
+			vnet.CreatePlayerTradeSlot(b, slot.TradeSlot, packSlot, slot.ItemID, slot.Count, slot.Durability, slot.MaxDurability)
+		}
+		theirOffer = b.EndVector(len(state.TheirOffer))
+	}
+	var myOffer flatbuffers.UOffsetT
+	if !options.omitMyOffer {
+		vnet.PlayerTradeStateStartMyOfferVector(b, len(state.MyOffer))
+		for index := len(state.MyOffer) - 1; index >= 0; index-- {
+			slot := state.MyOffer[index]
+			vnet.CreatePlayerTradeSlot(b, slot.TradeSlot, slot.PackSlot, slot.ItemID, slot.Count, slot.Durability, slot.MaxDurability)
+		}
+		myOffer = b.EndVector(len(state.MyOffer))
+	}
+
+	vnet.PlayerTradeStateStart(b)
+	vnet.PlayerTradeStateAddPartnerEntityId(b, state.PartnerEntityID)
+	if !options.omitName {
+		vnet.PlayerTradeStateAddPartnerName(b, name)
+	}
+	vnet.PlayerTradeStateAddRevision(b, state.Revision)
+	if !options.omitMyOffer {
+		vnet.PlayerTradeStateAddMyOffer(b, myOffer)
+	}
+	if !options.omitTheirOffer {
+		vnet.PlayerTradeStateAddTheirOffer(b, theirOffer)
+	}
+	vnet.PlayerTradeStateAddMySilver(b, state.MySilver)
+	vnet.PlayerTradeStateAddTheirSilver(b, state.TheirSilver)
+	vnet.PlayerTradeStateAddMyConfirmed(b, state.MyConfirmed)
+	vnet.PlayerTradeStateAddTheirConfirmed(b, state.TheirConfirmed)
+	payload := vnet.PlayerTradeStateEnd(b)
+	return finishEnvelope(b, vnet.PayloadPlayerTradeState, payload)
 }
 
 // The three server-to-client settlement messages encode the shapes their decoders are
