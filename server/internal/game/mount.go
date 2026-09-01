@@ -20,6 +20,16 @@ const allLearnedMounts LearnedMounts = 1<<(uint8(vnet.MountKindBlackHorse)-1) |
 	1<<(uint8(vnet.MountKindBrownHorse)-1) |
 	1<<(uint8(vnet.MountKindGreyHorse)-1)
 
+// learnedMountBit is the one translation between the wire enum and the stored set.
+// Unknown and future values fail closed rather than shifting by an invalid amount or
+// silently allocating a bit this build cannot validate on the next restart.
+func learnedMountBit(kind vnet.MountKind) (LearnedMounts, bool) {
+	if kind < vnet.MountKindBlackHorse || kind > vnet.MountKindGreyHorse {
+		return 0, false
+	}
+	return 1 << (uint8(kind) - 1), true
+}
+
 // Validate refuses bits for mounts this build does not know. A record is accepted
 // whole or refused whole, so an unknown bit is never silently discarded.
 func (m LearnedMounts) Validate() error {
@@ -27,6 +37,22 @@ func (m LearnedMounts) Validate() error {
 		return fmt.Errorf("game: stored learned mounts contain unknown bits %#02x", uint8(unknown))
 	}
 	return nil
+}
+
+// Has reports whether this set already contains one known concrete mount.
+func (m LearnedMounts) Has(kind vnet.MountKind) bool {
+	bit, known := learnedMountBit(kind)
+	return known && m&bit != 0
+}
+
+// Learn returns the set with one known concrete mount added and whether it was new.
+// The registry only names known mounts, but the bool keeps a future bad row fail-closed.
+func (m LearnedMounts) Learn(kind vnet.MountKind) (LearnedMounts, bool) {
+	bit, known := learnedMountBit(kind)
+	if !known || m&bit != 0 {
+		return m, false
+	}
+	return m | bit, true
 }
 
 // State returns the complete authoritative set in stable enum order.

@@ -1160,6 +1160,68 @@ func TestARefusedConsumeIsSilentAndTheSessionSurvivesIt(t *testing.T) {
 	}
 }
 
+func TestUsingAHorseTokenSendsTheInventoryThenTheCompleteLearnedSet(t *testing.T) {
+	t.Parallel()
+
+	account := testAccount(31)
+	identities, store := knownIdentities(t, account)
+	character := onlyCharacter(t, store, account)
+	record, found, err := store.Load(character.ID)
+	if err != nil || !found {
+		t.Fatalf("loading the seeded character: found=%v err=%v", found, err)
+	}
+	record.LearnedMounts = 0
+	record.Slots[4] = protocol.InventoryStack{ItemID: uint16(game.ItemBlackHorse), Count: 1}
+	if err := store.Save(character.ID, record); err != nil {
+		t.Fatalf("seeding the horse token: %v", err)
+	}
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn := newFakeConn()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Serve(ctx, conn, cfg, noTimeouts(), chunks, sim, peers, identities, 1, discard())
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = conn.Close()
+		if err := <-done; err != nil {
+			t.Errorf("session ended with %v", err)
+		}
+	})
+
+	conn.in <- protocol.EncodeClientHelloWithTicket(vnet.ProtocolVersionCurrent, "Eivor", testTicket(account))
+	chooseCharacter(t, conn, "Eivor")
+	_ = nextFrameOfKind(t, conn, vnet.PayloadServerWelcome)
+	_ = nextFrameOfKind(t, conn, vnet.PayloadInventoryState)
+	_ = nextFrameOfKind(t, conn, vnet.PayloadLearnedMounts)
+
+	conn.in <- protocol.EncodeConsumeRequest(protocol.ConsumeRequest{Slot: 4, ClientTick: 1})
+	inventoryFrame := vnet.GetRootAsEnvelope(nextFrameOfKind(t, conn, vnet.PayloadInventoryState), 0)
+	inventoryTable := payloadTable(t, inventoryFrame)
+	inventory := new(vnet.InventoryState)
+	inventory.Init(inventoryTable.Bytes, inventoryTable.Pos)
+	if got := inventory.Stacks(8); got != 0 {
+		t.Errorf("slot 4 item id after learning = %d, want empty", got)
+	}
+	if got := inventory.Stacks(9); got != 0 {
+		t.Errorf("slot 4 count after learning = %d, want empty", got)
+	}
+
+	learnedFrame := vnet.GetRootAsEnvelope(nextFrameOfKind(t, conn, vnet.PayloadLearnedMounts), 0)
+	learnedTable := payloadTable(t, learnedFrame)
+	learned := new(vnet.LearnedMounts)
+	learned.Init(learnedTable.Bytes, learnedTable.Pos)
+	if learned.MountsLength() != 1 {
+		t.Fatalf("learned update has %d mounts, want one", learned.MountsLength())
+	}
+	if got := learned.Mounts(0); got != vnet.MountKindBlackHorse {
+		t.Errorf("learned update contains %s, want BlackHorse", got)
+	}
+}
+
 // A durable drop the simulation accepts empties the named slot and puts one entity in the
 // world, and the session answers with the complete inventory that leaves behind.
 //
