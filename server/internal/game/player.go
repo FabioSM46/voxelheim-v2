@@ -316,6 +316,12 @@ type Sim struct {
 	// the same ids the first time anybody looks at their chunk again.
 	residents map[uint64]*resident
 
+	// paddockHorses are the three walking residents of the capital's stable. They are
+	// deliberately a collection of their own rather than mobs: no combat, projectile,
+	// corpse or director path can reach them. Like residents, they are derived from the
+	// world seed on first view and are never persisted.
+	paddockHorses map[uint64]*paddockHorse
+
 	// structuresDirty says the camp has changed since it was last written down.
 	//
 	// The chunk cache's dirty flag, for a store that rewrites one file rather than many:
@@ -479,6 +485,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		corpses:              make(map[uint64]*corpse),
 		structures:           make(map[uint64]*structure),
 		residents:            make(map[uint64]*resident),
+		paddockHorses:        make(map[uint64]*paddockHorse),
 		byIdentity:           make(map[identity.PlayerID]*Player),
 		minersByPos:          make(map[[3]int32]map[*Player]struct{}),
 		pendingWater:         make(map[waterVoxel]uint64),
@@ -1312,6 +1319,10 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// position this tick produced rather than the last one's — and after the director,
 	// which has nothing to say about them.
 	s.advanceResidentsLocked(players)
+	// The horses are evaluated from the tick rather than integrated from their previous
+	// position. They run after the director to make the collection boundary visible here:
+	// the director has already finished without ever seeing them.
+	s.advancePaddockHorsesLocked(worldTick)
 
 	states := make([]protocol.EntityState, len(players))
 	for i, p := range players {

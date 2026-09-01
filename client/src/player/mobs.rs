@@ -78,8 +78,19 @@ const VILLAGER_BODY: Body = Body {
     height: crate::player::constants::PLAYER_HEIGHT,
 };
 
-/// The box the server collides for one kind. Total over [`MobKind`], with no wildcard
-/// arm, so a new species does not compile until it has been given a body.
+// A presentation envelope only. Paddock horses are deliberately absent from the
+// server's mob registry and this module routes them to `player/horse.rs`, so no combat,
+// marker or corpse path reads this row. Keeping `body` total still forces a new wire kind
+// to make its routing choice explicit.
+const HORSE_BODY: Body = Body {
+    width: crate::player::constants::PLAYER_WIDTH,
+    height: 1.66,
+};
+
+/// The body envelope for one kind. It is the box the server collides for creatures and
+/// people; Horse is the explicit presentation-only exception above. Total over
+/// [`MobKind`], with no wildcard arm, so a new species does not compile until it has been
+/// given a body or routed away deliberately.
 ///
 /// **A villager has a row here and is drawn by nobody in this module.** The box is a fact
 /// about the world, and it belongs beside the three it has to stay in step with. What
@@ -91,6 +102,7 @@ pub(super) const fn body(kind: MobKind) -> Body {
         MobKind::Vargr => VARGR_BODY,
         MobKind::Deer => DEER_BODY,
         MobKind::Villager => VILLAGER_BODY,
+        MobKind::Horse => HORSE_BODY,
     }
 }
 
@@ -314,6 +326,7 @@ impl MobVisuals {
             MobKind::Vargr => Some(&self.vargr),
             MobKind::Deer => Some(&self.deer),
             MobKind::Villager => None,
+            MobKind::Horse => None,
         }
     }
 }
@@ -1116,7 +1129,7 @@ pub(super) fn face_aggro_markers(
     }
 }
 
-fn mob_visibility(mode: InputMode) -> Visibility {
+pub(super) fn mob_visibility(mode: InputMode) -> Visibility {
     if HIDDEN_INPUT_MODES.contains(&mode) {
         Visibility::Hidden
     } else {
@@ -1141,7 +1154,7 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
     };
     match kind {
         MobKind::Draugr => lean * DRAUGR_LEAN_FRACTION,
-        MobKind::Vargr | MobKind::Deer | MobKind::Villager => lean,
+        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
     }
 }
 
@@ -1226,7 +1239,9 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         // here spawns a `Mob` for a resident (see [`MobVisuals::of`]), and a resident has
         // no action but `Idle` anyway. Grouped with the draugr because a person that did
         // go over would go over like the other upright figure.
-        MobKind::Draugr | MobKind::Villager => Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen),
+        MobKind::Draugr | MobKind::Villager | MobKind::Horse => {
+            Quat::from_rotation_x(DRAUGR_FALL_PITCH * fallen)
+        }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
     }
@@ -1242,7 +1257,7 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        MobKind::Draugr | MobKind::Villager => Vec3::ONE,
+        MobKind::Draugr | MobKind::Villager | MobKind::Horse => Vec3::ONE,
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)
@@ -2705,8 +2720,9 @@ mod tests {
         // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
-        // `Horse` is the V27 contract reservation; its renderer belongs to the dependent
-        // mount issue and must not be invented by this contract-only change.
+        // `Horse` is drawn through the shared ridden-horse rig in `player/horse.rs`; that
+        // module pins the full mesh to the same 0.6 footprint. It has no server collision
+        // box because paddock horses are not mobs.
         assert_eq!(
             drawn.len(),
             crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 3,
@@ -2807,6 +2823,10 @@ mod tests {
             visuals.of(MobKind::Villager).is_none(),
             "this module offers meshes for a resident again; residents are people and are \
              drawn through `spawn_body` on the humanoid rig"
+        );
+        assert!(
+            visuals.of(MobKind::Horse).is_none(),
+            "paddock horses must use the shared horse rig rather than generic mob meshes"
         );
         for creature in [MobKind::Draugr, MobKind::Vargr, MobKind::Deer] {
             assert!(

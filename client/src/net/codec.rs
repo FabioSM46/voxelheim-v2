@@ -426,6 +426,9 @@ pub enum MobKind {
     /// A settlement's resident. Never hostile, never lootable, never a corpse — see
     /// `MobKind.Villager` in `schemas/player.fbs`, which carries the argument.
     Villager,
+    /// A capital paddock resident. It is routed to the shared horse rig and has no
+    /// combat body on either side.
+    Horse,
 }
 
 /// Which learned horse authoritative mount state names.
@@ -487,6 +490,7 @@ impl MobKind {
             fb::MobKind::Vargr => Some(Self::Vargr),
             fb::MobKind::Deer => Some(Self::Deer),
             fb::MobKind::Villager => Some(Self::Villager),
+            fb::MobKind::Horse => Some(Self::Horse),
             _ => None,
         }
     }
@@ -10785,6 +10789,9 @@ mod tests {
             MobKind::from_wire(fb::MobKind::Villager),
             Some(MobKind::Villager)
         );
+        // V27 reserved Horse together with the mount contract. It is accepted now that
+        // the paddock renderer exists; the wire member and version do not move.
+        assert_eq!(MobKind::from_wire(fb::MobKind::Horse), Some(MobKind::Horse));
         assert_eq!(MobKind::from_wire(fb::MobKind(6)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
@@ -14051,6 +14058,24 @@ mod tests {
         };
         assert_eq!(snapshot.mobs[0].kind, MobKind::Deer);
         assert_eq!(snapshot.mobs[0].action, MobAction::Flee);
+    }
+
+    #[test]
+    fn a_snapshot_carrying_a_paddock_horse_decodes() {
+        let horse = MobStateWire {
+            kind: fb::MobKind::Horse,
+            health: 100,
+            max_health: 100,
+            action: fb::MobAction::Idle,
+            ..MobStateWire::draugr(904, 4.0)
+        };
+
+        let Ok(Message::Snapshot(snapshot)) = snapshot_of(&[horse], PlayerVitalsWire::default())
+        else {
+            panic!("a snapshot carrying a horse did not decode");
+        };
+        assert_eq!(snapshot.mobs[0].kind, MobKind::Horse);
+        assert_eq!(snapshot.mobs[0].action, MobAction::Idle);
     }
 
     /// The campfire's half of the same statement, at the same layer.

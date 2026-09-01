@@ -1,9 +1,11 @@
 //! Snapshot-driven horses under the existing humanoid body rig.
 //!
-//! A horse exists only because the newest complete mount projection names its rider. It
+//! A ridden horse exists because the newest complete mount projection names its rider. It
 //! is a child of that rider's stable [`Body`] entity, so it inherits the authoritative
 //! feet position, yaw and visibility; dismounting removes only this child tree and never
-//! replaces the person. The rider remains the ordinary twelve-piece humanoid rig.
+//! replaces the person. A capital paddock horse arrives as a `MobKind::Horse` row and
+//! owns a world-space root instead. Both routes spawn the same mesh children. The rider
+//! remains the ordinary twelve-piece humanoid rig.
 //!
 //! The mesh is procedural cuboids and the gait is a transform on four leg children. Its
 //! only clock is [`WalkPose::phase`], which interpolation advances from horizontal
@@ -12,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -20,8 +23,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::appearance::{BodyPiece, Limb};
 use super::interpolate::SnapshotBuffer;
-use super::{Body, WalkPose, merge_all};
-use crate::net::MountKind;
+use super::{Body, InputMode, WalkPose, merge_all};
+use crate::net::{MobKind, MountKind, Session};
 
 /// The horse stays inside the same 0.6-square footprint the authoritative player body
 /// collides. It may be taller: the rider is visibly seated above a mount, while gameplay
@@ -110,11 +113,16 @@ impl HorseVisuals {
     }
 }
 
-/// The root of one horse, parented directly to the existing rider body.
+/// The root of one horse. Ridden roots are parented to a body; paddock roots stand in
+/// world space, but both own the exact same mesh children and gait transforms.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Horse {
     pub(super) kind: MountKind,
 }
+
+/// A world-space paddock horse keyed by the opaque identity in MobState.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PaddockHorse(u64);
 
 #[derive(Component)]
 struct HorsePart;
@@ -403,54 +411,137 @@ fn spawn_horse(commands: &mut Commands, visuals: &HorseVisuals, rider: Entity, k
     commands.entity(rider).with_children(|body| {
         body.spawn((Horse { kind }, Transform::default(), Visibility::Inherited))
             .with_children(|horse| {
-                horse.spawn((
-                    HorsePart,
-                    Mesh3d(visuals.body.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::default(),
-                ));
-                horse.spawn((
-                    HorsePart,
-                    Mesh3d(visuals.head.clone()),
-                    MeshMaterial3d(material.clone()),
-                    Transform::default(),
-                ));
-                horse.spawn((
-                    HorsePart,
-                    HorseHair::Mane,
-                    Mesh3d(visuals.mane.clone()),
-                    MeshMaterial3d(visuals.hair.clone()),
-                    hair_transform(HorseHair::Mane, WalkPose::default()),
-                ));
-                horse.spawn((
-                    HorsePart,
-                    HorseHair::Tail,
-                    Mesh3d(visuals.tail.clone()),
-                    MeshMaterial3d(visuals.hair.clone()),
-                    hair_transform(HorseHair::Tail, WalkPose::default()),
-                ));
-                horse.spawn((
-                    HorsePart,
-                    Mesh3d(visuals.tack.clone()),
-                    MeshMaterial3d(visuals.leather.clone()),
-                    Transform::default(),
-                ));
-                horse.spawn((
-                    HorsePart,
-                    Mesh3d(visuals.eyes.clone()),
-                    MeshMaterial3d(visuals.eye.clone()),
-                    Transform::default(),
-                ));
-                for leg in Leg::ALL {
-                    horse.spawn((
-                        HorseLeg(leg),
-                        Mesh3d(visuals.leg.clone()),
-                        MeshMaterial3d(material.clone()),
-                        gait_transform(leg, WalkPose::default()),
-                    ));
-                }
+                spawn_horse_parts(horse, visuals, &material);
             });
     });
+}
+
+fn spawn_horse_parts(
+    horse: &mut ChildSpawnerCommands<'_>,
+    visuals: &HorseVisuals,
+    material: &Handle<StandardMaterial>,
+) {
+    horse.spawn((
+        HorsePart,
+        Mesh3d(visuals.body.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::default(),
+    ));
+    horse.spawn((
+        HorsePart,
+        Mesh3d(visuals.head.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::default(),
+    ));
+    horse.spawn((
+        HorsePart,
+        HorseHair::Mane,
+        Mesh3d(visuals.mane.clone()),
+        MeshMaterial3d(visuals.hair.clone()),
+        hair_transform(HorseHair::Mane, WalkPose::default()),
+    ));
+    horse.spawn((
+        HorsePart,
+        HorseHair::Tail,
+        Mesh3d(visuals.tail.clone()),
+        MeshMaterial3d(visuals.hair.clone()),
+        hair_transform(HorseHair::Tail, WalkPose::default()),
+    ));
+    horse.spawn((
+        HorsePart,
+        Mesh3d(visuals.tack.clone()),
+        MeshMaterial3d(visuals.leather.clone()),
+        Transform::default(),
+    ));
+    horse.spawn((
+        HorsePart,
+        Mesh3d(visuals.eyes.clone()),
+        MeshMaterial3d(visuals.eye.clone()),
+        Transform::default(),
+    ));
+    for leg in Leg::ALL {
+        horse.spawn((
+            HorseLeg(leg),
+            Mesh3d(visuals.leg.clone()),
+            MeshMaterial3d(material.clone()),
+            gait_transform(leg, WalkPose::default()),
+        ));
+    }
+}
+
+// The server leaves entity ids opaque to gameplay. Its three stable anchors receive
+// low-bit presentation seeds 0, 1 and 2 exactly once; this total cosmetic mapping turns
+// that seed into one of the existing coat materials and is never sent back.
+const fn paddock_coat(entity_id: u64) -> MountKind {
+    match entity_id & 0b11 {
+        0 => MountKind::BlackHorse,
+        1 => MountKind::BrownHorse,
+        _ => MountKind::GreyHorse,
+    }
+}
+
+/// Reconciles world-space horses with Horse rows in the complete mob projection.
+pub(super) fn sync_paddock_horses(
+    buffer: Res<SnapshotBuffer>,
+    session: Option<Res<Session>>,
+    mode: Res<InputMode>,
+    visuals: Res<HorseVisuals>,
+    mut existing: Query<(
+        Entity,
+        &PaddockHorse,
+        &mut Transform,
+        &mut WalkPose,
+        &mut Visibility,
+    )>,
+    mut commands: Commands,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let interval = Duration::from_secs(1) / u32::from(session.0.tick_rate);
+    let drawn: HashMap<_, _> = buffer
+        .sample_mobs(Instant::now(), interval)
+        .into_iter()
+        .filter(|(_, state)| state.kind == MobKind::Horse)
+        .collect();
+    let visibility = super::mobs::mob_visibility(*mode);
+    let mut placed = HashMap::with_capacity(drawn.len());
+
+    for (entity, horse, mut transform, mut walk, mut shown) in &mut existing {
+        let Some(state) = drawn.get(&horse.0) else {
+            commands.entity(entity).despawn();
+            continue;
+        };
+        transform.translation = state.pos;
+        transform.rotation = Quat::from_rotation_y(state.yaw);
+        *walk = WalkPose {
+            phase: state.walk_phase,
+            moving: state.walking,
+        };
+        *shown = visibility;
+        placed.insert(horse.0, ());
+    }
+
+    for (entity_id, state) in drawn {
+        if placed.contains_key(&entity_id) {
+            continue;
+        }
+        let kind = paddock_coat(entity_id);
+        let material = visuals.material(kind);
+        commands
+            .spawn((
+                Horse { kind },
+                PaddockHorse(entity_id),
+                WalkPose {
+                    phase: state.walk_phase,
+                    moving: state.walking,
+                },
+                Transform::from_translation(state.pos)
+                    .with_rotation(Quat::from_rotation_y(state.yaw)),
+                visibility,
+            ))
+            .with_children(|horse| spawn_horse_parts(horse, &visuals, &material));
+    }
 }
 
 pub(super) type MovingHorsePartQuery<'w, 's> = Query<
@@ -463,29 +554,45 @@ pub(super) type MovingHorsePartQuery<'w, 's> = Query<
     ),
     Or<(With<HorseLeg>, With<HorseHair>)>,
 >;
+type RiddenHorseQuery<'w, 's> =
+    Query<'w, 's, (&'static ChildOf, &'static Children), (With<Horse>, Without<PaddockHorse>)>;
+type PaddockHorseQuery<'w, 's> =
+    Query<'w, 's, (&'static WalkPose, &'static Children), With<PaddockHorse>>;
 
-/// Poses four independently transformed legs from the rider's distance sample.
+/// Poses four independently transformed legs from the owning body's distance sample.
 pub(super) fn animate_gait(
     bodies: Query<&WalkPose>,
-    horses: Query<(&ChildOf, &Children), With<Horse>>,
+    horses: RiddenHorseQuery<'_, '_>,
+    paddock_horses: PaddockHorseQuery<'_, '_>,
     mut moving_parts: MovingHorsePartQuery<'_, '_>,
 ) {
     for (parent, children) in &horses {
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
-        for child in children {
-            let Ok((leg, hair, mut transform)) = moving_parts.get_mut(*child) else {
-                continue;
-            };
-            let next = match (leg, hair) {
-                (Some(leg), None) => gait_transform(leg.0, *walk),
-                (None, Some(hair)) => hair_transform(*hair, *walk),
-                _ => continue,
-            };
-            if *transform != next {
-                *transform = next;
-            }
+        pose_horse(children, *walk, &mut moving_parts);
+    }
+    for (walk, children) in &paddock_horses {
+        pose_horse(children, *walk, &mut moving_parts);
+    }
+}
+
+fn pose_horse(
+    children: &Children,
+    walk: WalkPose,
+    moving_parts: &mut MovingHorsePartQuery<'_, '_>,
+) {
+    for child in children {
+        let Ok((leg, hair, mut transform)) = moving_parts.get_mut(*child) else {
+            continue;
+        };
+        let next = match (leg, hair) {
+            (Some(leg), None) => gait_transform(leg.0, walk),
+            (None, Some(hair)) => hair_transform(*hair, walk),
+            _ => continue,
+        };
+        if *transform != next {
+            *transform = next;
         }
     }
 }
@@ -693,6 +800,16 @@ mod tests {
         let values: std::collections::HashSet<u8> =
             data.chunks_exact(4).map(|rgba| rgba[0]).collect();
         assert!(values.len() > 12);
+    }
+
+    #[test]
+    fn paddock_identity_seeds_choose_one_of_each_existing_coat() {
+        assert_eq!(paddock_coat(0), MountKind::BlackHorse);
+        assert_eq!(paddock_coat(1), MountKind::BrownHorse);
+        assert_eq!(paddock_coat(2), MountKind::GreyHorse);
+        // Total and cosmetic: a malformed fourth seed still gets a coat rather than
+        // changing snapshot acceptance or inventing a gameplay state.
+        assert_eq!(paddock_coat(3), MountKind::GreyHorse);
     }
 
     #[test]
