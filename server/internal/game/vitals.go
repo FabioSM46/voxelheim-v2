@@ -102,6 +102,7 @@ func (p *Player) damageLocked(amount uint16) bool {
 		p.dieLocked()
 		return true
 	}
+	p.interruptCastLocked(castInterruptedByDamage)
 	p.health -= amount
 	return true
 }
@@ -142,6 +143,7 @@ func (p *Player) dieLocked() {
 	p.health = 0
 	p.respawnTicks = p.sim.deathTicks
 	p.penaltyApplied = false
+	p.interruptCastLocked(castInterruptedByDeath)
 
 	p.current = intent{yaw: p.current.yaw}
 	p.vel = [3]float64{}

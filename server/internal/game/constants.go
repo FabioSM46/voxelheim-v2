@@ -323,6 +323,15 @@ const (
 	// in ticks for the same reason.
 	RespawnProtection = 2 * time.Second
 
+	// CastDuration is how long the first interruptible action takes to complete.
+	// Converted to authoritative ticks once by NewSim: two seconds is two seconds
+	// on a 5 Hz server and on a 60 Hz one, rather than a fixed number of frames.
+	//
+	// One value because the protocol currently has one CastKind. A future caster
+	// that needs a genuinely different duration makes that distinction here, never
+	// by counting wall time or client frames in its own call site.
+	CastDuration = 2 * time.Second
+
 	// HealthRegenDelay is how long after the last landed hit before health starts
 	// coming back, and HealthRegenInterval is how long one point of it takes.
 	//
