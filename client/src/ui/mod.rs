@@ -45,8 +45,8 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, CraftClick, InputMode, InventoryClick, Liveries, SelfVitals,
-    ViewMode, item_linear_rgba, item_livery, item_shape,
+    ApplyInputMode, ApplySnapshots, CraftClick, ITEM_SILVER, InputMode, InventoryClick, Liveries,
+    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -609,6 +609,20 @@ pub(super) fn stack_style(stack: Option<InventoryStack>) -> StackStyle {
             livery: item_livery(stack.item_id),
         }),
         count: stack.count.to_string(),
+    }
+}
+
+/// The reserved silver presentation, independent of any inventory slot.
+///
+/// It deliberately reads the display registry directly instead of manufacturing a stack:
+/// purse and corpse currency share one coin drawing without putting a synthetic item in the
+/// authoritative slot mirror.
+pub(super) fn silver_icon() -> StackIcon {
+    let [r, g, b, a] = item_linear_rgba(ITEM_SILVER);
+    StackIcon {
+        shape: item_shape(ITEM_SILVER),
+        colour: Color::linear_rgba(r, g, b, a),
+        livery: item_livery(ITEM_SILVER),
     }
 }
 
