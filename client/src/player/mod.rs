@@ -300,6 +300,7 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        horse::register(app);
         // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
         // Bevy panics on a unique plugin added twice.
         if !app.is_plugin_added::<BodyVisualsPlugin>() {
