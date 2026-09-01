@@ -30,6 +30,9 @@ pub const MAX_EQUIPMENT_SLOTS: u8 = 8;
 /// `protocol.MaxViewDistance`.
 pub const MAX_VIEW_DISTANCE: u8 = 16;
 
+/// Maximum entries on either side of a player-trade offer; a decode bound, not UI layout.
+pub const PLAYER_TRADE_SLOTS: usize = 5;
+
 /// Length of an identity token, in bytes. Fixed by `schemas/handshake.fbs`: a
 /// `player_token` is absent, empty, or exactly this — nothing else is a token.
 pub const PLAYER_TOKEN_LEN: usize = 32;
@@ -1366,6 +1369,8 @@ pub enum RefusedAction {
     /// [`Self::MineBlock`], which names the same action and is the value a shipped server
     /// may already have sent: both stay, and a receiver names both.
     Mine,
+    /// A player trade refusal, distinct from vendor [`Self::Trade`].
+    PlayerTrade,
 }
 
 impl RefusedAction {
@@ -1390,6 +1395,7 @@ impl RefusedAction {
             fb::RefusedAction::Trade => Self::Trade,
             fb::RefusedAction::Edit => Self::Edit,
             fb::RefusedAction::Mine => Self::Mine,
+            fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
             _ => Self::Unknown,
         }
     }
@@ -1448,6 +1454,11 @@ pub enum RefusalReason {
     /// over: an answer that did would let a client learn who has claimed ground by poking
     /// at it.
     Warded,
+    AlreadyTrading,
+    TradeNotOpen,
+    TradeSlotTaken,
+    NothingToOffer,
+    TradeCooldown,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1491,6 +1502,11 @@ impl RefusalReason {
             fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
             fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
             fb::RefusalReason::Warded => Self::Warded,
+            fb::RefusalReason::AlreadyTrading => Self::AlreadyTrading,
+            fb::RefusalReason::TradeNotOpen => Self::TradeNotOpen,
+            fb::RefusalReason::TradeSlotTaken => Self::TradeSlotTaken,
+            fb::RefusalReason::NothingToOffer => Self::NothingToOffer,
+            fb::RefusalReason::TradeCooldown => Self::TradeCooldown,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -2168,6 +2184,104 @@ pub struct TradeRequest {
     pub client_tick: u32,
 }
 
+/// Which operation one [`PlayerTradeRequest`] asks the server to perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "V28 reserves every player-trade action before the window originates one"
+)]
+pub enum PlayerTradeAction {
+    Open,
+    SetItem,
+    ClearItem,
+    SetSilver,
+    Confirm,
+    Cancel,
+}
+
+impl PlayerTradeAction {
+    fn wire(self) -> fb::PlayerTradeAction {
+        match self {
+            Self::Open => fb::PlayerTradeAction::Open,
+            Self::SetItem => fb::PlayerTradeAction::SetItem,
+            Self::ClearItem => fb::PlayerTradeAction::ClearItem,
+            Self::SetSilver => fb::PlayerTradeAction::SetSilver,
+            Self::Confirm => fb::PlayerTradeAction::Confirm,
+            Self::Cancel => fb::PlayerTradeAction::Cancel,
+        }
+    }
+}
+
+/// Player-trade intent. It names a pack slot; the server resolves that slot's stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerTradeRequest {
+    pub action: PlayerTradeAction,
+    pub target_entity_id: u64,
+    pub trade_slot: u8,
+    pub pack_slot: u8,
+    pub silver: u32,
+    pub revision: u32,
+    pub client_tick: u32,
+}
+
+/// One authoritative stack; `pack_slot` is meaningful only in `my_offer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerTradeSlot {
+    pub trade_slot: u8,
+    pub pack_slot: u8,
+    pub item_id: u16,
+    pub count: u16,
+    pub durability: u16,
+    pub max_durability: u16,
+}
+
+/// One recipient's complete revisioned view; a later value replaces it wholesale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerTradeState {
+    pub partner_entity_id: u64,
+    pub partner_name: String,
+    pub revision: u32,
+    pub my_offer: Vec<PlayerTradeSlot>,
+    pub their_offer: Vec<PlayerTradeSlot>,
+    pub my_silver: u32,
+    pub their_silver: u32,
+    pub my_confirmed: bool,
+    pub their_confirmed: bool,
+}
+
+/// Why a trade ended. Absent and newer wire members become `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerTradeCloseReason {
+    Unknown,
+    Completed,
+    Cancelled,
+    OutOfReach,
+    Died,
+    Disconnected,
+    Failed,
+}
+
+impl PlayerTradeCloseReason {
+    fn from_wire(value: fb::PlayerTradeCloseReason) -> Self {
+        match value {
+            fb::PlayerTradeCloseReason::Completed => Self::Completed,
+            fb::PlayerTradeCloseReason::Cancelled => Self::Cancelled,
+            fb::PlayerTradeCloseReason::OutOfReach => Self::OutOfReach,
+            fb::PlayerTradeCloseReason::Died => Self::Died,
+            fb::PlayerTradeCloseReason::Disconnected => Self::Disconnected,
+            fb::PlayerTradeCloseReason::Failed => Self::Failed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// Explicit termination of the trade with one partner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerTradeClosed {
+    pub partner_entity_id: u64,
+    pub reason: PlayerTradeCloseReason,
+}
+
 /// What the sky is doing where the player stands.
 ///
 /// No `Unknown` variant, for the reason [`ResidentRole`] has none — with one difference
@@ -2484,6 +2598,10 @@ pub enum Message {
     VendorState(VendorState),
     /// The named stall is no longer open.
     VendorClosed(VendorClosed),
+    /// Complete authoritative two-sided state for one open player trade.
+    PlayerTradeState(PlayerTradeState),
+    /// The open player trade with this partner ended for the stated reason.
+    PlayerTradeClosed(PlayerTradeClosed),
     /// Where the blizzard is in its life. Decoded and validated here; no ECS system
     /// consumes it until the storm's countdown (#470), exactly as `MineProgress` was
     /// decoded from V2 and drawn later.
@@ -2950,6 +3068,47 @@ pub enum DecodeError {
         field: &'static str,
         item_id: u16,
     },
+    /// A player-trade payload carries partner id 0.
+    PlayerTradeWithoutPartner(&'static str),
+    /// Partner text is absent; empty remains legal.
+    PlayerTradeWithoutPartnerName,
+    /// Revision 0 names no state.
+    PlayerTradeWithoutRevision,
+    /// A required complete offer vector is absent.
+    PlayerTradeWithoutOffer(&'static str),
+    /// An offer exceeds the contract's five positions.
+    PlayerTradeOfferTooLarge { field: &'static str, len: usize },
+    /// An offer index is outside `0..PLAYER_TRADE_SLOTS`.
+    PlayerTradeSlotOutOfRange {
+        field: &'static str,
+        index: usize,
+        trade_slot: u8,
+    },
+    /// One offer repeats a trade position.
+    DuplicatePlayerTradeSlot { field: &'static str, trade_slot: u8 },
+    /// An offered stack has count 0.
+    EmptyPlayerTradeSlot { field: &'static str, index: usize },
+    /// Durability is present without a maximum.
+    PlayerTradeDurabilityWithoutMaximum {
+        field: &'static str,
+        index: usize,
+        durability: u16,
+    },
+    /// Durability exceeds its maximum.
+    PlayerTradeDurabilityExceedsMaximum {
+        field: &'static str,
+        index: usize,
+        durability: u16,
+        max_durability: u16,
+    },
+    /// A durable stack has a count other than one.
+    PlayerTradeDurableStackCount {
+        field: &'static str,
+        index: usize,
+        count: u16,
+    },
+    /// The partner's private pack position was exposed.
+    PlayerTradePartnerPackSlot { index: usize, pack_slot: u8 },
     /// A present `WeatherState` names a kind this build has no member for, the
     /// absent-field `Unknown` included.
     ///
@@ -3476,6 +3635,66 @@ impl fmt::Display for DecodeError {
                 field,
                 item_id,
             } => write!(f, "vendor {entity_id} {field} names item {item_id} twice"),
+            Self::PlayerTradeWithoutPartner(message) => {
+                write!(f, "{message} carries the reserved partner entity id 0")
+            }
+            Self::PlayerTradeWithoutPartnerName => {
+                write!(f, "a PlayerTradeState carries no partner name")
+            }
+            Self::PlayerTradeWithoutRevision => {
+                write!(f, "a PlayerTradeState carries revision 0")
+            }
+            Self::PlayerTradeWithoutOffer(field) => {
+                write!(f, "a PlayerTradeState carries no {field}")
+            }
+            Self::PlayerTradeOfferTooLarge { field, len } => write!(
+                f,
+                "a PlayerTradeState {field} carries {len} entries, at most {PLAYER_TRADE_SLOTS}"
+            ),
+            Self::PlayerTradeSlotOutOfRange {
+                field,
+                index,
+                trade_slot,
+            } => write!(
+                f,
+                "PlayerTradeState {field} entry {index} names trade slot {trade_slot}, outside {PLAYER_TRADE_SLOTS} slots"
+            ),
+            Self::DuplicatePlayerTradeSlot { field, trade_slot } => write!(
+                f,
+                "PlayerTradeState {field} names trade slot {trade_slot} twice"
+            ),
+            Self::EmptyPlayerTradeSlot { field, index } => {
+                write!(f, "PlayerTradeState {field} entry {index} carries count 0")
+            }
+            Self::PlayerTradeDurabilityWithoutMaximum {
+                field,
+                index,
+                durability,
+            } => write!(
+                f,
+                "PlayerTradeState {field} entry {index} carries durability {durability} without a maximum"
+            ),
+            Self::PlayerTradeDurabilityExceedsMaximum {
+                field,
+                index,
+                durability,
+                max_durability,
+            } => write!(
+                f,
+                "PlayerTradeState {field} entry {index} durability {durability} exceeds maximum {max_durability}"
+            ),
+            Self::PlayerTradeDurableStackCount {
+                field,
+                index,
+                count,
+            } => write!(
+                f,
+                "PlayerTradeState {field} entry {index} carries durable count {count}, want 1"
+            ),
+            Self::PlayerTradePartnerPackSlot { index, pack_slot } => write!(
+                f,
+                "PlayerTradeState their_offer entry {index} exposes pack slot {pack_slot}"
+            ),
             Self::UnknownWeatherKind { value } => {
                 write!(f, "a snapshot carries an unknown weather kind: {value}")
             }
@@ -3892,6 +4111,25 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }
             Ok(Message::VendorClosed(VendorClosed { entity_id }))
         }
+        fb::Payload::PlayerTradeState => {
+            let payload = envelope
+                .payload_as_player_trade_state()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::PlayerTradeState(player_trade_state(&payload)?))
+        }
+        fb::Payload::PlayerTradeClosed => {
+            let payload = envelope
+                .payload_as_player_trade_closed()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let partner_entity_id = payload.partner_entity_id();
+            if partner_entity_id == 0 {
+                return Err(DecodeError::PlayerTradeWithoutPartner("PlayerTradeClosed"));
+            }
+            Ok(Message::PlayerTradeClosed(PlayerTradeClosed {
+                partner_entity_id,
+                reason: PlayerTradeCloseReason::from_wire(payload.reason()),
+            }))
+        }
         // Every payload only a *client* sends, which is the whole client→server half
         // of `schemas/envelope.fbs` rather than the part of it that existed when this
         // list was written. Four members added after `AttackRequest` inherited
@@ -3946,12 +4184,6 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .payload_as_wards_nearby()
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
-        }
-        // Reserved by V28. The strict decoder and application messages arrive in the
-        // dependent client part; carrying both names here keeps them out of the unknown
-        // fallback while preserving a compilable contract-only tranche.
-        fb::Payload::PlayerTradeState | fb::Payload::PlayerTradeClosed => {
-            Ok(Message::Deferred(name))
         }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
@@ -4249,6 +4481,124 @@ fn vendor_entries(
             });
         }
         decoded.push(VendorEntry { item_id, price });
+    }
+    Ok(decoded)
+}
+
+/// Copies and validates one complete per-recipient player-trade state.
+fn player_trade_state(state: &fb::PlayerTradeState<'_>) -> Result<PlayerTradeState, DecodeError> {
+    let partner_entity_id = state.partner_entity_id();
+    if partner_entity_id == 0 {
+        return Err(DecodeError::PlayerTradeWithoutPartner("PlayerTradeState"));
+    }
+    let partner_name = state
+        .partner_name()
+        .ok_or(DecodeError::PlayerTradeWithoutPartnerName)?
+        .to_owned();
+    let revision = state.revision();
+    if revision == 0 {
+        return Err(DecodeError::PlayerTradeWithoutRevision);
+    }
+
+    let my_offer = player_trade_offer(
+        state
+            .my_offer()
+            .ok_or(DecodeError::PlayerTradeWithoutOffer("my_offer"))?,
+        "my_offer",
+        false,
+    )?;
+    let their_offer = player_trade_offer(
+        state
+            .their_offer()
+            .ok_or(DecodeError::PlayerTradeWithoutOffer("their_offer"))?,
+        "their_offer",
+        true,
+    )?;
+
+    Ok(PlayerTradeState {
+        partner_entity_id,
+        partner_name,
+        revision,
+        my_offer,
+        their_offer,
+        my_silver: state.my_silver(),
+        their_silver: state.their_silver(),
+        my_confirmed: state.my_confirmed(),
+        their_confirmed: state.their_confirmed(),
+    })
+}
+
+/// Copies one offer while holding its index, uniqueness and durability invariants.
+fn player_trade_offer(
+    offer: flatbuffers::Vector<'_, fb::PlayerTradeSlot>,
+    field: &'static str,
+    partner: bool,
+) -> Result<Vec<PlayerTradeSlot>, DecodeError> {
+    if offer.len() > PLAYER_TRADE_SLOTS {
+        return Err(DecodeError::PlayerTradeOfferTooLarge {
+            field,
+            len: offer.len(),
+        });
+    }
+
+    let mut decoded = Vec::with_capacity(offer.len());
+    let mut seen = [false; PLAYER_TRADE_SLOTS];
+    for (index, wire) in offer.iter().enumerate() {
+        let slot = PlayerTradeSlot {
+            trade_slot: wire.trade_slot(),
+            pack_slot: wire.pack_slot(),
+            item_id: wire.item_id(),
+            count: wire.count(),
+            durability: wire.durability(),
+            max_durability: wire.max_durability(),
+        };
+        let trade_slot = usize::from(slot.trade_slot);
+        if trade_slot >= PLAYER_TRADE_SLOTS {
+            return Err(DecodeError::PlayerTradeSlotOutOfRange {
+                field,
+                index,
+                trade_slot: slot.trade_slot,
+            });
+        }
+        if seen[trade_slot] {
+            return Err(DecodeError::DuplicatePlayerTradeSlot {
+                field,
+                trade_slot: slot.trade_slot,
+            });
+        }
+        if slot.count == 0 {
+            return Err(DecodeError::EmptyPlayerTradeSlot { field, index });
+        }
+        if slot.max_durability == 0 && slot.durability != 0 {
+            return Err(DecodeError::PlayerTradeDurabilityWithoutMaximum {
+                field,
+                index,
+                durability: slot.durability,
+            });
+        }
+        if slot.durability > slot.max_durability {
+            return Err(DecodeError::PlayerTradeDurabilityExceedsMaximum {
+                field,
+                index,
+                durability: slot.durability,
+                max_durability: slot.max_durability,
+            });
+        }
+        if slot.max_durability != 0 && slot.count != 1 {
+            return Err(DecodeError::PlayerTradeDurableStackCount {
+                field,
+                index,
+                count: slot.count,
+            });
+        }
+        if partner && slot.pack_slot != 0 {
+            return Err(DecodeError::PlayerTradePartnerPackSlot {
+                index,
+                pack_slot: slot.pack_slot,
+            });
+        }
+        seen[trade_slot] = true;
+        decoded.push(slot);
     }
     Ok(decoded)
 }
@@ -5589,6 +5939,30 @@ pub fn encode_trade_request(request: &TradeRequest) -> Vec<u8> {
     finish_envelope(builder, fb::Payload::TradeRequest, payload.as_union_value())
 }
 
+/// Builds intent verbatim. The action decides which fields the server reads; an
+/// offered item is only a pack slot, never client-stated stack contents.
+#[allow(dead_code)] // V28 reserves the encoder before the player-trade UI consumer.
+pub fn encode_player_trade_request(request: &PlayerTradeRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::PlayerTradeRequest::create(
+        &mut builder,
+        &fb::PlayerTradeRequestArgs {
+            action: request.action.wire(),
+            target_entity_id: request.target_entity_id,
+            trade_slot: request.trade_slot,
+            pack_slot: request.pack_slot,
+            silver: request.silver,
+            revision: request.revision,
+            client_tick: request.client_tick,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::PlayerTradeRequest,
+        payload.as_union_value(),
+    )
+}
+
 /// Writes one appearance table and returns its offset.
 ///
 /// Must be called while no other table is open: a nested table is reached through an
@@ -6010,6 +6384,30 @@ pub(super) mod server_side {
     /// The token [`WelcomeWire::default`] carries: a legal one, so a test that is
     /// not about identity never has to name it.
     pub const DEFAULT_TOKEN: [u8; super::PLAYER_TOKEN_LEN] = [0x5a; super::PLAYER_TOKEN_LEN];
+
+    /// Test-server offered stack, including invalid combinations.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PlayerTradeSlotWire {
+        pub trade_slot: u8,
+        pub pack_slot: u8,
+        pub item_id: u16,
+        pub count: u16,
+        pub durability: u16,
+        pub max_durability: u16,
+    }
+
+    impl Default for PlayerTradeSlotWire {
+        fn default() -> Self {
+            Self {
+                trade_slot: 0,
+                pack_slot: 7,
+                item_id: 31,
+                count: 1,
+                durability: 0,
+                max_durability: 0,
+            }
+        }
+    }
 
     /// A `ServerWelcome` as it sits on the wire, before validation.
     ///
@@ -7566,6 +7964,73 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::VendorClosed, payload.as_union_value())
     }
 
+    /// A state builder that can omit each required field.
+    pub fn encode_player_trade_state(
+        partner_entity_id: u64,
+        partner_name: Option<&str>,
+        revision: u32,
+        my_offer: Option<&[PlayerTradeSlotWire]>,
+        their_offer: Option<&[PlayerTradeSlotWire]>,
+        silver: (u32, u32),
+        confirmed: (bool, bool),
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY * 2);
+        let lay_out = |builder: &mut FlatBufferBuilder<'static>, slots: &[PlayerTradeSlotWire]| {
+            let laid_out: Vec<_> = slots
+                .iter()
+                .map(|slot| {
+                    fb::PlayerTradeSlot::new(
+                        slot.trade_slot,
+                        slot.pack_slot,
+                        slot.item_id,
+                        slot.count,
+                        slot.durability,
+                        slot.max_durability,
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        };
+        let partner_name = partner_name.map(|name| builder.create_string(name));
+        let my_offer = my_offer.map(|slots| lay_out(&mut builder, slots));
+        let their_offer = their_offer.map(|slots| lay_out(&mut builder, slots));
+        let payload = fb::PlayerTradeState::create(
+            &mut builder,
+            &fb::PlayerTradeStateArgs {
+                partner_entity_id,
+                partner_name,
+                revision,
+                my_offer,
+                their_offer,
+                my_silver: silver.0,
+                their_silver: silver.1,
+                my_confirmed: confirmed.0,
+                their_confirmed: confirmed.1,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::PlayerTradeState,
+            payload.as_union_value(),
+        )
+    }
+
+    pub fn encode_player_trade_closed(partner_entity_id: u64, reason: u8) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
+        let payload = fb::PlayerTradeClosed::create(
+            &mut builder,
+            &fb::PlayerTradeClosedArgs {
+                partner_entity_id,
+                reason: fb::PlayerTradeCloseReason(reason),
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::PlayerTradeClosed,
+            payload.as_union_value(),
+        )
+    }
+
     /// A snapshot carrying the recipient's vitals, optionally the weather where they
     /// stand, and optionally one structure whose `lit` byte is never written.
     ///
@@ -7785,12 +8250,12 @@ mod tests {
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MarkerWire, MobStateWire, PartyMemberStateWire,
-        PartyRosterMemberWire, PlayerVitalsWire, ProjectileStateWire, StructureStateWire,
-        WardedColumnWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
-        encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
-        encode_block_update, encode_chat_message, encode_chunk_data, encode_chunk_unload,
-        encode_empty_inventory_with_silver, encode_empty_loot_with_silver, encode_entity_snapshot,
-        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        PartyRosterMemberWire, PlayerTradeSlotWire, PlayerVitalsWire, ProjectileStateWire,
+        StructureStateWire, WardedColumnWire, WelcomeWire, encode_action_refused,
+        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
+        encode_bare_entity_snapshot, encode_block_update, encode_chat_message, encode_chunk_data,
+        encode_chunk_unload, encode_empty_inventory_with_silver, encode_empty_loot_with_silver,
+        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
@@ -7799,10 +8264,10 @@ mod tests {
         encode_leave_started, encode_loot_closed, encode_loot_state, encode_map_explored,
         encode_map_tile, encode_marker_list, encode_mine_progress, encode_mob_hit,
         encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
-        encode_player_appearance_without_level, encode_resident_appearance,
-        encode_server_character_list, encode_server_reject, encode_server_welcome,
-        encode_snapshot_with_mounts, encode_storm_warning, encode_vendor_closed,
-        encode_vendor_state, encode_wards_nearby,
+        encode_player_appearance_without_level, encode_player_trade_closed,
+        encode_player_trade_state, encode_resident_appearance, encode_server_character_list,
+        encode_server_reject, encode_server_welcome, encode_snapshot_with_mounts,
+        encode_storm_warning, encode_vendor_closed, encode_vendor_state, encode_wards_nearby,
     };
     use super::*;
 
@@ -7828,6 +8293,21 @@ mod tests {
             PlayerVitalsWire::default(),
             structures,
         ))
+    }
+
+    fn trade_state(
+        my_offer: Option<&[PlayerTradeSlotWire]>,
+        their_offer: Option<&[PlayerTradeSlotWire]>,
+    ) -> Vec<u8> {
+        encode_player_trade_state(
+            77,
+            Some("Eydis"),
+            1,
+            my_offer,
+            their_offer,
+            (0, 0),
+            (false, false),
+        )
     }
 
     #[test]
@@ -8139,10 +8619,10 @@ mod tests {
         (fb::Payload::LearnedMounts, Handling::Consumed),
         (fb::Payload::MountRequest, Handling::ClientOnly),
         (fb::Payload::DismountRequest, Handling::ClientOnly),
-        // V28's intent is client-only; its two server messages are decoded in part 3.
+        // V28's intent is client-only; its two authoritative answers are consumed.
         (fb::Payload::PlayerTradeRequest, Handling::ClientOnly),
-        (fb::Payload::PlayerTradeState, Handling::Deferred),
-        (fb::Payload::PlayerTradeClosed, Handling::Deferred),
+        (fb::Payload::PlayerTradeState, Handling::Consumed),
+        (fb::Payload::PlayerTradeClosed, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -8319,12 +8799,6 @@ mod tests {
             // V27 reserves these wire members, but their application consumer belongs to
             // a later UI part. Until then both fail closed to `Unknown`.
             (fb::RefusedAction::Mount, fb::RefusalReason::MountNotLearned),
-            // V28 reserves player-trading refusal vocabulary for its dependent client
-            // consumer; the contract-only tranche must still fail closed here.
-            (
-                fb::RefusedAction::PlayerTrade,
-                fb::RefusalReason::AlreadyTrading,
-            ),
         ] {
             assert_eq!(
                 decode(&encode_action_refused(action, reason, None)),
@@ -8334,6 +8808,44 @@ mod tests {
                     anchor: None,
                 })),
                 "action {action:?}, reason {reason:?}"
+            );
+        }
+    }
+
+    /// V28's player-trade refusal vocabulary is known, while the total conversion still
+    /// maps a later contract's member to `Unknown` as the existing sweep above proves.
+    #[test]
+    fn player_trade_refusals_decode_totally() {
+        for (wire, want) in [
+            (
+                fb::RefusalReason::AlreadyTrading,
+                RefusalReason::AlreadyTrading,
+            ),
+            (fb::RefusalReason::TradeNotOpen, RefusalReason::TradeNotOpen),
+            (
+                fb::RefusalReason::TradeSlotTaken,
+                RefusalReason::TradeSlotTaken,
+            ),
+            (
+                fb::RefusalReason::NothingToOffer,
+                RefusalReason::NothingToOffer,
+            ),
+            (
+                fb::RefusalReason::TradeCooldown,
+                RefusalReason::TradeCooldown,
+            ),
+        ] {
+            assert_eq!(
+                decode(&encode_action_refused(
+                    fb::RefusedAction::PlayerTrade,
+                    wire,
+                    None,
+                )),
+                Ok(Message::ActionRefused(ActionRefused {
+                    action: RefusedAction::PlayerTrade,
+                    reason: want,
+                    anchor: None,
+                }))
             );
         }
     }
@@ -9055,6 +9567,282 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_player_trade_state_is_complete_and_empty_offers_are_legal() {
+        let my_offer = [PlayerTradeSlotWire {
+            trade_slot: 2,
+            pack_slot: 9,
+            item_id: 31,
+            count: 1,
+            durability: 17,
+            max_durability: 25,
+        }];
+        let their_offer = [PlayerTradeSlotWire {
+            trade_slot: 4,
+            pack_slot: 0,
+            item_id: 8,
+            count: 3,
+            durability: 0,
+            max_durability: 0,
+        }];
+        assert_eq!(
+            decode(&encode_player_trade_state(
+                77,
+                Some(""),
+                4,
+                Some(&my_offer),
+                Some(&their_offer),
+                (120, 35),
+                (true, false),
+            )),
+            Ok(Message::PlayerTradeState(PlayerTradeState {
+                partner_entity_id: 77,
+                partner_name: String::new(),
+                revision: 4,
+                my_offer: vec![PlayerTradeSlot {
+                    trade_slot: 2,
+                    pack_slot: 9,
+                    item_id: 31,
+                    count: 1,
+                    durability: 17,
+                    max_durability: 25,
+                }],
+                their_offer: vec![PlayerTradeSlot {
+                    trade_slot: 4,
+                    pack_slot: 0,
+                    item_id: 8,
+                    count: 3,
+                    durability: 0,
+                    max_durability: 0,
+                }],
+                my_silver: 120,
+                their_silver: 35,
+                my_confirmed: true,
+                their_confirmed: false,
+            }))
+        );
+
+        assert_eq!(
+            decode(&encode_player_trade_state(
+                77,
+                Some("Eydis"),
+                1,
+                Some(&[]),
+                Some(&[]),
+                (0, 0),
+                (false, false),
+            )),
+            Ok(Message::PlayerTradeState(PlayerTradeState {
+                partner_entity_id: 77,
+                partner_name: "Eydis".to_owned(),
+                revision: 1,
+                my_offer: vec![],
+                their_offer: vec![],
+                my_silver: 0,
+                their_silver: 0,
+                my_confirmed: false,
+                their_confirmed: false,
+            }))
+        );
+    }
+
+    /// Holds every vector invariant, including the partner's private pack slot.
+    #[test]
+    fn malformed_player_trade_states_are_refused() {
+        let ordinary = PlayerTradeSlotWire::default();
+        let partner = PlayerTradeSlotWire {
+            pack_slot: 0,
+            ..ordinary
+        };
+        let six = [ordinary; PLAYER_TRADE_SLOTS + 1];
+        let duplicate = [
+            ordinary,
+            PlayerTradeSlotWire {
+                pack_slot: 8,
+                ..ordinary
+            },
+        ];
+        let out_of_range = [PlayerTradeSlotWire {
+            trade_slot: PLAYER_TRADE_SLOTS as u8,
+            ..ordinary
+        }];
+        let empty = [PlayerTradeSlotWire {
+            count: 0,
+            ..ordinary
+        }];
+        let no_maximum = [PlayerTradeSlotWire {
+            durability: 2,
+            max_durability: 0,
+            ..ordinary
+        }];
+        let past_maximum = [PlayerTradeSlotWire {
+            durability: 11,
+            max_durability: 10,
+            ..ordinary
+        }];
+        let durable_pair = [PlayerTradeSlotWire {
+            count: 2,
+            durability: 4,
+            max_durability: 10,
+            ..ordinary
+        }];
+
+        for (name, frame, want) in [
+            (
+                "no partner",
+                encode_player_trade_state(
+                    0,
+                    Some("Eydis"),
+                    1,
+                    Some(&[]),
+                    Some(&[]),
+                    (0, 0),
+                    (false, false),
+                ),
+                DecodeError::PlayerTradeWithoutPartner("PlayerTradeState"),
+            ),
+            (
+                "no partner name",
+                encode_player_trade_state(
+                    77,
+                    None,
+                    1,
+                    Some(&[]),
+                    Some(&[]),
+                    (0, 0),
+                    (false, false),
+                ),
+                DecodeError::PlayerTradeWithoutPartnerName,
+            ),
+            (
+                "no revision",
+                encode_player_trade_state(
+                    77,
+                    Some("Eydis"),
+                    0,
+                    Some(&[]),
+                    Some(&[]),
+                    (0, 0),
+                    (false, false),
+                ),
+                DecodeError::PlayerTradeWithoutRevision,
+            ),
+            (
+                "no own offer",
+                trade_state(None, Some(&[])),
+                DecodeError::PlayerTradeWithoutOffer("my_offer"),
+            ),
+            (
+                "no partner offer",
+                trade_state(Some(&[]), None),
+                DecodeError::PlayerTradeWithoutOffer("their_offer"),
+            ),
+            (
+                "six own entries",
+                trade_state(Some(&six), Some(&[])),
+                DecodeError::PlayerTradeOfferTooLarge {
+                    field: "my_offer",
+                    len: 6,
+                },
+            ),
+            (
+                "duplicate own trade slot",
+                trade_state(Some(&duplicate), Some(&[])),
+                DecodeError::DuplicatePlayerTradeSlot {
+                    field: "my_offer",
+                    trade_slot: 0,
+                },
+            ),
+            (
+                "trade slot five",
+                trade_state(Some(&out_of_range), Some(&[])),
+                DecodeError::PlayerTradeSlotOutOfRange {
+                    field: "my_offer",
+                    index: 0,
+                    trade_slot: 5,
+                },
+            ),
+            (
+                "zero count",
+                trade_state(Some(&empty), Some(&[])),
+                DecodeError::EmptyPlayerTradeSlot {
+                    field: "my_offer",
+                    index: 0,
+                },
+            ),
+            (
+                "durability without maximum",
+                trade_state(Some(&no_maximum), Some(&[])),
+                DecodeError::PlayerTradeDurabilityWithoutMaximum {
+                    field: "my_offer",
+                    index: 0,
+                    durability: 2,
+                },
+            ),
+            (
+                "durability past maximum",
+                trade_state(Some(&past_maximum), Some(&[])),
+                DecodeError::PlayerTradeDurabilityExceedsMaximum {
+                    field: "my_offer",
+                    index: 0,
+                    durability: 11,
+                    max_durability: 10,
+                },
+            ),
+            (
+                "durable stack count two",
+                trade_state(Some(&durable_pair), Some(&[])),
+                DecodeError::PlayerTradeDurableStackCount {
+                    field: "my_offer",
+                    index: 0,
+                    count: 2,
+                },
+            ),
+            (
+                "partner pack slot exposed",
+                trade_state(Some(&[]), Some(&[ordinary])),
+                DecodeError::PlayerTradePartnerPackSlot {
+                    index: 0,
+                    pack_slot: 7,
+                },
+            ),
+        ] {
+            assert_eq!(decode(&frame), Err(want), "{name} was not refused");
+        }
+
+        // The same stack is legal on their side once the private pack position is zero.
+        assert!(matches!(
+            decode(&trade_state(Some(&[]), Some(&[partner]))),
+            Ok(Message::PlayerTradeState(_))
+        ));
+    }
+
+    #[test]
+    fn player_trade_close_reasons_decode_totally() {
+        for (wire, want) in [
+            (0, PlayerTradeCloseReason::Unknown),
+            (1, PlayerTradeCloseReason::Completed),
+            (2, PlayerTradeCloseReason::Cancelled),
+            (3, PlayerTradeCloseReason::OutOfReach),
+            (4, PlayerTradeCloseReason::Died),
+            (5, PlayerTradeCloseReason::Disconnected),
+            (6, PlayerTradeCloseReason::Failed),
+            (200, PlayerTradeCloseReason::Unknown),
+        ] {
+            assert_eq!(
+                decode(&encode_player_trade_closed(77, wire)),
+                Ok(Message::PlayerTradeClosed(PlayerTradeClosed {
+                    partner_entity_id: 77,
+                    reason: want,
+                }))
+            );
+        }
+        assert_eq!(
+            decode(&encode_player_trade_closed(0, 1)),
+            Err(DecodeError::PlayerTradeWithoutPartner("PlayerTradeClosed"))
+        );
+    }
+
     /// A warning says where the storm is, and the number beside the phase is read as
     /// whatever that phase makes it.
     ///
@@ -9437,6 +10225,61 @@ mod tests {
                     trade.buying,
                     trade.revision,
                     trade.client_tick,
+                )
+            );
+        }
+    }
+
+    /// Every action shares one table; the encoder rewrites none of its fields.
+    #[test]
+    fn player_trade_requests_round_trip_every_action() {
+        for (index, action) in [
+            PlayerTradeAction::Open,
+            PlayerTradeAction::SetItem,
+            PlayerTradeAction::ClearItem,
+            PlayerTradeAction::SetSilver,
+            PlayerTradeAction::Confirm,
+            PlayerTradeAction::Cancel,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request = PlayerTradeRequest {
+                action,
+                target_entity_id: 900 + index as u64,
+                trade_slot: index as u8,
+                pack_slot: 10 + index as u8,
+                silver: 100 + index as u32,
+                revision: 20 + index as u32,
+                client_tick: 30 + index as u32,
+            };
+            let frame = encode_player_trade_request(&request);
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::ClientOnly("PlayerTradeRequest"))
+            );
+            let envelope =
+                fb::root_as_envelope(&frame).expect("the encoder produced a valid frame");
+            let payload = envelope
+                .payload_as_player_trade_request()
+                .expect("the union tag names the payload it carries");
+            assert_eq!(payload.action(), action.wire());
+            assert_eq!(
+                (
+                    payload.target_entity_id(),
+                    payload.trade_slot(),
+                    payload.pack_slot(),
+                    payload.silver(),
+                    payload.revision(),
+                    payload.client_tick(),
+                ),
+                (
+                    request.target_entity_id,
+                    request.trade_slot,
+                    request.pack_slot,
+                    request.silver,
+                    request.revision,
+                    request.client_tick,
                 )
             );
         }
