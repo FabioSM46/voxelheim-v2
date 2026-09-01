@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 35] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 47] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -49,6 +49,18 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 35] = [
     RefusalReason::NotEnoughSilver,
     RefusalReason::VendorDoesNotWant,
     RefusalReason::Warded,
+    RefusalReason::MountNotLearned,
+    RefusalReason::AlreadyMounted,
+    RefusalReason::MountNotGrounded,
+    RefusalReason::MountIndoors,
+    RefusalReason::MountLowCeiling,
+    RefusalReason::CastAlreadyInProgress,
+    RefusalReason::CastInterruptedByDamage,
+    RefusalReason::CastInterruptedByMovement,
+    RefusalReason::CastInterruptedByJump,
+    RefusalReason::CastInterruptedByDeath,
+    RefusalReason::ActionForbiddenWhileMounted,
+    RefusalReason::MountAlreadyLearned,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -192,6 +204,18 @@ impl RefusalReason {
     /// who has claimed ground by poking at it. `WardsNearby` tells a session about the
     /// wards it can see, and this reason tells it that one of them just refused.
     pub const Warded: Self = Self(30);
+    pub const MountNotLearned: Self = Self(31);
+    pub const AlreadyMounted: Self = Self(32);
+    pub const MountNotGrounded: Self = Self(33);
+    pub const MountIndoors: Self = Self(34);
+    pub const MountLowCeiling: Self = Self(35);
+    pub const CastAlreadyInProgress: Self = Self(36);
+    pub const CastInterruptedByDamage: Self = Self(37);
+    pub const CastInterruptedByMovement: Self = Self(38);
+    pub const CastInterruptedByJump: Self = Self(39);
+    pub const CastInterruptedByDeath: Self = Self(40);
+    pub const ActionForbiddenWhileMounted: Self = Self(41);
+    pub const MountAlreadyLearned: Self = Self(42);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -239,6 +263,18 @@ impl RefusalReason {
         Self::NotEnoughSilver,
         Self::VendorDoesNotWant,
         Self::Warded,
+        Self::MountNotLearned,
+        Self::AlreadyMounted,
+        Self::MountNotGrounded,
+        Self::MountIndoors,
+        Self::MountLowCeiling,
+        Self::CastAlreadyInProgress,
+        Self::CastInterruptedByDamage,
+        Self::CastInterruptedByMovement,
+        Self::CastInterruptedByJump,
+        Self::CastInterruptedByDeath,
+        Self::ActionForbiddenWhileMounted,
+        Self::MountAlreadyLearned,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -278,6 +314,18 @@ impl RefusalReason {
             Self::NotEnoughSilver => Some("NotEnoughSilver"),
             Self::VendorDoesNotWant => Some("VendorDoesNotWant"),
             Self::Warded => Some("Warded"),
+            Self::MountNotLearned => Some("MountNotLearned"),
+            Self::AlreadyMounted => Some("AlreadyMounted"),
+            Self::MountNotGrounded => Some("MountNotGrounded"),
+            Self::MountIndoors => Some("MountIndoors"),
+            Self::MountLowCeiling => Some("MountLowCeiling"),
+            Self::CastAlreadyInProgress => Some("CastAlreadyInProgress"),
+            Self::CastInterruptedByDamage => Some("CastInterruptedByDamage"),
+            Self::CastInterruptedByMovement => Some("CastInterruptedByMovement"),
+            Self::CastInterruptedByJump => Some("CastInterruptedByJump"),
+            Self::CastInterruptedByDeath => Some("CastInterruptedByDeath"),
+            Self::ActionForbiddenWhileMounted => Some("ActionForbiddenWhileMounted"),
+            Self::MountAlreadyLearned => Some("MountAlreadyLearned"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

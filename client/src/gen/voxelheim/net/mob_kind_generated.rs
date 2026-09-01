@@ -11,18 +11,19 @@ pub const ENUM_MIN_MOB_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_KIND: u8 = 4;
+pub const ENUM_MAX_MOB_KIND: u8 = 5;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_KIND: [MobKind; 5] = [
+pub const ENUM_VALUES_MOB_KIND: [MobKind; 6] = [
     MobKind::Unknown,
     MobKind::Draugr,
     MobKind::Vargr,
     MobKind::Deer,
     MobKind::Villager,
+    MobKind::Horse,
 ];
 
 /// What kind of creature a `MobState` describes.
@@ -54,15 +55,19 @@ impl MobKind {
     /// member the receiver cannot name, so a V24 client meeting one would drop the
     /// session rather than the value. The argument is written out in `common.fbs`.
     pub const Villager: Self = Self(4);
+    /// A horse, whether standing in a stable or named by a player's mount state.
+    /// Appended rather than inserted: an older receiver refuses this unknown kind.
+    pub const Horse: Self = Self(5);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
+    pub const ENUM_MAX: u8 = 5;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Draugr,
         Self::Vargr,
         Self::Deer,
         Self::Villager,
+        Self::Horse,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -72,6 +77,7 @@ impl MobKind {
             Self::Vargr => Some("Vargr"),
             Self::Deer => Some("Deer"),
             Self::Villager => Some("Villager"),
+            Self::Horse => Some("Horse"),
             _ => None,
         }
     }

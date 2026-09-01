@@ -878,6 +878,51 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_learned_mounts(&self) -> Option<LearnedMounts<'a>> {
+        if self.payload_type() == Payload::LearnedMounts {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LearnedMounts::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_mount_request(&self) -> Option<MountRequest<'a>> {
+        if self.payload_type() == Payload::MountRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MountRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_dismount_request(&self) -> Option<DismountRequest<'a>> {
+        if self.payload_type() == Payload::DismountRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { DismountRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -943,6 +988,9 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::WardsNearby => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WardsNearby>>("Payload::WardsNearby", pos),
           Payload::LeaveCancelRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveCancelRequest>>("Payload::LeaveCancelRequest", pos),
           Payload::LeaveCancelResult => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LeaveCancelResult>>("Payload::LeaveCancelResult", pos),
+          Payload::LearnedMounts => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LearnedMounts>>("Payload::LearnedMounts", pos),
+          Payload::MountRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MountRequest>>("Payload::MountRequest", pos),
+          Payload::DismountRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DismountRequest>>("Payload::DismountRequest", pos),
           _ => Ok(()),
         }
      })?
@@ -1536,6 +1584,36 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::LeaveCancelResult => {
                 if let Some(x) = self.payload_as_leave_cancel_result() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LearnedMounts => {
+                if let Some(x) = self.payload_as_learned_mounts() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MountRequest => {
+                if let Some(x) = self.payload_as_mount_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::DismountRequest => {
+                if let Some(x) = self.payload_as_dismount_request() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

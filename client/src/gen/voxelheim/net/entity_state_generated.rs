@@ -24,6 +24,9 @@ use super::*;
 /// `EntitySnapshot.dead_players`, where it costs nothing on the ticks nobody is
 /// dead. A fifth field here would have charged every visible player those bytes on
 /// every tick to say "no", and could never have been taken back.
+///
+/// Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
+/// snapshot, because only that complete vector can answer whether an id occurs twice.
 // struct EntityState, aligned to 8
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq)]

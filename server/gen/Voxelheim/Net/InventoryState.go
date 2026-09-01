@@ -169,8 +169,22 @@ func (rcv *InventoryState) MutateMaxDurability(j int, n uint16) bool {
 	return false
 }
 
+// / Currency in this character's authoritative purse. It occupies no slot.
+func (rcv *InventoryState) Silver() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Currency in this character's authoritative purse. It occupies no slot.
+func (rcv *InventoryState) MutateSilver(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
 func InventoryStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func InventoryStateAddStacks(builder *flatbuffers.Builder, stacks flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(stacks), 0)
@@ -189,6 +203,9 @@ func InventoryStateAddMaxDurability(builder *flatbuffers.Builder, maxDurability 
 }
 func InventoryStateStartMaxDurabilityVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(2, numElems, 2)
+}
+func InventoryStateAddSilver(builder *flatbuffers.Builder, silver uint32) {
+	builder.PrependUint32Slot(3, silver, 0)
 }
 func InventoryStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
