@@ -37,6 +37,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	player.health = 61
 	player.hunger = 37
 	player.experience = 1337
+	player.learnedMounts = LearnedMounts(0b101)
 	h.sim.mu.Unlock()
 
 	player.inventory.mu.Lock()
@@ -78,6 +79,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	if got.Silver != saved.Silver {
 		t.Errorf("restored silver %d, want %d", got.Silver, saved.Silver)
 	}
+	if got.LearnedMounts != saved.LearnedMounts {
+		t.Errorf("restored learned mounts %#02x, want %#02x", got.LearnedMounts, saved.LearnedMounts)
+	}
 	for slot := range saved.Slots {
 		if got.Slots[slot] != saved.Slots[slot] {
 			t.Errorf("restored slot %d is %+v, want %+v", slot, got.Slots[slot], saved.Slots[slot])
@@ -99,6 +103,16 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	if state.Silver != saved.Silver {
 		t.Errorf("wire silver = %d, want %d", state.Silver, saved.Silver)
 	}
+	learned := restored.LearnedMountState().Mounts
+	wantLearned := []vnet.MountKind{vnet.MountKindBlackHorse, vnet.MountKindGreyHorse}
+	if len(learned) != len(wantLearned) {
+		t.Fatalf("wire learned set has %d mounts, want %d", len(learned), len(wantLearned))
+	}
+	for index := range wantLearned {
+		if learned[index] != wantLearned[index] {
+			t.Errorf("wire learned mount %d is %s, want %s", index, learned[index], wantLearned[index])
+		}
+	}
 }
 
 func TestAStoredSilverStackIsRefusedRatherThanRepaired(t *testing.T) {
@@ -108,6 +122,18 @@ func TestAStoredSilverStackIsRefusedRatherThanRepaired(t *testing.T) {
 	life.Slots[0] = protocol.InventoryStack{ItemID: uint16(ItemSilver), Count: 7}
 	if err := life.Validate(); err == nil {
 		t.Fatal("Validate accepted a legacy silver stack")
+	}
+}
+
+func TestAStoredUnknownMountBitIsRefusedRatherThanRepaired(t *testing.T) {
+	t.Parallel()
+
+	life := Life{
+		Health: PlayerMaxHealth, Hunger: PlayerMaxHunger,
+		LearnedMounts: LearnedMounts(0b1000),
+	}
+	if err := life.Validate(); err == nil {
+		t.Fatal("Validate accepted an unknown learned-mount bit")
 	}
 }
 

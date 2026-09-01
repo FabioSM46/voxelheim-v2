@@ -255,6 +255,43 @@ func TestResolveSetsACorruptRecordAsideAndAdmitsThePlayerAsNew(t *testing.T) {
 	}
 }
 
+func TestResolveRefusesAnUnknownLearnedMountBitWhole(t *testing.T) {
+	t.Parallel()
+
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	identities, hello := internalIdentities(t, store)
+
+	account := identity.Account{19}
+	character, path := seedCharacter(t, store, account)
+	if err := store.Save(character.ID, persist.Record{
+		Health: game.PlayerMaxHealth, Hunger: game.PlayerMaxHunger,
+		LearnedMounts: 0b1000,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	resolved, err := play(t, identities, hello(account), character.ID)
+	if err != nil {
+		t.Fatalf("the selection: %v", err)
+	}
+	if resolved.Returning || resolved.Life != nil {
+		t.Fatal("a record with an unknown learned-mount bit was partially restored")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the refused record remains at its live path: %v", err)
+	}
+	kept, err := filepath.Glob(path + ".corrupt.*")
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("found %d records set aside, want exactly 1", len(kept))
+	}
+}
+
 // A record that nobody can read and nobody can move refuses the connection, and this is
 // the branch the ticket changed.
 //
@@ -552,7 +589,7 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	}
 	identities.playing(Admitted{ID: id}, character, false, nil)
 
-	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73, Hunger: 29, Experience: 330, Silver: 2468}
+	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73, Hunger: 29, Experience: 330, Silver: 2468, LearnedMounts: game.LearnedMounts(0b110)}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: life}); err != nil {
 		t.Fatalf("RememberAll: %v", err)
 	}
@@ -564,10 +601,10 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	if !found {
 		t.Fatal("the autosave wrote nothing for a live session")
 	}
-	if saved.Pos != life.Pos || saved.Health != life.Health || saved.Hunger != life.Hunger || saved.Experience != life.Experience || saved.Silver != life.Silver {
-		t.Errorf("the autosaved record is %v/%d/%d/%d/%d, want %v/%d/%d/%d/%d",
-			saved.Pos, saved.Health, saved.Hunger, saved.Experience, saved.Silver,
-			life.Pos, life.Health, life.Hunger, life.Experience, life.Silver)
+	if saved.Pos != life.Pos || saved.Health != life.Health || saved.Hunger != life.Hunger || saved.Experience != life.Experience || saved.Silver != life.Silver || saved.LearnedMounts != uint8(life.LearnedMounts) {
+		t.Errorf("the autosaved record is %v/%d/%d/%d/%d/%#02x, want %v/%d/%d/%d/%d/%#02x",
+			saved.Pos, saved.Health, saved.Hunger, saved.Experience, saved.Silver, saved.LearnedMounts,
+			life.Pos, life.Health, life.Hunger, life.Experience, life.Silver, life.LearnedMounts)
 	}
 	// The character it was written under comes from the claim, because the simulation
 	// keys a life by account and an account has several characters.

@@ -122,7 +122,13 @@ import (
 // ItemSilver stack, and silently turning that stack into a purse would repair stored data
 // the game must refuse. The same rule limits v7 migration to records without that stack;
 // other bytes stay aside. Stable worldgen starts a new default directory.
-const StoreVersion uint32 = 9
+//
+// **10 adds the learned-mount bitmask after silver.** It is one byte because the
+// contract has three concrete mounts, and game validates the unused bits on load rather
+// than this package deciding what a mount means. There is no migration: a v9 record
+// cannot say which mounts the character learned, and inventing an empty set would erase
+// permanent progression while presenting it as a successful load.
+const StoreVersion uint32 = 10
 
 const (
 	previousStoreVersion   uint32 = 7
@@ -139,7 +145,8 @@ const (
 //	    character_id:u64 owner:32
 //	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
 //	    pos:3×f64 yaw:f64 health:u16 hunger:u16 experience:u32
-//	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16) silver:u32
+//	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
+//	    silver:u32 learned_mounts:u8
 //	    name_len:u16 name[name_len] crc32:u32
 //
 // Everything fixed-width first and the one variable-length field last, so the only
@@ -173,7 +180,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v9.<timestamp>.
+	// by this version becomes players.pre-v<StoreVersion>.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -190,18 +197,19 @@ const (
 	// above names them.
 	appearanceSize = 5*4 + 1
 
-	offLastSeen   = world.HeaderSize
-	offCharacter  = offLastSeen + 8
-	offOwner      = offCharacter + 8
-	offAppearance = offOwner + identity.IDSize
-	offPos        = offAppearance + appearanceSize
-	offYaw        = offPos + 3*8
-	offHealth     = offYaw + 8
-	offHunger     = offHealth + 2
-	offExperience = offHunger + 2
-	offSlots      = offExperience + 4
-	offSilver     = offSlots + slotsSize
-	offNameLen    = offSilver + 4
+	offLastSeen      = world.HeaderSize
+	offCharacter     = offLastSeen + 8
+	offOwner         = offCharacter + 8
+	offAppearance    = offOwner + identity.IDSize
+	offPos           = offAppearance + appearanceSize
+	offYaw           = offPos + 3*8
+	offHealth        = offYaw + 8
+	offHunger        = offHealth + 2
+	offExperience    = offHunger + 2
+	offSlots         = offExperience + 4
+	offSilver        = offSlots + slotsSize
+	offLearnedMounts = offSilver + 4
+	offNameLen       = offLearnedMounts + 1
 
 	recordHeaderSize      = offNameLen + 2
 	maxRecordSize         = recordHeaderSize + MaxNameBytes + world.ChecksumSize
@@ -277,6 +285,10 @@ type Record struct {
 	// Silver is the character's authoritative purse. It is not represented in Slots;
 	// game refuses a stored ItemSilver stack rather than repairing it into this field.
 	Silver uint32
+
+	// LearnedMounts is the opaque one-byte set game owns and validates. Persist writes
+	// it verbatim because deciding which bits name real mounts is a gameplay rule.
+	LearnedMounts uint8
 
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
 	// sent InventoryState are the same value rather than two that have to agree.
@@ -837,7 +849,7 @@ func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	silverOffset := offSlots + inventorySlots*slotSize
 	nameOffset := silverOffset
 	if version == StoreVersion {
-		nameOffset += 4
+		nameOffset += 5
 	}
 	headerSize := nameOffset + 2
 
@@ -869,6 +881,7 @@ func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	}
 	if version == StoreVersion {
 		binary.LittleEndian.PutUint32(buf[silverOffset:silverOffset+4], rec.Silver)
+		buf[silverOffset+4] = rec.LearnedMounts
 	}
 
 	binary.LittleEndian.PutUint16(buf[nameOffset:nameOffset+2], uint16(len(name)))
@@ -906,7 +919,7 @@ func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record
 	silverOffset := offSlots + inventorySlots*slotSize
 	nameOffset := silverOffset
 	if version == StoreVersion {
-		nameOffset += 4
+		nameOffset += 5
 	}
 	headerSize := nameOffset + 2
 	if len(data) < headerSize+world.ChecksumSize {
@@ -956,6 +969,7 @@ func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record
 	}
 	if version == StoreVersion {
 		rec.Silver = binary.LittleEndian.Uint32(data[silverOffset : silverOffset+4])
+		rec.LearnedMounts = data[silverOffset+4]
 	}
 	return rec, nil
 }
