@@ -212,6 +212,8 @@ type Message struct {
 	MarkerRemove       *MarkerRemoveRequest
 	NpcInteract        *NpcInteractRequest
 	Trade              *TradeRequest
+	MountRequest       *MountRequest
+	DismountRequest    *DismountRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -221,6 +223,16 @@ type LeaveRequest struct{}
 // LeaveCancelRequest is an intentionally empty request to resume the same live
 // session. The server's clock and player state decide whether it succeeds.
 type LeaveCancelRequest struct{}
+
+// MountRequest names the learned mount a client wants the authoritative simulation to
+// call. Whether it is learned or legal here is not a framing decision.
+type MountRequest struct {
+	Mount vnet.MountKind
+}
+
+// DismountRequest is intentionally empty. Dismount is immediate and unconditional;
+// the client supplies no distance, legality or outcome.
+type DismountRequest struct{}
 
 // ChatRequest is display text copied verbatim from one client request. Whether the
 // server accepts, rate-limits or delivers it is a simulation decision.
@@ -274,6 +286,7 @@ type LootState struct {
 	CorpseID uint64
 	Revision uint32
 	Entries  []LootEntry
+	Silver   uint32
 }
 
 // LootClosed explicitly ends presentation for one corpse container.
@@ -564,6 +577,7 @@ type InventoryStack struct {
 // the pair (0, 0).
 type InventoryState struct {
 	Stacks []InventoryStack
+	Silver uint32
 }
 
 // MineRequest is a decoded start, continuation or cancellation of mining one
@@ -889,6 +903,23 @@ type MobState struct {
 	TargetEntityID uint64
 }
 
+// MountState is one visible player's authoritative sparse mount state.
+type MountState struct {
+	EntityID uint64
+	Mount    vnet.MountKind
+}
+
+// CastState is the recipient's own authoritative interruptible cast.
+type CastState struct {
+	Kind     vnet.CastKind
+	Progress uint8
+}
+
+// LearnedMounts is the complete authoritative set this recipient has learned.
+type LearnedMounts struct {
+	Mounts []vnet.MountKind
+}
+
 // WeatherState is what the sky is doing at one point in the world.
 //
 // A struct on the wire for the reason schemas/player.fbs gives: it is hot — one per
@@ -951,6 +982,7 @@ type EntitySnapshot struct {
 	Drops       []ItemDropState
 	Mobs        []MobState
 	Projectiles []ProjectileState
+	Mounts      []MountState
 
 	// Structures visible to this session, under the same rule the three vectors above
 	// obey. The newest snapshot is the complete existence set: a structure that stops
@@ -961,6 +993,11 @@ type EntitySnapshot struct {
 	// Vitals belongs to the session this snapshot is being encoded for, which is why
 	// this type is built per recipient rather than once per tick.
 	Vitals PlayerVitals
+
+	// Cast belongs to the snapshot recipient. HasCast distinguishes the ordinary
+	// absence from a present CastKindUnknown, which is invalid on the wire.
+	Cast    CastState
+	HasCast bool
 
 	// DeadPlayers is the entity ids in Entities the server currently holds dead — a fact
 	// about the world rather than an event, so a session that arrives after a death is
@@ -1636,6 +1673,26 @@ func Decode(frame []byte) (msg Message, err error) {
 		request.Init(table.Bytes, table.Pos)
 		msg.LeaveCancelRequest = &LeaveCancelRequest{}
 
+	case vnet.PayloadMountRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.MountRequest
+		request.Init(table.Bytes, table.Pos)
+		// Copied verbatim, Unknown included: learned membership and support are
+		// authoritative simulation refusals, not framing decisions.
+		msg.MountRequest = &MountRequest{Mount: request.Mount()}
+
+	case vnet.PayloadDismountRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.DismountRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.DismountRequest = &DismountRequest{}
+
 	case vnet.PayloadSelectCharacterRequest:
 		table, tErr := unionPayload(env, msg.Kind)
 		if tErr != nil {
@@ -1867,6 +1924,92 @@ func Decode(frame []byte) (msg Message, err error) {
 	}
 
 	return msg, nil
+}
+
+// ValidateEntitySnapshot decodes the V27 associations a server-to-client snapshot adds
+// and refuses every state the contract says has no meaning. The authoritative server does
+// not consume its own snapshots in production, but interoperability tests and tools need
+// the same decoder boundary as the Rust client rather than raw generated accessors that
+// accept absent scalar defaults.
+func ValidateEntitySnapshot(frame []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%w: %v", ErrMalformed, r)
+		}
+	}()
+
+	if minimum := int(flatbuffers.SizeUOffsetT) + len(vnet.EnvelopeIdentifier); len(frame) < minimum {
+		return fmt.Errorf("%w: %d bytes cannot hold a root offset and identifier (%d)", ErrMalformed, len(frame), minimum)
+	}
+	if !vnet.EnvelopeBufferHasIdentifier(frame) {
+		return fmt.Errorf("%w: not a %q buffer", ErrMalformed, vnet.EnvelopeIdentifier)
+	}
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	if env.PayloadType() != vnet.PayloadEntitySnapshot {
+		return fmt.Errorf("%w: payload is %s, want EntitySnapshot", ErrMalformed, env.PayloadType())
+	}
+	table, err := unionPayload(env, vnet.PayloadEntitySnapshot)
+	if err != nil {
+		return err
+	}
+	var snapshot vnet.EntitySnapshot
+	snapshot.Init(table.Bytes, table.Pos)
+
+	entities := make(map[uint64]struct{}, snapshot.EntitiesLength())
+	for i := 0; i < snapshot.EntitiesLength(); i++ {
+		var state vnet.EntityState
+		if !snapshot.Entities(&state, i) {
+			return fmt.Errorf("%w: EntitySnapshot entity %d is absent", ErrMalformed, i)
+		}
+		entityID := state.EntityId()
+		if entityID == 0 {
+			return fmt.Errorf("%w: EntitySnapshot entity %d has reserved id 0", ErrMalformed, i)
+		}
+		if _, duplicate := entities[entityID]; duplicate {
+			return fmt.Errorf("%w: EntitySnapshot names player %d twice", ErrMalformed, entityID)
+		}
+		entities[entityID] = struct{}{}
+	}
+
+	mounted := make(map[uint64]struct{}, snapshot.MountsLength())
+	for i := 0; i < snapshot.MountsLength(); i++ {
+		var state vnet.MountState
+		if !snapshot.Mounts(&state, i) {
+			return fmt.Errorf("%w: EntitySnapshot mount %d is absent", ErrMalformed, i)
+		}
+		entityID := state.EntityId()
+		if entityID == 0 {
+			return fmt.Errorf("%w: MountState has reserved entity id 0", ErrMalformed)
+		}
+		if _, exists := entities[entityID]; !exists {
+			return fmt.Errorf("%w: MountState names player %d absent from EntitySnapshot.entities", ErrMalformed, entityID)
+		}
+		if _, duplicate := mounted[entityID]; duplicate {
+			return fmt.Errorf("%w: MountState names player %d twice", ErrMalformed, entityID)
+		}
+		mounted[entityID] = struct{}{}
+		mount := state.Mount()
+		if mount == vnet.MountKindUnknown {
+			return fmt.Errorf("%w: MountState for player %d has Unknown mount", ErrMalformed, entityID)
+		}
+		if _, known := vnet.EnumNamesMountKind[mount]; !known {
+			return fmt.Errorf("%w: MountState for player %d has unknown mount %d", ErrMalformed, entityID, mount)
+		}
+	}
+
+	if cast := snapshot.SelfCast(nil); cast != nil {
+		kind := cast.Kind()
+		if kind == vnet.CastKindUnknown {
+			return fmt.Errorf("%w: CastState has Unknown kind", ErrMalformed)
+		}
+		if _, known := vnet.EnumNamesCastKind[kind]; !known {
+			return fmt.Errorf("%w: CastState has unknown kind %d", ErrMalformed, kind)
+		}
+		if cast.Progress() == ^uint8(0) {
+			return fmt.Errorf("%w: CastState remains present at completed progress 255", ErrMalformed)
+		}
+	}
+	return nil
 }
 
 // ResidentRoleOK reports whether role is a member this contract names, Unknown
@@ -2269,7 +2412,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			durableDrops++
 		}
 	}
-	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.Projectiles)*40 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + len(s.PartyRoster)*64 + len(s.AccessibleLootCorpses)*8 + 128)
+	b := flatbuffers.NewBuilder(len(s.Entities)*40 + len(s.Drops)*24 + durableDrops*16 + len(s.Mobs)*64 + len(s.Structures)*48 + len(s.Mounts)*24 + len(s.Projectiles)*40 + len(s.DeadPlayers)*8 + len(s.PartyMembers)*32 + len(s.PartyRoster)*64 + len(s.AccessibleLootCorpses)*8 + 128)
 
 	// Every table a vector points at must be finished before that vector opens, so the
 	// mob tables are built first and the vector below only carries their offsets. The
@@ -2322,6 +2465,32 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		b.PrependUOffsetT(structureOffsets[i])
 	}
 	structuresOffset := b.EndVector(len(structureOffsets))
+
+	// Sparse mount tables are keyed back to the fixed player vector by entity id. Build
+	// them before their vector for the same FlatBuffers table rule the mobs follow.
+	mountOffsets := make([]flatbuffers.UOffsetT, len(s.Mounts))
+	for i, mount := range s.Mounts {
+		vnet.MountStateStart(b)
+		vnet.MountStateAddEntityId(b, mount.EntityID)
+		vnet.MountStateAddMount(b, mount.Mount)
+		mountOffsets[i] = vnet.MountStateEnd(b)
+	}
+	var mountsOffset flatbuffers.UOffsetT
+	if len(mountOffsets) > 0 {
+		vnet.EntitySnapshotStartMountsVector(b, len(mountOffsets))
+		for i := len(mountOffsets) - 1; i >= 0; i-- {
+			b.PrependUOffsetT(mountOffsets[i])
+		}
+		mountsOffset = b.EndVector(len(mountOffsets))
+	}
+
+	var castOffset flatbuffers.UOffsetT
+	if s.HasCast {
+		vnet.CastStateStart(b)
+		vnet.CastStateAddKind(b, s.Cast.Kind)
+		vnet.CastStateAddProgress(b, s.Cast.Progress)
+		castOffset = vnet.CastStateEnd(b)
+	}
 
 	vnet.PlayerVitalsStart(b)
 	vnet.PlayerVitalsAddHealth(b, s.Vitals.Health)
@@ -2503,6 +2672,12 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	if s.HasWeather {
 		vnet.EntitySnapshotAddWeather(b, vnet.CreateWeatherState(b, s.Weather.Kind, s.Weather.Intensity))
 	}
+	if mountsOffset != 0 {
+		vnet.EntitySnapshotAddMounts(b, mountsOffset)
+	}
+	if castOffset != 0 {
+		vnet.EntitySnapshotAddSelfCast(b, castOffset)
+	}
 	snapshot := vnet.EntitySnapshotEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadEntitySnapshot, snapshot)
@@ -2593,6 +2768,7 @@ func EncodeInventoryState(state InventoryState) []byte {
 	vnet.InventoryStateAddStacks(b, stacks)
 	vnet.InventoryStateAddDurability(b, durabilityOffset)
 	vnet.InventoryStateAddMaxDurability(b, maxDurabilityOffset)
+	vnet.InventoryStateAddSilver(b, state.Silver)
 	inventory := vnet.InventoryStateEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadInventoryState, inventory)
@@ -2806,6 +2982,7 @@ func EncodeLootState(state LootState) []byte {
 	vnet.LootStateAddCorpseId(b, state.CorpseID)
 	vnet.LootStateAddRevision(b, state.Revision)
 	vnet.LootStateAddEntries(b, entries)
+	vnet.LootStateAddSilver(b, state.Silver)
 	loot := vnet.LootStateEnd(b)
 	return finishEnvelope(b, vnet.PayloadLootState, loot)
 }
@@ -3231,6 +3408,37 @@ func EncodeLeaveCancelRequest() []byte {
 	request := vnet.LeaveCancelRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadLeaveCancelRequest, request)
+}
+
+// EncodeMountRequest builds one mount-selection intent for protocol round-trip tests.
+func EncodeMountRequest(r MountRequest) []byte {
+	b := flatbuffers.NewBuilder(64)
+	vnet.MountRequestStart(b)
+	vnet.MountRequestAddMount(b, r.Mount)
+	request := vnet.MountRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadMountRequest, request)
+}
+
+// EncodeDismountRequest builds the deliberately empty immediate dismount intent.
+func EncodeDismountRequest() []byte {
+	b := flatbuffers.NewBuilder(64)
+	vnet.DismountRequestStart(b)
+	request := vnet.DismountRequestEnd(b)
+	return finishEnvelope(b, vnet.PayloadDismountRequest, request)
+}
+
+// EncodeLearnedMounts builds the complete authoritative learned set for one recipient.
+func EncodeLearnedMounts(learned LearnedMounts) []byte {
+	b := flatbuffers.NewBuilder(len(learned.Mounts) + 64)
+	vnet.LearnedMountsStartMountsVector(b, len(learned.Mounts))
+	for i := len(learned.Mounts) - 1; i >= 0; i-- {
+		b.PrependByte(byte(learned.Mounts[i]))
+	}
+	mounts := b.EndVector(len(learned.Mounts))
+	vnet.LearnedMountsStart(b)
+	vnet.LearnedMountsAddMounts(b, mounts)
+	payload := vnet.LearnedMountsEnd(b)
+	return finishEnvelope(b, vnet.PayloadLearnedMounts, payload)
 }
 
 // EncodeLeaveStarted acknowledges the server-owned linger duration.

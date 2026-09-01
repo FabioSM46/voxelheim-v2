@@ -970,7 +970,7 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) {
 	t.Parallel()
 
-	want := LootState{CorpseID: 400, Revision: 2, Entries: []LootEntry{
+	want := LootState{CorpseID: 400, Revision: 2, Silver: 37, Entries: []LootEntry{
 		{EntryID: 9, ItemID: 31, Count: 4},
 		{EntryID: 10, ItemID: 8, Count: 1, Durability: 3, MaxDurability: 10},
 	}}
@@ -984,6 +984,9 @@ func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) 
 	if state.CorpseId() != want.CorpseID || state.Revision() != want.Revision || state.EntriesLength() != len(want.Entries) {
 		t.Fatalf("loot state header = corpse %d revision %d entries %d", state.CorpseId(), state.Revision(), state.EntriesLength())
 	}
+	if got := state.Silver(); got != want.Silver {
+		t.Errorf("loot silver = %d, want %d", got, want.Silver)
+	}
 	for index, expected := range want.Entries {
 		entry := new(vnet.LootEntry)
 		if !state.Entries(entry, index) {
@@ -993,6 +996,22 @@ func TestLootServerMessagesCarryCompleteEntriesAndExplicitClosure(t *testing.T) 
 		if got != expected {
 			t.Errorf("entry %d = %+v, want %+v", index, got, expected)
 		}
+	}
+
+	// Currency-only loot is a live container, not a closure. Its required entries
+	// vector is present and empty; EntriesLength alone cannot distinguish that from
+	// an omitted vector. `entries` is the third field, so its vtable slot is 4 + 2*2.
+	const entriesVTableSlot = flatbuffers.VOffsetT(8)
+	silverOnlyEnv := vnet.GetRootAsEnvelope(EncodeLootState(LootState{CorpseID: 401, Revision: 1, Silver: 12}), 0)
+	silverOnlyTable := payloadTable(t, silverOnlyEnv)
+	silverOnly := new(vnet.LootState)
+	silverOnly.Init(silverOnlyTable.Bytes, silverOnlyTable.Pos)
+	if silverOnly.EntriesLength() != 0 || silverOnly.Silver() != 12 {
+		t.Errorf("silver-only loot carries %d entries and %d silver, want 0 and 12", silverOnly.EntriesLength(), silverOnly.Silver())
+	}
+	silverOnlyLootTable := silverOnly.Table()
+	if silverOnlyLootTable.Offset(entriesVTableSlot) == 0 {
+		t.Error("silver-only loot omitted entries; the contract requires an empty vector")
 	}
 
 	closedEnv := vnet.GetRootAsEnvelope(EncodeLootClosed(LootClosed{CorpseID: 400}), 0)
@@ -1687,6 +1706,151 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 	}
 	if gotVitals != wantVitals {
 		t.Errorf("self_vitals decoded as %+v, want %+v", gotVitals, wantVitals)
+	}
+}
+
+func TestV27MountProjectionCastAndLearnedSetKeepAuthoritativeOrder(t *testing.T) {
+	t.Parallel()
+
+	frame := EncodeEntitySnapshot(EntitySnapshot{
+		Tick:     8,
+		Entities: []EntityState{{EntityID: 7}, {EntityID: 9}},
+		Mounts: []MountState{
+			{EntityID: 9, Mount: vnet.MountKindGreyHorse},
+			{EntityID: 7, Mount: vnet.MountKindBlackHorse},
+		},
+		Vitals:  PlayerVitals{Health: 100, MaxHealth: 100, Hunger: 100, MaxHunger: 100, Level: 1, ExperienceToNext: 50, LifeState: vnet.LifeStateAlive},
+		HasCast: true,
+		Cast:    CastState{Kind: vnet.CastKindMount, Progress: 128},
+	})
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	table := payloadTable(t, env)
+	snapshot := new(vnet.EntitySnapshot)
+	snapshot.Init(table.Bytes, table.Pos)
+	if got := snapshot.MountsLength(); got != 2 {
+		t.Fatalf("MountsLength = %d, want 2", got)
+	}
+	for index, want := range []MountState{
+		{EntityID: 9, Mount: vnet.MountKindGreyHorse},
+		{EntityID: 7, Mount: vnet.MountKindBlackHorse},
+	} {
+		state := new(vnet.MountState)
+		if !snapshot.Mounts(state, index) {
+			t.Fatalf("mount %d is absent", index)
+		}
+		if got := (MountState{EntityID: state.EntityId(), Mount: state.Mount()}); got != want {
+			t.Errorf("mount %d = %+v, want %+v", index, got, want)
+		}
+	}
+	cast := snapshot.SelfCast(nil)
+	if cast == nil || cast.Kind() != vnet.CastKindMount || cast.Progress() != 128 {
+		t.Fatalf("self cast = %#v, want Mount at 128", cast)
+	}
+
+	learnedEnv := vnet.GetRootAsEnvelope(EncodeLearnedMounts(LearnedMounts{Mounts: []vnet.MountKind{
+		vnet.MountKindBrownHorse, vnet.MountKindGreyHorse,
+	}}), 0)
+	learnedTable := payloadTable(t, learnedEnv)
+	learned := new(vnet.LearnedMounts)
+	learned.Init(learnedTable.Bytes, learnedTable.Pos)
+	if learned.MountsLength() != 2 || learned.Mounts(0) != vnet.MountKindBrownHorse || learned.Mounts(1) != vnet.MountKindGreyHorse {
+		t.Errorf("learned mount order = [%s, %s], want [BrownHorse, GreyHorse]", learned.Mounts(0), learned.Mounts(1))
+	}
+}
+
+func TestV27MountAndDismountRequestsDecodeAsIntent(t *testing.T) {
+	t.Parallel()
+
+	for name, frame := range map[string][]byte{
+		"mount":    EncodeMountRequest(MountRequest{Mount: vnet.MountKindBrownHorse}),
+		"dismount": EncodeDismountRequest(),
+	} {
+		message, err := Decode(frame)
+		if err != nil {
+			t.Fatalf("%s Decode: %v", name, err)
+		}
+		switch name {
+		case "mount":
+			if message.Kind != vnet.PayloadMountRequest || message.MountRequest == nil || message.MountRequest.Mount != vnet.MountKindBrownHorse {
+				t.Errorf("mount decoded as %+v", message)
+			}
+		case "dismount":
+			if message.Kind != vnet.PayloadDismountRequest || message.DismountRequest == nil {
+				t.Errorf("dismount decoded as %+v", message)
+			}
+		}
+	}
+
+	message, err := Decode(EncodeMountRequest(MountRequest{Mount: vnet.MountKindUnknown}))
+	if err != nil || message.MountRequest == nil || message.MountRequest.Mount != vnet.MountKindUnknown {
+		t.Errorf("Unknown mount intent must be copied for simulation refusal, got %+v / %v", message, err)
+	}
+}
+
+func TestV27SnapshotValidatorRefusesBrokenMountAssociations(t *testing.T) {
+	t.Parallel()
+
+	vitals := PlayerVitals{Health: 100, MaxHealth: 100, Hunger: 100, MaxHunger: 100, Level: 1, ExperienceToNext: 50, LifeState: vnet.LifeStateAlive}
+	valid := EntitySnapshot{
+		Entities: []EntityState{{EntityID: 7}},
+		Mounts:   []MountState{{EntityID: 7, Mount: vnet.MountKindBlackHorse}},
+		Vitals:   vitals,
+	}
+	if err := ValidateEntitySnapshot(EncodeEntitySnapshot(valid)); err != nil {
+		t.Fatalf("valid snapshot: %v", err)
+	}
+
+	for name, snapshot := range map[string]EntitySnapshot{
+		"missing player": {
+			Entities: []EntityState{{EntityID: 7}},
+			Mounts:   []MountState{{EntityID: 9, Mount: vnet.MountKindBlackHorse}},
+			Vitals:   vitals,
+		},
+		"zero player id": {
+			Entities: []EntityState{{EntityID: 0}},
+			Vitals:   vitals,
+		},
+		"duplicate player": {
+			Entities: []EntityState{{EntityID: 7}, {EntityID: 7}},
+			Vitals:   vitals,
+		},
+		"zero mount id": {
+			Entities: []EntityState{{EntityID: 7}},
+			Mounts:   []MountState{{EntityID: 0, Mount: vnet.MountKindBlackHorse}},
+			Vitals:   vitals,
+		},
+		"duplicate mount": {
+			Entities: []EntityState{{EntityID: 7}},
+			Mounts: []MountState{
+				{EntityID: 7, Mount: vnet.MountKindBlackHorse},
+				{EntityID: 7, Mount: vnet.MountKindBrownHorse},
+			},
+			Vitals: vitals,
+		},
+		"unknown mount": {
+			Entities: []EntityState{{EntityID: 7}},
+			Mounts:   []MountState{{EntityID: 7, Mount: vnet.MountKindUnknown}},
+			Vitals:   vitals,
+		},
+		"unknown cast": {
+			Entities: []EntityState{{EntityID: 7}},
+			Vitals:   vitals,
+			HasCast:  true,
+			Cast:     CastState{Kind: vnet.CastKindUnknown},
+		},
+		"completed cast": {
+			Entities: []EntityState{{EntityID: 7}},
+			Vitals:   vitals,
+			HasCast:  true,
+			Cast:     CastState{Kind: vnet.CastKindMount, Progress: ^uint8(0)},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateEntitySnapshot(EncodeEntitySnapshot(snapshot)); !errors.Is(err, ErrMalformed) {
+				t.Errorf("ValidateEntitySnapshot = %v, want ErrMalformed", err)
+			}
+		})
 	}
 }
 
@@ -2782,10 +2946,13 @@ func TestInventoryStateEmitsAlignedDurabilityVectors(t *testing.T) {
 	// unusable item, never an empty slot.
 	stacks[35] = InventoryStack{ItemID: 7, Count: 1, Durability: 0, MaxDurability: 100}
 
-	env := vnet.GetRootAsEnvelope(EncodeInventoryState(InventoryState{Stacks: stacks}), 0)
+	env := vnet.GetRootAsEnvelope(EncodeInventoryState(InventoryState{Stacks: stacks, Silver: 1234}), 0)
 	tbl := payloadTable(t, env)
 	state := new(vnet.InventoryState)
 	state.Init(tbl.Bytes, tbl.Pos)
+	if got := state.Silver(); got != 1234 {
+		t.Errorf("Silver = %d, want 1234", got)
+	}
 
 	slots := int(InventorySlots)
 	if got := state.StacksLength(); got != slots*2 {
