@@ -276,8 +276,15 @@ const DISC_SEGMENTS: usize = 32;
 /// [`DAY_ILLUMINANCE`] and [`NIGHT_ILLUMINANCE`] already draw.
 const SUN_COLOUR: [f32; 3] = [1.0, 0.94, 0.82];
 
-/// The moon's disc, as sRGB: paler and cooler than the sun, and always full.
+/// The moon's illuminated face, as sRGB: paler and cooler than the sun.
 const MOON_COLOUR: [f32; 3] = [0.78, 0.82, 0.90];
+
+/// How many authoritative world days one lunar cycle spans.
+///
+/// Eight is a gameplay-scale month: with the default twenty-minute day, every phase is
+/// observable in two hours and forty minutes. The phase is always derived from the
+/// persisted [`SkyClock`] anchor; this is a period, not a second client clock.
+const LUNAR_CYCLE_DAYS: u64 = 8;
 
 /// How many stars should be visible above any world horizon, within the small variation a
 /// deterministic uniform draw produces.
@@ -328,7 +335,7 @@ pub enum SkyBodyKind {
     Dome,
     /// The *apparent* sun, which sets — not the light, which does not.
     Sun,
-    /// The moon's disc, at the antisolar direction and always full.
+    /// The moon's procedurally illuminated face on its eight-day orbit.
     Moon,
     /// Every star, as one mesh.
     Stars,
@@ -351,6 +358,9 @@ pub(super) enum SkyPlacement {
 #[derive(Resource, Debug)]
 pub(super) struct SkyVisuals {
     dome: Handle<Mesh>,
+    /// The moon is the one sky body whose geometry moves: the missing part of this mesh
+    /// reveals the real dome behind it instead of painting a guessed sky-colour patch.
+    moon: Handle<Mesh>,
     /// The star field's one material: its base colour's **alpha** is the night fraction, so
     /// the whole field fades through a single write.
     stars: Handle<StandardMaterial>,
@@ -422,6 +432,23 @@ impl SkyClock {
         let tick_of_day = (anchor.world_tick % u64::from(day_length_ticks)) as f32;
         let advanced = tick_of_day + elapsed * f32::from(tick_rate);
         Some(advanced.rem_euclid(day_length_ticks as f32))
+    }
+
+    /// Where the eight-day lunar cycle is at `now`, in turns from new moon.
+    ///
+    /// The absolute anchor is reduced while it is still an integer. Converting a long-lived
+    /// world's `u64` directly to floating point would eventually make two adjacent server
+    /// ticks indistinguishable; one eight-day cycle stays small no matter how old the save is.
+    fn lunar_phase_at(&self, now: Instant, tick_rate: u8, day_length_ticks: u32) -> Option<f32> {
+        if day_length_ticks == 0 {
+            return None;
+        }
+        let anchor = self.0?;
+        let cycle_ticks = u64::from(day_length_ticks) * LUNAR_CYCLE_DAYS;
+        let elapsed_ticks =
+            now.saturating_duration_since(anchor.at).as_secs_f64() * f64::from(tick_rate);
+        let into_cycle = (anchor.world_tick % cycle_ticks) as f64 + elapsed_ticks;
+        Some((into_cycle / cycle_ticks as f64).rem_euclid(1.0) as f32)
     }
 }
 
@@ -627,16 +654,23 @@ pub(crate) fn sun_phase(clock: &WorldClock, tick_of_day: f32) -> f32 {
 /// [`HORIZON_ALTITUDE_DEGREES`]. The *disc* is free to set: one sine over the whole
 /// revolution, zero at both boundaries, continuous across tick zero because [`sun_phase`] is.
 pub(super) fn apparent_sun_altitude(clock: &WorldClock, tick_of_day: f32) -> f32 {
-    MIDDAY_ALTITUDE_DEGREES * (TAU * sun_phase(clock, tick_of_day)).sin()
+    apparent_altitude_at_phase(sun_phase(clock, tick_of_day))
 }
 
-/// The unit vector from the eye towards the sun's disc: the light's azimuth, its own altitude.
-fn apparent_sun_direction(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
-    let phase = sun_phase(clock, tick_of_day);
+/// The apparent body's altitude in degrees at `phase` turns from dawn.
+fn apparent_altitude_at_phase(phase: f32) -> f32 {
+    MIDDAY_ALTITUDE_DEGREES * (TAU * phase).sin()
+}
+
+/// A unit direction on the apparent sun's daily path, at `phase` turns from dawn.
+fn apparent_direction_at_phase(phase: f32) -> Vec3 {
+    direction_at(phase, apparent_altitude_at_phase(phase))
+}
+
+/// A unit direction with the daily azimuth at `phase` and an explicit altitude in degrees.
+fn direction_at(phase: f32, altitude_degrees: f32) -> Vec3 {
     let (azimuth_sin, azimuth_cos) = (TAU * phase).sin_cos();
-    let (altitude_sin, altitude_cos) = apparent_sun_altitude(clock, tick_of_day)
-        .to_radians()
-        .sin_cos();
+    let (altitude_sin, altitude_cos) = altitude_degrees.to_radians().sin_cos();
     Vec3::new(
         azimuth_cos * altitude_cos,
         altitude_sin,
@@ -644,13 +678,48 @@ fn apparent_sun_direction(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
     )
 }
 
+/// The unit vector from the eye towards the sun's disc: the light's azimuth, its own altitude.
+fn apparent_sun_direction(clock: &WorldClock, tick_of_day: f32) -> Vec3 {
+    direction_at(
+        sun_phase(clock, tick_of_day),
+        apparent_sun_altitude(clock, tick_of_day),
+    )
+}
+
+/// The moon's unit direction at one solar and one lunar phase.
+///
+/// The tangent is the sun path's local orbital direction. Rotating from the sun towards it
+/// by the lunar elongation makes new moon coincide with the sun, full moon exactly
+/// antisolar, and both quarters exactly ninety degrees away. Sampling the same smooth path
+/// on either side avoids a second dawn/sunset schedule and remains well-conditioned because
+/// the apparent sun never reaches either pole.
+fn moon_direction(solar_phase: f32, lunar_phase: f32) -> Vec3 {
+    const TANGENT_STEP: f32 = 1.0 / 4_096.0;
+
+    let sun = apparent_direction_at_phase(solar_phase);
+    let path_delta = apparent_direction_at_phase(solar_phase + TANGENT_STEP)
+        - apparent_direction_at_phase(solar_phase - TANGENT_STEP);
+    let tangent = (path_delta - sun * path_delta.dot(sun)).normalize();
+    let (elongation_sin, elongation_cos) = (TAU * lunar_phase).sin_cos();
+    (sun * elongation_cos + tangent * elongation_sin).normalize()
+}
+
+/// The projected fraction of the lunar disc illuminated at this cycle phase.
+fn moon_illuminated_fraction(lunar_phase: f32) -> f32 {
+    0.5 * (1.0 - (TAU * lunar_phase).cos())
+}
+
 /// Everything the bodies on the sky are placed and faded by, at one tick of one day —
 /// computed only where the server declared a clock, which is why a world without one draws no
 /// disc, no moon and no stars.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ApparentSky {
-    /// Towards the sun's disc. The moon is at its negation.
+    /// Towards the sun's disc.
     sun: Vec3,
+    /// Towards the moon on the same celestial path, separated by the eight-day phase.
+    moon: Vec3,
+    /// Turns from new moon, used to cut the visible lunar mesh out of the real sky.
+    lunar_phase: f32,
     /// The night fraction, which is the star field's alpha.
     night: f32,
     /// How far the star field has turned about the east-west axis.
@@ -658,13 +727,16 @@ pub(super) struct ApparentSky {
 }
 
 impl ApparentSky {
-    fn at(clock: &WorldClock, tick_of_day: f32, tick_rate: u8) -> Self {
+    fn at(clock: &WorldClock, tick_of_day: f32, tick_rate: u8, lunar_phase: f32) -> Self {
+        let solar_phase = sun_phase(clock, tick_of_day);
         Self {
             sun: apparent_sun_direction(clock, tick_of_day),
+            moon: moon_direction(solar_phase, lunar_phase),
+            lunar_phase,
             night: night_fraction(clock, tick_of_day, RAMP_SECONDS * f32::from(tick_rate)),
             // About +X, the east-west axis, offset so the field keeps its original orientation
             // at the one hour it is at full alpha.
-            turn: Quat::from_rotation_x(TAU * (sun_phase(clock, tick_of_day) - MIDNIGHT_PHASE)),
+            turn: Quat::from_rotation_x(TAU * (solar_phase - MIDNIGHT_PHASE)),
         }
     }
 
@@ -748,23 +820,37 @@ pub(super) fn spawn_sky(
         Visibility::Hidden,
     ));
 
-    let disc = meshes.add(disc_mesh());
-    for (kind, colour) in [
-        (SkyBodyKind::Sun, SUN_COLOUR),
-        (SkyBodyKind::Moon, MOON_COLOUR),
-    ] {
-        commands.spawn((
-            SkyBody,
-            kind,
-            SkyPlacement::Facing(Vec3::Y),
-            Mesh3d(disc.clone()),
-            MeshMaterial3d(
-                materials.add(sky_material(Color::srgb(colour[0], colour[1], colour[2]))),
-            ),
-            Transform::default(),
-            Visibility::Hidden,
-        ));
-    }
+    commands.spawn((
+        SkyBody,
+        SkyBodyKind::Sun,
+        SkyPlacement::Facing(Vec3::Y),
+        Mesh3d(meshes.add(disc_mesh())),
+        MeshMaterial3d(materials.add(sky_material(Color::srgb(
+            SUN_COLOUR[0],
+            SUN_COLOUR[1],
+            SUN_COLOUR[2],
+        )))),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+
+    // New moon begins empty. `drive_the_sky` replaces this tiny mesh from the persisted
+    // cycle phase before showing it; a separate handle is load-bearing because changing a
+    // shared disc would cut the same crescent out of the sun.
+    let moon = meshes.add(moon_phase_mesh(0.0));
+    commands.spawn((
+        SkyBody,
+        SkyBodyKind::Moon,
+        SkyPlacement::Facing(Vec3::Y),
+        Mesh3d(moon.clone()),
+        MeshMaterial3d(materials.add(sky_material(Color::srgb(
+            MOON_COLOUR[0],
+            MOON_COLOUR[1],
+            MOON_COLOUR[2],
+        )))),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
 
     let stars = materials.add(StandardMaterial {
         base_color: Color::srgba(STAR_COLOUR[0], STAR_COLOUR[1], STAR_COLOUR[2], 0.0),
@@ -784,7 +870,7 @@ pub(super) fn spawn_sky(
         Visibility::Hidden,
     ));
 
-    commands.insert_resource(SkyVisuals { dome, stars });
+    commands.insert_resource(SkyVisuals { dome, moon, stars });
 }
 
 /// The material every opaque body on the sky is drawn with.
@@ -825,6 +911,57 @@ fn disc_mesh() -> Mesh {
         indices.extend_from_slice(&[0, rim, 1 + (rim % DISC_SEGMENTS as u32)]);
     }
     sky_mesh(positions, uvs, indices, Vec3::NEG_Z)
+}
+
+/// One illuminated lunar phase in the billboard's XY plane.
+///
+/// Each horizontal strip runs from the projected day/night terminator to the round outer
+/// limb. The terminator is an ellipse (`cos(phase) * circle_half_width`): it begins on the
+/// right limb at new moon, crosses the centre at first quarter, reaches the left limb at
+/// full, and traverses the other way while waning. There is deliberately no dark mesh. The
+/// absent triangles reveal the actual dome, including its horizon gradient and weather tint.
+fn moon_phase_mesh(lunar_phase: f32) -> Mesh {
+    let half = disc_half_width();
+    let mut positions = Vec::with_capacity(DISC_SEGMENTS * 4);
+    let mut uvs = Vec::with_capacity(DISC_SEGMENTS * 4);
+    let mut indices = Vec::with_capacity(DISC_SEGMENTS * 6);
+
+    for strip in 0..DISC_SEGMENTS {
+        let y0 = -half + 2.0 * half * strip as f32 / DISC_SEGMENTS as f32;
+        let y1 = -half + 2.0 * half * (strip + 1) as f32 / DISC_SEGMENTS as f32;
+        let edge0 = (half * half - y0 * y0).max(0.0).sqrt();
+        let edge1 = (half * half - y1 * y1).max(0.0).sqrt();
+        let (inner0, outer0) = moon_strip_edges(lunar_phase, edge0);
+        let (inner1, outer1) = moon_strip_edges(lunar_phase, edge1);
+
+        let first = positions.len() as u32;
+        positions.extend_from_slice(&[
+            [inner0, y0, 0.0],
+            [outer0, y0, 0.0],
+            [outer1, y1, 0.0],
+            [inner1, y1, 0.0],
+        ]);
+        uvs.extend_from_slice(&[
+            [0.5 + inner0 / (2.0 * half), 0.5 - y0 / (2.0 * half)],
+            [0.5 + outer0 / (2.0 * half), 0.5 - y0 / (2.0 * half)],
+            [0.5 + outer1 / (2.0 * half), 0.5 - y1 / (2.0 * half)],
+            [0.5 + inner1 / (2.0 * half), 0.5 - y1 / (2.0 * half)],
+        ]);
+        indices.extend_from_slice(&[first, first + 1, first + 2, first, first + 2, first + 3]);
+    }
+
+    sky_mesh(positions, uvs, indices, Vec3::NEG_Z)
+}
+
+/// The terminator and outer-limb X coordinates for one horizontal moon strip.
+fn moon_strip_edges(lunar_phase: f32, circle_half_width: f32) -> (f32, f32) {
+    let phase = lunar_phase.rem_euclid(1.0);
+    let terminator = (TAU * phase).cos() * circle_half_width;
+    if phase < 0.5 {
+        (terminator, circle_half_width)
+    } else {
+        (-terminator, -circle_half_width)
+    }
 }
 
 /// Every star as one mesh, in the field's own space: quads on a sphere of
@@ -1085,6 +1222,8 @@ pub(super) struct SkyMemory {
     weather: Option<WeatherState>,
     /// The night fraction the star material's alpha was last written from.
     stars: Option<f32>,
+    /// The cycle phase the moon mesh was last cut for.
+    moon: Option<f32>,
     /// The `(sky, horizon)` pair the dome's colour attribute was last written from.
     ///
     /// The dome's write is a **buffer upload** rather than a component assignment, so this
@@ -1171,21 +1310,20 @@ pub(super) fn drive_the_sky(
     //
     // `None` covers both refusals — no clock, and the frames before the first snapshot named
     // a time of day. Neither has an hour, so neither draws a sun, a moon or a star.
+    let now = Instant::now();
     let sampled = declared
-        .then(|| {
-            clock.ticks_at(
-                Instant::now(),
-                params.tick_rate,
-                params.clock.day_length_ticks,
-            )
-        })
+        .then(|| clock.ticks_at(now, params.tick_rate, params.clock.day_length_ticks))
+        .flatten();
+    let lunar_phase = declared
+        .then(|| clock.lunar_phase_at(now, params.tick_rate, params.clock.day_length_ticks))
         .flatten();
     let light = match sampled {
         Some(tick_of_day) => Daylight::at(&params.clock, tick_of_day, params.tick_rate),
         None => Daylight::FIXED,
     };
-    let apparent =
-        sampled.map(|tick_of_day| ApparentSky::at(&params.clock, tick_of_day, params.tick_rate));
+    let apparent = sampled.zip(lunar_phase).map(|(tick_of_day, lunar_phase)| {
+        ApparentSky::at(&params.clock, tick_of_day, params.tick_rate, lunar_phase)
+    });
 
     if declared {
         for (mut directional, mut transform) in &mut sun {
@@ -1333,10 +1471,11 @@ fn paint_the_sky(
                 !submerged && ApparentSky::above_the_horizon(altitude_of(sky.sun)),
                 Some(SkyPlacement::Facing(sky.sun)),
             ),
-            // The antisolar point, which is where a full moon is by definition.
             (SkyBodyKind::Moon, Some(sky)) => (
-                !submerged && ApparentSky::above_the_horizon(altitude_of(-sky.sun)),
-                Some(SkyPlacement::Facing(-sky.sun)),
+                !submerged
+                    && moon_illuminated_fraction(sky.lunar_phase) > f32::EPSILON
+                    && ApparentSky::above_the_horizon(altitude_of(sky.moon)),
+                Some(SkyPlacement::Facing(sky.moon)),
             ),
             // Shown at every hour and faded by its alpha, so midday costs no write.
             (SkyBodyKind::Stars, Some(sky)) => (!submerged, Some(SkyPlacement::Around(sky.turn))),
@@ -1364,6 +1503,20 @@ fn paint_the_sky(
     {
         material.base_color = material.base_color.with_alpha(night);
         memory.stars = Some(night);
+    }
+
+    // Four vertices per strip — a few kilobytes — and updated continuously so the
+    // terminator advances as smoothly as the orbit. Skipped under water because nobody can
+    // see the mesh there; leaving the remembered phase stale makes the first surface frame
+    // catch it up exactly once.
+    if !submerged
+        && let Some(sky) = apparent
+        && memory.moon != Some(sky.lunar_phase)
+        && let Some(visuals) = geometry.visuals.as_deref()
+        && let Some(mut mesh) = geometry.meshes.get_mut(&visuals.moon)
+    {
+        *mesh = moon_phase_mesh(sky.lunar_phase);
+        memory.moon = Some(sky.lunar_phase);
     }
 
     if submerged || memory.dome == Some((sky, horizon)) {
@@ -1872,6 +2025,145 @@ mod tests {
         assert!((apparent_sun_altitude(&clock, 18_000.0) + MIDDAY_ALTITUDE_DEGREES).abs() < 1e-3);
     }
 
+    /// The clock label and the disc are two readings of [`sun_phase`], including the
+    /// acceptance anchors between the server's dawn and dusk boundaries.
+    #[test]
+    fn six_eight_noon_and_six_share_one_solar_phase() {
+        let clock = clock();
+        let daylight = clock.day_length_ticks - clock.night_end_ticks + clock.night_start_ticks;
+        let at_eight = (clock.night_end_ticks + daylight / 6) % clock.day_length_ticks;
+        let midday = (clock.night_end_ticks + daylight / 2) % clock.day_length_ticks;
+        let anchors = [
+            (clock.night_end_ticks, 6.0),
+            (at_eight, 8.0),
+            (midday, 12.0),
+            (clock.night_start_ticks, 18.0),
+        ];
+
+        for (tick, expected_hour) in anchors {
+            let displayed_hour = 24.0 * (sun_phase(&clock, tick as f32) + 0.25).rem_euclid(1.0);
+            assert!(
+                (displayed_hour - expected_hour).abs() < 1e-3,
+                "tick {tick} displayed {displayed_hour}, want {expected_hour}"
+            );
+        }
+
+        let dawn = apparent_sun_direction(&clock, clock.night_end_ticks as f32);
+        let morning = apparent_sun_direction(&clock, at_eight as f32);
+        let noon = apparent_sun_direction(&clock, midday as f32);
+        let dusk = apparent_sun_direction(&clock, clock.night_start_ticks as f32);
+        assert!(
+            dawn.x > 0.99 && dawn.y.abs() < 1e-3,
+            "dawn was not east: {dawn:?}"
+        );
+        assert!(
+            morning.y > 0.0,
+            "the 08:00 sun was below the horizon: {morning:?}"
+        );
+        assert!(noon.z > 0.0 && altitude_of(noon) > altitude_of(morning));
+        assert!(
+            dusk.x < -0.99 && dusk.y.abs() < 1e-3,
+            "dusk was not west: {dusk:?}"
+        );
+    }
+
+    /// Eight persisted day boundaries name the eight familiar phases in order. The
+    /// fractions are the sphere projection, not a hand-tuned table.
+    #[test]
+    fn eight_authoritative_days_are_the_eight_lunar_stages() {
+        let day_length = 24_000;
+        let at = Instant::now();
+        let expected = [
+            ("new", 0.0),
+            ("waxing crescent", 0.146_446_62),
+            ("first quarter", 0.5),
+            ("waxing gibbous", 0.853_553_4),
+            ("full", 1.0),
+            ("waning gibbous", 0.853_553_4),
+            ("last quarter", 0.5),
+            ("waning crescent", 0.146_446_62),
+        ];
+
+        let mut clock = SkyClock::default();
+        for (day, (name, expected_light)) in expected.into_iter().enumerate() {
+            clock.anchor(day as u64 * u64::from(day_length), at);
+            let phase = clock
+                .lunar_phase_at(at, TICK_RATE, day_length)
+                .expect("the persisted day has a phase");
+            assert!((phase - day as f32 / 8.0).abs() < 1e-6, "{name}: {phase}");
+            assert!(
+                (moon_illuminated_fraction(phase) - expected_light).abs() < 1e-5,
+                "{name} carried the wrong illuminated fraction"
+            );
+        }
+    }
+
+    /// Reconnecting changes only the arrival instant: the persisted absolute tick names
+    /// the same phase before and after a server restart.
+    #[test]
+    fn a_restarted_world_resumes_the_same_lunar_phase() {
+        let day_length = 24_000;
+        let world_tick = 5 * u64::from(day_length) + 6_000;
+        let first_arrival = Instant::now();
+        let second_arrival = first_arrival + Duration::from_secs(30);
+        let mut before = SkyClock::default();
+        let mut after = SkyClock::default();
+        before.anchor(world_tick, first_arrival);
+        after.anchor(world_tick, second_arrival);
+
+        assert_eq!(
+            before.lunar_phase_at(first_arrival, TICK_RATE, day_length),
+            after.lunar_phase_at(second_arrival, TICK_RATE, day_length)
+        );
+    }
+
+    /// Orbital elongation is the lunar phase itself: new is solar, full antisolar and the
+    /// quarter moons are perpendicular on opposite sides of the sun's path.
+    #[test]
+    fn lunar_position_agrees_with_the_named_phase() {
+        let solar_phase = 0.17;
+        let sun = apparent_direction_at_phase(solar_phase);
+        for (name, phase, wanted_degrees) in [
+            ("new", 0.0, 0.0),
+            ("first quarter", 0.25, 90.0),
+            ("full", 0.5, 180.0),
+            ("last quarter", 0.75, 90.0),
+        ] {
+            let moon = moon_direction(solar_phase, phase);
+            let separation = sun.dot(moon).clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(
+                (separation - wanted_degrees).abs() < 1e-3,
+                "{name} stood {separation} degrees from the sun"
+            );
+        }
+        assert!(moon_direction(solar_phase, 0.25).dot(moon_direction(solar_phase, 0.75)) < -0.999);
+    }
+
+    /// The bright interval crosses the disc in the named order, and waxing and waning
+    /// stages face opposite directions. Missing intervals are actual missing geometry.
+    #[test]
+    fn lunar_meshes_are_new_crescent_quarter_gibbous_and_full() {
+        let edge = disc_half_width();
+        let stages = [
+            ("new", 0.0, 1.0, 1.0),
+            ("waxing crescent", 0.125, 0.707_106_77, 1.0),
+            ("first quarter", 0.25, 0.0, 1.0),
+            ("waxing gibbous", 0.375, -0.707_106_77, 1.0),
+            ("full", 0.5, 1.0, -1.0),
+            ("waning gibbous", 0.625, 0.707_106_77, -1.0),
+            ("last quarter", 0.75, 0.0, -1.0),
+            ("waning crescent", 0.875, -0.707_106_77, -1.0),
+        ];
+        for (name, phase, inner_scale, outer_scale) in stages {
+            let (inner, outer) = moon_strip_edges(phase, edge);
+            assert!(
+                (inner / edge - inner_scale).abs() < 1e-5,
+                "{name} terminator"
+            );
+            assert!((outer / edge - outer_scale).abs() < 1e-5, "{name} limb");
+        }
+    }
+
     /// The same curve read in both directions about midday and about midnight, which is what
     /// makes the disc set the way it rose.
     #[test]
@@ -2132,22 +2424,22 @@ mod tests {
     #[test]
     fn the_star_field_turns_once_a_day_and_is_overhead_at_midnight() {
         let clock = clock();
-        let midnight = ApparentSky::at(&clock, 18_000.0, TICK_RATE);
+        let midnight = ApparentSky::at(&clock, 18_000.0, TICK_RATE, 0.5);
         assert_eq!(midnight.night, 1.0);
         assert!(
             midnight.turn.angle_between(Quat::IDENTITY) < 1e-3,
             "the field was turned away from the eye at midnight"
         );
-        let midday = ApparentSky::at(&clock, 6_000.0, TICK_RATE);
+        let midday = ApparentSky::at(&clock, 6_000.0, TICK_RATE, 0.5);
         assert_eq!(midday.night, 0.0);
         assert!(
             midday.turn.angle_between(Quat::IDENTITY) > 1.0,
             "the field had not turned by midday"
         );
-        // And the moon is opposite the sun at every hour.
+        // And a full moon is opposite the sun at every hour.
         for tick in (0..24_000).step_by(500) {
-            let sky = ApparentSky::at(&clock, tick as f32, TICK_RATE);
-            assert!((altitude_of(sky.sun) + altitude_of(-sky.sun)).abs() < 1e-3);
+            let sky = ApparentSky::at(&clock, tick as f32, TICK_RATE, 0.5);
+            assert!(sky.sun.dot(sky.moon) < -0.999);
         }
     }
 
@@ -2429,6 +2721,27 @@ mod tests {
             .ticks_at(at + Duration::from_secs(1), 20, 24_000)
             .expect("anchored");
         assert!((second - 1_020.0).abs() < 1e-3, "one second on, {second}");
+    }
+
+    /// The moon extrapolates from that same accepted anchor instead of advancing once per
+    /// snapshot or keeping an independent client calendar.
+    #[test]
+    fn the_lunar_phase_advances_smoothly_between_snapshots() {
+        let mut sky = SkyClock::default();
+        let at = Instant::now();
+        sky.anchor(24_000, at);
+
+        let anchored = sky
+            .lunar_phase_at(at, 20, 24_000)
+            .expect("the clock is anchored");
+        let half_tick = sky
+            .lunar_phase_at(at + Duration::from_millis(25), 20, 24_000)
+            .expect("the clock remains anchored");
+        let wanted_step = 0.5 / (24_000.0 * LUNAR_CYCLE_DAYS as f32);
+        assert!(
+            (half_tick - anchored - wanted_step).abs() < 1e-7,
+            "half a server tick moved the phase from {anchored} to {half_tick}"
+        );
     }
 
     /// Re-anchoring just after midnight is continuous, not a jump backwards.

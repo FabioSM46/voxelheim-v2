@@ -5728,7 +5728,9 @@ fn the_sun_disc_hangs_at_a_fixed_distance_from_the_eye() {
 #[test]
 fn midnight_hides_the_sun_and_lights_the_stars() {
     let mut app = headless_player_with_a_clock();
-    deliver_at_tick_of_day(&mut app, 1, 18_000, Instant::now());
+    // Day three at midnight is immediately before full moon. Unlike the old permanently
+    // full placeholder, an early-cycle moon is correctly near the hidden sun instead.
+    deliver_at_world_tick(&mut app, 1, 18_000, 3 * 24_000 + 18_000, Instant::now());
     app.update();
     let eye = Vec3::new(4.0, 66.0, -9.0);
     put_the_eye_at(&mut app, eye);
@@ -5749,7 +5751,7 @@ fn midnight_hides_the_sun_and_lights_the_stars() {
 #[test]
 fn midday_puts_the_stars_out_and_the_moon_down() {
     let mut app = headless_player_with_a_clock();
-    deliver_at_tick_of_day(&mut app, 1, 6_000, Instant::now());
+    deliver_at_world_tick(&mut app, 1, 6_000, 4 * 24_000 + 6_000, Instant::now());
     app.update();
 
     assert_eq!(star_alpha(&mut app), 0.0);
@@ -5759,6 +5761,22 @@ fn midday_puts_the_stars_out_and_the_moon_down() {
         "the moon was drawn at midday"
     );
     assert_eq!(body(&mut app, sky::SkyBodyKind::Sun).2, Visibility::Visible);
+}
+
+/// A daytime moon is an orbital result, not a blanket daytime prohibition.
+#[test]
+fn a_daytime_crescent_is_drawn_when_its_orbit_is_above_the_horizon() {
+    let mut app = headless_player_with_a_clock();
+    // Early on day zero the waxing crescent is still close to the midday sun.
+    deliver_at_world_tick(&mut app, 1, 6_000, 6_000, Instant::now());
+    app.update();
+
+    let (_, moon, visibility) = body(&mut app, sky::SkyBodyKind::Moon);
+    assert_eq!(visibility, Visibility::Visible);
+    assert!(
+        moon.translation.y > 0.0,
+        "the crescent was below the horizon"
+    );
 }
 
 /// A server with no clock spawns every body and shows none of them.
@@ -5792,7 +5810,7 @@ fn a_clockless_server_spawns_the_bodies_and_draws_none() {
 fn the_water_hides_every_body_on_the_sky() {
     let mut app = headless_player_with_a_clock();
     app.insert_resource(a_puddle());
-    deliver_at_tick_of_day(&mut app, 1, 18_000, Instant::now());
+    deliver_at_world_tick(&mut app, 1, 18_000, 3 * 24_000 + 18_000, Instant::now());
     app.update();
     assert_eq!(
         body(&mut app, sky::SkyBodyKind::Moon).2,
