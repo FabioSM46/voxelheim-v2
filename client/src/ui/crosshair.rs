@@ -5,7 +5,10 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 use bevy::prelude::*;
 
 use crate::net::Session;
-use crate::player::{ApplyMiningFeedback, HealTargetHint, InputMode, MiningFeedback, ViewMode};
+use crate::player::{
+    ApplyMiningFeedback, ApplySnapshots, HealTargetHint, InputMode, LocalMount, MiningFeedback,
+    ViewMode,
+};
 use crate::world::palette;
 
 const FRAME_EDGE: f32 = 48.0;
@@ -24,11 +27,12 @@ impl Plugin for CrosshairPlugin {
             // `PlayerCameraPlugin` owns it in the game. Initialising it here keeps this
             // module's headless contract complete when it is built on its own.
             .init_resource::<ViewMode>()
+            .init_resource::<LocalMount>()
             .add_systems(Startup, spawn_crosshair)
             .add_systems(
                 Update,
                 (
-                    show_crosshair,
+                    show_crosshair.after(ApplySnapshots),
                     tint_healing_aim,
                     show_mining_progress.after(ApplyMiningFeedback),
                 ),
@@ -198,10 +202,15 @@ fn bar(left: f32, top: f32, width: f32, height: f32) -> Node {
 fn show_crosshair(
     mode: Res<InputMode>,
     view: Res<ViewMode>,
+    mount: Res<LocalMount>,
     session: Option<Res<Session>>,
     mut roots: Query<&mut Visibility, With<CrosshairRoot>>,
 ) {
-    let next = if *mode == InputMode::Playing && session.is_some() && view.first_person() {
+    let next = if *mode == InputMode::Playing
+        && session.is_some()
+        && view.first_person()
+        && !mount.mounted()
+    {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -220,7 +229,7 @@ mod tests {
     use bevy::camera::visibility::VisibilityPlugin;
     use bevy::mesh::MeshPlugin;
 
-    use crate::net::SessionParams;
+    use crate::net::{MountKind, SessionParams};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -420,6 +429,25 @@ mod tests {
         assert_eq!(root_visibility(&mut app), Visibility::Hidden);
 
         *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
+    }
+
+    #[test]
+    fn the_authoritative_mount_hides_and_dismount_restores_the_crosshair() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<InputMode>()
+            .insert_resource(session())
+            .add_plugins(CrosshairPlugin);
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Visible);
+
+        app.insert_resource(LocalMount::from_server(Some(MountKind::BlackHorse)));
+        app.update();
+        assert_eq!(root_visibility(&mut app), Visibility::Hidden);
+
+        app.insert_resource(LocalMount::default());
         app.update();
         assert_eq!(root_visibility(&mut app), Visibility::Visible);
     }
