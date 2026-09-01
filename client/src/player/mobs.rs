@@ -97,6 +97,27 @@ pub(super) const fn body(kind: MobKind) -> Body {
 /// How much of a draugr's height the head takes.
 const HEAD_EDGE: f32 = 0.34;
 
+/// The draugr keeps the server's 0.6-wide box by narrowing its chest and letting two
+/// separately posed arms take the width back. The arms are authored from this shoulder
+/// line downwards, with their child origin on that line so a swing is rotation only.
+const DRAUGR_CHEST_WIDTH: f32 = 0.34;
+const DRAUGR_CHEST_DEPTH: f32 = 0.54;
+const DRAUGR_SHOULDER_HEIGHT: f32 = DRAUGR_BODY.height - HEAD_EDGE;
+const DRAUGR_ARM_WIDTH: f32 = 0.13;
+const DRAUGR_ARM_DEPTH: f32 = 0.13;
+const DRAUGR_ARM_LENGTH: f32 = 0.76;
+const DRAUGR_ARM_X: f32 = (DRAUGR_BODY.width - DRAUGR_ARM_WIDTH) / 2.0;
+
+/// A raised arm is behind the shoulder in the canonical -Z facing; recovery brings it
+/// down and just forward of the body. The strike stays short of the torso's front face,
+/// so the hand never swings through the creature it belongs to.
+const DRAUGR_ARM_RAISED: f32 = -1.12;
+const DRAUGR_ARM_STRIKE: f32 = 0.20;
+
+/// Draugr arms carry the telegraph now. Retaining fifteen percent of the shared lean keeps
+/// weight in the blow without leaving the old whole-body headbutt as the attack.
+const DRAUGR_LEAN_FRACTION: f32 = 0.15;
+
 /// The vargr, in fractions of its own box: a torso the full width of what the server
 /// collides, four short legs under it, a raised hackled ridge that reaches the top of the
 /// box, and a low head thrust out along the facing.
@@ -193,6 +214,8 @@ const LOOTABLE_COLOUR: Color = Color::srgb(0.58, 0.47, 0.24);
 /// The undead grey a draugr is drawn in.
 const DRAUGR_BODY_COLOUR: Color = Color::srgb(0.36, 0.40, 0.38);
 const DRAUGR_HEAD_COLOUR: Color = Color::srgb(0.46, 0.48, 0.44);
+const DRAUGR_BANDAGE_COLOUR: Color = Color::srgb(0.72, 0.70, 0.61);
+const DRAUGR_EYE_COLOUR: Color = Color::srgb(1.0, 0.03, 0.02);
 
 /// The vargr's pelt: warm and dark where the draugr is cold and pale, so the two are told
 /// apart by colour as well as by silhouette at the distance the difference matters.
@@ -215,10 +238,9 @@ const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 
 /// The two meshes and two materials one species is drawn from.
 ///
-/// Two of each rather than one per part, so a hit flash stays the single material swap it
-/// has always been however many primitives a species is built out of: everything that is
-/// not the head is merged into `body`, exactly as a structure's parts are merged into one
-/// mesh per material.
+/// One handle per independently posed part, so a hit flash stays the single material swap
+/// it has always been however many primitives a species is built out of. Multiple colours
+/// inside a draugr part are vertex colours rather than extra draw children.
 #[derive(Debug, Clone)]
 struct SpeciesVisuals {
     body: Handle<Mesh>,
@@ -227,6 +249,9 @@ struct SpeciesVisuals {
     /// one whose legs are part of its body, which a draugr's are — nothing poses them
     /// separately, so nothing gains from a child holding them.
     legs: Option<Handle<Mesh>>,
+    /// The paired arms, authored around one shoulder-line pivot. Draugr only: the other
+    /// species keep their existing silhouettes and poses.
+    arms: Option<Handle<Mesh>>,
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
 }
@@ -282,6 +307,16 @@ pub(super) struct Mob {
     entity_id: u64,
     kind: MobKind,
     action: MobAction,
+
+    /// Cosmetic time inside the newest server-sent action. Reset only when that action
+    /// changes; it poses the arms and can neither advance nor replace the action itself.
+    action_elapsed: Duration,
+
+    /// The angle the arms held when the newest authoritative action began, and the angle
+    /// the current curve has reached. Keeping both makes an interrupted windup or a
+    /// completed recovery continuous without letting either value choose the next action.
+    arm_start_angle: f32,
+    arm_angle: f32,
     lootable: bool,
 
     /// The health the last snapshot reported. A *decrease* is what flashes; anything
@@ -337,15 +372,15 @@ pub(super) struct Mob {
 
 /// Which part of a body one child mesh draws.
 ///
-/// Three where the flash only ever needed two, and the third is why this is an enum rather
-/// than the `head: bool` it replaces: the legs are the one part a pose moves on its own, and
-/// a boolean cannot name a third thing. The flash still asks one question of it — head or
-/// not — so nothing about the recolour grew.
+/// Four where the flash only ever needed two. Legs and arms are parts because each has a
+/// transform of its own; the flash still asks one question — head or not — so every new
+/// draugr primitive remains covered by the same one material swap per child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MobPart {
     Body,
     Head,
     Legs,
+    Arms,
 }
 
 /// Marks the child meshes so a flash can recolour them, and a collapse can splay them,
@@ -367,18 +402,25 @@ pub(super) fn create_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Draugr meshes carry their body, bandage and eye colours per vertex. One neutral,
+    // lit material lets all three parts share those colours without a texture or another
+    // material binding; swapping that handle still flashes and amber-washes every vertex,
+    // eyes included.
+    let draugr_material = materials.add(StandardMaterial::from_color(Color::WHITE));
     commands.insert_resource(MobVisuals {
         draugr: SpeciesVisuals {
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
-            body_material: materials.add(StandardMaterial::from_color(DRAUGR_BODY_COLOUR)),
-            head_material: materials.add(StandardMaterial::from_color(DRAUGR_HEAD_COLOUR)),
+            arms: Some(meshes.add(draugr_arms_mesh())),
+            body_material: draugr_material.clone(),
+            head_material: draugr_material,
         },
         vargr: SpeciesVisuals {
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
+            arms: None,
             body_material: materials.add(StandardMaterial::from_color(VARGR_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(VARGR_HEAD_COLOUR)),
         },
@@ -386,6 +428,7 @@ pub(super) fn create_visuals(
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
+            arms: None,
             body_material: materials.add(StandardMaterial::from_color(DEER_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
@@ -407,24 +450,141 @@ pub(super) fn create_visuals(
 // single path from the server's number to the geometry, so the sweep that compares the
 // two is comparing something rather than restating one constant twice.
 
-/// The draugr's torso: one cuboid the full width of its box, standing on the feet.
+/// Gives one primitive the linear vertex colour Bevy's PBR mesh pipeline consumes.
+/// Draugr geometry needs three colours inside one child without a texture or material per
+/// strip; every primitive is coloured before merging so all merged layouts remain equal.
+fn draugr_tint(mesh: Mesh, colour: Color) -> Mesh {
+    let linear = colour.to_linear().to_f32_array();
+    let vertices = mesh.count_vertices();
+    mesh.with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![linear; vertices])
+}
+
+fn draugr_box(size: Vec3, centre: Vec3, colour: Color) -> Mesh {
+    draugr_tint(
+        Mesh::from(Cuboid::from_size(size)).translated_by(centre),
+        colour,
+    )
+}
+
+/// The draugr's narrowed torso and its proud horizontal wrappings, standing on the feet.
+/// Bands take the depth back to the collision box while the arms take its width back.
 fn draugr_body_mesh() -> Mesh {
     let draugr = body(MobKind::Draugr);
     let height = draugr.height - HEAD_EDGE;
-    Mesh::from(Cuboid::from_size(Vec3::new(
-        draugr.width,
-        height,
-        draugr.width,
-    )))
-    // The parent sits at the feet, as every entity in this game does, so the box is
-    // lifted by half its own height to stand on that point.
-    .translated_by(Vec3::Y * (height / 2.0))
+    let mut torso = draugr_box(
+        Vec3::new(DRAUGR_CHEST_WIDTH, height, DRAUGR_CHEST_DEPTH),
+        Vec3::Y * (height / 2.0),
+        DRAUGR_BODY_COLOUR,
+    );
+
+    let bands = [0.28, 0.48, 0.68, 0.88, 1.08, 1.28].map(|y| {
+        draugr_box(
+            Vec3::new(DRAUGR_CHEST_WIDTH + 0.035, 0.045, draugr.width),
+            Vec3::new(0.0, y, 0.0),
+            DRAUGR_BANDAGE_COLOUR,
+        )
+    });
+    // One loose end breaks the otherwise perfect rings and makes the wrapping geometry
+    // rather than stripes painted on a box. It stays inside the same exact outer depth.
+    let loose_end = draugr_box(
+        Vec3::new(0.045, 0.22, 0.025),
+        Vec3::new(0.13, 0.93, -draugr.width / 2.0 + 0.0125),
+        DRAUGR_BANDAGE_COLOUR,
+    );
+    merge_all(
+        &mut torso,
+        bands.into_iter().chain([loose_end]),
+        "draugr torso",
+    );
+    torso
 }
 
-/// The draugr's head: a cube on top of the torso, closing the box at its full height.
+/// The bandaged head and two red eyes. The eyes are deliberately ordinary lit geometry,
+/// not an exempt emissive child: they remain as visible as the body under the same night
+/// lighting, and flash or turn amber with the whole Head through one material swap.
 fn draugr_head_mesh() -> Mesh {
-    Mesh::from(Cuboid::from_size(Vec3::splat(HEAD_EDGE)))
-        .translated_by(Vec3::Y * (body(MobKind::Draugr).height - HEAD_EDGE / 2.0))
+    let draugr = body(MobKind::Draugr);
+    let mut head = draugr_box(
+        Vec3::splat(HEAD_EDGE),
+        Vec3::Y * (draugr.height - HEAD_EDGE / 2.0),
+        DRAUGR_HEAD_COLOUR,
+    );
+    let bands = [1.51, 1.61, 1.76].map(|y| {
+        draugr_box(
+            Vec3::new(HEAD_EDGE + 0.025, 0.035, HEAD_EDGE + 0.025),
+            Vec3::new(0.0, y, 0.0),
+            DRAUGR_BANDAGE_COLOUR,
+        )
+    });
+    let eyes = [-0.075, 0.075].map(|x| {
+        draugr_box(
+            Vec3::new(0.055, 0.045, 0.025),
+            Vec3::new(x, 1.69, -HEAD_EDGE / 2.0 - 0.0125),
+            DRAUGR_EYE_COLOUR,
+        )
+    });
+    let loose_end = draugr_box(
+        Vec3::new(0.035, 0.18, 0.025),
+        Vec3::new(HEAD_EDGE / 2.0 + 0.0175, 1.58, 0.10),
+        DRAUGR_BANDAGE_COLOUR,
+    );
+    merge_all(
+        &mut head,
+        bands.into_iter().chain(eyes).chain([loose_end]),
+        "draugr head",
+    );
+    head
+}
+
+/// Both arms in one mesh, authored below a shared shoulder-line origin.
+///
+/// Each hand has a palm and three narrow, separated fingers. The pale rings sit proud of
+/// narrower grey limbs, and a loose strip hangs from each forearm. Keeping all of it in
+/// this one child makes the attack one transform and one draw part, however many cuboids
+/// make the silhouette read.
+fn draugr_arms_mesh() -> Mesh {
+    let mut parts = Vec::new();
+    for side in [-1.0, 1.0] {
+        let x = side * DRAUGR_ARM_X;
+        parts.push(draugr_box(
+            Vec3::new(0.095, DRAUGR_ARM_LENGTH, DRAUGR_ARM_DEPTH - 0.02),
+            Vec3::new(x, -DRAUGR_ARM_LENGTH / 2.0, 0.0),
+            DRAUGR_BODY_COLOUR,
+        ));
+        parts.push(draugr_box(
+            Vec3::new(DRAUGR_ARM_WIDTH, 0.18, DRAUGR_ARM_DEPTH),
+            Vec3::new(x, -DRAUGR_ARM_LENGTH - 0.09, -0.01),
+            DRAUGR_BODY_COLOUR,
+        ));
+
+        for y in [-0.18, -0.36, -0.55] {
+            parts.push(draugr_box(
+                Vec3::new(DRAUGR_ARM_WIDTH, 0.04, DRAUGR_ARM_DEPTH),
+                Vec3::new(x, y, 0.0),
+                DRAUGR_BANDAGE_COLOUR,
+            ));
+        }
+
+        // Gaps wider than each finger leave daylight between them from front and back;
+        // their stagger in Z keeps the hand from collapsing into one end-cap in profile.
+        for (finger_x, finger_z) in [(-0.042, -0.028), (0.0, -0.052), (0.042, -0.028)] {
+            parts.push(draugr_box(
+                Vec3::new(0.022, 0.14, 0.026),
+                Vec3::new(x + finger_x, -DRAUGR_ARM_LENGTH - 0.23, finger_z),
+                DRAUGR_BODY_COLOUR,
+            ));
+        }
+        parts.push(draugr_box(
+            Vec3::new(0.025, 0.17, 0.025),
+            Vec3::new(x - side * 0.045, -0.50, -0.07),
+            DRAUGR_BANDAGE_COLOUR,
+        ));
+    }
+
+    let mut parts = parts.into_iter();
+    let mut arms = parts.next().expect("a draugr has two arms");
+    merge_all(&mut arms, parts, "draugr arms");
+    arms
 }
 
 /// The vargr's body: the torso, the four legs under it and the hackled ridge over it.
@@ -595,6 +755,10 @@ pub(super) fn apply_snapshots(
             mob.flash = Some(Duration::ZERO);
         }
         mob.health = state.health;
+        if mob.action != state.action {
+            mob.action_elapsed = Duration::ZERO;
+            mob.arm_start_angle = mob.arm_angle;
+        }
         mob.action = state.action;
         mob.kind = state.kind;
         mob.lootable = state.action == MobAction::Corpse && lootable.contains(&mob.entity_id);
@@ -675,12 +839,15 @@ fn spawn_mob(
                 entity_id,
                 kind: state.kind,
                 action: state.action,
+                action_elapsed: Duration::ZERO,
+                arm_start_angle: draugr_arm_initial_angle(state.action),
+                arm_angle: draugr_arm_initial_angle(state.action),
                 lootable,
                 // The first snapshot of a body is not an impact, whatever its health.
                 health: state.health,
                 flash: None,
                 yaw: state.yaw,
-                lean: lean_for(state.action),
+                lean: lean_for(state.kind, state.action),
                 // A body first seen already dying falls from upright, and one first seen
                 // already a corpse is left lying flat — see the field. This is the *only*
                 // place a corpse starts at FALL_TIME: reaching here means there was no
@@ -697,10 +864,10 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
-        // No offset on any child: every mesh is authored with its origin at the feet,
-        // which is the point the parent transform already stands on. The legs child is
-        // the one whose transform ever becomes anything else, and only while a body is
-        // going down.
+        // Body, head and legs are authored from the feet. Arms are the deliberate second
+        // exception after the independently moving legs: their origin is the shoulder
+        // line, so their child carries that one translation and a swing needs no matching
+        // compensation.
         parent.spawn((
             MobVisual {
                 owner,
@@ -726,8 +893,19 @@ fn spawn_mob(
                     part: MobPart::Legs,
                 },
                 Mesh3d(legs),
-                MeshMaterial3d(species.body_material),
+                MeshMaterial3d(species.body_material.clone()),
                 Transform::default(),
+            ));
+        }
+        if let Some(arms) = species.arms {
+            parent.spawn((
+                MobVisual {
+                    owner,
+                    part: MobPart::Arms,
+                },
+                Mesh3d(arms),
+                MeshMaterial3d(species.body_material),
+                Transform::from_translation(Vec3::Y * DRAUGR_SHOULDER_HEIGHT),
             ));
         }
         if hunts_local {
@@ -803,8 +981,8 @@ fn mob_visibility(mode: InputMode) -> Visibility {
 /// A body going down leans at nothing: the whole of its pose is [`collapse`], and easing a
 /// windup's lean out of the way while the fall eases in is what keeps a creature killed
 /// mid-telegraph from finishing that telegraph on its back.
-fn lean_for(action: MobAction) -> f32 {
-    match action {
+fn lean_for(kind: MobKind, action: MobAction) -> f32 {
+    let lean = match action {
         MobAction::Windup => WINDUP_LEAN,
         MobAction::Recovery => RECOVERY_LEAN,
         MobAction::Idle
@@ -812,7 +990,62 @@ fn lean_for(action: MobAction) -> f32 {
         | MobAction::Flee
         | MobAction::Dying
         | MobAction::Corpse => 0.0,
+    };
+    match kind {
+        MobKind::Draugr => lean * DRAUGR_LEAN_FRACTION,
+        MobKind::Vargr | MobKind::Deer | MobKind::Villager => lean,
     }
+}
+
+/// The fraction of a cosmetic pose reached after `elapsed`.
+///
+/// This is the same frame-rate-independent response as the body lean, expressed from
+/// elapsed time so [`draugr_arm_swing`] is pure and tests can inspect the whole curve.
+/// It is not a copy of any species timing: the server decides when the action changes,
+/// and this answer can only pose the action currently on the mob.
+fn pose_progress(elapsed: Duration) -> f32 {
+    1.0 - (-LEAN_RESPONSE * elapsed.as_secs_f32()).exp()
+}
+
+/// The angle a body first seen in one action honestly starts at.
+///
+/// Recovery follows a windup that already landed, so a body first streamed into view in
+/// recovery starts raised. Every other first sight starts neutral; the wire carries no
+/// earlier pose to recover.
+fn draugr_arm_initial_angle(action: MobAction) -> f32 {
+    match action {
+        MobAction::Recovery => DRAUGR_ARM_RAISED,
+        MobAction::Idle
+        | MobAction::Chase
+        | MobAction::Flee
+        | MobAction::Windup
+        | MobAction::Dying
+        | MobAction::Corpse => 0.0,
+    }
+}
+
+/// Rotation about the shoulder line for one server-sent action.
+///
+/// Windup raises the arms behind the shoulders and recovery moves them down and forward.
+/// The curve begins at the angle the previous authoritative action actually reached, so
+/// an abandoned windup and Recovery -> Chase settle without a discontinuity. Death is
+/// still drawn with identity below, so an arm pose never fights the parent's fall.
+fn draugr_arm_angle(action: MobAction, start_angle: f32, elapsed: Duration) -> f32 {
+    let progress = pose_progress(elapsed);
+    let target = match action {
+        MobAction::Windup => DRAUGR_ARM_RAISED,
+        MobAction::Recovery => DRAUGR_ARM_STRIKE,
+        MobAction::Idle
+        | MobAction::Chase
+        | MobAction::Flee
+        | MobAction::Dying
+        | MobAction::Corpse => 0.0,
+    };
+    start_angle + (target - start_angle) * progress
+}
+
+fn draugr_arm_swing(action: MobAction, start_angle: f32, elapsed: Duration) -> Quat {
+    Quat::from_rotation_x(draugr_arm_angle(action, start_angle, elapsed))
 }
 
 /// How far through its fall a body is, from how long it has been going down.
@@ -904,16 +1137,19 @@ pub(super) fn animate(
     };
     let delta = time.delta();
 
-    // The kind and how far down the body is: between them, everything a child needs — one
-    // says which materials it wears, the other where the legs are.
-    let mut poses: HashMap<Entity, (MobKind, f32, bool)> = HashMap::new();
+    // Everything a child needs: species and fall pose select its ordinary transforms,
+    // the server's action plus local elapsed time poses the draugr's arms, and lootable
+    // chooses the authoritative presentation wash.
+    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat)> = HashMap::new();
     let mut flashing = HashSet::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
         // and never overshoots into a lean the server did not ask for. The timings the
         // pose reads are the server's — `mob.action` is a snapshot field — so a vargr
         // leans and recovers on its own species' clock without a second copy of it here.
-        let target = lean_for(mob.action);
+        mob.action_elapsed += delta;
+        mob.arm_angle = draugr_arm_angle(mob.action, mob.arm_start_angle, mob.action_elapsed);
+        let target = lean_for(mob.kind, mob.action);
         let response = 1.0 - (-LEAN_RESPONSE * delta.as_secs_f32()).exp();
         mob.lean += (target - mob.lean) * response;
 
@@ -941,11 +1177,16 @@ pub(super) fn animate(
             }
         }
 
-        poses.insert(entity, (mob.kind, down, mob.lootable));
+        let arm_swing = if down == 0.0 {
+            draugr_arm_swing(mob.action, mob.arm_start_angle, mob.action_elapsed)
+        } else {
+            Quat::IDENTITY
+        };
+        poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
     }
 
     for (part, mut material, mut transform) in &mut parts {
-        let Some((kind, down, lootable)) = poses.get(&part.owner).copied() else {
+        let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
             continue;
@@ -979,6 +1220,9 @@ pub(super) fn animate(
                 transform.scale = splay;
             }
         }
+        if part.part == MobPart::Arms {
+            transform.rotation = arm_swing;
+        }
     }
 }
 
@@ -988,6 +1232,7 @@ mod tests {
     //! or about a cosmetic value local time produced from it.
 
     use bevy::asset::AssetPlugin;
+    use bevy::mesh::VertexAttributeValues;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -1258,7 +1503,7 @@ mod tests {
 
         assert_eq!(kinds(&mut app), vec![(903, MobKind::Deer)]);
         assert_eq!(bodies(&mut app), vec![(903, 20, MobAction::Flee)]);
-        assert_eq!(lean_for(MobAction::Flee), 0.0);
+        assert_eq!(lean_for(MobKind::Deer, MobAction::Flee), 0.0);
     }
 
     /// The newest snapshot is the complete existence set, exactly as it is for drops.
@@ -1342,6 +1587,13 @@ mod tests {
         deliver(&mut app, 3, vec![draugr(900, 3.0, 35, MobAction::Chase)]);
         app.update();
         assert_eq!(flashing(&mut app), 1, "a health decrease did not flash");
+        let flash = app.world().resource::<MobVisuals>().flash_material.clone();
+        let flashed = parts(&mut app);
+        assert_eq!(flashed.len(), 3, "the draugr lost a visual part");
+        assert!(
+            flashed.iter().all(|(_, material)| *material == flash),
+            "the hit flash did not recolour body, head/eyes and arms"
+        );
 
         // It ends on local time, without another snapshot.
         app.insert_resource(TimeUpdateStrategy::ManualDuration(FLASH_TIME));
@@ -1416,10 +1668,26 @@ mod tests {
     /// The pose follows the server's action and cannot advance it.
     #[test]
     fn the_pose_leans_where_the_action_says_and_nowhere_else() {
-        assert_eq!(lean_for(MobAction::Idle), 0.0);
-        assert_eq!(lean_for(MobAction::Chase), 0.0);
-        assert_eq!(lean_for(MobAction::Windup), WINDUP_LEAN);
-        assert_eq!(lean_for(MobAction::Recovery), RECOVERY_LEAN);
+        assert_eq!(lean_for(MobKind::Draugr, MobAction::Idle), 0.0);
+        assert_eq!(lean_for(MobKind::Draugr, MobAction::Chase), 0.0);
+        assert_eq!(
+            lean_for(MobKind::Draugr, MobAction::Windup),
+            WINDUP_LEAN * DRAUGR_LEAN_FRACTION
+        );
+        assert_eq!(
+            lean_for(MobKind::Draugr, MobAction::Recovery),
+            RECOVERY_LEAN * DRAUGR_LEAN_FRACTION
+        );
+        assert_eq!(
+            lean_for(MobKind::Vargr, MobAction::Windup),
+            WINDUP_LEAN,
+            "moving the draugr telegraph changed another species' pose"
+        );
+        assert_eq!(
+            lean_for(MobKind::Deer, MobAction::Recovery),
+            RECOVERY_LEAN,
+            "moving the draugr telegraph changed another species' pose"
+        );
 
         let mut app = headless();
         deliver(&mut app, 1, vec![draugr(900, 3.0, 60, MobAction::Windup)]);
@@ -1431,6 +1699,183 @@ mod tests {
             app.update();
             assert_eq!(bodies(&mut app), vec![(900, 60, MobAction::Windup)]);
         }
+    }
+
+    fn canonical_arm_angle(action: MobAction, elapsed: Duration) -> f32 {
+        draugr_arm_angle(action, draugr_arm_initial_angle(action), elapsed)
+    }
+
+    /// The arms present the newest authoritative action, and their local clock can only
+    /// ease inside that pose. It never promotes Windup to Recovery on its own.
+    #[test]
+    fn draugr_arms_raise_then_strike_without_overshooting() {
+        for action in [
+            MobAction::Idle,
+            MobAction::Chase,
+            MobAction::Flee,
+            MobAction::Dying,
+            MobAction::Corpse,
+        ] {
+            assert_eq!(
+                draugr_arm_swing(action, 0.0, Duration::from_secs(10)),
+                Quat::IDENTITY
+            );
+        }
+
+        let samples = [0, 25, 50, 100, 250, 1_000]
+            .map(|millis| canonical_arm_angle(MobAction::Windup, Duration::from_millis(millis)));
+        assert!(samples[0].abs() < 1e-6);
+        assert!(
+            samples.windows(2).all(|pair| pair[1] <= pair[0]),
+            "windup was not monotonic: {samples:?}"
+        );
+        assert!(
+            samples.iter().all(|angle| *angle >= DRAUGR_ARM_RAISED),
+            "windup overshot its authored raised pose: {samples:?}"
+        );
+
+        let samples = [0, 25, 50, 100, 250, 1_000]
+            .map(|millis| canonical_arm_angle(MobAction::Recovery, Duration::from_millis(millis)));
+        assert!((samples[0] - DRAUGR_ARM_RAISED).abs() < 1e-6);
+        assert!(
+            samples.windows(2).all(|pair| pair[1] >= pair[0]),
+            "recovery was not monotonic: {samples:?}"
+        );
+        assert!(
+            samples.iter().all(|angle| *angle <= DRAUGR_ARM_STRIKE),
+            "recovery overshot through the body: {samples:?}"
+        );
+        assert!((samples[5] - DRAUGR_ARM_STRIKE).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_new_authoritative_action_restarts_only_the_cosmetic_arm_clock() {
+        let mut app = headless();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+        deliver(&mut app, 1, vec![draugr(900, 3.0, 60, MobAction::Windup)]);
+        app.update();
+        for _ in 0..50 {
+            app.update();
+        }
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<&Mob>();
+            query.single(world).expect("one draugr").arm_angle
+        };
+
+        deliver(&mut app, 2, vec![draugr(900, 3.0, 60, MobAction::Recovery)]);
+        app.update();
+        let world = app.world_mut();
+        let mut query = world.query::<&Mob>();
+        let mob = query.single(world).expect("one draugr");
+        assert_eq!(mob.action, MobAction::Recovery);
+        assert!(
+            mob.action_elapsed <= Duration::from_millis(1),
+            "the recovery inherited {:?} of its windup",
+            mob.action_elapsed
+        );
+        assert_eq!(
+            mob.arm_start_angle, before,
+            "the recovery snapped away from the angle its windup actually reached"
+        );
+        assert!(
+            (mob.arm_angle - before).abs() < 0.02,
+            "the first recovery frame jumped from {before} to {}",
+            mob.arm_angle
+        );
+
+        let partial_recovery = draugr_arm_angle(
+            MobAction::Recovery,
+            mob.arm_start_angle,
+            Duration::from_millis(80),
+        );
+        assert_eq!(
+            draugr_arm_angle(MobAction::Chase, partial_recovery, Duration::ZERO),
+            partial_recovery,
+            "Recovery -> Chase snapped to neutral at the action boundary"
+        );
+    }
+
+    #[test]
+    fn draugr_arms_rotate_about_the_shared_shoulder_line() {
+        let shoulder = Vec3::Y * DRAUGR_SHOULDER_HEIGHT;
+        for action in [MobAction::Idle, MobAction::Windup, MobAction::Recovery] {
+            for millis in [0, 40, 200, 1_000] {
+                let start = draugr_arm_initial_angle(action);
+                let child = Transform::from_translation(shoulder).with_rotation(draugr_arm_swing(
+                    action,
+                    start,
+                    Duration::from_millis(millis),
+                ));
+                assert_eq!(
+                    child.transform_point(Vec3::ZERO),
+                    shoulder,
+                    "{action:?} moved the arm pivot away from the shoulder"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn draugr_details_are_geometry_in_one_shared_material() {
+        fn colours(mesh: &Mesh) -> &[[f32; 4]] {
+            let Some(VertexAttributeValues::Float32x4(colours)) =
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("draugr geometry has no vertex colours");
+            };
+            colours
+        }
+
+        fn has(mesh: &Mesh, colour: Color) -> bool {
+            let expected = colour.to_linear().to_f32_array();
+            colours(mesh).contains(&expected)
+        }
+
+        let body = draugr_body_mesh();
+        let head = draugr_head_mesh();
+        let arms = draugr_arms_mesh();
+        assert!(has(&body, DRAUGR_BODY_COLOUR));
+        assert!(has(&body, DRAUGR_BANDAGE_COLOUR));
+        assert!(has(&head, DRAUGR_HEAD_COLOUR));
+        assert!(has(&head, DRAUGR_BANDAGE_COLOUR));
+        assert!(
+            has(&head, DRAUGR_EYE_COLOUR),
+            "the two night-readable eyes are not part of the head mesh"
+        );
+        assert!(has(&arms, DRAUGR_BODY_COLOUR));
+        assert!(has(&arms, DRAUGR_BANDAGE_COLOUR));
+
+        let mut app = headless();
+        deliver(&mut app, 1, vec![draugr(900, 3.0, 60, MobAction::Idle)]);
+        app.update();
+        let (arms_mesh, shared_material) = {
+            let visuals = app.world().resource::<MobVisuals>();
+            (
+                visuals.draugr.arms.clone().expect("draugr arm mesh"),
+                visuals.draugr.body_material.clone(),
+            )
+        };
+        let world = app.world_mut();
+        let mut query = world.query::<(
+            &MobVisual,
+            &Mesh3d,
+            &MeshMaterial3d<StandardMaterial>,
+            &Transform,
+        )>();
+        let drawn: Vec<_> = query.iter(world).collect();
+        assert_eq!(
+            drawn.len(),
+            3,
+            "the new rig costs more than body, head and one arm child"
+        );
+        let (_, mesh, material, transform) = drawn
+            .iter()
+            .find(|(visual, _, _, _)| visual.part == MobPart::Arms)
+            .expect("one independently posed arm child");
+        assert_eq!(mesh.0, arms_mesh);
+        assert_eq!(material.0, shared_material);
+        assert_eq!(transform.translation, Vec3::Y * DRAUGR_SHOULDER_HEIGHT);
     }
 
     #[test]
@@ -1523,7 +1968,11 @@ mod tests {
         deliver(&mut app, 1, vec![draugr(900, 3.0, 60, MobAction::Idle)]);
         app.update();
         let drawn_draugr = parts(&mut app);
-        assert_eq!(drawn_draugr.len(), 2, "a draugr is a body and a head");
+        assert_eq!(
+            drawn_draugr.len(),
+            3,
+            "a draugr is a body, a head and one paired-arm child"
+        );
 
         deliver(&mut app, 2, vec![vargr(901, 9.0, 35, MobAction::Idle)]);
         app.update();
@@ -1628,6 +2077,19 @@ mod tests {
             fallen.z > 0.99,
             "a draugr that fell over ended up with its head at {fallen}, want it behind at +Z"
         );
+
+        let world = app.world_mut();
+        let mut arms = world.query::<(&MobVisual, &Transform)>();
+        let (_, arms) = arms
+            .iter(world)
+            .find(|(part, _)| part.part == MobPart::Arms)
+            .expect("one arm child");
+        assert_eq!(
+            arms.rotation,
+            Quat::IDENTITY,
+            "the arm telegraph fought the parent's backwards fall"
+        );
+        assert_eq!(arms.translation, Vec3::Y * DRAUGR_SHOULDER_HEIGHT);
     }
 
     #[test]
@@ -1922,7 +2384,11 @@ mod tests {
         let drawn = [
             (
                 MobKind::Draugr,
-                vec![draugr_body_mesh(), draugr_head_mesh()],
+                vec![
+                    draugr_body_mesh(),
+                    draugr_head_mesh(),
+                    draugr_arms_mesh().translated_by(Vec3::Y * DRAUGR_SHOULDER_HEIGHT),
+                ],
             ),
             (
                 MobKind::Vargr,
