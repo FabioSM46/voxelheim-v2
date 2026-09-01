@@ -28,6 +28,7 @@ mod settings;
 mod status;
 mod storm;
 mod text_input;
+mod trade;
 mod vendor;
 
 use bevy::prelude::*;
@@ -153,6 +154,8 @@ impl Plugin for UiPlugin {
             .add_message::<CraftClick>()
             .add_message::<crate::player::LootTakeClick>()
             .add_message::<crate::player::VendorTradeClick>()
+            .add_message::<crate::player::PlayerTradeClick>()
+            .add_message::<crate::player::PlayerTradeEnded>()
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
@@ -195,7 +198,12 @@ impl Plugin for UiPlugin {
                 login::LoginPlugin,
                 // Nested for the reason the compass and the crosshair are, one entry
                 // above: the tuple is at `add_plugins`' fifteen-plugin ceiling.
-                (loot::LootUiPlugin, map::MapUiPlugin, vendor::VendorUiPlugin),
+                (
+                    loot::LootUiPlugin,
+                    map::MapUiPlugin,
+                    trade::PlayerTradeUiPlugin,
+                    vendor::VendorUiPlugin,
+                ),
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
@@ -408,7 +416,11 @@ fn choose_input_mode(
     if vitals.dead()
         && matches!(
             *mode,
-            InputMode::Inventory | InputMode::Loot | InputMode::Vendor | InputMode::Map
+            InputMode::Inventory
+                | InputMode::Loot
+                | InputMode::Vendor
+                | InputMode::Trade
+                | InputMode::Map
         )
     {
         set_mode(&mut mode, InputMode::Playing);
@@ -458,9 +470,11 @@ fn choose_input_mode(
             return;
         }
         let next = match *mode {
-            InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
-                InputMode::Playing
-            }
+            InputMode::Menu
+            | InputMode::Loot
+            | InputMode::Vendor
+            | InputMode::Trade
+            | InputMode::Map => InputMode::Playing,
             InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
         };
         set_mode(&mut mode, next);
@@ -481,6 +495,7 @@ fn choose_input_mode(
             InputMode::Inventory => InputMode::Playing,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -505,6 +520,7 @@ fn choose_input_mode(
             InputMode::Inventory => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };

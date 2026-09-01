@@ -21,10 +21,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 
 use crate::net::{
-    ActionRefused, ConnectionState, Identity, MAX_MARKERS, RefusalInbox, RefusalReason,
-    RefusedAction, Reject, ServerAddress, Session,
+    ActionRefused, ConnectionState, Identity, MAX_MARKERS, PlayerTradeCloseReason, RefusalInbox,
+    RefusalReason, RefusedAction, Reject, ServerAddress, Session,
 };
-use crate::player::PlayerStats;
+use crate::player::{PlayerStats, PlayerTradeEnded};
 use crate::settings::{Corner, Settings};
 use crate::world::MeshStats;
 
@@ -92,6 +92,7 @@ impl Plugin for StatusUiPlugin {
         app.init_resource::<Notice>()
             .init_resource::<ReadoutMeasurements>()
             .init_resource::<Settings>()
+            .add_message::<PlayerTradeEnded>()
             .add_systems(Startup, spawn_status_text)
             .add_systems(
                 Update,
@@ -511,6 +512,7 @@ fn refresh_player_text(
 fn refresh_notice_text(
     time: Option<Res<Time>>,
     inbox: Option<ResMut<RefusalInbox>>,
+    mut trade_ended: MessageReader<PlayerTradeEnded>,
     mut notice: ResMut<Notice>,
     mut nodes: Query<&mut Text, With<NoticeText>>,
 ) {
@@ -545,6 +547,15 @@ fn refresh_notice_text(
             ),
         }
     }
+    if let Some(ended) = trade_ended.read().last() {
+        match trade_end_text(ended) {
+            Some(line) => {
+                notice.show(line, now);
+                changed = true;
+            }
+            None => warn!("the server ended a player trade for a reason this build cannot name"),
+        }
+    }
 
     if !changed {
         return;
@@ -552,6 +563,20 @@ fn refresh_notice_text(
     for mut text in &mut nodes {
         text.0.clear();
         text.0.push_str(notice.line());
+    }
+}
+
+fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
+    match ended.reason {
+        PlayerTradeCloseReason::Completed => Some("Trade complete".to_owned()),
+        PlayerTradeCloseReason::Cancelled => {
+            Some(format!("{} cancelled the trade", ended.partner_name))
+        }
+        PlayerTradeCloseReason::OutOfReach => Some("Too far away".to_owned()),
+        PlayerTradeCloseReason::Died
+        | PlayerTradeCloseReason::Disconnected
+        | PlayerTradeCloseReason::Failed => Some("The trade ended".to_owned()),
+        PlayerTradeCloseReason::Unknown => None,
     }
 }
 
@@ -1645,6 +1670,29 @@ mod tests {
                 .as_deref(),
                 want,
                 "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_known_player_trade_close_has_the_requested_sentence() {
+        for (reason, want) in [
+            (PlayerTradeCloseReason::Completed, Some("Trade complete")),
+            (
+                PlayerTradeCloseReason::Cancelled,
+                Some("Eirik cancelled the trade"),
+            ),
+            (PlayerTradeCloseReason::OutOfReach, Some("Too far away")),
+            (PlayerTradeCloseReason::Failed, Some("The trade ended")),
+            (PlayerTradeCloseReason::Unknown, None),
+        ] {
+            assert_eq!(
+                trade_end_text(&PlayerTradeEnded {
+                    partner_name: "Eirik".to_owned(),
+                    reason,
+                })
+                .as_deref(),
+                want
             );
         }
     }
