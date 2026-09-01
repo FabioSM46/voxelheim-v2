@@ -288,8 +288,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 21 {
-		t.Fatalf("WorldgenVersion = %d, want 21 after terrace falls began following only their higher source's downstream edge", WorldgenVersion)
+	if WorldgenVersion != 22 {
+		t.Fatalf("WorldgenVersion = %d, want 22 after the capital gained its stable and larger concentric rings", WorldgenVersion)
 	}
 }
 

@@ -82,8 +82,8 @@ func assertCapital(t *testing.T, seed int64) {
 	if s.Radius != capitalRadius {
 		t.Errorf("seed %#x: the capital's radius is %d, want %d", seed, s.Radius, capitalRadius)
 	}
-	// A keep, a hall, a smithy and six huts.
-	if want := 3 + capitalHutCount; len(s.Buildings) != want {
+	// A keep, a hall, a smithy, a stable and six huts.
+	if want := 4 + capitalHutCount; len(s.Buildings) != want {
 		t.Errorf("seed %#x: the capital has %d buildings, want %d", seed, len(s.Buildings), want)
 	}
 }
@@ -112,6 +112,42 @@ func TestOnlyTheOriginCellHoldsACapital(t *testing.T) {
 	}
 }
 
+func TestEveryCapitalAndNoVillageHasAStable(t *testing.T) {
+	t.Parallel()
+
+	for seed := int64(1); seed <= 40; seed++ {
+		capital := theCapital(t, seed)
+		stables := 0
+		for _, b := range capital.Buildings {
+			if b.Kind == BuildingStable {
+				stables++
+			}
+		}
+		if stables != 1 {
+			t.Errorf("seed %d capital has %d stables, want one", seed, stables)
+		}
+	}
+
+	checked := 0
+	for cz := int64(-8); cz <= 8; cz++ {
+		for cx := int64(-8); cx <= 8; cx++ {
+			s, ok := SettlementAt(settlementTestSeed, cx, cz)
+			if !ok || s.Kind != SettlementVillage {
+				continue
+			}
+			checked++
+			for _, b := range s.Buildings {
+				if b.Kind == BuildingStable {
+					t.Errorf("village in cell (%d, %d) has a stable", cx, cz)
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("the village sweep found nothing; absence of stables was not exercised")
+	}
+}
+
 // TestTheLatticeIsTheSameWorldEveryTime pins where this seed actually puts things.
 //
 // **Every other test here checks a property, and a property is blind to which hash
@@ -136,7 +172,7 @@ func TestTheLatticeIsTheSameWorldEveryTime(t *testing.T) {
 		plateau          int
 		buildings        int
 	}{
-		{cellX: 0, cellZ: 0, held: true, kind: SettlementCapital, centreX: 116, centreZ: 111, plateau: 63, buildings: 9},
+		{cellX: 0, cellZ: 0, held: true, kind: SettlementCapital, centreX: 116, centreZ: 111, plateau: 63, buildings: 10},
 		{cellX: 1, cellZ: 0, held: true, kind: SettlementVillage, centreX: 2118, centreZ: 236, plateau: 56, buildings: 4},
 		{cellX: -2, cellZ: 3, held: true, kind: SettlementVillage, centreX: -3753, centreZ: 6892, plateau: 76, buildings: 6},
 		{cellX: 0, cellZ: 1},
@@ -166,7 +202,7 @@ func TestTheLatticeIsTheSameWorldEveryTime(t *testing.T) {
 // compile-time layout guards are written against back to the schematics they claim to
 // describe.
 //
-// **A const expression cannot read a `var`, and the four drawings are built at init**, so
+// **A const expression cannot read a `var`, and the five drawings are built at init**, so
 // the guards restate their widths as literals. That restating is the weak point: resize a
 // schematic and the guards keep protecting the old one, silently. This is the one line of
 // defence against that, and it is a test rather than a compile error for exactly the
@@ -181,6 +217,7 @@ func TestTheGuardsBelowDescribeTheActualDrawings(t *testing.T) {
 		{BuildingHut, hutHalfFootprint},
 		{BuildingSmithy, smithyHalfFootprint},
 		{BuildingHall, hallHalfFootprint},
+		{BuildingStable, stableHalfFootprint},
 		{BuildingKeep, largestHalfFootprint},
 	} {
 		schematic := SchematicFor(tc.kind)
@@ -217,6 +254,20 @@ func TestTheGuardsBelowDescribeTheActualDrawings(t *testing.T) {
 		t.Errorf("plotRingNearestAxis is %d and the bearing table puts a plot-ring building %d out on its nearer axis", got, want)
 	}
 
+	for _, margin := range []struct {
+		name string
+		got  int
+	}{
+		{"plateau to hut ring", capitalPlateauMargin},
+		{"hut ring to plot ring", capitalRingMargin},
+		{"plot ring to keep", capitalKeepMargin},
+		{"adjacent plot bearings", capitalPlotMargin},
+	} {
+		if margin.got < 1 {
+			t.Errorf("%s clearance is %d blocks, want at least one", margin.name, margin.got)
+		}
+	}
+
 	// ceil(3√2) = 5: a 7-across footprint centred on a ring reaches this far past it at
 	// its corner, which is the clearance both hut-ring guards subtract.
 	if got := hutHalfFootprint * hutHalfFootprint * 2; got > hutRingClearance*hutRingClearance {
@@ -238,7 +289,7 @@ func TestTheGuardsBelowDescribeTheActualDrawings(t *testing.T) {
 // `capitalHutRingRadius` 40 → 52 pushes the ring twelve blocks out; fixing the hut ring's
 // `start` bearing to zero orients every capital in every world identically; replacing the
 // even hut spacing with `start+i` bunches all six into a 150° arc; and putting the keep on
-// the ring instead of at the origin means a capital has no middle. All nine buildings
+// the ring instead of at the origin means a capital has no middle. All ten buildings
 // survive each of those, so a count cannot see any of it, and no golden fixture covers the
 // capital — `chunk_golden_settlement.bin` is a village nearly nine kilometres out.
 //
@@ -255,13 +306,13 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		got  int
 		want int
 	}{
-		{"capitalRadius", capitalRadius, 68},
-		{"capitalPlotRadius", capitalPlotRadius, 46},
-		{"capitalHutRingRadius", capitalHutRingRadius, 61},
+		{"capitalRadius", capitalRadius, 69},
+		{"capitalPlotRadius", capitalPlotRadius, 50},
+		{"capitalHutRingRadius", capitalHutRingRadius, 63},
 		{"capitalHutCount", capitalHutCount, 6},
 	} {
 		if c.got != c.want {
-			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 20 is the world it produces",
+			t.Errorf("%s is %d, want %d — the plan below is written for that number, and worldgen 22 is the world it produces",
 				c.name, c.got, c.want)
 		}
 	}
@@ -274,14 +325,15 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 		facing                    Facing
 	}{
 		{BuildingKeep, 85, 64, 80, FacingPlusZ},
-		{BuildingHall, 156, 64, 105, FacingMinusX},
-		{BuildingSmithy, 72, 64, 130, FacingPlusX},
-		{BuildingHut, 143, 64, 160, FacingMinusZ},
-		{BuildingHut, 82, 64, 160, FacingMinusZ},
-		{BuildingHut, 52, 64, 108, FacingPlusX},
-		{BuildingHut, 82, 64, 55, FacingPlusZ},
-		{BuildingHut, 143, 64, 55, FacingPlusZ},
-		{BuildingHut, 174, 64, 108, FacingMinusX},
+		{BuildingHall, 160, 64, 105, FacingMinusX},
+		{BuildingSmithy, 68, 64, 132, FacingPlusX},
+		{BuildingStable, 63, 64, 77, FacingPlusX},
+		{BuildingHut, 144, 64, 162, FacingMinusZ},
+		{BuildingHut, 81, 64, 162, FacingMinusZ},
+		{BuildingHut, 50, 64, 108, FacingPlusX},
+		{BuildingHut, 81, 64, 53, FacingPlusZ},
+		{BuildingHut, 144, 64, 53, FacingPlusZ},
+		{BuildingHut, 176, 64, 108, FacingMinusX},
 	}
 	if len(s.Buildings) != len(want) {
 		t.Fatalf("the capital has %d buildings, want %d", len(s.Buildings), len(want))
@@ -308,7 +360,7 @@ func TestTheCapitalsPlanIsTheSamePlanEveryTime(t *testing.T) {
 	// And the six huts are spread round the whole circle rather than bunched on one
 	// side of it: no two share a bearing, and the arc they span is the whole of it.
 	seen := map[[2]int64]bool{}
-	for _, b := range s.Buildings[3:] {
+	for _, b := range s.Buildings[4:] {
 		w, d := rotatedFootprint(SchematicFor(b.Kind), b.Facing)
 		offset := [2]int64{
 			b.OriginX + int64(w/2) - s.CentreX,
