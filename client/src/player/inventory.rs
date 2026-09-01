@@ -791,7 +791,7 @@ mod tests {
     fn deliver(app: &mut App, stacks: Vec<InventoryStack>) {
         app.world_mut()
             .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks });
+            .push(InventoryState { stacks, silver: 0 });
     }
 
     fn press(app: &mut App, key_code: KeyCode, character: &str) {
