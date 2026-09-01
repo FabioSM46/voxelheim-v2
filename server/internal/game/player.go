@@ -36,6 +36,9 @@ type Sim struct {
 	// speed with twice the resolution instead of twice as fast.
 	dt float64
 
+	// Fixed at startup: no client or live session can toggle this cheat surface.
+	devCommands bool
+
 	viewDistance int32
 	idleLimit    int
 
@@ -363,6 +366,18 @@ type Sim struct {
 	minersByPos map[[3]int32]map[*Player]struct{}
 }
 
+type simOptions struct {
+	devCommands bool
+}
+
+// SimOption is one startup-only simulation choice.
+type SimOption func(*simOptions)
+
+// WithDevCommands controls the startup-only command surface; the default is false.
+func WithDevCommands(enabled bool) SimOption {
+	return func(options *simOptions) { options.devCommands = enabled }
+}
+
 // NewSim returns a simulation whose timestep matches tickRate hertz.
 //
 // mintEntityID is the identity source shared with the sessions; see the field.
@@ -382,7 +397,7 @@ type Sim struct {
 // Each generator gets its own PCG stream off this one seed, so neither is a function of
 // what the other has drawn. Any value is accepted, including zero: a seed is a starting
 // point and there is no such thing as a wrong one.
-func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, editor Editor, mintEntityID func() uint64, log *slog.Logger) (*Sim, error) {
+func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, editor Editor, mintEntityID func() uint64, log *slog.Logger, options ...SimOption) (*Sim, error) {
 	if tickRate < 1 {
 		return nil, fmt.Errorf("game: tick rate must be at least 1, got %d", tickRate)
 	}
@@ -405,9 +420,17 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	if log == nil {
 		return nil, errors.New("game: logger must not be nil")
 	}
+	var configured simOptions
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("game: simulation option must not be nil")
+		}
+		option(&configured)
+	}
 
 	return &Sim{
 		dt:                 1 / float64(tickRate),
+		devCommands:        configured.devCommands,
 		viewDistance:       int32(viewDistance),
 		idleLimit:          idleLimitTicks(tickRate),
 		terrain:            terrain,

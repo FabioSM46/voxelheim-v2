@@ -91,6 +91,7 @@ type options struct {
 	idleTimeout         time.Duration
 	stormPeriod         time.Duration
 	nextStorm           string
+	devCommands         bool
 
 	logLevel  string
 	logFormat string
@@ -153,11 +154,17 @@ func parseFlags() options {
 		"real-wall-clock time between Fimbulvetr storms; 0 disables storms")
 	flag.StringVar(&opts.nextStorm, "next-storm", "",
 		"one-time RFC3339 override for the next Fimbulvetr deadline; persisted at startup")
+	registerDevCommandsFlag(flag.CommandLine, &opts)
 	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
 
 	return opts
+}
+
+func registerDevCommandsFlag(flags *flag.FlagSet, opts *options) {
+	flags.BoolVar(&opts.devCommands, "dev-commands", false,
+		"enable development-only chat commands; disabled by default because they bypass normal progression")
 }
 
 func registerWorldDirFlag(flags *flag.FlagSet, opts *options) {
@@ -368,7 +375,8 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// The seed goes in beside them and generates nothing: it seeds the spawn director's
 	// one generator, so where the dark puts creatures is a property of this world rather
 	// than of this process. See game.NewSim.
-	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log)
+	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log,
+		game.WithDevCommands(opts.devCommands))
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}

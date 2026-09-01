@@ -2,6 +2,7 @@ package session_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -61,5 +62,58 @@ func TestWorldChatReachesBothSessionsAndOnlyRateLimitAnswers(t *testing.T) {
 	}
 	if got := len(receiverFrames.chatMessages()); got != game.ChatBurst {
 		t.Errorf("receiver received %d chat lines, want %d; the sixth landed", got, game.ChatBurst)
+	}
+}
+
+func TestDisabledCommandIsPrivateAndChangesNoInventory(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	sender, senderFrames := admit(t, cfg, chunks, sim, peers, 1)
+	_, receiverFrames := admit(t, cfg, chunks, sim, peers, 2)
+	joinStates := len(senderFrames.inventoryStates())
+
+	sender.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "/additem 1 1"})
+	waitUntil(t, "the private disabled-command answer", func() bool {
+		return len(senderFrames.chatMessages()) == 1
+	})
+	answer := senderFrames.chatMessages()[0]
+	if answer.SenderEntityID != 1 || answer.SenderName != game.CommandSenderName ||
+		!strings.Contains(strings.ToLower(answer.Text), "disabled") {
+		t.Errorf("private command answer = %+v", answer)
+	}
+	if got := len(receiverFrames.chatMessages()); got != 0 {
+		t.Errorf("receiver got %d private command answers", got)
+	}
+	if got := len(senderFrames.inventoryStates()); got != joinStates {
+		t.Errorf("disabled additem sent %d new inventory states", got-joinStates)
+	}
+}
+
+func TestAcceptedAddItemSendsPrivateAnswerAndWholeInventory(t *testing.T) {
+	t.Parallel()
+
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg, game.WithDevCommands(true))
+	sender, senderFrames := admit(t, cfg, chunks, sim, peers, 1)
+	_, receiverFrames := admit(t, cfg, chunks, sim, peers, 2)
+	joinStates := len(senderFrames.inventoryStates())
+
+	sender.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "/additem 1 2"})
+	waitUntil(t, "the command answer and inventory", func() bool {
+		return len(senderFrames.chatMessages()) == 1 &&
+			len(senderFrames.inventoryStates()) == joinStates+1
+	})
+	answer := senderFrames.chatMessages()[0]
+	if answer.SenderEntityID != 1 || answer.SenderName != game.CommandSenderName ||
+		!strings.Contains(answer.Text, "Added 2") {
+		t.Errorf("private command answer = %+v", answer)
+	}
+	if got := len(receiverFrames.chatMessages()); got != 0 {
+		t.Errorf("receiver got %d private command answers", got)
+	}
+	if got := senderFrames.inventoryCount(uint16(game.ItemStone)); got != 2 {
+		t.Errorf("stone count = %d, want 2", got)
 	}
 }
