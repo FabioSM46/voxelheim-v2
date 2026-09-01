@@ -468,6 +468,9 @@ func (p *Player) InteractNPC(request protocol.NpcInteractRequest) (vnet.RefusalR
 	if err := p.cannotActLocked(); err != nil {
 		return vnet.RefusalReasonPlayerIsDead, err
 	}
+	if reason, err := p.mountedActionLocked(); err != nil {
+		return reason, err
+	}
 
 	r, standing := p.sim.residents[request.EntityID]
 	if !standing {

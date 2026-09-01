@@ -258,6 +258,9 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 	if err := p.cannotActLocked(); err != nil {
 		return vnet.RefusalReasonPlayerIsDead, err
 	}
+	if reason, err := p.mountedActionLocked(); err != nil {
+		return reason, err
+	}
 	if p.haveTradeTick && !newerTick(req.ClientTick, p.lastTradeTick) {
 		return vnet.RefusalReasonUnknown, fmt.Errorf("stale trade client tick %d; newest is %d", req.ClientTick, p.lastTradeTick)
 	}

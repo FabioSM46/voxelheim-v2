@@ -54,6 +54,9 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	if err := p.cannotActLocked(); err != nil {
 		return vnet.RefusalReasonUnknown, err
 	}
+	if reason, err := p.mountedActionLocked(); err != nil {
+		return reason, err
+	}
 	if p.blocking {
 		// A shield up silently drops every swing before it creates pending state.
 		return vnet.RefusalReasonUnknown, nil
@@ -99,7 +102,8 @@ func (p *Player) Block(active bool) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	p.blocking = active && p.alive() && !p.leaving && p.wornShield.fraction > 0
+	p.blocking = active && p.alive() && !p.leaving &&
+		p.mounted == vnet.MountKindUnknown && p.wornShield.fraction > 0
 	if p.blocking {
 		p.pendingSwing = nil
 	}

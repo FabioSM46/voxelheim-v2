@@ -1,11 +1,18 @@
 package game
 
 import (
+	"errors"
 	"fmt"
+	"math"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
+
+// ErrActionForbiddenWhileMounted is the stable identity session routes use when
+// an older silent action path now owes the mounted refusal the V27 contract names.
+var ErrActionForbiddenWhileMounted = errors.New("the action is forbidden while mounted")
 
 // LearnedMounts is the character's durable set of learned mounts.
 //
@@ -75,4 +82,104 @@ func (p *Player) LearnedMountState() protocol.LearnedMounts {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 	return p.learnedMounts.State()
+}
+
+// Mount admits one learned horse into the common authoritative cast. Completion
+// rechecks the world: a roof may be placed or the ground may disappear during the
+// two seconds, and the client cannot turn the state checked at admission into a
+// promise that is no longer true on the completion tick.
+func (p *Player) Mount(kind vnet.MountKind) (vnet.RefusalReason, error) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if err := p.cannotActLocked(); err != nil {
+		return vnet.RefusalReasonPlayerIsDead, err
+	}
+	if !p.learnedMounts.Has(kind) {
+		return vnet.RefusalReasonMountNotLearned, fmt.Errorf("mount %s is not learned", kind)
+	}
+	if p.mounted != vnet.MountKindUnknown {
+		return vnet.RefusalReasonAlreadyMounted, fmt.Errorf("already mounted on %s", p.mounted)
+	}
+	if reason, err := p.mountFitLocked(); err != nil {
+		return reason, err
+	}
+
+	return p.startCastLocked(vnet.CastKindMount, vnet.RefusedActionMount, func() {
+		if reason, err := p.mountFitLocked(); err != nil {
+			p.queueCastRefusalLocked(protocol.ActionRefused{
+				Action: vnet.RefusedActionMount,
+				Reason: reason,
+			})
+			return
+		}
+		p.mounted = kind
+		p.pendingSwing = nil
+		p.blocking = false
+		p.setMiningLocked(nil)
+		p.closeVendorLocked()
+	})
+}
+
+// Dismount is immediate and unconditional. It also cancels a mount cast without an
+// interruption refusal: the player asked to end the mounting state, and absence in
+// the next snapshot is the complete answer whether the horse was present or pending.
+func (p *Player) Dismount() {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+
+	if p.cast != nil && p.cast.kind == vnet.CastKindMount {
+		p.cast = nil
+	}
+	p.mounted = vnet.MountKindUnknown
+}
+
+// mountedActionLocked is the common server-side gate for the deliberately
+// enumerated saddle restrictions. Inventory movement is absent: mounting does not
+// restrict the pack, only actions performed from it.
+func (p *Player) mountedActionLocked() (vnet.RefusalReason, error) {
+	if p.mounted == vnet.MountKindUnknown {
+		return vnet.RefusalReasonUnknown, nil
+	}
+	return vnet.RefusalReasonActionForbiddenWhileMounted, ErrActionForbiddenWhileMounted
+}
+
+// mountFitLocked distinguishes the two spatial refusals. A solid inside the three-
+// block rider volume is a low ceiling; a solid above that volume but below the top
+// of the authoritative streamed cube means the player is indoors. Movement keeps
+// using playerBody after mounting, so this is the only enlarged box in the server.
+//
+// The caller holds Sim.mu. Terrain reads are non-generating.
+func (p *Player) mountFitLocked() (vnet.RefusalReason, error) {
+	if !p.onGround {
+		return vnet.RefusalReasonMountNotGrounded, errors.New("mounting requires authoritative ground contact")
+	}
+
+	clearance := (body{width: PlayerWidth, height: MountClearanceHeight}).boxAt(p.pos)
+	x0, x1 := voxelSpan(clearance.min[0], clearance.max[0])
+	z0, z1 := voxelSpan(clearance.min[2], clearance.max[2])
+	y0, y1 := voxelSpan(clearance.min[1], clearance.max[1])
+	for y := y0; y <= y1; y++ {
+		for z := z0; z <= z1; z++ {
+			for x := x0; x <= x1; x++ {
+				if p.sim.terrain.Solid(x, y, z) {
+					return vnet.RefusalReasonMountLowCeiling, fmt.Errorf("mount clearance is blocked at [%d %d %d]", x, y, z)
+				}
+			}
+		}
+	}
+
+	roofBottom := int64(math.Ceil(clearance.max[1]))
+	roofTop := (int64(p.chunk.Y)+int64(p.sim.viewDistance)+1)*world.ChunkSize - 1
+	for y := roofBottom; y <= roofTop; y++ {
+		for z := z0; z <= z1; z++ {
+			for x := x0; x <= x1; x++ {
+				block, resident := p.sim.terrain.Block(x, y, z)
+				if resident && world.Solid(block) {
+					return vnet.RefusalReasonMountIndoors, fmt.Errorf("mounting is indoors under the roof at [%d %d %d]", x, y, z)
+				}
+			}
+		}
+	}
+	return vnet.RefusalReasonUnknown, nil
 }

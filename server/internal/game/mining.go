@@ -340,6 +340,9 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 		// being mined, so there is nothing here to cancel — only something to decline.
 		return err
 	}
+	if _, err := p.mountedActionLocked(); err != nil {
+		return err
+	}
 
 	if p.haveMineTick && !newerTick(req.ClientTick, p.lastMineTick) {
 		return fmt.Errorf("stale mining client tick %d; the newest accepted is %d", req.ClientTick, p.lastMineTick)

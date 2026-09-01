@@ -158,6 +158,7 @@ func (p *Player) dieLocked() {
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
 	p.blocking = false
+	p.mounted = vnet.MountKindUnknown
 	p.sim.removeAllThreatFor(p.entityID)
 
 	p.sim.log.Debug("player died", "entity_id", p.entityID, "respawn_ticks", p.respawnTicks)
