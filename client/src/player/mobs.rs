@@ -311,6 +311,12 @@ pub(super) struct Mob {
     /// Cosmetic time inside the newest server-sent action. Reset only when that action
     /// changes; it poses the arms and can neither advance nor replace the action itself.
     action_elapsed: Duration,
+
+    /// The angle the arms held when the newest authoritative action began, and the angle
+    /// the current curve has reached. Keeping both makes an interrupted windup or a
+    /// completed recovery continuous without letting either value choose the next action.
+    arm_start_angle: f32,
+    arm_angle: f32,
     lootable: bool,
 
     /// The health the last snapshot reported. A *decrease* is what flashes; anything
@@ -751,6 +757,7 @@ pub(super) fn apply_snapshots(
         mob.health = state.health;
         if mob.action != state.action {
             mob.action_elapsed = Duration::ZERO;
+            mob.arm_start_angle = mob.arm_angle;
         }
         mob.action = state.action;
         mob.kind = state.kind;
@@ -833,6 +840,8 @@ fn spawn_mob(
                 kind: state.kind,
                 action: state.action,
                 action_elapsed: Duration::ZERO,
+                arm_start_angle: draugr_arm_initial_angle(state.action),
+                arm_angle: draugr_arm_initial_angle(state.action),
                 lootable,
                 // The first snapshot of a body is not an impact, whatever its health.
                 health: state.health,
@@ -998,26 +1007,45 @@ fn pose_progress(elapsed: Duration) -> f32 {
     1.0 - (-LEAN_RESPONSE * elapsed.as_secs_f32()).exp()
 }
 
+/// The angle a body first seen in one action honestly starts at.
+///
+/// Recovery follows a windup that already landed, so a body first streamed into view in
+/// recovery starts raised. Every other first sight starts neutral; the wire carries no
+/// earlier pose to recover.
+fn draugr_arm_initial_angle(action: MobAction) -> f32 {
+    match action {
+        MobAction::Recovery => DRAUGR_ARM_RAISED,
+        MobAction::Idle
+        | MobAction::Chase
+        | MobAction::Flee
+        | MobAction::Windup
+        | MobAction::Dying
+        | MobAction::Corpse => 0.0,
+    }
+}
+
 /// Rotation about the shoulder line for one server-sent action.
 ///
-/// Windup raises the arms behind the shoulders. Recovery begins at that raised pose and
-/// moves monotonically down and forward to a small positive angle. Every other action is
-/// identity, especially death, so an arm pose never fights the parent's fall.
-fn draugr_arm_swing(action: MobAction, elapsed: Duration) -> Quat {
+/// Windup raises the arms behind the shoulders and recovery moves them down and forward.
+/// The curve begins at the angle the previous authoritative action actually reached, so
+/// an abandoned windup and Recovery -> Chase settle without a discontinuity. Death is
+/// still drawn with identity below, so an arm pose never fights the parent's fall.
+fn draugr_arm_angle(action: MobAction, start_angle: f32, elapsed: Duration) -> f32 {
     let progress = pose_progress(elapsed);
-    let angle = match action {
-        MobAction::Windup => -DRAUGR_ARM_RAISED.abs() * progress,
-        MobAction::Recovery => {
-            let raised = -DRAUGR_ARM_RAISED.abs();
-            raised + (DRAUGR_ARM_STRIKE - raised) * progress
-        }
+    let target = match action {
+        MobAction::Windup => DRAUGR_ARM_RAISED,
+        MobAction::Recovery => DRAUGR_ARM_STRIKE,
         MobAction::Idle
         | MobAction::Chase
         | MobAction::Flee
         | MobAction::Dying
         | MobAction::Corpse => 0.0,
     };
-    Quat::from_rotation_x(angle)
+    start_angle + (target - start_angle) * progress
+}
+
+fn draugr_arm_swing(action: MobAction, start_angle: f32, elapsed: Duration) -> Quat {
+    Quat::from_rotation_x(draugr_arm_angle(action, start_angle, elapsed))
 }
 
 /// How far through its fall a body is, from how long it has been going down.
@@ -1120,6 +1148,7 @@ pub(super) fn animate(
         // pose reads are the server's — `mob.action` is a snapshot field — so a vargr
         // leans and recovers on its own species' clock without a second copy of it here.
         mob.action_elapsed += delta;
+        mob.arm_angle = draugr_arm_angle(mob.action, mob.arm_start_angle, mob.action_elapsed);
         let target = lean_for(mob.kind, mob.action);
         let response = 1.0 - (-LEAN_RESPONSE * delta.as_secs_f32()).exp();
         mob.lean += (target - mob.lean) * response;
@@ -1149,7 +1178,7 @@ pub(super) fn animate(
         }
 
         let arm_swing = if down == 0.0 {
-            draugr_arm_swing(mob.action, mob.action_elapsed)
+            draugr_arm_swing(mob.action, mob.arm_start_angle, mob.action_elapsed)
         } else {
             Quat::IDENTITY
         };
@@ -1672,8 +1701,8 @@ mod tests {
         }
     }
 
-    fn arm_angle(action: MobAction, elapsed: Duration) -> f32 {
-        draugr_arm_swing(action, elapsed).to_euler(EulerRot::XYZ).0
+    fn canonical_arm_angle(action: MobAction, elapsed: Duration) -> f32 {
+        draugr_arm_angle(action, draugr_arm_initial_angle(action), elapsed)
     }
 
     /// The arms present the newest authoritative action, and their local clock can only
@@ -1688,13 +1717,13 @@ mod tests {
             MobAction::Corpse,
         ] {
             assert_eq!(
-                draugr_arm_swing(action, Duration::from_secs(10)),
+                draugr_arm_swing(action, 0.0, Duration::from_secs(10)),
                 Quat::IDENTITY
             );
         }
 
         let samples = [0, 25, 50, 100, 250, 1_000]
-            .map(|millis| arm_angle(MobAction::Windup, Duration::from_millis(millis)));
+            .map(|millis| canonical_arm_angle(MobAction::Windup, Duration::from_millis(millis)));
         assert!(samples[0].abs() < 1e-6);
         assert!(
             samples.windows(2).all(|pair| pair[1] <= pair[0]),
@@ -1706,7 +1735,7 @@ mod tests {
         );
 
         let samples = [0, 25, 50, 100, 250, 1_000]
-            .map(|millis| arm_angle(MobAction::Recovery, Duration::from_millis(millis)));
+            .map(|millis| canonical_arm_angle(MobAction::Recovery, Duration::from_millis(millis)));
         assert!((samples[0] - DRAUGR_ARM_RAISED).abs() < 1e-6);
         assert!(
             samples.windows(2).all(|pair| pair[1] >= pair[0]),
@@ -1728,6 +1757,11 @@ mod tests {
         for _ in 0..50 {
             app.update();
         }
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<&Mob>();
+            query.single(world).expect("one draugr").arm_angle
+        };
 
         deliver(&mut app, 2, vec![draugr(900, 3.0, 60, MobAction::Recovery)]);
         app.update();
@@ -1740,6 +1774,26 @@ mod tests {
             "the recovery inherited {:?} of its windup",
             mob.action_elapsed
         );
+        assert_eq!(
+            mob.arm_start_angle, before,
+            "the recovery snapped away from the angle its windup actually reached"
+        );
+        assert!(
+            (mob.arm_angle - before).abs() < 0.02,
+            "the first recovery frame jumped from {before} to {}",
+            mob.arm_angle
+        );
+
+        let partial_recovery = draugr_arm_angle(
+            MobAction::Recovery,
+            mob.arm_start_angle,
+            Duration::from_millis(80),
+        );
+        assert_eq!(
+            draugr_arm_angle(MobAction::Chase, partial_recovery, Duration::ZERO),
+            partial_recovery,
+            "Recovery -> Chase snapped to neutral at the action boundary"
+        );
     }
 
     #[test]
@@ -1747,8 +1801,12 @@ mod tests {
         let shoulder = Vec3::Y * DRAUGR_SHOULDER_HEIGHT;
         for action in [MobAction::Idle, MobAction::Windup, MobAction::Recovery] {
             for millis in [0, 40, 200, 1_000] {
-                let child = Transform::from_translation(shoulder)
-                    .with_rotation(draugr_arm_swing(action, Duration::from_millis(millis)));
+                let start = draugr_arm_initial_angle(action);
+                let child = Transform::from_translation(shoulder).with_rotation(draugr_arm_swing(
+                    action,
+                    start,
+                    Duration::from_millis(millis),
+                ));
                 assert_eq!(
                     child.transform_point(Vec3::ZERO),
                     shoulder,
