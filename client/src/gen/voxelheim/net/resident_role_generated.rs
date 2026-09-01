@@ -11,13 +11,13 @@ pub const ENUM_MIN_RESIDENT_ROLE: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_RESIDENT_ROLE: u8 = 6;
+pub const ENUM_MAX_RESIDENT_ROLE: u8 = 7;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_RESIDENT_ROLE: [ResidentRole; 7] = [
+pub const ENUM_VALUES_RESIDENT_ROLE: [ResidentRole; 8] = [
     ResidentRole::Unknown,
     ResidentRole::Villager,
     ResidentRole::Smith,
@@ -25,6 +25,7 @@ pub const ENUM_VALUES_RESIDENT_ROLE: [ResidentRole; 7] = [
     ResidentRole::Cook,
     ResidentRole::Trader,
     ResidentRole::Guard,
+    ResidentRole::Stablemaster,
 ];
 
 /// What a resident does in their settlement. A vocabulary, not a description.
@@ -59,9 +60,10 @@ impl ResidentRole {
     pub const Cook: Self = Self(4);
     pub const Trader: Self = Self(5);
     pub const Guard: Self = Self(6);
+    pub const Stablemaster: Self = Self(7);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 6;
+    pub const ENUM_MAX: u8 = 7;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Villager,
@@ -70,6 +72,7 @@ impl ResidentRole {
         Self::Cook,
         Self::Trader,
         Self::Guard,
+        Self::Stablemaster,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -81,6 +84,7 @@ impl ResidentRole {
             Self::Cook => Some("Cook"),
             Self::Trader => Some("Trader"),
             Self::Guard => Some("Guard"),
+            Self::Stablemaster => Some("Stablemaster"),
             _ => None,
         }
     }

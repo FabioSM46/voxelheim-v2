@@ -1893,7 +1893,8 @@ func Decode(frame []byte) (msg Message, err error) {
 func ResidentRoleOK(role vnet.ResidentRole) bool {
 	switch role {
 	case vnet.ResidentRoleVillager, vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
-		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleGuard:
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleGuard,
+		vnet.ResidentRoleStablemaster:
 		return true
 	default:
 		return false

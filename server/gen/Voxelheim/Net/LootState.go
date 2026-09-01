@@ -10,13 +10,14 @@ import (
 // /
 // / A later state for the same corpse supersedes the earlier revision wholesale. The list
 // / is per-recipient: two boss participants may receive different entries for the same corpse
-// / without either learning the other's roll. Empty containers are ended with `LootClosed`
-// / rather than represented by an empty state.
+// / without either learning the other's roll. A container with neither entries nor silver is
+// / ended with `LootClosed`; an empty entry vector with non-zero silver is a valid currency-only
+// / container.
 // /
 // / Decoder invariants:
 // /   - `corpse_id` is the non-zero `entity_id` of the `MobState` in `Corpse`
 // /   - `revision` is non-zero
-// /   - `entries` is present and non-empty
+// /   - `entries` is present; it may be empty only when `silver` is non-zero
 // /   - every entry satisfies `LootEntry` and entry ids are unique
 type LootState struct {
 	_tab flatbuffers.Table
@@ -96,8 +97,22 @@ func (rcv *LootState) EntriesLength() int {
 	return 0
 }
 
+// / Currency in this recipient's authoritative container. Zero is ordinary.
+func (rcv *LootState) Silver() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / Currency in this recipient's authoritative container. Zero is ordinary.
+func (rcv *LootState) MutateSilver(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
 func LootStateStart(builder *flatbuffers.Builder) {
-	builder.StartObject(3)
+	builder.StartObject(4)
 }
 func LootStateAddCorpseId(builder *flatbuffers.Builder, corpseId uint64) {
 	builder.PrependUint64Slot(0, corpseId, 0)
@@ -110,6 +125,9 @@ func LootStateAddEntries(builder *flatbuffers.Builder, entries flatbuffers.UOffs
 }
 func LootStateStartEntriesVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(16, numElems, 8)
+}
+func LootStateAddSilver(builder *flatbuffers.Builder, silver uint32) {
+	builder.PrependUint32Slot(3, silver, 0)
 }
 func LootStateEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

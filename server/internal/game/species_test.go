@@ -171,8 +171,9 @@ func TestTheDeerRowIsPassivePrey(t *testing.T) {
 // then have to learn to skip it. #458 gives residents whatever server-side representation
 // they turn out to need, which is not this one.
 //
-// The guard this weakens is real, so it is replaced rather than removed: the exemption is
-// one named member, and any *other* new kind still fails here.
+// Horse is the same staged-contract exception: #705 reserves the wire member while the
+// dependent authoritative issue owns its registry row. The guard remains exact — these
+// two named members and no wildcard.
 func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 	t.Parallel()
 
@@ -183,9 +184,9 @@ func TestEveryWireKindIsARegisteredSpecies(t *testing.T) {
 			if registered {
 				t.Error("MobKind.Unknown is registered, and it is the value an absent field decodes to")
 			}
-		case vnet.MobKindVillager:
+		case vnet.MobKindVillager, vnet.MobKindHorse:
 			if registered {
-				t.Error("MobKind.Villager has a director row; a resident is not spawned, hunted or looted")
+				t.Errorf("%s has a director row before its authoritative producer owns one", kind)
 			}
 		default:
 			if !registered {

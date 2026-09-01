@@ -279,10 +279,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // reason is read as Unknown. Ask what the receiver does with the value it does not
 // recognise, not which way it travelled.
 //
-// **V27 appends authoritative leave cancellation.** LeaveCancelRequest travels client
-// to server, so a V26 server would close the session on a tag it cannot name. The result
-// travels back and would be safely droppable alone; the request is the bump owed.
-func TestProtocolV27AddsAuthoritativeLeaveCancellation(t *testing.T) {
+// **V27 batches authoritative leave cancellation and the stable contract.**
+// LeaveCancelRequest, MountRequest and DismountRequest travel client to server, so a
+// V26 server would close the session on any tag it cannot name. Their server-to-client
+// companions would be safely droppable alone; each request is a bump owed.
+func TestProtocolV27BatchesLeaveCancellationAndStableContract(t *testing.T) {
 	t.Parallel()
 
 	if got := uint16(vnet.ProtocolVersionCurrent); got != 27 {
@@ -347,6 +348,10 @@ func TestProtocolV27AddsAuthoritativeLeaveCancellation(t *testing.T) {
 		// V27's request asks; its result is the only answer that resumes play.
 		vnet.PayloadLeaveCancelRequest,
 		vnet.PayloadLeaveCancelResult,
+		// The stable contract's complete learned set, followed by its two intents.
+		vnet.PayloadLearnedMounts,
+		vnet.PayloadMountRequest,
+		vnet.PayloadDismountRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -771,6 +776,7 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	for _, role := range []vnet.ResidentRole{
 		vnet.ResidentRoleVillager, vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
 		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleGuard,
+		vnet.ResidentRoleStablemaster,
 	} {
 		if !ResidentRoleOK(role) {
 			t.Errorf("ResidentRoleOK(%s) = false, want true", role)
@@ -791,12 +797,13 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 		"ResidentRole.Unknown": {byte(vnet.ResidentRoleUnknown), 0},
 		// Villager is 1 rather than last because it is the ordinary case, which is a
 		// decision schemas/player.fbs argues and this is where it is held.
-		"ResidentRole.Villager":  {byte(vnet.ResidentRoleVillager), 1},
-		"ResidentRole.Smith":     {byte(vnet.ResidentRoleSmith), 2},
-		"ResidentRole.Carpenter": {byte(vnet.ResidentRoleCarpenter), 3},
-		"ResidentRole.Cook":      {byte(vnet.ResidentRoleCook), 4},
-		"ResidentRole.Trader":    {byte(vnet.ResidentRoleTrader), 5},
-		"ResidentRole.Guard":     {byte(vnet.ResidentRoleGuard), 6},
+		"ResidentRole.Villager":     {byte(vnet.ResidentRoleVillager), 1},
+		"ResidentRole.Smith":        {byte(vnet.ResidentRoleSmith), 2},
+		"ResidentRole.Carpenter":    {byte(vnet.ResidentRoleCarpenter), 3},
+		"ResidentRole.Cook":         {byte(vnet.ResidentRoleCook), 4},
+		"ResidentRole.Trader":       {byte(vnet.ResidentRoleTrader), 5},
+		"ResidentRole.Guard":        {byte(vnet.ResidentRoleGuard), 6},
+		"ResidentRole.Stablemaster": {byte(vnet.ResidentRoleStablemaster), 7},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -807,8 +814,8 @@ func TestSettlementServerMessagesCarryNamesRolesAndPrices(t *testing.T) {
 	// here would notice while ResidentRoleOK went on answering false for a role the
 	// contract now names. That is the one question this file can ask about a member
 	// nobody has written down yet.
-	if got := len(vnet.EnumNamesResidentRole); got != 7 {
-		t.Errorf("ResidentRole has %d members, want 7 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesResidentRole); got != 8 {
+		t.Errorf("ResidentRole has %d members, want 8 — a new one needs a decision, not a test edit", got)
 	}
 
 	// A name is written exactly as given, over-long ones included: truncating here would
@@ -2211,8 +2218,9 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		// members rather than one, because they are separate requests with separate
 		// answers. Mine sits beside the reserved MineBlock = 2 rather than replacing it:
 		// removing or renumbering that one would relabel every refusal already sent.
-		"RefusedAction.Edit": {byte(vnet.RefusedActionEdit), 17},
-		"RefusedAction.Mine": {byte(vnet.RefusedActionMine), 18},
+		"RefusedAction.Edit":  {byte(vnet.RefusedActionEdit), 17},
+		"RefusedAction.Mine":  {byte(vnet.RefusedActionMine), 18},
+		"RefusedAction.Mount": {byte(vnet.RefusedActionMount), 19},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2227,8 +2235,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 19 {
-		t.Errorf("RefusedAction has %d members, want 19 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 20 {
+		t.Errorf("RefusedAction has %d members, want 20 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2268,18 +2276,30 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"VendorDoesNotWant": {byte(vnet.RefusalReasonVendorDoesNotWant), 29},
 		// V26's one, appended inside the low group for the same reason: the ground is
 		// warded, the request was legal, and the player can walk somewhere else.
-		"Warded":            {byte(vnet.RefusalReasonWarded), 30},
-		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
-		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
-		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
-		"MalformedKind":     {byte(vnet.RefusalReasonMalformedKind), 67},
+		"Warded":                      {byte(vnet.RefusalReasonWarded), 30},
+		"MountNotLearned":             {byte(vnet.RefusalReasonMountNotLearned), 31},
+		"AlreadyMounted":              {byte(vnet.RefusalReasonAlreadyMounted), 32},
+		"MountNotGrounded":            {byte(vnet.RefusalReasonMountNotGrounded), 33},
+		"MountIndoors":                {byte(vnet.RefusalReasonMountIndoors), 34},
+		"MountLowCeiling":             {byte(vnet.RefusalReasonMountLowCeiling), 35},
+		"CastAlreadyInProgress":       {byte(vnet.RefusalReasonCastAlreadyInProgress), 36},
+		"CastInterruptedByDamage":     {byte(vnet.RefusalReasonCastInterruptedByDamage), 37},
+		"CastInterruptedByMovement":   {byte(vnet.RefusalReasonCastInterruptedByMovement), 38},
+		"CastInterruptedByJump":       {byte(vnet.RefusalReasonCastInterruptedByJump), 39},
+		"CastInterruptedByDeath":      {byte(vnet.RefusalReasonCastInterruptedByDeath), 40},
+		"ActionForbiddenWhileMounted": {byte(vnet.RefusalReasonActionForbiddenWhileMounted), 41},
+		"MountAlreadyLearned":         {byte(vnet.RefusalReasonMountAlreadyLearned), 42},
+		"MalformedNoAnchor":           {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
+		"MalformedFacing":             {byte(vnet.RefusalReasonMalformedFacing), 65},
+		"MalformedSlot":               {byte(vnet.RefusalReasonMalformedSlot), 66},
+		"MalformedKind":               {byte(vnet.RefusalReasonMalformedKind), 67},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 35 {
-		t.Errorf("RefusalReason has %d members, want 35 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 47 {
+		t.Errorf("RefusalReason has %d members, want 47 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -2696,6 +2716,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// ProtocolVersion.Current by itself: MobState.kind is refused rather than
 		// dropped when the receiver cannot name it.
 		"MobKind.Villager": {byte(vnet.MobKindVillager), 4},
+		// V27 reserves the mountable stable resident; authoritative behavior follows.
+		"MobKind.Horse": {byte(vnet.MobKindHorse), 5},
 		// Appended after Forge = 2.
 		"StructureKind.Campfire": {byte(vnet.StructureKindCampfire), 3},
 		// Appended after Tent = 4.
@@ -2738,7 +2760,7 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	for name, pair := range map[string][2]int{
 		// Five since V25's Villager, which is the one member of this enum whose arrival
 		// moved ProtocolVersion.Current on its own.
-		"MobKind":       {len(vnet.EnumNamesMobKind), 5},
+		"MobKind":       {len(vnet.EnumNamesMobKind), 6},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 5},
 		"RecipeID":      {len(vnet.EnumNamesRecipeID), 22},
 	} {

@@ -1372,21 +1372,20 @@ mod tests {
         }
     }
 
-    /// [`EVERY_REASON`] is every reason, and a length is what says so.
+    /// [`EVERY_REASON`] is every reason this UI consumes, and a length is what says so.
     ///
     /// The sweeps in this module are only as good as the list they run over, and nothing
     /// in the language makes that list complete: a `[RefusalReason; N]` compiles perfectly
     /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
     /// V24 and again in V25, and both times every sweep below went on passing over a
-    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count, which is the
-    /// same pin the codec puts on `CLASSIFICATION`.
+    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V27 reserves
+    /// twelve stable reasons whose consumer belongs to the dependent client part.
     #[test]
     fn every_reason_is_in_the_sweep() {
         assert_eq!(
             EVERY_REASON.len(),
-            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len(),
-            "a reason the contract names is missing from EVERY_REASON, so every sweep in \
-             this module is reporting on a subset while reading as if it swept them all"
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 12,
+            "a reason this UI consumes is missing from EVERY_REASON"
         );
 
         // A length on its own would be satisfied by naming one member twice while another

@@ -200,12 +200,13 @@ namespace Voxelheim.Net;
 /// the weather, storm, runestone and ward issues that follow consume one settled contract
 /// instead of moving this number four more times.
 ///
-/// **V27 adds authoritative leave cancellation.** `LeaveCancelRequest` travels client ->
-/// server, so a V26 server cannot name the tag and closes the session rather than dropping
-/// it. `LeaveCancelResult` is the server's answer: only its accepted result puts the client
-/// back in play, while a refusal carries the server-owned time still remaining. The request
-/// is the break; the result travels server -> client and would have been safely droppable on
-/// its own.
+/// **V27 batches leave cancellation with the stable's complete contract.** Three client ->
+/// server requests (`LeaveCancelRequest`, `MountRequest`, `DismountRequest`) each owe the
+/// bump: a V26 server cannot name any of their tags and closes the session rather than
+/// dropping one. `MobKind.Horse` owes it independently, exactly as `MobKind.Villager` did:
+/// it travels inside a table field whose receiver refuses an unknown member. The purse,
+/// learned set, cast and mount snapshot state ride in the same one bump so every later
+/// stable issue consumes one settled contract instead of moving this number again.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail

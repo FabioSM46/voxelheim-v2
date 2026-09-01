@@ -81,6 +81,9 @@ const (
 	PayloadWardsNearby            Payload = 52
 	PayloadLeaveCancelRequest     Payload = 53
 	PayloadLeaveCancelResult      Payload = 54
+	PayloadLearnedMounts          Payload = 55
+	PayloadMountRequest           Payload = 56
+	PayloadDismountRequest        Payload = 57
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -139,6 +142,9 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadWardsNearby:            "WardsNearby",
 	PayloadLeaveCancelRequest:     "LeaveCancelRequest",
 	PayloadLeaveCancelResult:      "LeaveCancelResult",
+	PayloadLearnedMounts:          "LearnedMounts",
+	PayloadMountRequest:           "MountRequest",
+	PayloadDismountRequest:        "DismountRequest",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -197,6 +203,9 @@ var EnumValuesPayload = map[string]Payload{
 	"WardsNearby":            PayloadWardsNearby,
 	"LeaveCancelRequest":     PayloadLeaveCancelRequest,
 	"LeaveCancelResult":      PayloadLeaveCancelResult,
+	"LearnedMounts":          PayloadLearnedMounts,
+	"MountRequest":           PayloadMountRequest,
+	"DismountRequest":        PayloadDismountRequest,
 }
 
 func (v Payload) String() string {

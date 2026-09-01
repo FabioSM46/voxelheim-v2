@@ -212,7 +212,15 @@ union Payload {
   //    answer; an older client would safely drop that server payload, but it could never
   //    send the request that causes one.
   LeaveCancelRequest,      // 53  client -> server
-  LeaveCancelResult        // 54  server -> client
+  LeaveCancelResult,       // 54  server -> client
+
+  //    The stable contract shares this bump. Both requests travel client -> server,
+  //    so an older server closes the session on either unknown tag. LearnedMounts is
+  //    the complete per-recipient set and would be safely droppable by an older client;
+  //    `MobKind.Horse`, outside this union, independently owes the same bump.
+  LearnedMounts,           // 55  server -> client
+  MountRequest,            // 56  client -> server
+  DismountRequest          // 57  client -> server
 }
 
 table Envelope {

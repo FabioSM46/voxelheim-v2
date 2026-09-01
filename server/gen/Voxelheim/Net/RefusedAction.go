@@ -66,6 +66,8 @@ const (
 	/// already have sent, and renumbering or removing it would relabel every refusal
 	/// already on the wire. A receiver names both.
 	RefusedActionMine RefusedAction = 18
+	/// A `MountRequest` that did not begin or complete its authoritative cast.
+	RefusedActionMount RefusedAction = 19
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -88,6 +90,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionTrade:          "Trade",
 	RefusedActionEdit:           "Edit",
 	RefusedActionMine:           "Mine",
+	RefusedActionMount:          "Mount",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -110,6 +113,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"Trade":          RefusedActionTrade,
 	"Edit":           RefusedActionEdit,
 	"Mine":           RefusedActionMine,
+	"Mount":          RefusedActionMount,
 }
 
 func (v RefusedAction) String() string {
