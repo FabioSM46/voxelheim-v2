@@ -190,7 +190,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		// thing the night sends after you.
 		loot: []lootRoll{
 			{item: ItemBone, min: 1, max: 2},
-			{item: ItemSilver, min: 2, max: 6},
+			{silver: true, min: 2, max: 6},
 		},
 	},
 

@@ -104,9 +104,19 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 			t.Errorf("%s leaves nothing behind, so hunting one is a pure loss", kind)
 		}
 		for i, roll := range def.loot {
-			if _, registered := itemByID(roll.item); !registered {
-				t.Errorf("%s loot line %d leaves item %d, which no registry entry describes",
-					kind, i, roll.item)
+			if roll.silver {
+				if roll.item != ItemNone {
+					t.Errorf("%s loot line %d mixes silver with item %d", kind, i, roll.item)
+				}
+			} else {
+				if _, registered := itemByID(roll.item); !registered {
+					t.Errorf("%s loot line %d leaves item %d, which no registry entry describes",
+						kind, i, roll.item)
+				}
+				if limit := stackLimit(roll.item); roll.max > limit {
+					t.Errorf("%s loot line %d can leave %d of item %d, which stacks to %d",
+						kind, i, roll.max, roll.item, limit)
+				}
 			}
 			if roll.min == 0 {
 				t.Errorf("%s loot line %d can leave nothing; a chance below certainty is not a thing this table can express",
@@ -114,10 +124,6 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 			}
 			if roll.max < roll.min {
 				t.Errorf("%s loot line %d rolls %d..%d, which is an empty range", kind, i, roll.min, roll.max)
-			}
-			if limit := stackLimit(roll.item); roll.max > limit {
-				t.Errorf("%s loot line %d can leave %d of item %d, which stacks to %d",
-					kind, i, roll.max, roll.item, limit)
 			}
 		}
 
@@ -229,7 +235,7 @@ func TestTheDraugrsNumbersSurvivedTheMoveIntoTheRegistry(t *testing.T) {
 		// it should have to be made here as well as in the table.
 		loot: []lootRoll{
 			{item: ItemBone, min: 1, max: 2},
-			{item: ItemSilver, min: 2, max: 6},
+			{silver: true, min: 2, max: 6},
 		},
 	}
 	// DeepEqual rather than `!=`, because a row carries a slice and slices are not

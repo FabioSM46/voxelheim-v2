@@ -101,6 +101,16 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	}
 }
 
+func TestAStoredSilverStackIsRefusedRatherThanRepaired(t *testing.T) {
+	t.Parallel()
+
+	life := Life{Health: PlayerMaxHealth, Hunger: PlayerMaxHunger, Silver: 12}
+	life.Slots[0] = protocol.InventoryStack{ItemID: uint16(ItemSilver), Count: 7}
+	if err := life.Validate(); err == nil {
+		t.Fatal("Validate accepted a legacy silver stack")
+	}
+}
+
 func TestARecordRestoresAWornChestItemAndRejectsItInTheWrongSlot(t *testing.T) {
 	const testChest ItemID = 64_990
 	itemRegistry[testChest] = itemDefinition{

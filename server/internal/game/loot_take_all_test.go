@@ -40,6 +40,21 @@ func standCorpse(t *testing.T, h *vitalsHarness, p *Player, stacks ...inventoryS
 	}
 }
 
+func standSilverCorpse(t *testing.T, h *vitalsHarness, p *Player, silver uint32) {
+	t.Helper()
+
+	h.sim.mu.Lock()
+	h.sim.corpses[takeAllCorpse] = &corpse{
+		entityID: takeAllCorpse, kind: vnet.MobKindDraugr, pos: [3]float64{0.5, 64, 0.5},
+		chunk: p.chunk, owner: p.corpseOwner(), expiresTick: h.sim.corpseLifetimeTicks,
+		container: corpseContainer{revision: 1, silver: silver},
+	}
+	h.sim.mu.Unlock()
+	if reason, err := p.OpenLoot(protocol.LootOpenRequest{CorpseID: takeAllCorpse, ClientTick: 1}); err != nil {
+		t.Fatalf("open = %s, %v", reason, err)
+	}
+}
+
 // packWithOneEmptySlot leaves exactly `empty` general slots free and every other one
 // holding a blade, which is the only shape that separates "does not fit" from "the pack
 // is untouched": a durable item needs a whole empty slot, and a resource can still merge
@@ -212,6 +227,39 @@ func TestTakeAllThatEmptiesTheCorpseClosesTheWindow(t *testing.T) {
 	if len(states) != 0 || len(revisions) != 0 {
 		t.Errorf("loot states = %v at revisions %v; an emptied corpse owes a closure and nothing else", states, revisions)
 	}
+}
+
+func TestSilverLeavesACurrencyOnlyCorpseWithAFullPack(t *testing.T) {
+	t.Parallel()
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	standSilverCorpse(t, h, player, 6)
+	h.sim.mu.Lock()
+	state := h.sim.corpses[takeAllCorpse].lootState(&h.sim.corpses[takeAllCorpse].container)
+	h.sim.mu.Unlock()
+	if state.Silver != 6 || len(state.Entries) != 0 {
+		t.Fatalf("currency-only loot state = silver %d entries %v", state.Silver, state.Entries)
+	}
+	packWithEmptySlots(t, player, 0)
+	before := packSlots(player)
+
+	if reason, err := player.TakeAllLoot(protocol.LootTakeAllRequest{
+		CorpseID: takeAllCorpse, Revision: 1, ClientTick: 2,
+	}); err != nil {
+		t.Fatalf("taking silver with a full pack = %s, %v", reason, err)
+	}
+	if after := packSlots(player); after != before {
+		t.Error("taking purse silver changed a full pack")
+	}
+	if got := player.InventoryState().Silver; got != 6 {
+		t.Errorf("purse holds %d silver, want 6", got)
+	}
+	h.sim.mu.Lock()
+	container := &h.sim.corpses[takeAllCorpse].container
+	if !container.empty() || container.revision != 2 {
+		t.Errorf("container after take = entries %v silver %d revision %d", container.entries, container.silver, container.revision)
+	}
+	h.sim.mu.Unlock()
 }
 
 // Nothing fits: the container is exactly as it was, and no revision was spent on saying so.
