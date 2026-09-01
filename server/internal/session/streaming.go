@@ -658,10 +658,11 @@ func newResendLimiter(radius uint8, now func() time.Time) *tokenBucket {
 // still two orders of magnitude below what a client could ask for if it simply sent
 // requests as fast as the socket accepts them.
 //
-// **The burst is what one opening of the map costs.** Thirty-two tiles is a 8×4 grid of
-// them, more than any window shows at once, so a client that opens the map cold never
-// meets the limit; what it bounds is the client that keeps asking after the map is
-// already drawn.
+// **The burst is what one opening of the map costs.** At the client's default rung a
+// 1024×768 viewport is a 512×384-pixel picture: eight by six complete tiles when its
+// edges happen to be grid-aligned, and at most nine by seven when neither is. Sixty-four
+// therefore admits the whole 63-tile worst case without making an ordinary opening wait
+// for a refill, while still bounding a client that keeps asking after the map is drawn.
 //
 // **An empty bucket drops the request in silence, which is the chunk-resend precedent
 // and not the refusal channel.** A refusal names something the player did wrong, and
@@ -675,7 +676,7 @@ func newResendLimiter(radius uint8, now func() time.Time) *tokenBucket {
 // That is why the number can be generous where resendRefillPerSecond could not be.
 const (
 	mapTileRefillPerSecond = 8
-	mapTileBurst           = 32
+	mapTileBurst           = 64
 )
 
 // newMapTileLimiter returns this session's full map-tile bucket.

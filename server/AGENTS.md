@@ -525,9 +525,10 @@ action merely to exercise an abstraction.
   nothing; an accepted line spends one token even when every outbound queue drops it.
 - **The map tile bucket is the third, and the first that bounds work a client can ask for
   *twice over*: the request is throttled, and the answer is drawn rather than looked up.** The
-  burst is 32 tiles — more than one opening of the map costs at any scale, since a tile is 64×64
-  pixels however coarse — and the refill is 8 a second, which is comfortably above a client
-  panning across a continent. Both numbers are generous where `resendRefillPerSecond` could not
+  burst is 64 tiles — enough for the default viewport's 63-tile worst case when neither edge is
+  grid-aligned, since a tile is 64×64 pixels however coarse — and the refill is 8 a second, which
+  is comfortably above a client panning across a continent. Both numbers are generous where
+  `resendRefillPerSecond` could not
   be, and the reason is what the work touches rather than how much of it there is: a resend can
   regenerate a chunk under the semaphore every session shares, while a tile is 4096 evaluations
   of a pure function on the session's own goroutine, so a client spending its whole bucket
