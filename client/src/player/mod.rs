@@ -238,21 +238,21 @@ pub enum InputMode {
     Playing,
     /// Pointer captured and text entry owns the keyboard; gameplay input is closed.
     Chat,
-    /// Pointer released and the authoritative inventory visible; horizontal movement
+    /// Pointer visible and confined over the authoritative inventory; horizontal movement
     /// remains live.
     Inventory,
-    /// Pointer released over one authoritative corpse container.
+    /// Pointer visible and confined over one authoritative corpse container.
     Loot,
-    /// Pointer released over one authoritative stall.
+    /// Pointer visible and confined over one authoritative stall.
     ///
     /// [`Self::Loot`]'s rules with a different window behind them, and deliberately not a
-    /// second spelling of them: the pointer is released because the whole content is rows,
-    /// `Escape` closes it, the pack key is ignored rather than layering a second window over
-    /// it, and death closes it because the server refuses every trade from a corpse anyway.
+    /// second spelling of them: the pointer is visible because the whole content is rows,
+    /// `Escape` closes it, the pack key is ignored rather than layering a second window over it,
+    /// and death closes it because the server refuses every trade from a corpse anyway.
     Vendor,
-    /// Pointer released and the pause menu visible.
+    /// Pointer visible and confined while the pause menu is visible.
     Menu,
-    /// Pointer released and the world map visible. Movement is closed, as it is for
+    /// Pointer visible and confined over the world map. Movement is closed, as it is for
     /// [`Self::Menu`] and unlike [`Self::Inventory`]: reading a map is not something a
     /// player does while walking, and a drag that panned the map would also be steering.
     Map,

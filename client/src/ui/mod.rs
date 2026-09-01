@@ -31,7 +31,7 @@ mod vendor;
 
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
 use icon::StackIcon;
 
@@ -209,22 +209,27 @@ impl Plugin for UiPlugin {
 /// `choose_input_mode` runs relative to the snapshots it reads, and a registration
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
-    app.add_message::<CancelLeaveRequest>().add_systems(
-        Update,
-        (
-            // After the snapshots, because this system reads the life state they
-            // publish. Without it, the frame a player dies on can decide the input
-            // mode from the vitals of the frame before — and leave the pack open on
-            // top of a death overlay for one frame, or refuse `E` for one frame
-            // after a respawn. Presentation either way, since the server refuses
-            // what a dead player asks for, but a gate that reads yesterday's answer
-            // is not the gate this module documents.
-            choose_input_mode
-                .in_set(ApplyInputMode)
-                .after(ApplySnapshots),
-            sync_cursor.after(ApplyInputMode),
-        ),
-    );
+    app.add_message::<CancelLeaveRequest>()
+        // `WindowPlugin` owns this in the game. Registering it here too keeps the
+        // pointer policy headlessly testable wherever this narrow system bundle is
+        // installed; `add_message` is idempotent when the plugin already installed it.
+        .add_message::<WindowFocused>()
+        .add_systems(
+            Update,
+            (
+                // After the snapshots, because this system reads the life state they
+                // publish. Without it, the frame a player dies on can decide the input
+                // mode from the vitals of the frame before — and leave the pack open on
+                // top of a death overlay for one frame, or refuse `E` for one frame
+                // after a respawn. Presentation either way, since the server refuses
+                // what a dead player asks for, but a gate that reads yesterday's answer
+                // is not the gate this module documents.
+                choose_input_mode
+                    .in_set(ApplyInputMode)
+                    .after(ApplySnapshots),
+                sync_cursor.after(ApplyInputMode),
+            ),
+        );
 }
 
 /// The two surfaces that own the keyboard without owning the mode.
@@ -502,35 +507,56 @@ fn choose_input_mode(
     }
 }
 
-/// Captures and hides the pointer only for a live playing session.
+/// Captures, confines or releases the pointer for the surface that owns it.
 fn sync_cursor(
     mode: Res<InputMode>,
+    session: Option<Res<Session>>,
     overlays: Overlays<'_>,
-    mut cursors: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut focused: MessageReader<WindowFocused>,
+    mut cursors: Query<(Entity, &Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
+    let Ok((window_entity, window, mut cursor)) = cursors.single_mut() else {
+        return;
+    };
+
+    // Winit updates `Window::focused` before sending this message. Reading the message as
+    // well has a second purpose: a compositor may have dropped the native constraint while
+    // Bevy's component still says `Locked` or `Confined`. Bevy's backend applies cursor
+    // options on change, so a focus transition must write the desired values even when they
+    // compare equal and thereby re-assert the constraint at the windowing-system boundary.
+    let focus_event = focused
+        .read()
+        .filter(|event| event.window == window_entity)
+        .map(|event| event.focused)
+        .last();
+    let window_is_focused = focus_event.unwrap_or(window.focused);
+    let reassert = focus_event.is_some();
+
     // The pointer belongs to whatever is on top, and while an overlay is up that is a
     // button. A locked, invisible cursor over a screen whose whole content is controls is
     // a screen nobody can press. The overlay test is redundant with the `Connected` one
     // beside it — none of the three is up on a live session — and it is asked anyway,
     // because "the pointer is released for every overlay" should be readable here rather
     // than inferred from a state machine somewhere else.
-    let playing = matches!(*mode, InputMode::Playing | InputMode::Chat)
-        && !overlays.any_is_up()
-        && overlays.connected();
-    let (grab_mode, visible) = if playing {
+    let live_surface = session.is_some() && !overlays.any_is_up() && overlays.connected();
+    let (grab_mode, visible) = if !window_is_focused || !live_surface {
+        // Focus loss must always release confinement: alt-tab and the window manager's
+        // own bindings are how a player deliberately leaves the game.
+        (CursorGrabMode::None, true)
+    } else if matches!(*mode, InputMode::Playing | InputMode::Chat) {
         // Bevy falls back to Confined on X11, where Locked is unsupported.
         (CursorGrabMode::Locked, false)
     } else {
-        (CursorGrabMode::None, true)
+        // Panels need a visible pointer, but letting it cross a window edge turns an
+        // ordinary UI gesture into a focus change on a multi-monitor desktop.
+        (CursorGrabMode::Confined, true)
     };
 
-    for mut cursor in &mut cursors {
-        if cursor.grab_mode != grab_mode {
-            cursor.grab_mode = grab_mode;
-        }
-        if cursor.visible != visible {
-            cursor.visible = visible;
-        }
+    if reassert || cursor.grab_mode != grab_mode {
+        cursor.grab_mode = grab_mode;
+    }
+    if reassert || cursor.visible != visible {
+        cursor.visible = visible;
     }
 }
 
@@ -1859,8 +1885,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cursor_capture_follows_the_live_playing_mode() {
+    fn cursor_test_app() -> (App, Entity) {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             // The character screen's preview is a real body, so the assets its meshes and
@@ -1871,21 +1896,122 @@ mod tests {
             .insert_resource(ConnectionState::Connected)
             .insert_resource(ServerAddress("ws://127.0.0.1:7777".to_owned()))
             .insert_resource(session())
-            .add_plugins(UiPlugin)
+            .add_plugins(UiPlugin);
+        let window = app
             .world_mut()
-            .spawn((PrimaryWindow, CursorOptions::default()));
+            .spawn((PrimaryWindow, Window::default()))
+            .id();
+        (app, window)
+    }
 
-        app.update();
+    fn primary_cursor(app: &mut App) -> (CursorGrabMode, bool) {
         let cursor = app
             .world_mut()
             .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
             .single(app.world())
             .expect("one primary cursor");
-        assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
-        assert!(!cursor.visible);
+        (cursor.grab_mode, cursor.visible)
+    }
+
+    #[test]
+    fn cursor_policy_has_captured_confined_and_released_states() {
+        let (mut app, _window) = cursor_test_app();
+
+        app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::Locked, false));
 
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::Locked, false));
+
+        for mode in [
+            InputMode::Inventory,
+            InputMode::Loot,
+            InputMode::Vendor,
+            InputMode::Menu,
+            InputMode::Map,
+        ] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            assert_eq!(
+                primary_cursor(&mut app),
+                (CursorGrabMode::Confined, true),
+                "{mode:?} did not keep the visible pointer inside the live window"
+            );
+        }
+
+        app.world_mut().remove_resource::<Session>();
+        app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::None, true));
+    }
+
+    #[test]
+    fn focus_loss_releases_and_focus_gain_recaptures_without_a_click() {
+        let (mut app, window) = cursor_test_app();
+        app.update();
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("primary window")
+            .focused = false;
+        app.world_mut().write_message(WindowFocused {
+            window,
+            focused: false,
+        });
+        app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::None, true));
+
+        // Remaining unfocused must not re-confine the pointer on the next frame.
+        app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::None, true));
+
+        app.world_mut()
+            .entity_mut(window)
+            .get_mut::<Window>()
+            .expect("primary window")
+            .focused = true;
+        app.world_mut().write_message(WindowFocused {
+            window,
+            focused: true,
+        });
+        app.update();
+        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::Locked, false));
+    }
+
+    #[derive(Resource, Default)]
+    struct CursorChangeObserved(bool);
+
+    fn observe_cursor_change(
+        cursors: Query<(), (With<PrimaryWindow>, Changed<CursorOptions>)>,
+        mut observed: ResMut<CursorChangeObserved>,
+    ) {
+        observed.0 = !cursors.is_empty();
+    }
+
+    #[test]
+    fn focus_gain_reasserts_an_unchanged_native_grab() {
+        let (mut app, window) = cursor_test_app();
+        app.init_resource::<CursorChangeObserved>()
+            .add_systems(Update, observe_cursor_change.after(sync_cursor));
+        app.update();
+
+        app.world_mut().resource_mut::<CursorChangeObserved>().0 = false;
+        app.update();
+        assert!(
+            !app.world().resource::<CursorChangeObserved>().0,
+            "an idle policy frame rewrote CursorOptions"
+        );
+
+        // The ECS value still says Locked, modelling a compositor that dropped only the
+        // native constraint. The focus event must nevertheless mark CursorOptions changed
+        // so Bevy's window backend attempts the grab again.
+        app.world_mut().write_message(WindowFocused {
+            window,
+            focused: true,
+        });
+        app.update();
+        assert!(app.world().resource::<CursorChangeObserved>().0);
         let cursor = app
             .world_mut()
             .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
@@ -1893,25 +2019,5 @@ mod tests {
             .expect("one primary cursor");
         assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
         assert!(!cursor.visible);
-
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
-        app.update();
-        let cursor = app
-            .world_mut()
-            .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
-            .single(app.world())
-            .expect("one primary cursor");
-        assert_eq!(cursor.grab_mode, CursorGrabMode::None);
-        assert!(cursor.visible);
-
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
-        app.update();
-        let cursor = app
-            .world_mut()
-            .query_filtered::<&CursorOptions, With<PrimaryWindow>>()
-            .single(app.world())
-            .expect("one primary cursor");
-        assert_eq!(cursor.grab_mode, CursorGrabMode::None);
-        assert!(cursor.visible);
     }
 }

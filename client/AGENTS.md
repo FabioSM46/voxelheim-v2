@@ -2215,11 +2215,14 @@ Recorded here so the next reader does not mistake them for oversights:
   *is* superseded by a later edit to the same voxel, so coalescing by coordinate loses nothing,
   where a refusal would. Asking the server to slow down is the other candidate and it is a
   protocol change. Stated rather than traded away, in `DecodeQueue::admit` as well as here.
-- **The pointer is not captured, so turning stops when it leaves the window.** Mouse motion drives
-  the look state while the pointer is over the window and nothing recentres it. Cursor capture is
-  fiddly and platform-specific — `CursorGrabMode::Locked` is unsupported on X11, and `Confined`
-  stops generating motion at the window edge — so it belongs with the camera-control issue rather
-  than as a drive-by here.
+- **The pointer has three states, and focus loss is always the released one.** A focused live
+  session uses `Locked` and hides the pointer for play and chat; panels keep it visible under
+  `Confined`; login, server-list, disconnect and every unfocused window use `None`. A
+  `WindowFocused` transition writes that answer even when `CursorOptions` already contains it,
+  because the compositor can drop a native constraint without changing Bevy's component. Bevy
+  falls `Locked` back to `Confined` on X11, where true locking is unsupported; that platform
+  distinction is why headless policy tests are evidence about ECS state and not about native
+  multi-monitor behaviour.
 - **Two views, and the local player's body is drawn in both and hidden in one.** First person is
   what the game is played in and the camera is the eye there, so the body is `Visibility::Hidden` —
   a body at the eye fills the screen with the inside of the player's own head. F5 swaps to a
