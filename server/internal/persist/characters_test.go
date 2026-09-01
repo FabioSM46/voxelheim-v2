@@ -490,8 +490,8 @@ func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T)
 	if version, ours := recordVersion(filepath.Join(players, name)); !ours || version != StoreVersion {
 		t.Errorf("the replacement record reports version %d (ours %v), want %d", version, ours, StoreVersion)
 	}
-	if len(migrated) != len(old)+slotSize+4 {
-		t.Errorf("the migrated record is %d bytes, want v7's %d plus one slot and the purse", len(migrated), len(old))
+	if len(migrated) != len(old)+slotSize+4+1 {
+		t.Errorf("the migrated record is %d bytes, want v7's %d plus one slot, the purse and the learned set", len(migrated), len(old))
 	}
 	preservedCurrent, err := os.ReadFile(filepath.Join(players, currentName))
 	if err != nil {
@@ -501,8 +501,8 @@ func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T)
 		t.Error("the current record changed while it was copied into the replacement")
 	}
 	aside := store.SetAside()
-	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"9.") {
-		t.Errorf("the v7 directory was kept as %q, want players.pre-v9.<timestamp>", base)
+	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"10.") {
+		t.Errorf("the v7 directory was kept as %q, want players.pre-v10.<timestamp>", base)
 	}
 	kept, err := os.ReadFile(filepath.Join(aside, name))
 	if err != nil {

@@ -399,12 +399,13 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 		LastSeen: time.Unix(1_700_000_000, 0).UTC(),
 		// Values a float32 could not hold exactly, so a narrowing anywhere in the
 		// format shows up as a failure rather than as a rounding nobody notices.
-		Pos:        [3]float64{-1234.5678901234567, 70.100000000000001, 4096.3333333333333},
-		Yaw:        -2.7182818284590452,
-		Health:     61,
-		Hunger:     37,
-		Experience: 1234,
-		Silver:     987654,
+		Pos:           [3]float64{-1234.5678901234567, 70.100000000000001, 4096.3333333333333},
+		Yaw:           -2.7182818284590452,
+		Health:        61,
+		Hunger:        37,
+		Experience:    1234,
+		Silver:        987654,
+		LearnedMounts: 0b101,
 	}
 	// Every shape a slot can take: a worn durable item, a partial stack, the last slot
 	// occupied, and empties everywhere else.
@@ -441,6 +442,9 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	if got.Silver != want.Silver {
 		t.Errorf("Silver = %d, want %d", got.Silver, want.Silver)
 	}
+	if got.LearnedMounts != want.LearnedMounts {
+		t.Errorf("LearnedMounts = %#02x, want %#02x", got.LearnedMounts, want.LearnedMounts)
+	}
 	if got.Slots != want.Slots {
 		for slot := range want.Slots {
 			if got.Slots[slot] != want.Slots[slot] {
@@ -474,14 +478,14 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V9 keeps the v8 slot table and appends the purse before the variable name. Pin
+// V10 keeps the v9 purse and appends the learned-mount byte before the variable name. Pin
 // every relationship and the bytes themselves: changing only the struct field would
 // otherwise round trip through an equally wrong encoder and decoder.
-func TestV9StoresSilverAfterFortySlots(t *testing.T) {
+func TestV10StoresLearnedMountsAfterSilver(t *testing.T) {
 	t.Parallel()
 
-	if StoreVersion != 9 {
-		t.Fatalf("StoreVersion = %d, want 9", StoreVersion)
+	if StoreVersion != 10 {
+		t.Fatalf("StoreVersion = %d, want 10", StoreVersion)
 	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
@@ -498,8 +502,14 @@ func TestV9StoresSilverAfterFortySlots(t *testing.T) {
 	if offSilver != offSlots+slotsSize {
 		t.Fatalf("offSilver = %d, want offSlots+slotsSize = %d", offSilver, offSlots+slotsSize)
 	}
+	if offLearnedMounts != offSilver+4 {
+		t.Fatalf("offLearnedMounts = %d, want offSilver+4 = %d", offLearnedMounts, offSilver+4)
+	}
+	if offNameLen != offLearnedMounts+1 {
+		t.Fatalf("offNameLen = %d, want offLearnedMounts+1 = %d", offNameLen, offLearnedMounts+1)
+	}
 
-	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0, Silver: 0x12345678}
+	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0, Silver: 0x12345678, LearnedMounts: 0b101}
 	rec.Slots[0] = protocol.InventoryStack{ItemID: 0x9abc, Count: 1}
 	encoded := encodeRecord(rec)
 	if got := binary.LittleEndian.Uint16(encoded[offHealth : offHealth+2]); got != rec.Health {
@@ -517,18 +527,23 @@ func TestV9StoresSilverAfterFortySlots(t *testing.T) {
 	if got := binary.LittleEndian.Uint32(encoded[offSilver : offSilver+4]); got != rec.Silver {
 		t.Errorf("silver bytes = %#x, want %#x", got, rec.Silver)
 	}
+	if got := encoded[offLearnedMounts]; got != rec.LearnedMounts {
+		t.Errorf("learned-mount bytes = %#02x, want %#02x", got, rec.LearnedMounts)
+	}
 }
 
-// There is deliberately no v8 migration. It may hold silver in an inventory slot, so
-// the bytes stay with their old world rather than being repaired into the purse.
-func TestV9RefusesAV8RecordRatherThanMigratingIt(t *testing.T) {
+// There is deliberately no v9 migration. It has no learned-set byte, so the bytes stay
+// with their old world rather than an empty set being invented.
+func TestV10RefusesAV9RecordRatherThanMigratingIt(t *testing.T) {
 	t.Parallel()
 
-	old := encodeRecord(Record{Health: 100, Hunger: 100, Experience: 200})
-	binary.LittleEndian.PutUint32(old[4:8], 8)
+	current := encodeRecord(Record{Health: 100, Hunger: 100, Experience: 200})
+	old := append([]byte{}, current[:offLearnedMounts]...)
+	old = append(old, current[offLearnedMounts+1:]...)
+	binary.LittleEndian.PutUint32(old[4:8], 9)
 	world.PutChecksum(old)
 	if _, err := decodeRecord(old); !errors.Is(err, world.ErrCorruptStore) {
-		t.Fatalf("decodeRecord(v8) = %v, want ErrCorruptStore", err)
+		t.Fatalf("decodeRecord(v9) = %v, want ErrCorruptStore", err)
 	}
 }
 

@@ -1062,6 +1062,16 @@ func TestServeEndsAnIdleSessionCleanly(t *testing.T) {
 	if got := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0).PayloadType(); got != vnet.PayloadInventoryState {
 		t.Fatalf("second reply is %s, want %s", got, vnet.PayloadInventoryState)
 	}
+	learnedFrame := vnet.GetRootAsEnvelope(nextFrame(t, conn), 0)
+	if got := learnedFrame.PayloadType(); got != vnet.PayloadLearnedMounts {
+		t.Fatalf("third reply is %s, want %s", got, vnet.PayloadLearnedMounts)
+	}
+	table := payloadTable(t, learnedFrame)
+	learned := new(vnet.LearnedMounts)
+	learned.Init(table.Bytes, table.Pos)
+	if learned.MountsLength() != 0 {
+		t.Errorf("a fresh character was sent %d learned mounts, want none", learned.MountsLength())
+	}
 	if got := sim.Count(); got != 1 {
 		t.Fatalf("simulation holds %d players after the handshake, want 1", got)
 	}

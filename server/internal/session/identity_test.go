@@ -139,12 +139,13 @@ func verifierAt(t *testing.T, now time.Time) *session.Verifier {
 // fills all three from its own index and ignores what a caller puts here.
 func livingRecord() persist.Record {
 	return persist.Record{
-		LastSeen:   time.Unix(1, 0),
-		Pos:        [3]float64{0.5, 64, 0.5},
-		Health:     game.PlayerMaxHealth,
-		Hunger:     41,
-		Experience: 725,
-		Silver:     2468,
+		LastSeen:      time.Unix(1, 0),
+		Pos:           [3]float64{0.5, 64, 0.5},
+		Health:        game.PlayerMaxHealth,
+		Hunger:        41,
+		Experience:    725,
+		Silver:        2468,
+		LearnedMounts: 0b101,
 	}
 }
 
@@ -260,6 +261,9 @@ func TestResolveAPlayer(t *testing.T) {
 		}
 		if resolved.Life.Silver != 2468 {
 			t.Errorf("the resumed life has silver %d, want the stored 2468", resolved.Life.Silver)
+		}
+		if resolved.Life.LearnedMounts != game.LearnedMounts(0b101) {
+			t.Errorf("the resumed life has learned mounts %#02x, want 0x05", resolved.Life.LearnedMounts)
 		}
 		if resolved.ID != testPlayerID(account) {
 			t.Error("a resumed player has a different player id")
