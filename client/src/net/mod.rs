@@ -72,8 +72,9 @@ pub use codec::{
     WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
-#[allow(unused_imports)]
-pub use codec::{CastKind, CastState, LearnedMounts, MountKind, MountRequest, MountState};
+#[cfg(test)]
+pub use codec::MountState;
+pub use codec::{CastKind, CastState, LearnedMounts, MountKind, MountRequest};
 // V28's player-trade protocol surface, ahead of the presentation consumer. The
 // authoritative state is decoded here; no client system decides a trade outcome.
 #[allow(unused_imports)]
@@ -104,6 +105,7 @@ pub use codec::{
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
 pub use codec::encode_block_request;
+pub use codec::encode_mount_request;
 #[allow(unused_imports)] // V28 outbound encoder precedes the player-trade UI.
 pub use codec::encode_player_trade_request;
 #[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
@@ -519,6 +521,20 @@ impl InventoryInbox {
     #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.0.len()
+    }
+}
+
+/// Complete learned-mount sets awaiting the player presentation.
+#[derive(Resource, Debug, Default)]
+pub struct LearnedMountsInbox(Vec<LearnedMounts>);
+
+impl LearnedMountsInbox {
+    pub fn take(&mut self) -> Vec<LearnedMounts> {
+        std::mem::take(&mut self.0)
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -1168,6 +1184,7 @@ impl Plugin for NetPlugin {
         app.init_resource::<WorldInbox>()
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
+            .init_resource::<LearnedMountsInbox>()
             .init_resource::<LootInbox>()
             .init_resource::<VendorInbox>()
             .init_resource::<MobHitInbox>()
@@ -1757,6 +1774,7 @@ struct Inboxes<'w> {
     world: ResMut<'w, WorldInbox>,
     snapshots: ResMut<'w, SnapshotInbox>,
     inventories: ResMut<'w, InventoryInbox>,
+    learned_mounts: ResMut<'w, LearnedMountsInbox>,
     // Optional only for focused boundary tests that install the drain directly.
     loot: Option<ResMut<'w, LootInbox>>,
     // Optional only for focused boundary tests that install the drain directly.
@@ -1864,6 +1882,7 @@ fn drain_session_events(
                 // from the connection it replaced; answers later in this same ordered
                 // drain belong to the new session and are queued normally.
                 inboxes.wards.clear();
+                inboxes.learned_mounts.clear();
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
                 // later line reaches for `{params:?}`.
@@ -1912,6 +1931,7 @@ fn drain_session_events(
 
             // Complete state, queued for the player module rather than interpreted here.
             Ok(SessionEvent::Inventory(inventory)) => inboxes.inventories.0.push(inventory),
+            Ok(SessionEvent::LearnedMounts(mounts)) => inboxes.learned_mounts.0.push(mounts),
 
             Ok(SessionEvent::LootState(state)) => {
                 if let Some(loot) = inboxes.loot.as_deref_mut() {
@@ -4982,6 +5002,7 @@ mod tests {
             .init_resource::<WorldInbox>()
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
+            .init_resource::<LearnedMountsInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()

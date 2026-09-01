@@ -645,6 +645,18 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::NotAVendor
         | RefusalReason::NotEnoughSilver
         | RefusalReason::VendorDoesNotWant
+        | RefusalReason::MountNotLearned
+        | RefusalReason::AlreadyMounted
+        | RefusalReason::MountNotGrounded
+        | RefusalReason::MountIndoors
+        | RefusalReason::MountLowCeiling
+        | RefusalReason::CastAlreadyInProgress
+        | RefusalReason::CastInterruptedByDamage
+        | RefusalReason::CastInterruptedByMovement
+        | RefusalReason::CastInterruptedByJump
+        | RefusalReason::CastInterruptedByDeath
+        | RefusalReason::ActionForbiddenWhileMounted
+        | RefusalReason::MountAlreadyLearned
         // V28's player-trade reasons are decoded at the protocol boundary, but their
         // presentation belongs to the later player-trade UI. They remain silent here.
         | RefusalReason::AlreadyTrading
@@ -710,6 +722,42 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     };
 
     match (refused.action, refused.reason) {
+        (RefusedAction::Mount, RefusalReason::MountNotLearned) => {
+            Some("Cannot call mount: that mount is not learned".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::AlreadyMounted) => {
+            Some("Cannot call mount: you are already mounted".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::MountNotGrounded) => {
+            Some("Cannot call mount: cast interrupted when you left the ground".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::MountIndoors) => {
+            Some("Cannot call mount indoors".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::MountLowCeiling) => {
+            Some("Cannot call mount: the ceiling is too low".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::CastAlreadyInProgress) => {
+            Some("Cannot call mount: a cast is already in progress".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::CastInterruptedByDamage) => {
+            Some("Cannot call mount: cast interrupted by damage".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::CastInterruptedByMovement) => {
+            Some("Cannot call mount: cast interrupted by movement".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::CastInterruptedByJump) => {
+            Some("Cannot call mount: cast interrupted by jumping".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::CastInterruptedByDeath) => {
+            Some("Cannot call mount: cast interrupted by death".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::ActionForbiddenWhileMounted) => {
+            Some("Cannot act while mounted".to_owned())
+        }
+        (RefusedAction::Mount, RefusalReason::MountAlreadyLearned) => {
+            Some("Cannot learn mount: that mount is already learned".to_owned())
+        }
         (
             RefusedAction::EditBlock
             | RefusedAction::MineBlock
@@ -1300,7 +1348,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 35] = [
+    const EVERY_REASON: [RefusalReason; 47] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1335,6 +1383,19 @@ mod tests {
         RefusalReason::VendorDoesNotWant,
         // V26's one warded-ground reason.
         RefusalReason::Warded,
+        // V27's mount and cast reasons.
+        RefusalReason::MountNotLearned,
+        RefusalReason::AlreadyMounted,
+        RefusalReason::MountNotGrounded,
+        RefusalReason::MountIndoors,
+        RefusalReason::MountLowCeiling,
+        RefusalReason::CastAlreadyInProgress,
+        RefusalReason::CastInterruptedByDamage,
+        RefusalReason::CastInterruptedByMovement,
+        RefusalReason::CastInterruptedByJump,
+        RefusalReason::CastInterruptedByDeath,
+        RefusalReason::ActionForbiddenWhileMounted,
+        RefusalReason::MountAlreadyLearned,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1350,6 +1411,18 @@ mod tests {
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
             RefusalReason::NoAmmunition => RefusedAction::Attack,
+            RefusalReason::MountNotLearned
+            | RefusalReason::AlreadyMounted
+            | RefusalReason::MountNotGrounded
+            | RefusalReason::MountIndoors
+            | RefusalReason::MountLowCeiling
+            | RefusalReason::CastAlreadyInProgress
+            | RefusalReason::CastInterruptedByDamage
+            | RefusalReason::CastInterruptedByMovement
+            | RefusalReason::CastInterruptedByJump
+            | RefusalReason::CastInterruptedByDeath
+            | RefusalReason::ActionForbiddenWhileMounted
+            | RefusalReason::MountAlreadyLearned => RefusedAction::Mount,
             // Their sentences live behind a marker action, so a placement action here
             // would sweep them as silent and pin the opposite of what is true.
             RefusalReason::TooManyMarkers
@@ -1385,14 +1458,13 @@ mod tests {
     /// in the language makes that list complete: a `[RefusalReason; N]` compiles perfectly
     /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
     /// V24 and again in V25, and both times every sweep below went on passing over a
-    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V27 reserves
-    /// twelve stable reasons and V28 five player-trading reasons whose consumers belong
-    /// to dependent client parts.
+    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V28's five
+    /// player-trading reasons belong to a dependent client part.
     #[test]
     fn every_reason_is_in_the_sweep() {
         assert_eq!(
             EVERY_REASON.len(),
-            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 17,
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 5,
             "a reason this UI consumes is missing from EVERY_REASON"
         );
 

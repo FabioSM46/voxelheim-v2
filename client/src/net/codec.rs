@@ -450,10 +450,6 @@ impl MountKind {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "the V27 encoder is reserved before its mount-menu consumer"
-    )]
     fn wire(self) -> fb::MountKind {
         match self {
             Self::BlackHorse => fb::MountKind::BlackHorse,
@@ -1369,6 +1365,8 @@ pub enum RefusedAction {
     /// [`Self::MineBlock`], which names the same action and is the value a shipped server
     /// may already have sent: both stay, and a receiver names both.
     Mine,
+    /// Beginning or interrupting the authoritative mount cast.
+    Mount,
     /// A player trade refusal, distinct from vendor [`Self::Trade`].
     PlayerTrade,
 }
@@ -1395,6 +1393,7 @@ impl RefusedAction {
             fb::RefusedAction::Trade => Self::Trade,
             fb::RefusedAction::Edit => Self::Edit,
             fb::RefusedAction::Mine => Self::Mine,
+            fb::RefusedAction::Mount => Self::Mount,
             fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
             _ => Self::Unknown,
         }
@@ -1454,6 +1453,18 @@ pub enum RefusalReason {
     /// over: an answer that did would let a client learn who has claimed ground by poking
     /// at it.
     Warded,
+    MountNotLearned,
+    AlreadyMounted,
+    MountNotGrounded,
+    MountIndoors,
+    MountLowCeiling,
+    CastAlreadyInProgress,
+    CastInterruptedByDamage,
+    CastInterruptedByMovement,
+    CastInterruptedByJump,
+    CastInterruptedByDeath,
+    ActionForbiddenWhileMounted,
+    MountAlreadyLearned,
     AlreadyTrading,
     TradeNotOpen,
     TradeSlotTaken,
@@ -1502,6 +1513,18 @@ impl RefusalReason {
             fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
             fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
             fb::RefusalReason::Warded => Self::Warded,
+            fb::RefusalReason::MountNotLearned => Self::MountNotLearned,
+            fb::RefusalReason::AlreadyMounted => Self::AlreadyMounted,
+            fb::RefusalReason::MountNotGrounded => Self::MountNotGrounded,
+            fb::RefusalReason::MountIndoors => Self::MountIndoors,
+            fb::RefusalReason::MountLowCeiling => Self::MountLowCeiling,
+            fb::RefusalReason::CastAlreadyInProgress => Self::CastAlreadyInProgress,
+            fb::RefusalReason::CastInterruptedByDamage => Self::CastInterruptedByDamage,
+            fb::RefusalReason::CastInterruptedByMovement => Self::CastInterruptedByMovement,
+            fb::RefusalReason::CastInterruptedByJump => Self::CastInterruptedByJump,
+            fb::RefusalReason::CastInterruptedByDeath => Self::CastInterruptedByDeath,
+            fb::RefusalReason::ActionForbiddenWhileMounted => Self::ActionForbiddenWhileMounted,
+            fb::RefusalReason::MountAlreadyLearned => Self::MountAlreadyLearned,
             fb::RefusalReason::AlreadyTrading => Self::AlreadyTrading,
             fb::RefusalReason::TradeNotOpen => Self::TradeNotOpen,
             fb::RefusalReason::TradeSlotTaken => Self::TradeSlotTaken,
@@ -6218,10 +6241,6 @@ pub fn encode_leave_cancel_request() -> Vec<u8> {
 }
 
 /// Builds one request to begin the server-owned cast for a learned mount.
-#[allow(
-    dead_code,
-    reason = "the V27 encoder is reserved before its mount-menu consumer"
-)]
 pub fn encode_mount_request(request: &MountRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let payload = fb::MountRequest::create(
@@ -8798,9 +8817,6 @@ mod tests {
         for (action, reason) in [
             (fb::RefusedAction::Unknown, fb::RefusalReason::Unknown),
             (fb::RefusedAction(200), fb::RefusalReason(200)),
-            // V27 reserves these wire members, but their application consumer belongs to
-            // a later UI part. Until then both fail closed to `Unknown`.
-            (fb::RefusedAction::Mount, fb::RefusalReason::MountNotLearned),
         ] {
             assert_eq!(
                 decode(&encode_action_refused(action, reason, None)),
