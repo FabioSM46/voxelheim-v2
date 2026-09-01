@@ -209,6 +209,9 @@ func TestCancelledPlayerTradeEnforcesTheStablePairCooldown(t *testing.T) {
 	}
 	h.advance(int(h.sim.tradeReopenTicks))
 	h.mustAccept(h.players[0], protocol.PlayerTradeRequest{Action: vnet.PlayerTradeActionOpen, TargetEntityID: h.players[1].entityID})
+	if len(h.sim.tradeCooldowns) != 0 {
+		t.Fatalf("expired cooldowns remain: %+v", h.sim.tradeCooldowns)
+	}
 }
 
 func TestPlayerTradeOffersSnapshotSlotsAndResetBothConfirmations(t *testing.T) {
@@ -269,6 +272,9 @@ func TestPlayerTradeOfferRefusalsChangeNothing(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if test.name == "stale revision" {
+				h.players[0].trade.dirty[0] = false
+			}
 			if test.req.Revision == 0 {
 				test.req.Revision = revision
 			}
@@ -278,6 +284,9 @@ func TestPlayerTradeOfferRefusalsChangeNothing(t *testing.T) {
 			}
 			if got := h.revision(); got != revision {
 				t.Fatalf("revision = %d, want unchanged %d", got, revision)
+			}
+			if test.name == "stale revision" && !h.players[0].trade.dirty[0] {
+				t.Fatal("stale request did not queue the current state for resynchronization")
 			}
 		})
 	}

@@ -90,18 +90,19 @@ func (p *Player) PlayerTrade(req protocol.PlayerTradeRequest) (vnet.RefusalReaso
 	if p.trade != trade {
 		return vnet.RefusalReasonTradeNotOpen, errors.New("the player trade is no longer open")
 	}
+	side := trade.side(p)
+	if side < 0 {
+		return vnet.RefusalReasonTradeNotOpen, errors.New("the player is not a participant in this trade")
+	}
 	if req.Action == vnet.PlayerTradeActionCancel {
 		p.closePlayerTradeLocked(vnet.PlayerTradeCloseReasonCancelled)
 		return vnet.RefusalReasonUnknown, nil
 	}
 	if req.Revision != trade.revision {
+		trade.dirty[side] = true
 		return vnet.RefusalReasonStaleRevision, fmt.Errorf("player-trade revision %d is not current revision %d", req.Revision, trade.revision)
 	}
 
-	side := trade.side(p)
-	if side < 0 {
-		return vnet.RefusalReasonTradeNotOpen, errors.New("the player is not a participant in this trade")
-	}
 	switch req.Action {
 	case vnet.PlayerTradeActionSetItem:
 		return p.setPlayerTradeItemLocked(trade, side, req.TradeSlot, req.PackSlot)
@@ -143,11 +144,13 @@ func (p *Player) openPlayerTradeLocked(targetID uint64) (vnet.RefusalReason, err
 		return vnet.RefusalReasonNoSuchPlayer, fmt.Errorf("entity %d is not an available trade partner", targetID)
 	}
 	pair := orderedPlayerTradePair(p.characterID, target.characterID)
-	if expiry, cooling := p.sim.tradeCooldowns[pair]; cooling {
-		if p.sim.currentTick < expiry {
-			return vnet.RefusalReasonTradeCooldown, errors.New("this pair recently cancelled a trade")
+	for held, expiry := range p.sim.tradeCooldowns {
+		if p.sim.currentTick >= expiry {
+			delete(p.sim.tradeCooldowns, held)
 		}
-		delete(p.sim.tradeCooldowns, pair)
+	}
+	if expiry, cooling := p.sim.tradeCooldowns[pair]; cooling {
+		return vnet.RefusalReasonTradeCooldown, fmt.Errorf("this pair cannot trade again before tick %d", expiry)
 	}
 
 	trade := &playerTrade{
