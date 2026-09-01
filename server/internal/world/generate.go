@@ -445,7 +445,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // source pointing across their shared face paints the fall. Terrain height and river
 // sources stay byte-identical, but flowing-water voxels above lower terraces change,
 // so stored deltas need the new generated base.
-const WorldgenVersion uint32 = 21
+// 21 → 22: #712 adds the capital's stable and widens its three concentric layout
+// radii to hold the nineteen-block paddock with clearance. Villages and terrain beyond
+// a capital's settlement reach stay byte-identical; the capital plateau, blend and
+// building voxels change, so stored deltas there need the new generated base.
+const WorldgenVersion uint32 = 22
 
 // Generate builds the chunk at coord for seed.
 //
