@@ -1494,7 +1494,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			Drops:    visibleDrops,
 			// The newest snapshot is the complete set of what this session can see. A
 			// mob or corpse that stops appearing has stopped existing for this viewer —
-			// because it expired, emptied, or moved out of the cube — and the client despawns it
+			// because it expired or moved out of the cube — and the client despawns it
 			// rather than inferring which.
 			Mobs: visibleMobs,
 			// The same complete-existence-set rule. A structure that stops appearing has

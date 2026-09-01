@@ -236,9 +236,14 @@ func TestBossCorpseFreezesPersonalLootAndIsolatesEveryContainer(t *testing.T) {
 	}
 	h.sim.mu.Lock()
 	_, corpseStillExists = h.sim.corpses[id]
+	leaderCanOpen := leader.canOpenCorpseLocked(c)
+	eligibleCanOpen := reconnected.canOpenCorpseLocked(c)
 	h.sim.mu.Unlock()
-	if corpseStillExists {
-		t.Fatal("corpse survived after every personal container became empty")
+	if !corpseStillExists {
+		t.Fatal("corpse disappeared after every personal container became empty")
+	}
+	if leaderCanOpen || eligibleCanOpen {
+		t.Fatalf("empty boss corpse remained openable by leader=%v eligible=%v", leaderCanOpen, eligibleCanOpen)
 	}
 }
 

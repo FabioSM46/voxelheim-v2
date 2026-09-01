@@ -168,9 +168,9 @@ func TestCorpseAccessBelongsToFirstTapAndSurvivesReconnect(t *testing.T) {
 	}
 }
 
-func TestLootTakeIsWholeAtomicAndEmptiesCorpseImmediately(t *testing.T) {
+func TestLootTakeIsWholeAtomicAndLeavesAnInertCorpseUntilExpiry(t *testing.T) {
 	t.Parallel()
-	h, player, _, id := armedAgainst(t, vnet.MobKindVargr, [3]float64{0.5, 64, -1.5})
+	h, player, out, id := armedAgainst(t, vnet.MobKindVargr, [3]float64{0.5, 64, -1.5})
 	h.killWithTheStarterBlade(player, id)
 	if reason, err := player.OpenLoot(protocol.LootOpenRequest{CorpseID: id, ClientTick: 1}); err != nil {
 		t.Fatalf("open = %s, %v", reason, err)
@@ -196,13 +196,60 @@ func TestLootTakeIsWholeAtomicAndEmptiesCorpseImmediately(t *testing.T) {
 		t.Fatalf("take = %s, %v", reason, err)
 	}
 	h.sim.mu.Lock()
-	_, exists := h.sim.corpses[id]
+	c := h.sim.corpses[id]
+	if c == nil {
+		h.sim.mu.Unlock()
+		t.Fatal("taking the final entry removed the corpse")
+	}
+	expiresTick := c.expiresTick
+	entries := len(c.container.entries)
 	h.sim.mu.Unlock()
-	if exists {
-		t.Error("empty corpse was not removed immediately")
+	if entries != 0 {
+		t.Fatalf("emptied corpse = %#v with %d entries; want a surviving empty body", c, entries)
 	}
 	if reason, err := player.TakeLoot(protocol.LootTakeRequest{CorpseID: id, EntryID: 1, Revision: 1, ClientTick: 3}); err == nil || reason != vnet.RefusalReasonCorpseUnavailable {
 		t.Fatalf("duplicate take = %s, %v; want unavailable", reason, err)
+	}
+
+	h.step()
+	snapshot := newestSnapshot(t, out)
+	if got := snapshot.AccessibleLootCorpsesLength(); got != 0 {
+		t.Fatalf("empty corpse remained in %d accessible-corpse entries", got)
+	}
+	var bodyStillDrawn bool
+	for _, mob := range newestSnapshotMobs(t, out) {
+		if mob.EntityID == id {
+			bodyStillDrawn = mob.Action == vnet.MobActionCorpse
+		}
+	}
+	if !bodyStillDrawn {
+		t.Fatal("empty corpse left the authoritative mob snapshot")
+	}
+	h.sim.mu.Lock()
+	openLootID := player.openLootID
+	h.sim.mu.Unlock()
+	if openLootID != 0 {
+		t.Fatalf("empty corpse remained open as %d", openLootID)
+	}
+	h.step()
+	_, _, closed := lootFrames(t, out)
+	if len(closed) != 1 || closed[0] != id {
+		t.Fatalf("loot closures = %v, want the emptied corpse once", closed)
+	}
+
+	h.advance(int(expiresTick-h.tick) - 1)
+	h.sim.mu.Lock()
+	_, beforeExpiry := h.sim.corpses[id]
+	h.sim.mu.Unlock()
+	if !beforeExpiry {
+		t.Fatal("empty corpse disappeared before its original deadline")
+	}
+	h.step()
+	h.sim.mu.Lock()
+	_, afterExpiry := h.sim.corpses[id]
+	h.sim.mu.Unlock()
+	if afterExpiry {
+		t.Fatal("empty corpse survived its original deadline")
 	}
 }
 
