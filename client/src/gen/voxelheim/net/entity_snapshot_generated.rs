@@ -41,6 +41,8 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_PROJECTILES: ::flatbuffers::VOffsetT = 30;
     pub const VT_BLOCKING_PLAYERS: ::flatbuffers::VOffsetT = 32;
     pub const VT_WEATHER: ::flatbuffers::VOffsetT = 34;
+    pub const VT_MOUNTS: ::flatbuffers::VOffsetT = 36;
+    pub const VT_SELF_CAST: ::flatbuffers::VOffsetT = 38;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -58,6 +60,12 @@ impl<'a> EntitySnapshot<'a> {
     ) -> ::flatbuffers::WIPOffset<EntitySnapshot<'bldr>> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.self_cast {
+            builder.add_self_cast(x);
+        }
+        if let Some(x) = args.mounts {
+            builder.add_mounts(x);
+        }
         if let Some(x) = args.weather {
             builder.add_weather(x);
         }
@@ -114,6 +122,8 @@ impl<'a> EntitySnapshot<'a> {
                 .unwrap()
         }
     }
+    /// Every member has a non-zero `entity_id`, and no id occurs twice. Sparse vectors
+    /// such as `mounts` key back to this one complete player set.
     #[inline]
     pub fn entities(&self) -> Option<::flatbuffers::Vector<'a, EntityState>> {
         // Safety:
@@ -468,6 +478,34 @@ impl<'a> EntitySnapshot<'a> {
                 .get::<WeatherState>(EntitySnapshot::VT_WEATHER, None)
         }
     }
+    /// Mounted players in `entities`, keyed by `MountState.entity_id`. Sparse and
+    /// complete: absence and empty both mean nobody in this snapshot is mounted.
+    #[inline]
+    pub fn mounts(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MountState<'a>>>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MountState>>,
+            >>(EntitySnapshot::VT_MOUNTS, None)
+        }
+    }
+    /// This recipient's own cast, when one is running. A later snapshot supersedes it.
+    #[inline]
+    pub fn self_cast(&self) -> Option<CastState<'a>> {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<CastState>>(
+                EntitySnapshot::VT_SELF_CAST,
+                None,
+            )
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -493,6 +531,8 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ProjectileState>>>("projectiles", Self::VT_PROJECTILES, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, u64>>>("blocking_players", Self::VT_BLOCKING_PLAYERS, false)?
      .visit_field::<WeatherState>("weather", Self::VT_WEATHER, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<MountState>>>>("mounts", Self::VT_MOUNTS, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<CastState>>("self_cast", Self::VT_SELF_CAST, false)?
      .finish();
         Ok(())
     }
@@ -528,6 +568,12 @@ pub struct EntitySnapshotArgs<'a> {
     pub projectiles: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, ProjectileState>>>,
     pub blocking_players: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u64>>>,
     pub weather: Option<&'a WeatherState>,
+    pub mounts: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<MountState<'a>>>,
+        >,
+    >,
+    pub self_cast: Option<::flatbuffers::WIPOffset<CastState<'a>>>,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -549,6 +595,8 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             projectiles: None,
             blocking_players: None,
             weather: None,
+            mounts: None,
+            self_cast: None,
         }
     }
 }
@@ -700,6 +748,24 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
             .push_slot_always::<&WeatherState>(EntitySnapshot::VT_WEATHER, weather);
     }
     #[inline]
+    pub fn add_mounts(
+        &mut self,
+        mounts: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<MountState<'b>>>,
+        >,
+    ) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<_>>(EntitySnapshot::VT_MOUNTS, mounts);
+    }
+    #[inline]
+    pub fn add_self_cast(&mut self, self_cast: ::flatbuffers::WIPOffset<CastState<'b>>) {
+        self.fbb_
+            .push_slot_always::<::flatbuffers::WIPOffset<CastState>>(
+                EntitySnapshot::VT_SELF_CAST,
+                self_cast,
+            );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -737,6 +803,8 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("projectiles", &self.projectiles());
         ds.field("blocking_players", &self.blocking_players());
         ds.field("weather", &self.weather());
+        ds.field("mounts", &self.mounts());
+        ds.field("self_cast", &self.self_cast());
         ds.finish()
     }
 }

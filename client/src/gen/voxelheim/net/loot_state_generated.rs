@@ -9,13 +9,14 @@ pub enum LootStateOffset {}
 ///
 /// A later state for the same corpse supersedes the earlier revision wholesale. The list
 /// is per-recipient: two boss participants may receive different entries for the same corpse
-/// without either learning the other's roll. Empty containers are ended with `LootClosed`
-/// rather than represented by an empty state.
+/// without either learning the other's roll. A container with neither entries nor silver is
+/// ended with `LootClosed`; an empty entry vector with non-zero silver is a valid currency-only
+/// container.
 ///
 /// Decoder invariants:
 ///   - `corpse_id` is the non-zero `entity_id` of the `MobState` in `Corpse`
 ///   - `revision` is non-zero
-///   - `entries` is present and non-empty
+///   - `entries` is present; it may be empty only when `silver` is non-zero
 ///   - every entry satisfies `LootEntry` and entry ids are unique
 pub struct LootState<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
@@ -35,6 +36,7 @@ impl<'a> LootState<'a> {
     pub const VT_CORPSE_ID: ::flatbuffers::VOffsetT = 4;
     pub const VT_REVISION: ::flatbuffers::VOffsetT = 6;
     pub const VT_ENTRIES: ::flatbuffers::VOffsetT = 8;
+    pub const VT_SILVER: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -52,6 +54,7 @@ impl<'a> LootState<'a> {
     ) -> ::flatbuffers::WIPOffset<LootState<'bldr>> {
         let mut builder = LootStateBuilder::new(_fbb);
         builder.add_corpse_id(args.corpse_id);
+        builder.add_silver(args.silver);
         if let Some(x) = args.entries {
             builder.add_entries(x);
         }
@@ -94,6 +97,14 @@ impl<'a> LootState<'a> {
                 )
         }
     }
+    /// Currency in this recipient's authoritative container. Zero is ordinary.
+    #[inline]
+    pub fn silver(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe { self._tab.get::<u32>(LootState::VT_SILVER, Some(0)).unwrap() }
+    }
 }
 
 impl ::flatbuffers::Verifiable for LootState<'_> {
@@ -110,6 +121,7 @@ impl ::flatbuffers::Verifiable for LootState<'_> {
                 Self::VT_ENTRIES,
                 false,
             )?
+            .visit_field::<u32>("silver", Self::VT_SILVER, false)?
             .finish();
         Ok(())
     }
@@ -118,6 +130,7 @@ pub struct LootStateArgs<'a> {
     pub corpse_id: u64,
     pub revision: u32,
     pub entries: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, LootEntry>>>,
+    pub silver: u32,
 }
 impl<'a> Default for LootStateArgs<'a> {
     #[inline]
@@ -126,6 +139,7 @@ impl<'a> Default for LootStateArgs<'a> {
             corpse_id: 0,
             revision: 0,
             entries: None,
+            silver: 0,
         }
     }
 }
@@ -154,6 +168,10 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LootStateBuilder<'a, 'b, A> {
             .push_slot_always::<::flatbuffers::WIPOffset<_>>(LootState::VT_ENTRIES, entries);
     }
     #[inline]
+    pub fn add_silver(&mut self, silver: u32) {
+        self.fbb_.push_slot::<u32>(LootState::VT_SILVER, silver, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> LootStateBuilder<'a, 'b, A> {
@@ -176,6 +194,7 @@ impl ::core::fmt::Debug for LootState<'_> {
         ds.field("corpse_id", &self.corpse_id());
         ds.field("revision", &self.revision());
         ds.field("entries", &self.entries());
+        ds.field("silver", &self.silver());
         ds.finish()
     }
 }

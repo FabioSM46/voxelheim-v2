@@ -856,6 +856,7 @@ const fn role_label(role: ResidentRole) -> &'static str {
         ResidentRole::Cook => "Cook",
         ResidentRole::Trader => "Trader",
         ResidentRole::Guard => "Guard",
+        ResidentRole::Stablemaster => "Stablemaster",
     }
 }
 

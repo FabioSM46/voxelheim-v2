@@ -31,6 +31,9 @@ const (
 	/// member the receiver cannot name, so a V24 client meeting one would drop the
 	/// session rather than the value. The argument is written out in `common.fbs`.
 	MobKindVillager MobKind = 4
+	/// A horse, whether standing in a stable or named by a player's mount state.
+	/// Appended rather than inserted: an older receiver refuses this unknown kind.
+	MobKindHorse MobKind = 5
 )
 
 var EnumNamesMobKind = map[MobKind]string{
@@ -39,6 +42,7 @@ var EnumNamesMobKind = map[MobKind]string{
 	MobKindVargr:    "Vargr",
 	MobKindDeer:     "Deer",
 	MobKindVillager: "Villager",
+	MobKindHorse:    "Horse",
 }
 
 var EnumValuesMobKind = map[string]MobKind{
@@ -47,6 +51,7 @@ var EnumValuesMobKind = map[string]MobKind{
 	"Vargr":    MobKindVargr,
 	"Deer":     MobKindDeer,
 	"Villager": MobKindVillager,
+	"Horse":    MobKindHorse,
 }
 
 func (v MobKind) String() string {

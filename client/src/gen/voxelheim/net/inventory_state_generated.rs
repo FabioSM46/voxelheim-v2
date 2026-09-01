@@ -67,6 +67,7 @@ impl<'a> InventoryState<'a> {
     pub const VT_STACKS: ::flatbuffers::VOffsetT = 4;
     pub const VT_DURABILITY: ::flatbuffers::VOffsetT = 6;
     pub const VT_MAX_DURABILITY: ::flatbuffers::VOffsetT = 8;
+    pub const VT_SILVER: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -83,6 +84,7 @@ impl<'a> InventoryState<'a> {
         args: &'args InventoryStateArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<InventoryState<'bldr>> {
         let mut builder = InventoryStateBuilder::new(_fbb);
+        builder.add_silver(args.silver);
         if let Some(x) = args.max_durability {
             builder.add_max_durability(x);
         }
@@ -137,6 +139,18 @@ impl<'a> InventoryState<'a> {
                 )
         }
     }
+    /// Currency in this character's authoritative purse. It occupies no slot.
+    #[inline]
+    pub fn silver(&self) -> u32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u32>(InventoryState::VT_SILVER, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for InventoryState<'_> {
@@ -161,6 +175,7 @@ impl ::flatbuffers::Verifiable for InventoryState<'_> {
                 Self::VT_MAX_DURABILITY,
                 false,
             )?
+            .visit_field::<u32>("silver", Self::VT_SILVER, false)?
             .finish();
         Ok(())
     }
@@ -169,6 +184,7 @@ pub struct InventoryStateArgs<'a> {
     pub stacks: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u16>>>,
     pub durability: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u16>>>,
     pub max_durability: Option<::flatbuffers::WIPOffset<::flatbuffers::Vector<'a, u16>>>,
+    pub silver: u32,
 }
 impl<'a> Default for InventoryStateArgs<'a> {
     #[inline]
@@ -177,6 +193,7 @@ impl<'a> Default for InventoryStateArgs<'a> {
             stacks: None,
             durability: None,
             max_durability: None,
+            silver: 0,
         }
     }
 }
@@ -212,6 +229,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> InventoryStateBuilder<'a, 'b,
         );
     }
     #[inline]
+    pub fn add_silver(&mut self, silver: u32) {
+        self.fbb_
+            .push_slot::<u32>(InventoryState::VT_SILVER, silver, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> InventoryStateBuilder<'a, 'b, A> {
@@ -234,6 +256,7 @@ impl ::core::fmt::Debug for InventoryState<'_> {
         ds.field("stacks", &self.stacks());
         ds.field("durability", &self.durability());
         ds.field("max_durability", &self.max_durability());
+        ds.field("silver", &self.silver());
         ds.finish()
     }
 }

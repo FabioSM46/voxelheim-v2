@@ -32,6 +32,10 @@ pub mod voxelheim {
         pub use self::life_state_generated::*;
         mod mob_kind_generated;
         pub use self::mob_kind_generated::*;
+        mod mount_kind_generated;
+        pub use self::mount_kind_generated::*;
+        mod cast_kind_generated;
+        pub use self::cast_kind_generated::*;
         mod mob_action_generated;
         pub use self::mob_action_generated::*;
         mod structure_kind_generated;
@@ -158,6 +162,10 @@ pub mod voxelheim {
         pub use self::item_drop_state_generated::*;
         mod item_drop_durability_generated;
         pub use self::item_drop_durability_generated::*;
+        mod mount_state_generated;
+        pub use self::mount_state_generated::*;
+        mod cast_state_generated;
+        pub use self::cast_state_generated::*;
         mod player_vitals_generated;
         pub use self::player_vitals_generated::*;
         mod mob_state_generated;
@@ -196,6 +204,12 @@ pub mod voxelheim {
         pub use self::trade_request_generated::*;
         mod vendor_closed_generated;
         pub use self::vendor_closed_generated::*;
+        mod learned_mounts_generated;
+        pub use self::learned_mounts_generated::*;
+        mod mount_request_generated;
+        pub use self::mount_request_generated::*;
+        mod dismount_request_generated;
+        pub use self::dismount_request_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

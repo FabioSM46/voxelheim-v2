@@ -1942,13 +1942,15 @@ mod tests {
         // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
         // `CLASSIFICATION` are.
         //
-        // **Two members have no row, for opposite reasons.** `Unknown` is never drawn at
+        // **Three members have no row, for separate reasons.** `Unknown` is never drawn at
         // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
+        // `Horse` is the V27 contract reservation; its renderer belongs to the dependent
+        // mount issue and must not be invented by this contract-only change.
         assert_eq!(
             drawn.len(),
-            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 2,
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 3,
             "a species the contract names is drawn by nobody here, so its box is unchecked"
         );
         for (seen, (kind, _)) in drawn.iter().enumerate() {

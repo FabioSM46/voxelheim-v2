@@ -27,33 +27,36 @@ import "strconv"
 type ResidentRole byte
 
 const (
-	ResidentRoleUnknown   ResidentRole = 0
-	ResidentRoleVillager  ResidentRole = 1
-	ResidentRoleSmith     ResidentRole = 2
-	ResidentRoleCarpenter ResidentRole = 3
-	ResidentRoleCook      ResidentRole = 4
-	ResidentRoleTrader    ResidentRole = 5
-	ResidentRoleGuard     ResidentRole = 6
+	ResidentRoleUnknown      ResidentRole = 0
+	ResidentRoleVillager     ResidentRole = 1
+	ResidentRoleSmith        ResidentRole = 2
+	ResidentRoleCarpenter    ResidentRole = 3
+	ResidentRoleCook         ResidentRole = 4
+	ResidentRoleTrader       ResidentRole = 5
+	ResidentRoleGuard        ResidentRole = 6
+	ResidentRoleStablemaster ResidentRole = 7
 )
 
 var EnumNamesResidentRole = map[ResidentRole]string{
-	ResidentRoleUnknown:   "Unknown",
-	ResidentRoleVillager:  "Villager",
-	ResidentRoleSmith:     "Smith",
-	ResidentRoleCarpenter: "Carpenter",
-	ResidentRoleCook:      "Cook",
-	ResidentRoleTrader:    "Trader",
-	ResidentRoleGuard:     "Guard",
+	ResidentRoleUnknown:      "Unknown",
+	ResidentRoleVillager:     "Villager",
+	ResidentRoleSmith:        "Smith",
+	ResidentRoleCarpenter:    "Carpenter",
+	ResidentRoleCook:         "Cook",
+	ResidentRoleTrader:       "Trader",
+	ResidentRoleGuard:        "Guard",
+	ResidentRoleStablemaster: "Stablemaster",
 }
 
 var EnumValuesResidentRole = map[string]ResidentRole{
-	"Unknown":   ResidentRoleUnknown,
-	"Villager":  ResidentRoleVillager,
-	"Smith":     ResidentRoleSmith,
-	"Carpenter": ResidentRoleCarpenter,
-	"Cook":      ResidentRoleCook,
-	"Trader":    ResidentRoleTrader,
-	"Guard":     ResidentRoleGuard,
+	"Unknown":      ResidentRoleUnknown,
+	"Villager":     ResidentRoleVillager,
+	"Smith":        ResidentRoleSmith,
+	"Carpenter":    ResidentRoleCarpenter,
+	"Cook":         ResidentRoleCook,
+	"Trader":       ResidentRoleTrader,
+	"Guard":        ResidentRoleGuard,
+	"Stablemaster": ResidentRoleStablemaster,
 }
 
 func (v ResidentRole) String() string {

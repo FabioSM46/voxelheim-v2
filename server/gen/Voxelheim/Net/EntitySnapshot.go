@@ -60,6 +60,8 @@ func (rcv *EntitySnapshot) MutateServerTick(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(4, n)
 }
 
+// / Every member has a non-zero `entity_id`, and no id occurs twice. Sparse vectors
+// / such as `mounts` key back to this one complete player set.
 func (rcv *EntitySnapshot) Entities(obj *EntityState, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
 	if o != 0 {
@@ -79,6 +81,8 @@ func (rcv *EntitySnapshot) EntitiesLength() int {
 	return 0
 }
 
+// / Every member has a non-zero `entity_id`, and no id occurs twice. Sparse vectors
+// / such as `mounts` key back to this one complete player set.
 // / Dropped items visible to this session. Empty when there are none; kept
 // / separate from `entities` so the hot player struct remains unchanged.
 func (rcv *EntitySnapshot) Drops(obj *ItemDropState, j int) bool {
@@ -679,8 +683,47 @@ func (rcv *EntitySnapshot) Weather(obj *WeatherState) *WeatherState {
 // / Absence says this server keeps no weather, which a test world and an older server
 // / both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
 // / protocol error. `WeatherState` sets both cases out.
+// / Mounted players in `entities`, keyed by `MountState.entity_id`. Sparse and
+// / complete: absence and empty both mean nobody in this snapshot is mounted.
+func (rcv *EntitySnapshot) Mounts(obj *MountState, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) MountsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Mounted players in `entities`, keyed by `MountState.entity_id`. Sparse and
+// / complete: absence and empty both mean nobody in this snapshot is mounted.
+// / This recipient's own cast, when one is running. A later snapshot supersedes it.
+func (rcv *EntitySnapshot) SelfCast(obj *CastState) *CastState {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(CastState)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+// / This recipient's own cast, when one is running. A later snapshot supersedes it.
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(16)
+	builder.StartObject(18)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -762,6 +805,15 @@ func EntitySnapshotStartBlockingPlayersVector(builder *flatbuffers.Builder, numE
 }
 func EntitySnapshotAddWeather(builder *flatbuffers.Builder, weather flatbuffers.UOffsetT) {
 	builder.PrependStructSlot(15, flatbuffers.UOffsetT(weather), 0)
+}
+func EntitySnapshotAddMounts(builder *flatbuffers.Builder, mounts flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(16, flatbuffers.UOffsetT(mounts), 0)
+}
+func EntitySnapshotStartMountsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func EntitySnapshotAddSelfCast(builder *flatbuffers.Builder, selfCast flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(selfCast), 0)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -602,18 +602,22 @@ struct LootEntry {
 ///
 /// A later state for the same corpse supersedes the earlier revision wholesale. The list
 /// is per-recipient: two boss participants may receive different entries for the same corpse
-/// without either learning the other's roll. Empty containers are ended with `LootClosed`
-/// rather than represented by an empty state.
+/// without either learning the other's roll. A container with neither entries nor silver is
+/// ended with `LootClosed`; an empty entry vector with non-zero silver is a valid currency-only
+/// container.
 ///
 /// Decoder invariants:
 ///   - `corpse_id` is the non-zero `entity_id` of the `MobState` in `Corpse`
 ///   - `revision` is non-zero
-///   - `entries` is present and non-empty
+///   - `entries` is present; it may be empty only when `silver` is non-zero
 ///   - every entry satisfies `LootEntry` and entry ids are unique
 table LootState {
   corpse_id: ulong;
   revision: uint;
   entries: [LootEntry];
+
+  /// Currency in this recipient's authoritative container. Zero is ordinary.
+  silver: uint;
 }
 
 /// Explicitly ends an open loot container. Server -> client.
@@ -847,7 +851,14 @@ enum RefusedAction : ubyte {
   /// the same action. Both members stay: `MineBlock` is the value a shipped server may
   /// already have sent, and renumbering or removing it would relabel every refusal
   /// already on the wire. A receiver names both.
-  Mine = 18
+  Mine = 18,
+
+  // -- V27. The stable's client request, appended so every shipped action keeps its
+  //    number. Dismount is absent deliberately: it is immediate and unconditional, so
+  //    there is no refusal for a client to route.
+
+  /// A `MountRequest` that did not begin or complete its authoritative cast.
+  Mount = 19
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1016,6 +1027,21 @@ enum RefusalReason : ubyte {
   /// wards it can see, and this reason tells it that one of them just refused.
   Warded = 30,
 
+  // -- V27. Mount and cast refusals, appended inside the low group because every one
+  //    answers a well-formed request against authoritative player or world state.
+  MountNotLearned = 31,
+  AlreadyMounted = 32,
+  MountNotGrounded = 33,
+  MountIndoors = 34,
+  MountLowCeiling = 35,
+  CastAlreadyInProgress = 36,
+  CastInterruptedByDamage = 37,
+  CastInterruptedByMovement = 38,
+  CastInterruptedByJump = 39,
+  CastInterruptedByDeath = 40,
+  ActionForbiddenWhileMounted = 41,
+  MountAlreadyLearned = 42,
+
   // -- The request said something no correct client sends. A defect in the peer.
 
   /// The request carried no anchor at all. The origin is a real place, so an absent
@@ -1103,6 +1129,9 @@ table ActionRefused {
 /// `EntitySnapshot.dead_players`, where it costs nothing on the ticks nobody is
 /// dead. A fifth field here would have charged every visible player those bytes on
 /// every tick to say "no", and could never have been taken back.
+///
+/// Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
+/// snapshot, because only that complete vector can answer whether an id occurs twice.
 struct EntityState {
   entity_id: ulong;
   pos: Vec3;
@@ -1215,7 +1244,58 @@ enum MobKind : ubyte {
   /// `ProtocolVersion.Current` on its own: `MobState.kind` is refused when it is a
   /// member the receiver cannot name, so a V24 client meeting one would drop the
   /// session rather than the value. The argument is written out in `common.fbs`.
-  Villager = 4
+  Villager = 4,
+
+  /// A horse, whether standing in a stable or named by a player's mount state.
+  /// Appended rather than inserted: an older receiver refuses this unknown kind.
+  Horse = 5
+}
+
+/// Which learned horse a request, snapshot or stable item names.
+///
+/// The colours differ in presentation only. Zero is the absent-field sentinel and is
+/// refused in every authoritative table that carries it.
+enum MountKind : ubyte {
+  Unknown = 0,
+  BlackHorse = 1,
+  BrownHorse = 2,
+  GreyHorse = 3
+}
+
+/// One visible player's authoritative mount state for this snapshot.
+///
+/// A table in its own vector rather than a field on `EntityState`: that state is an
+/// immutable FlatBuffers struct, and an unmounted player should pay no bytes every tick.
+/// The newest vector is complete, so absence means dismounted.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero and names exactly one player in the same snapshot
+///   - `mount` is a known non-zero member
+///   - no entity id appears twice in `EntitySnapshot.mounts`
+table MountState {
+  entity_id: ulong;
+  mount: MountKind;
+}
+
+/// Which authoritative interruptible action this recipient is casting.
+/// Zero remains the absent-field sentinel as new casters are appended.
+enum CastKind : ubyte {
+  Unknown = 0,
+  Mount = 1
+}
+
+/// This recipient's own authoritative cast in one snapshot.
+///
+/// Per-recipient and superseding: there is no event to replay and no local timer to
+/// complete. Absence means no cast is running. `progress` is a fraction of 255, matching
+/// `MineProgress`; 255 is excluded because a completed cast is no longer running.
+///
+/// Decoder invariants:
+///   - `kind` is a known non-zero member
+///   - `progress` is in `0 .. 254`
+table CastState {
+  kind: CastKind;
+  progress: ubyte;
 }
 
 /// What a mob is doing this tick, as the server's finite-state machine holds it.
@@ -1722,6 +1802,8 @@ table EntitySnapshot {
   /// The server tick this snapshot describes. Monotonic per session.
   server_tick: uint;
 
+  /// Every member has a non-zero `entity_id`, and no id occurs twice. Sparse vectors
+  /// such as `mounts` key back to this one complete player set.
   entities: [EntityState];
 
   /// Dropped items visible to this session. Empty when there are none; kept
@@ -1919,6 +2001,13 @@ table EntitySnapshot {
   /// both legitimately are; a *present* struct carrying `WeatherKind.Unknown` is a
   /// protocol error. `WeatherState` sets both cases out.
   weather: WeatherState;
+
+  /// Mounted players in `entities`, keyed by `MountState.entity_id`. Sparse and
+  /// complete: absence and empty both mean nobody in this snapshot is mounted.
+  mounts: [MountState];
+
+  /// This recipient's own cast, when one is running. A later snapshot supersedes it.
+  self_cast: CastState;
 }
 
 /// Everything the player is carrying, as the server holds it.
@@ -1974,6 +2063,9 @@ table InventoryState {
   /// Maximum durability per slot, slot-indexed. Zero means the slot's contents do not
   /// wear out at all, which is every resource and every empty slot.
   max_durability: [ushort];
+
+  /// Currency in this character's authoritative purse. It occupies no slot.
+  silver: uint;
 }
 
 /// What one player entity looks like and is called. **Server -> client, and static per
@@ -2096,7 +2188,8 @@ enum ResidentRole : ubyte {
   Carpenter = 3,
   Cook = 4,
   Trader = 5,
-  Guard = 6
+  Guard = 6,
+  Stablemaster = 7
 }
 
 /// What one resident is called and what they do. **Server -> client, and static per
@@ -2271,4 +2364,41 @@ table TradeRequest {
 /// message ends.
 table VendorClosed {
   entity_id: ulong;
+}
+
+// -----------------------------------------------------------------------------
+// The stable: learned mounts, the request that calls one, and immediate dismount.
+// -----------------------------------------------------------------------------
+
+/// The complete authoritative set of mounts this recipient has learned.
+/// Server -> client, per recipient, and replacing the previous set wholesale.
+///
+/// Decoder invariants:
+///   - every member is a known non-zero `MountKind`
+///   - no member appears twice
+///   - absent and empty are the same ordinary empty set
+table LearnedMounts {
+  mounts: [MountKind];
+}
+
+/// A client asking to begin the authoritative cast for one learned mount.
+/// Client -> server and intent only.
+///
+/// It carries no position, distance, clearance, legality or outcome. The server reads
+/// every one of those from state it owns and answers through cast and mount snapshot
+/// state or an `ActionRefused`.
+///
+/// Decoder invariant: `mount` is copied verbatim, including `Unknown`; whether the
+/// character has learned it and whether it is supported are simulation refusals.
+table MountRequest {
+  mount: MountKind;
+}
+
+/// A client asking to leave its current mount. Client -> server and intent only.
+///
+/// Empty deliberately: dismount is immediate and unconditional, so there is no distance,
+/// legality, duration or outcome a client may state.
+///
+/// Decoder invariant: the empty table carries no value to validate.
+table DismountRequest {
 }

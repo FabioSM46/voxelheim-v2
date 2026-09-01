@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 54;
+pub const ENUM_MAX_PAYLOAD: u8 = 57;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 55] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 58] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -73,6 +73,9 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 55] = [
     Payload::WardsNearby,
     Payload::LeaveCancelRequest,
     Payload::LeaveCancelResult,
+    Payload::LearnedMounts,
+    Payload::MountRequest,
+    Payload::DismountRequest,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -154,9 +157,12 @@ impl Payload {
     pub const WardsNearby: Self = Self(52);
     pub const LeaveCancelRequest: Self = Self(53);
     pub const LeaveCancelResult: Self = Self(54);
+    pub const LearnedMounts: Self = Self(55);
+    pub const MountRequest: Self = Self(56);
+    pub const DismountRequest: Self = Self(57);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 54;
+    pub const ENUM_MAX: u8 = 57;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -213,6 +219,9 @@ impl Payload {
         Self::WardsNearby,
         Self::LeaveCancelRequest,
         Self::LeaveCancelResult,
+        Self::LearnedMounts,
+        Self::MountRequest,
+        Self::DismountRequest,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -272,6 +281,9 @@ impl Payload {
             Self::WardsNearby => Some("WardsNearby"),
             Self::LeaveCancelRequest => Some("LeaveCancelRequest"),
             Self::LeaveCancelResult => Some("LeaveCancelResult"),
+            Self::LearnedMounts => Some("LearnedMounts"),
+            Self::MountRequest => Some("MountRequest"),
+            Self::DismountRequest => Some("DismountRequest"),
             _ => None,
         }
     }

@@ -2461,13 +2461,14 @@ fn hostile_and_unicode_names_remain_bounded_valid_single_line_text() {
 /// from the same `match` it checks would agree with every hole in that `match`. Its length
 /// is pinned to the contract's own count below, because a fixed-size array of enum values
 /// does not stop compiling when the enum grows — the mistake `EVERY_REASON` cost twice.
-const EVERY_ROLE: [ResidentRole; 6] = [
+const EVERY_ROLE: [ResidentRole; 7] = [
     ResidentRole::Villager,
     ResidentRole::Smith,
     ResidentRole::Carpenter,
     ResidentRole::Cook,
     ResidentRole::Trader,
     ResidentRole::Guard,
+    ResidentRole::Stablemaster,
 ];
 
 /// The list is complete, and every role reads as its own ASCII word.

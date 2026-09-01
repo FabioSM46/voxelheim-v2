@@ -1295,6 +1295,7 @@ pub enum RefusedAction {
     /// [`Self::MineBlock`], which names the same action and is the value a shipped server
     /// may already have sent: both stay, and a receiver names both.
     Mine,
+    Mount,
 }
 
 impl RefusedAction {
@@ -1319,6 +1320,7 @@ impl RefusedAction {
             fb::RefusedAction::Trade => Self::Trade,
             fb::RefusedAction::Edit => Self::Edit,
             fb::RefusedAction::Mine => Self::Mine,
+            fb::RefusedAction::Mount => Self::Mount,
             _ => Self::Unknown,
         }
     }
@@ -1377,6 +1379,18 @@ pub enum RefusalReason {
     /// over: an answer that did would let a client learn who has claimed ground by poking
     /// at it.
     Warded,
+    MountNotLearned,
+    AlreadyMounted,
+    MountNotGrounded,
+    MountIndoors,
+    MountLowCeiling,
+    CastAlreadyInProgress,
+    CastInterruptedByDamage,
+    CastInterruptedByMovement,
+    CastInterruptedByJump,
+    CastInterruptedByDeath,
+    ActionForbiddenWhileMounted,
+    MountAlreadyLearned,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1420,6 +1434,18 @@ impl RefusalReason {
             fb::RefusalReason::NotEnoughSilver => Self::NotEnoughSilver,
             fb::RefusalReason::VendorDoesNotWant => Self::VendorDoesNotWant,
             fb::RefusalReason::Warded => Self::Warded,
+            fb::RefusalReason::MountNotLearned => Self::MountNotLearned,
+            fb::RefusalReason::AlreadyMounted => Self::AlreadyMounted,
+            fb::RefusalReason::MountNotGrounded => Self::MountNotGrounded,
+            fb::RefusalReason::MountIndoors => Self::MountIndoors,
+            fb::RefusalReason::MountLowCeiling => Self::MountLowCeiling,
+            fb::RefusalReason::CastAlreadyInProgress => Self::CastAlreadyInProgress,
+            fb::RefusalReason::CastInterruptedByDamage => Self::CastInterruptedByDamage,
+            fb::RefusalReason::CastInterruptedByMovement => Self::CastInterruptedByMovement,
+            fb::RefusalReason::CastInterruptedByJump => Self::CastInterruptedByJump,
+            fb::RefusalReason::CastInterruptedByDeath => Self::CastInterruptedByDeath,
+            fb::RefusalReason::ActionForbiddenWhileMounted => Self::ActionForbiddenWhileMounted,
+            fb::RefusalReason::MountAlreadyLearned => Self::MountAlreadyLearned,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -1986,6 +2012,7 @@ pub enum ResidentRole {
     Cook,
     Trader,
     Guard,
+    Stablemaster,
 }
 
 impl ResidentRole {
@@ -1999,6 +2026,7 @@ impl ResidentRole {
             fb::ResidentRole::Cook => Some(Self::Cook),
             fb::ResidentRole::Trader => Some(Self::Trader),
             fb::ResidentRole::Guard => Some(Self::Guard),
+            fb::ResidentRole::Stablemaster => Some(Self::Stablemaster),
             _ => None,
         }
     }
@@ -3758,6 +3786,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::DropItemRequest
         | fb::Payload::LeaveRequest
         | fb::Payload::LeaveCancelRequest
+        | fb::Payload::MountRequest
+        | fb::Payload::DismountRequest
         | fb::Payload::ConsumeRequest
         | fb::Payload::ChatRequest
         | fb::Payload::PartyRequest
@@ -3788,6 +3818,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
         }
+        // Reserved by V27; the strict decoder and consumer arrive in the dependent
+        // client part. Naming it here keeps the known tag out of the unknown fallback.
+        fb::Payload::LearnedMounts => Ok(Message::Deferred(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -6020,6 +6053,7 @@ pub(super) mod server_side {
                 stacks,
                 durability,
                 max_durability,
+                silver: 0,
             },
         );
         finish_envelope(
@@ -7065,6 +7099,7 @@ pub(super) mod server_side {
                 corpse_id,
                 revision,
                 entries,
+                silver: 0,
             },
         );
         finish_envelope(builder, fb::Payload::LootState, payload.as_union_value())
@@ -7670,6 +7705,9 @@ mod tests {
             (fb::Payload::WardsNearby, 52),
             (fb::Payload::LeaveCancelRequest, 53),
             (fb::Payload::LeaveCancelResult, 54),
+            (fb::Payload::LearnedMounts, 55),
+            (fb::Payload::MountRequest, 56),
+            (fb::Payload::DismountRequest, 57),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -7685,7 +7723,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            55,
+            58,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -7715,7 +7753,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 55] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 58] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -7776,6 +7814,9 @@ mod tests {
         // V27's request stays intent-only; its result is fully validated and consumed.
         (fb::Payload::LeaveCancelRequest, Handling::ClientOnly),
         (fb::Payload::LeaveCancelResult, Handling::Consumed),
+        (fb::Payload::LearnedMounts, Handling::Deferred),
+        (fb::Payload::MountRequest, Handling::ClientOnly),
+        (fb::Payload::DismountRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -7951,7 +7992,7 @@ mod tests {
             (fb::RefusedAction(200), fb::RefusalReason(200)),
             // A value inside the gap the contract leaves between its two groups, which is
             // where a reason appended later most plausibly lands.
-            (fb::RefusedAction(6), fb::RefusalReason(40)),
+            (fb::RefusedAction(6), fb::RefusalReason(63)),
         ] {
             assert_eq!(
                 decode(&encode_action_refused(action, reason, None)),
@@ -8370,11 +8411,12 @@ mod tests {
             (fb::ResidentRole::Cook, ResidentRole::Cook),
             (fb::ResidentRole::Trader, ResidentRole::Trader),
             (fb::ResidentRole::Guard, ResidentRole::Guard),
+            (fb::ResidentRole::Stablemaster, ResidentRole::Stablemaster),
         ] {
             assert_eq!(ResidentRole::from_wire(wire), Some(want));
         }
         assert_eq!(ResidentRole::from_wire(fb::ResidentRole::Unknown), None);
-        assert_eq!(ResidentRole::from_wire(fb::ResidentRole(7)), None);
+        assert_eq!(ResidentRole::from_wire(fb::ResidentRole(8)), None);
 
         // Exactly at the bound is accepted. Bytes, not characters: eleven three-byte
         // runes are 33 bytes and are refused, while a 32-character ASCII name is not.
@@ -9170,6 +9212,7 @@ mod tests {
         // renumbering that one would relabel every refusal a shipped server has sent.
         assert_eq!(fb::RefusedAction::Edit.0, 17);
         assert_eq!(fb::RefusedAction::Mine.0, 18);
+        assert_eq!(fb::RefusedAction::Mount.0, 19);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -9180,7 +9223,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            19,
+            20,
             "a removal is refused in silence by design"
         );
 
@@ -9220,6 +9263,18 @@ mod tests {
             // V26's one, appended inside the low group: warded ground is the world
             // answering a legal question no, and the player can walk somewhere else.
             (fb::RefusalReason::Warded, 30),
+            (fb::RefusalReason::MountNotLearned, 31),
+            (fb::RefusalReason::AlreadyMounted, 32),
+            (fb::RefusalReason::MountNotGrounded, 33),
+            (fb::RefusalReason::MountIndoors, 34),
+            (fb::RefusalReason::MountLowCeiling, 35),
+            (fb::RefusalReason::CastAlreadyInProgress, 36),
+            (fb::RefusalReason::CastInterruptedByDamage, 37),
+            (fb::RefusalReason::CastInterruptedByMovement, 38),
+            (fb::RefusalReason::CastInterruptedByJump, 39),
+            (fb::RefusalReason::CastInterruptedByDeath, 40),
+            (fb::RefusalReason::ActionForbiddenWhileMounted, 41),
+            (fb::RefusalReason::MountAlreadyLearned, 42),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -9229,7 +9284,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            35,
+            47,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -9263,6 +9318,18 @@ mod tests {
             RefusalReason::NotAVendor,
             RefusalReason::NotEnoughSilver,
             RefusalReason::VendorDoesNotWant,
+            RefusalReason::MountNotLearned,
+            RefusalReason::AlreadyMounted,
+            RefusalReason::MountNotGrounded,
+            RefusalReason::MountIndoors,
+            RefusalReason::MountLowCeiling,
+            RefusalReason::CastAlreadyInProgress,
+            RefusalReason::CastInterruptedByDamage,
+            RefusalReason::CastInterruptedByMovement,
+            RefusalReason::CastInterruptedByJump,
+            RefusalReason::CastInterruptedByDeath,
+            RefusalReason::ActionForbiddenWhileMounted,
+            RefusalReason::MountAlreadyLearned,
         ] {
             assert!(
                 !reason.is_client_defect(),
@@ -9302,6 +9369,7 @@ mod tests {
         assert_eq!(fb::MobKind::Vargr.0, 2);
         assert_eq!(fb::MobKind::Deer.0, 3);
         assert_eq!(fb::MobKind::Villager.0, 4);
+        assert_eq!(fb::MobKind::Horse.0, 5);
 
         assert_eq!(fb::MobAction::Unknown.0, 0);
         assert_eq!(fb::MobAction::Idle.0, 1);
@@ -9510,7 +9578,7 @@ mod tests {
             MobKind::from_wire(fb::MobKind::Villager),
             Some(MobKind::Villager)
         );
-        assert_eq!(MobKind::from_wire(fb::MobKind(5)), None);
+        assert_eq!(MobKind::from_wire(fb::MobKind(6)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);

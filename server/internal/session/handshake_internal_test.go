@@ -40,12 +40,11 @@ func TestUnspeakableRefusesWhatCannotBeAHello(t *testing.T) {
 			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(99), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
-		// The point of the V3 break, named rather than left to the general case: a V2
-		// client's snapshots would carry no vitals and its inventory no durability, and
-		// the handshake is where that has to be discovered. Mid-session it is a decode
-		// error on a connection both sides thought was healthy.
+		// The immediately previous contract is refused at the handshake. V26 cannot name
+		// the V27 mount and dismount intents; discovering that mid-session would close a
+		// connection both sides had accepted as compatible.
 		"the previous protocol": {
-			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(2), "Eivor"),
+			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(26), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
 		"first message is not a hello": {
