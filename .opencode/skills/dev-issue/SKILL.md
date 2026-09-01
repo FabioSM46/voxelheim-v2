@@ -325,7 +325,10 @@ DeepSeek emits its chain of thought into the same output budget the verdict has 
 diff that reasons hard enough runs the budget out and returns nothing — half an hour, a full API
 spend, a red `review` job, and no statement anywhere that the size was the problem. **That is not
 monotonic in size**: 72,350 characters came back with a verdict and 60,863 did not (#491), because
-what binds is how hard the model reasons about *that* content. `DEEPSEEK_MAX_DIFF_CHARS` is
+what binds is how hard the model reasons about *that* content. Those measurements used `max`;
+the current `high` effort trades some reasoning depth for lower latency and a lower risk of
+exhausting the shared reasoning/verdict budget, without changing its 384,000-token ceiling.
+`DEEPSEEK_MAX_DIFF_CHARS` is
 **45,000** characters, set from the worst ratio yet measured; over it the diff is truncated and
 every unread file is injected as a finding, which blocks the pull request until a human
 acknowledges the gap. Neither outcome is one to open a PR into deliberately.

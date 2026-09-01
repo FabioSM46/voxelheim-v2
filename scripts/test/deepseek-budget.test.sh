@@ -94,8 +94,8 @@ assert model == default_model == "deepseek-v4-flash", (
     "workflow and reviewer fallback must both select deepseek-v4-flash: "
     f"workflow={model} fallback={default_model}"
 )
-assert reasoning_effort == default_reasoning_effort == "max", (
-    "workflow and reviewer fallback must both use maximum reasoning: "
+assert reasoning_effort == default_reasoning_effort == "high", (
+    "workflow and reviewer fallback must both use high reasoning: "
     f"workflow={reasoning_effort} fallback={default_reasoning_effort}"
 )
 assert output_ceiling == default_ceiling, (

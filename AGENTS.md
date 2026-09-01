@@ -477,7 +477,7 @@ bootstrap path.
 ### Automated PR Review (DeepSeek)
 
 `deepseek-pr-review.yml` provides automated code review via the DeepSeek API
-(`deepseek-v4-flash`, thinking enabled, `reasoning_effort=max`):
+(`deepseek-v4-flash`, thinking enabled, `reasoning_effort=high`):
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
@@ -737,6 +737,12 @@ existed rather than creating any. **There is none left above it**: a review that
 needs a smaller diff, not a larger budget. At the V4 Flash rate of $0.28 per million output
 tokens, one attempt that consumes the full ceiling costs about $0.108; with the single retry the
 worst-case two-attempt output envelope is about $0.215, excluding input tokens.
+
+**Reasoning effort is `high`, not `max`.** That trades some reasoning depth for lower latency and
+a lower risk that reasoning consumes the shared 384,000-token output budget before a verdict can
+be emitted. The model, output ceiling, diff cap, retry and timeout budgets remain unchanged; the
+historical exhaustion measurements above were collected at `max` and must not be relabelled as
+measurements of `high`.
 
 **Timeouts — two of them, and the order matters**: the request budget is
 `DEEPSEEK_REQUEST_TIMEOUT_SECONDS` × (`DEEPSEEK_MAX_RETRIES` + 1) — currently 2700s × 2 =
