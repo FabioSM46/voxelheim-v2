@@ -603,7 +603,8 @@ fn travelled(kind: WeatherKind, intensity: u8, seed: Vec3, elapsed: f32) -> Vec3
         }
         // Horizontal, and only horizontal: sand does not fall, it is carried past you.
         WeatherKind::Sandstorm => {
-            WIND_DIRECTION * scaled_speed(SAND_DRIFT_SPEED, driving) * elapsed
+            Vec3::new(scaled_speed(SAND_DRIFT_SPEED, driving) * elapsed, 0.0, 0.0)
+                + wind_travel(driving, elapsed)
         }
     }
 }
@@ -1036,7 +1037,7 @@ mod tests {
         assert!(snow.x.abs() <= SNOW_DRIFT_BLOCKS && snow.z.abs() <= SNOW_DRIFT_BLOCKS);
 
         let sand = travelled(WeatherKind::Sandstorm, CALM_INTENSITY, seed, second);
-        assert_eq!(sand, WIND_DIRECTION * SAND_DRIFT_SPEED[0]);
+        assert_eq!(sand, Vec3::new(SAND_DRIFT_SPEED[0], 0.0, 0.0));
     }
 
     /// Ordinary weather moves faster at the top of the server-owned intensity
