@@ -117,6 +117,7 @@ pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 #[cfg(test)]
 pub(crate) use sky::NIGHT_SKY;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
+pub use trade::{PlayerTradeClick, PlayerTradeEnded, PlayerTradeWindow};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
 use crate::net::{
@@ -280,6 +281,9 @@ pub enum InputMode {
     /// `Escape` closes it, the pack key is ignored rather than layering a second window over it,
     /// and death closes it because the server refuses every trade from a corpse anyway.
     Vendor,
+    /// Pointer visible and confined over one authoritative player trade. Horizontal
+    /// movement remains live so the server can close a trade that walks out of reach.
+    Trade,
     /// Pointer visible and confined while the pause menu is visible.
     Menu,
     /// Pointer visible and confined over the world map. Movement is closed, as it is for
@@ -1085,7 +1089,10 @@ impl InputGate<'_> {
     /// pointer, jump, targeting and world actions remain closed through their own gates;
     /// chat, loot and the pause menu still own movement as well as their other input.
     pub fn may_move(&self) -> bool {
-        matches!(*self.mode, InputMode::Playing | InputMode::Inventory) && !self.vitals.dead()
+        matches!(
+            *self.mode,
+            InputMode::Playing | InputMode::Inventory | InputMode::Trade
+        ) && !self.vitals.dead()
     }
 
     /// Whether aiming, targeting and the outline are live.

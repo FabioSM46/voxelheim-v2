@@ -2223,11 +2223,11 @@ pub struct TradeRequest {
 
 /// Which operation one [`PlayerTradeRequest`] asks the server to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "V28 reserves every player-trade action before the window originates one"
-)]
 pub enum PlayerTradeAction {
+    #[allow(
+        dead_code,
+        reason = "part 3 of #750 originates Open from the local prompt"
+    )]
     Open,
     SetItem,
     ClearItem,
@@ -5979,7 +5979,6 @@ pub fn encode_trade_request(request: &TradeRequest) -> Vec<u8> {
 
 /// Builds intent verbatim. The action decides which fields the server reads; an
 /// offered item is only a pack slot, never client-stated stack contents.
-#[allow(dead_code)] // V28 reserves the encoder before the player-trade UI consumer.
 pub fn encode_player_trade_request(request: &PlayerTradeRequest) -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let payload = fb::PlayerTradeRequest::create(
