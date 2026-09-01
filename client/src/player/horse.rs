@@ -13,7 +13,10 @@
 use std::collections::HashMap;
 use std::f32::consts::PI;
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::appearance::{BodyPiece, Limb};
 use super::interpolate::SnapshotBuffer;
@@ -36,6 +39,21 @@ const HORSE_HIP_X: f32 = 0.21;
 const HORSE_HIP_Z: f32 = 0.11;
 const HORSE_LEG_SWING: f32 = 0.13;
 
+const MANE_ROOT: Vec3 = Vec3::new(0.0, 1.48, -0.015);
+const MANE_STRIP: Vec3 = Vec3::new(0.055, 0.44, 0.045);
+const TAIL_ROOT: Vec3 = Vec3::new(0.0, 1.02, 0.23);
+const TAIL_STRIP: Vec3 = Vec3::new(0.075, 0.46, 0.045);
+const MANE_SWING: f32 = 0.035;
+const TAIL_SWING: f32 = 0.10;
+
+const SADDLE: Vec3 = Vec3::new(0.50, 0.08, 0.26);
+const SADDLE_CENTRE: Vec3 = Vec3::new(0.0, 1.15, 0.045);
+const SADDLE_FLAP: Vec3 = Vec3::new(0.035, 0.25, 0.18);
+const EYE: Vec2 = Vec2::new(0.045, 0.045);
+
+const COAT_EDGE: u32 = 32;
+const COAT_SEED: u32 = 0x0715_C0A7;
+
 /// Raising the existing humanoid by this amount puts its hip on the top of the horse's
 /// back. The legs then fold from that same hip; the rider is seated rather than standing
 /// on the torso, and no second humanoid rig is introduced.
@@ -46,15 +64,40 @@ const RIDER_ARM_ANGLE: f32 = 0.68;
 const BLACK_COAT: Color = Color::srgb(0.075, 0.065, 0.055);
 const BROWN_COAT: Color = Color::srgb(0.30, 0.16, 0.075);
 const GREY_COAT: Color = Color::srgb(0.43, 0.45, 0.44);
+const HAIR_COLOUR: Color = Color::srgb(0.055, 0.045, 0.038);
+const LEATHER_COLOUR: Color = Color::srgb(0.25, 0.105, 0.045);
+const EYE_COLOUR: Color = Color::srgb(0.82, 0.61, 0.18);
+
+#[derive(Resource, Clone)]
+pub(super) struct HorseCoats {
+    image: Handle<Image>,
+}
+
+impl FromWorld for HorseCoats {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            image: world
+                .resource_mut::<Assets<Image>>()
+                .add(generated_coat_image()),
+        }
+    }
+}
 
 #[derive(Resource)]
 pub(super) struct HorseVisuals {
     body: Handle<Mesh>,
     head: Handle<Mesh>,
     leg: Handle<Mesh>,
+    mane: Handle<Mesh>,
+    tail: Handle<Mesh>,
+    tack: Handle<Mesh>,
+    eyes: Handle<Mesh>,
     black: Handle<StandardMaterial>,
     brown: Handle<StandardMaterial>,
     grey: Handle<StandardMaterial>,
+    hair: Handle<StandardMaterial>,
+    leather: Handle<StandardMaterial>,
+    eye: Handle<StandardMaterial>,
 }
 
 impl HorseVisuals {
@@ -113,18 +156,118 @@ impl Leg {
     }
 }
 
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HorseHair {
+    Mane,
+    Tail,
+}
+
+fn coat_scatter(mark: u32, channel: u32) -> f32 {
+    let mut bits = mark
+        .wrapping_mul(0x9E37_79B1)
+        .wrapping_add(channel.wrapping_mul(0x85EB_CA6B))
+        ^ COAT_SEED;
+    bits ^= bits >> 16;
+    bits = bits.wrapping_mul(0x7FEB_352D);
+    bits ^= bits >> 15;
+    bits = bits.wrapping_mul(0x846C_A68B);
+    bits ^= bits >> 16;
+    (bits >> 8) as f32 / 16_777_216.0
+}
+
+fn coat_field(u: f32, v: f32) -> f32 {
+    let mut dapple = 0.0_f32;
+    for mark in 0..12 {
+        let centre_u = coat_scatter(mark, 0);
+        let centre_v = coat_scatter(mark, 1);
+        let radius = 0.08 + coat_scatter(mark, 2) * 0.08;
+        let around = (u - centre_u).abs();
+        let dx = around.min(1.0 - around);
+        let dy = v - centre_v;
+        let distance = (dx * dx + dy * dy).sqrt() / radius;
+        dapple = dapple.max((1.0 - distance * distance).max(0.0));
+    }
+
+    let muscle = (v * PI * 4.0).sin().abs();
+    (0.76 + 0.16 * dapple + 0.08 * muscle).clamp(0.0, 1.0)
+}
+
+fn generated_coat_image() -> Image {
+    let mut data = Vec::with_capacity((COAT_EDGE * COAT_EDGE * 4) as usize);
+    for row in 0..COAT_EDGE {
+        for column in 0..COAT_EDGE {
+            let value = coat_field(
+                (column as f32 + 0.5) / COAT_EDGE as f32,
+                (row as f32 + 0.5) / COAT_EDGE as f32,
+            );
+            let texel = (value * 255.0).round() as u8;
+            data.extend_from_slice(&[texel, texel, texel, u8::MAX]);
+        }
+    }
+
+    let mut image = Image::new(
+        Extent3d {
+            width: COAT_EDGE,
+            height: COAT_EDGE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+pub(super) fn register(app: &mut App) {
+    if !app.world().contains_resource::<Assets<Image>>() {
+        app.init_asset::<Image>();
+    }
+    app.init_resource::<HorseCoats>();
+}
+
+fn coat_material(colour: Color, image: &Handle<Image>) -> StandardMaterial {
+    StandardMaterial {
+        base_color: colour,
+        base_color_texture: Some(image.clone()),
+        perceptual_roughness: 0.92,
+        ..default()
+    }
+}
+
 pub(super) fn create_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    coats: Res<HorseCoats>,
 ) {
     commands.insert_resource(HorseVisuals {
         body: meshes.add(horse_body_mesh()),
         head: meshes.add(horse_head_mesh()),
         leg: meshes.add(horse_leg_mesh()),
-        black: materials.add(StandardMaterial::from_color(BLACK_COAT)),
-        brown: materials.add(StandardMaterial::from_color(BROWN_COAT)),
-        grey: materials.add(StandardMaterial::from_color(GREY_COAT)),
+        mane: meshes.add(horse_mane_mesh()),
+        tail: meshes.add(horse_tail_mesh()),
+        tack: meshes.add(horse_tack_mesh()),
+        eyes: meshes.add(horse_eye_mesh()),
+        black: materials.add(coat_material(BLACK_COAT, &coats.image)),
+        brown: materials.add(coat_material(BROWN_COAT, &coats.image)),
+        grey: materials.add(coat_material(GREY_COAT, &coats.image)),
+        hair: materials.add(StandardMaterial::from_color(HAIR_COLOUR)),
+        leather: materials.add(StandardMaterial::from_color(LEATHER_COLOUR)),
+        eye: materials.add(StandardMaterial {
+            base_color: EYE_COLOUR,
+            unlit: true,
+            cull_mode: None,
+            depth_bias: 1.0,
+            ..default()
+        }),
     });
 }
 
@@ -162,6 +305,58 @@ fn horse_leg_mesh() -> Mesh {
     ));
     merge_all(&mut leg, [hoof], "horse leg");
     leg
+}
+
+fn horse_mane_mesh() -> Mesh {
+    Mesh::from(Cuboid::from_size(MANE_STRIP)).translated_by(Vec3::Y * -MANE_STRIP.y / 2.0)
+}
+
+fn horse_tail_mesh() -> Mesh {
+    Mesh::from(Cuboid::from_size(TAIL_STRIP)).translated_by(Vec3::Y * -TAIL_STRIP.y / 2.0)
+}
+
+fn bar_between(start: Vec3, end: Vec3, width: f32) -> Mesh {
+    let axis = end - start;
+    Mesh::from(Cuboid::new(width, width, axis.length())).transformed_by(
+        Transform::from_translation((start + end) / 2.0)
+            .with_rotation(Quat::from_rotation_arc(Vec3::Z, axis.normalize())),
+    )
+}
+
+fn horse_tack_mesh() -> Mesh {
+    let mut saddle = Mesh::from(Cuboid::from_size(SADDLE)).translated_by(SADDLE_CENTRE);
+    let flap_x = SADDLE.x / 2.0 - SADDLE_FLAP.x / 2.0;
+    let flaps = [-1.0, 1.0].map(|side| {
+        Mesh::from(Cuboid::from_size(SADDLE_FLAP)).translated_by(Vec3::new(
+            side * flap_x,
+            1.045,
+            SADDLE_CENTRE.z,
+        ))
+    });
+    let reins = [-1.0, 1.0].map(|side| {
+        bar_between(
+            Vec3::new(side * 0.11, 1.35, -0.29),
+            Vec3::new(side * 0.20, 1.18, 0.13),
+            0.018,
+        )
+    });
+    merge_all(&mut saddle, flaps.into_iter().chain(reins), "horse tack");
+    saddle
+}
+
+fn horse_eye_mesh() -> Mesh {
+    let mut left = Mesh::from(Rectangle::new(EYE.x, EYE.y)).translated_by(Vec3::new(
+        -0.08,
+        HORSE_HEAD_CENTRE.y + 0.02,
+        HORSE_HEAD_CENTRE.z - HORSE_HEAD.z / 2.0,
+    ));
+    let right = Mesh::from(Rectangle::new(EYE.x, EYE.y)).translated_by(Vec3::new(
+        0.08,
+        HORSE_HEAD_CENTRE.y + 0.02,
+        HORSE_HEAD_CENTRE.z - HORSE_HEAD.z / 2.0,
+    ));
+    merge_all(&mut left, [right], "horse eyes");
+    left
 }
 
 /// Reconciles horse child trees with the newest sparse complete mount projection.
@@ -220,6 +415,32 @@ fn spawn_horse(commands: &mut Commands, visuals: &HorseVisuals, rider: Entity, k
                     MeshMaterial3d(material.clone()),
                     Transform::default(),
                 ));
+                horse.spawn((
+                    HorsePart,
+                    HorseHair::Mane,
+                    Mesh3d(visuals.mane.clone()),
+                    MeshMaterial3d(visuals.hair.clone()),
+                    hair_transform(HorseHair::Mane, WalkPose::default()),
+                ));
+                horse.spawn((
+                    HorsePart,
+                    HorseHair::Tail,
+                    Mesh3d(visuals.tail.clone()),
+                    MeshMaterial3d(visuals.hair.clone()),
+                    hair_transform(HorseHair::Tail, WalkPose::default()),
+                ));
+                horse.spawn((
+                    HorsePart,
+                    Mesh3d(visuals.tack.clone()),
+                    MeshMaterial3d(visuals.leather.clone()),
+                    Transform::default(),
+                ));
+                horse.spawn((
+                    HorsePart,
+                    Mesh3d(visuals.eyes.clone()),
+                    MeshMaterial3d(visuals.eye.clone()),
+                    Transform::default(),
+                ));
                 for leg in Leg::ALL {
                     horse.spawn((
                         HorseLeg(leg),
@@ -232,21 +453,36 @@ fn spawn_horse(commands: &mut Commands, visuals: &HorseVisuals, rider: Entity, k
     });
 }
 
+pub(super) type MovingHorsePartQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static HorseLeg>,
+        Option<&'static HorseHair>,
+        &'static mut Transform,
+    ),
+    Or<(With<HorseLeg>, With<HorseHair>)>,
+>;
+
 /// Poses four independently transformed legs from the rider's distance sample.
 pub(super) fn animate_gait(
     bodies: Query<&WalkPose>,
     horses: Query<(&ChildOf, &Children), With<Horse>>,
-    mut legs: Query<(&HorseLeg, &mut Transform)>,
+    mut moving_parts: MovingHorsePartQuery<'_, '_>,
 ) {
     for (parent, children) in &horses {
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
         for child in children {
-            let Ok((leg, mut transform)) = legs.get_mut(*child) else {
+            let Ok((leg, hair, mut transform)) = moving_parts.get_mut(*child) else {
                 continue;
             };
-            let next = gait_transform(leg.0, *walk);
+            let next = match (leg, hair) {
+                (Some(leg), None) => gait_transform(leg.0, *walk),
+                (None, Some(hair)) => hair_transform(*hair, *walk),
+                _ => continue,
+            };
             if *transform != next {
                 *transform = next;
             }
@@ -263,6 +499,15 @@ fn gait_transform(leg: Leg, walk: WalkPose) -> Transform {
     Transform::from_translation(leg.hip()).with_rotation(Quat::from_rotation_x(angle))
 }
 
+fn hair_transform(hair: HorseHair, walk: WalkPose) -> Transform {
+    let phase = if walk.moving { walk.phase.sin() } else { 0.0 };
+    let (root, swing) = match hair {
+        HorseHair::Mane => (MANE_ROOT, MANE_SWING),
+        HorseHair::Tail => (TAIL_ROOT, TAIL_SWING),
+    };
+    Transform::from_translation(root).with_rotation(Quat::from_rotation_x(phase * swing))
+}
+
 /// The existing humanoid piece in its seated pose.
 pub(super) fn rider_piece_transform(piece: BodyPiece, blocking: bool) -> Transform {
     let angle = match piece.limb() {
@@ -277,6 +522,7 @@ pub(super) fn rider_piece_transform(piece: BodyPiece, blocking: bool) -> Transfo
 
 #[cfg(test)]
 mod tests {
+    use bevy::asset::AssetPlugin;
     use bevy::mesh::VertexAttributeValues;
 
     use super::super::constants::PLAYER_WIDTH;
@@ -318,6 +564,12 @@ mod tests {
             meshes.extend(
                 Leg::ALL.map(|leg| horse_leg_mesh().transformed_by(gait_transform(leg, pose))),
             );
+            meshes.extend([
+                horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, pose)),
+                horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, pose)),
+                horse_tack_mesh(),
+                horse_eye_mesh(),
+            ]);
             let (low, high) = extent(&meshes);
             assert!(
                 low.x >= -half && high.x <= half,
@@ -360,6 +612,107 @@ mod tests {
         for leg in Leg::ALL {
             assert_eq!(angle(leg, standing), 0.0);
         }
+    }
+
+    #[test]
+    fn mane_and_tail_read_the_legs_distance_phase_without_changing_it() {
+        let walking = WalkPose {
+            phase: PI / 2.0,
+            moving: true,
+        };
+        for (hair, want) in [(HorseHair::Mane, MANE_SWING), (HorseHair::Tail, TAIL_SWING)] {
+            let pitch = hair_transform(hair, walking)
+                .rotation
+                .to_euler(EulerRot::XYZ)
+                .0;
+            assert!((pitch - want).abs() < 1e-5);
+            assert_eq!(
+                hair_transform(hair, WalkPose::default()).rotation,
+                Quat::IDENTITY
+            );
+        }
+        assert!((angle(Leg::LeftFront, walking) - HORSE_LEG_SWING).abs() < 1e-5);
+    }
+
+    fn visual_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>();
+        register(&mut app);
+        app.add_systems(Startup, create_visuals);
+        app.update();
+        app
+    }
+
+    #[test]
+    fn one_generated_image_dresses_all_three_coats() {
+        let app = visual_app();
+        let world = app.world();
+        let coats = world.resource::<HorseCoats>();
+        let visuals = world.resource::<HorseVisuals>();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+
+        let coat_materials = [&visuals.black, &visuals.brown, &visuals.grey]
+            .map(|handle| materials.get(handle).expect("horse coat material"));
+        for material in coat_materials {
+            assert_eq!(material.base_color_texture.as_ref(), Some(&coats.image));
+        }
+        assert_eq!(
+            coat_materials.map(|material| material.base_color),
+            [BLACK_COAT, BROWN_COAT, GREY_COAT]
+        );
+        assert_eq!(
+            materials.get(&visuals.hair).unwrap().base_color,
+            HAIR_COLOUR
+        );
+        assert_eq!(
+            materials.get(&visuals.leather).unwrap().base_color,
+            LEATHER_COLOUR
+        );
+        let cuboid = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
+        assert_eq!(horse_head_mesh().count_vertices(), cuboid * 3);
+        assert_eq!(horse_eye_mesh().count_vertices(), 8);
+        assert_eq!(horse_tack_mesh().count_vertices(), cuboid * 5);
+        assert_ne!(HAIR_COLOUR, LEATHER_COLOUR);
+        for mesh in [horse_body_mesh(), horse_head_mesh(), horse_leg_mesh()] {
+            let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+            else {
+                panic!("a coat mesh has no UVs");
+            };
+            assert!(uvs.iter().any(|uv| *uv != uvs[0]));
+        }
+    }
+
+    #[test]
+    fn the_seeded_coat_is_stable_and_has_depth() {
+        let first = generated_coat_image();
+        assert_eq!(first.data, generated_coat_image().data);
+
+        let data = first.data.expect("generated coat carries texels");
+        let values: std::collections::HashSet<u8> =
+            data.chunks_exact(4).map(|rgba| rgba[0]).collect();
+        assert!(values.len() > 12);
+    }
+
+    #[test]
+    fn registering_the_coat_twice_preserves_foreign_images_and_its_one_handle() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Image>();
+        let foreign = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::default());
+
+        register(&mut app);
+        let coat = app.world().resource::<HorseCoats>().image.clone();
+        register(&mut app);
+
+        let images = app.world().resource::<Assets<Image>>();
+        assert!(images.get(&foreign).is_some());
+        assert!(images.get(&coat).is_some());
+        assert_eq!(app.world().resource::<HorseCoats>().image, coat);
     }
 
     #[test]
