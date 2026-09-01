@@ -1685,7 +1685,8 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			return nil
 		}
 
-		if cErr := player.Chat(msg.Chat.Text); cErr != nil {
+		outcome, cErr := player.Chat(msg.Chat.Text)
+		if cErr != nil {
 			// Text, death and leaving are ordinary silent refusals. The cadence limit is
 			// different because the client can wait and retry it; that one actionable
 			// answer uses the blocking path so a full queue cannot make it disappear.
@@ -1699,6 +1700,22 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			}
 			if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
 				return fmt.Errorf("session: send chat rate-limit refusal: %w", sErr)
+			}
+			return nil
+		}
+		if outcome.PrivateText != "" {
+			answer := protocol.ChatMessage{
+				SenderEntityID: player.EntityID(),
+				SenderName:     game.CommandSenderName,
+				Text:           outcome.PrivateText,
+			}
+			if sErr := send(protocol.EncodeChatMessage(answer)); sErr != nil {
+				return fmt.Errorf("session: send private command answer: %w", sErr)
+			}
+		}
+		if outcome.Inventory != nil {
+			if sErr := send(protocol.EncodeInventoryState(*outcome.Inventory)); sErr != nil {
+				return fmt.Errorf("session: send inventory after command: %w", sErr)
 			}
 		}
 		return nil

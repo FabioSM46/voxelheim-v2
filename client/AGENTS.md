@@ -1652,9 +1652,9 @@ are intentionally not rebindable. The opening frame drains its `KeyboardInput`, 
 opened the line cannot become its first character.
 
 **Only locally typed text is command syntax.** `/invite`, `/accept`, `/decline`, `/leave` and
-`/kick` become typed `PartyRequest`s; every other non-empty non-command line becomes a
-`ChatRequest`, and an unknown slash command stays local as a log line. Surrounding whitespace is
-removed before that routing, matching the server's accepted line. A `ChatMessage` or `PartyInvite`
+`/kick` become typed `PartyRequest`s; every other non-empty line becomes a `ChatRequest`.
+Ordinary chat is trimmed, while an otherwise-unrecognised line whose first character is `/`
+reaches that encoder byte-for-byte so the authoritative server is the only parser. A `ChatMessage` or `PartyInvite`
 received from the server is display text only, bounded and stripped of layout controls before Bevy
 sees it, never parsed or used as identity. Both share one `ChatInbox`, which preserves their
 relative wire order for its first consumer. The log holds eight lines, fades them after twelve

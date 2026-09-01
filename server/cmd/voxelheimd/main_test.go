@@ -240,6 +240,32 @@ func TestTheWorldDirectoryFlagPreservesAllThreeModes(t *testing.T) {
 	}
 }
 
+func TestDevelopmentCommandsHaveToBeExplicitlyEnabled(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "omitted"},
+		{name: "enabled", args: []string{"-dev-commands"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var opts options
+			flags := flag.NewFlagSet("voxelheimd", flag.ContinueOnError)
+			registerDevCommandsFlag(flags, &opts)
+			if err := flags.Parse(test.args); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if opts.devCommands != test.want {
+				t.Errorf("dev commands enabled = %t, want %t", opts.devCommands, test.want)
+			}
+		})
+	}
+}
+
 func TestWorldDirectoryHelpNamesTheConcreteDefault(t *testing.T) {
 	t.Parallel()
 

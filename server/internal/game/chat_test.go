@@ -115,7 +115,7 @@ func TestChatFansOneAcceptedLineBackToTheSenderAndTheWorld(t *testing.T) {
 		t.Fatalf("Join receiver: %v", err)
 	}
 
-	if err := sender.Chat("  shields up  "); err != nil {
+	if _, err := sender.Chat("  shields up  "); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	want := protocol.ChatMessage{SenderEntityID: 7, SenderName: "Astrid", Text: "shields up"}
@@ -140,7 +140,7 @@ func TestReconnectKeepsTheIdentityChatBucket(t *testing.T) {
 		t.Fatalf("first Join: %v", err)
 	}
 	for line := 1; line <= ChatBurst; line++ {
-		if err := first.Chat("line"); err != nil {
+		if _, err := first.Chat("line"); err != nil {
 			t.Fatalf("first session line %d: %v", line, err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestReconnectKeepsTheIdentityChatBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconnect Join: %v", err)
 	}
-	if err := second.Chat("fresh session"); !errors.Is(err, ErrChatTooFast) {
+	if _, err := second.Chat("fresh session"); !errors.Is(err, ErrChatTooFast) {
 		t.Fatalf("reconnect line error = %v, want ErrChatTooFast", err)
 	}
 	if got := len(chatMessages(t, secondOut)); got != 0 {
@@ -159,7 +159,7 @@ func TestReconnectKeepsTheIdentityChatBucket(t *testing.T) {
 	}
 
 	now = now.Add(time.Second)
-	if err := second.Chat("after waiting"); err != nil {
+	if _, err := second.Chat("after waiting"); err != nil {
 		t.Fatalf("line after refill: %v", err)
 	}
 	if got := len(chatMessages(t, secondOut)); got != 1 {
@@ -182,7 +182,7 @@ func TestAFullChatLimiterIsPrunedWhenTheNextLineArrives(t *testing.T) {
 		t.Fatalf("second Join: %v", err)
 	}
 
-	if err := first.Chat("one line"); err != nil {
+	if _, err := first.Chat("one line"); err != nil {
 		t.Fatalf("first Chat: %v", err)
 	}
 	if got := len(h.sim.chatLimiters); got != 1 {
@@ -190,7 +190,7 @@ func TestAFullChatLimiterIsPrunedWhenTheNextLineArrives(t *testing.T) {
 	}
 
 	now = now.Add(time.Duration(ChatBurst) * time.Second)
-	if err := second.Chat("later line"); err != nil {
+	if _, err := second.Chat("later line"); err != nil {
 		t.Fatalf("second Chat: %v", err)
 	}
 	if got := len(h.sim.chatLimiters); got != 1 {
@@ -207,7 +207,7 @@ func TestDeadAndLeavingPlayersSayNothing(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	dead, deadOut := h.join(1, [3]float32{0.5, 64, 0.5})
 	h.hurt(dead, PlayerMaxHealth)
-	if err := dead.Chat("from the grave"); err == nil || errors.Is(err, ErrChatTooFast) {
+	if _, err := dead.Chat("from the grave"); err == nil || errors.Is(err, ErrChatTooFast) {
 		t.Fatalf("dead player's Chat error = %v", err)
 	}
 	if got := len(chatMessages(t, deadOut)); got != 0 {
@@ -216,7 +216,7 @@ func TestDeadAndLeavingPlayersSayNothing(t *testing.T) {
 
 	leaving, leavingOut := h.join(2, [3]float32{0.5, 64, 0.5})
 	leaving.BeginLeaving()
-	if err := leaving.Chat("on the way out"); err == nil || errors.Is(err, ErrChatTooFast) {
+	if _, err := leaving.Chat("on the way out"); err == nil || errors.Is(err, ErrChatTooFast) {
 		t.Fatalf("leaving player's Chat error = %v", err)
 	}
 	if got := len(chatMessages(t, leavingOut)); got != 0 {
