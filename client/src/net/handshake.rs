@@ -530,6 +530,13 @@ impl Handshake {
             (Phase::Established, Message::VendorClosed(closed)) => {
                 Ok(Transition::VendorClosed(closed))
             }
+            // Fully validated by the codec; the later trade UI owns their ECS inbox.
+            (Phase::Established, Message::PlayerTradeState(_)) => {
+                Ok(Transition::Ignored("PlayerTradeState"))
+            }
+            (Phase::Established, Message::PlayerTradeClosed(_)) => {
+                Ok(Transition::Ignored("PlayerTradeClosed"))
+            }
             // V26's two, carried by name for the same reason V25's three are: each is
             // fully validated at the decode boundary, and nothing about a session changes
             // what either one means.
@@ -572,6 +579,10 @@ impl Handshake {
             }
             (_, Message::VendorState(_)) => Err(HandshakeError::Premature("VendorState")),
             (_, Message::VendorClosed(_)) => Err(HandshakeError::Premature("VendorClosed")),
+            (_, Message::PlayerTradeState(_)) => Err(HandshakeError::Premature("PlayerTradeState")),
+            (_, Message::PlayerTradeClosed(_)) => {
+                Err(HandshakeError::Premature("PlayerTradeClosed"))
+            }
             (_, Message::StormWarning(_)) => Err(HandshakeError::Premature("StormWarning")),
             (_, Message::WardsNearby(_)) => Err(HandshakeError::Premature("WardsNearby")),
         }
