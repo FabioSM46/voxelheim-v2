@@ -68,6 +68,7 @@ mod projectiles;
 mod sky;
 mod structures;
 mod target;
+mod trade;
 mod vendor;
 mod wards;
 
@@ -443,6 +444,7 @@ impl Plugin for PlayerPlugin {
             .add_plugins(crafting::CraftingPlugin)
             .add_plugins(loot::LootPlugin)
             .add_plugins(mounts::MountsPlugin)
+            .add_plugins(trade::PlayerTradePlugin)
             .add_plugins(vendor::VendorPlugin)
             // After the camera plugin, because the ray starts at the camera and the
             // ordering inside `BlockTargetPlugin` is written against its system set.
