@@ -1,6 +1,7 @@
 package game
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
@@ -243,6 +244,31 @@ func TestTurningTheCameraDoesNotInterruptACast(t *testing.T) {
 	}
 }
 
+func TestZeroDamageDoesNotInterruptACast(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+	completed := 0
+	if reason, err := beginTestCast(t, player, &completed); err != nil || reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("begin cast: reason %s, error %v", reason, err)
+	}
+
+	player.sim.mu.Lock()
+	landed := player.damageLocked(0)
+	player.sim.mu.Unlock()
+
+	if landed {
+		t.Fatal("zero damage was reported as a landed hit")
+	}
+	if !castRunning(player) || completed != 0 {
+		t.Fatalf("zero damage left running = %t, completed = %d", castRunning(player), completed)
+	}
+	if got := len(actionRefusals(t, out)); got != 0 {
+		t.Errorf("zero damage produced %d refusals", got)
+	}
+}
+
 func TestACurrentDisplacingAStillPlayerDoesNotInterruptACast(t *testing.T) {
 	t.Parallel()
 
@@ -292,6 +318,49 @@ func TestACastInterruptionIsRetriedWhenTheOutboundQueueIsFull(t *testing.T) {
 	want := protocol.ActionRefused{Action: vnet.RefusedActionMount, Reason: vnet.RefusalReasonCastInterruptedByJump}
 	if len(refusals) != 1 || refusals[0] != want {
 		t.Fatalf("retried refusals = %+v, want [%+v]", refusals, want)
+	}
+}
+
+func TestCastRefusalRetriesStayBoundedWhenAClientStopsDraining(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+	out.setFull(true)
+
+	oldest := protocol.ActionRefused{
+		Action: vnet.RefusedActionMount,
+		Reason: vnet.RefusalReasonCastInterruptedByDamage,
+	}
+	middle := protocol.ActionRefused{
+		Action: vnet.RefusedActionMount,
+		Reason: vnet.RefusalReasonCastInterruptedByMovement,
+	}
+	newest := protocol.ActionRefused{
+		Action: vnet.RefusedActionMount,
+		Reason: vnet.RefusalReasonCastInterruptedByJump,
+	}
+
+	player.sim.mu.Lock()
+	player.queueCastRefusalLocked(oldest)
+	for range maxPendingCastRefusals - 1 {
+		player.queueCastRefusalLocked(middle)
+	}
+	player.queueCastRefusalLocked(newest)
+	queued := append([][]byte(nil), player.pendingCastRefusals...)
+	player.sim.mu.Unlock()
+
+	if len(queued) != maxPendingCastRefusals {
+		t.Fatalf("pending refusals = %d, want cap %d", len(queued), maxPendingCastRefusals)
+	}
+	if bytes.Equal(queued[0], protocol.EncodeActionRefused(oldest)) {
+		t.Error("the oldest refusal survived after the retry queue reached its cap")
+	}
+	if !bytes.Equal(queued[0], protocol.EncodeActionRefused(middle)) {
+		t.Error("capping the queue disturbed the retained FIFO order")
+	}
+	if !bytes.Equal(queued[len(queued)-1], protocol.EncodeActionRefused(newest)) {
+		t.Error("the newest refusal was not retained at the tail of the retry queue")
 	}
 }
 

@@ -19,6 +19,13 @@ const (
 	castInterruptedByJump
 	castInterruptedByDeath
 	castInterruptionCount
+
+	// maxPendingCastRefusals bounds the durable retry seam when a client stops
+	// draining its session queue. Refusals are tiny, but an unresponsive client
+	// must not be able to turn repeated start/cancel requests into unbounded
+	// server memory. The oldest explanation is the least useful once this burst
+	// limit is reached, so a newer interruption supersedes it.
+	maxPendingCastRefusals = 32
 )
 
 var castInterruptionReasons = [castInterruptionCount]vnet.RefusalReason{
@@ -151,6 +158,11 @@ func (p *Player) interruptCastLocked(interruption castInterruption) bool {
 func (p *Player) queueCastRefusalLocked(refusal protocol.ActionRefused) {
 	frame := protocol.EncodeActionRefused(refusal)
 	if len(p.pendingCastRefusals) == 0 && p.deliver(frame) {
+		return
+	}
+	if len(p.pendingCastRefusals) == maxPendingCastRefusals {
+		copy(p.pendingCastRefusals, p.pendingCastRefusals[1:])
+		p.pendingCastRefusals[len(p.pendingCastRefusals)-1] = frame
 		return
 	}
 	p.pendingCastRefusals = append(p.pendingCastRefusals, frame)
