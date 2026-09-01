@@ -71,16 +71,11 @@ pub(super) const ITEM_TENT: u16 = 9;
 pub(super) const ITEM_CAMPFIRE: u16 = 12;
 pub(super) const ITEM_RUNESTONE: u16 = 39;
 
-/// Modes whose UI owns the view instead of the 3D world. The same rule mobs and drops
-/// obey — a snapshot-driven visual is hidden while a panel owns the screen, and hidden
-/// rather than despawned, so opening a pack cannot be mistaken for anything happening in
-/// the world.
-const HIDDEN_INPUT_MODES: [InputMode; 4] = [
-    InputMode::Inventory,
-    InputMode::Loot,
-    InputMode::Vendor,
-    InputMode::Menu,
-];
+/// Full-screen modes whose UI owns the view instead of the 3D world. The same rule mobs,
+/// drops and projectiles obey — a snapshot-driven visual is hidden while a takeover owns
+/// the screen, and hidden rather than despawned, so opening a pack cannot be mistaken for
+/// anything happening in the world.
+const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
 // ---------------------------------------------------------------------------
 // The footprint, mirrored from the server
@@ -2396,33 +2391,36 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_mode_hides_the_structures_without_despawning_them() {
+    fn only_full_screen_ui_modes_hide_structures_without_despawning_them() {
         let mut app = aiming_app(store_with(&[]));
         deliver(&mut app, 1, vec![tent_at(900, [3, 80, 0], LOCAL_ID)]);
         app.update();
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
-        app.update();
-        {
+        for mode in [InputMode::Chat, InputMode::Loot, InputMode::Vendor] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
             let world = app.world_mut();
             let mut query = world.query_filtered::<&Visibility, With<Structure>>();
             assert_eq!(
                 *query.single(world).expect("one structure"),
-                Visibility::Visible
+                Visibility::Visible,
+                "the centred {mode:?} panel hid the structure"
             );
         }
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
-        app.update();
+        for mode in [InputMode::Inventory, InputMode::Menu] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
 
-        let world = app.world_mut();
-        let mut query = world.query_filtered::<&Visibility, With<Structure>>();
-        assert_eq!(
-            *query.single(world).expect("one structure"),
-            Visibility::Hidden,
-            "an open pack left the camp drawn"
-        );
-        assert_eq!(drawn(&mut app).len(), 1, "hiding despawned the structure");
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Visibility, With<Structure>>();
+            assert_eq!(
+                *query.single(world).expect("one structure"),
+                Visibility::Hidden,
+                "the full-screen {mode:?} mode left the structure drawn"
+            );
+            assert_eq!(drawn(&mut app).len(), 1, "hiding despawned the structure");
+        }
     }
 
     // ---------------------------------------------------------------------------

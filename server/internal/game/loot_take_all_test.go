@@ -180,8 +180,8 @@ func TestTakeAllThatEmptiesTheCorpseClosesTheWindow(t *testing.T) {
 	if reason, err := player.TakeAllLoot(protocol.LootTakeAllRequest{CorpseID: takeAllCorpse, Revision: 1, ClientTick: 2}); err != nil {
 		t.Fatalf("take-all = %s, %v", reason, err)
 	}
-	if _, _, exists := containerNow(t, h, player); exists {
-		t.Error("the emptied corpse was not removed")
+	if revision, remaining, exists := containerNow(t, h, player); !exists || revision != 2 || len(remaining) != 0 {
+		t.Errorf("emptied container = revision %d entries %v exists %v; want a surviving empty revision 2", revision, remaining, exists)
 	}
 	if got := heldCount(player.InventoryState(), ItemBone); got != 2 {
 		t.Errorf("the pack holds %d Bone, want 2", got)
@@ -190,6 +190,20 @@ func TestTakeAllThatEmptiesTheCorpseClosesTheWindow(t *testing.T) {
 		t.Errorf("the pack holds %d VargrPelt, want 1", got)
 	}
 
+	h.step()
+	snapshot := newestSnapshot(t, out)
+	if got := snapshot.AccessibleLootCorpsesLength(); got != 0 {
+		t.Errorf("empty corpse remained in %d accessible-corpse entries", got)
+	}
+	var bodyStillDrawn bool
+	for _, mob := range newestSnapshotMobs(t, out) {
+		if mob.EntityID == takeAllCorpse {
+			bodyStillDrawn = mob.Action == vnet.MobActionCorpse
+		}
+	}
+	if !bodyStillDrawn {
+		t.Error("take-all removed the empty body from the authoritative snapshot")
+	}
 	h.step()
 	states, revisions, closed := lootFrames(t, out)
 	if len(closed) != 1 || closed[0] != takeAllCorpse {
@@ -274,7 +288,7 @@ func TestTakeAllOrderingDoesNotSilenceASingleTake(t *testing.T) {
 	if reason, err := player.TakeAllLoot(protocol.LootTakeAllRequest{CorpseID: takeAllCorpse, Revision: 1, ClientTick: 9}); err != nil {
 		t.Fatalf("take-all = %s, %v", reason, err)
 	}
-	// The same client tick, on the other stream, after the corpse has already gone.
+	// The same client tick, on the other stream, after the container has become empty.
 	if reason, err := player.TakeLoot(protocol.LootTakeRequest{CorpseID: takeAllCorpse, EntryID: 1, Revision: 2, ClientTick: 9}); err == nil || reason != vnet.RefusalReasonCorpseUnavailable {
 		t.Fatalf("take on the same tick = %s, %v; want the corpse's own answer rather than a stale-tick silence", reason, err)
 	}
@@ -284,7 +298,7 @@ func TestTakeAllOrderingDoesNotSilenceASingleTake(t *testing.T) {
 //
 // The one place where "take everything" could mean somebody else's everything.
 // `containerFor` is what keeps it from meaning that, and this pins the walk to it rather
-// than to the entry list `hasLoot` happens to see.
+// than to every personal entry list the corpse happens to carry.
 func TestTakeAllWalksOnlyTheRequestersOwnContainer(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})

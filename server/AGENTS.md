@@ -1446,8 +1446,12 @@ kill. A draugr leaves 1..2 bones, a vargr leaves exactly one pelt, and two pelts
   request names — and differs only in the loop. It walks the entries in `entryID` order
   and **skips** what does not fit rather than stopping at it, so a bone behind a blade the
   pack has no empty slot for still comes home. One `revision++` for the whole walk if
-  anything moved, none if nothing did. A bare container is `removeCorpseLocked` and the
-  existing `LootClosed`; a remainder is `lootDirty` and a `TakeLoot`/`InventoryFull`
+  anything moved, none if nothing did. In ordinary simulation a bare container remains a
+  `MobAction.Corpse` until its original authoritative expiry, leaves that recipient's
+  accessible-corpse projection, and `offerLootLocked` turns the existing `lootDirty` debt
+  into `LootClosed`. Explicit chunk regeneration remains the administrative exception that
+  removes every entity in the regenerated volume; looting never enters that path. A remainder
+  stays `lootDirty` and carries a `TakeLoot`/`InventoryFull`
   refusal, which is the one place in this file where a *partial success* is reported as
   both things it is — the entries that moved are committed, and the refusal is what says
   the rest did not. The whole walk is inside the one `inventory.mu.TryLock` window, which

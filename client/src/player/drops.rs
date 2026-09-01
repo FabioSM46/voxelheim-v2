@@ -88,13 +88,8 @@ const BUNDLE_DROP_SIZE: Vec3 = Vec3::new(DROP_EDGE * 1.15, DROP_EDGE * 0.62, DRO
 /// One full turn every eight seconds: visible, but not a propeller.
 const SPIN_RADIANS_PER_SECOND: f32 = TAU / 8.0;
 
-/// Modes whose UI owns the view instead of the 3D world.
-const HIDDEN_INPUT_MODES: [InputMode; 4] = [
-    InputMode::Inventory,
-    InputMode::Loot,
-    InputMode::Vendor,
-    InputMode::Menu,
-];
+/// Full-screen modes whose UI owns the view instead of the 3D world.
+const HIDDEN_INPUT_MODES: [InputMode; 2] = [InputMode::Inventory, InputMode::Menu];
 
 /// What decides which mesh a drop is drawn from.
 ///
@@ -1722,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn inventory_and_menu_hide_a_drop_without_removing_it() {
+    fn only_inventory_and_menu_hide_a_drop_without_removing_it() {
         let mut app = headless_player();
         deliver(
             &mut app,
@@ -1735,6 +1730,16 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
         assert_eq!(only_anchor_visibility(&mut app), Visibility::Visible);
+
+        for mode in [InputMode::Loot, InputMode::Vendor] {
+            *app.world_mut().resource_mut::<InputMode>() = mode;
+            app.update();
+            assert_eq!(
+                only_anchor_visibility(&mut app),
+                Visibility::Visible,
+                "the centred {mode:?} panel hid the drop"
+            );
+        }
 
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
         app.update();

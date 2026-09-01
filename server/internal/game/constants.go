@@ -108,9 +108,10 @@ const (
 	// spread across one fight counts, and well inside the default streamed view.
 	PartyShareRadius = 32.0
 
-	// CorpseLifetime is how long an owned normal-mob container remains lootable.
-	// NewSim converts it to authoritative ticks; opening a corpse never moves the
-	// deadline and no wall clock participates in expiry.
+	// CorpseLifetime is how long a killed mob's body remains in the authoritative
+	// world. Its container is lootable only while that recipient still has entries;
+	// emptying it never moves the deadline. NewSim converts the duration to ticks, so
+	// no wall clock participates in expiry.
 	CorpseLifetime = 10 * time.Minute
 
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per

@@ -94,21 +94,6 @@ func (c *corpse) containerFor(p *Player) (*corpseContainer, bool) {
 	return &c.container, true
 }
 
-func (c *corpse) hasLoot() bool {
-	if c == nil {
-		return false
-	}
-	if c.personal == nil {
-		return len(c.container.entries) > 0
-	}
-	for _, container := range c.personal {
-		if len(container.entries) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func (c *corpse) entryCount() int {
 	if c == nil {
 		return 0
@@ -360,7 +345,7 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	}
 	p.haveLootTakeTick, p.lastLootTakeTick = true, req.ClientTick
 
-	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
+	_, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
 	if err != nil {
 		return reason, err
 	}
@@ -386,9 +371,6 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	container.revision++
 	p.inventoryDirty = true
 	p.lootDirty = true
-	if !c.hasLoot() {
-		p.sim.removeCorpseLocked(c.entityID)
-	}
 	return vnet.RefusalReasonUnknown, nil
 }
 
@@ -416,7 +398,7 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 	}
 	p.haveLootTakeAllTick, p.lastLootTakeAllTick = true, req.ClientTick
 
-	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
+	_, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
 	if err != nil {
 		return reason, err
 	}
@@ -441,10 +423,6 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 		container.revision++
 		p.inventoryDirty = true
 		p.lootDirty = true
-		if !c.hasLoot() {
-			p.sim.removeCorpseLocked(c.entityID)
-			return vnet.RefusalReasonUnknown, nil
-		}
 	}
 	if len(container.entries) > 0 {
 		return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d loot entries do not fit", len(container.entries))
