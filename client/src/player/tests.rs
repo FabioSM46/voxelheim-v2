@@ -680,6 +680,39 @@ fn dismount_removes_only_the_horse_and_restores_the_same_rider() {
 }
 
 #[test]
+fn a_horse_whose_parent_stops_being_a_body_is_removed() {
+    let mut app = headless_player();
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(99, [4.0, 64.0, 0.0], 0.0)],
+        vec![MountState {
+            entity_id: 99,
+            mount: MountKind::BlackHorse,
+        }],
+        Instant::now(),
+    );
+    app.update();
+    let rider = body_of(&mut app, 99).expect("one mounted body");
+
+    app.world_mut().entity_mut(rider).remove::<Body>();
+    app.update();
+
+    let world = app.world_mut();
+    let mut horses = world.query_filtered::<Entity, With<horse::Horse>>();
+    assert_eq!(
+        horses.iter(world).count(),
+        1,
+        "the stale horse survived beside the replacement body's horse"
+    );
+    assert_ne!(
+        horse_of(&mut app, 99).map(|(entity, _)| entity),
+        None,
+        "the replacement body did not receive the projected mount"
+    );
+}
+
+#[test]
 fn the_local_third_person_rider_uses_the_same_horse_tree() {
     let mut app = headless_player();
     deliver_mounts(

@@ -33,8 +33,8 @@ const HORSE_EAR: Vec3 = Vec3::new(0.07, 0.16, 0.07);
 const HORSE_LEG: Vec3 = Vec3::new(0.11, 0.72, 0.11);
 const HORSE_HOOF: Vec3 = Vec3::new(0.13, 0.12, 0.16);
 const HORSE_HIP_X: f32 = 0.21;
-const HORSE_HIP_Z: f32 = 0.19;
-const HORSE_LEG_SWING: f32 = 0.62;
+const HORSE_HIP_Z: f32 = 0.11;
+const HORSE_LEG_SWING: f32 = 0.13;
 
 /// Raising the existing humanoid by this amount puts its hip on the top of the horse's
 /// back. The legs then fold from that same hip; the rider is seated rather than standing
@@ -194,6 +194,13 @@ pub(super) fn sync_horses(
             (None, None) => {}
         }
     }
+
+    // The projection is complete over bodies, so a horse whose parent is no longer a
+    // body is stale too. Ordinary body despawns take their descendants with them; this
+    // closes the distinct case where the parent survives but stops being a body.
+    for (_, (horse, _)) in current {
+        commands.entity(horse).despawn();
+    }
 }
 
 fn spawn_horse(commands: &mut Commands, visuals: &HorseVisuals, rider: Entity, kind: MountKind) {
@@ -295,26 +302,38 @@ mod tests {
 
     #[test]
     fn the_horse_stays_inside_the_authoritative_player_footprint() {
-        let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
-        meshes.extend(
-            Leg::ALL
-                .map(|leg| horse_leg_mesh().translated_by(leg.hip()))
-                .into_iter(),
-        );
-        let (low, high) = extent(&meshes);
         let half = PLAYER_WIDTH / 2.0;
-        assert!(
-            low.x >= -half && high.x <= half,
-            "horse x = {low:?}..{high:?}"
-        );
-        assert!(
-            low.z >= -half && high.z <= half,
-            "horse z = {low:?}..{high:?}"
-        );
-        assert!(
-            low.y.abs() < 1e-5,
-            "horse does not stand on the rider's feet plane"
-        );
+        for pose in [
+            WalkPose::default(),
+            WalkPose {
+                phase: PI / 2.0,
+                moving: true,
+            },
+            WalkPose {
+                phase: 3.0 * PI / 2.0,
+                moving: true,
+            },
+        ] {
+            let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
+            meshes.extend(
+                Leg::ALL.map(|leg| horse_leg_mesh().transformed_by(gait_transform(leg, pose))),
+            );
+            let (low, high) = extent(&meshes);
+            assert!(
+                low.x >= -half && high.x <= half,
+                "horse at {pose:?} has x = {low:?}..{high:?}"
+            );
+            assert!(
+                low.z >= -half && high.z <= half,
+                "horse at {pose:?} has z = {low:?}..{high:?}"
+            );
+            if !pose.moving {
+                assert!(
+                    low.y.abs() < 1e-5,
+                    "standing horse does not reach the rider's feet plane"
+                );
+            }
+        }
     }
 
     fn angle(leg: Leg, pose: WalkPose) -> f32 {
