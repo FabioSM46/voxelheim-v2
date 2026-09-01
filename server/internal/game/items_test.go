@@ -81,6 +81,38 @@ func TestPalmLogCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
 	}
 }
 
+func TestTheThreeHorseTokensCarryAppendedIDsAndDifferOnlyByColour(t *testing.T) {
+	t.Parallel()
+
+	want := []struct {
+		item  ItemID
+		id    ItemID
+		mount vnet.MountKind
+	}{
+		{ItemBlackHorse, 41, vnet.MountKindBlackHorse},
+		{ItemBrownHorse, 42, vnet.MountKindBrownHorse},
+		{ItemGreyHorse, 43, vnet.MountKindGreyHorse},
+	}
+	base := itemDefinition{places: world.Air, maxStack: 1}
+	for _, tc := range want {
+		if tc.item != tc.id {
+			t.Errorf("%s token id = %d, want appended wire id %d", tc.mount, tc.item, tc.id)
+		}
+		definition, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("%s token is not registered", tc.mount)
+			continue
+		}
+		if definition.learnsMount != tc.mount {
+			t.Errorf("item %d learns %s, want %s", tc.item, definition.learnsMount, tc.mount)
+		}
+		definition.learnsMount = vnet.MountKindUnknown
+		if definition != base {
+			t.Errorf("%s token has non-colour stats %+v, want %+v", tc.mount, definition, base)
+		}
+	}
+}
+
 func TestBothMeatsCarryTheirPinnedIDsAndResourceStats(t *testing.T) {
 	t.Parallel()
 
@@ -245,6 +277,24 @@ func TestRawAndCookedMeatAreTheOnlyFoods(t *testing.T) {
 		}
 		if definition.restoresHunger != want {
 			t.Errorf("item %d restores %d hunger, want %d", id, definition.restoresHunger, want)
+		}
+	}
+}
+
+func TestOnlyTheThreeHorseTokensTeachMounts(t *testing.T) {
+	t.Parallel()
+
+	want := map[ItemID]vnet.MountKind{
+		ItemBlackHorse: vnet.MountKindBlackHorse,
+		ItemBrownHorse: vnet.MountKindBrownHorse,
+		ItemGreyHorse:  vnet.MountKindGreyHorse,
+	}
+	for id, definition := range itemRegistry {
+		if definition.learnsMount != want[id] {
+			t.Errorf("item %d learns %s, want %s", id, definition.learnsMount, want[id])
+		}
+		if definition.learnsMount != vnet.MountKindUnknown && definition.restoresHunger != 0 {
+			t.Errorf("item %d both teaches %s and restores hunger", id, definition.learnsMount)
 		}
 	}
 }

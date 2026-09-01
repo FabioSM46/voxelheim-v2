@@ -33,3 +33,31 @@ func TestLearnedMountsRefuseEveryUnknownStoredBit(t *testing.T) {
 		t.Errorf("Validate refused all three concrete mounts: %v", err)
 	}
 }
+
+func TestLearningAddsEachKnownMountOnceAndRefusesUnknowns(t *testing.T) {
+	t.Parallel()
+
+	var learned LearnedMounts
+	for _, kind := range []vnet.MountKind{
+		vnet.MountKindBlackHorse,
+		vnet.MountKindBrownHorse,
+		vnet.MountKindGreyHorse,
+	} {
+		next, added := learned.Learn(kind)
+		if !added || !next.Has(kind) {
+			t.Fatalf("learning %s from %#02x returned %#02x, added=%v", kind, learned, next, added)
+		}
+		if duplicate, added := next.Learn(kind); added || duplicate != next {
+			t.Errorf("learning %s twice returned %#02x, added=%v; want unchanged %#02x", kind, duplicate, added, next)
+		}
+		learned = next
+	}
+	if learned != allLearnedMounts {
+		t.Errorf("learning every concrete mount produced %#02x, want %#02x", learned, allLearnedMounts)
+	}
+	for _, kind := range []vnet.MountKind{vnet.MountKindUnknown, vnet.MountKind(99)} {
+		if next, added := learned.Learn(kind); added || next != learned || learned.Has(kind) {
+			t.Errorf("unknown %d changed %#02x into %#02x (added=%v)", kind, learned, next, added)
+		}
+	}
+}

@@ -897,18 +897,45 @@ the cost either of them would pay alone.
   everyone else back toward their anchor's bearing at the same rate. Nothing walks, paths,
   schedules or speaks. The pass iterates the map rather than a sorted slice because it reads
   only players and writes only its own field — there is no order for a result to depend on.
-- **Every `NpcInteractRequest` is refused `ActionRefused{Interact, NotAVendor}`**, a vendor
-  role included. An unknown id, an id that is not a resident, one out of `EditReach` and one
-  who keeps no stall all produce the same frame, so a client learns nothing by probing. This is
-  the fail-closed default rather than a stand-in: #459 is what teaches the server what a vendor
-  role opens, and `vendorRole` is the one place the trades are named so that issue changes an
-  outcome rather than rediscovering a list.
+- **A resident role with a `vendorTable` row opens a stall; every other address is refused
+  `ActionRefused{Interact, NotAVendor}`.** An unknown id, an id that is not a resident, one out
+  of `EditReach` and a resident who keeps no stall all produce the same frame, so a client learns
+  nothing by probing. `vendorRole` and `vendorTable` are pinned to each other by a sweep: adding a
+  trade is one table row and one exhaustive predicate member, never an entity flag.
+- **The stablemaster is an ordinary resident at the capital-only `AnchorStablemaster`.** That is
+  the whole of the invulnerability, no-loot and no-corpse argument above: the role changes the
+  stall it opens, not the entity class it belongs to. Paddock anchors remain deliberately
+  unclaimed until the scenic-horse issue; villages have no stable schematic and therefore no
+  stablemaster slot to materialise.
 - **The router's case is what closed a live edge, and it is worth knowing which one.**
   `NpcInteractRequest` has decoded at the protocol boundary since V25; while the router had no
   case for it, such a frame fell through the default and closed the session as **malformed** —
   a V25 client hung up on by a server that understood every byte it sent. A refusal is an
   answer and a disconnect is not, which is why `npc_test.go` sends two requests rather than
   one: the second can only be answered by a session that survived the first.
+
+## Vendor stalls and consumable progression
+
+- **A stall is unlimited, role-owned stock, not resident state.** `vendorTable` carries the
+  complete sells and buys vectors and `vendorState` projects them afresh for every player. A
+  stablemaster therefore lists all three horse tokens at 1000 silver even after the recipient
+  has learned them all; filtering by recipient state would make the sale, rather than use, decide
+  whether a duplicate is allowed.
+- **A trade is one transaction over scratch copies of the pack and purse.** Buying checks the
+  server's price, subtracts from the copied purse, then performs the real insertion rule on copied
+  slots; either both copies replace the authoritative state or neither does. Revision, reach,
+  liveness and the open vendor are checked under `Sim.mu`, and the pack uses `TryLock` because the
+  tick takes that lock in the opposite nesting direction.
+- **What using an item does is a registry capability.** `restoresHunger` and `learnsMount` both
+  have fail-closed zeroes; `Consume` names neither food ids nor horse-token ids. The two
+  capabilities are mutually exclusive by a registry sweep. A mount token checks the durable
+  learned bit before `consumeOneLocked`, so `MountAlreadyLearned` changes neither the set nor the
+  token; a successful use consumes one, updates the bit under the same critical section and sends
+  both the complete inventory and complete learned set immediately.
+- **Horse-token rows differ only in `learnsMount`.** They are appended item ids, max-stack one,
+  non-placeable and non-durable. Speed, jump, mounting and cast state do not belong to those item
+  rows and remain owned by the mount simulation issues; the stablemaster's three prices are equal
+  here without pre-implementing any of those outcomes.
 
 ## Crafting, and how a transaction is made out of an array
 

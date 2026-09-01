@@ -146,6 +146,8 @@ func residentRole(anchor world.AnchorKind) (vnet.ResidentRole, bool) {
 		return vnet.ResidentRoleVillager, true
 	case world.AnchorGuard:
 		return vnet.ResidentRoleGuard, true
+	case world.AnchorStablemaster:
+		return vnet.ResidentRoleStablemaster, true
 	default:
 		return vnet.ResidentRoleUnknown, false
 	}
@@ -433,7 +435,8 @@ func (r *resident) appearanceFrame() []byte {
 func vendorRole(role vnet.ResidentRole) bool {
 	switch role {
 	case vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
-		vnet.ResidentRoleCook, vnet.ResidentRoleTrader:
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader,
+		vnet.ResidentRoleStablemaster:
 		return true
 	default:
 		return false

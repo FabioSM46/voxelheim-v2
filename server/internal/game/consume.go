@@ -4,61 +4,88 @@ import (
 	"errors"
 	"fmt"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
-// consumeFoodLocked spends exactly one edible item from slot and returns what it
-// restores. The caller holds the inventory lock. Slot stays uint16 until both the
-// uint8 representation and pack bounds are checked, so narrowing an untrusted value
-// can never wrap it onto a real slot even if the pack grows beyond 256 entries.
-func (i *inventory) consumeFoodLocked(slot uint16) (uint16, bool) {
+// ConsumeResult is every complete authoritative state one successful item use changes.
+// Inventory is always present. LearnedMounts is present only when the item taught a
+// mount; food changes hunger, which already travels in the next ordinary snapshot.
+type ConsumeResult struct {
+	Inventory     protocol.InventoryState
+	LearnedMounts *protocol.LearnedMounts
+}
+
+// consumableStackLocked resolves one untrusted slot to one registered consumable.
+// The caller holds the inventory lock. Slot stays uint16 until both the uint8
+// representation and pack bounds are checked, so narrowing can never wrap it onto a
+// real slot even if the pack grows beyond 256 entries.
+func (i *inventory) consumableStackLocked(slot uint16) (uint8, inventoryStack, itemDefinition, bool) {
 	if slot > uint16(^uint8(0)) || int(slot) >= len(i.slots) {
-		return 0, false
+		return 0, inventoryStack{}, itemDefinition{}, false
 	}
 
 	index := uint8(slot)
 	stack, held := i.stackAtLocked(index)
 	if !held {
-		return 0, false
+		return 0, inventoryStack{}, itemDefinition{}, false
 	}
 	definition, registered := itemByID(stack.item)
-	if !registered || definition.restoresHunger == 0 {
-		return 0, false
+	if !registered || definition.restoresHunger == 0 && definition.learnsMount == vnet.MountKindUnknown {
+		return 0, inventoryStack{}, itemDefinition{}, false
 	}
-	if !i.consumeOneLocked(index, stack.item) {
-		return 0, false
-	}
-	return definition.restoresHunger, true
+	return index, stack, definition, true
 }
 
-// Consume resolves one ConsumeRequest against the authoritative life and pack. A
-// refusal is silence at the session boundary; success consumes exactly one item,
-// raises hunger without overflowing, and returns the complete inventory state.
-func (p *Player) Consume(req protocol.ConsumeRequest) (protocol.InventoryState, error) {
+// Consume resolves one ConsumeRequest against the authoritative life and pack. Success
+// spends exactly one item and applies the one effect its registry row names. A duplicate
+// mount is decided before the spend, so the token survives the refusal intact.
+func (p *Player) Consume(req protocol.ConsumeRequest) (ConsumeResult, vnet.RefusalReason, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
 	if err := p.cannotActLocked(); err != nil {
-		return protocol.InventoryState{}, err
+		return ConsumeResult{}, vnet.RefusalReasonPlayerIsDead, err
 	}
-	if p.hunger >= PlayerMaxHunger {
-		return protocol.InventoryState{}, errors.New("the hunger reserve is already full")
-	}
-
 	if !p.inventory.mu.TryLock() {
-		return protocol.InventoryState{}, errors.New("the inventory is busy")
+		return ConsumeResult{}, vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
 
-	restore, consumed := p.inventory.consumeFoodLocked(req.Slot)
-	if !consumed {
-		return protocol.InventoryState{}, fmt.Errorf("slot %d holds no edible item", req.Slot)
+	index, stack, definition, usable := p.inventory.consumableStackLocked(req.Slot)
+	if !usable {
+		return ConsumeResult{}, vnet.RefusalReasonSlotUnusable, fmt.Errorf("slot %d holds no consumable item", req.Slot)
 	}
+
+	result := ConsumeResult{}
+	switch {
+	case definition.restoresHunger != 0:
+		if p.hunger >= PlayerMaxHunger {
+			return ConsumeResult{}, vnet.RefusalReasonUnknown, errors.New("the hunger reserve is already full")
+		}
+		if !p.inventory.consumeOneLocked(index, stack.item) {
+			return ConsumeResult{}, vnet.RefusalReasonSlotChanged, fmt.Errorf("slot %d changed before its item could be consumed", req.Slot)
+		}
+		p.hunger = uint16(min(uint32(PlayerMaxHunger), uint32(p.hunger)+uint32(definition.restoresHunger)))
+
+	case definition.learnsMount != vnet.MountKindUnknown:
+		next, learned := p.learnedMounts.Learn(definition.learnsMount)
+		if !learned {
+			return ConsumeResult{}, vnet.RefusalReasonMountAlreadyLearned,
+				fmt.Errorf("%s is already learned", definition.learnsMount)
+		}
+		if !p.inventory.consumeOneLocked(index, stack.item) {
+			return ConsumeResult{}, vnet.RefusalReasonSlotChanged, fmt.Errorf("slot %d changed before its item could be consumed", req.Slot)
+		}
+		p.learnedMounts = next
+		learnedState := next.State()
+		result.LearnedMounts = &learnedState
+	}
+
 	p.refreshWornLocked()
-
-	p.hunger = uint16(min(uint32(PlayerMaxHunger), uint32(p.hunger)+uint32(restore)))
+	result.Inventory = p.inventory.stateLocked()
 	p.sim.log.Debug("item consumed", "entity_id", p.entityID, "slot", req.Slot,
-		"client_tick", req.ClientTick, "hunger", p.hunger)
-
-	return p.inventory.stateLocked(), nil
+		"item", stack.item, "client_tick", req.ClientTick, "hunger", p.hunger,
+		"learned_mounts", uint8(p.learnedMounts))
+	return result, vnet.RefusalReasonUnknown, nil
 }
