@@ -28,7 +28,9 @@ const DropSize = 0.25
 // you do with your feet, not something you do at arm's length.
 const DropPickupRadius = 1.0
 
-// DropLifetime is how long an uncollected drop stays in the world.
+// DropLifetime is how long an uncollected drop stays in the world. It matches
+// CorpseLifetime because drops and corpses follow the same five-minute retention
+// rule for temporary world entities.
 //
 // Whether or not anybody is nearby: a drop is simulation state, not a render, so a
 // world nobody is standing in still tidies itself. Five minutes is long enough to

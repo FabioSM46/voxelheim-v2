@@ -109,10 +109,12 @@ const (
 	PartyShareRadius = 32.0
 
 	// CorpseLifetime is how long a killed mob's body remains in the authoritative
-	// world. Its container is lootable only while that recipient still has entries;
-	// emptying it never moves the deadline. NewSim converts the duration to ticks, so
-	// no wall clock participates in expiry.
-	CorpseLifetime = 10 * time.Minute
+	// world. It matches DropLifetime because corpses and drops follow the same
+	// five-minute retention rule for temporary world entities. Its container is
+	// lootable only while that recipient still has entries; emptying it never moves
+	// the deadline. NewSim converts the duration to ticks, so no wall clock
+	// participates in expiry.
+	CorpseLifetime = 5 * time.Minute
 
 	// WalkSpeed is the horizontal speed of a player at full intent, in blocks per
 	// second. Roughly a brisk walk at one block to the metre.
