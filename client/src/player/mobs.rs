@@ -118,18 +118,22 @@ const DRAUGR_ARM_STRIKE: f32 = 0.20;
 /// weight in the blow without leaving the old whole-body headbutt as the attack.
 const DRAUGR_LEAN_FRACTION: f32 = 0.15;
 
-/// The vargr, in fractions of its own box: a torso the full width of what the server
-/// collides, four short legs under it, a raised hackled ridge that reaches the top of the
-/// box, and a low head thrust out along the facing.
+/// The vargr, in fractions of its own box: a narrow torso under broken flank and back
+/// tufts, four short legs, a heavy shoulder ruff that reaches the top of the box, and a
+/// low head thrust out along the facing.
 ///
 /// **Low and long is the whole point of the silhouette.** A draugr is 0.6 wide and 1.8
 /// tall and a remote player's capsule is the same; a vargr at 0.9 by 1.0 reads as neither
 /// from any distance, which is what "tell a vargr from a draugr before it is close enough
 /// to bite" asks for.
-const VARGR_TORSO: Vec3 = Vec3::new(VARGR_BODY.width, 0.40, 0.62);
+const VARGR_TORSO: Vec3 = Vec3::new(0.72, 0.40, 0.52);
 const VARGR_TORSO_CENTRE: Vec3 = Vec3::new(0.0, 0.42, 0.14);
-const VARGR_HACKLES: Vec3 = Vec3::new(0.34, 0.38, 0.30);
-const VARGR_HEAD: Vec3 = Vec3::new(0.42, 0.34, 0.34);
+const VARGR_RUFF: Vec3 = Vec3::new(0.44, 0.34, 0.34);
+const VARGR_HEAD: Vec3 = Vec3::new(0.38, 0.32, 0.28);
+const VARGR_HEAD_CENTRE: Vec3 = Vec3::new(0.0, 0.38, -0.28);
+const VARGR_MUZZLE: Vec3 = Vec3::new(0.28, 0.16, 0.08);
+const VARGR_EYE: Vec3 = Vec3::new(0.065, 0.055, 0.025);
+const VARGR_FANG: Vec3 = Vec3::new(0.04, 0.10, 0.03);
 const VARGR_LEG: Vec3 = Vec3::new(0.16, 0.24, 0.16);
 const VARGR_LEG_SPREAD: Vec3 = Vec3::new(0.26, 0.0, 0.26);
 
@@ -221,6 +225,10 @@ const DRAUGR_EYE_COLOUR: Color = Color::srgb(1.0, 0.03, 0.02);
 /// apart by colour as well as by silhouette at the distance the difference matters.
 const VARGR_BODY_COLOUR: Color = Color::srgb(0.26, 0.22, 0.20);
 const VARGR_HEAD_COLOUR: Color = Color::srgb(0.38, 0.33, 0.29);
+const VARGR_FUR_COLOUR: Color = Color::srgb(0.18, 0.14, 0.13);
+const VARGR_FANG_COLOUR: Color = Color::srgb(0.88, 0.84, 0.68);
+const VARGR_EYE_COLOUR: Color = Color::srgb(1.0, 0.78, 0.05);
+const VARGR_EYE_EMISSIVE: LinearRgba = LinearRgba::rgb(7.0, 4.2, 0.15);
 
 /// Warm hide and a lighter face distinguish prey from both hostile species.
 const DEER_BODY_COLOUR: Color = Color::srgb(0.48, 0.30, 0.18);
@@ -236,7 +244,7 @@ const FLASH_COLOUR: Color = Color::srgb(0.85, 0.20, 0.18);
 // them against the set and not against the system, which leaves them free to run before
 // the snapshot they are meant to draw has arrived — a body that never spawns.
 
-/// The two meshes and two materials one species is drawn from.
+/// The independently drawn meshes and materials one species is drawn from.
 ///
 /// One handle per independently posed part, so a hit flash stays the single material swap
 /// it has always been however many primitives a species is built out of. Multiple colours
@@ -252,8 +260,17 @@ struct SpeciesVisuals {
     /// The paired arms, authored around one shoulder-line pivot. Draugr only: the other
     /// species keep their existing silhouettes and poses.
     arms: Option<Handle<Mesh>>,
+    /// A separately lit pair of eyes, for the vargr only. Keeping mesh and material in one
+    /// option makes it impossible to spawn emissive geometry without its matching handle.
+    eyes: Option<EyeVisuals>,
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
+}
+
+#[derive(Debug, Clone)]
+struct EyeVisuals {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
 }
 
 /// The shared meshes and materials every body is drawn from, one entry per species.
@@ -381,6 +398,9 @@ pub(super) enum MobPart {
     Head,
     Legs,
     Arms,
+    /// Vargr only. These stay emissive through hit flash and the lootable amber wash: the
+    /// rest of the creature carries those states while its night-time face stays readable.
+    Eyes,
 }
 
 /// Marks the child meshes so a flash can recolour them, and a collapse can splay them,
@@ -407,12 +427,17 @@ pub(super) fn create_visuals(
     // material binding; swapping that handle still flashes and amber-washes every vertex,
     // eyes included.
     let draugr_material = materials.add(StandardMaterial::from_color(Color::WHITE));
+    // Vargr coat and fang colours live on vertices so fur, face and teeth stay within the
+    // existing body/head draws. Reusing this neutral handle for both leaves the emissive
+    // eyes as the creature's only extra material binding.
+    let vargr_material = materials.add(StandardMaterial::from_color(Color::WHITE));
     commands.insert_resource(MobVisuals {
         draugr: SpeciesVisuals {
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
             arms: Some(meshes.add(draugr_arms_mesh())),
+            eyes: None,
             body_material: draugr_material.clone(),
             head_material: draugr_material,
         },
@@ -421,14 +446,24 @@ pub(super) fn create_visuals(
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
             arms: None,
-            body_material: materials.add(StandardMaterial::from_color(VARGR_BODY_COLOUR)),
-            head_material: materials.add(StandardMaterial::from_color(VARGR_HEAD_COLOUR)),
+            eyes: Some(EyeVisuals {
+                mesh: meshes.add(vargr_eye_mesh()),
+                material: materials.add(StandardMaterial {
+                    base_color: VARGR_EYE_COLOUR,
+                    emissive: VARGR_EYE_EMISSIVE,
+                    perceptual_roughness: 1.0,
+                    ..default()
+                }),
+            }),
+            body_material: vargr_material.clone(),
+            head_material: vargr_material,
         },
         deer: SpeciesVisuals {
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
             arms: None,
+            eyes: None,
             body_material: materials.add(StandardMaterial::from_color(DEER_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
@@ -461,6 +496,22 @@ fn draugr_tint(mesh: Mesh, colour: Color) -> Mesh {
 
 fn draugr_box(size: Vec3, centre: Vec3, colour: Color) -> Mesh {
     draugr_tint(
+        Mesh::from(Cuboid::from_size(size)).translated_by(centre),
+        colour,
+    )
+}
+
+/// Gives the vargr several coat and face colours without turning each tuft or tooth into a
+/// child draw. The shared white material preserves these colours until a flash or loot wash
+/// deliberately replaces that one handle for the whole part.
+fn vargr_tint(mesh: Mesh, colour: Color) -> Mesh {
+    let linear = colour.to_linear().to_f32_array();
+    let vertices = mesh.count_vertices();
+    mesh.with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, vec![linear; vertices])
+}
+
+fn vargr_box(size: Vec3, centre: Vec3, colour: Color) -> Mesh {
+    vargr_tint(
         Mesh::from(Cuboid::from_size(size)).translated_by(centre),
         colour,
     )
@@ -587,23 +638,71 @@ fn draugr_arms_mesh() -> Mesh {
     arms
 }
 
-/// The vargr's body: the torso, the four legs under it and the hackled ridge over it.
+/// The vargr's body: a narrow torso under a broken coat and a heavy shoulder ruff.
 ///
 /// Authored in the canonical facing — North is -Z, so the head end is -Z and the haunches
 /// are +Z — and merged into one mesh, so a hit flash stays a single material swap.
 fn vargr_body_mesh() -> Mesh {
     let vargr = body(MobKind::Vargr);
-    let mut torso = Mesh::from(Cuboid::from_size(VARGR_TORSO)).translated_by(VARGR_TORSO_CENTRE);
+    let mut torso = vargr_box(VARGR_TORSO, VARGR_TORSO_CENTRE, VARGR_BODY_COLOUR);
 
-    // The ridge over the shoulders, and the highest thing a vargr has: it is what takes
-    // the drawn body up to the full height the server collides.
-    let hackles = Mesh::from(Cuboid::from_size(VARGR_HACKLES)).translated_by(Vec3::new(
-        0.0,
-        vargr.height - VARGR_HACKLES.y / 2.0,
-        VARGR_TORSO_CENTRE.z - VARGR_TORSO.z / 4.0,
-    ));
+    // The ruff overlaps both torso and head instead of perching on the back. Its uneven
+    // crown is assembled from a core and three darker steps; the centre step is still the
+    // highest thing a vargr has and takes the drawing to the full collided height.
+    let ruff_core = vargr_box(VARGR_RUFF, Vec3::new(0.0, 0.78, -0.08), VARGR_FUR_COLOUR);
+    let ruff_steps = [
+        (Vec3::new(0.15, 0.14, 0.16), Vec3::new(-0.14, 0.90, -0.13)),
+        (
+            Vec3::new(0.14, 0.20, 0.18),
+            Vec3::new(0.01, vargr.height - 0.10, -0.08),
+        ),
+        (Vec3::new(0.12, 0.12, 0.15), Vec3::new(0.15, 0.89, -0.02)),
+    ]
+    .map(|(size, centre)| vargr_box(size, centre, VARGR_FUR_COLOUR));
 
-    merge_all(&mut torso, std::iter::once(hackles), "vargr body");
+    // The torso itself stops short of the collision walls. Discrete tufts take the flanks
+    // and haunches back out to those walls, leaving gaps between their outer faces so the
+    // outline is shag rather than one smooth cuboid. Nothing crosses the server-owned box.
+    let flank_tufts = [
+        (-1.0, -0.08, 0.43, 0.15),
+        (-1.0, 0.16, 0.48, 0.18),
+        (-1.0, 0.34, 0.41, 0.13),
+        (1.0, -0.03, 0.46, 0.18),
+        (1.0, 0.20, 0.41, 0.14),
+        (1.0, 0.35, 0.50, 0.19),
+    ]
+    .map(|(side, z, y, height)| {
+        vargr_box(
+            Vec3::new(0.09, height, 0.13),
+            Vec3::new(side * 0.405, y, z),
+            VARGR_FUR_COLOUR,
+        )
+    });
+    let haunch_tufts =
+        [(-0.22, 0.47, 0.16), (0.0, 0.54, 0.20), (0.22, 0.45, 0.14)].map(|(x, y, height)| {
+            vargr_box(
+                Vec3::new(0.18, height, 0.10),
+                Vec3::new(x, y, vargr.width / 2.0 - 0.05),
+                VARGR_FUR_COLOUR,
+            )
+        });
+    let back_tufts = [
+        (Vec3::new(-0.25, 0.69, 0.10), 0.14),
+        (Vec3::new(-0.07, 0.72, 0.23), 0.20),
+        (Vec3::new(0.13, 0.68, 0.31), 0.12),
+        (Vec3::new(0.28, 0.70, 0.13), 0.16),
+    ]
+    .map(|(centre, height)| vargr_box(Vec3::new(0.13, height, 0.14), centre, VARGR_FUR_COLOUR));
+
+    merge_all(
+        &mut torso,
+        std::iter::once(ruff_core)
+            .chain(ruff_steps)
+            .chain(flank_tufts)
+            .chain(haunch_tufts)
+            .chain(back_tufts),
+        "vargr coat",
+    );
     torso
 }
 
@@ -618,14 +717,17 @@ fn vargr_body_mesh() -> Mesh {
 /// Authored in the same frame the rest of the vargr is, with each leg standing on the
 /// origin plane, so the group's transform is a scale about the point the body stands on.
 fn vargr_legs_mesh() -> Mesh {
-    let leg = Cuboid::from_size(VARGR_LEG);
     let mut standing = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
         .map(|(sx, sz): (f32, f32)| {
-            Mesh::from(leg).translated_by(Vec3::new(
-                sx * VARGR_LEG_SPREAD.x,
-                VARGR_LEG.y / 2.0,
-                sz * VARGR_LEG_SPREAD.z,
-            ))
+            vargr_box(
+                VARGR_LEG,
+                Vec3::new(
+                    sx * VARGR_LEG_SPREAD.x,
+                    VARGR_LEG.y / 2.0,
+                    sz * VARGR_LEG_SPREAD.z,
+                ),
+                VARGR_BODY_COLOUR,
+            )
         })
         .into_iter();
 
@@ -636,13 +738,48 @@ fn vargr_legs_mesh() -> Mesh {
     legs
 }
 
-/// The vargr's head: low and thrust out along the facing, reaching the front of the box.
+/// The vargr's low head, broad muzzle, ears and bared fangs, all in one flashing part.
 fn vargr_head_mesh() -> Mesh {
-    Mesh::from(Cuboid::from_size(VARGR_HEAD)).translated_by(Vec3::new(
-        0.0,
-        VARGR_TORSO_CENTRE.y - VARGR_TORSO.y / 5.0,
-        -(body(MobKind::Vargr).width - VARGR_HEAD.z) / 2.0,
-    ))
+    let mut head = vargr_box(VARGR_HEAD, VARGR_HEAD_CENTRE, VARGR_HEAD_COLOUR);
+    // The muzzle stops short of the collision wall so the eyes and fangs can sit visibly
+    // proud of it while those details, rather than another invisible box, reach -0.45.
+    let muzzle = vargr_box(VARGR_MUZZLE, Vec3::new(0.0, 0.32, -0.39), VARGR_HEAD_COLOUR);
+    let ears = [-1.0, 1.0].map(|side| {
+        vargr_box(
+            Vec3::new(0.10, 0.18, 0.09),
+            Vec3::new(side * 0.13, 0.58, -0.24),
+            VARGR_FUR_COLOUR,
+        )
+    });
+    let fangs = [-1.0, 1.0].map(|side| {
+        vargr_box(
+            VARGR_FANG,
+            Vec3::new(side * 0.09, 0.23, -0.435),
+            VARGR_FANG_COLOUR,
+        )
+    });
+    merge_all(
+        &mut head,
+        std::iter::once(muzzle).chain(ears).chain(fangs),
+        "vargr head",
+    );
+    head
+}
+
+/// Two emissive eyes, kept in one additional child and against the face's front plane.
+fn vargr_eye_mesh() -> Mesh {
+    let mut eyes = [-1.0, 1.0]
+        .map(|side| {
+            Mesh::from(Cuboid::from_size(VARGR_EYE)).translated_by(Vec3::new(
+                side * 0.09,
+                0.42,
+                -0.4325,
+            ))
+        })
+        .into_iter();
+    let mut pair = eyes.next().expect("a vargr has two eyes");
+    merge_all(&mut pair, eyes, "vargr eyes");
+    pair
 }
 
 /// The deer's long torso, aligned with the canonical -Z facing.
@@ -906,6 +1043,17 @@ fn spawn_mob(
                 Mesh3d(arms),
                 MeshMaterial3d(species.body_material),
                 Transform::from_translation(Vec3::Y * DRAUGR_SHOULDER_HEIGHT),
+            ));
+        }
+        if let Some(eyes) = species.eyes {
+            parent.spawn((
+                MobVisual {
+                    owner,
+                    part: MobPart::Eyes,
+                },
+                Mesh3d(eyes.mesh),
+                MeshMaterial3d(eyes.material),
+                Transform::default(),
             ));
         }
         if hunts_local {
@@ -1197,7 +1345,17 @@ pub(super) fn animate(
             continue;
         };
 
-        let next = if flashing.contains(&part.owner) {
+        // Vargr eyes are deliberately the exception to both presentation washes. Their
+        // emissive material is what makes the face visible in darkness; the other three
+        // parts still flash or turn amber, so preserving the eyes hides neither state.
+        let next = if part.part == MobPart::Eyes {
+            species
+                .eyes
+                .as_ref()
+                .expect("only a species with eye visuals spawns an eye part")
+                .material
+                .clone()
+        } else if flashing.contains(&part.owner) {
             visuals.flash_material.clone()
         } else if lootable {
             visuals.lootable_material.clone()
@@ -1979,8 +2137,8 @@ mod tests {
         let drawn_vargr = parts(&mut app);
         assert_eq!(
             drawn_vargr.len(),
-            3,
-            "a vargr is a body, a head and its legs"
+            4,
+            "a vargr is a body, a head, its legs and one paired-eye child"
         );
 
         for part in &drawn_vargr {
@@ -1989,6 +2147,117 @@ mod tests {
                 "a vargr reused one of the draugr's parts: {part:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_vargrs_coat_fangs_and_eyes_are_geometry_with_bounded_draw_cost() {
+        fn colours(mesh: &Mesh) -> &[[f32; 4]] {
+            let Some(VertexAttributeValues::Float32x4(colours)) =
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("vargr geometry has no vertex colours");
+            };
+            colours
+        }
+
+        fn has(mesh: &Mesh, colour: Color) -> bool {
+            colours(mesh).contains(&colour.to_linear().to_f32_array())
+        }
+
+        let body = vargr_body_mesh();
+        let head = vargr_head_mesh();
+        assert!(has(&body, VARGR_BODY_COLOUR));
+        assert!(
+            has(&body, VARGR_FUR_COLOUR),
+            "the broken coat is not carried by the body draw"
+        );
+        assert!(has(&head, VARGR_HEAD_COLOUR));
+        assert!(has(&head, VARGR_FUR_COLOUR));
+        assert!(
+            has(&head, VARGR_FANG_COLOUR),
+            "the fangs are not carried by the head draw"
+        );
+
+        let mut app = headless();
+        deliver(&mut app, 1, vec![vargr(900, 3.0, 35, MobAction::Idle)]);
+        app.update();
+        let drawn = parts(&mut app);
+        assert_eq!(drawn.len(), 4, "the new face cost more than one child draw");
+
+        let visuals = app.world().resource::<MobVisuals>();
+        let eyes = visuals.vargr.eyes.as_ref().expect("vargr eye visuals");
+        assert_eq!(visuals.vargr.body_material, visuals.vargr.head_material);
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let eye_material = materials.get(&eyes.material).expect("eye material is live");
+        assert_eq!(eye_material.base_color, VARGR_EYE_COLOUR);
+        assert_eq!(eye_material.emissive, VARGR_EYE_EMISSIVE);
+    }
+
+    #[test]
+    fn a_vargrs_eyes_stay_lit_while_every_other_part_flashes_or_turns_amber() {
+        fn assert_materials(
+            app: &mut App,
+            state: &str,
+            ordinary: &Handle<StandardMaterial>,
+            eyes: &Handle<StandardMaterial>,
+        ) {
+            let world = app.world_mut();
+            let mut query = world.query::<(&MobVisual, &MeshMaterial3d<StandardMaterial>)>();
+            let drawn: Vec<_> = query
+                .iter(world)
+                .map(|(part, material)| (part.part, material.0.clone()))
+                .collect();
+            assert_eq!(drawn.len(), 4, "the vargr lost a visual part");
+            for (part, material) in drawn {
+                if part == MobPart::Eyes {
+                    assert_eq!(
+                        material, *eyes,
+                        "the eyes lost their emissive material during {state}"
+                    );
+                } else {
+                    assert_eq!(material, *ordinary, "{part:?} missed the {state} body wash");
+                }
+            }
+        }
+
+        let mut app = headless();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+        deliver(&mut app, 1, vec![vargr(900, 3.0, 35, MobAction::Idle)]);
+        app.update();
+        let (eye_material, flash_material, lootable_material) = {
+            let visuals = app.world().resource::<MobVisuals>();
+            (
+                visuals
+                    .vargr
+                    .eyes
+                    .as_ref()
+                    .expect("vargr eye visuals")
+                    .material
+                    .clone(),
+                visuals.flash_material.clone(),
+                visuals.lootable_material.clone(),
+            )
+        };
+
+        // Give the one-tick-delayed sampler an unchanged second endpoint before the hit.
+        deliver(&mut app, 2, vec![vargr(900, 3.0, 35, MobAction::Chase)]);
+        app.update();
+        deliver(&mut app, 3, vec![vargr(900, 3.0, 20, MobAction::Chase)]);
+        app.update();
+        assert_eq!(flashing(&mut app), 1, "the hit did not begin a flash");
+        assert_materials(&mut app, "flash", &flash_material, &eye_material);
+
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(FLASH_TIME));
+        app.update();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(1)));
+        deliver_lootable(&mut app, 4, vargr(900, 3.0, 0, MobAction::Corpse), true);
+        app.update();
+        deliver_lootable(&mut app, 5, vargr(900, 3.0, 0, MobAction::Corpse), true);
+        app.update();
+        // The killing decrease flashes first; amber is the steady corpse state underneath.
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(FLASH_TIME));
+        app.update();
+        assert_materials(&mut app, "lootable", &lootable_material, &eye_material);
     }
 
     // -----------------------------------------------------------------------
@@ -2392,7 +2661,12 @@ mod tests {
             ),
             (
                 MobKind::Vargr,
-                vec![vargr_body_mesh(), vargr_head_mesh(), vargr_legs_mesh()],
+                vec![
+                    vargr_body_mesh(),
+                    vargr_head_mesh(),
+                    vargr_legs_mesh(),
+                    vargr_eye_mesh(),
+                ],
             ),
             (
                 MobKind::Deer,
@@ -2451,6 +2725,28 @@ mod tests {
                 "a {kind:?} is not centred on the position the server sends"
             );
         }
+    }
+
+    #[test]
+    fn the_vargrs_ruff_reaches_the_collided_height_and_its_face_stays_inside_the_box() {
+        let vargr = body(MobKind::Vargr);
+        let (_, body_max) = drawn_extent(&[vargr_body_mesh()]);
+        assert!(
+            (body_max.y - vargr.height).abs() < 1e-5,
+            "the ruff reaches {} high, want {}",
+            body_max.y,
+            vargr.height
+        );
+
+        let (head_min, head_max) = drawn_extent(&[vargr_head_mesh(), vargr_eye_mesh()]);
+        let half = vargr.width / 2.0;
+        let epsilon = 1e-5;
+        assert!(head_min.x >= -half - epsilon && head_max.x <= half + epsilon);
+        assert!(head_min.y >= -epsilon && head_max.y <= vargr.height + epsilon);
+        assert!(
+            head_min.z >= -half - epsilon && head_max.z <= half + epsilon,
+            "the eyes or fangs left the head end of the collision box: {head_min}..{head_max}"
+        );
     }
 
     /// A villager's box is the server's, mirrored the way a player's is.
