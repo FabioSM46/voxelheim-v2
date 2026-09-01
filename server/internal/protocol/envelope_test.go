@@ -283,11 +283,13 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // **V28 appends player-to-player trading.** PlayerTradeRequest travels client to server,
 // so a V27 server would close the session on a tag it cannot name. The state and close
 // messages travel back and would be safely droppable alone; the request is the bump owed.
-func TestProtocolV28AddsPlayerTrading(t *testing.T) {
+// V29 then appends the persisted absolute world tick; absence would look like a fresh
+// world rather than an unreadable one, so that append owes a clean handshake refusal.
+func TestProtocolV29AddsTheAbsoluteWorldClock(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 28 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 28", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 29 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 29", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -3598,21 +3600,26 @@ func TestWhatADeathCostsOnTheWire(t *testing.T) {
 // Protocol V6 — the world's clock
 // ---------------------------------------------------------------------------
 
-// The tick of day rides in the snapshot and survives the encoder unchanged, including
-// the last tick of a day — the value most likely to be lost to an off-by-one, and the
-// one a receiver must accept: the contract's bound is `tick_of_day < day_length_ticks`,
-// so 23999 of 24000 is legal and 24000 is not.
-func TestASnapshotCarriesTheTickOfDay(t *testing.T) {
+// Both halves of the clock ride in the snapshot and survive the encoder unchanged,
+// including the last tick of a day. The protocol layer lays the pair out; the
+// session-aware client, which also has the announced day length, validates its modulo.
+func TestASnapshotCarriesTheAbsoluteAndWrappedClock(t *testing.T) {
 	t.Parallel()
 
 	for _, tickOfDay := range []uint32{0, 1, 14400, 23999} {
-		env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{Tick: 7, TickOfDay: tickOfDay}), 0)
+		worldTick := 17*uint64(24_000) + uint64(tickOfDay)
+		env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{
+			Tick: 7, TickOfDay: tickOfDay, WorldTick: worldTick,
+		}), 0)
 		tbl := payloadTable(t, env)
 		snapshot := new(vnet.EntitySnapshot)
 		snapshot.Init(tbl.Bytes, tbl.Pos)
 
 		if got := snapshot.TickOfDay(); got != tickOfDay {
 			t.Errorf("TickOfDay = %d, want %d", got, tickOfDay)
+		}
+		if got := snapshot.WorldTick(); got != worldTick {
+			t.Errorf("WorldTick = %d, want %d", got, worldTick)
 		}
 		// The field it was appended after, read in the same breath: an appended scalar
 		// that displaced an existing one would pass the assertion above and still have
@@ -3640,6 +3647,9 @@ func TestASnapshotWithNoClockCarriesZero(t *testing.T) {
 
 	if got := snapshot.TickOfDay(); got != 0 {
 		t.Errorf("TickOfDay = %d on a clock-less snapshot, want 0", got)
+	}
+	if got := snapshot.WorldTick(); got != 0 {
+		t.Errorf("WorldTick = %d on a clock-less snapshot, want 0", got)
 	}
 }
 

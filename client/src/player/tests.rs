@@ -4468,10 +4468,17 @@ fn headless_player_with_a_clock() -> App {
 
 /// Queues a snapshot that names where the day is, as the net thread would.
 fn deliver_at_tick_of_day(app: &mut App, tick: u32, tick_of_day: u32, at: Instant) {
+    deliver_at_world_tick(app, tick, tick_of_day, u64::from(tick_of_day), at);
+}
+
+/// Queues both projections of a persisted world clock. Separate from the convenience
+/// helper above for the tests that cross days or simulate a reconnect after restart.
+fn deliver_at_world_tick(app: &mut App, tick: u32, tick_of_day: u32, world_tick: u64, at: Instant) {
     app.world_mut().resource_mut::<SnapshotInbox>().push(
         Snapshot {
             server_tick: tick,
             tick_of_day,
+            world_tick,
             ..Default::default()
         },
         at,
@@ -4990,6 +4997,26 @@ fn a_snapshot_older_than_the_newest_does_not_move_the_clock() {
         after_the_newest,
         "a snapshot from an earlier tick anchored the sky"
     );
+}
+
+#[test]
+fn an_accepted_snapshot_anchors_the_persisted_world_tick() {
+    // Two snapshots at the same displayed hour but on different days are intentionally
+    // distinct anchors. The rendering half can therefore derive a multi-day lunar phase
+    // without inventing a client counter, and a reconnect resumes the server's day.
+    let mut app = headless_player_with_a_clock();
+    app.update();
+    let at = Instant::now();
+
+    deliver_at_world_tick(&mut app, 1, 6_000, 6_000, at);
+    app.update();
+    let first_day = *app.world().resource::<sky::SkyClock>();
+
+    deliver_at_world_tick(&mut app, 2, 6_000, 5 * 24_000 + 6_000, at);
+    app.update();
+    let sixth_day = *app.world().resource::<sky::SkyClock>();
+
+    assert_ne!(first_day, sixth_day, "the absolute day was discarded");
 }
 
 #[test]

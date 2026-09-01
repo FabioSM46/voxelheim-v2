@@ -2022,6 +2022,20 @@ table EntitySnapshot {
 
   /// This recipient's own cast, when one is running. A later snapshot supersedes it.
   self_cast: CastState;
+
+  /// How many authoritative ticks this world has lived through, across every restart.
+  /// This is the absolute half of `tick_of_day`: when the welcome declares a clock,
+  /// `world_tick % day_length_ticks == tick_of_day`. A receiver refuses the whole frame
+  /// when the pair disagrees rather than deriving or wrapping either half, because the
+  /// disagreement is the only evidence that the server emitted a non-atomic clock.
+  ///
+  /// A clockless server carries zero. Unlike `server_tick`, this value is persisted world
+  /// time rather than process uptime, so every client connected to the same world derives
+  /// the same multi-day presentation and a restart resumes it instead of beginning again.
+  ///
+  /// Appended in V29. An older server's absent scalar would read as a fresh world's zero,
+  /// which is a plausible but false lunar phase; the protocol version therefore moves.
+  world_tick: ulong;
 }
 
 /// Everything the player is carrying, as the server holds it.
