@@ -70,7 +70,7 @@ use super::constants::{
 };
 use super::sky::Daylight;
 use super::target::{BlockHit, raycast};
-use super::{ApplySnapshots, InputMode, LocalPlayer, LookState, SelfVitals};
+use super::{ApplySnapshots, InputMode, LocalMount, LocalPlayer, LookState, SelfVitals};
 use crate::net::{BlockCoord, Session};
 use crate::world::ChunkStore;
 
@@ -90,6 +90,8 @@ impl Plugin for PlayerCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewMode>()
             .init_resource::<Orbit>()
+            .init_resource::<EyeHeight>()
+            .init_resource::<LocalMount>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
@@ -194,6 +196,41 @@ struct Aim<'w> {
     look: Res<'w, LookState>,
     orbit: Res<'w, Orbit>,
     view: Res<'w, ViewMode>,
+    time: Res<'w, Time>,
+    mount: Res<'w, LocalMount>,
+    eye: ResMut<'w, EyeHeight>,
+}
+
+/// The eye height the camera is currently drawing, between walking and the saddle.
+///
+/// The target is an authoritative binary answer in [`LocalMount`]; this resource is only
+/// the cosmetic path between the two heights. It cannot move the player or keep the
+/// saddle composition alive after the server removes the mount entry.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+struct EyeHeight(f32);
+
+impl Default for EyeHeight {
+    fn default() -> Self {
+        Self(EYE_HEIGHT)
+    }
+}
+
+const SADDLE_EYE_HEIGHT: f32 = EYE_HEIGHT + super::horse::RIDER_LIFT;
+const EYE_TRANSITION_TIME: Duration = Duration::from_millis(260);
+
+fn next_eye_height(current: f32, mounted: bool, delta: Duration) -> f32 {
+    let target = if mounted {
+        SADDLE_EYE_HEIGHT
+    } else {
+        EYE_HEIGHT
+    };
+    let step =
+        (SADDLE_EYE_HEIGHT - EYE_HEIGHT) * delta.as_secs_f32() / EYE_TRANSITION_TIME.as_secs_f32();
+    if current < target {
+        (current + step).min(target)
+    } else {
+        (current - step).max(target)
+    }
 }
 
 /// Keeps the camera at the player's eyes, looking where the player is looking.
@@ -203,7 +240,7 @@ struct Aim<'w> {
 /// camera's `Transform` and the player's are different components of different entities,
 /// and would refuse the system rather than risk aliasing them.
 fn follow_the_player(
-    aim: Aim<'_>,
+    mut aim: Aim<'_>,
     session: Option<Res<Session>>,
     store: Option<Res<ChunkStore>>,
     player: Query<(&Transform, &DeathFall), With<LocalPlayer>>,
@@ -226,18 +263,30 @@ fn follow_the_player(
         .as_deref()
         .zip(store.as_deref())
         .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
-    let placed = camera_placement(feet, *aim.look, *aim.orbit, *aim.view, fallen, |voxel| {
-        solid.is_some_and(|(store, size)| {
-            store.solid_at(
-                BlockCoord {
-                    x: voxel.x,
-                    y: voxel.y,
-                    z: voxel.z,
-                },
-                size,
-            )
-        })
-    });
+    let next_height = next_eye_height(aim.eye.0, aim.mount.mounted(), aim.time.delta());
+    if aim.eye.0 != next_height {
+        aim.eye.0 = next_height;
+    }
+    let placed = camera_placement_at_height(
+        feet,
+        *aim.look,
+        *aim.orbit,
+        *aim.view,
+        aim.eye.0,
+        fallen,
+        |voxel| {
+            solid.is_some_and(|(store, size)| {
+                store.solid_at(
+                    BlockCoord {
+                        x: voxel.x,
+                        y: voxel.y,
+                        z: voxel.z,
+                    },
+                    size,
+                )
+            })
+        },
+    );
     for mut transform in &mut cameras {
         *transform = placed;
     }
@@ -443,20 +492,33 @@ impl DeathFall {
 
 /// Where the camera sits and what it looks at, in whichever view is current.
 ///
-/// The eye is the same point in both: the character's feet plus [`EYE_HEIGHT`], which is
-/// the position the server sent. First person puts the camera there. Third person aims
-/// from there and then walks backwards along the view direction, which is why the two
-/// share a function rather than being two systems that have to agree about what an eye is.
+/// The eye is the same point in both: the character's feet plus the current walking-to-
+/// saddle presentation height. First person puts the camera there. Third person aims from
+/// there and then walks backwards along the view direction, which is why the two share a
+/// function rather than being two systems that have to agree about what an eye is.
 ///
 /// **`fallen` is the one input the two views do not share.** In first person the camera is
 /// the eye, so the eye is what goes over; in third person it is an observer watching a body
 /// go over, and an observer that fell with it would take the thing being watched out of
 /// frame. See the module comment, where the decision is argued rather than only applied.
+#[cfg(test)]
 fn camera_placement(
     feet: Vec3,
     look: LookState,
     orbit: Orbit,
     view: ViewMode,
+    fallen: f32,
+    solid: impl FnMut(IVec3) -> bool,
+) -> Transform {
+    camera_placement_at_height(feet, look, orbit, view, EYE_HEIGHT, fallen, solid)
+}
+
+fn camera_placement_at_height(
+    feet: Vec3,
+    look: LookState,
+    orbit: Orbit,
+    view: ViewMode,
+    eye_height: f32,
     fallen: f32,
     solid: impl FnMut(IVec3) -> bool,
 ) -> Transform {
@@ -480,7 +542,7 @@ fn camera_placement(
         // the image flips as the pitch crosses it.
         let pitch = aimed + (MAX_PITCH - aimed) * fallen;
         return Transform {
-            translation: feet + Vec3::Y * (EYE_HEIGHT + (DEATH_EYE_HEIGHT - EYE_HEIGHT) * fallen),
+            translation: feet + Vec3::Y * (eye_height + (DEATH_EYE_HEIGHT - eye_height) * fallen),
             rotation: Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(pitch),
             ..default()
         };
@@ -488,7 +550,7 @@ fn camera_placement(
 
     // Third person, where `fallen` is deliberately unread: what falls is the character, and
     // this camera's job for the next three seconds is to keep it in frame.
-    let eye = feet + Vec3::Y * EYE_HEIGHT;
+    let eye = feet + Vec3::Y * eye_height;
     let rotation = Quat::from_rotation_y(look.yaw + orbit.yaw) * Quat::from_rotation_x(aimed);
 
     // The camera's own backwards, normalised: `face_distance` divides by a component
@@ -565,6 +627,36 @@ mod tests {
 
     /// A player whose fall has finished.
     const FALLEN: f32 = 1.0;
+
+    #[test]
+    fn mount_and_dismount_move_the_eye_smoothly_between_exact_heights() {
+        let rising = next_eye_height(EYE_HEIGHT, true, EYE_TRANSITION_TIME / 2);
+        assert!(rising > EYE_HEIGHT && rising < SADDLE_EYE_HEIGHT);
+        assert_eq!(
+            next_eye_height(rising, true, EYE_TRANSITION_TIME),
+            SADDLE_EYE_HEIGHT
+        );
+
+        let falling = next_eye_height(SADDLE_EYE_HEIGHT, false, EYE_TRANSITION_TIME / 2);
+        assert!(falling > EYE_HEIGHT && falling < SADDLE_EYE_HEIGHT);
+        assert_eq!(
+            next_eye_height(falling, false, EYE_TRANSITION_TIME),
+            EYE_HEIGHT
+        );
+
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(1.5, 64.0, -2.5);
+        let mounted = camera_placement_at_height(
+            feet,
+            look,
+            orbit,
+            ViewMode::FirstPerson,
+            SADDLE_EYE_HEIGHT,
+            UPRIGHT,
+            |_| false,
+        );
+        assert_eq!(mounted.translation, feet + Vec3::Y * SADDLE_EYE_HEIGHT);
+    }
 
     #[test]
     fn first_person_puts_the_camera_at_the_eye_whatever_is_behind_the_player() {

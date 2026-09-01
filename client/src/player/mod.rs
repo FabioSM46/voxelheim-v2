@@ -65,6 +65,7 @@ mod mobs;
 mod mounts;
 mod precipitation;
 mod projectiles;
+mod saddle;
 mod sky;
 mod structures;
 mod target;
@@ -119,7 +120,7 @@ pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
 use crate::net::{
-    Appearance, AppearanceInbox, BlockCoord, HairModel, LifeState, Outbound,
+    Appearance, AppearanceInbox, BlockCoord, HairModel, LifeState, MountKind, Outbound,
     PLACEHOLDER_APPEARANCE, PartyMemberState, PartyRosterMember, PlayerInput, PlayerVitals,
     ResidentInbox, ResidentRole, Sent, Session, SnapshotInbox, WeatherState, encode_player_input,
 };
@@ -230,6 +231,31 @@ const WALK_SWING: f32 = 0.55;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ApplySnapshots;
 
+/// The newest complete snapshot's answer to whether this session is mounted.
+///
+/// One projection rather than five direct reads of [`SnapshotBuffer`]: the camera, both
+/// held-item renderers, the crosshair and the saddle view must all change on the frame the
+/// server's sparse mount entry appears or disappears. Absence is the authoritative
+/// unmounted answer; no local request or animation writes this resource.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalMount(Option<MountKind>);
+
+impl LocalMount {
+    #[cfg(test)]
+    pub(crate) const fn kind(self) -> Option<MountKind> {
+        self.0
+    }
+
+    pub(crate) const fn mounted(self) -> bool {
+        self.0.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_server(kind: Option<MountKind>) -> Self {
+        Self(kind)
+    }
+}
+
 /// Which family of controls currently owns the keyboard and pointer.
 ///
 /// This is local presentation state, never a gameplay outcome. The server still owns
@@ -286,6 +312,7 @@ impl Plugin for PlayerPlugin {
             .init_resource::<SnapshotBuffer>()
             .init_resource::<Appearances>()
             .init_resource::<SelfVitals>()
+            .init_resource::<LocalMount>()
             .init_resource::<Party>()
             .init_resource::<PartyLogInbox>()
             .init_resource::<sky::SkyClock>()
@@ -384,6 +411,9 @@ impl Plugin for PlayerPlugin {
                     )
                         .chain()
                         .in_set(ApplySnapshots),
+                    sync_local_mount
+                        .after(apply_snapshots)
+                        .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_weather_without_a_session.after(ApplySnapshots),
@@ -451,7 +481,21 @@ impl Plugin for PlayerPlugin {
             .add_plugins(combat::CombatPlugin)
             .add_plugins(target::BlockTargetPlugin)
             .add_plugins(structures::StructuresPlugin)
+            .add_plugins(saddle::SaddleViewPlugin)
             .add_plugins(hands::HandsPlugin);
+    }
+}
+
+fn sync_local_mount(
+    buffer: Res<SnapshotBuffer>,
+    session: Option<Res<Session>>,
+    mut local: ResMut<LocalMount>,
+) {
+    let next = session
+        .as_deref()
+        .and_then(|session| buffer.mount_of(session.0.entity_id));
+    if local.0 != next {
+        local.0 = next;
     }
 }
 
@@ -1248,8 +1292,13 @@ enum HeldItemSurface {
     Body,
 }
 
-fn held_item_surface(mode: InputMode, view: ViewMode, session_exists: bool) -> HeldItemSurface {
-    if !matches!(mode, InputMode::Playing | InputMode::Chat) || !session_exists {
+fn held_item_surface(
+    mode: InputMode,
+    view: ViewMode,
+    session_exists: bool,
+    mounted: bool,
+) -> HeldItemSurface {
+    if !matches!(mode, InputMode::Playing | InputMode::Chat) || !session_exists || mounted {
         HeldItemSurface::Hidden
     } else if view.first_person() {
         HeldItemSurface::ViewModel
@@ -2704,17 +2753,26 @@ struct BodyHeldSubject<'w> {
     selected: Res<'w, SelectedSlot>,
     mode: Res<'w, InputMode>,
     view: Res<'w, ViewMode>,
+    mount: Res<'w, LocalMount>,
     session: Option<Res<'w, Session>>,
 }
 
 impl BodyHeldSubject<'_> {
     fn item_id(&self) -> Option<u16> {
-        stack_item_id(self.inventory.slot(self.selected.0))
+        if self.mount.mounted() {
+            None
+        } else {
+            stack_item_id(self.inventory.slot(self.selected.0))
+        }
     }
 
     fn visibility(&self) -> Visibility {
-        if held_item_surface(*self.mode, *self.view, self.session.is_some())
-            == HeldItemSurface::Body
+        if held_item_surface(
+            *self.mode,
+            *self.view,
+            self.session.is_some(),
+            self.mount.mounted(),
+        ) == HeldItemSurface::Body
         {
             Visibility::Inherited
         } else {

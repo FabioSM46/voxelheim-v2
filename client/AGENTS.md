@@ -70,6 +70,7 @@ keeps meaning "everything the client is".
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
+| `player/saddle.rs` | the camera-space horse head, reins and fists shown by the newest authoritative local mount projection | draw a world horse, predict a mount transition, or decide any mounted action legality |
 | `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
 | `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the four intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down or consumed |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
@@ -789,7 +790,10 @@ The client samples the controls, sends what the player is *trying* to do at the 
   the interpolation divides by the gap between two arrivals, and a frame's worth of scheduling
   jitter in that number is a frame's worth of jitter in every position on screen.
 - **The camera's position comes from the server and its direction comes from here.** Its
-  translation is the authoritative position, interpolated, an eye height above the feet. Its
+  translation is the authoritative position, interpolated, an eye height above the feet. That
+  cosmetic eye height eases between walking and saddle height, but the saddle view itself, the
+  ordinary held item and the crosshair switch on the exact frame the complete server snapshot
+  adds or removes this player's mount. Its
   rotation is the local look state, applied the frame the pointer moves. That is not an exception
   to the rule — `schemas/player.fbs` says in as many words that "the camera is a client concern",
   and the yaw a snapshot echoes back came from here in the first place. Waiting a tick for that

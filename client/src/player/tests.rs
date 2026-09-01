@@ -1296,6 +1296,49 @@ fn exactly_one_held_item_renderer_owns_each_playing_view() {
     assert_eq!(body_held_item(&mut app)[0].visibility, Visibility::Hidden);
 }
 
+#[test]
+fn a_local_mount_removes_the_body_item_until_the_authoritative_dismount() {
+    let mut app = headless_player();
+    *app.world_mut().resource_mut::<Inventory>() =
+        Inventory::from_stacks(vec![crate::net::InventoryStack {
+            item_id: items::ITEM_STONE,
+            count: 1,
+            ..Default::default()
+        }]);
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    let now = Instant::now();
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![MountState {
+            entity_id: LOCAL_ID,
+            mount: MountKind::GreyHorse,
+        }],
+        now,
+    );
+    app.update();
+    assert_eq!(
+        app.world().resource::<LocalMount>().kind(),
+        Some(MountKind::GreyHorse)
+    );
+    assert!(body_held_item(&mut app).is_empty());
+
+    deliver_mounts(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        vec![],
+        now + INTERVAL,
+    );
+    app.update();
+    assert_eq!(app.world().resource::<LocalMount>().kind(), None);
+    assert_eq!(
+        body_held_item(&mut app)[0].visibility,
+        Visibility::Inherited
+    );
+}
+
 /// A session, two players and an appearance for each, one frame in.
 fn a_world_with_a_body(app: &mut App) {
     describe(app, LOCAL_ID, an_appearance(HairModel::Braided));
