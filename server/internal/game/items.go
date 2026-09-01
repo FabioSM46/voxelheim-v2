@@ -138,6 +138,13 @@ const (
 	// ids cross the wire and are persisted in inventories; fronds and scrub have
 	// explicit no-drop outcomes and therefore no item ids of their own.
 	ItemPalmLog
+
+	// The stablemaster's three horse tokens. Appended because item ids cross the wire
+	// and are persisted in inventories; the colour is the only distinction between
+	// these rows, and using one learns the matching mount permanently.
+	ItemBlackHorse
+	ItemBrownHorse
+	ItemGreyHorse
 )
 
 // What each blade is worth, and the only copy of it.
@@ -297,6 +304,11 @@ type itemDefinition struct {
 	// and zero for everything that is not food. The zero is fail-closed: a new item
 	// cannot be consumed until its registry row deliberately says it is edible.
 	restoresHunger uint16
+
+	// learnsMount is the permanent mount one of this item teaches when used, and
+	// Unknown for everything that is not a mount token. The absent enum is fail-closed:
+	// adding an item without deliberately naming a mount cannot change progression.
+	learnsMount vnet.MountKind
 }
 
 // wornAt is the server-only placement class for worn equipment. Its zero value refuses
@@ -349,6 +361,12 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// here says anything about it.
 	ItemRunestone: {places: world.Air, maxStack: 1},
 	ItemPalmLog:   {places: world.PalmLog, maxStack: 64},
+
+	// One token is one horse learned. They stack with nothing so buying a second is a
+	// visible second object which can survive the duplicate-learning refusal intact.
+	ItemBlackHorse: {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindBlackHorse},
+	ItemBrownHorse: {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindBrownHorse},
+	ItemGreyHorse:  {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindGreyHorse},
 
 	// The forge's own products. The blade is equipment on the same terms the rusty one
 	// is: one to a slot, its own wear, its own damage.

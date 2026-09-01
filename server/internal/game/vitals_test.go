@@ -560,7 +560,7 @@ func TestEveryInventoryMutationRefreshesTheWornSummary(t *testing.T) {
 				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemRawMeat), Count: 1}
 				player, _ := h.joinLife(1, pos, &life)
 				poisonWornSummary(player)
-				if _, err := player.Consume(protocol.ConsumeRequest{Slot: 1}); err != nil {
+				if _, _, err := player.Consume(protocol.ConsumeRequest{Slot: 1}); err != nil {
 					t.Fatalf("Consume: %v", err)
 				}
 				return player

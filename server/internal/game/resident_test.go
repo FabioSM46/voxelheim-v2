@@ -133,6 +133,15 @@ func TestResidentsAreNotCreatures(t *testing.T) {
 	if len(h.sim.residents) == 0 {
 		t.Fatal("nobody stands in the capital")
 	}
+	stablemasters := 0
+	for _, r := range h.sim.residents {
+		if r.role == vnet.ResidentRoleStablemaster {
+			stablemasters++
+		}
+	}
+	if stablemasters != 1 {
+		t.Errorf("the capital has %d stablemasters in the resident registry, want one", stablemasters)
+	}
 	if len(h.sim.mobs) != 0 {
 		t.Errorf("%d creatures appeared when a village was looked at", len(h.sim.mobs))
 	}
@@ -221,24 +230,27 @@ func TestAChunkWithNobodyInItStandsNobodyUp(t *testing.T) {
 	}
 }
 
-// Every word in the anchor vocabulary is claimed by exactly one of the two materialisers.
+// Every furnishing anchor is claimed by exactly one materialiser. The paddock slots are
+// deliberately scenic anchors for the later horse issue and furnish nothing in this one.
 //
 // The guard against the failure that costs nothing to make and is invisible afterwards: a
 // seventh resident slot appended to [world.AnchorKind] and forgotten here is a slot that
 // silently produces nobody, and the settlement still builds.
-func TestEveryAnchorIsEitherAStationOrAPerson(t *testing.T) {
+func TestEveryFurnishingAnchorIsEitherAStationOrAPerson(t *testing.T) {
 	t.Parallel()
 
 	for kind, name := range map[world.AnchorKind]string{
-		world.AnchorNone:      "no anchor",
-		world.AnchorForge:     "forge",
-		world.AnchorCampfire:  "campfire",
-		world.AnchorSmith:     "smith",
-		world.AnchorCarpenter: "carpenter",
-		world.AnchorCook:      "cook",
-		world.AnchorTrader:    "trader",
-		world.AnchorVillager:  "villager",
-		world.AnchorGuard:     "guard",
+		world.AnchorNone:         "no anchor",
+		world.AnchorForge:        "forge",
+		world.AnchorCampfire:     "campfire",
+		world.AnchorSmith:        "smith",
+		world.AnchorCarpenter:    "carpenter",
+		world.AnchorCook:         "cook",
+		world.AnchorTrader:       "trader",
+		world.AnchorVillager:     "villager",
+		world.AnchorGuard:        "guard",
+		world.AnchorStablemaster: "stablemaster",
+		world.AnchorPaddock:      "paddock",
 	} {
 		if got := kind.String(); got != name {
 			t.Fatalf("AnchorKind %d is %q, want %q — this table has fallen behind the vocabulary", kind, got, name)
@@ -246,9 +258,9 @@ func TestEveryAnchorIsEitherAStationOrAPerson(t *testing.T) {
 		_, station := stationKind(kind)
 		_, lives := residentRole(kind)
 		switch {
-		case kind == world.AnchorNone:
+		case kind == world.AnchorNone || kind == world.AnchorPaddock:
 			if station || lives {
-				t.Error("AnchorNone is the uninitialised zero and must furnish nothing")
+				t.Errorf("%s must furnish nothing in this issue", name)
 			}
 		case station && lives:
 			t.Errorf("the %s slot is claimed by both materialisers", name)
@@ -835,13 +847,14 @@ func TestOnlyTheTradesCouldEverKeepAStall(t *testing.T) {
 	t.Parallel()
 
 	for role, could := range map[vnet.ResidentRole]bool{
-		vnet.ResidentRoleUnknown:   false,
-		vnet.ResidentRoleVillager:  false,
-		vnet.ResidentRoleGuard:     false,
-		vnet.ResidentRoleSmith:     true,
-		vnet.ResidentRoleCarpenter: true,
-		vnet.ResidentRoleCook:      true,
-		vnet.ResidentRoleTrader:    true,
+		vnet.ResidentRoleUnknown:      false,
+		vnet.ResidentRoleVillager:     false,
+		vnet.ResidentRoleGuard:        false,
+		vnet.ResidentRoleSmith:        true,
+		vnet.ResidentRoleCarpenter:    true,
+		vnet.ResidentRoleCook:         true,
+		vnet.ResidentRoleTrader:       true,
+		vnet.ResidentRoleStablemaster: true,
 	} {
 		if got := vendorRole(role); got != could {
 			t.Errorf("vendorRole(%s) = %v, want %v", role, got, could)

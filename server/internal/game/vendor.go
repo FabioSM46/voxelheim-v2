@@ -110,6 +110,13 @@ var vendorTable = map[vnet.ResidentRole]vendorStock{
 			{ItemLeatherPatch, 2},
 		},
 	},
+	vnet.ResidentRoleStablemaster: {
+		sells: []vendorEntry{
+			{ItemBlackHorse, 1000},
+			{ItemBrownHorse, 1000},
+			{ItemGreyHorse, 1000},
+		},
+	},
 }
 
 // priceOf finds one item in one direction of a stall's list.

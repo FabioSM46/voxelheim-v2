@@ -197,11 +197,52 @@ func TestTheStallKeepersAndThePriceListAgree(t *testing.T) {
 	for _, role := range []vnet.ResidentRole{
 		vnet.ResidentRoleUnknown, vnet.ResidentRoleVillager, vnet.ResidentRoleGuard,
 		vnet.ResidentRoleSmith, vnet.ResidentRoleCarpenter,
-		vnet.ResidentRoleCook, vnet.ResidentRoleTrader,
+		vnet.ResidentRoleCook, vnet.ResidentRoleTrader, vnet.ResidentRoleStablemaster,
 	} {
 		_, priced := vendorTable[role]
 		if keeps := vendorRole(role); keeps != priced {
 			t.Errorf("vendorRole(%s) = %v but the table has a row for it = %v", role, keeps, priced)
+		}
+	}
+}
+
+func TestTheStablemasterListsEveryHorseAtOneThousandRegardlessOfLearning(t *testing.T) {
+	t.Parallel()
+
+	h, player, out, r := stall(t, vnet.ResidentRoleStablemaster)
+	h.step()
+	first := newestVendorState(t, out)
+	want := []protocol.VendorEntry{
+		{ItemID: uint16(ItemBlackHorse), Price: 1000},
+		{ItemID: uint16(ItemBrownHorse), Price: 1000},
+		{ItemID: uint16(ItemGreyHorse), Price: 1000},
+	}
+	if len(first.Buys) != 0 {
+		t.Errorf("the stablemaster buys %v, want no buy-back list", first.Buys)
+	}
+	if len(first.Sells) != len(want) {
+		t.Fatalf("the stablemaster sells %v, want exactly three horses", first.Sells)
+	}
+	for index := range want {
+		if first.Sells[index] != want[index] {
+			t.Errorf("stable row %d = %+v, want %+v", index, first.Sells[index], want[index])
+		}
+	}
+
+	h.sim.mu.Lock()
+	player.learnedMounts = allLearnedMounts
+	h.sim.mu.Unlock()
+	if _, err := player.InteractNPC(protocol.NpcInteractRequest{EntityID: r.entityID, ClientTick: 2}); err != nil {
+		t.Fatalf("re-addressing the stablemaster after learning every horse: %v", err)
+	}
+	h.step()
+	learned := newestVendorState(t, out)
+	if len(learned.Sells) != len(want) {
+		t.Fatalf("the learned player's list has %d rows, want %d", len(learned.Sells), len(want))
+	}
+	for index := range want {
+		if learned.Sells[index] != want[index] {
+			t.Errorf("learned player's row %d = %+v, want unchanged %+v", index, learned.Sells[index], want[index])
 		}
 	}
 }
@@ -479,6 +520,36 @@ func TestBuyingAPickaxeSpendsTheSilverAndBumpsTheRevision(t *testing.T) {
 	}
 	if states := out.inventoryStates(t); len(states) == 0 {
 		t.Error("a trade that moved two stacks sent no inventory state")
+	}
+}
+
+func TestAThousandSilverBuysAHorseAndNineHundredNinetyNineDoesNot(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleStablemaster)
+	h.fund(player, 999)
+	h.step()
+	was := h.pack(player)
+
+	reason, err := player.Trade(tradeFor(r, ItemBlackHorse, 1, true, 1, 2))
+	if err == nil {
+		t.Fatal("999 silver bought a 1000-silver horse")
+	}
+	if reason != vnet.RefusalReasonNotEnoughSilver {
+		t.Errorf("the short purse is refused %s, want NotEnoughSilver", reason)
+	}
+	h.unchanged(player, was, "the refused horse purchase")
+
+	h.fund(player, 1000)
+	reason, err = player.Trade(tradeFor(r, ItemBlackHorse, 1, true, 1, 3))
+	if err != nil {
+		t.Fatalf("1000 silver was refused %s: %v", reason, err)
+	}
+	if got := h.purse(player); got != 0 {
+		t.Errorf("the horse purchase left %d silver, want none", got)
+	}
+	if got := h.carrying(player, ItemBlackHorse); got != 1 {
+		t.Errorf("the pack holds %d black horse tokens, want one", got)
 	}
 }
 

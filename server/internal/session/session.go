@@ -1566,12 +1566,14 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 
 		request := *msg.Consume
-		state, cErr := player.Consume(request)
+		result, reason, cErr := player.Consume(request)
 		if cErr != nil {
-			// Refusal is silence plus a debug line, exactly as a refused repair is. Food
-			// that was not consumed leaves both the pack and the hunger reserve unchanged.
+			// Consume has no RefusedAction member, so a refusal stays silence plus a debug
+			// line. The simulation still names MountAlreadyLearned for the audit trail and
+			// decides it before spending the token.
 			log.Debug("refusing consume",
 				"reason", cErr.Error(),
+				"refusal", reason.String(),
 				"slot", request.Slot,
 				"client_tick", request.ClientTick,
 			)
@@ -1579,10 +1581,15 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		}
 
 		// Unlike a snapshot, an inventory state is not superseded on the next tick. Use
-		// the blocking session send so a full queue cannot leave the client showing food
-		// the server has already spent. Hunger follows in the next ordinary snapshot.
-		if sErr := send(protocol.EncodeInventoryState(state)); sErr != nil {
+		// the blocking session send so a full queue cannot leave the client showing an
+		// item the server has already spent. Hunger follows in the next ordinary snapshot.
+		if sErr := send(protocol.EncodeInventoryState(result.Inventory)); sErr != nil {
 			return fmt.Errorf("session: send inventory after consume: %w", sErr)
+		}
+		if result.LearnedMounts != nil {
+			if sErr := send(protocol.EncodeLearnedMounts(*result.LearnedMounts)); sErr != nil {
+				return fmt.Errorf("session: send learned mounts after consume: %w", sErr)
+			}
 		}
 		log.Debug("item consumed", "slot", request.Slot)
 		return nil

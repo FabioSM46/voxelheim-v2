@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
@@ -27,18 +28,18 @@ func TestEatingConsumesOneItemAndCapsTheReserve(t *testing.T) {
 	player.hunger = 90
 	h.sim.mu.Unlock()
 
-	state, err := player.Consume(consumeRequest(4))
+	result, _, err := player.Consume(consumeRequest(4))
 	if err != nil {
 		t.Fatalf("Consume: %v", err)
 	}
 	if got := hungerOf(h.sim, player); got != PlayerMaxHunger {
 		t.Errorf("hunger after eating = %d, want capped at %d", got, PlayerMaxHunger)
 	}
-	if got := state.Stacks[4]; got.ItemID != uint16(ItemRawMeat) || got.Count != 1 {
+	if got := result.Inventory.Stacks[4]; got.ItemID != uint16(ItemRawMeat) || got.Count != 1 {
 		t.Errorf("slot 4 after eating = %+v, want one raw meat", got)
 	}
-	if len(state.Stacks) != int(protocol.InventorySlots) {
-		t.Errorf("Consume returned %d slots, want the full %d", len(state.Stacks), protocol.InventorySlots)
+	if len(result.Inventory.Stacks) != int(protocol.InventorySlots) {
+		t.Errorf("Consume returned %d slots, want the full %d", len(result.Inventory.Stacks), protocol.InventorySlots)
 	}
 }
 
@@ -76,7 +77,7 @@ func TestEveryRefusedMealLeavesTheLifeAndPackUntouched(t *testing.T) {
 			h.sim.mu.Unlock()
 			before := player.InventoryState()
 
-			if _, err := player.Consume(consumeRequest(tc.slot)); err == nil {
+			if _, _, err := player.Consume(consumeRequest(tc.slot)); err == nil {
 				t.Fatal("Consume accepted an ineligible request")
 			}
 			if got := hungerOf(h.sim, player); got != beforeHunger {
@@ -110,16 +111,83 @@ func TestEachFoodAtZeroRestoresExactlyItsRegistryAmount(t *testing.T) {
 			player.hunger = 0
 			h.sim.mu.Unlock()
 
-			state, err := player.Consume(consumeRequest(0))
+			result, _, err := player.Consume(consumeRequest(0))
 			if err != nil {
 				t.Fatalf("Consume: %v", err)
 			}
 			if got := hungerOf(h.sim, player); got != tc.want {
 				t.Errorf("hunger after %s = %d, want %d", tc.name, got, tc.want)
 			}
-			if got := state.Stacks[0]; got != (protocol.InventoryStack{}) {
+			if got := result.Inventory.Stacks[0]; got != (protocol.InventoryStack{}) {
 				t.Errorf("the last %s left slot 0 as %+v, want empty", tc.name, got)
 			}
 		})
+	}
+}
+
+func TestEachHorseTokenLearnsItsMountConsumesItselfAndEntersTheRecord(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		item  ItemID
+		mount vnet.MountKind
+	}{
+		{"black", ItemBlackHorse, vnet.MountKindBlackHorse},
+		{"brown", ItemBrownHorse, vnet.MountKindBrownHorse},
+		{"grey", ItemGreyHorse, vnet.MountKindGreyHorse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.give(player, 4, tc.item, 1)
+			h.sim.mu.Lock()
+			player.hunger = PlayerMaxHunger
+			h.sim.mu.Unlock()
+
+			result, reason, err := player.Consume(consumeRequest(4))
+			if err != nil {
+				t.Fatalf("Consume refused item %d with %s: %v", tc.item, reason, err)
+			}
+			if got := result.Inventory.Stacks[4]; got != (protocol.InventoryStack{}) {
+				t.Errorf("the learned token left slot 4 as %+v, want empty", got)
+			}
+			if result.LearnedMounts == nil || !reflect.DeepEqual(result.LearnedMounts.Mounts, []vnet.MountKind{tc.mount}) {
+				t.Errorf("learned update = %+v, want only %s", result.LearnedMounts, tc.mount)
+			}
+			if saved := player.Record().LearnedMounts; !saved.Has(tc.mount) {
+				t.Errorf("the captured life stores %#02x after learning %s", saved, tc.mount)
+			}
+			if got := hungerOf(h.sim, player); got != PlayerMaxHunger {
+				t.Errorf("learning a mount changed full hunger to %d", got)
+			}
+		})
+	}
+}
+
+func TestLearningADuplicateMountIsRefusedBeforeTheTokenIsSpent(t *testing.T) {
+	t.Parallel()
+
+	h := newStructureHarness(t)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.give(player, 4, ItemBlackHorse, 1)
+	if _, reason, err := player.Consume(consumeRequest(4)); err != nil {
+		t.Fatalf("first black horse use was refused %s: %v", reason, err)
+	}
+	h.give(player, 4, ItemBlackHorse, 1)
+	before := player.InventoryState()
+
+	if _, reason, err := player.Consume(consumeRequest(4)); err == nil {
+		t.Fatal("a second black horse was learned")
+	} else if reason != vnet.RefusalReasonMountAlreadyLearned {
+		t.Errorf("a duplicate horse is refused %s, want MountAlreadyLearned", reason)
+	}
+	if after := player.InventoryState(); !reflect.DeepEqual(after, before) {
+		t.Errorf("duplicate refusal changed the token:\n before %+v\n after  %+v", before, after)
+	}
+	if got := player.LearnedMountState().Mounts; !reflect.DeepEqual(got, []vnet.MountKind{vnet.MountKindBlackHorse}) {
+		t.Errorf("duplicate refusal changed learned mounts to %v", got)
 	}
 }
