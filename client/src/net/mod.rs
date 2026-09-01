@@ -71,6 +71,9 @@ pub use codec::{
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
     WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
+// V27's stable contract, ahead of the server and presentation consumers that fill it.
+#[allow(unused_imports)]
+pub use codec::{CastKind, CastState, LearnedMounts, MountKind, MountRequest, MountState};
 // V25's settlement surface, ahead of the consumers that read it: the resident window is
 // #458 and the vendor window is #459. Named here for the reason the block above is —
 // so neither issue has to reopen `codec.rs` to find out what it is allowed to spell.
@@ -4695,6 +4698,7 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                silver: 0,
             }]
         );
         assert_eq!(state(&app), ConnectionState::Connected);

@@ -225,6 +225,7 @@ mod tests {
                     durability: 7,
                     max_durability: 10,
                 }],
+                silver: 0,
             }))
             .add_plugins(LootUiPlugin);
         app.update();

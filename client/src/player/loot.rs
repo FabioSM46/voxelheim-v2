@@ -342,6 +342,7 @@ mod tests {
                 durability: 0,
                 max_durability: 0,
             }],
+            silver: 0,
         }
     }
 

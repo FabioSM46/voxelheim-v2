@@ -501,6 +501,11 @@ impl Handshake {
             (Phase::Established, Message::LeaveCancelResult(result)) => {
                 Ok(Transition::LeaveCancellation(result))
             }
+            // Fully decoded at the contract boundary; the mount feature's state consumer
+            // follows in its own issue. Admitted and intentionally dropped until then.
+            (Phase::Established, Message::LearnedMounts(_)) => {
+                Ok(Transition::Ignored("LearnedMounts"))
+            }
             (Phase::Established, Message::Chat(message)) => Ok(Transition::Chat(message)),
             (Phase::Established, Message::PartyInvite(invite)) => {
                 Ok(Transition::PartyInvite(invite))
@@ -553,6 +558,7 @@ impl Handshake {
             (_, Message::LeaveCancelResult(_)) => {
                 Err(HandshakeError::Premature("LeaveCancelResult"))
             }
+            (_, Message::LearnedMounts(_)) => Err(HandshakeError::Premature("LearnedMounts")),
             (_, Message::Chat(_)) => Err(HandshakeError::Premature("ChatMessage")),
             (_, Message::PartyInvite(_)) => Err(HandshakeError::Premature("PartyInvite")),
             (_, Message::LootState(_)) => Err(HandshakeError::Premature("LootState")),
@@ -588,8 +594,8 @@ fn world_payload_name(update: &WorldUpdate) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::codec::{
-        ActionRefused, BlockCoord, CharacterList, ChunkCoord, InventoryStack, MineProgress,
-        PLACEHOLDER_APPEARANCE, PlayerAppearance, PlayerVitals,
+        ActionRefused, BlockCoord, CharacterList, ChunkCoord, InventoryStack, LearnedMounts,
+        MineProgress, MountKind, PLACEHOLDER_APPEARANCE, PlayerAppearance, PlayerVitals,
     };
     use super::*;
 
@@ -749,6 +755,7 @@ mod tests {
                 },
                 InventoryStack::default(),
             ],
+            silver: 0,
         }
     }
 
@@ -786,6 +793,7 @@ mod tests {
                     };
                     got
                 ],
+                silver: 0,
             };
 
             assert_eq!(
@@ -1313,6 +1321,25 @@ mod tests {
             Ok(Transition::Ignored("SomethingNewer"))
         );
         assert!(handshake.established(), "the session survives it");
+    }
+
+    #[test]
+    fn learned_mounts_is_admitted_only_after_the_welcome() {
+        let learned = LearnedMounts {
+            mounts: vec![MountKind::BlackHorse],
+        };
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::LearnedMounts(learned.clone())),
+            Err(HandshakeError::Premature("LearnedMounts"))
+        );
+
+        let mut live = established();
+        assert_eq!(
+            live.apply(Message::LearnedMounts(learned)),
+            Ok(Transition::Ignored("LearnedMounts"))
+        );
+        assert!(live.established());
     }
 
     /// A refusal on a live session is admitted, and before the welcome it is premature.

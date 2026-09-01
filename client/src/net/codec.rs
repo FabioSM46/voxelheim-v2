@@ -425,6 +425,56 @@ pub enum MobKind {
     Villager,
 }
 
+/// Which learned horse authoritative mount state names.
+#[allow(
+    clippy::enum_variant_names,
+    reason = "the wire vocabulary spells the horse colour in each append-only member"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MountKind {
+    BlackHorse,
+    BrownHorse,
+    GreyHorse,
+}
+
+impl MountKind {
+    fn from_wire(value: fb::MountKind) -> Option<Self> {
+        match value {
+            fb::MountKind::BlackHorse => Some(Self::BlackHorse),
+            fb::MountKind::BrownHorse => Some(Self::BrownHorse),
+            fb::MountKind::GreyHorse => Some(Self::GreyHorse),
+            _ => None,
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the V27 encoder is reserved before its mount-menu consumer"
+    )]
+    fn wire(self) -> fb::MountKind {
+        match self {
+            Self::BlackHorse => fb::MountKind::BlackHorse,
+            Self::BrownHorse => fb::MountKind::BrownHorse,
+            Self::GreyHorse => fb::MountKind::GreyHorse,
+        }
+    }
+}
+
+/// Which authoritative interruptible action is running for this recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastKind {
+    Mount,
+}
+
+impl CastKind {
+    fn from_wire(value: fb::CastKind) -> Option<Self> {
+        match value {
+            fb::CastKind::Mount => Some(Self::Mount),
+            _ => None,
+        }
+    }
+}
+
 impl MobKind {
     /// **Accepting a member is a decision about the renderer, not about the decoder.**
     /// A kind listed here and drawn nowhere would spawn a body with no mesh; a kind the
@@ -978,6 +1028,20 @@ pub struct MobState {
     pub target_entity_id: u64,
 }
 
+/// One player named as mounted in this complete snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountState {
+    pub entity_id: u64,
+    pub mount: MountKind,
+}
+
+/// This recipient's own authoritative running cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CastState {
+    pub kind: CastKind,
+    pub progress: u8,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EntityState {
     /// Server-assigned identity. The local player's is `SessionParams::entity_id`.
@@ -1096,8 +1160,12 @@ pub struct Snapshot {
     /// appearing has stopped existing for this session, and the reason is never
     /// inferred from its health.
     pub mobs: Vec<MobState>,
+    /// Sparse complete mount state, keyed to players in `entities`.
+    pub mounts: Vec<MountState>,
     /// This client's own health and life state. Present in every snapshot by contract.
     pub self_vitals: PlayerVitals,
+    /// The recipient's running cast; absence means no cast is running.
+    pub self_cast: Option<CastState>,
     /// Every structure in view, under the same complete-existence-set rule `mobs` obeys:
     /// one that stops appearing has stopped existing for this session. Removed by its
     /// owner, collapsed under a broken block and simply out of view are the same fact on
@@ -1175,7 +1243,9 @@ impl Default for Snapshot {
             drops: Vec::new(),
             projectiles: Vec::new(),
             mobs: Vec::new(),
+            mounts: Vec::new(),
             self_vitals: PlayerVitals::unharmed(),
+            self_cast: None,
             structures: Vec::new(),
             tick_of_day: 0,
             dead_players: Vec::new(),
@@ -1237,6 +1307,7 @@ pub struct InventoryStack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryState {
     pub stacks: Vec<InventoryStack>,
+    pub silver: u32,
 }
 
 /// Starts, continues or cancels mining one voxel. Intent only.
@@ -1710,12 +1781,29 @@ pub struct LootState {
     pub corpse_id: u64,
     pub revision: u32,
     pub entries: Vec<LootEntry>,
+    pub silver: u32,
 }
 
 /// Explicit end of one open corpse container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootClosed {
     pub corpse_id: u64,
+}
+
+/// Complete authoritative learned-mount set for this recipient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedMounts {
+    pub mounts: Vec<MountKind>,
+}
+
+/// Intent to begin calling one learned mount. Legality and outcome stay server-owned.
+#[allow(
+    dead_code,
+    reason = "the V27 request is reserved before its mount-menu consumer"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountRequest {
+    pub mount: MountKind,
 }
 
 /// The fixed pixel edge of every map tile, at every scale.
@@ -2376,6 +2464,8 @@ pub enum Message {
     LootState(LootState),
     /// The named corpse container is no longer openable.
     LootClosed(LootClosed),
+    /// Complete authoritative learned-mount set for this recipient.
+    LearnedMounts(LearnedMounts),
     /// One monster blow that actually reduced this player's authoritative health.
     MobHit(MobHit),
     /// One authoritative square of the map. Decoded and validated here; no ECS system
@@ -2633,6 +2723,20 @@ pub enum DecodeError {
         health: u16,
         max_health: u16,
     },
+    /// A player state carries the reserved entity id 0.
+    EntityWithoutIdentity,
+    /// One entity id names two player states in the same snapshot.
+    DuplicateEntity(u64),
+    /// Sparse mount state names no player in the same snapshot.
+    MountNotInSnapshot(u64),
+    /// Sparse mount state names one player more than once.
+    DuplicateMountState(u64),
+    /// Mount state carries the absent zero or a member this build cannot name.
+    UnknownMountKind { entity_id: u64, value: u8 },
+    /// The recipient's cast carries the absent zero or an unknown kind.
+    UnknownCastKind(u8),
+    /// A completed cast must leave the snapshot instead of remaining at 255.
+    CompletedCast,
     /// `dead_players` names an entity that is not a player in the same snapshot. Refused
     /// rather than remembered: the vector describes the bodies this snapshot carries.
     DeadPlayerNotInSnapshot(u64),
@@ -2816,6 +2920,10 @@ pub enum DecodeError {
     /// A `ResidentAppearance` carries a role this build has no member for, the
     /// absent-field `Unknown` included.
     UnknownResidentRole { entity_id: u64, value: u8 },
+    /// LearnedMounts carries the absent zero or an unknown mount.
+    UnknownLearnedMount(u8),
+    /// LearnedMounts names one mount more than once.
+    DuplicateLearnedMount(MountKind),
     /// A `VendorState` or `VendorClosed` carries the reserved entity id 0.
     VendorWithoutEntity(&'static str),
     /// A `VendorState` carries revision 0, which names no list.
@@ -3081,6 +3189,29 @@ impl fmt::Display for DecodeError {
                 f,
                 "mob {entity_id} is {health}/{max_health}, want a non-zero maximum and no more health than it"
             ),
+            Self::EntityWithoutIdentity => {
+                write!(f, "a player state carries the reserved entity id 0")
+            }
+            Self::DuplicateEntity(entity_id) => {
+                write!(f, "entity id {entity_id} names two players in one snapshot")
+            }
+            Self::MountNotInSnapshot(entity_id) => write!(
+                f,
+                "mounts names {entity_id}, which is not a player in this snapshot"
+            ),
+            Self::DuplicateMountState(entity_id) => {
+                write!(f, "mounts names player {entity_id} twice")
+            }
+            Self::UnknownMountKind { entity_id, value } => {
+                write!(
+                    f,
+                    "mount state for player {entity_id} has unknown mount {value}"
+                )
+            }
+            Self::UnknownCastKind(value) => {
+                write!(f, "self_cast has unknown kind {value}")
+            }
+            Self::CompletedCast => write!(f, "self_cast remains present at completed progress 255"),
             Self::DeadPlayerNotInSnapshot(entity_id) => write!(
                 f,
                 "dead_players names {entity_id}, which is not a player in this snapshot"
@@ -3314,6 +3445,12 @@ impl fmt::Display for DecodeError {
             ),
             Self::UnknownResidentRole { entity_id, value } => {
                 write!(f, "resident {entity_id} has an unknown role: {value}")
+            }
+            Self::UnknownLearnedMount(value) => {
+                write!(f, "LearnedMounts carries unknown mount {value}")
+            }
+            Self::DuplicateLearnedMount(mount) => {
+                write!(f, "LearnedMounts names {mount:?} twice")
             }
             Self::VendorWithoutEntity(message) => {
                 write!(f, "{message} carries the reserved entity id 0")
@@ -3617,6 +3754,25 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }
             Ok(Message::LootClosed(LootClosed { corpse_id }))
         }
+        fb::Payload::LearnedMounts => {
+            let payload = envelope
+                .payload_as_learned_mounts()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let mut mounts = Vec::new();
+            let mut seen = HashSet::new();
+            if let Some(list) = payload.mounts() {
+                mounts.reserve(list.len());
+                for value in list.iter() {
+                    let mount = MountKind::from_wire(value)
+                        .ok_or(DecodeError::UnknownLearnedMount(value.0))?;
+                    if !seen.insert(mount) {
+                        return Err(DecodeError::DuplicateLearnedMount(mount));
+                    }
+                    mounts.push(mount);
+                }
+            }
+            Ok(Message::LearnedMounts(LearnedMounts { mounts }))
+        }
         fb::Payload::MobHit => {
             let payload = envelope
                 .payload_as_mob_hit()
@@ -3758,8 +3914,6 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::DropItemRequest
         | fb::Payload::LeaveRequest
         | fb::Payload::LeaveCancelRequest
-        | fb::Payload::MountRequest
-        | fb::Payload::DismountRequest
         | fb::Payload::ConsumeRequest
         | fb::Payload::ChatRequest
         | fb::Payload::PartyRequest
@@ -3771,6 +3925,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::MarkerRemoveRequest
         | fb::Payload::NpcInteractRequest
         | fb::Payload::TradeRequest
+        | fb::Payload::MountRequest
+        | fb::Payload::DismountRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -3790,9 +3946,6 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
         }
-        // Reserved by V27; the strict decoder and consumer arrive in the dependent
-        // client part. Naming it here keeps the known tag out of the unknown fallback.
-        fb::Payload::LearnedMounts => Ok(Message::Deferred(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -4106,7 +4259,7 @@ fn loot_state(state: &fb::LootState<'_>) -> Result<LootState, DecodeError> {
     let entries = state
         .entries()
         .ok_or(DecodeError::LootWithoutEntries(corpse_id))?;
-    if entries.is_empty() {
+    if entries.is_empty() && state.silver() == 0 {
         return Err(DecodeError::LootWithoutEntries(corpse_id));
     }
 
@@ -4156,6 +4309,7 @@ fn loot_state(state: &fb::LootState<'_>) -> Result<LootState, DecodeError> {
         corpse_id,
         revision,
         entries: decoded,
+        silver: state.silver(),
     })
 }
 
@@ -4318,7 +4472,10 @@ fn inventory_state(state: &fb::InventoryState<'_>) -> Result<InventoryState, Dec
         }
         stacks.push(stack);
     }
-    Ok(InventoryState { stacks })
+    Ok(InventoryState {
+        stacks,
+        silver: state.silver(),
+    })
 }
 
 /// Copies a `ChunkCoord` struct out of the buffer.
@@ -4376,10 +4533,45 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         entities.reserve(list.len());
         for state in &list {
             let state = entity_state(state)?;
-            player_ids.insert(state.entity_id);
+            if !player_ids.insert(state.entity_id) {
+                return Err(DecodeError::DuplicateEntity(state.entity_id));
+            }
             entities.push(state);
         }
     }
+
+    let mut mounts = Vec::new();
+    let mut mounted_ids = HashSet::new();
+    if let Some(list) = snapshot.mounts() {
+        mounts.reserve(list.len());
+        for state in list.iter() {
+            let entity_id = state.entity_id();
+            if !player_ids.contains(&entity_id) {
+                return Err(DecodeError::MountNotInSnapshot(entity_id));
+            }
+            if !mounted_ids.insert(entity_id) {
+                return Err(DecodeError::DuplicateMountState(entity_id));
+            }
+            let mount =
+                MountKind::from_wire(state.mount()).ok_or(DecodeError::UnknownMountKind {
+                    entity_id,
+                    value: state.mount().0,
+                })?;
+            mounts.push(MountState { entity_id, mount });
+        }
+    }
+
+    let self_cast = if let Some(state) = snapshot.self_cast() {
+        let kind = CastKind::from_wire(state.kind())
+            .ok_or(DecodeError::UnknownCastKind(state.kind().0))?;
+        let progress = state.progress();
+        if progress == u8::MAX {
+            return Err(DecodeError::CompletedCast);
+        }
+        Some(CastState { kind, progress })
+    } else {
+        None
+    };
 
     let mut drops = Vec::new();
     let mut drop_indexes = HashMap::new();
@@ -4645,7 +4837,9 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         drops,
         projectiles,
         mobs,
+        mounts,
         self_vitals: player_vitals(&snapshot.self_vitals())?,
+        self_cast,
         structures,
         // Copied, not checked. See the field's own documentation: the bound is against a
         // number this function has never seen.
@@ -4860,6 +5054,9 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
 /// and from there into every child of it.
 fn entity_state(state: &fb::EntityState) -> Result<EntityState, DecodeError> {
     let entity_id = state.entity_id();
+    if entity_id == 0 {
+        return Err(DecodeError::EntityWithoutIdentity);
+    }
     let pos = state.pos();
     let vel = state.vel();
 
@@ -5637,6 +5834,37 @@ pub fn encode_leave_cancel_request() -> Vec<u8> {
     )
 }
 
+/// Builds one request to begin the server-owned cast for a learned mount.
+#[allow(
+    dead_code,
+    reason = "the V27 encoder is reserved before its mount-menu consumer"
+)]
+pub fn encode_mount_request(request: &MountRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::MountRequest::create(
+        &mut builder,
+        &fb::MountRequestArgs {
+            mount: request.mount.wire(),
+        },
+    );
+    finish_envelope(builder, fb::Payload::MountRequest, payload.as_union_value())
+}
+
+/// Builds the deliberately empty immediate dismount intent.
+#[allow(
+    dead_code,
+    reason = "the V27 encoder is reserved before its mount-input consumer"
+)]
+pub fn encode_dismount_request() -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::DismountRequest::create(&mut builder, &fb::DismountRequestArgs::default());
+    finish_envelope(
+        builder,
+        fb::Payload::DismountRequest,
+        payload.as_union_value(),
+    )
+}
+
 /// Builds one request to plant a structure.
 ///
 /// No float in it, and therefore no finiteness question: an anchor is three integers and
@@ -6035,6 +6263,25 @@ pub(super) mod server_side {
         )
     }
 
+    pub fn encode_empty_inventory_with_silver(silver: u32) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let empty = builder.create_vector::<u16>(&[]);
+        let inventory = fb::InventoryState::create(
+            &mut builder,
+            &fb::InventoryStateArgs {
+                stacks: Some(empty),
+                durability: Some(empty),
+                max_durability: Some(empty),
+                silver,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::InventoryState,
+            inventory.as_union_value(),
+        )
+    }
+
     /// One entity as it sits on the wire, before validation.
     ///
     /// Every field is settable, including into states a correct server never produces —
@@ -6237,6 +6484,82 @@ pub(super) mod server_side {
     /// including the back-to-front vector build a struct vector needs.
     pub fn encode_entity_snapshot(server_tick: u32, entities: &[EntityStateWire]) -> Vec<u8> {
         encode_entity_snapshot_with_drops(server_tick, entities, &[])
+    }
+
+    /// Builds the V27 sparse mount projection and recipient-only cast with raw enum
+    /// values, including states a correct server cannot emit.
+    pub fn encode_snapshot_with_mounts(
+        entities: &[EntityStateWire],
+        mounts: &[(u64, fb::MountKind)],
+        self_cast: Option<(fb::CastKind, u8)>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let entities: Vec<_> = entities
+            .iter()
+            .map(|state| {
+                fb::EntityState::new(
+                    state.entity_id,
+                    &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
+                    &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
+                    state.yaw,
+                )
+            })
+            .collect();
+        let entities = builder.create_vector(&entities);
+        let mounts: Vec<_> = mounts
+            .iter()
+            .map(|(entity_id, mount)| {
+                fb::MountState::create(
+                    &mut builder,
+                    &fb::MountStateArgs {
+                        entity_id: *entity_id,
+                        mount: *mount,
+                    },
+                )
+            })
+            .collect();
+        let mounts = builder.create_vector(&mounts);
+        let self_cast = self_cast.map(|(kind, progress)| {
+            fb::CastState::create(&mut builder, &fb::CastStateArgs { kind, progress })
+        });
+        let vitals = fb::PlayerVitals::create(
+            &mut builder,
+            &fb::PlayerVitalsArgs {
+                health: 100,
+                max_health: 100,
+                hunger: 100,
+                max_hunger: 100,
+                level: 1,
+                experience_to_next: 50,
+                life_state: fb::LifeState::Alive,
+                ..Default::default()
+            },
+        );
+        let mut snapshot = fb::EntitySnapshotBuilder::new(&mut builder);
+        snapshot.add_server_tick(1);
+        snapshot.add_entities(entities);
+        snapshot.add_mounts(mounts);
+        snapshot.add_self_vitals(vitals);
+        if let Some(self_cast) = self_cast {
+            snapshot.add_self_cast(self_cast);
+        }
+        let snapshot = snapshot.finish();
+        finish_envelope(
+            builder,
+            fb::Payload::EntitySnapshot,
+            snapshot.as_union_value(),
+        )
+    }
+
+    pub fn encode_learned_mounts(mounts: Option<&[fb::MountKind]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let mounts = mounts.map(|mounts| builder.create_vector(mounts));
+        let payload = fb::LearnedMounts::create(&mut builder, &fb::LearnedMountsArgs { mounts });
+        finish_envelope(
+            builder,
+            fb::Payload::LearnedMounts,
+            payload.as_union_value(),
+        )
     }
 
     /// Encodes the two struct entity kinds carried by an `EntitySnapshot`.
@@ -7077,6 +7400,21 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::LootState, payload.as_union_value())
     }
 
+    pub fn encode_empty_loot_with_silver(silver: u32) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let entries = builder.create_vector::<fb::LootEntry>(&[]);
+        let loot = fb::LootState::create(
+            &mut builder,
+            &fb::LootStateArgs {
+                corpse_id: 7,
+                revision: 1,
+                entries: Some(entries),
+                silver,
+            },
+        );
+        finish_envelope(builder, fb::Payload::LootState, loot.as_union_value())
+    }
+
     /// Builds one `MapTile` frame from raw parts, so a test can present the decoder
     /// with a tile no correct server would send: a short array, an absent one, a scale
     /// this contract has no member for, a surface byte nobody names.
@@ -7444,18 +7782,20 @@ mod tests {
         WardedColumnWire, WelcomeWire, encode_action_refused, encode_bare_block_update,
         encode_bare_chunk_data, encode_bare_chunk_unload, encode_bare_entity_snapshot,
         encode_block_update, encode_chat_message, encode_chunk_data, encode_chunk_unload,
-        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        encode_empty_inventory_with_silver, encode_empty_loot_with_silver, encode_entity_snapshot,
+        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
         encode_entity_snapshot_without_vitals, encode_inventory_state,
-        encode_inventory_state_with_durability, encode_leave_cancel_result, encode_leave_started,
-        encode_loot_closed, encode_loot_state, encode_map_explored, encode_map_tile,
-        encode_marker_list, encode_mine_progress, encode_mob_hit, encode_party_invite,
-        encode_player_appearance, encode_player_appearance_with_worn,
+        encode_inventory_state_with_durability, encode_learned_mounts, encode_leave_cancel_result,
+        encode_leave_started, encode_loot_closed, encode_loot_state, encode_map_explored,
+        encode_map_tile, encode_marker_list, encode_mine_progress, encode_mob_hit,
+        encode_party_invite, encode_player_appearance, encode_player_appearance_with_worn,
         encode_player_appearance_without_level, encode_resident_appearance,
         encode_server_character_list, encode_server_reject, encode_server_welcome,
-        encode_storm_warning, encode_vendor_closed, encode_vendor_state, encode_wards_nearby,
+        encode_snapshot_with_mounts, encode_storm_warning, encode_vendor_closed,
+        encode_vendor_state, encode_wards_nearby,
     };
     use super::*;
 
@@ -7786,7 +8126,7 @@ mod tests {
         // V27's request stays intent-only; its result is fully validated and consumed.
         (fb::Payload::LeaveCancelRequest, Handling::ClientOnly),
         (fb::Payload::LeaveCancelResult, Handling::Consumed),
-        (fb::Payload::LearnedMounts, Handling::Deferred),
+        (fb::Payload::LearnedMounts, Handling::Consumed),
         (fb::Payload::MountRequest, Handling::ClientOnly),
         (fb::Payload::DismountRequest, Handling::ClientOnly),
     ];
@@ -7963,7 +8303,7 @@ mod tests {
             (fb::RefusedAction::Unknown, fb::RefusalReason::Unknown),
             (fb::RefusedAction(200), fb::RefusalReason(200)),
             // V27 reserves these wire members, but their application consumer belongs to
-            // the dependent client part. Until then both fail closed to `Unknown`.
+            // a later UI part. Until then both fail closed to `Unknown`.
             (fb::RefusedAction::Mount, fb::RefusalReason::MountNotLearned),
         ] {
             assert_eq!(
@@ -10801,10 +11141,182 @@ mod tests {
                     party_roster: vec![],
                     accessible_loot_corpses: vec![],
                     weather: None,
+                    mounts: vec![],
+                    self_cast: None,
                 })),
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn mount_projection_and_recipient_cast_decode_in_wire_order() {
+        let entities = [EntityStateWire::at(7, 0.0), EntityStateWire::at(9, 4.0)];
+        let frame = encode_snapshot_with_mounts(
+            &entities,
+            &[
+                (9, fb::MountKind::GreyHorse),
+                (7, fb::MountKind::BlackHorse),
+            ],
+            Some((fb::CastKind::Mount, 128)),
+        );
+        let Ok(Message::Snapshot(snapshot)) = decode(&frame) else {
+            panic!("a valid V27 snapshot was refused");
+        };
+        assert_eq!(
+            snapshot.mounts,
+            vec![
+                MountState {
+                    entity_id: 9,
+                    mount: MountKind::GreyHorse,
+                },
+                MountState {
+                    entity_id: 7,
+                    mount: MountKind::BlackHorse,
+                },
+            ]
+        );
+        assert_eq!(
+            snapshot.self_cast,
+            Some(CastState {
+                kind: CastKind::Mount,
+                progress: 128,
+            })
+        );
+    }
+
+    #[test]
+    fn mount_projection_refuses_missing_duplicate_and_unknown_players() {
+        let entities = [EntityStateWire::at(7, 0.0)];
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &[EntityStateWire::at(0, 0.0)],
+                &[],
+                None,
+            )),
+            Err(DecodeError::EntityWithoutIdentity)
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &[EntityStateWire::at(7, 0.0), EntityStateWire::at(7, 4.0)],
+                &[],
+                None,
+            )),
+            Err(DecodeError::DuplicateEntity(7))
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &entities,
+                &[(0, fb::MountKind::BlackHorse)],
+                None,
+            )),
+            Err(DecodeError::MountNotInSnapshot(0))
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &entities,
+                &[(9, fb::MountKind::BlackHorse)],
+                None,
+            )),
+            Err(DecodeError::MountNotInSnapshot(9))
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &entities,
+                &[
+                    (7, fb::MountKind::BlackHorse),
+                    (7, fb::MountKind::BrownHorse),
+                ],
+                None,
+            )),
+            Err(DecodeError::DuplicateMountState(7))
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &entities,
+                &[(7, fb::MountKind(99))],
+                None,
+            )),
+            Err(DecodeError::UnknownMountKind {
+                entity_id: 7,
+                value: 99,
+            })
+        );
+    }
+
+    #[test]
+    fn recipient_cast_refuses_unknown_kind_and_completed_progress() {
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &[],
+                &[],
+                Some((fb::CastKind::Unknown, 0)),
+            )),
+            Err(DecodeError::UnknownCastKind(0))
+        );
+        assert_eq!(
+            decode(&encode_snapshot_with_mounts(
+                &[],
+                &[],
+                Some((fb::CastKind::Mount, u8::MAX)),
+            )),
+            Err(DecodeError::CompletedCast)
+        );
+    }
+
+    #[test]
+    fn learned_mounts_is_a_complete_known_unique_set() {
+        assert_eq!(
+            decode(&encode_learned_mounts(Some(&[
+                fb::MountKind::GreyHorse,
+                fb::MountKind::BlackHorse,
+            ]))),
+            Ok(Message::LearnedMounts(LearnedMounts {
+                mounts: vec![MountKind::GreyHorse, MountKind::BlackHorse],
+            }))
+        );
+        for frame in [
+            encode_learned_mounts(None),
+            encode_learned_mounts(Some(&[])),
+        ] {
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::LearnedMounts(LearnedMounts { mounts: vec![] }))
+            );
+        }
+        assert_eq!(
+            decode(&encode_learned_mounts(Some(&[fb::MountKind::Unknown]))),
+            Err(DecodeError::UnknownLearnedMount(0))
+        );
+        assert_eq!(
+            decode(&encode_learned_mounts(Some(&[
+                fb::MountKind::BrownHorse,
+                fb::MountKind::BrownHorse,
+            ]))),
+            Err(DecodeError::DuplicateLearnedMount(MountKind::BrownHorse))
+        );
+    }
+
+    #[test]
+    fn mount_and_dismount_encoders_are_intent_only() {
+        let mount = encode_mount_request(&MountRequest {
+            mount: MountKind::BrownHorse,
+        });
+        assert_eq!(decode(&mount), Ok(Message::ClientOnly("MountRequest")));
+        let envelope = fb::root_as_envelope(&mount).expect("a frame this client built");
+        assert_eq!(
+            envelope
+                .payload_as_mount_request()
+                .expect("the tag names the payload")
+                .mount(),
+            fb::MountKind::BrownHorse
+        );
+
+        let dismount = encode_dismount_request();
+        assert_eq!(
+            decode(&dismount),
+            Ok(Message::ClientOnly("DismountRequest"))
+        );
     }
 
     /// The dead arrive in the order the server gave them, and an empty vector is the ordinary
@@ -11650,6 +12162,27 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                silver: 0,
+            }))
+        );
+    }
+
+    #[test]
+    fn silver_is_part_of_complete_inventory_and_loot_state() {
+        assert_eq!(
+            decode(&encode_empty_inventory_with_silver(1_234)),
+            Ok(Message::Inventory(InventoryState {
+                stacks: vec![],
+                silver: 1_234,
+            }))
+        );
+        assert_eq!(
+            decode(&encode_empty_loot_with_silver(37)),
+            Ok(Message::LootState(LootState {
+                corpse_id: 7,
+                revision: 1,
+                entries: vec![],
+                silver: 37,
             }))
         );
     }
@@ -11662,7 +12195,10 @@ mod tests {
         ] {
             assert_eq!(
                 decode(&frame),
-                Ok(Message::Inventory(InventoryState { stacks: vec![] }))
+                Ok(Message::Inventory(InventoryState {
+                    stacks: vec![],
+                    silver: 0
+                }))
             );
         }
     }
@@ -12331,6 +12867,7 @@ mod tests {
                 corpse_id: 400,
                 revision: 2,
                 entries: entries.to_vec(),
+                silver: 0,
             }))
         );
         assert_eq!(
@@ -13319,6 +13856,7 @@ mod tests {
                     },
                     InventoryStack::default(),
                 ],
+                silver: 0,
             }))
         );
     }
@@ -13338,6 +13876,7 @@ mod tests {
                     durability: 0,
                     max_durability: 100,
                 }],
+                silver: 0,
             }))
         );
     }
