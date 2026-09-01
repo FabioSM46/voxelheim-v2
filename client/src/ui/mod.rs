@@ -28,6 +28,7 @@ mod settings;
 mod status;
 mod storm;
 mod text_input;
+mod trade;
 mod vendor;
 
 use bevy::prelude::*;
@@ -47,7 +48,7 @@ use crate::net::{
 
 use crate::player::{
     ApplyInputMode, ApplySnapshots, CraftClick, ITEM_SILVER, InputMode, InventoryClick, Liveries,
-    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
+    PlayerTradeClick, SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -153,6 +154,8 @@ impl Plugin for UiPlugin {
             .add_message::<CraftClick>()
             .add_message::<crate::player::LootTakeClick>()
             .add_message::<crate::player::VendorTradeClick>()
+            .add_message::<crate::player::PlayerTradeClick>()
+            .add_message::<crate::player::PlayerTradeEnded>()
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
@@ -195,7 +198,12 @@ impl Plugin for UiPlugin {
                 login::LoginPlugin,
                 // Nested for the reason the compass and the crosshair are, one entry
                 // above: the tuple is at `add_plugins`' fifteen-plugin ceiling.
-                (loot::LootUiPlugin, map::MapUiPlugin, vendor::VendorUiPlugin),
+                (
+                    loot::LootUiPlugin,
+                    map::MapUiPlugin,
+                    trade::PlayerTradeUiPlugin,
+                    vendor::VendorUiPlugin,
+                ),
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
@@ -215,6 +223,7 @@ impl Plugin for UiPlugin {
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
     app.add_message::<CancelLeaveRequest>()
+        .add_message::<PlayerTradeClick>()
         // `WindowPlugin` owns this in the game. Registering it here too keeps the
         // pointer policy headlessly testable wherever this narrow system bundle is
         // installed; `add_message` is idempotent when the plugin already installed it.
@@ -360,6 +369,7 @@ fn choose_input_mode(
     vitals: Res<SelfVitals>,
     typing: Typing<'_>,
     mut mode: ResMut<InputMode>,
+    mut trade_clicks: MessageWriter<PlayerTradeClick>,
 ) {
     // **A full-screen overlay owns the input while one is up.** The game is running
     // behind them, so a click meant for a control would otherwise also reach the world as
@@ -408,7 +418,11 @@ fn choose_input_mode(
     if vitals.dead()
         && matches!(
             *mode,
-            InputMode::Inventory | InputMode::Loot | InputMode::Vendor | InputMode::Map
+            InputMode::Inventory
+                | InputMode::Loot
+                | InputMode::Vendor
+                | InputMode::Trade
+                | InputMode::Map
         )
     {
         set_mode(&mut mode, InputMode::Playing);
@@ -458,6 +472,10 @@ fn choose_input_mode(
             return;
         }
         let next = match *mode {
+            InputMode::Trade => {
+                trade_clicks.write(PlayerTradeClick::Cancel);
+                InputMode::Playing
+            }
             InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
                 InputMode::Playing
             }
@@ -481,6 +499,7 @@ fn choose_input_mode(
             InputMode::Inventory => InputMode::Playing,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -505,6 +524,7 @@ fn choose_input_mode(
             InputMode::Inventory => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };
@@ -1631,6 +1651,7 @@ mod tests {
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(life_state)))
             .add_message::<CancelLeaveRequest>()
+            .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
         *app.world().resource::<InputMode>()
@@ -1690,6 +1711,7 @@ mod tests {
             })
             .insert_resource(LeaveCancellation::Available)
             .add_message::<CancelLeaveRequest>()
+            .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
 
@@ -1787,6 +1809,7 @@ mod tests {
             .insert_resource(screen)
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
             .add_message::<CancelLeaveRequest>()
+            .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
         *app.world().resource::<InputMode>()

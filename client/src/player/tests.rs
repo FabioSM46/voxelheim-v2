@@ -4319,7 +4319,7 @@ fn the_pointer_turns_the_view_the_way_the_pointer_moved() {
 }
 
 #[test]
-fn inventory_keeps_each_horizontal_direction_but_not_jump_or_camera_input() {
+fn inventory_and_trade_keep_horizontal_movement_but_not_jump_or_camera_input() {
     for (key, x, z) in [
         (KeyCode::KeyW, 0.0, 1.0),
         (KeyCode::KeyS, 0.0, -1.0),
@@ -4331,7 +4331,11 @@ fn inventory_keeps_each_horizontal_direction_but_not_jump_or_camera_input() {
         app.update();
         let before = *app.world().resource::<LookState>();
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        *app.world_mut().resource_mut::<InputMode>() = if x + z > 0.0 {
+            InputMode::Trade
+        } else {
+            InputMode::Inventory
+        };
         {
             let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
             keys.press(key);
@@ -4346,7 +4350,7 @@ fn inventory_keeps_each_horizontal_direction_but_not_jump_or_camera_input() {
         assert_eq!(
             *app.world().resource::<MoveIntent>(),
             MoveIntent { x, z, jump: false },
-            "key {key:?} did not remain horizontal-only while the inventory was open"
+            "key {key:?} did not remain horizontal-only while a moving window was open"
         );
     }
 }
