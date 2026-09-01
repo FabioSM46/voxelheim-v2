@@ -18,7 +18,8 @@ use bevy::time::TimeUpdateStrategy;
 
 use super::*;
 use crate::net::{
-    EntityState, PlayerAppearance, SessionParams, Snapshot, WeatherKind, WeatherState, WorldClock,
+    EntityState, MountKind, MountState, PlayerAppearance, SessionParams, Snapshot, WeatherKind,
+    WeatherState, WorldClock,
 };
 
 const TICK_RATE: u8 = 20;
@@ -70,6 +71,24 @@ fn deliver(app: &mut App, tick: u32, entities: Vec<EntityState>, at: Instant) {
             server_tick: tick,
             entities,
             drops: vec![],
+            ..Default::default()
+        },
+        at,
+    );
+}
+
+fn deliver_mounts(
+    app: &mut App,
+    tick: u32,
+    entities: Vec<EntityState>,
+    mounts: Vec<MountState>,
+    at: Instant,
+) {
+    app.world_mut().resource_mut::<SnapshotInbox>().push(
+        Snapshot {
+            server_tick: tick,
+            entities,
+            mounts,
             ..Default::default()
         },
         at,
@@ -255,6 +274,18 @@ fn body_of(app: &mut App, entity_id: u64) -> Option<Entity> {
         .iter(world)
         .find(|(_, body)| body.0 == entity_id)
         .map(|(entity, _)| entity)
+}
+
+fn horse_of(app: &mut App, entity_id: u64) -> Option<(Entity, MountKind)> {
+    let world = app.world_mut();
+    let mut bodies = world.query::<&Body>();
+    let mut horses = world.query::<(Entity, &horse::Horse, &ChildOf)>();
+    horses.iter(world).find_map(|(entity, horse, parent)| {
+        bodies
+            .get(world, parent.parent())
+            .is_ok_and(|body| body.0 == entity_id)
+            .then_some((entity, horse.kind))
+    })
 }
 
 fn name_plate_of(app: &mut App, entity_id: u64) -> Option<(Entity, String)> {
@@ -542,6 +573,178 @@ fn every_body_root_carries_visibility_for_its_rendered_children() {
         visibility,
         vec![(LOCAL_ID, Visibility::Hidden), (99, Visibility::Inherited),],
         "a rendered child under a root without visibility triggers Bevy B0004"
+    );
+}
+
+#[test]
+fn only_the_players_named_by_the_mount_projection_get_horses() {
+    let mut app = headless_player();
+    let now = Instant::now();
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.75),
+        ],
+        vec![MountState {
+            entity_id: 99,
+            mount: MountKind::BrownHorse,
+        }],
+        now,
+    );
+    app.update();
+
+    assert!(horse_of(&mut app, LOCAL_ID).is_none());
+    let (horse_entity, kind) = horse_of(&mut app, 99).expect("the mounted player has a horse");
+    assert_eq!(kind, MountKind::BrownHorse);
+    assert_eq!(
+        piece_transform(&mut app, 99, BodyPiece::Torso).translation,
+        Vec3::Y * horse::RIDER_LIFT,
+        "the ordinary humanoid rig is not seated on the horse"
+    );
+
+    let world = app.world_mut();
+    let mut horses = world.query::<(&ChildOf, &Transform, &Visibility)>();
+    let (parent, horse_transform, visibility) = {
+        let (parent, transform, visibility) = horses.get(world, horse_entity).unwrap();
+        (parent.parent(), *transform, *visibility)
+    };
+    let children: Vec<Entity> = world
+        .get::<Children>(horse_entity)
+        .expect("horse root has drawn parts")
+        .iter()
+        .collect();
+    let mut legs = world.query::<&horse::HorseLeg>();
+    assert_eq!(
+        children
+            .iter()
+            .filter(|child| legs.get(world, **child).is_ok())
+            .count(),
+        4,
+        "the horse does not have four independently posed legs"
+    );
+    let mut bodies = world.query::<(&Body, &Transform)>();
+    let (body, rider_transform) = bodies.get(world, parent).unwrap();
+    assert_eq!(body.0, 99);
+    assert_eq!(horse_transform, Transform::default());
+    assert_eq!(visibility, Visibility::Inherited);
+    assert!(
+        (rider_transform.rotation.to_euler(EulerRot::YXZ).0 - 0.75).abs() < 1e-5,
+        "horse and rider did not inherit the snapshot yaw"
+    );
+}
+
+#[test]
+fn dismount_removes_only_the_horse_and_restores_the_same_rider() {
+    let mut app = headless_player();
+    let now = Instant::now();
+    let remote = state(99, [4.0, 64.0, 0.0], 0.0);
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0), remote],
+        vec![MountState {
+            entity_id: 99,
+            mount: MountKind::BlackHorse,
+        }],
+        now,
+    );
+    app.update();
+    let rider = body_of(&mut app, 99).expect("one remote rider");
+    assert!(horse_of(&mut app, 99).is_some());
+
+    deliver_mounts(
+        &mut app,
+        2,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0), remote],
+        vec![],
+        now + INTERVAL,
+    );
+    app.update();
+
+    assert!(
+        horse_of(&mut app, 99).is_none(),
+        "an absent mount projection left a horse"
+    );
+    assert_eq!(
+        body_of(&mut app, 99),
+        Some(rider),
+        "dismount replaced the rider entity"
+    );
+    assert_eq!(
+        piece_transform(&mut app, 99, BodyPiece::Torso),
+        resting_piece_transform(BodyPiece::Torso),
+        "dismount left the rider in its seated pose"
+    );
+}
+
+#[test]
+fn a_horse_whose_parent_stops_being_a_body_is_removed() {
+    let mut app = headless_player();
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(99, [4.0, 64.0, 0.0], 0.0)],
+        vec![MountState {
+            entity_id: 99,
+            mount: MountKind::BlackHorse,
+        }],
+        Instant::now(),
+    );
+    app.update();
+    let rider = body_of(&mut app, 99).expect("one mounted body");
+
+    app.world_mut().entity_mut(rider).remove::<Body>();
+    app.update();
+
+    let world = app.world_mut();
+    let mut horses = world.query_filtered::<Entity, With<horse::Horse>>();
+    assert_eq!(
+        horses.iter(world).count(),
+        1,
+        "the stale horse survived beside the replacement body's horse"
+    );
+    assert_ne!(
+        horse_of(&mut app, 99).map(|(entity, _)| entity),
+        None,
+        "the replacement body did not receive the projected mount"
+    );
+}
+
+#[test]
+fn the_local_third_person_rider_uses_the_same_horse_tree() {
+    let mut app = headless_player();
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.4)],
+        vec![MountState {
+            entity_id: LOCAL_ID,
+            mount: MountKind::GreyHorse,
+        }],
+        Instant::now(),
+    );
+    app.update();
+    let (horse, _) = horse_of(&mut app, LOCAL_ID).expect("the local mount is rendered");
+    assert_eq!(local_visibility(&mut app), Visibility::Hidden);
+
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    app.update();
+    assert_eq!(local_visibility(&mut app), Visibility::Inherited);
+    assert_eq!(
+        horse_of(&mut app, LOCAL_ID).map(|found| found.0),
+        Some(horse)
+    );
+
+    // UI mode changes do not create a second visibility rule for the mount. It stays
+    // under the same body root, exactly like every ordinary humanoid piece behind the UI.
+    *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+    app.update();
+    assert_eq!(local_visibility(&mut app), Visibility::Inherited);
+    assert_eq!(
+        horse_of(&mut app, LOCAL_ID).map(|found| found.0),
+        Some(horse)
     );
 }
 
