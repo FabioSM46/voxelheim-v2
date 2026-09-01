@@ -378,7 +378,7 @@ impl Plugin for PlayerPlugin {
                         // the flush just made visible. Reconcile the horse child without
                         // replacing its rider, then expose new leg children to this
                         // frame's pose systems.
-                        horse::sync_horses,
+                        (horse::sync_horses, horse::sync_paddock_horses).chain(),
                         ApplyDeferred,
                         // After the flush, because the children it writes to are spawned
                         // by a command and a queued spawn is invisible to a query.

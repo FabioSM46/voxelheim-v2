@@ -1,6 +1,9 @@
 package game
 
 import (
+	"cmp"
+	"slices"
+
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
@@ -116,11 +119,12 @@ func (p *Player) MaterialiseSettlements(coord world.Coord) {
 }
 
 // materialiseSettlementsLocked puts a forge in every smithy, a fire in every hall and a
-// person in every resident slot this chunk holds, for whatever is not there already.
+// person in every resident slot and a horse at every paddock anchor this chunk holds, for
+// whatever is not there already.
 //
-// **One hook for both entity classes, deliberately.** A station and a resident are
-// different things — one is a structure a client draws from a footprint, the other an
-// entity in the mob stream — but they are the same *fact about the world*: something the
+// **One hook for all three resident classes, deliberately.** A station, a person and a
+// paddock horse are different things — one is a structure a client draws from a footprint,
+// the others are separately safe entities in the mob stream — but they are the same *fact about the world*: something the
 // seed put in a settlement that nothing wrote down. Asking the question twice would mean
 // two passes over world.SettlementsNear per chunk for one answer.
 //
@@ -143,18 +147,34 @@ func (s *Sim) materialiseSettlementsLocked(coord world.Coord) {
 	near := world.SettlementsNear(s.worldSeed, originX+world.ChunkSize/2, originZ+world.ChunkSize/2, 1)
 
 	for _, settled := range near {
+		var paddock []world.PlacedAnchor
 		for _, slot := range settled.Anchors() {
 			// The two answers a slot can have, asked in the order the vocabulary was
 			// written: a forge or a fire goes to station.go's half, a smith or a guard to
-			// resident.go's, and an anchor neither of them claims — there is none today —
-			// is passed over rather than defaulted.
+			// resident.go's, and a paddock slot to paddock_horse.go's. Anything none of
+			// them claims is passed over rather than defaulted.
 			if kind, station := stationKind(slot.Kind); station {
 				s.materialiseStationLocked(coord, settled, slot, kind)
 				continue
 			}
 			if role, lives := residentRole(slot.Kind); lives {
 				s.materialiseResidentLocked(coord, settled, slot, role)
+				continue
 			}
+			if slot.Kind == world.AnchorPaddock {
+				paddock = append(paddock, slot)
+			}
+		}
+
+		// Rotation changes which local paddock slot is west or north, so colour order is
+		// defined in world coordinates. Every chunk-enter call sees all three anchors and
+		// therefore assigns the same one-of-each variants even when only one horse belongs
+		// to the chunk being materialised.
+		slices.SortFunc(paddock, func(a, b world.PlacedAnchor) int {
+			return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Z, b.Z))
+		})
+		for variant, slot := range paddock {
+			s.materialisePaddockHorseLocked(coord, slot, uint8(variant))
 		}
 	}
 }

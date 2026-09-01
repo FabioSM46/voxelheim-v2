@@ -139,16 +139,17 @@ type mobSnapshot struct {
 	resident *resident
 }
 
-// mobSnapshotsLocked merges living mobs, corpses and residents in entity-id order. The
+// mobSnapshotsLocked merges living mobs, corpses and world residents in entity-id order. The
 // collection boundary stays internal: a receiver sees one continuous MobState stream.
 //
-// **Three collections rather than two, and the merge is the reason they can be three.**
+// **Four collections rather than two, and the merge is the reason they can be four.**
 // A resident is kept out of Sim.mobs so that combat, the projectiles and the director
 // cannot reach one (resident.go argues it); the wire has no third vector to put one in
 // and needs none, because `MobState` already says everything a client draws a standing
-// body from. So the split that makes them safe costs exactly this: one more loop here.
+// body from. Paddock horses take the same seam: a Horse row for drawing, from a map no
+// combat or director reader knows exists. So each safe resident class costs one loop here.
 func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
-	shown := make([]mobSnapshot, 0, len(mobs)+len(s.corpses)+len(s.residents))
+	shown := make([]mobSnapshot, 0, len(mobs)+len(s.corpses)+len(s.residents)+len(s.paddockHorses))
 	states := mobStates(mobs)
 	for index, m := range mobs {
 		shown = append(shown, mobSnapshot{state: states[index], chunk: m.chunk})
@@ -158,6 +159,9 @@ func (s *Sim) mobSnapshotsLocked(mobs []*mob) []mobSnapshot {
 	}
 	for _, r := range s.residents {
 		shown = append(shown, mobSnapshot{state: r.state(), chunk: r.chunk, resident: r})
+	}
+	for _, horse := range s.paddockHorses {
+		shown = append(shown, mobSnapshot{state: horse.state(), chunk: horse.chunk})
 	}
 	slices.SortFunc(shown, func(a, b mobSnapshot) int {
 		return compareEntityIDs(a.state.EntityID, b.state.EntityID)
