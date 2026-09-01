@@ -296,6 +296,17 @@ func TestTheThreeGroundBlocksOfWorldgenThreeCarryTheirPinnedIDs(t *testing.T) {
 	}
 }
 
+func TestSilverKeepsItsReservedIDWithoutARegistryRow(t *testing.T) {
+	t.Parallel()
+
+	if ItemSilver != 35 {
+		t.Fatalf("ItemSilver = %d, want reserved id 35", ItemSilver)
+	}
+	if _, registered := itemByID(ItemSilver); registered {
+		t.Fatal("reserved silver id still has an inventory registry row")
+	}
+}
+
 // The three blocks worldgen 6 builds a settlement out of, at the ids the registry
 // appended them at and with the plain block-item row each of them has.
 //

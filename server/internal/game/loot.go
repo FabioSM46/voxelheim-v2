@@ -25,6 +25,7 @@ func newLootRNG(worldSeed int64) *rand.Rand {
 
 type lootRoll struct {
 	item     ItemID
+	silver   bool
 	min, max uint16
 }
 
@@ -35,7 +36,12 @@ type corpseEntry struct {
 
 type corpseContainer struct {
 	entries  []corpseEntry
+	silver   uint32
 	revision uint32
+}
+
+func (c *corpseContainer) empty() bool {
+	return c == nil || (len(c.entries) == 0 && c.silver == 0)
 }
 
 // corpseOwner is exactly the stable account-plus-character boundary. Display names
@@ -183,13 +189,14 @@ func (s *Sim) makeCorpseLocked(m *mob) *corpse {
 		// Roster order is RNG order. The map is only the lookup after every roll
 		// has settled, so opening order can never influence the sequence.
 		for _, owner := range roster {
-			c.personal[owner] = &corpseContainer{entries: s.rollLootLocked(m), revision: 1}
+			container := s.rollLootLocked(m)
+			c.personal[owner] = &container
 		}
 	} else {
 		if m.firstHit != nil {
 			c.owner = s.corpseOwnerLocked(m.firstHit, m.pos)
 		}
-		c.container = corpseContainer{entries: s.rollLootLocked(m), revision: 1}
+		c.container = s.rollLootLocked(m)
 	}
 	s.corpses[c.entityID] = c
 	return c
@@ -254,9 +261,9 @@ func standingDistanceSquared(a, b [3]float64) float64 {
 
 // rollLootLocked rolls the species table exactly once, at the Corpse transition — which is
 // the tick of the killing blow, and the only tick on which it is ever called.
-func (s *Sim) rollLootLocked(m *mob) []corpseEntry {
+func (s *Sim) rollLootLocked(m *mob) corpseContainer {
 	table := m.species().loot
-	entries := make([]corpseEntry, 0, len(table))
+	container := corpseContainer{entries: make([]corpseEntry, 0, len(table)), revision: 1}
 	for _, roll := range table {
 		count := roll.min
 		if roll.max > roll.min {
@@ -265,12 +272,16 @@ func (s *Sim) rollLootLocked(m *mob) []corpseEntry {
 		if count == 0 {
 			continue
 		}
-		entries = append(entries, corpseEntry{
-			entryID: uint64(len(entries) + 1),
+		if roll.silver {
+			container.silver += uint32(count)
+			continue
+		}
+		container.entries = append(container.entries, corpseEntry{
+			entryID: uint64(len(container.entries) + 1),
 			stack:   stackOf(roll.item, count),
 		})
 	}
-	return entries
+	return container
 }
 
 // expireCorpsesLocked removes bodies at the exact authoritative tick and schedules an
@@ -406,6 +417,9 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
+	if container.silver > math.MaxUint32-p.inventory.silver {
+		return vnet.RefusalReasonInventoryFull, errors.New("the purse cannot hold the corpse's silver")
+	}
 
 	// Filtered in place: the write index never overtakes the read index, so an entry
 	// is always read before its slot can be reused. Nothing is committed to the
@@ -418,7 +432,10 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 		}
 		kept = append(kept, entry)
 	}
-	if moved > 0 {
+	movedSilver := container.silver
+	p.inventory.silver += movedSilver
+	container.silver = 0
+	if moved > 0 || movedSilver > 0 {
 		container.entries = kept
 		container.revision++
 		p.inventoryDirty = true
@@ -457,7 +474,7 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 	if !owned {
 		return nil, nil, vnet.RefusalReasonLootNotOwned, errors.New("the corpse belongs to another character")
 	}
-	if len(container.entries) == 0 {
+	if container.empty() {
 		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the character's corpse container is empty")
 	}
 	reach := p.reachLocked()
@@ -471,7 +488,7 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 // no reason because a snapshot advertises capabilities rather than refusals.
 func (p *Player) canOpenCorpseLocked(c *corpse) bool {
 	container, owned := c.containerFor(p)
-	if c == nil || !owned || len(container.entries) == 0 || p.cannotActLocked() != nil ||
+	if c == nil || !owned || container.empty() || p.cannotActLocked() != nil ||
 		!withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return false
 	}
@@ -489,7 +506,7 @@ func (c *corpse) lootState(container *corpseContainer) protocol.LootState {
 			MaxDurability: entry.stack.maxDurability,
 		}
 	}
-	return protocol.LootState{CorpseID: c.entityID, Revision: container.revision, Entries: entries}
+	return protocol.LootState{CorpseID: c.entityID, Revision: container.revision, Entries: entries, Silver: container.silver}
 }
 
 // offerLootLocked retries explicit closures before the currently open full state. A
@@ -507,7 +524,7 @@ func (p *Player) offerLootLocked() {
 	}
 	c := p.sim.corpses[p.openLootID]
 	container, owned := c.containerFor(p)
-	if c == nil || !owned || len(container.entries) == 0 {
+	if c == nil || !owned || container.empty() {
 		p.queueLootClosedLocked(p.openLootID)
 		p.openLootID = 0
 		p.lootDirty = false

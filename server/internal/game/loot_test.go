@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
-	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 // What the dead leave behind, and what one of those things mends.
@@ -345,10 +344,10 @@ func TestTheSameWorldLeavesTheSameLoot(t *testing.T) {
 		counts := make([][2]uint16, 0, times)
 		for range times {
 			left := sim.rollLootLocked(sim.mobs[id])
-			if len(left) != 2 || left[0].stack.item != ItemBone || left[1].stack.item != ItemSilver {
-				t.Fatalf("a draugr rolled %v, want a line of bones and a line of silver", left)
+			if len(left.entries) != 1 || left.entries[0].stack.item != ItemBone || left.silver == 0 {
+				t.Fatalf("a draugr rolled %+v, want a bone entry and separate silver", left)
 			}
-			counts = append(counts, [2]uint16{left[0].stack.count, left[1].stack.count})
+			counts = append(counts, [2]uint16{left.entries[0].stack.count, uint16(left.silver)})
 		}
 		return counts
 	}
@@ -406,46 +405,31 @@ func equalCounts(a, b [][2]uint16) bool {
 // Silver
 // ---------------------------------------------------------------------------
 
-// The coin's id, its row, and the three creatures' answer to "is there money on this one".
+// The reserved coin id, its absent row, and the creatures' answer to "is there money on this one".
 //
 // Pinned by name for the reason every id before it is: iota renumbers everything after an
-// insertion, and this number is inside a persisted pack the moment somebody kills a draugr.
-//
-// The row is asserted whole rather than field by field, so a later edit that quietly makes
-// silver wearable, placeable, edible or a repair kit fails here — those are the registry's
-// documented zeroes, and a coin is the item that is nothing but its stack.
-func TestSilverIsAPlainCoinDroppedOnlyByDraugr(t *testing.T) {
+// insertion, and deleting this hole would reinterpret every persisted id after it.
+func TestSilverIsReservedCurrencyDroppedOnlyByDraugr(t *testing.T) {
 	t.Parallel()
 
 	if ItemSilver != 35 {
 		t.Errorf("silver is item %d, want the appended wire id 35", ItemSilver)
 	}
-	got, registered := itemByID(ItemSilver)
-	if !registered {
-		t.Fatal("silver is not registered")
-	}
-	want := itemDefinition{places: world.Air, maxStack: 200}
-	if got != want {
-		t.Errorf("silver's row is %+v, want %+v", got, want)
-	}
-	// The two the acceptance criteria name, restated against the palette and the equipment
-	// column rather than against the struct literal above, because those are the two
-	// readers that would act on a non-zero value.
-	if block, placeable := blockPlacedBy(ItemSilver); placeable {
-		t.Errorf("silver places block %d", block)
-	}
-	if got.wornAt != wornNowhere {
-		t.Errorf("silver is worn at %d, and a coin is not equipment", got.wornAt)
+	if _, registered := itemByID(ItemSilver); registered {
+		t.Fatal("silver has an inventory registry row")
 	}
 
 	// Only the draugr carries any, which is what makes money something the night pays for.
 	for kind, def := range mobRegistry {
 		var silver int
 		for _, roll := range def.loot {
-			if roll.item != ItemSilver {
+			if !roll.silver {
 				continue
 			}
 			silver++
+			if roll.item != ItemNone {
+				t.Errorf("%s represents purse silver as item %d", kind, roll.item)
+			}
 			if roll.min != 2 || roll.max != 6 {
 				t.Errorf("%s leaves %d..%d silver, want 2..6", kind, roll.min, roll.max)
 			}
