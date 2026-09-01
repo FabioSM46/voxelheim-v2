@@ -40,11 +40,11 @@ func TestUnspeakableRefusesWhatCannotBeAHello(t *testing.T) {
 			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(99), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
-		// The immediately previous contract is refused at the handshake. V26 cannot name
-		// the V27 mount and dismount intents; discovering that mid-session would close a
+		// The immediately previous contract is refused at the handshake. V27 cannot name
+		// the V28 player-trade intent; discovering that mid-session would close a
 		// connection both sides had accepted as compatible.
 		"the previous protocol": {
-			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(26), "Eivor"),
+			frame:  protocol.EncodeClientHello(vnet.ProtocolVersion(27), "Eivor"),
 			reason: vnet.RejectReasonPROTOCOL_MISMATCH,
 		},
 		"first message is not a hello": {

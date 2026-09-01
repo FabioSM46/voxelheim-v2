@@ -68,6 +68,8 @@ const (
 	RefusedActionMine RefusedAction = 18
 	/// A `MountRequest` that did not begin or complete its authoritative cast.
 	RefusedActionMount RefusedAction = 19
+	/// A `PlayerTradeRequest` that did not change or complete a player trade.
+	RefusedActionPlayerTrade RefusedAction = 20
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -91,6 +93,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionEdit:           "Edit",
 	RefusedActionMine:           "Mine",
 	RefusedActionMount:          "Mount",
+	RefusedActionPlayerTrade:    "PlayerTrade",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -114,6 +117,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"Edit":           RefusedActionEdit,
 	"Mine":           RefusedActionMine,
 	"Mount":          RefusedActionMount,
+	"PlayerTrade":    RefusedActionPlayerTrade,
 }
 
 func (v RefusedAction) String() string {

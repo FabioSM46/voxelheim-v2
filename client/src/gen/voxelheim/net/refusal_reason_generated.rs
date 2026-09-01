@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 47] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 52] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -61,6 +61,11 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 47] = [
     RefusalReason::CastInterruptedByDeath,
     RefusalReason::ActionForbiddenWhileMounted,
     RefusalReason::MountAlreadyLearned,
+    RefusalReason::AlreadyTrading,
+    RefusalReason::TradeNotOpen,
+    RefusalReason::TradeSlotTaken,
+    RefusalReason::NothingToOffer,
+    RefusalReason::TradeCooldown,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -216,6 +221,11 @@ impl RefusalReason {
     pub const CastInterruptedByDeath: Self = Self(40);
     pub const ActionForbiddenWhileMounted: Self = Self(41);
     pub const MountAlreadyLearned: Self = Self(42);
+    pub const AlreadyTrading: Self = Self(43);
+    pub const TradeNotOpen: Self = Self(44);
+    pub const TradeSlotTaken: Self = Self(45);
+    pub const NothingToOffer: Self = Self(46);
+    pub const TradeCooldown: Self = Self(47);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -275,6 +285,11 @@ impl RefusalReason {
         Self::CastInterruptedByDeath,
         Self::ActionForbiddenWhileMounted,
         Self::MountAlreadyLearned,
+        Self::AlreadyTrading,
+        Self::TradeNotOpen,
+        Self::TradeSlotTaken,
+        Self::NothingToOffer,
+        Self::TradeCooldown,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -326,6 +341,11 @@ impl RefusalReason {
             Self::CastInterruptedByDeath => Some("CastInterruptedByDeath"),
             Self::ActionForbiddenWhileMounted => Some("ActionForbiddenWhileMounted"),
             Self::MountAlreadyLearned => Some("MountAlreadyLearned"),
+            Self::AlreadyTrading => Some("AlreadyTrading"),
+            Self::TradeNotOpen => Some("TradeNotOpen"),
+            Self::TradeSlotTaken => Some("TradeSlotTaken"),
+            Self::NothingToOffer => Some("NothingToOffer"),
+            Self::TradeCooldown => Some("TradeCooldown"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

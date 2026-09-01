@@ -203,6 +203,12 @@ import "strconv"
 // / it travels inside a table field whose receiver refuses an unknown member. The purse,
 // / learned set, cast and mount snapshot state ride in the same one bump so every later
 // / stable issue consumes one settled contract instead of moving this number again.
+// /
+// / **V28 belongs to `PlayerTradeRequest`.** It is a client -> server union member a
+// / V27 server cannot name, and that server closes the session instead of dropping the
+// / frame. `PlayerTradeState` and `PlayerTradeClosed` ride in the same bump so the server
+// / and client halves of player trading consume one settled contract rather than moving
+// / this number again.
 type ProtocolVersion uint16
 
 const (
@@ -211,7 +217,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 27
+	ProtocolVersionCurrent ProtocolVersion = 28
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 19;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 20;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 20] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 21] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -38,6 +38,7 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 20] = [
     RefusedAction::Edit,
     RefusedAction::Mine,
     RefusedAction::Mount,
+    RefusedAction::PlayerTrade,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -106,9 +107,11 @@ impl RefusedAction {
     pub const Mine: Self = Self(18);
     /// A `MountRequest` that did not begin or complete its authoritative cast.
     pub const Mount: Self = Self(19);
+    /// A `PlayerTradeRequest` that did not change or complete a player trade.
+    pub const PlayerTrade: Self = Self(20);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 19;
+    pub const ENUM_MAX: u8 = 20;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -130,6 +133,7 @@ impl RefusedAction {
         Self::Edit,
         Self::Mine,
         Self::Mount,
+        Self::PlayerTrade,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -154,6 +158,7 @@ impl RefusedAction {
             Self::Edit => Some("Edit"),
             Self::Mine => Some("Mine"),
             Self::Mount => Some("Mount"),
+            Self::PlayerTrade => Some("PlayerTrade"),
             _ => None,
         }
     }
