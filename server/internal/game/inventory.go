@@ -16,8 +16,9 @@ import (
 // slot change. An inventory move therefore waits for another operation on this
 // player, never for chunk generation and never for the simulation tick.
 type inventory struct {
-	mu    sync.Mutex
-	slots slotTable
+	mu     sync.Mutex
+	slots  slotTable
+	silver uint32
 }
 
 // slotTable is one player's authoritative slots as a plain value.
@@ -285,9 +286,7 @@ func (t *slotTable) consume(itemID ItemID, count uint32) bool {
 // **Selling is what needed the distinction, and it is a rule rather than a nicety.** #459
 // puts no worn item on the wire — the trade takes what the player is carrying and leaves
 // what they have on — so a vendor buying iron greaves must not be able to take the pair
-// on the player's legs because the pack ran out. The same bound answers "how much silver
-// is in the purse", for the plainer reason that a purse is a pack slot and a breastplate
-// is not.
+// on the player's legs because the pack ran out.
 func (t *slotTable) consumePack(itemID ItemID, count uint32) bool {
 	return t.consumeWithin(itemID, count, equipmentFirst)
 }
@@ -413,7 +412,7 @@ func (i *inventory) stateLocked() protocol.InventoryState {
 			MaxDurability: stack.maxDurability,
 		}
 	}
-	return protocol.InventoryState{Stacks: stacks}
+	return protocol.InventoryState{Stacks: stacks, Silver: i.silver}
 }
 
 // carriedOnPerson reports whether a slot is one the player has *on them*, as opposed to

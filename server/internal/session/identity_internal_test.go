@@ -552,7 +552,7 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	}
 	identities.playing(Admitted{ID: id}, character, false, nil)
 
-	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73, Hunger: 29, Experience: 330}
+	life := game.Life{Pos: [3]float64{4, 65, -4}, Yaw: 1, Health: 73, Hunger: 29, Experience: 330, Silver: 2468}
 	if err := identities.RememberAll(map[identity.PlayerID]game.Life{id: life}); err != nil {
 		t.Fatalf("RememberAll: %v", err)
 	}
@@ -564,10 +564,10 @@ func TestAnAutosaveWritesForALiveSession(t *testing.T) {
 	if !found {
 		t.Fatal("the autosave wrote nothing for a live session")
 	}
-	if saved.Pos != life.Pos || saved.Health != life.Health || saved.Hunger != life.Hunger || saved.Experience != life.Experience {
-		t.Errorf("the autosaved record is %v/%d/%d/%d, want %v/%d/%d/%d",
-			saved.Pos, saved.Health, saved.Hunger, saved.Experience,
-			life.Pos, life.Health, life.Hunger, life.Experience)
+	if saved.Pos != life.Pos || saved.Health != life.Health || saved.Hunger != life.Hunger || saved.Experience != life.Experience || saved.Silver != life.Silver {
+		t.Errorf("the autosaved record is %v/%d/%d/%d/%d, want %v/%d/%d/%d/%d",
+			saved.Pos, saved.Health, saved.Hunger, saved.Experience, saved.Silver,
+			life.Pos, life.Health, life.Hunger, life.Experience, life.Silver)
 	}
 	// The character it was written under comes from the claim, because the simulation
 	// keys a life by account and an account has several characters.

@@ -37,9 +37,8 @@ func stall(t *testing.T, role vnet.ResidentRole) (*vitalsHarness, *Player, *drop
 	return h, player, out, r
 }
 
-// stock puts an item straight into a slot, which is how a test gets silver: nothing in
-// this package mints any, and killing draugr for it would make every trade test a combat
-// test as well.
+// stock puts an item straight into a slot. Currency has its own helper below because no
+// inventory slot is allowed to hold it.
 func (h *vitalsHarness) stock(p *Player, slot uint8, item ItemID, count uint16) {
 	h.t.Helper()
 
@@ -48,21 +47,12 @@ func (h *vitalsHarness) stock(p *Player, slot uint8, item ItemID, count uint16) 
 	p.inventory.slots[slot] = stackOf(item, count)
 }
 
-// stockRaw puts a stack into a slot exactly as given, without stackOf's clamp to the
-// registry's stack maximum.
-//
-// **Not a synthetic state.** `restoredSlots` is deliberately a straight copy of a stored
-// record rather than a second place a slot is decided, and `validateStoredSlot` bounds a
-// count by nothing but the uint16 it is stored in — so a restored purse really can come
-// back holding more silver than stackOf would ever put in one slot. That is what makes a
-// total wider than a uint16 something the trade has to survive rather than something only
-// a test can build.
-func (h *vitalsHarness) stockRaw(p *Player, slot uint8, item ItemID, count uint16) {
+func (h *vitalsHarness) fund(p *Player, silver uint32) {
 	h.t.Helper()
 
 	p.inventory.mu.Lock()
 	defer p.inventory.mu.Unlock()
-	p.inventory.slots[slot] = inventoryStack{item: item, count: count}
+	p.inventory.silver = silver
 }
 
 // carrying is how many of one item the player holds in the pack, read under the lock
@@ -71,6 +61,12 @@ func (h *vitalsHarness) carrying(p *Player, item ItemID) uint32 {
 	p.inventory.mu.Lock()
 	defer p.inventory.mu.Unlock()
 	return p.inventory.slots.heldInPack(item)
+}
+
+func (h *vitalsHarness) purse(p *Player) uint32 {
+	p.inventory.mu.Lock()
+	defer p.inventory.mu.Unlock()
+	return p.inventory.silver
 }
 
 // standAt moves the player without simulating the walk, which is what a reach test needs:
@@ -306,7 +302,7 @@ func TestAddressingTheOpenStallAgainKeepsItsRevision(t *testing.T) {
 	t.Parallel()
 
 	h, player, out, r := stall(t, vnet.ResidentRoleCarpenter)
-	h.stock(player, 0, ItemSilver, 50)
+	h.fund(player, 50)
 	h.step()
 
 	if _, err := player.Trade(tradeFor(r, ItemPlanks, 5, true, 1, 2)); err != nil {
@@ -463,7 +459,7 @@ func TestBuyingAPickaxeSpendsTheSilverAndBumpsTheRevision(t *testing.T) {
 	t.Parallel()
 
 	h, player, out, r := stall(t, vnet.ResidentRoleSmith)
-	h.stock(player, 0, ItemSilver, 50)
+	h.fund(player, 50)
 	h.step()
 
 	reason, err := player.Trade(tradeFor(r, ItemPickaxe, 1, true, 1, 2))
@@ -472,7 +468,7 @@ func TestBuyingAPickaxeSpendsTheSilverAndBumpsTheRevision(t *testing.T) {
 	}
 	h.step()
 
-	if got := h.carrying(player, ItemSilver); got != 25 {
+	if got := h.purse(player); got != 25 {
 		t.Errorf("the purse holds %d silver after a 25-silver purchase from 50, want 25", got)
 	}
 	if got := h.carrying(player, ItemPickaxe); got != 1 {
@@ -492,13 +488,13 @@ func TestBuyingTenArrowsCostsTenSilver(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleCarpenter)
-	h.stock(player, 0, ItemSilver, 30)
+	h.fund(player, 30)
 	h.step()
 
 	if _, err := player.Trade(tradeFor(r, ItemArrow, 10, true, 1, 2)); err != nil {
 		t.Fatalf("buying ten arrows was refused: %v", err)
 	}
-	if got := h.carrying(player, ItemSilver); got != 20 {
+	if got := h.purse(player); got != 20 {
 		t.Errorf("the purse holds %d silver, want 20", got)
 	}
 	if got := h.carrying(player, ItemArrow); got != 10 {
@@ -523,7 +519,7 @@ func TestSellingBonesPaysForThem(t *testing.T) {
 	if got := h.carrying(player, ItemVargrPelt); got != 0 {
 		t.Errorf("the pack still holds %d pelts after selling all three", got)
 	}
-	if got := h.carrying(player, ItemSilver); got != 12 {
+	if got := h.purse(player); got != 12 {
 		t.Errorf("three pelts at 4 paid %d silver, want 12", got)
 	}
 	if got := h.carrying(player, ItemBone); got != 10 {
@@ -534,26 +530,60 @@ func TestSellingBonesPaysForThem(t *testing.T) {
 	}
 }
 
+// A sale needs no empty slot for its payment. The sold stack remains present, so the
+// pack is still completely full after one pelt leaves it; only the purse changes.
+func TestSellingWithAFullPackPaysThePurse(t *testing.T) {
+	t.Parallel()
+
+	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
+	h.stock(player, 0, ItemVargrPelt, 3)
+	for slot := 1; slot < equipmentFirst; slot++ {
+		h.stock(player, uint8(slot), ItemStone, 64)
+	}
+	h.step()
+
+	if _, err := player.Trade(tradeFor(r, ItemVargrPelt, 1, false, 1, 2)); err != nil {
+		t.Fatalf("selling from a full pack was refused: %v", err)
+	}
+	if got := h.carrying(player, ItemVargrPelt); got != 2 {
+		t.Errorf("the pack holds %d pelts, want 2", got)
+	}
+	if got := h.purse(player); got != 4 {
+		t.Errorf("the purse holds %d silver, want 4", got)
+	}
+	for slot, stack := range player.InventoryState().Stacks[:equipmentFirst] {
+		if stack.ItemID == 0 {
+			t.Errorf("pack slot %d became empty; the sale did not need room for silver", slot)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Every refusal moves nothing
 // ---------------------------------------------------------------------------
 
 // unchanged fails the test unless the pack is exactly as the caller left it.
-func (h *vitalsHarness) unchanged(p *Player, was slotTable, what string) {
+type inventorySnapshot struct {
+	slots  slotTable
+	silver uint32
+}
+
+func (h *vitalsHarness) unchanged(p *Player, was inventorySnapshot, what string) {
 	h.t.Helper()
 
 	p.inventory.mu.Lock()
 	defer p.inventory.mu.Unlock()
-	if p.inventory.slots != was {
-		h.t.Errorf("%s moved something: the pack is %v, want %v", what, p.inventory.slots, was)
+	got := inventorySnapshot{slots: p.inventory.slots, silver: p.inventory.silver}
+	if got != was {
+		h.t.Errorf("%s moved something: inventory is %+v, want %+v", what, got, was)
 	}
 }
 
 // pack is a copy of the authoritative slots, for a test to compare against afterwards.
-func (h *vitalsHarness) pack(p *Player) slotTable {
+func (h *vitalsHarness) pack(p *Player) inventorySnapshot {
 	p.inventory.mu.Lock()
 	defer p.inventory.mu.Unlock()
-	return p.inventory.slots
+	return inventorySnapshot{slots: p.inventory.slots, silver: p.inventory.silver}
 }
 
 // A purse that is short buys nothing, and the silver it does hold stays where it is. The
@@ -563,7 +593,7 @@ func TestBuyingWithoutTheSilverRefusesAndSpendsNothing(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
-	h.stock(player, 0, ItemSilver, 39)
+	h.fund(player, 39)
 	h.step()
 	was := h.pack(player)
 
@@ -591,8 +621,8 @@ func TestBuyingIntoAFullPackRefusesAndSpendsNothing(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
-	h.stock(player, 0, ItemSilver, 200)
-	for slot := 1; slot < equipmentFirst; slot++ {
+	h.fund(player, 200)
+	for slot := 0; slot < equipmentFirst; slot++ {
 		h.stock(player, uint8(slot), ItemStone, 60000)
 	}
 	h.step()
@@ -635,7 +665,7 @@ func TestAVendorRefusesWhatItDoesNotDealIn(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleCook)
-	h.stock(player, 0, ItemSilver, 100)
+	h.fund(player, 100)
 	h.stock(player, 1, ItemBone, 10)
 	h.step()
 	was := h.pack(player)
@@ -665,7 +695,7 @@ func TestAStaleRevisionRefusesTheTrade(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleCarpenter)
-	h.stock(player, 0, ItemSilver, 100)
+	h.fund(player, 100)
 	h.step()
 
 	if _, err := player.Trade(tradeFor(r, ItemPlanks, 1, true, 1, 2)); err != nil {
@@ -691,7 +721,7 @@ func TestTradingWithNoStallOpenIsRefused(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	r := h.standResidentAt(vnet.ResidentRoleSmith, [3]float64{1.5, 64, 0.5}, 0)
-	h.stock(player, 0, ItemSilver, 100)
+	h.fund(player, 100)
 	h.step()
 	was := h.pack(player)
 
@@ -711,7 +741,7 @@ func TestTradingAfterWalkingAwayRefusesAndCloses(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
-	h.stock(player, 0, ItemSilver, 100)
+	h.fund(player, 100)
 	h.step()
 	was := h.pack(player)
 
@@ -735,7 +765,7 @@ func TestADeadPlayerTradesNothing(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
-	h.stock(player, 0, ItemSilver, 100)
+	h.fund(player, 100)
 	h.step()
 	was := h.pack(player)
 
@@ -804,46 +834,6 @@ func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
 // A total wider than a slot
 // ---------------------------------------------------------------------------
 
-// **A spend larger than one slot spends the whole of it.** A purse is a sum over pack
-// slots, so what a player can pay is bounded by that sum and not by the uint16 a single
-// stack is stored in — which is why `heldInPack` reports a uint32 and why the spending
-// rule now takes one.
-//
-// It took a uint16 until this was found: the buying branch compared the wide total
-// against the purse and then handed the rule `uint16(total)`, so a 90,000 silver purchase
-// was settled for 90,000 mod 65,536 = 24,464 with the goods delivered in full.
-//
-// Asked of the helper directly, because no row of today's price table can put goods worth
-// more than 65,535 silver into a 36-slot pack — the truncation is reachable arithmetic
-// that the pack's capacity happens to hide, and "safe because of something over there" is
-// exactly what stops being true when a row changes.
-func TestAPurseSpendsATotalWiderThanASingleSlot(t *testing.T) {
-	t.Parallel()
-
-	var slots slotTable
-	slots[0] = inventoryStack{item: ItemSilver, count: 60000}
-	slots[1] = inventoryStack{item: ItemSilver, count: 30000}
-
-	if held := slots.heldInPack(ItemSilver); held != 90000 {
-		t.Fatalf("the purse counts %d silver, want the 90000 spread over two slots", held)
-	}
-
-	// A copy per attempt, for the reason the worn-equipment test above records:
-	// consumeWithin does not unwind a partial spend.
-	spent := slots
-	if !spent.consumePack(ItemSilver, 90000) {
-		t.Fatal("a purse holding 90000 silver could not pay 90000")
-	}
-	if held := spent.heldInPack(ItemSilver); held != 0 {
-		t.Errorf("paying 90000 out of 90000 left %d silver behind, want 0 — a truncated spend pays the remainder of the division and keeps the rest", held)
-	}
-
-	short := slots
-	if short.consumePack(ItemSilver, 90001) {
-		t.Error("a purse holding 90000 silver paid 90001")
-	}
-}
-
 // **A purchase the purse can plainly afford is never refused for want of silver**, and a
 // purchase it cannot must not be settled for a fraction of its price.
 //
@@ -857,12 +847,11 @@ func TestABuyingTotalWiderThanASlotIsNotTruncated(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleTrader)
-	h.stockRaw(player, 0, ItemSilver, 65535)
-	h.stockRaw(player, 1, ItemSilver, 65535)
+	h.fund(player, 131070)
 	h.step()
 	was := h.pack(player)
 
-	if held := h.carrying(player, ItemSilver); held != 131070 {
+	if held := h.purse(player); held != 131070 {
 		t.Fatalf("the purse holds %d silver, want the 131070 the test put in it", held)
 	}
 
@@ -879,24 +868,26 @@ func TestABuyingTotalWiderThanASlotIsNotTruncated(t *testing.T) {
 	h.unchanged(player, was, "a purchase costing more than a slot can count")
 }
 
-// Silver is counted across the pack and nowhere else, over as many slots as it is spread
-// through — the purse is not a slot, it is however many slots money ended up in.
-func TestThePurseIsEveryPackSlotSilverIsIn(t *testing.T) {
+// Silver is one character counter and no slot participates in paying.
+func TestThePurseIsNotAnInventorySlot(t *testing.T) {
 	t.Parallel()
 
 	h, player, _, r := stall(t, vnet.ResidentRoleSmith)
-	h.stock(player, 0, ItemSilver, 20)
-	h.stock(player, 5, ItemSilver, 20)
-	h.stock(player, 9, ItemSilver, 5)
+	h.fund(player, 45)
 	h.step()
 
-	if held := h.carrying(player, ItemSilver); held != 45 {
-		t.Fatalf("the purse holds %d, want the 45 spread over three slots", held)
+	if held := h.purse(player); held != 45 {
+		t.Fatalf("the purse holds %d, want 45", held)
 	}
 	if _, err := player.Trade(tradeFor(r, ItemIronCuirass, 1, true, 1, 2)); err != nil {
 		t.Fatalf("forty-five silver did not buy a forty-five-silver cuirass: %v", err)
 	}
-	if held := h.carrying(player, ItemSilver); held != 0 {
+	if held := h.purse(player); held != 0 {
 		t.Errorf("%d silver survived a purchase that cost every coin", held)
+	}
+	for slot, stack := range player.InventoryState().Stacks {
+		if stack.ItemID == uint16(ItemSilver) {
+			t.Errorf("slot %d holds reserved silver id", slot)
+		}
 	}
 }

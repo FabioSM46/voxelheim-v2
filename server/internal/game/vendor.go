@@ -229,8 +229,8 @@ func (p *Player) openVendorLocked(r *resident) {
 
 // Trade moves silver one way and goods the other, or moves nothing at all.
 //
-// **The whole transaction happens inside one TryLock window and on one copy of the slot
-// table**, and those two facts are the entirety of the atomicity argument. The copy is
+// **The whole transaction happens inside one TryLock window, on one copy of the slot
+// table and one copy of the purse**, and those facts are the entirety of the atomicity argument. The copy is
 // what makes "nothing spent" true without an unwind — a purchase that pays for a pickaxe
 // and then finds no room for it throws the copy away, exactly as `craft` does — and the
 // window is what makes "what fits" a question about a pack no other request can be
@@ -238,10 +238,9 @@ func (p *Player) openVendorLocked(r *resident) {
 // records: the tick takes this lock only under sim.mu, which this call is already
 // holding, so waiting on it is the one thing that could deadlock.
 //
-// **Silver is consumed and the goods inserted in that order, deliberately.** A player
-// whose purse is the last slot with room in it can buy something, because paying empties
-// the slot the purchase goes into; doing it the other way round would refuse that trade
-// with a full pack the player is about to have room in.
+// The purse arithmetic is independent of the slot copy. Buying may still fail when the
+// goods do not fit, while selling can always credit ordinary silver without asking the
+// pack for room.
 //
 // The caller is the session goroutine. No frame is produced here: the accepted trade
 // dirties the inventory and the stall, and the tick delivers both complete states.
@@ -295,34 +294,12 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 	defer p.inventory.mu.Unlock()
 
 	next := p.inventory.slots
+	nextSilver := p.inventory.silver
 	if req.Buying {
-		// The comparison and the spend are both uint32, and that is the entirety of the
-		// safety argument — there is no narrowing left to justify. A purse is a sum over
-		// pack slots rather than a single stack, so `heldInPack` can exceed what one slot
-		// holds and a total it covers can too; the old `uint16(total)` here was checked
-		// against the wide value and then spent as the narrow one, which is the shape of
-		// a free purchase: a 90,000 silver total was spent as `uint16(90000)` = 24,464.
-		// The comment that stood here argued that was safe because "forty slots of a
-		// uint16 count" fit a uint16 — which is backwards, and is why the truncation was
-		// reachable rather than why it was not.
-		//
-		// **What kept it from actually being a free purchase was somewhere else, which is
-		// the reason to fix it here rather than to rely on that.** Delivery still has to
-		// fit, and no row of today's table can put goods worth more than 65,535 silver
-		// into a 36-slot pack — the best `price x maxStack x 36` is 1,728 — so `insert`
-		// refused and the copy was discarded. What did get through was the wrong refusal:
-		// at a total of 65,536 the low bits are zero, `consumePack` returned false on its
-		// `count == 0` guard, and a purse deep enough to pay was told it was short.
-		//
-		// And the purse is genuinely not bounded by a stack maximum: `restoredSlots`
-		// copies a stored count straight from the record on purpose, and
-		// `validateStoredSlot` bounds it by nothing but the uint16 it is stored in.
-		if next.heldInPack(ItemSilver) < total {
+		if nextSilver < total {
 			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("%d silver is more than the purse holds", total)
 		}
-		if !next.consumePack(ItemSilver, total) {
-			return vnet.RefusalReasonNotEnoughSilver, fmt.Errorf("the purse did not yield %d silver", total)
-		}
+		nextSilver -= total
 		if remaining := next.insert(item, req.Count); remaining != 0 {
 			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d of item %d do not fit", remaining, req.ItemID)
 		}
@@ -334,19 +311,13 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 		if !next.consumePack(item, uint32(req.Count)) {
 			return vnet.RefusalReasonVendorDoesNotWant, fmt.Errorf("the pack does not hold %d of item %d", req.Count, req.ItemID)
 		}
-		// This branch keeps an explicit MaxUint16 refusal and the buying one needs none,
-		// because the two guard different widths: `insert` writes a single slot's count
-		// and genuinely takes a uint16, while a spend walks the whole pack and now takes
-		// the uint32 it always summed to. Paying is bounded by what the purse holds;
-		// being paid is bounded by what one call to `insert` can be asked for.
-		if total > math.MaxUint16 {
-			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d silver is more than a pack could hold", total)
+		if total > math.MaxUint32-nextSilver {
+			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d silver exceeds the purse's numeric capacity", total)
 		}
-		if remaining := next.insert(ItemSilver, uint16(total)); remaining != 0 {
-			return vnet.RefusalReasonInventoryFull, fmt.Errorf("%d of the %d silver does not fit", remaining, total)
-		}
+		nextSilver += total
 	}
 	p.inventory.slots = next
+	p.inventory.silver = nextSilver
 
 	// No refreshWornLocked, and it is worth saying why rather than leaving its absence to
 	// look like an omission: both halves above are bounded to the pack — `insert` writes
