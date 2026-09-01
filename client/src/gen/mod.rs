@@ -50,6 +50,10 @@ pub mod voxelheim {
         pub use self::ward_kind_generated::*;
         mod resident_role_generated;
         pub use self::resident_role_generated::*;
+        mod player_trade_action_generated;
+        pub use self::player_trade_action_generated::*;
+        mod player_trade_close_reason_generated;
+        pub use self::player_trade_close_reason_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -204,6 +208,14 @@ pub mod voxelheim {
         pub use self::trade_request_generated::*;
         mod vendor_closed_generated;
         pub use self::vendor_closed_generated::*;
+        mod player_trade_request_generated;
+        pub use self::player_trade_request_generated::*;
+        mod player_trade_slot_generated;
+        pub use self::player_trade_slot_generated::*;
+        mod player_trade_state_generated;
+        pub use self::player_trade_state_generated::*;
+        mod player_trade_closed_generated;
+        pub use self::player_trade_closed_generated::*;
         mod learned_mounts_generated;
         pub use self::learned_mounts_generated::*;
         mod mount_request_generated;

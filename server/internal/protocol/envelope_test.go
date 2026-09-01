@@ -279,15 +279,14 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // reason is read as Unknown. Ask what the receiver does with the value it does not
 // recognise, not which way it travelled.
 //
-// **V27 batches authoritative leave cancellation and the stable contract.**
-// LeaveCancelRequest, MountRequest and DismountRequest travel client to server, so a
-// V26 server would close the session on any tag it cannot name. Their server-to-client
-// companions would be safely droppable alone; each request is a bump owed.
-func TestProtocolV27BatchesLeaveCancellationAndStableContract(t *testing.T) {
+// **V28 appends player-to-player trading.** PlayerTradeRequest travels client to server,
+// so a V27 server would close the session on a tag it cannot name. The state and close
+// messages travel back and would be safely droppable alone; the request is the bump owed.
+func TestProtocolV28AddsPlayerTrading(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 27 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 27", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 28 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 28", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -352,6 +351,10 @@ func TestProtocolV27BatchesLeaveCancellationAndStableContract(t *testing.T) {
 		vnet.PayloadLearnedMounts,
 		vnet.PayloadMountRequest,
 		vnet.PayloadDismountRequest,
+		// V28's intent, followed by the complete state and explicit end marker.
+		vnet.PayloadPlayerTradeRequest,
+		vnet.PayloadPlayerTradeState,
+		vnet.PayloadPlayerTradeClosed,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2382,9 +2385,10 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		// members rather than one, because they are separate requests with separate
 		// answers. Mine sits beside the reserved MineBlock = 2 rather than replacing it:
 		// removing or renumbering that one would relabel every refusal already sent.
-		"RefusedAction.Edit":  {byte(vnet.RefusedActionEdit), 17},
-		"RefusedAction.Mine":  {byte(vnet.RefusedActionMine), 18},
-		"RefusedAction.Mount": {byte(vnet.RefusedActionMount), 19},
+		"RefusedAction.Edit":        {byte(vnet.RefusedActionEdit), 17},
+		"RefusedAction.Mine":        {byte(vnet.RefusedActionMine), 18},
+		"RefusedAction.Mount":       {byte(vnet.RefusedActionMount), 19},
+		"RefusedAction.PlayerTrade": {byte(vnet.RefusedActionPlayerTrade), 20},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2399,8 +2403,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 20 {
-		t.Errorf("RefusedAction has %d members, want 20 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 21 {
+		t.Errorf("RefusedAction has %d members, want 21 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2453,6 +2457,11 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"CastInterruptedByDeath":      {byte(vnet.RefusalReasonCastInterruptedByDeath), 40},
 		"ActionForbiddenWhileMounted": {byte(vnet.RefusalReasonActionForbiddenWhileMounted), 41},
 		"MountAlreadyLearned":         {byte(vnet.RefusalReasonMountAlreadyLearned), 42},
+		"AlreadyTrading":              {byte(vnet.RefusalReasonAlreadyTrading), 43},
+		"TradeNotOpen":                {byte(vnet.RefusalReasonTradeNotOpen), 44},
+		"TradeSlotTaken":              {byte(vnet.RefusalReasonTradeSlotTaken), 45},
+		"NothingToOffer":              {byte(vnet.RefusalReasonNothingToOffer), 46},
+		"TradeCooldown":               {byte(vnet.RefusalReasonTradeCooldown), 47},
 		"MalformedNoAnchor":           {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":             {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":               {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2462,8 +2471,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 47 {
-		t.Errorf("RefusalReason has %d members, want 47 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 52 {
+		t.Errorf("RefusalReason has %d members, want 52 — a new one needs a decision, not a test edit", got)
 	}
 }
 

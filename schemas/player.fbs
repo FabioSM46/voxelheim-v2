@@ -858,7 +858,13 @@ enum RefusedAction : ubyte {
   //    there is no refusal for a client to route.
 
   /// A `MountRequest` that did not begin or complete its authoritative cast.
-  Mount = 19
+  Mount = 19,
+
+  // -- V28. Player-to-player trading, appended so every shipped action keeps its
+  //    number and remains distinct from the vendor `TradeRequest` vocabulary.
+
+  /// A `PlayerTradeRequest` that did not change or complete a player trade.
+  PlayerTrade = 20
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1041,6 +1047,14 @@ enum RefusalReason : ubyte {
   CastInterruptedByDeath = 40,
   ActionForbiddenWhileMounted = 41,
   MountAlreadyLearned = 42,
+
+  // -- V28. Player-to-player trade refusals, appended inside the low group because
+  //    each answers a well-formed request against authoritative session or offer state.
+  AlreadyTrading = 43,
+  TradeNotOpen = 44,
+  TradeSlotTaken = 45,
+  NothingToOffer = 46,
+  TradeCooldown = 47,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -2364,6 +2378,118 @@ table TradeRequest {
 /// message ends.
 table VendorClosed {
   entity_id: ulong;
+}
+
+// -----------------------------------------------------------------------------
+// Player-to-player trading: intent, complete two-sided state, and explicit close.
+// -----------------------------------------------------------------------------
+
+/// Which operation one `PlayerTradeRequest` asks the authoritative server to perform.
+///
+/// There is deliberately no invite, accept or decline. `Open` is the only way a trade
+/// starts, and the addressed partner learns of it from the first `PlayerTradeState`, in
+/// the same way a stall opens on its first `VendorState`. The confirmation prompt belongs
+/// to the player who pressed the key, not to the player they addressed.
+///
+/// Every action also reads `client_tick` for authoritative ordering and staleness:
+///   - `Open` reads `target_entity_id`. A target that is absent, self, not a player,
+///     out of reach, dead or already trading is refused as `NoSuchPlayer`, so the sender
+///     cannot probe another player's state. The sender's own state may instead produce
+///     `PlayerIsDead` or `AlreadyTrading`; a recently closed pair uses `TradeCooldown`
+///   - `SetItem` reads `trade_slot`, `pack_slot`, and `revision`
+///   - `ClearItem` reads `trade_slot` and `revision`
+///   - `SetSilver` reads `silver` and `revision`
+///   - `Confirm` reads `revision`
+///   - `Cancel` reads no action-specific field
+enum PlayerTradeAction : ubyte {
+  Unknown = 0,
+  Open,
+  SetItem,
+  ClearItem,
+  SetSilver,
+  Confirm,
+  Cancel
+}
+
+/// One request to open or change a player-to-player trade. Client -> server, intent only.
+///
+/// An offered item is named by `pack_slot`; the request carries no item id, count,
+/// durability or outcome. The authoritative server resolves what that slot holds and
+/// publishes it in `PlayerTradeState`.
+table PlayerTradeRequest {
+  action: PlayerTradeAction;
+  target_entity_id: ulong;
+  trade_slot: ubyte;
+  pack_slot: ubyte;
+  silver: uint;
+  revision: uint;
+  client_tick: uint;
+}
+
+/// One offered stack in a complete player-to-player trade state.
+///
+/// Decoder invariants:
+///   - `trade_slot` is below 5 and unique within the vector that contains it
+///   - `count` is at least 1
+///   - `(durability, max_durability) == (0, 0)` means the stack does not wear out
+///   - otherwise `max_durability` is non-zero, `durability <= max_durability`, and
+///     `count == 1`; zero durability under a non-zero maximum is legal
+struct PlayerTradeSlot {
+  trade_slot: ubyte;
+  pack_slot: ubyte;
+  item_id: ushort;
+  count: ushort;
+  durability: ushort;
+  max_durability: ushort;
+}
+
+/// The complete two-sided player-to-player trade state. Server -> client.
+///
+/// A later state replaces the earlier revision wholesale; it is never a diff. A change
+/// to either offer clears confirmation, and `Confirm` names the revision the player saw.
+///
+/// Decoder invariants:
+///   - `partner_entity_id` is non-zero
+///   - `partner_name` is present; the empty string remains legal display text
+///   - `revision` is non-zero
+///   - `my_offer` and `their_offer` are present and each contains at most 5 entries
+///   - every entry satisfies `PlayerTradeSlot`, with `trade_slot` unique within its vector
+///   - `pack_slot` is meaningful only in `my_offer`; the server writes 0 in
+///     `their_offer`, and a client must never read it there
+table PlayerTradeState {
+  partner_entity_id: ulong;
+  partner_name: string;
+  revision: uint;
+  my_offer: [PlayerTradeSlot];
+  their_offer: [PlayerTradeSlot];
+  my_silver: uint;
+  their_silver: uint;
+  my_confirmed: bool;
+  their_confirmed: bool;
+}
+
+/// Why an open player-to-player trade ended.
+///
+/// Decoded totally: an absent or unrecognised member reads as `Unknown` and costs the
+/// explanation, never the session.
+enum PlayerTradeCloseReason : ubyte {
+  Unknown = 0,
+  Completed,
+  Cancelled,
+  OutOfReach,
+  Died,
+  Disconnected,
+  Failed
+}
+
+/// Explicitly ends an open player-to-player trade. Server -> client.
+///
+/// Decoder invariants:
+///   - `partner_entity_id` is non-zero
+///   - `reason` is decoded totally; absent and unrecognised values read as `Unknown`
+table PlayerTradeClosed {
+  partner_entity_id: ulong;
+  reason: PlayerTradeCloseReason;
 }
 
 // -----------------------------------------------------------------------------
