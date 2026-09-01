@@ -386,7 +386,6 @@ fn show_window(
 mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, SessionParams, VendorState};
-    use crate::player::ITEM_SILVER;
     use crate::ui::inventory::SilverCount;
 
     /// Three ids from the smith's list in `server/internal/game/vendor.go`. Spelled as
@@ -445,10 +444,10 @@ mod tests {
         }
     }
 
-    /// The inventory this test reads its held counts from: four raw iron and twelve
-    /// silver, and no coal at all.
+    /// The inventory this test reads its held counts from: four raw iron, a twelve-silver
+    /// purse, and no coal at all.
     fn carrying() -> Inventory {
-        Inventory::from_stacks(vec![stack(RAW_IRON, 4), stack(ITEM_SILVER, 12)])
+        Inventory::from_state(vec![stack(RAW_IRON, 4)], 12)
     }
 
     fn app() -> App {
@@ -513,7 +512,7 @@ mod tests {
     #[test]
     fn a_pack_that_moved_rebuilds_the_sell_column() {
         let mut app = app();
-        app.insert_resource(Inventory::from_stacks(vec![stack(ITEM_SILVER, 12)]));
+        app.insert_resource(Inventory::from_state(Vec::new(), 12));
         app.update();
 
         let drawn = lines(&mut app);

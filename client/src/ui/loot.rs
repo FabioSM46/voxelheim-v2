@@ -2,7 +2,7 @@
 
 use bevy::prelude::*;
 
-use super::{BUTTON, CELL_SIZE, FILLED_CELL, button_colour, icon, stack_style};
+use super::{BUTTON, CELL_SIZE, FILLED_CELL, button_colour, icon, silver_icon, stack_style};
 use crate::net::{InventoryStack, Session};
 use crate::player::{InputMode, Liveries, LootTakeClick, LootWindow, item_label};
 
@@ -24,6 +24,10 @@ struct LootRoot;
 
 #[derive(Component)]
 struct LootEntryButton(u64);
+
+/// The corpse's server-owned currency, drawn apart from its clickable item entries.
+#[derive(Component)]
+struct LootSilver;
 
 pub(super) struct LootUiPlugin;
 
@@ -99,6 +103,40 @@ fn rebuild_window(
                 },
                 TextColor(HINT),
             ));
+            if state.silver > 0 {
+                root.spawn((
+                    LootSilver,
+                    Node {
+                        width: Val::Percent(100.0),
+                        min_height: Val::Px(CELL_SIZE),
+                        display: Display::Flex,
+                        align_items: AlignItems::Center,
+                        column_gap: Val::Px(10.0),
+                        padding: UiRect::all(Val::Px(4.0)),
+                        ..default()
+                    },
+                ))
+                .with_children(|row| {
+                    row.spawn((
+                        Node {
+                            width: Val::Px(CELL_SIZE),
+                            height: Val::Px(CELL_SIZE),
+                            position_type: PositionType::Relative,
+                            ..default()
+                        },
+                        BackgroundColor(FILLED_CELL),
+                    ))
+                    .with_children(|host| icon::spawn(host, silver_icon(), None));
+                    row.spawn((
+                        Text::new(format!("Silver x {}", state.silver)),
+                        TextFont {
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::WHITE),
+                    ));
+                });
+            }
             for entry in &state.entries {
                 let durability = if entry.max_durability == 0 {
                     String::new()
@@ -197,8 +235,7 @@ mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, LootEntry, LootState, SessionParams};
 
-    #[test]
-    fn the_window_draws_complete_entries_and_a_click_only_emits_the_entry_id() {
+    fn app(state: LootState) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(Session(SessionParams {
@@ -215,20 +252,44 @@ mod tests {
                 player_token: ANY_TOKEN,
             }))
             .insert_resource(InputMode::Loot)
-            .insert_resource(LootWindow::from_server(LootState {
-                corpse_id: 90,
-                revision: 4,
-                entries: vec![LootEntry {
-                    entry_id: 44,
-                    item_id: 1,
-                    count: 3,
-                    durability: 7,
-                    max_durability: 10,
-                }],
-                silver: 0,
-            }))
+            .insert_resource(LootWindow::from_server(state))
             .add_plugins(LootUiPlugin);
         app.update();
+        app
+    }
+
+    #[test]
+    fn currency_only_loot_is_visible_without_an_item_entry() {
+        let mut app = app(LootState {
+            corpse_id: 89,
+            revision: 3,
+            entries: Vec::new(),
+            silver: 23,
+        });
+
+        let world = app.world_mut();
+        let mut texts = world.query::<&Text>();
+        assert!(texts.iter(world).any(|text| text.0 == "Silver x 23"));
+        let mut silver = world.query_filtered::<Entity, With<LootSilver>>();
+        assert_eq!(silver.iter(world).count(), 1);
+        let mut buttons = world.query_filtered::<Entity, With<LootEntryButton>>();
+        assert_eq!(buttons.iter(world).count(), 0);
+    }
+
+    #[test]
+    fn the_window_draws_complete_entries_and_a_click_only_emits_the_entry_id() {
+        let mut app = app(LootState {
+            corpse_id: 90,
+            revision: 4,
+            entries: vec![LootEntry {
+                entry_id: 44,
+                item_id: 1,
+                count: 3,
+                durability: 7,
+                max_durability: 10,
+            }],
+            silver: 17,
+        });
 
         let world = app.world_mut();
         let mut roots = world.query_filtered::<&Visibility, With<LootRoot>>();
@@ -246,12 +307,15 @@ mod tests {
             .expect("the window names the take-all control");
         assert_eq!(*hint, "F - take all");
         assert!(hint.is_ascii(), "the hint carries an undrawable glyph");
+        assert!(lines.contains(&"Silver x 17"));
         assert!(
             lines
                 .iter()
                 .any(|line| { line.contains("x 3") && line.contains("durability 7/10") })
         );
 
+        let mut silver = world.query_filtered::<Entity, With<LootSilver>>();
+        assert_eq!(silver.iter(world).count(), 1);
         let mut buttons = world.query::<(&LootEntryButton, &mut Interaction)>();
         let (entry, mut interaction) = buttons.single_mut(world).expect("one loot entry");
         assert_eq!(entry.0, 44);
