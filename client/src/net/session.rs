@@ -215,6 +215,8 @@ pub(super) enum SessionEvent {
     Snapshot { snapshot: Snapshot, at: Instant },
     /// The player's complete authoritative inventory.
     Inventory(InventoryState),
+    /// The complete authoritative learned-mount set.
+    LearnedMounts(codec::LearnedMounts),
     /// Authoritative progress for one mined voxel.
     MineProgress(MineProgress),
     /// What one visible player looks like.
@@ -1437,6 +1439,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::Inventory(inventory)) => {
                     events.send(SessionEvent::Inventory(inventory)).ok()?;
+                }
+                Ok(Transition::LearnedMounts(mounts)) => {
+                    events.send(SessionEvent::LearnedMounts(mounts)).ok()?;
                 }
                 Ok(Transition::ActionRefused(refused)) => {
                     events.send(SessionEvent::ActionRefused(refused)).ok()?;

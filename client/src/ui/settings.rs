@@ -199,8 +199,9 @@ const WIDE_BUTTON: f32 = 40.0;
 /// describes. `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails rather than the
 /// panel jumping, and #399 is what made it fail: adding `Control::Consume` grew Controls to
 /// eleven rows, so this number moved with it rather than the area silently overflowing.
-/// #452 moved it again, to twelve, for `Control::Map`.
-const CONTENT_ROWS: usize = 12;
+/// #452 moved it again, to twelve, for `Control::Map`; #711 moves it to thirteen for the
+/// rebindable default-mount call.
+const CONTENT_ROWS: usize = 13;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;

@@ -1,5 +1,6 @@
 //! The client's on-screen surface and the input mode that owns the pointer.
 
+mod cast;
 mod character;
 mod chat;
 mod compass;
@@ -182,7 +183,11 @@ impl Plugin for UiPlugin {
                 // at `add_plugins`' fifteen-plugin ceiling. The leave countdown is beside
                 // health because it is the same kind of surface -- permanent game UI a
                 // release build keeps drawing -- and it borrows that module's z-ordering.
-                (health::HealthUiPlugin, leaving::LeavingUiPlugin),
+                (
+                    health::HealthUiPlugin,
+                    leaving::LeavingUiPlugin,
+                    cast::CastUiPlugin,
+                ),
                 hunger::HungerUiPlugin,
                 experience::ExperienceUiPlugin,
                 hotbar::HotbarPlugin,

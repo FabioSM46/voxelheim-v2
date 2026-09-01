@@ -212,6 +212,7 @@ pub enum Control {
     Consume,
     Menu,
     Map,
+    Mount,
 }
 
 /// Every control, in the order the settings screen lists them.
@@ -220,7 +221,7 @@ pub enum Control {
 /// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
 /// that array with `CONTROLS.map`, so a control listed here out of its declaration order
 /// would silently hand every control below it somebody else's key.
-pub const CONTROLS: [Control; 11] = [
+pub const CONTROLS: [Control; 12] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -232,6 +233,7 @@ pub const CONTROLS: [Control; 11] = [
     Control::Consume,
     Control::Menu,
     Control::Map,
+    Control::Mount,
 ];
 
 impl Control {
@@ -249,6 +251,7 @@ impl Control {
             Self::Consume => "consume",
             Self::Menu => "menu",
             Self::Map => "map",
+            Self::Mount => "mount",
         }
     }
 
@@ -266,6 +269,7 @@ impl Control {
             Self::Consume => "Consume item",
             Self::Menu => "Pause menu",
             Self::Map => "World map",
+            Self::Mount => "Call mount",
         }
     }
 
@@ -288,6 +292,34 @@ impl Control {
             Self::Consume => KeyCode::KeyC,
             Self::Menu => KeyCode::Escape,
             Self::Map => KeyCode::KeyM,
+            Self::Mount => KeyCode::KeyZ,
+        }
+    }
+}
+
+/// The horse a player chose as their default; learned state remains server-owned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultMount {
+    Black,
+    Brown,
+    Grey,
+}
+
+impl DefaultMount {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Black => "black-horse",
+            Self::Brown => "brown-horse",
+            Self::Grey => "grey-horse",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "black-horse" => Some(Self::Black),
+            "brown-horse" => Some(Self::Brown),
+            "grey-horse" => Some(Self::Grey),
+            _ => None,
         }
     }
 }
@@ -873,6 +905,7 @@ const NO_FRAME_CAP: u16 = 0;
 pub struct Settings {
     look_sensitivity: f32,
     bindings: Bindings,
+    default_mount: Option<DefaultMount>,
     window_mode: DisplayMode,
     monitor: MonitorPreference,
     readout_shown: bool,
@@ -890,6 +923,7 @@ impl Default for Settings {
         Self {
             look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
             bindings: Bindings::default(),
+            default_mount: None,
             window_mode: DEFAULT_WINDOW_MODE,
             monitor: DEFAULT_MONITOR,
             readout_shown: false,
@@ -913,6 +947,16 @@ impl Settings {
     /// Which key answers for each control.
     pub const fn bindings(&self) -> &Bindings {
         &self.bindings
+    }
+
+    /// Which learned mount the player chose in the mounts tab, if any.
+    pub const fn default_mount(&self) -> Option<DefaultMount> {
+        self.default_mount
+    }
+
+    /// Remembers the selection made from an authoritative learned-mount row.
+    pub const fn set_default_mount(&mut self, mount: DefaultMount) {
+        self.default_mount = Some(mount);
     }
 
     /// Whether the window is borderless fullscreen or decorated and resizable.
@@ -1116,6 +1160,7 @@ impl Settings {
         match tab {
             Tab::Controls => {
                 self.look_sensitivity = defaults.look_sensitivity;
+                self.default_mount = defaults.default_mount;
                 self.bindings =
                     Bindings::from_pairs(&CONTROLS.map(|control| (control, control.default_key())))
                         .unwrap_or_default();

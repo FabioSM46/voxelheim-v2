@@ -29,10 +29,10 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, ChatMessage, InventoryState, LeaveCancelResult, LeaveStarted,
-    LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message, MineProgress,
-    MobHit, PartyInvite, PlayerAppearance, Reject, ResidentAppearance, SessionParams, Snapshot,
-    StormWarning, VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
+    ActionRefused, CharacterList, ChatMessage, InventoryState, LearnedMounts, LeaveCancelResult,
+    LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message,
+    MineProgress, MobHit, PartyInvite, PlayerAppearance, Reject, ResidentAppearance, SessionParams,
+    Snapshot, StormWarning, VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -81,6 +81,8 @@ pub enum Transition {
     Snapshot(Snapshot),
     /// The player's complete authoritative inventory, admitted because a session exists.
     Inventory(InventoryState),
+    /// The complete authoritative learned-mount set.
+    LearnedMounts(LearnedMounts),
     /// Authoritative progress for the voxel currently being mined.
     MineProgress(MineProgress),
     /// What one visible player looks like, admitted because a session exists.
@@ -501,10 +503,8 @@ impl Handshake {
             (Phase::Established, Message::LeaveCancelResult(result)) => {
                 Ok(Transition::LeaveCancellation(result))
             }
-            // Fully decoded at the contract boundary; the mount feature's state consumer
-            // follows in its own issue. Admitted and intentionally dropped until then.
-            (Phase::Established, Message::LearnedMounts(_)) => {
-                Ok(Transition::Ignored("LearnedMounts"))
+            (Phase::Established, Message::LearnedMounts(mounts)) => {
+                Ok(Transition::LearnedMounts(mounts))
             }
             (Phase::Established, Message::Chat(message)) => Ok(Transition::Chat(message)),
             (Phase::Established, Message::PartyInvite(invite)) => {
@@ -1347,8 +1347,8 @@ mod tests {
 
         let mut live = established();
         assert_eq!(
-            live.apply(Message::LearnedMounts(learned)),
-            Ok(Transition::Ignored("LearnedMounts"))
+            live.apply(Message::LearnedMounts(learned.clone())),
+            Ok(Transition::LearnedMounts(learned))
         );
         assert!(live.established());
     }

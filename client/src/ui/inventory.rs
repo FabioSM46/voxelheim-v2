@@ -31,13 +31,13 @@ use super::{
 };
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
-use crate::net::{InventoryStack, Session, StructureKind};
+use crate::net::{InventoryStack, MountKind, Session, StructureKind};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
     ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
-    InventoryClickKind, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
-    equipment_item_fits, item_label,
+    InventoryClickKind, LearnedMounts, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
+    equipment_item_fits, item_label, mount_label, preference_from_mount,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -73,6 +73,8 @@ impl Plugin for InventoryUiPlugin {
                     show_the_active_tab,
                     switch_craft_filters,
                     show_filtered_recipes,
+                    choose_default_mount,
+                    rebuild_mount_rows,
                     scroll_crafting,
                     hover_tooltip,
                     inventory_clicks,
@@ -316,6 +318,8 @@ pub(super) enum InventoryTab {
     Pack,
     /// The recipe rows, which were a third section of the one panel until #177.
     Crafting,
+    /// The authoritative learned horses and the local default selection.
+    Mounts,
 }
 
 impl InventoryTab {
@@ -326,13 +330,14 @@ impl InventoryTab {
     /// it and `label` matches on the variant with no wildcard arm, so a third tab is a
     /// build failure until it has a name — and then it appears in the strip and gets its
     /// own panel with nothing rearranged, which is the acceptance criterion.
-    const ALL: [Self; 2] = [Self::Pack, Self::Crafting];
+    const ALL: [Self; 3] = [Self::Pack, Self::Crafting, Self::Mounts];
 
     /// What a player reads on the tab.
     const fn label(self) -> &'static str {
         match self {
             Self::Pack => "PACK",
             Self::Crafting => "CRAFTING",
+            Self::Mounts => "MOUNTS",
         }
     }
 }
@@ -349,6 +354,12 @@ struct TabButton(InventoryTab);
 /// `Display::None`.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct TabPanel(InventoryTab);
+
+#[derive(Component)]
+struct MountList;
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct MountChoice(MountKind);
 
 fn spawn_inventory_screen(mut commands: Commands) {
     commands
@@ -509,6 +520,28 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                             ));
                                         });
                                     crafting.spawn(hint("Click a recipe to craft    E: close"));
+                                });
+
+                            content
+                                .spawn((
+                                    TabPanel(InventoryTab::Mounts),
+                                    tab_panel_node(Display::None),
+                                ))
+                                .with_children(|mounts| {
+                                    mounts.spawn(section_title("LEARNED MOUNTS"));
+                                    mounts.spawn((
+                                        MountList,
+                                        Node {
+                                            display: Display::Flex,
+                                            flex_direction: FlexDirection::Column,
+                                            flex_grow: 1.0,
+                                            row_gap: Val::Px(8.0),
+                                            ..default()
+                                        },
+                                    ));
+                                    mounts.spawn(hint(
+                                        "Click a learned mount to make it the default    E: close",
+                                    ));
                                 });
                         });
                     // Last of the window's children, so it draws over whichever tab is
@@ -1168,6 +1201,90 @@ fn show_the_active_tab(active: Res<InventoryTab>, mut panels: Query<(&TabPanel, 
         // first `DerefMut` and `bevy_ui` lays a changed node's subtree out again.
         if node.display != next {
             node.display = next;
+        }
+    }
+}
+
+/// Replaces the rows wholesale from the newest complete server answer.
+fn rebuild_mount_rows(
+    mut commands: Commands,
+    learned: Option<Res<LearnedMounts>>,
+    settings: Option<Res<Settings>>,
+    lists: Query<(Entity, Option<&Children>), With<MountList>>,
+) {
+    let changed = learned.as_ref().is_some_and(|mounts| mounts.is_changed())
+        || settings
+            .as_ref()
+            .is_some_and(|settings| settings.is_changed());
+    for (list, children) in &lists {
+        if !changed && children.is_some() {
+            continue;
+        }
+        if let Some(children) = children {
+            for child in children.iter() {
+                commands.entity(child).despawn();
+            }
+        }
+        let mounts = learned.as_deref().map_or(&[][..], LearnedMounts::mounts);
+        commands.entity(list).with_children(|rows| {
+            if mounts.is_empty() {
+                rows.spawn((
+                    Text::new("You have not learned any mounts yet"),
+                    TextFont {
+                        font_size: FontSize::Px(18.0),
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.72, 0.75, 0.80)),
+                ));
+                return;
+            }
+            let selected = settings.as_deref().and_then(Settings::default_mount);
+            for mount in mounts {
+                let is_default = selected == Some(preference_from_mount(*mount));
+                rows.spawn((
+                    MountChoice(*mount),
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::all(Val::Px(12.0)),
+                        border_radius: BorderRadius::all(Val::Px(4.0)),
+                        ..default()
+                    },
+                    BackgroundColor(if is_default { TAB_SELECTED } else { BUTTON }),
+                ))
+                .with_child((
+                    Text::new(if is_default {
+                        format!("{}  -  DEFAULT", mount_label(*mount))
+                    } else {
+                        mount_label(*mount).to_owned()
+                    }),
+                    TextFont {
+                        font_size: FontSize::Px(18.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                ));
+            }
+        });
+    }
+}
+
+fn choose_default_mount(
+    mode: Res<InputMode>,
+    active: Res<InventoryTab>,
+    learned: Option<Res<LearnedMounts>>,
+    mut settings: Option<ResMut<Settings>>,
+    choices: Query<(&MountChoice, &Interaction)>,
+) {
+    if *mode != InputMode::Inventory || *active != InventoryTab::Mounts {
+        return;
+    }
+    let (Some(learned), Some(settings)) = (learned, settings.as_deref_mut()) else {
+        return;
+    };
+    for (choice, interaction) in &choices {
+        if *interaction == Interaction::Pressed && learned.contains(choice.0) {
+            settings.set_default_mount(preference_from_mount(choice.0));
         }
     }
 }
