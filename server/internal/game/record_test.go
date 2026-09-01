@@ -45,6 +45,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	}
 	player.inventory.slots[5] = inventoryStack{item: ItemStone, count: 23}
 	player.inventory.slots[35] = inventoryStack{item: ItemRawIron, count: 1}
+	player.inventory.silver = 2468
 	player.inventory.mu.Unlock()
 
 	saved := player.Record()
@@ -74,6 +75,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	if got.Experience != saved.Experience {
 		t.Errorf("restored experience %d, want %d", got.Experience, saved.Experience)
 	}
+	if got.Silver != saved.Silver {
+		t.Errorf("restored silver %d, want %d", got.Silver, saved.Silver)
+	}
 	for slot := range saved.Slots {
 		if got.Slots[slot] != saved.Slots[slot] {
 			t.Errorf("restored slot %d is %+v, want %+v", slot, got.Slots[slot], saved.Slots[slot])
@@ -91,6 +95,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 		if stack != saved.Slots[slot] {
 			t.Errorf("the wire state for slot %d is %+v, want %+v", slot, stack, saved.Slots[slot])
 		}
+	}
+	if state.Silver != saved.Silver {
+		t.Errorf("wire silver = %d, want %d", state.Silver, saved.Silver)
 	}
 }
 

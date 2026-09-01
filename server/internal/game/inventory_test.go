@@ -68,10 +68,14 @@ func TestInventoryStatePreservesAllFortyRealSlots(t *testing.T) {
 	inventory.slots[9] = inventoryStack{item: ItemStone, count: 3}
 	inventory.slots[35] = inventoryStack{item: ItemRawIron, count: 1}
 	inventory.slots[39] = inventoryStack{item: ItemSnow, count: 2}
+	inventory.silver = 987
 
 	state := inventory.state()
 	if got := len(state.Stacks); got != int(protocol.InventorySlots) {
 		t.Fatalf("inventory has %d slots, want %d", got, protocol.InventorySlots)
+	}
+	if state.Silver != 987 {
+		t.Errorf("inventory purse = %d, want 987", state.Silver)
 	}
 	want := map[int]protocol.InventoryStack{
 		0:  {ItemID: uint16(ItemDirt), Count: 7},

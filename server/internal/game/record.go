@@ -10,7 +10,7 @@ import (
 
 // Life is everything about one player that outlives their connection: where they
 // stood, which way they faced, how much health and hunger they had, their lifetime
-// experience, and every slot of their pack.
+// experience, purse, and every slot of their pack.
 //
 // # Why the type lives here and not in the store
 //
@@ -34,6 +34,7 @@ type Life struct {
 	Health     uint16
 	Hunger     uint16
 	Experience uint32
+	Silver     uint32
 	Slots      [protocol.InventorySlots]protocol.InventoryStack
 }
 
@@ -212,7 +213,7 @@ func (p *Player) recordLocked() Life {
 	// describe the same slots differently.
 	state := p.inventory.stateLocked()
 
-	life := Life{Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger, Experience: p.experience}
+	life := Life{Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger, Experience: p.experience, Silver: state.Silver}
 	copy(life.Slots[:], state.Stacks)
 	return life
 }

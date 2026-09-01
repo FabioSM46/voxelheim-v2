@@ -80,7 +80,7 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	// Seconds, because that is the resolution the format keeps. A test that wrote
 	// time.Now() and compared it whole would fail on the nanoseconds the format
 	// deliberately does not store.
-	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100, Hunger: 73, Experience: 4321}
+	want := Record{LastSeen: time.Unix(1_700_000_000, 0).UTC(), Health: 100, Hunger: 73, Experience: 4321, Silver: 2468}
 	if err := store.Save(character.ID, want); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -116,12 +116,12 @@ func TestStoreRoundTripsARecord(t *testing.T) {
 	}
 
 	// A second save replaces the first rather than appending to it.
-	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61, Hunger: 12, Experience: 9876}
+	later := Record{LastSeen: want.LastSeen.Add(time.Hour), Health: 61, Hunger: 12, Experience: 9876, Silver: 8642}
 	if err := store.Save(character.ID, later); err != nil {
 		t.Fatalf("the second Save: %v", err)
 	}
 	got, _, _ = store.Load(character.ID)
-	if got.Health != later.Health || got.Hunger != later.Hunger || got.Experience != later.Experience || !got.LastSeen.Equal(later.LastSeen) {
+	if got.Health != later.Health || got.Hunger != later.Hunger || got.Experience != later.Experience || got.Silver != later.Silver || !got.LastSeen.Equal(later.LastSeen) {
 		t.Errorf("the second save did not replace the first: %+v", got)
 	}
 }
@@ -404,6 +404,7 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 		Health:     61,
 		Hunger:     37,
 		Experience: 1234,
+		Silver:     987654,
 	}
 	// Every shape a slot can take: a worn durable item, a partial stack, the last slot
 	// occupied, and empties everywhere else.
@@ -436,6 +437,9 @@ func TestStoreRoundTripsTheLife(t *testing.T) {
 	}
 	if got.Experience != want.Experience {
 		t.Errorf("Experience = %d, want %d", got.Experience, want.Experience)
+	}
+	if got.Silver != want.Silver {
+		t.Errorf("Silver = %d, want %d", got.Silver, want.Silver)
 	}
 	if got.Slots != want.Slots {
 		for slot := range want.Slots {
@@ -470,14 +474,14 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V8 keeps experience immediately after hunger and widens the fixed slot table. Pin
+// V9 keeps the v8 slot table and appends the purse before the variable name. Pin
 // every relationship and the bytes themselves: changing only the struct field would
 // otherwise round trip through an equally wrong encoder and decoder.
-func TestV8StoresFortySlotsAfterExperience(t *testing.T) {
+func TestV9StoresSilverAfterFortySlots(t *testing.T) {
 	t.Parallel()
 
-	if StoreVersion != 8 {
-		t.Fatalf("StoreVersion = %d, want 8", StoreVersion)
+	if StoreVersion != 9 {
+		t.Fatalf("StoreVersion = %d, want 9", StoreVersion)
 	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
@@ -491,8 +495,11 @@ func TestV8StoresFortySlotsAfterExperience(t *testing.T) {
 	if slotsSize != 40*slotSize {
 		t.Fatalf("slotsSize = %d, want 40 slots × %d bytes", slotsSize, slotSize)
 	}
+	if offSilver != offSlots+slotsSize {
+		t.Fatalf("offSilver = %d, want offSlots+slotsSize = %d", offSilver, offSlots+slotsSize)
+	}
 
-	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0}
+	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0, Silver: 0x12345678}
 	rec.Slots[0] = protocol.InventoryStack{ItemID: 0x9abc, Count: 1}
 	encoded := encodeRecord(rec)
 	if got := binary.LittleEndian.Uint16(encoded[offHealth : offHealth+2]); got != rec.Health {
@@ -507,19 +514,21 @@ func TestV8StoresFortySlotsAfterExperience(t *testing.T) {
 	if got := binary.LittleEndian.Uint16(encoded[offSlots : offSlots+2]); got != rec.Slots[0].ItemID {
 		t.Errorf("first slot item bytes = %#x, want %#x", got, rec.Slots[0].ItemID)
 	}
+	if got := binary.LittleEndian.Uint32(encoded[offSilver : offSilver+4]); got != rec.Silver {
+		t.Errorf("silver bytes = %#x, want %#x", got, rec.Silver)
+	}
 }
 
-// There is deliberately no v6 migration. Even bytes that otherwise have the current
-// layout are refused when the header says v6, rather than being parsed as a shorter slot
-// table and assigned empty worn equipment the old record never stored.
-func TestV8RefusesAV6RecordRatherThanMigratingIt(t *testing.T) {
+// There is deliberately no v8 migration. It may hold silver in an inventory slot, so
+// the bytes stay with their old world rather than being repaired into the purse.
+func TestV9RefusesAV8RecordRatherThanMigratingIt(t *testing.T) {
 	t.Parallel()
 
 	old := encodeRecord(Record{Health: 100, Hunger: 100, Experience: 200})
-	binary.LittleEndian.PutUint32(old[4:8], 6)
+	binary.LittleEndian.PutUint32(old[4:8], 8)
 	world.PutChecksum(old)
 	if _, err := decodeRecord(old); !errors.Is(err, world.ErrCorruptStore) {
-		t.Fatalf("decodeRecord(v6) = %v, want ErrCorruptStore", err)
+		t.Fatalf("decodeRecord(v8) = %v, want ErrCorruptStore", err)
 	}
 }
 

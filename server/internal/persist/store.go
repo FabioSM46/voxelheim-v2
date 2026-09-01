@@ -116,7 +116,13 @@ import (
 // **8 widens that table to 40 entries for the trailing off-hand slot.** V7 is migrated:
 // its 39 slots retain their indexes and the new tail is empty, while the complete v7
 // directory is kept beside the replacement as evidence of the pre-migration state.
-const StoreVersion uint32 = 8
+//
+// **9 adds silver after the fixed slot table.** It is a character value like experience,
+// but it occupies no slot. There is no v8 migration: a v8 record can carry silver as an
+// ItemSilver stack, and silently turning that stack into a purse would repair stored data
+// the game is required to refuse. The stable worldgen bump selects a new default players
+// directory; explicit older directories are kept beside the new one unchanged.
+const StoreVersion uint32 = 9
 
 const (
 	previousStoreVersion   uint32 = 7
@@ -130,7 +136,7 @@ const (
 //	    character_id:u64 owner:32
 //	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
 //	    pos:3×f64 yaw:f64 health:u16 hunger:u16 experience:u32
-//	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
+//	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16) silver:u32
 //	    name_len:u16 name[name_len] crc32:u32
 //
 // Everything fixed-width first and the one variable-length field last, so the only
@@ -164,7 +170,7 @@ const (
 
 	// supersededSuffix marks a players directory written in a format this build does
 	// not speak, and it names the format this build *does* speak: a directory set aside
-	// by this version becomes players.pre-v8.<timestamp>.
+	// by this version becomes players.pre-v9.<timestamp>.
 	//
 	// It said `.pre-accounts` while there had been exactly one such move, which was
 	// true of the format that introduced characters and stopped being true the moment a
@@ -191,7 +197,8 @@ const (
 	offHunger     = offHealth + 2
 	offExperience = offHunger + 2
 	offSlots      = offExperience + 4
-	offNameLen    = offSlots + slotsSize
+	offSilver     = offSlots + slotsSize
+	offNameLen    = offSilver + 4
 
 	recordHeaderSize      = offNameLen + 2
 	maxRecordSize         = recordHeaderSize + MaxNameBytes + world.ChecksumSize
@@ -263,6 +270,10 @@ type Record struct {
 	// Experience is the character's authoritative lifetime total. Level and progress
 	// within the current level are derived by game and are never stored beside it.
 	Experience uint32
+
+	// Silver is the character's authoritative purse. It is not represented in Slots;
+	// game refuses a stored ItemSilver stack rather than repairing it into this field.
+	Silver uint32
 
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
 	// sent InventoryState are the same value rather than two that have to agree.
@@ -821,7 +832,11 @@ func encodeRecord(rec Record) []byte {
 
 func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	name := rec.Name
-	nameOffset := offSlots + inventorySlots*slotSize
+	silverOffset := offSlots + inventorySlots*slotSize
+	nameOffset := silverOffset
+	if version == StoreVersion {
+		nameOffset += 4
+	}
 	headerSize := nameOffset + 2
 
 	buf := world.NewRecord(headerSize, len(name), playerMagic, version)
@@ -850,6 +865,9 @@ func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 		binary.LittleEndian.PutUint16(buf[at+4:at+6], stack.Durability)
 		binary.LittleEndian.PutUint16(buf[at+6:at+8], stack.MaxDurability)
 	}
+	if version == StoreVersion {
+		binary.LittleEndian.PutUint32(buf[silverOffset:silverOffset+4], rec.Silver)
+	}
 
 	binary.LittleEndian.PutUint16(buf[nameOffset:nameOffset+2], uint16(len(name)))
 	copy(buf[headerSize:], name)
@@ -874,7 +892,11 @@ func decodeV7Record(data []byte) (Record, error) {
 }
 
 func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
-	nameOffset := offSlots + inventorySlots*slotSize
+	silverOffset := offSlots + inventorySlots*slotSize
+	nameOffset := silverOffset
+	if version == StoreVersion {
+		nameOffset += 4
+	}
 	headerSize := nameOffset + 2
 	if len(data) < headerSize+world.ChecksumSize {
 		return Record{}, fmt.Errorf("%w: %d bytes is shorter than an empty player record",
@@ -920,6 +942,9 @@ func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record
 			Durability:    binary.LittleEndian.Uint16(data[at+4 : at+6]),
 			MaxDurability: binary.LittleEndian.Uint16(data[at+6 : at+8]),
 		}
+	}
+	if version == StoreVersion {
+		rec.Silver = binary.LittleEndian.Uint32(data[silverOffset : silverOffset+4])
 	}
 	return rec, nil
 }
