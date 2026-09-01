@@ -255,6 +255,29 @@ func TestAMapTileBurstIsServedAndTheNextIsDropped(t *testing.T) {
 	}
 }
 
+// The production client opens on a 1024×768 logical viewport at zoom two, so its map
+// picture is 512×384 tile pixels. A 64-pixel tile divides that into eight by six when
+// aligned; a centre off the tile grid adds at most one square on each axis. The limiter
+// must admit that whole ordinary opening before it starts protecting the read loop from
+// a client that keeps asking.
+func TestTheMapTileBurstCoversAColdDefaultViewport(t *testing.T) {
+	t.Parallel()
+
+	const (
+		defaultImageWidth  = 1024 / 2
+		defaultImageHeight = 768 / 2
+		maxTilesAcross     = defaultImageWidth/protocol.MapTileEdge + 1
+		maxTilesDown       = defaultImageHeight/protocol.MapTileEdge + 1
+		coldOpening        = maxTilesAcross * maxTilesDown
+	)
+	if mapTileBurst < coldOpening {
+		t.Fatalf("map tile burst %d does not cover a %d-tile cold opening", mapTileBurst, coldOpening)
+	}
+	if mapTileBurst != 64 {
+		t.Fatalf("map tile burst = %d, want the measured 64-tile bound", mapTileBurst)
+	}
+}
+
 // BenchmarkDrawMapTile is the acceptance criterion the tile path has to hold: a
 // scale-16 tile — the most ground one frame can describe, 4096 columns of it — inside
 // 10 ms on the CI runner class.
