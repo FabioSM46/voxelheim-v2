@@ -1645,10 +1645,10 @@ fn ingest_snapshots(
         // the buffer *accepted*: a duplicate or out-of-order tick carries the vitals of a
         // moment already drawn, and applying them would walk health backwards.
         let self_vitals = snapshot.self_vitals;
-        // The time of day rides the same gate for the same reason. A frame that arrived
-        // late describes a moment already drawn, and letting it anchor the sky would run
-        // the sun backwards — the one thing `SkyClock` promises it never does.
-        let tick_of_day = snapshot.tick_of_day;
+        // The persisted world time rides the same gate for the same reason. A frame that
+        // arrived late describes a moment already drawn, and letting it anchor the sky
+        // would run both solar time and a multi-day lunar phase backwards.
+        let world_tick = snapshot.world_tick;
         // And the weather, on the same gate for the same reason: a late frame describes a
         // sky that has already been drawn.
         let weather = snapshot.weather;
@@ -1661,7 +1661,7 @@ fn ingest_snapshots(
             // is not news — it is what lets the death countdown hold rather than churn the
             // UI that reads it.
             set_if_changed(&mut outputs.vitals, SelfVitals(Some(self_vitals)));
-            outputs.sky.anchor(tick_of_day, at);
+            outputs.sky.anchor(world_tick, at);
             set_if_changed(&mut outputs.weather, Weather(weather));
             let recipient = outputs
                 .session

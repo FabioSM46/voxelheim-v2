@@ -722,8 +722,44 @@ func (rcv *EntitySnapshot) SelfCast(obj *CastState) *CastState {
 }
 
 // / This recipient's own cast, when one is running. A later snapshot supersedes it.
+// / How many authoritative ticks this world has lived through, across every restart.
+// / This is the absolute half of `tick_of_day`: when the welcome declares a clock,
+// / `world_tick % day_length_ticks == tick_of_day`. A receiver refuses the whole frame
+// / when the pair disagrees rather than deriving or wrapping either half, because the
+// / disagreement is the only evidence that the server emitted a non-atomic clock.
+// /
+// / A clockless server carries zero. Unlike `server_tick`, this value is persisted world
+// / time rather than process uptime, so every client connected to the same world derives
+// / the same multi-day presentation and a restart resumes it instead of beginning again.
+// /
+// / Appended in V29. An older server's absent scalar would read as a fresh world's zero,
+// / which is a plausible but false lunar phase; the protocol version therefore moves.
+func (rcv *EntitySnapshot) WorldTick() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / How many authoritative ticks this world has lived through, across every restart.
+// / This is the absolute half of `tick_of_day`: when the welcome declares a clock,
+// / `world_tick % day_length_ticks == tick_of_day`. A receiver refuses the whole frame
+// / when the pair disagrees rather than deriving or wrapping either half, because the
+// / disagreement is the only evidence that the server emitted a non-atomic clock.
+// /
+// / A clockless server carries zero. Unlike `server_tick`, this value is persisted world
+// / time rather than process uptime, so every client connected to the same world derives
+// / the same multi-day presentation and a restart resumes it instead of beginning again.
+// /
+// / Appended in V29. An older server's absent scalar would read as a fresh world's zero,
+// / which is a plausible but false lunar phase; the protocol version therefore moves.
+func (rcv *EntitySnapshot) MutateWorldTick(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(40, n)
+}
+
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(18)
+	builder.StartObject(19)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -814,6 +850,9 @@ func EntitySnapshotStartMountsVector(builder *flatbuffers.Builder, numElems int)
 }
 func EntitySnapshotAddSelfCast(builder *flatbuffers.Builder, selfCast flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(17, flatbuffers.UOffsetT(selfCast), 0)
+}
+func EntitySnapshotAddWorldTick(builder *flatbuffers.Builder, worldTick uint64) {
+	builder.PrependUint64Slot(18, worldTick, 0)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

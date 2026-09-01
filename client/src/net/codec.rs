@@ -1179,6 +1179,13 @@ pub struct Snapshot {
     /// handshake owns that check, exactly as it owns the inventory's slot count, and
     /// for the same reason: it is the only layer that holds both halves.
     pub tick_of_day: u32,
+    /// Persisted absolute world time from the same snapshot as `tick_of_day`.
+    ///
+    /// The session layer validates the pair against the day length announced in
+    /// `ServerWelcome`, because this frame-only decoder has never seen that value.
+    /// Unlike `server_tick`, this survives a server restart and is shared by every
+    /// client connected to the world.
+    pub world_tick: u64,
     /// Which of the players in `entities` the server currently holds dead.
     ///
     /// **A fact about the world rather than an event**, which is why it is a field of the
@@ -1247,6 +1254,7 @@ impl Default for Snapshot {
             self_cast: None,
             structures: Vec::new(),
             tick_of_day: 0,
+            world_tick: 0,
             dead_players: Vec::new(),
             blocking_players: Vec::new(),
             party_leader_entity_id: 0,
@@ -5226,6 +5234,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         // Copied, not checked. See the field's own documentation: the bound is against a
         // number this function has never seen.
         tick_of_day: snapshot.tick_of_day(),
+        world_tick: snapshot.world_tick(),
         dead_players,
         blocking_players,
         party_leader_entity_id,
@@ -7450,12 +7459,17 @@ pub(super) mod server_side {
         )
     }
 
-    /// Encodes a snapshot carrying nothing but a tick and a time of day.
+    /// Encodes a snapshot carrying nothing but its process tick and both world-clock
+    /// projections.
     ///
-    /// Every vector empty, deliberately: what its callers are checking is one scalar's
-    /// journey across the wire, and an entity in the frame would only be a second thing
+    /// Every vector empty, deliberately: what its callers are checking is the clock pair's
+    /// journey across the wire, and an entity in the frame would only be another thing
     /// that could go wrong.
-    pub fn encode_entity_snapshot_at_tick_of_day(server_tick: u32, tick_of_day: u32) -> Vec<u8> {
+    pub fn encode_entity_snapshot_at_world_tick(
+        server_tick: u32,
+        tick_of_day: u32,
+        world_tick: u64,
+    ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
 
         let vitals = PlayerVitalsWire::default();
@@ -7486,6 +7500,7 @@ pub(super) mod server_side {
                 self_vitals: Some(self_vitals),
                 structures: None,
                 tick_of_day,
+                world_tick,
                 dead_players: None,
                 drop_durabilities: None,
                 party_leader_entity_id: 0,
@@ -8462,14 +8477,19 @@ mod tests {
     /// close the session on any unknown tag. Their server-to-client companions are safely
     /// droppable alone; every request independently owes the bump.
     ///
-    /// The rule that generalises, now that eight shapes have been argued: **ask what the
+    /// **V29 appends the absolute world clock.** An absent scalar decodes as zero, which
+    /// is a plausible fresh world rather than an error, so a V28 server would silently
+    /// restart multi-day presentation on every connection. That semantic mismatch owes
+    /// the bump even though FlatBuffers accepts the older table.
+    ///
+    /// The rule that generalises, now that nine shapes have been argued: **ask what the
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v28_adds_player_trading() {
+    fn protocol_v29_adds_the_absolute_world_clock() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 28);
+        assert_eq!(fb::ProtocolVersion::Current.0, 29);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -10899,21 +10919,23 @@ mod tests {
         assert!(!params.clock.declared());
     }
 
-    /// The tick of day rides in the snapshot and arrives unchanged, the last tick of a
-    /// day included — the value an off-by-one loses, and a legal one: the contract's
-    /// bound is `tick_of_day < day_length_ticks`.
+    /// The two world-clock projections ride in the snapshot and arrive unchanged, the
+    /// last tick of a day included.
     ///
     /// Nothing here checks that bound, and that is the design: this layer decodes one
     /// frame and the day length arrived in another. `net::handshake` owns the check.
     #[test]
-    fn a_snapshot_carries_the_tick_of_day() {
+    fn a_snapshot_carries_the_absolute_and_wrapped_world_clock() {
         for tick_of_day in [0_u32, 1, 14_400, 23_999] {
-            let frame = server_side::encode_entity_snapshot_at_tick_of_day(7, tick_of_day);
+            let world_tick = 12 * 24_000 + u64::from(tick_of_day);
+            let frame =
+                server_side::encode_entity_snapshot_at_world_tick(7, tick_of_day, world_tick);
             let Ok(Message::Snapshot(snapshot)) = decode(&frame) else {
                 panic!("a snapshot with a tick of day is a snapshot");
             };
 
             assert_eq!(snapshot.tick_of_day, tick_of_day);
+            assert_eq!(snapshot.world_tick, world_tick);
             // The field it was appended after, read in the same breath: an appended
             // scalar that displaced an existing one would satisfy the line above and
             // still have broken the contract.
@@ -12011,6 +12033,7 @@ mod tests {
                 decode(&frame),
                 Ok(Message::Snapshot(Snapshot {
                     tick_of_day: 0,
+                    world_tick: 0,
                     server_tick: 5,
                     entities: Vec::new(),
                     drops: Vec::new(),

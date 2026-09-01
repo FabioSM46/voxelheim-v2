@@ -211,28 +211,41 @@ func TestRestoreClockAcceptsEveryTickInsideTheDay(t *testing.T) {
 	}
 }
 
-// The wire half: tick_of_day rides every snapshot, carrying the value the tick that
-// built it advanced to — not the one before it, and not the absolute tick.
-func TestEverySnapshotCarriesTheTickOfDay(t *testing.T) {
+// The wire half: both forms of the clock ride every snapshot, captured after the tick
+// advanced and from the same locked simulation state.
+func TestEverySnapshotCarriesOneAtomicClockPair(t *testing.T) {
 	t.Parallel()
 
 	h := newDropHarness(t, dropTerrain{groundTop: 63})
 	_, out := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	if err := h.sim.RestoreClock(NightStartTicks-1, NightStartTicks-1); err != nil {
+	restoredWorldTick := 4*uint64(DayLengthTicks) + uint64(NightStartTicks-1)
+	if err := h.sim.RestoreClock(NightStartTicks-1, restoredWorldTick); err != nil {
 		t.Fatalf("RestoreClock: %v", err)
 	}
 
 	for i, want := range []uint32{NightStartTicks, NightStartTicks + 1, NightStartTicks + 2} {
 		h.step()
-		if got := newestSnapshot(t, out).TickOfDay(); got != want {
+		snapshot := newestSnapshot(t, out)
+		if got := snapshot.TickOfDay(); got != want {
 			t.Errorf("snapshot %d carries tick_of_day %d, want %d", i+1, got, want)
+		}
+		wantWorldTick := restoredWorldTick + uint64(i+1)
+		if got := snapshot.WorldTick(); got != wantWorldTick {
+			t.Errorf("snapshot %d carries world_tick %d, want %d", i+1, got, wantWorldTick)
+		}
+		if snapshot.WorldTick()%uint64(DayLengthTicks) != uint64(snapshot.TickOfDay()) {
+			t.Fatalf("snapshot %d carries a non-atomic clock pair (%d, %d)",
+				i+1, snapshot.TickOfDay(), snapshot.WorldTick())
 		}
 	}
 
 	// And it is the simulation's own clock rather than a number the encoder invented.
 	if got, want := newestSnapshot(t, out).TickOfDay(), h.sim.TickOfDay(); got != want {
 		t.Errorf("the snapshot says %d and the simulation says %d", got, want)
+	}
+	if got, want := newestSnapshot(t, out).WorldTick(), h.sim.WorldTick(); got != want {
+		t.Errorf("the snapshot says world tick %d and the simulation says %d", got, want)
 	}
 }
 
