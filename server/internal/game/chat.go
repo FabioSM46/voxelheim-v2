@@ -12,8 +12,24 @@ import (
 )
 
 // ErrChatTooFast is the one chat refusal a session answers on the wire. Invalid
-// text and players that cannot act are deliberately silent.
+// text and players that cannot act are deliberately silent. Commands spend this
+// same bucket before they are parsed or dispatched.
 var ErrChatTooFast = errors.New("chat was sent too fast")
+
+// CommandSenderName is the reserved display name on private command answers.
+//
+// Reusing ChatMessage avoids a schema change. A character can share this name, an
+// accepted ambiguity on a development server whose operator enabled cheats.
+const CommandSenderName = "Server"
+
+// ChatOutcome is the private state a command asks the session to send. Ordinary
+// chat returns its zero value after broadcasting the accepted line.
+type ChatOutcome struct {
+	PrivateText string
+	Inventory   *protocol.InventoryState
+	command     string
+	arguments   []string
+}
 
 // chatLimiter is one token bucket retained by Sim under the player's stable
 // identity. It has no mutex of its own: every access happens under Sim.mu.
@@ -81,30 +97,48 @@ func acceptChat(text string) (string, error) {
 	return accepted, nil
 }
 
-// Chat asks the authoritative simulation to accept and broadcast one world-chat
-// line. The limiter belongs to Sim rather than this session-scoped Player: Join
-// creates a new Player on reconnect, while the stable identity must keep the bucket.
-func (p *Player) Chat(text string) error {
+// Chat accepts one development command or world-chat line. A raw leading slash is
+// split before chat validation and cannot fall through to broadcast. Sim owns the
+// limiter so reconnecting the stable player identity cannot reset it.
+func (p *Player) Chat(text string) (ChatOutcome, error) {
 	p.sim.mu.Lock()
-	defer p.sim.mu.Unlock()
 
+	if strings.HasPrefix(text, "/") {
+		allowed := p.spendChatTokenLocked()
+		// Disabled commands still spend the shared bucket, but the startup gate is
+		// the more specific refusal and always wins: every command on a server with
+		// the feature off says why it is off.
+		if !p.sim.devCommands {
+			outcome := p.commandLocked(text)
+			p.sim.mu.Unlock()
+			return outcome, nil
+		}
+		if !allowed {
+			p.sim.mu.Unlock()
+			return ChatOutcome{}, ErrChatTooFast
+		}
+		outcome := p.commandLocked(text)
+		p.sim.mu.Unlock()
+		if outcome.command != "" {
+			p.sim.log.Info("development command accepted",
+				"entity_id", p.entityID,
+				"command", outcome.command,
+				"arguments", outcome.arguments)
+		}
+		return outcome, nil
+	}
 	if err := p.cannotActLocked(); err != nil {
-		return err
+		p.sim.mu.Unlock()
+		return ChatOutcome{}, err
 	}
 	accepted, err := acceptChat(text)
 	if err != nil {
-		return err
+		p.sim.mu.Unlock()
+		return ChatOutcome{}, err
 	}
-
-	now := p.sim.chatNow()
-	p.sim.pruneChatLimitersLocked(now)
-	limiter := p.sim.chatLimiters[p.playerID]
-	if limiter == nil {
-		limiter = newChatLimiter(now)
-		p.sim.chatLimiters[p.playerID] = limiter
-	}
-	if !limiter.allow(now) {
-		return ErrChatTooFast
+	if !p.spendChatTokenLocked() {
+		p.sim.mu.Unlock()
+		return ChatOutcome{}, ErrChatTooFast
 	}
 
 	frame := protocol.EncodeChatMessage(protocol.ChatMessage{
@@ -113,7 +147,20 @@ func (p *Player) Chat(text string) error {
 		Text:           accepted,
 	})
 	p.sim.broadcastLocked(frame)
-	return nil
+	p.sim.mu.Unlock()
+	return ChatOutcome{}, nil
+}
+
+// spendChatTokenLocked is the single cadence gate for chat and commands.
+func (p *Player) spendChatTokenLocked() bool {
+	now := p.sim.chatNow()
+	p.sim.pruneChatLimitersLocked(now)
+	limiter := p.sim.chatLimiters[p.playerID]
+	if limiter == nil {
+		limiter = newChatLimiter(now)
+		p.sim.chatLimiters[p.playerID] = limiter
+	}
+	return limiter.allow(now)
 }
 
 // Broadcast hands one non-superseded frame to every connected player in stable

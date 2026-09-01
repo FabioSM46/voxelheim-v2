@@ -523,6 +523,11 @@ action merely to exercise an abstraction.
   deliberate deviation from the issue's `player.go` field pointer in favour of its behavioural
   requirement that reconnecting does not refill. Invalid text and a body that cannot act spend
   nothing; an accepted line spends one token even when every outbound queue drops it.
+  A raw leading slash takes the same token before entering the development-command parser and
+  can never fall through to broadcast. That parser is disabled unless `-dev-commands` was set at
+  startup; its answers are ordinary `ChatMessage`s delivered only to the requester under the
+  reserved display name `Server`, avoiding a schema change at the accepted cost that a character
+  with that name looks the same in presentation.
 - **The map tile bucket is the third, and the first that bounds work a client can ask for
   *twice over*: the request is throttled, and the answer is drawn rather than looked up.** The
   burst is 64 tiles — enough for the default viewport's 63-tile worst case when neither edge is

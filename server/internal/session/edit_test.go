@@ -271,12 +271,12 @@ func TestBroadcastsRunSafelyWhileSessionsArriveAndLeave(t *testing.T) {
 
 // editDeps builds one world, one simulation and one registry for a set of sessions, so an
 // edit made through one connection is resolved against the terrain the others are streaming.
-func editDeps(t *testing.T, cfg session.Config) (*world.Cache, *game.Sim, *session.Registry) {
+func editDeps(t *testing.T, cfg session.Config, options ...game.SimOption) (*world.Cache, *game.Sim, *session.Registry) {
 	t.Helper()
 
 	chunks := world.NewCache(cfg.WorldSeed, 4, 512)
 	peers := session.NewRegistry(session.DefaultConcurrentSessions)
-	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard())
+	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, discard(), options...)
 	if err != nil {
 		t.Fatalf("NewSim: %v", err)
 	}

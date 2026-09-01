@@ -1,8 +1,9 @@
 //! The transient world-chat log and the one-line text entry surface.
 //!
 //! Received text is presentation only: this module bounds it for layout and never parses
-//! it as a command or trusts its sender name as identity. Commands exist only on the
-//! locally typed line and become typed party requests for the authoritative server.
+//! it as a command or trusts its sender name as identity. The five party commands become
+//! typed requests; every other slash-prefixed line reaches the authoritative server as
+//! chat-carried command input.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -27,6 +28,10 @@ const LINE_LIFETIME: Duration = Duration::from_secs(12);
 const DRAFT_LIMIT_BYTES: usize = 256;
 const SENDER_CHARACTERS: usize = 48;
 const MESSAGE_CHARACTERS: usize = 256;
+// A reserved display hint rather than identity. A player can have this name too;
+// avoiding that ambiguity would require a new schema member, which development-only
+// command feedback does not justify.
+const COMMAND_SENDER_NAME: &str = "Server";
 const FONT_SIZE: FontSize = FontSize::Px(17.0);
 const LEFT: f32 = 16.0;
 const INPUT_BOTTOM: f32 = 44.0;
@@ -168,7 +173,12 @@ fn ingest_server_lines(
             ChatEntry::Message(message) => {
                 let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
                 let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
-                log.push(format!("{sender}: {text}"), now);
+                let line = format!("{sender}: {text}");
+                if message.sender_name == COMMAND_SENDER_NAME {
+                    log.push_highlighted(line, now);
+                } else {
+                    log.push(line, now);
+                }
             }
             ChatEntry::PartyInvite(invite) => {
                 let sender = bounded_display(&invite.from_name, SENDER_CHARACTERS);
@@ -200,8 +210,6 @@ fn capture_chat(
     mut typed: MessageReader<KeyboardInput>,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
-    mut log: ResMut<ChatLog>,
-    time: Res<Time<Real>>,
     mut outbound: Option<ResMut<Outbound>>,
 ) {
     if *mode != InputMode::Chat || mode.is_changed() {
@@ -223,7 +231,7 @@ fn capture_chat(
             }
             Some(TextEdit::Submitted) => {
                 let line = std::mem::take(&mut draft.0);
-                send_line(line, outbound.as_deref_mut(), &mut log, time.elapsed());
+                send_line(line, outbound.as_deref_mut());
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
@@ -232,8 +240,8 @@ fn capture_chat(
     }
 }
 
-fn send_line(line: String, outbound: Option<&mut Outbound>, log: &mut ChatLog, now: Duration) {
-    let Some(frame) = outgoing_frame(&line, log, now) else {
+fn send_line(line: String, outbound: Option<&mut Outbound>) {
+    let Some(frame) = outgoing_frame(&line) else {
         return;
     };
     let Some(outbound) = outbound else {
@@ -244,22 +252,22 @@ fn send_line(line: String, outbound: Option<&mut Outbound>, log: &mut ChatLog, n
     }
 }
 
-fn outgoing_frame(line: &str, log: &mut ChatLog, now: Duration) -> Option<Vec<u8>> {
-    let line = line.trim();
-    if line.is_empty() {
+fn outgoing_frame(line: &str) -> Option<Vec<u8>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
         return None;
     }
     if !line.starts_with('/') {
         return Some(encode_chat_request(&ChatRequest {
-            text: line.to_owned(),
+            text: trimmed.to_owned(),
         }));
     }
 
-    let party = match line {
+    let party = match trimmed {
         "/accept" => Some((PartyAction::Accept, "")),
         "/decline" => Some((PartyAction::Decline, "")),
         "/leave" => Some((PartyAction::Leave, "")),
-        _ => line
+        _ => trimmed
             .strip_prefix("/invite ")
             .map(str::trim)
             .filter(|target| !target.is_empty())
@@ -276,13 +284,12 @@ fn outgoing_frame(line: &str, log: &mut ChatLog, now: Duration) -> Option<Vec<u8
             action,
             target_name: target_name.to_owned(),
         })),
-        None => {
-            log.push(
-                format!("Unknown command: {}", bounded_display(line, 64)),
-                now,
-            );
-            None
-        }
+        // Preserve the raw command byte-for-byte. Parsing and every outcome belong
+        // to the server; local trimming here would be a second parser whose answer
+        // could disagree with it.
+        None => Some(encode_chat_request(&ChatRequest {
+            text: line.to_owned(),
+        })),
     }
 }
 
@@ -455,19 +462,17 @@ mod tests {
     }
 
     #[test]
-    fn commands_encode_only_the_five_typed_party_requests() {
-        let now = Duration::ZERO;
-        let mut log = ChatLog::default();
+    fn party_commands_are_typed_and_other_slash_lines_reach_chat_verbatim() {
         let cases = [
             ("/invite Eivor", PartyAction::Invite, "Eivor"),
-            (" /accept ", PartyAction::Accept, ""),
+            ("/accept ", PartyAction::Accept, ""),
             ("/decline ", PartyAction::Decline, ""),
             ("/leave   ", PartyAction::Leave, ""),
             ("/kick Eivor ", PartyAction::Kick, "Eivor"),
         ];
         for (line, action, target_name) in cases {
             assert_eq!(
-                outgoing_frame(line, &mut log, now),
+                outgoing_frame(line),
                 Some(encode_party_request(&PartyRequest {
                     action,
                     target_name: target_name.to_owned(),
@@ -475,15 +480,30 @@ mod tests {
             );
         }
         assert_eq!(
-            outgoing_frame("hello", &mut log, now),
+            outgoing_frame("hello"),
             Some(encode_chat_request(&ChatRequest {
                 text: "hello".to_owned()
             }))
         );
-        assert_eq!(outgoing_frame("   ", &mut log, now), None);
-        assert_eq!(outgoing_frame("/dance", &mut log, now), None);
-        assert_eq!(log.0.back().unwrap().text, "Unknown command: /dance");
-        assert_eq!(outgoing_frame("/invite   ", &mut log, now), None);
+        assert_eq!(outgoing_frame("   "), None);
+        assert_eq!(
+            outgoing_frame("/teleport 1 2 3  "),
+            Some(encode_chat_request(&ChatRequest {
+                text: "/teleport 1 2 3  ".to_owned()
+            }))
+        );
+        assert_eq!(
+            outgoing_frame("/dance"),
+            Some(encode_chat_request(&ChatRequest {
+                text: "/dance".to_owned()
+            }))
+        );
+        assert_eq!(
+            outgoing_frame("/invite   "),
+            Some(encode_chat_request(&ChatRequest {
+                text: "/invite   ".to_owned()
+            }))
+        );
     }
 
     #[test]
@@ -568,6 +588,26 @@ mod tests {
             line.text,
             "Eivor invites you to a party - /accept or /decline"
         );
+        assert!(line.highlighted);
+    }
+
+    #[test]
+    fn the_reserved_command_answer_is_visibly_distinct() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ChatInbox>()
+            .init_resource::<ChatLog>()
+            .add_systems(Update, ingest_server_lines);
+        app.world_mut()
+            .resource_mut::<ChatInbox>()
+            .push(ChatEntry::Message(ChatMessage {
+                sender_entity_id: 7,
+                sender_name: COMMAND_SENDER_NAME.to_owned(),
+                text: "Development commands are disabled.".to_owned(),
+            }));
+        app.update();
+        let line = app.world().resource::<ChatLog>().0.back().unwrap();
+        assert_eq!(line.text, "Server: Development commands are disabled.");
         assert!(line.highlighted);
     }
 
