@@ -4319,23 +4319,19 @@ fn the_pointer_turns_the_view_the_way_the_pointer_moved() {
 }
 
 #[test]
-fn inventory_and_trade_keep_horizontal_movement_but_not_jump_or_camera_input() {
-    for (key, x, z) in [
-        (KeyCode::KeyW, 0.0, 1.0),
-        (KeyCode::KeyS, 0.0, -1.0),
-        (KeyCode::KeyA, -1.0, 0.0),
-        (KeyCode::KeyD, 1.0, 0.0),
+fn inventory_trade_prompt_and_trade_keep_horizontal_movement_but_not_jump_or_camera_input() {
+    for (mode, key, x, z) in [
+        (InputMode::Inventory, KeyCode::KeyW, 0.0, 1.0),
+        (InputMode::TradePrompt, KeyCode::KeyS, 0.0, -1.0),
+        (InputMode::Trade, KeyCode::KeyA, -1.0, 0.0),
+        (InputMode::TradePrompt, KeyCode::KeyD, 1.0, 0.0),
     ] {
         let mut app = headless_player();
         app.add_plugins(InputPlugin);
         app.update();
         let before = *app.world().resource::<LookState>();
 
-        *app.world_mut().resource_mut::<InputMode>() = if x + z > 0.0 {
-            InputMode::Trade
-        } else {
-            InputMode::Inventory
-        };
+        *app.world_mut().resource_mut::<InputMode>() = mode;
         {
             let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
             keys.press(key);

@@ -65,6 +65,7 @@ mod mobs;
 mod mounts;
 mod precipitation;
 mod projectiles;
+mod prompt;
 mod saddle;
 mod sky;
 mod structures;
@@ -114,10 +115,11 @@ pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 // The sky the low-health vignette has to be visible against. Test-only and deliberately
 // so: `ui/health.rs` reads the colour to assert that its edge is not one the night has
 // already reached (#553), and nothing at runtime may read a rule back out of it.
+pub use prompt::{ConfirmationAnswer, ConfirmationPrompt};
 #[cfg(test)]
 pub(crate) use sky::NIGHT_SKY;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
-pub use trade::{PlayerTradeClick, PlayerTradeEnded, PlayerTradeWindow};
+pub use trade::{PlayerTradeClick, PlayerTradeEnded, PlayerTradePromptRequest, PlayerTradeWindow};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
 
 use crate::net::{
@@ -281,6 +283,9 @@ pub enum InputMode {
     /// `Escape` closes it, the pack key is ignored rather than layering a second window over it,
     /// and death closes it because the server refuses every trade from a corpse anyway.
     Vendor,
+    /// Pointer visible and confined over a local yes/no confirmation. Horizontal movement
+    /// remains live; the controller that opened it owns what accepting means.
+    TradePrompt,
     /// Pointer visible and confined over one authoritative player trade. Horizontal
     /// movement remains live so the server can close a trade that walks out of reach.
     Trade,
@@ -866,6 +871,31 @@ impl Appearances {
             (name_plate_name(&described.name), level)
         })
     }
+
+    /// The display-safe name from the newest server description of this entity.
+    pub(crate) fn name(&self, entity_id: u64) -> Option<String> {
+        self.0
+            .get(&entity_id)
+            .map(|described| name_plate_name(&described.name))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_player_name(entity_id: u64, name: &str) -> Self {
+        Self(HashMap::from([(
+            entity_id,
+            Described {
+                appearance: PLACEHOLDER_APPEARANCE,
+                name: name.to_owned(),
+                label: PlateLabel::Level(1),
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
+                worn_offhand: 0,
+                at: Instant::now(),
+                drawn: true,
+            },
+        )]))
+    }
 }
 
 /// The complete party answer carried by the newest accepted snapshot.
@@ -1091,7 +1121,7 @@ impl InputGate<'_> {
     pub fn may_move(&self) -> bool {
         matches!(
             *self.mode,
-            InputMode::Playing | InputMode::Inventory | InputMode::Trade
+            InputMode::Playing | InputMode::Inventory | InputMode::TradePrompt | InputMode::Trade
         ) && !self.vitals.dead()
     }
 

@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use bevy::prelude::*;
 
 use super::{
-    ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, SnapshotBuffer,
+    Appearances, ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode,
+    PlayerTradePromptRequest, SelfVitals, SnapshotBuffer,
 };
 use crate::net::{
     LootEvent, LootInbox, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest,
@@ -49,13 +50,22 @@ impl LootWindow {
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LootTakeClick(pub u64);
 
+/// The interaction-key target has been selected for this frame.
+///
+/// Player-trade prompt creation runs after this set, so the local prompt opens on the
+/// same frame as the edge-triggered key without moving targeting into the UI controller.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct OriginateInteract;
+
 pub(super) struct LootPlugin;
 
 impl Plugin for LootPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LootWindow>()
             .init_resource::<LootInbox>()
+            .init_resource::<Appearances>()
             .add_message::<LootTakeClick>()
+            .add_message::<PlayerTradePromptRequest>()
             .add_systems(
                 Update,
                 reconcile_loot
@@ -67,7 +77,8 @@ impl Plugin for LootPlugin {
                 Update,
                 send_loot_intents
                     .after(ApplyInputMode)
-                    .after(ApplySnapshots),
+                    .after(ApplySnapshots)
+                    .in_set(OriginateInteract),
             );
     }
 }
@@ -145,8 +156,10 @@ struct LootIntent<'w> {
     gate: InputGate<'w>,
     session: Option<Res<'w, Session>>,
     buffer: Res<'w, SnapshotBuffer>,
+    appearances: Option<Res<'w, Appearances>>,
     cadence: Res<'w, InputCadence>,
     outbound: Option<ResMut<'w, Outbound>>,
+    trade_prompts: MessageWriter<'w, PlayerTradePromptRequest>,
 }
 
 fn send_loot_intents(
@@ -160,8 +173,10 @@ fn send_loot_intents(
         gate,
         session,
         buffer,
+        appearances,
         cadence,
         mut outbound,
+        mut trade_prompts,
     } = intent;
     if window.current.is_some() && gate.mode() != InputMode::Loot {
         window.dismiss_current();
@@ -210,36 +225,55 @@ fn send_loot_intents(
     if !gate.may_act() || !interact {
         return;
     }
-    let (Some(session), Some(outbound)) = (session, outbound.as_deref_mut()) else {
+    let Some(session) = session else {
         return;
     };
-    let Some(corpse_id) = buffer.nearest_accessible_corpse(session.0.entity_id, MAX_REACH) else {
-        // **The corpse keeps priority, and nothing about that is arbitrary.** One key means
-        // two things, and the two are not equally likely to be a mistake: a player who has
-        // just killed something is standing over it deliberately, while a resident is
-        // simply somewhere a village put them. Reaching this arm means the server offered
-        // no corpse this player may open within reach, so the other meaning is the only one
-        // left.
-        //
-        // **One request, and it states nothing.** Whether that entity keeps a stall,
-        // whether the player is close enough by the server's own measure and whether
-        // anything opens are all the server's — `MAX_REACH` here only decides which intent
-        // is originated, and the answer today is `NotAVendor` on every path
-        // (`Player.InteractNPC` in `server/internal/game/resident.go`).
-        if let Some(entity_id) = buffer.nearest_resident(session.0.entity_id, MAX_REACH) {
-            outbound.send(encode_npc_interact_request(&NpcInteractRequest {
-                entity_id,
-                client_tick: cadence.client_tick,
-            }));
+    if let Some(corpse_id) = buffer.nearest_accessible_corpse(session.0.entity_id, MAX_REACH) {
+        let Some(outbound) = outbound.as_deref_mut() else {
+            return;
+        };
+        window.dismissed.remove(&corpse_id);
+        window.newest_revision.remove(&corpse_id);
+        outbound.send(encode_loot_open_request(&LootOpenRequest {
+            corpse_id,
+            client_tick: cadence.client_tick,
+        }));
+        return;
+    }
+
+    // **Corpse, then player, then resident — categories before distance.** A player who
+    // has just killed something is standing over it deliberately, so loot keeps the key
+    // even when somebody stands nearer. With no corpse, addressing a person is the next
+    // least surprising meaning: it opens only a local prompt and costs that person nothing
+    // until Yes. A resident's stall is therefore the final meaning. Distance and entity-id
+    // ties choose only within each category; the server rechecks every request.
+    if let Some(entity_id) = buffer.nearest_player(session.0.entity_id, MAX_REACH) {
+        // Appearance and snapshot streams are unordered. Without the server-owned name
+        // there is no honest value for the prompt's X, so keep the priority and send
+        // nothing rather than silently addressing the resident behind an unnamed player.
+        if let Some(name) = appearances
+            .as_deref()
+            .and_then(|appearances| appearances.name(entity_id))
+        {
+            trade_prompts.write(PlayerTradePromptRequest {
+                target_entity_id: entity_id,
+                target_name: name,
+            });
         }
         return;
-    };
-    window.dismissed.remove(&corpse_id);
-    window.newest_revision.remove(&corpse_id);
-    outbound.send(encode_loot_open_request(&LootOpenRequest {
-        corpse_id,
-        client_tick: cadence.client_tick,
-    }));
+    }
+
+    // **One request, and it states nothing.** Whether that entity keeps a stall, whether
+    // the player is close enough by the server's own measure and whether anything opens
+    // are all the server's — `MAX_REACH` here only decides which intent is originated.
+    if let Some(entity_id) = buffer.nearest_resident(session.0.entity_id, MAX_REACH)
+        && let Some(outbound) = outbound.as_deref_mut()
+    {
+        outbound.send(encode_npc_interact_request(&NpcInteractRequest {
+            entity_id,
+            client_tick: cadence.client_tick,
+        }));
+    }
 }
 
 #[cfg(test)]
@@ -255,9 +289,11 @@ mod tests {
         ANY_TOKEN, EntityState, LifeState, LootClosed, LootEntry, MobAction, MobKind, MobState,
         PlayerVitals, SessionParams, Snapshot,
     };
-    use crate::player::ViewMode;
+    use crate::player::trade::PlayerTradePlugin;
+    use crate::player::{ConfirmationPrompt, ViewMode};
 
     const PLAYER: u64 = 7;
+    const OTHER_PLAYER: u64 = 8;
     const CORPSE: u64 = 40;
 
     fn session() -> Session {
@@ -361,7 +397,8 @@ mod tests {
             .init_resource::<SelfVitals>()
             .init_resource::<ViewMode>()
             .init_resource::<InputCadence>()
-            .add_plugins(LootPlugin);
+            .insert_resource(Appearances::with_player_name(OTHER_PLAYER, "Freya"))
+            .add_plugins((LootPlugin, PlayerTradePlugin));
         app
     }
 
@@ -491,6 +528,72 @@ mod tests {
                 client_tick: 0,
             })]
         );
+    }
+
+    /// A player owns the second priority even when a resident is closer, and pressing the
+    /// key creates only the local confirmation. The Open frame belongs to Yes.
+    #[test]
+    fn interact_prefers_a_player_to_a_resident_and_opens_only_the_prompt() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![
+                me(),
+                EntityState {
+                    entity_id: OTHER_PLAYER,
+                    pos: [2.0, 64.0, 0.0],
+                    ..me()
+                },
+            ],
+            mobs: vec![villager(RESIDENT, 1.0)],
+            ..Default::default()
+        });
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert!(sent.is_empty(), "the prompt originated a wire request");
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::TradePrompt);
+        assert_eq!(
+            app.world()
+                .resource::<ConfirmationPrompt>()
+                .current()
+                .map(|prompt| prompt.title()),
+            Some("Trade with Freya?")
+        );
+    }
+
+    #[test]
+    fn interact_never_targets_self_or_a_dead_player() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![
+                me(),
+                EntityState {
+                    entity_id: OTHER_PLAYER,
+                    pos: [1.0, 64.0, 0.0],
+                    ..me()
+                },
+            ],
+            dead_players: vec![OTHER_PLAYER],
+            mobs: vec![villager(RESIDENT, 2.0)],
+            ..Default::default()
+        });
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert_eq!(
+            sent,
+            vec![encode_npc_interact_request(&NpcInteractRequest {
+                entity_id: RESIDENT,
+                client_tick: 0,
+            })]
+        );
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
     }
 
     /// A corpse in reach keeps the key, even with somebody standing closer.
