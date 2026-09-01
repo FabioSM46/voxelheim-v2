@@ -71,3 +71,31 @@ func TestATradeIsRoutedAndRefusedWithoutEndingSession(t *testing.T) {
 		}
 	}
 }
+
+// Player trading entered the same client-to-server union in V28. Two requests pin both
+// routing and survival: an admitted session with no open player trade answers each one
+// through the dedicated refused action instead of treating the understood payload as a
+// protocol violation and closing the connection.
+func TestAPlayerTradeIsRoutedAndRefusedWithoutEndingSession(t *testing.T) {
+	t.Parallel()
+	cfg := editConfig()
+	chunks, sim, peers := editDeps(t, cfg)
+	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
+
+	for tick := uint32(1); tick <= 2; tick++ {
+		conn.in <- protocol.EncodePlayerTradeRequest(protocol.PlayerTradeRequest{
+			Action: vnet.PlayerTradeActionConfirm, Revision: 1, ClientTick: tick,
+		})
+	}
+	waitUntil(t, "both player-trade refusals", func() bool { return len(frames.actionRefusals()) == 2 })
+
+	want := protocol.ActionRefused{
+		Action: vnet.RefusedActionPlayerTrade,
+		Reason: vnet.RefusalReasonTradeNotOpen,
+	}
+	for index, got := range frames.actionRefusals() {
+		if got != want {
+			t.Errorf("refusal %d = %+v, want %+v", index, got, want)
+		}
+	}
+}
