@@ -587,6 +587,31 @@ impl VendorInbox {
     }
 }
 
+/// Player-trade payloads awaiting the authoritative session mirror, in wire order.
+#[derive(Resource, Debug, Default)]
+pub struct PlayerTradeInbox(Vec<PlayerTradeEvent>);
+
+/// The two server-owned changes one player trade can receive.
+///
+/// One queue preserves the only ordering that matters: a close after a state ends that
+/// view, while the reverse order opens the newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerTradeEvent {
+    State(PlayerTradeState),
+    Closed(PlayerTradeClosed),
+}
+
+impl PlayerTradeInbox {
+    pub fn take(&mut self) -> Vec<PlayerTradeEvent> {
+        std::mem::take(&mut self.0)
+    }
+
+    #[cfg(test)]
+    pub fn push(&mut self, event: PlayerTradeEvent) {
+        self.0.push(event);
+    }
+}
+
 /// Map payloads not yet consumed by the map screen, in wire order.
 ///
 /// Order is what makes these one queue rather than three: a `MapExplored` that arrives
@@ -1187,6 +1212,7 @@ impl Plugin for NetPlugin {
             .init_resource::<LearnedMountsInbox>()
             .init_resource::<LootInbox>()
             .init_resource::<VendorInbox>()
+            .init_resource::<PlayerTradeInbox>()
             .init_resource::<MobHitInbox>()
             .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
@@ -1782,6 +1808,8 @@ struct Inboxes<'w> {
     // Optional only for focused boundary tests that install the drain directly.
     vendor: Option<ResMut<'w, VendorInbox>>,
     // Optional only for focused boundary tests that install the drain directly.
+    player_trade: Option<ResMut<'w, PlayerTradeInbox>>,
+    // Optional only for focused boundary tests that install the drain directly.
     map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     appearances: ResMut<'w, AppearanceInbox>,
@@ -1993,6 +2021,16 @@ fn drain_session_events(
             Ok(SessionEvent::VendorClosed(closed)) => {
                 if let Some(vendor) = inboxes.vendor.as_deref_mut() {
                     vendor.0.push(VendorEvent::Closed(closed));
+                }
+            }
+            Ok(SessionEvent::PlayerTradeState(state)) => {
+                if let Some(player_trade) = inboxes.player_trade.as_deref_mut() {
+                    player_trade.0.push(PlayerTradeEvent::State(state));
+                }
+            }
+            Ok(SessionEvent::PlayerTradeClosed(closed)) => {
+                if let Some(player_trade) = inboxes.player_trade.as_deref_mut() {
+                    player_trade.0.push(PlayerTradeEvent::Closed(closed));
                 }
             }
 
@@ -5003,6 +5041,7 @@ mod tests {
             .init_resource::<SnapshotInbox>()
             .init_resource::<InventoryInbox>()
             .init_resource::<LearnedMountsInbox>()
+            .init_resource::<PlayerTradeInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
@@ -5065,6 +5104,42 @@ mod tests {
         assert_eq!(
             app.world_mut().resource_mut::<WardsInbox>().take(),
             vec![wards]
+        );
+    }
+
+    #[test]
+    fn player_trade_state_and_close_cross_the_boundary_in_wire_order() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        let state = PlayerTradeState {
+            partner_entity_id: 11,
+            partner_name: "Eirik".to_owned(),
+            revision: 4,
+            my_offer: Vec::new(),
+            their_offer: Vec::new(),
+            my_silver: 2,
+            their_silver: 3,
+            my_confirmed: false,
+            their_confirmed: true,
+        };
+        let closed = PlayerTradeClosed {
+            partner_entity_id: 11,
+            reason: PlayerTradeCloseReason::Cancelled,
+        };
+
+        events
+            .send(SessionEvent::PlayerTradeState(state.clone()))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::PlayerTradeClosed(closed))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<PlayerTradeInbox>().take(),
+            vec![
+                PlayerTradeEvent::State(state),
+                PlayerTradeEvent::Closed(closed)
+            ]
         );
     }
 

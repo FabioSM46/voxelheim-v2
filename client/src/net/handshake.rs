@@ -31,8 +31,9 @@ use std::fmt;
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LearnedMounts, LeaveCancelResult,
     LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message,
-    MineProgress, MobHit, PartyInvite, PlayerAppearance, Reject, ResidentAppearance, SessionParams,
-    Snapshot, StormWarning, VendorClosed, VendorState, WardsNearby, WorldClock, WorldUpdate,
+    MineProgress, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed, PlayerTradeState,
+    Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning, VendorClosed, VendorState,
+    WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -136,6 +137,10 @@ pub enum Transition {
     VendorState(VendorState),
     /// The authoritative end of an open stall.
     VendorClosed(VendorClosed),
+    /// One recipient's complete authoritative player-trade revision.
+    PlayerTradeState(PlayerTradeState),
+    /// The authoritative end of one player trade.
+    PlayerTradeClosed(PlayerTradeClosed),
     /// Where the blizzard is in its life, admitted because a session exists.
     ///
     /// Nothing is checked here that the codec has not: the phase's membership and its
@@ -530,12 +535,11 @@ impl Handshake {
             (Phase::Established, Message::VendorClosed(closed)) => {
                 Ok(Transition::VendorClosed(closed))
             }
-            // Fully validated by the codec; the later trade UI owns their ECS inbox.
-            (Phase::Established, Message::PlayerTradeState(_)) => {
-                Ok(Transition::Ignored("PlayerTradeState"))
+            (Phase::Established, Message::PlayerTradeState(state)) => {
+                Ok(Transition::PlayerTradeState(state))
             }
-            (Phase::Established, Message::PlayerTradeClosed(_)) => {
-                Ok(Transition::Ignored("PlayerTradeClosed"))
+            (Phase::Established, Message::PlayerTradeClosed(closed)) => {
+                Ok(Transition::PlayerTradeClosed(closed))
             }
             // V26's two, carried by name for the same reason V25's three are: each is
             // fully validated at the decode boundary, and nothing about a session changes
@@ -658,6 +662,34 @@ mod tests {
 
         assert_eq!(handshake.phase(), Phase::AwaitingCharacters);
         assert!(!handshake.established());
+    }
+
+    #[test]
+    fn an_established_session_admits_both_player_trade_answers_by_value() {
+        let state = PlayerTradeState {
+            partner_entity_id: 11,
+            partner_name: "Eirik".to_owned(),
+            revision: 4,
+            my_offer: Vec::new(),
+            their_offer: Vec::new(),
+            my_silver: 2,
+            their_silver: 3,
+            my_confirmed: false,
+            their_confirmed: true,
+        };
+        let closed = PlayerTradeClosed {
+            partner_entity_id: 11,
+            reason: super::super::codec::PlayerTradeCloseReason::Cancelled,
+        };
+
+        assert_eq!(
+            established().apply(Message::PlayerTradeState(state.clone())),
+            Ok(Transition::PlayerTradeState(state))
+        );
+        assert_eq!(
+            established().apply(Message::PlayerTradeClosed(closed)),
+            Ok(Transition::PlayerTradeClosed(closed))
+        );
     }
 
     /// The whole exchange, in the order the contract puts it in.

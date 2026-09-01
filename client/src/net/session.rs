@@ -260,6 +260,10 @@ pub(super) enum SessionEvent {
     VendorState(codec::VendorState),
     /// The authoritative end of one open stall.
     VendorClosed(codec::VendorClosed),
+    /// One recipient's complete authoritative player-trade revision.
+    PlayerTradeState(codec::PlayerTradeState),
+    /// The authoritative end of one player trade.
+    PlayerTradeClosed(codec::PlayerTradeClosed),
     /// Where the blizzard is in its life, with the moment the bytes arrived.
     ///
     /// The timestamp is taken on this thread for the same reason a snapshot's is: the
@@ -1503,6 +1507,12 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::VendorClosed(closed)) => {
                     events.send(SessionEvent::VendorClosed(closed)).ok()?;
+                }
+                Ok(Transition::PlayerTradeState(state)) => {
+                    events.send(SessionEvent::PlayerTradeState(state)).ok()?;
+                }
+                Ok(Transition::PlayerTradeClosed(closed)) => {
+                    events.send(SessionEvent::PlayerTradeClosed(closed)).ok()?;
                 }
                 Ok(Transition::StormWarning(warning)) => {
                     events
