@@ -578,11 +578,12 @@ fn refresh_notice_text(
 /// font stack, and a glyph it lacks renders as nothing.
 /// Whether this build can name the reason and has deliberately written no sentence for it.
 ///
-/// **Not a defect, and not an unreadable code** — the two silences that existed before
-/// V25. These are reasons the contract names, this build decodes, and no surface answers
-/// yet. `TileMisaligned` is the only one left: a misaligned tile request is this build
+/// **Not a defect, and not an unreadable code.** These are reasons the contract names,
+/// this build decodes, and no status sentence answers yet. `TileMisaligned` is this build
 /// asking wrongly, but it is not one of the four `Malformed*` codes
 /// [`RefusalReason::is_client_defect`] names, so nothing classified it at all.
+/// `TradeNotOpen` is a lifecycle answer: the authoritative trade state or close event is
+/// the surface the player sees, not an extra transient line.
 ///
 /// It exists because the sweep needs a third category to assert against, and because the
 /// caller needs one to keep from logging "no sentence for" at a reason whose silence is a
@@ -591,11 +592,14 @@ fn refresh_notice_text(
 /// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
 /// stall on screen, and a refused trade is answered beside it.
 ///
-/// One name is left, so [`the_deliberate_silences_do_not_overlap`]'s non-empty assertion
-/// still holds. It will not survive the issue that gives `TileMisaligned` a surface, and
-/// that test says so rather than the category quietly becoming decorative.
+/// Two names remain, so [`the_deliberate_silences_do_not_overlap`]'s non-empty assertion
+/// still holds. When both acquire an explicit surface, that test says so rather than the
+/// category quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
-    matches!(reason, RefusalReason::TileMisaligned)
+    matches!(
+        reason,
+        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
+    )
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
@@ -657,8 +661,6 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::CastInterruptedByDeath
         | RefusalReason::ActionForbiddenWhileMounted
         | RefusalReason::MountAlreadyLearned
-        // V28's player-trade reasons are decoded at the protocol boundary, but their
-        // presentation belongs to the later player-trade UI. They remain silent here.
         | RefusalReason::AlreadyTrading
         | RefusalReason::TradeNotOpen
         | RefusalReason::TradeSlotTaken
@@ -720,6 +722,17 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         RefusalReason::PlayerIsDead => Some("You cannot trade while dead"),
         _ => None,
     };
+    let player_trade_reason = match refused.reason {
+        RefusalReason::AlreadyTrading => Some("They are busy"),
+        RefusalReason::TradeCooldown => Some("Not so soon"),
+        RefusalReason::TradeSlotTaken => Some("That slot is taken"),
+        RefusalReason::NothingToOffer => Some("Nothing there to offer"),
+        RefusalReason::NotEnoughSilver => Some("Not enough silver"),
+        RefusalReason::InventoryFull => Some("Not enough room"),
+        RefusalReason::NoSuchPlayer => Some("Nobody to trade with"),
+        RefusalReason::StaleRevision | RefusalReason::TradeNotOpen => None,
+        _ => None,
+    };
 
     match (refused.action, refused.reason) {
         (RefusedAction::Mount, RefusalReason::MountNotLearned) => {
@@ -768,6 +781,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         ) => Some("This ground is warded and not yours to dig or build on".to_owned()),
         (RefusedAction::PlaceMarker | RefusedAction::RemoveMarker, _) => marker_reason,
         (RefusedAction::Trade, _) => trade_reason.map(str::to_owned),
+        (RefusedAction::PlayerTrade, _) => player_trade_reason.map(str::to_owned),
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
         // A whole sentence about the person rather than the "Cannot X: y" shape, for the
         // reason the map's lines are whole sentences: nothing was refused that the player
@@ -1348,7 +1362,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 47] = [
+    const EVERY_REASON: [RefusalReason; 52] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1396,6 +1410,12 @@ mod tests {
         RefusalReason::CastInterruptedByDeath,
         RefusalReason::ActionForbiddenWhileMounted,
         RefusalReason::MountAlreadyLearned,
+        // V28's player-trade reasons.
+        RefusalReason::AlreadyTrading,
+        RefusalReason::TradeNotOpen,
+        RefusalReason::TradeSlotTaken,
+        RefusalReason::NothingToOffer,
+        RefusalReason::TradeCooldown,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1443,6 +1463,11 @@ mod tests {
             RefusalReason::NotEnoughSilver | RefusalReason::VendorDoesNotWant => {
                 RefusedAction::Trade
             }
+            RefusalReason::AlreadyTrading
+            | RefusalReason::TradeNotOpen
+            | RefusalReason::TradeSlotTaken
+            | RefusalReason::NothingToOffer
+            | RefusalReason::TradeCooldown => RefusedAction::PlayerTrade,
             _ => RefusedAction::PlaceStructure,
         };
         ActionRefused {
@@ -1458,13 +1483,13 @@ mod tests {
     /// in the language makes that list complete: a `[RefusalReason; N]` compiles perfectly
     /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
     /// V24 and again in V25, and both times every sweep below went on passing over a
-    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V28's five
-    /// player-trading reasons belong to a dependent client part.
+    /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count, so this test
+    /// moves with the committed wire vocabulary rather than a hand-maintained number.
     #[test]
     fn every_reason_is_in_the_sweep() {
         assert_eq!(
             EVERY_REASON.len(),
-            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 5,
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len(),
             "a reason this UI consumes is missing from EVERY_REASON"
         );
 
@@ -1523,6 +1548,10 @@ mod tests {
                         || line == "They have nothing to trade"
                         || line == "Not enough silver"
                         || line == "They do not want that"
+                        || line == "They are busy"
+                        || line == "Not so soon"
+                        || line == "That slot is taken"
+                        || line == "Nothing there to offer"
                         || line == "This ground is warded and not yours to dig or build on",
                     "{reason:?} -> {line}"
                 );
@@ -1530,7 +1559,7 @@ mod tests {
         }
     }
 
-    /// The three silences are three, and no reason is in two of them at once.
+    /// The three silence categories stay disjoint.
     ///
     /// [`has_no_sentence_yet`] is the category the test above checks against, so a member
     /// slipped into it is a member excused from ever getting a sentence. It must not
@@ -1548,9 +1577,9 @@ mod tests {
                 "Unknown is silent because it cannot be read, not because nobody wrote it"
             );
         }
-        // One name is left after #458 and #459 took theirs out — `TileMisaligned` — and
-        // when the issue that gives it a surface empties the list this test says so rather
-        // than the category quietly becoming decorative.
+        // At least one named reason still deliberately has no status sentence. When the
+        // final one acquires a surface, this test says so rather than leaving a decorative
+        // exception category behind.
         assert!(
             EVERY_REASON.iter().copied().any(has_no_sentence_yet),
             "no reason awaits a surface; delete `has_no_sentence_yet` and its category"
@@ -1588,6 +1617,35 @@ mod tests {
                 anchor: None,
             };
             assert_eq!(describe_refusal(&refused).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn every_player_trade_refusal_has_the_exact_requested_sentence_or_silence() {
+        for (reason, want) in [
+            (RefusalReason::AlreadyTrading, Some("They are busy")),
+            (RefusalReason::TradeCooldown, Some("Not so soon")),
+            (RefusalReason::TradeSlotTaken, Some("That slot is taken")),
+            (
+                RefusalReason::NothingToOffer,
+                Some("Nothing there to offer"),
+            ),
+            (RefusalReason::NotEnoughSilver, Some("Not enough silver")),
+            (RefusalReason::InventoryFull, Some("Not enough room")),
+            (RefusalReason::NoSuchPlayer, Some("Nobody to trade with")),
+            (RefusalReason::StaleRevision, None),
+            (RefusalReason::TradeNotOpen, None),
+        ] {
+            assert_eq!(
+                describe_refusal(&ActionRefused {
+                    action: RefusedAction::PlayerTrade,
+                    reason,
+                    anchor: None,
+                })
+                .as_deref(),
+                want,
+                "{reason:?}"
+            );
         }
     }
 
