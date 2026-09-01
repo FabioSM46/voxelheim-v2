@@ -68,6 +68,7 @@ type Sim struct {
 	// seconds on a 5 Hz server as on a 60 Hz one.
 	deathTicks      uint32
 	protectionTicks uint32
+	castTicks       uint32
 
 	// regenDelayTicks and regenIntervalTicks are HealthRegenDelay and
 	// HealthRegenInterval in the ticks Step counts, derived for the reason every other
@@ -417,6 +418,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		hardness:           handMiningTicksFor(tickRate),
 		deathTicks:         deathDurationTicks(tickRate),
 		protectionTicks:    respawnProtectionTicks(tickRate),
+		castTicks:          ticksFor(CastDuration, tickRate),
 		regenDelayTicks:    ticksFor(HealthRegenDelay, tickRate),
 
 		regenIntervalTicks:   ticksFor(HealthRegenInterval, tickRate),
@@ -571,6 +573,15 @@ type Player struct {
 	idleTicks int
 	haveTick  bool
 	lastTick  uint32
+
+	// One authoritative interruptible action, advanced only by Step. The action is
+	// retained beside the kind so the common interruption path can route its refusal
+	// without learning which caster started it. pendingCastRefusals are immutable
+	// frames whose first non-blocking delivery found the session queue full; unlike a
+	// snapshot, no later frame supersedes an interruption, so the tick retries them in
+	// order before offering the next snapshot.
+	cast                *activeCast
+	pendingCastRefusals [][]byte
 
 	// leaving is the server-owned linger state. The body remains a live
 	// simulation entity — gravity, damage, snapshots and interaction all continue —
@@ -1097,6 +1108,7 @@ func (p *Player) Submit(in protocol.PlayerInput) error {
 
 	p.haveTick, p.lastTick = true, in.ClientTick
 	p.current = acceptIntent(in)
+	p.interruptCastForIntentLocked(p.current)
 	p.idleTicks = 0
 	return nil
 }
@@ -1188,6 +1200,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		// the tick that brings a player back is also the tick that starts them falling
 		// to their spawn and publishes the chunk they arrived in.
 		p.advanceVitalsLocked()
+		p.advanceCastLocked()
 		p.step(s.dt, s.terrain)
 		p.advanceMining(tick, s.terrain)
 
@@ -1280,6 +1293,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// next tick's and a snapshot is, so when a queue has room for one frame it should
 	// be this one.
 	for _, p := range players {
+		p.offerCastRefusalsLocked()
 		p.offerInventoryLocked()
 		p.offerLootLocked()
 		p.offerVendorLocked()
@@ -1547,6 +1561,10 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			// which a true flag could carry an Unknown.
 			Weather:    viewer.weather,
 			HasWeather: true,
+		}
+		if cast, running := viewer.castStateLocked(); running {
+			snapshot.Cast = cast
+			snapshot.HasCast = true
 		}
 		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column()) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
