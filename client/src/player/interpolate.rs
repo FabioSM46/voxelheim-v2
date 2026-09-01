@@ -82,6 +82,9 @@ pub struct InterpolatedProjectile {
 pub struct InterpolatedMob {
     pub pos: Vec3,
     pub yaw: f32,
+    /// Distance-driven presentation phase, on the same stride clock as a player.
+    pub walk_phase: f32,
+    pub walking: bool,
     pub kind: MobKind,
     pub health: u16,
     pub max_health: u16,
@@ -96,6 +99,9 @@ struct Received {
     at: Instant,
     /// The accumulated phase at each entity's position in this snapshot.
     walk_phases: HashMap<u64, f32>,
+    /// The same accumulated presentation phase for rows in the mob vector. Ordinary
+    /// combat mobs may ignore it; paddock horses consume it through the shared gait rig.
+    mob_walk_phases: HashMap<u64, f32>,
 }
 
 /// The two most recent snapshots a session has received.
@@ -287,11 +293,38 @@ impl SnapshotBuffer {
             })
             .collect();
 
+        let mob_walk_phases = snapshot
+            .mobs
+            .iter()
+            .map(|state| {
+                let phase = self
+                    .latest
+                    .as_ref()
+                    .and_then(|latest| {
+                        let earlier = latest
+                            .snapshot
+                            .mobs
+                            .iter()
+                            .find(|earlier| earlier.entity_id == state.entity_id)?;
+                        let phase = latest.mob_walk_phases.get(&state.entity_id).copied()?;
+                        let distance = horizontal_mob_distance(earlier, state);
+                        Some(if distance > f32::EPSILON {
+                            advance_walk_phase(phase, distance)
+                        } else {
+                            0.0
+                        })
+                    })
+                    .unwrap_or(0.0);
+                (state.entity_id, phase)
+            })
+            .collect();
+
         self.previous = self.latest.take();
         self.latest = Some(Received {
             snapshot,
             at,
             walk_phases,
+            mob_walk_phases,
         });
         true
     }
@@ -552,7 +585,14 @@ impl SnapshotBuffer {
                 .snapshot
                 .mobs
                 .iter()
-                .map(|state| (state.entity_id, mob_at_rest(state)))
+                .map(|state| {
+                    let phase = latest
+                        .mob_walk_phases
+                        .get(&state.entity_id)
+                        .copied()
+                        .unwrap_or(0.0);
+                    (state.entity_id, mob_at_rest(state, phase))
+                })
                 .collect();
         };
 
@@ -575,10 +615,25 @@ impl SnapshotBuffer {
                     .iter()
                     .find(|earlier| earlier.entity_id == state.entity_id);
 
-                let mut drawn = mob_at_rest(state);
+                let latest_phase = latest
+                    .mob_walk_phases
+                    .get(&state.entity_id)
+                    .copied()
+                    .unwrap_or(0.0);
+                let mut drawn = mob_at_rest(state, latest_phase);
                 if let Some(from) = from {
+                    let distance = horizontal_mob_distance(from, state);
                     drawn.pos = Vec3::from_array(from.pos).lerp(drawn.pos, weight);
                     drawn.yaw = lerp_angle(from.yaw, state.yaw, weight);
+                    drawn.walk_phase = advance_walk_phase(
+                        previous
+                            .mob_walk_phases
+                            .get(&state.entity_id)
+                            .copied()
+                            .unwrap_or(0.0),
+                        distance * weight,
+                    );
+                    drawn.walking = distance > f32::EPSILON;
                 }
                 (state.entity_id, drawn)
             })
@@ -643,15 +698,21 @@ fn horizontal_distance(from: &EntityState, to: &EntityState) -> f32 {
     Vec2::new(to.pos[0] - from.pos[0], to.pos[2] - from.pos[2]).length()
 }
 
+fn horizontal_mob_distance(from: &MobState, to: &MobState) -> f32 {
+    Vec2::new(to.pos[0] - from.pos[0], to.pos[2] - from.pos[2]).length()
+}
+
 fn advance_walk_phase(phase: f32, distance: f32) -> f32 {
     (phase + distance * WALK_RADIANS_PER_BLOCK).rem_euclid(TAU)
 }
 
 /// A mob drawn exactly where the snapshot puts it.
-fn mob_at_rest(state: &MobState) -> InterpolatedMob {
+fn mob_at_rest(state: &MobState, walk_phase: f32) -> InterpolatedMob {
     InterpolatedMob {
         pos: Vec3::from_array(state.pos),
         yaw: state.yaw,
+        walk_phase,
+        walking: false,
         kind: state.kind,
         health: state.health,
         max_health: state.max_health,
@@ -1239,6 +1300,8 @@ mod mob_tests {
         assert_eq!(state.health, 35);
         assert_eq!(state.action, MobAction::Windup);
         assert_eq!(state.kind, MobKind::Draugr);
+        assert!(state.walking);
+        assert!((state.walk_phase - WALK_RADIANS_PER_BLOCK).abs() < 1e-4);
 
         let mut targeted = mob(900, 2.0, 1.0, 35, MobAction::Windup);
         targeted.target_entity_id = 77;
