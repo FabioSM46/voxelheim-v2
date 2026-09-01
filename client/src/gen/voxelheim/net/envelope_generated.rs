@@ -923,6 +923,51 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_player_trade_request(&self) -> Option<PlayerTradeRequest<'a>> {
+        if self.payload_type() == Payload::PlayerTradeRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PlayerTradeRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_player_trade_state(&self) -> Option<PlayerTradeState<'a>> {
+        if self.payload_type() == Payload::PlayerTradeState {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PlayerTradeState::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_player_trade_closed(&self) -> Option<PlayerTradeClosed<'a>> {
+        if self.payload_type() == Payload::PlayerTradeClosed {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PlayerTradeClosed::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -991,6 +1036,9 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::LearnedMounts => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LearnedMounts>>("Payload::LearnedMounts", pos),
           Payload::MountRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MountRequest>>("Payload::MountRequest", pos),
           Payload::DismountRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DismountRequest>>("Payload::DismountRequest", pos),
+          Payload::PlayerTradeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeRequest>>("Payload::PlayerTradeRequest", pos),
+          Payload::PlayerTradeState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeState>>("Payload::PlayerTradeState", pos),
+          Payload::PlayerTradeClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeClosed>>("Payload::PlayerTradeClosed", pos),
           _ => Ok(()),
         }
      })?
@@ -1614,6 +1662,36 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::DismountRequest => {
                 if let Some(x) = self.payload_as_dismount_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PlayerTradeRequest => {
+                if let Some(x) = self.payload_as_player_trade_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PlayerTradeState => {
+                if let Some(x) = self.payload_as_player_trade_state() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PlayerTradeClosed => {
+                if let Some(x) = self.payload_as_player_trade_closed() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

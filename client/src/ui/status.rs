@@ -1379,12 +1379,13 @@ mod tests {
     /// while the enum grows past `N`. That is not hypothetical — it happened twice, in
     /// V24 and again in V25, and both times every sweep below went on passing over a
     /// subset. `fb::RefusalReason::ENUM_VALUES` is the contract's own count; V27 reserves
-    /// twelve stable reasons whose consumer belongs to the dependent client part.
+    /// twelve stable reasons and V28 five player-trading reasons whose consumers belong
+    /// to dependent client parts.
     #[test]
     fn every_reason_is_in_the_sweep() {
         assert_eq!(
             EVERY_REASON.len(),
-            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 12,
+            crate::wire::voxelheim::net::RefusalReason::ENUM_VALUES.len() - 17,
             "a reason this UI consumes is missing from EVERY_REASON"
         );
 

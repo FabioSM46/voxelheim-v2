@@ -220,7 +220,17 @@ union Payload {
   //    `MobKind.Horse`, outside this union, independently owes the same bump.
   LearnedMounts,           // 55  server -> client
   MountRequest,            // 56  client -> server
-  DismountRequest          // 57  client -> server
+  DismountRequest,         // 57  client -> server
+
+  // -- V28. Appended, so the tags of 1..57 are untouched.
+  //
+  //    PlayerTradeRequest carries the bump: a V27 server cannot name this client
+  //    payload and closes the session instead of dropping it. The complete two-sided
+  //    state and explicit close ride in the same bump so every player-trading consumer
+  //    builds against one settled contract.
+  PlayerTradeRequest,      // 58  client -> server
+  PlayerTradeState,        // 59  server -> client
+  PlayerTradeClosed        // 60  server -> client
 }
 
 table Envelope {

@@ -3927,6 +3927,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::TradeRequest
         | fb::Payload::MountRequest
         | fb::Payload::DismountRequest
+        | fb::Payload::PlayerTradeRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -3945,6 +3946,12 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .payload_as_wards_nearby()
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
+        }
+        // Reserved by V28. The strict decoder and application messages arrive in the
+        // dependent client part; carrying both names here keeps them out of the unknown
+        // fallback while preserving a compilable contract-only tranche.
+        fb::Payload::PlayerTradeState | fb::Payload::PlayerTradeClosed => {
+            Ok(Message::Deferred(name))
         }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
@@ -7959,9 +7966,9 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v27_batches_leave_cancellation_and_the_stable_contract() {
+    fn protocol_v28_adds_player_trading() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 27);
+        assert_eq!(fb::ProtocolVersion::Current.0, 28);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -8020,6 +8027,9 @@ mod tests {
             (fb::Payload::LearnedMounts, 55),
             (fb::Payload::MountRequest, 56),
             (fb::Payload::DismountRequest, 57),
+            (fb::Payload::PlayerTradeRequest, 58),
+            (fb::Payload::PlayerTradeState, 59),
+            (fb::Payload::PlayerTradeClosed, 60),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -8035,7 +8045,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            58,
+            61,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -8065,7 +8075,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 58] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 61] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -8129,6 +8139,10 @@ mod tests {
         (fb::Payload::LearnedMounts, Handling::Consumed),
         (fb::Payload::MountRequest, Handling::ClientOnly),
         (fb::Payload::DismountRequest, Handling::ClientOnly),
+        // V28's intent is client-only; its two server messages are decoded in part 3.
+        (fb::Payload::PlayerTradeRequest, Handling::ClientOnly),
+        (fb::Payload::PlayerTradeState, Handling::Deferred),
+        (fb::Payload::PlayerTradeClosed, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -8305,6 +8319,12 @@ mod tests {
             // V27 reserves these wire members, but their application consumer belongs to
             // a later UI part. Until then both fail closed to `Unknown`.
             (fb::RefusedAction::Mount, fb::RefusalReason::MountNotLearned),
+            // V28 reserves player-trading refusal vocabulary for its dependent client
+            // consumer; the contract-only tranche must still fail closed here.
+            (
+                fb::RefusedAction::PlayerTrade,
+                fb::RefusalReason::AlreadyTrading,
+            ),
         ] {
             assert_eq!(
                 decode(&encode_action_refused(action, reason, None)),
@@ -9529,6 +9549,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::Edit.0, 17);
         assert_eq!(fb::RefusedAction::Mine.0, 18);
         assert_eq!(fb::RefusedAction::Mount.0, 19);
+        assert_eq!(fb::RefusedAction::PlayerTrade.0, 20);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -9539,7 +9560,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            20,
+            21,
             "a removal is refused in silence by design"
         );
 
@@ -9591,6 +9612,11 @@ mod tests {
             (fb::RefusalReason::CastInterruptedByDeath, 40),
             (fb::RefusalReason::ActionForbiddenWhileMounted, 41),
             (fb::RefusalReason::MountAlreadyLearned, 42),
+            (fb::RefusalReason::AlreadyTrading, 43),
+            (fb::RefusalReason::TradeNotOpen, 44),
+            (fb::RefusalReason::TradeSlotTaken, 45),
+            (fb::RefusalReason::NothingToOffer, 46),
+            (fb::RefusalReason::TradeCooldown, 47),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -9600,7 +9626,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            47,
+            52,
             "a new reason needs a sentence here, not a test edit"
         );
 

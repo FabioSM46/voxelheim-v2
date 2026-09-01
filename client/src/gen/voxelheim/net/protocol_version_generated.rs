@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 27;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 28;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -219,6 +219,12 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// it travels inside a table field whose receiver refuses an unknown member. The purse,
 /// learned set, cast and mount snapshot state ride in the same one bump so every later
 /// stable issue consumes one settled contract instead of moving this number again.
+///
+/// **V28 belongs to `PlayerTradeRequest`.** It is a client -> server union member a
+/// V27 server cannot name, and that server closes the session instead of dropping the
+/// frame. `PlayerTradeState` and `PlayerTradeClosed` ride in the same bump so the server
+/// and client halves of player trading consume one settled contract rather than moving
+/// this number again.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -229,10 +235,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(27);
+    pub const Current: Self = Self(28);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 27;
+    pub const ENUM_MAX: u16 = 28;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

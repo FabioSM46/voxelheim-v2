@@ -151,6 +151,11 @@ const (
 	RefusalReasonCastInterruptedByDeath      RefusalReason = 40
 	RefusalReasonActionForbiddenWhileMounted RefusalReason = 41
 	RefusalReasonMountAlreadyLearned         RefusalReason = 42
+	RefusalReasonAlreadyTrading              RefusalReason = 43
+	RefusalReasonTradeNotOpen                RefusalReason = 44
+	RefusalReasonTradeSlotTaken              RefusalReason = 45
+	RefusalReasonNothingToOffer              RefusalReason = 46
+	RefusalReasonTradeCooldown               RefusalReason = 47
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -209,6 +214,11 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonCastInterruptedByDeath:      "CastInterruptedByDeath",
 	RefusalReasonActionForbiddenWhileMounted: "ActionForbiddenWhileMounted",
 	RefusalReasonMountAlreadyLearned:         "MountAlreadyLearned",
+	RefusalReasonAlreadyTrading:              "AlreadyTrading",
+	RefusalReasonTradeNotOpen:                "TradeNotOpen",
+	RefusalReasonTradeSlotTaken:              "TradeSlotTaken",
+	RefusalReasonNothingToOffer:              "NothingToOffer",
+	RefusalReasonTradeCooldown:               "TradeCooldown",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -259,6 +269,11 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"CastInterruptedByDeath":      RefusalReasonCastInterruptedByDeath,
 	"ActionForbiddenWhileMounted": RefusalReasonActionForbiddenWhileMounted,
 	"MountAlreadyLearned":         RefusalReasonMountAlreadyLearned,
+	"AlreadyTrading":              RefusalReasonAlreadyTrading,
+	"TradeNotOpen":                RefusalReasonTradeNotOpen,
+	"TradeSlotTaken":              RefusalReasonTradeSlotTaken,
+	"NothingToOffer":              RefusalReasonNothingToOffer,
+	"TradeCooldown":               RefusalReasonTradeCooldown,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,
