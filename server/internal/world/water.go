@@ -100,35 +100,34 @@ const (
 	// to riverTerraceStep — so a channel climbs with the ground, the cap is gone, and
 	// a river ends where its own surface falls under the sea line.
 	//
-	// **The condition is |n − ½| < riverHalfWidth, which is caveAt's condition in two
-	// dimensions and for the same reason.** A field *thresholded* selects a region
-	// with an area; a field held near a *level set* selects a curve with a length,
-	// and a curve is the thing that runs somewhere. One field rather than caveAt's
-	// two, because a river is meant to be a line and not a network.
+	// **The course is the field's midpoint level set.** A field *thresholded* selects
+	// a region with an area; a field held near a *level set* selects a curve with a
+	// length, and a curve is the thing that runs somewhere. [riverAt] turns the field
+	// distance from that level set into blocks through its local gradient, so the
+	// selected band has a stable physical width instead of widening wherever the
+	// field crosses its midpoint slowly. One field rather than caveAt's two, because
+	// a river is meant to be a line and not a network.
 	//
 	// riverScaleBlocks is the largest scale in this file: a river is a feature of a
 	// region, and at 640 blocks to a lattice cell the first octave alone is twenty
 	// chunks across, so a channel wanders for a long walk before it turns.
 	riverScaleBlocks = 640
 
-	// riverHalfWidth is how far either side of the midpoint the field may sit and
-	// still be a channel.
+	// riverHalfWidthBlocks is how far either side of the midpoint level set a channel
+	// reaches, in blocks.
 	//
-	// **The issue said 2/100 and that is a marsh, not a river**, for the third time
-	// in this file and the same reason each time: the number is a fraction of the
-	// field's range and the field is concentrated around its midpoint, so it buys far
-	// more columns than its size suggests. Measured over the same six windows:
+	// **The old number was in field units, not blocks.** Its band covered a different
+	// physical width wherever the field's slope changed: over the same 1024x1024
+	// window, one seed produced a channel 65 blocks across and two others produced
+	// widest bodies of 31 and 15 blocks. A four-block terrace through the first is a
+	// wall across a lake rather than a short river fall.
 	//
-	//	2/100  → 1.0% … 9.8% of columns are channel
-	//	1/100  → 0.6% … 4.8%
-	//	6/1000 → 0.6% … 6.8%
-	//	4/1000 → 0.6% … 4.6%
-	//	3/1000 → 0.6% … 3.6%
-	//
-	// At 4/1000 a channel is a few blocks across — narrow enough to be a line on the
-	// ground and wide enough to swim down. TestARiverIsContinuousAlongItsCourse walks
-	// one rather than trusting this sentence.
-	riverHalfWidth = one * 4 / 1000
+	// Three is wide enough to swim down. [riverAt] measures it with a first-order
+	// distance to the level set; confluences and the 32-block gradient baseline make
+	// the widest measured half-width seven blocks rather than exactly three.
+	// TestRiverChannelsStayWithinTheirBlockWidth measures that bound over three seeds,
+	// while TestARiverIsContinuousAlongItsCourse still walks one course end to end.
+	riverHalfWidthBlocks = 3
 
 	// riverBedDrop is how far under its own surface a river bed sits, so that a
 	// channel is three blocks of water deep wherever it runs.
@@ -288,6 +287,7 @@ const _ = uint8(riverTerraceStep - riverBedDrop - 1)
 const _ = uint8(riverSmoothSpan - 1)
 const _ = uint8(riverGradientSpan - 1)
 const _ = uint8(riverSlopeSpan - 1)
+const _ = uint8(riverHalfWidthBlocks - 1)
 
 // A basin has to deepen with the field rather than the other way about. Swap these
 // two and the rescale below divides by a negative, which is a compile error here
@@ -339,13 +339,32 @@ func riverField(seed, worldX, worldZ int64) int64 {
 	return climateField(seed+riverSeedOffset, worldX, worldZ, riverScaleBlocks)
 }
 
+// riverGradientAt is the central difference of [riverField] over the baseline that
+// defines one local step across its course. The raw difference deliberately retains
+// the 2*riverGradientSpan factor: [riverAt] can compare against it with integers, and
+// [riverCurrentAt] needs only the relative components to choose the tangent axis.
+func riverGradientAt(seed, worldX, worldZ int64) (gx, gz int64) {
+	gx = riverField(seed, worldX+riverGradientSpan, worldZ) - riverField(seed, worldX-riverGradientSpan, worldZ)
+	gz = riverField(seed, worldX, worldZ+riverGradientSpan) - riverField(seed, worldX, worldZ-riverGradientSpan)
+	return gx, gz
+}
+
 // riverAt reports whether a column lies in a river channel.
 //
 // Reads nothing but the seed and the column, like every other field here: two
 // neighbouring chunks agree about a river crossing their border by each computing
 // this, not by consulting one another.
 func riverAt(seed, worldX, worldZ int64) bool {
-	return absInt64(riverField(seed, worldX, worldZ)-one/2) < riverHalfWidth
+	distanceInField := absInt64(riverField(seed, worldX, worldZ) - one/2)
+	gx, gz := riverGradientAt(seed, worldX, worldZ)
+	ax, az := absInt64(gx), absInt64(gz)
+	gradientMagnitude := max(ax, az) + min(ax, az)/2
+
+	// max + min/2 is an octagonal approximation to hypot, within about three
+	// percent and with no square root or float in the deterministic generator. The
+	// strict comparison also makes a zero gradient no channel: without a local slope
+	// there is no finite first-order distance to the level set.
+	return distanceInField*(2*riverGradientSpan) < riverHalfWidthBlocks*gradientMagnitude
 }
 
 // riverSmoothedHeightAt is the land under a channel with its finest octave averaged
@@ -400,8 +419,7 @@ func riverSurfaceAt(seed, worldX, worldZ int64) int {
 // divides at the other, which is what water does. water_test.go counts those pairs as a
 // diagnostic instead of rejecting them.
 func riverCurrentAt(seed, worldX, worldZ int64) (dx, dz int) {
-	gx := riverField(seed, worldX+riverGradientSpan, worldZ) - riverField(seed, worldX-riverGradientSpan, worldZ)
-	gz := riverField(seed, worldX, worldZ+riverGradientSpan) - riverField(seed, worldX, worldZ-riverGradientSpan)
+	gx, gz := riverGradientAt(seed, worldX, worldZ)
 
 	if absInt64(gz) >= absInt64(gx) {
 		if riverSmoothedHeightAt(seed, worldX+riverSlopeSpan, worldZ) <= riverSmoothedHeightAt(seed, worldX-riverSlopeSpan, worldZ) {

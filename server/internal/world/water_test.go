@@ -85,6 +85,8 @@ func TestWaterCoversItsShareOfTheWorld(t *testing.T) {
 	if beaches == 0 {
 		t.Error("no shore in the sample window: every water column meets its land at grass")
 	}
+	t.Logf("measured %d of %d columns standing in water (%d%%): %d rivers, %d beaches and %d ice",
+		wet, columns, wet*100/columns, rivers, beaches, ice)
 }
 
 // A channel is a curve, so it has a length: every column of one is joined to the
@@ -135,6 +137,74 @@ func TestARiverIsContinuousAlongItsCourse(t *testing.T) {
 	}
 	if isolated != 0 {
 		t.Errorf("%d river columns in the window have no river neighbour: the channel is a scatter, not a course", isolated)
+	}
+}
+
+// A channel is a band around a curve, and its width is measured in blocks rather
+// than inferred from how much of the field it happens to cover. The old field-unit
+// threshold made the same knob produce bodies 65, 31 and 15 blocks across at these
+// three seeds; a slow midpoint crossing became a lake with a river's terraces in it.
+//
+// This is a Manhattan distance transform from every non-channel column. A distance
+// of one is a bank-adjacent channel column, so its maximum is the channel's discrete
+// half-width. Confluences and the gradient's 32-block baseline can widen the nominal
+// three-block half-width, but the measured residual stays within this stated bound
+// instead of varying by a factor of four between seeds.
+func TestRiverChannelsStayWithinTheirBlockWidth(t *testing.T) {
+	const (
+		originX             = -512
+		originZ             = -1512
+		sampleSize          = 1024
+		maximumHalfWidth    = 2*riverHalfWidthBlocks + 1
+		unreachableDistance = 2 * sampleSize
+	)
+
+	for _, seed := range []int64{1, waterSeed, 7} {
+		distance := make([]int, sampleSize*sampleSize)
+		channels := 0
+		for z := range sampleSize {
+			for x := range sampleSize {
+				at := z*sampleSize + x
+				if riverAt(seed, int64(originX+x), int64(originZ+z)) {
+					distance[at] = unreachableDistance
+					channels++
+				}
+			}
+		}
+		if channels == 0 {
+			t.Fatalf("seed %#x has no channel in the width sample", seed)
+		}
+
+		for z := range sampleSize {
+			for x := range sampleSize {
+				at := z*sampleSize + x
+				if x > 0 {
+					distance[at] = min(distance[at], distance[at-1]+1)
+				}
+				if z > 0 {
+					distance[at] = min(distance[at], distance[at-sampleSize]+1)
+				}
+			}
+		}
+		widest := 0
+		for z := sampleSize - 1; z >= 0; z-- {
+			for x := sampleSize - 1; x >= 0; x-- {
+				at := z*sampleSize + x
+				if x+1 < sampleSize {
+					distance[at] = min(distance[at], distance[at+1]+1)
+				}
+				if z+1 < sampleSize {
+					distance[at] = min(distance[at], distance[at+sampleSize]+1)
+				}
+				widest = max(widest, distance[at])
+			}
+		}
+
+		if widest > maximumHalfWidth {
+			t.Errorf("seed %#x has a channel half-width of %d blocks, want at most %d for the nominal %d-block half-width",
+				seed, widest, maximumHalfWidth, riverHalfWidthBlocks)
+		}
+		t.Logf("seed %#x: %d channel columns, widest half-width %d blocks", seed, channels, widest)
 	}
 }
 
@@ -389,17 +459,19 @@ func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 		channels, higherEdges, feedingEdges, rejectedEdges)
 }
 
-// The seed-one cascade reported in #696, bounded around the two captured player
-// positions. This keeps the concrete defect behind the general sweep above: the old
-// rule raised a lower column to the highest terrace on any side, while the directional
-// rule keeps only the height supplied across a downstream edge.
+// The seed-one cascade reported in #696, kept as a concrete instance beside the
+// general sweep above: the old rule raised a lower column to the highest terrace on
+// any side, while the directional rule keeps only the height supplied across a
+// downstream edge. Worldgen 23 narrows the reported 27-block body enough that its
+// original window no longer contains a sideways curtain, so the window is re-derived
+// on the same seed where both a downstream fall and a rejected sideways edge remain.
 func TestTheSeedOneCascadeRejectsSidewaysTerraceCurtains(t *testing.T) {
 	t.Parallel()
 
 	const seed int64 = 1
 	channels, keptFalls, shortenedCurtains, removedFallVoxels := 0, 0, 0, 0
-	for z := int64(208); z < 288; z++ {
-		for x := int64(384); x < 448; x++ {
+	for z := int64(1040); z < 1120; z++ {
+		for x := int64(-128); x < -64; x++ {
 			col := columnAt(seed, x, z)
 			if !col.river {
 				continue

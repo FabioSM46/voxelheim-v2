@@ -70,10 +70,9 @@ const (
 	// had to record that a fixture only pins what happens to be in it.
 	//
 	// It was chosen by sweeping for the richest channel rather than the richest
-	// palette, and it is both: sixteen distinct block ids and 588 channel columns
-	// standing on three terraces four blocks apart — 48, 52 and 56, so two falls — with
-	// 2484 voxels of water between their beds and their surfaces, of which worldgen 16
-	// makes 2467 running water carrying all four current ids.
+	// palette, and worldgen 23 moves it to keep that contract after channels gain a
+	// stable physical width: 271 channel columns standing on two terraces four blocks
+	// apart — 48 and 52 — with 557 source-water voxels carrying all four current ids.
 	goldenRiverPath = "testdata/chunk_golden_river.bin"
 )
 
@@ -82,7 +81,7 @@ var (
 	goldenWaterCoord      = Coord{X: 182, Y: 1, Z: -59}
 	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
 	goldenPlainsCoord     = Coord{X: 3, Y: 2, Z: 64}
-	goldenRiverCoord      = Coord{X: 197, Y: 1, Z: -61}
+	goldenRiverCoord      = Coord{X: 195, Y: 1, Z: -65}
 
 	// bodyCaveMouthCoord holds a cave mouth in the bed of a lake — a carved voxel above
 	// [caveWaterLevel] that the run from its own column's ground reaches, and so the one
@@ -288,8 +287,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 22 {
-		t.Fatalf("WorldgenVersion = %d, want 22 after the capital gained its stable and larger concentric rings", WorldgenVersion)
+	if WorldgenVersion != 23 {
+		t.Fatalf("WorldgenVersion = %d, want 23 after river channels gained a stable width in blocks", WorldgenVersion)
 	}
 }
 

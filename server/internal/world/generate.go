@@ -313,8 +313,8 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface
 // riverMaxSurface rejected high ground before the fbm2D behind riverAt was paid for; a
 // river now runs at any height, so every column pays that sum and a channel column pays
 // [riverSurfaceAt]'s five height fields on top. It is affordable because a channel is a
-// curve: riverHalfWidth selects a few percent of columns and only those reach the
-// expensive half. BenchmarkGenerate is the check.
+// curve: [riverAt]'s block-width band selects a few percent of columns and only those
+// reach the expensive half. BenchmarkGenerate is the check.
 //
 // riverSurface is meaningful only beside river, exactly as [column.waterSurface] is
 // beside [column.standingWater].
@@ -449,7 +449,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // radii to hold the nineteen-block paddock with clearance. Villages and terrain beyond
 // a capital's settlement reach stay byte-identical; the capital plateau, blend and
 // building voxels change, so stored deltas there need the new generated base.
-const WorldgenVersion uint32 = 22
+// 22 → 23: #784 measures a river's distance from its level set in blocks instead of
+// field units. Channels keep a stable physical width across seeds instead of widening
+// into lakes where the field crosses its midpoint slowly, so river beds, water and
+// nearby composition all move and stored deltas need the new generated base.
+const WorldgenVersion uint32 = 23
 
 // Generate builds the chunk at coord for seed.
 //
