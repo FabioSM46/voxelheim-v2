@@ -784,6 +784,30 @@ type Player struct {
 	mineReset      *miningReset
 }
 
+// body is the collision body this player occupies right now: mountedBody while a
+// horse is under them, playerBody on foot.
+//
+// **The one place the choice is made.** A box is a property of the thing standing
+// there — residentBody and mobRegistry[kind].body already say so — and the mounted
+// box is a property of this player, so every reader that describes an existing player
+// asks here rather than reaching for playerBody itself: the movement sweep, the water
+// read, pickup, reach, aggro and attack range, line of sight, the projectile hit-test
+// and the placement overlap all measure the same body, and mounting changes all of
+// them at once. The spot search in spawn.go keeps playerBody, because the player it
+// is finding a place for does not exist yet.
+//
+// Reads mounted, so the caller holds Sim.mu.
+func (p *Player) body() body {
+	if p.mounted != vnet.MountKindUnknown {
+		return mountedBody
+	}
+	return playerBody
+}
+
+// box is the box this player occupies where they stand: body at pos. The caller
+// holds Sim.mu.
+func (p *Player) box() box { return p.body().boxAt(p.pos) }
+
 // Join admits a player at spawn and returns the handle its session uses.
 //
 // playerID is the identity the session's handshake resolved, and it is passed in
@@ -1720,7 +1744,7 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// below. A box query through the same Terrain seam the collision uses, so it sees
 	// a player's own digging and an absent chunk answers "not water" — see
 	// [Terrain.Fluid], where that direction is argued.
-	inWater := overlapsFluid(terrain, playerBox(p.pos))
+	inWater := overlapsFluid(terrain, p.box())
 
 	// Which way the water is going, asked once and only in water: a unit horizontal
 	// direction and a flag saying this voxel is a fall. **The server decides this**,
@@ -1824,8 +1848,11 @@ func (p *Player) step(dt float64, terrain Terrain) {
 		p.vel[1] = max(p.vel[1]-Gravity*dt, -TerminalFallSpeed)
 	}
 
+	// Swept as the body this player has — the mounted one while a horse is under
+	// them — so a rider is stopped by the alley and the lintel a walker clears, and
+	// the water read above and the landing read below describe the same box.
 	delta := [3]float64{p.vel[0] * dt, p.vel[1] * dt, p.vel[2] * dt}
-	pos, blocked := moveAndCollideWithStep(terrain, playerBody, p.pos, delta, playerStepHeight)
+	pos, blocked := moveAndCollideWithStep(terrain, p.body(), p.pos, delta, playerStepHeight)
 	p.pos = pos
 
 	// The ground is "a downward move that was stopped". Deriving it from the collision
@@ -1865,8 +1892,8 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// residency check and for the same reason: a damaging impact is rare, and this
 	// box scan is only paid on the ticks that have one.
 	if damage := fallDamage(impact); damage > 0 &&
-		!overlapsFluid(terrain, playerBox(p.pos)) &&
-		landedOnResidentTerrain(terrain, p.pos) {
+		!overlapsFluid(terrain, p.box()) &&
+		landedOnResidentTerrain(terrain, p.box()) {
 		p.damageLocked(damage)
 	}
 }

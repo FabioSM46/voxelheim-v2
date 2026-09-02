@@ -401,7 +401,7 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 
 	target := mineTarget(req.Pos)
 	reach := p.reachLocked()
-	if distance := distanceToVoxel(p.pos, target); distance > reach {
+	if distance := distanceToVoxel(p.box(), target); distance > reach {
 		return fmt.Errorf("the target is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
 	// Beside the reach check, under the lock this function already holds. It is the one
@@ -497,7 +497,7 @@ func (p *Player) advanceMining(tick uint64, terrain Terrain) {
 	// that comes up over a player mid-swing takes the block they were breaking out of
 	// their arm's length, and the progress frame that says so is the one they already
 	// get when they walk away from it.
-	if distanceToVoxel(p.pos, target) > p.reachLocked() {
+	if distanceToVoxel(p.box(), target) > p.reachLocked() {
 		p.resetMining(state.pos, tick, "target moved out of reach")
 		return
 	}

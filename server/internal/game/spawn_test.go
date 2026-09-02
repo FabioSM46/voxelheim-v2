@@ -625,7 +625,7 @@ func TestNothingSpawnsInsideTheCampfireRadius(t *testing.T) {
 		t.Fatal("no creature ever spawned, so nothing here was tested")
 	}
 	for id, seen := range spawned {
-		if got := distanceToVoxel(seen.pos, [3]int64{int64(fire[0]), int64(fire[1]), int64(fire[2])}); got <= CampfireSafeRadius {
+		if got := distanceToVoxel(playerBox(seen.pos), [3]int64{int64(fire[0]), int64(fire[1]), int64(fire[2])}); got <= CampfireSafeRadius {
 			t.Errorf("creature %d stands %v blocks from the fire, inside %v", id, got, CampfireSafeRadius)
 		}
 	}

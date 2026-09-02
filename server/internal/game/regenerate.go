@@ -124,11 +124,11 @@ func (s *Sim) regenerateChunkLocked(coord world.Coord) error {
 	err := s.chunkRegenerator.Regenerate(coord)
 
 	for _, player := range s.players {
-		if !overlapsChunk(s.terrain, playerBox(player.pos), coord) {
+		if !overlapsChunk(s.terrain, player.box(), coord) {
 			continue
 		}
 
-		player.pos[1] = generatedLiftHeight(s.worldSeed, playerBox(player.pos), coord)
+		player.pos[1] = generatedLiftHeight(s.worldSeed, player.box(), coord)
 		player.vel[1] = 0
 		player.onGround = false
 		if next := chunkAt(player.pos); next != player.chunk {

@@ -482,7 +482,7 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the character's corpse container is empty")
 	}
 	reach := p.reachLocked()
-	if distance := boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)); math.IsNaN(distance) || distance > reach {
+	if distance := boxDistance(p.box(), mobRegistry[c.kind].body.boxAt(c.pos)); math.IsNaN(distance) || distance > reach {
 		return nil, nil, vnet.RefusalReasonOutOfReach, fmt.Errorf("the corpse is %.2f blocks away, past the reach of %.1f", distance, reach)
 	}
 	return c, container, vnet.RefusalReasonUnknown, nil
@@ -496,7 +496,7 @@ func (p *Player) canOpenCorpseLocked(c *corpse) bool {
 		!withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return false
 	}
-	return boxDistance(playerBox(p.pos), mobRegistry[c.kind].body.boxAt(c.pos)) <= p.reachLocked()
+	return boxDistance(p.box(), mobRegistry[c.kind].body.boxAt(c.pos)) <= p.reachLocked()
 }
 
 func (c *corpse) lootState(container *corpseContainer) protocol.LootState {

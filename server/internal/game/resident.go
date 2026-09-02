@@ -360,7 +360,7 @@ func (r *resident) nearestNoticedLocked(players []*Player) *Player {
 		if !p.alive() {
 			continue
 		}
-		distance := boxDistance(residentBody.boxAt(r.pos), playerBox(p.pos))
+		distance := boxDistance(residentBody.boxAt(r.pos), p.box())
 		if distance > ResidentNoticeRadius || distance >= best {
 			continue
 		}
@@ -477,7 +477,7 @@ func (p *Player) InteractNPC(request protocol.NpcInteractRequest) (vnet.RefusalR
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("entity %d is not a resident of this world", request.EntityID)
 	}
 	reach := p.reachLocked()
-	if distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos)); math.IsNaN(distance) || distance > reach {
+	if distance := boxDistance(p.box(), residentBody.boxAt(r.pos)); math.IsNaN(distance) || distance > reach {
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is %.2f blocks away, past the reach of %.1f", r.name, distance, reach)
 	}
 	if !vendorRole(r.role) {

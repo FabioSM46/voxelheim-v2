@@ -401,8 +401,8 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 // The caller holds Sim.mu.
 func (s *Sim) swingTargetLocked(p *Player) *mob {
 	aim := lookDirection(p.current.yaw, p.current.pitch)
-	origin := boxCentre(playerBox(p.pos))
-	reach := playerBox(p.pos)
+	origin := boxCentre(p.box())
+	reach := p.box()
 
 	var best *mob
 	bestDistance := math.Inf(1)

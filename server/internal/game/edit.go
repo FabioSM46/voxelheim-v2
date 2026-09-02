@@ -20,8 +20,9 @@ import (
 // rendering decision the client owns and says so — `EYE_HEIGHT` in
 // `client/src/player/constants.rs` is documented as "client-owned, not a mirror" — so a
 // reach measured from a camera would be a reach the server could only evaluate by
-// copying a constant it does not own. The box centre is PlayerHeight/2 above the feet,
-// derived from a number the server already states, and it makes the limit symmetric:
+// copying a constant it does not own. The box centre is half the body's height above
+// the feet — PlayerHeight/2 on foot, MountedHeight/2 in the saddle — derived from
+// numbers the server already states, and it makes the limit symmetric:
 // four blocks up costs what four blocks along costs.
 //
 // Euclidean, not per axis. A per-axis test with the same number would let a corner
@@ -132,7 +133,7 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	target := [3]int64{int64(req.Pos[0]), int64(req.Pos[1]), int64(req.Pos[2])}
 
 	p.sim.mu.Lock()
-	origin := p.pos
+	origin := p.box()
 	// The reach is read in the same critical section as the position it is measured
 	// from, and for the same reason: both are answers about this player at one instant,
 	// and a sky sampled after the lock was dropped could belong to a later tick than the
@@ -398,7 +399,7 @@ func (s *Sim) voxelHoldsAPlayer(v [3]int64) (uint64, bool) {
 		occupied bool
 	)
 	for id, p := range s.players {
-		if !voxelOverlapsBox(v, playerBox(p.pos)) {
+		if !voxelOverlapsBox(v, p.box()) {
 			continue
 		}
 		if !occupied || id < blocker {
@@ -424,14 +425,17 @@ func voxelOverlapsBox(v [3]int64, b box) bool {
 	return true
 }
 
-// distanceToVoxel is the distance from the centre of the player's collision box at pos
-// to the centre of the unit voxel at v, in blocks.
+// distanceToVoxel is the distance from the centre of a body's box b to the centre of the
+// unit voxel at v, in blocks.
+//
+// A box rather than a position, so the caller says whose body is measured: a player
+// hands in [Player.box], which is the mounted body while a horse is under them, and a
+// position nobody stands on — a creature's spot, a station radius asked about a place —
+// hands in [playerBox] of it.
 //
 // float64 throughout, and the widening of v is exact: a BlockCoord axis is an int32, and
 // every int32 is representable in a float64.
-func distanceToVoxel(pos [3]float64, v [3]int64) float64 {
-	b := playerBox(pos)
-
+func distanceToVoxel(b box, v [3]int64) float64 {
 	var sum float64
 	for axis := range 3 {
 		centre := (b.min[axis] + b.max[axis]) / 2

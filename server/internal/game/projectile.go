@@ -13,7 +13,7 @@ var projectileBody = body{width: ProjectileBodySize, height: ProjectileBodySize}
 // projectileOriginLocked is the server's firing point: the centre of the owner's
 // footprint raised to the eye height. The caller holds Sim.mu.
 func projectileOriginLocked(owner *Player) [3]float64 {
-	origin := boxCentre(playerBox(owner.pos))
+	origin := boxCentre(owner.box())
 	origin[1] = owner.pos[1] + ProjectileEyeHeight
 	return origin
 }
@@ -55,17 +55,19 @@ func (s *Sim) spawnProjectileLocked(kind vnet.ProjectileKind, owner *Player, ori
 
 	pos := origin
 	// The longest route out is straight down from eye height. This bounded walk covers
-	// twice a player height and advances by half the projectile edge, so it cannot leave
-	// a valid finite origin inside the owner after the loop.
-	for range int(math.Ceil(PlayerHeight*2/(ProjectileBodySize/2))) + 1 {
-		if !boxesIntersect(projectileBody.boxAt(pos), playerBox(owner.pos)) {
+	// twice the owner's body height — the mounted body's while a horse is under them —
+	// and advances by half the projectile edge, so it cannot leave a valid finite origin
+	// inside the owner after the loop.
+	ownerBox := owner.box()
+	for range int(math.Ceil(owner.body().height*2/(ProjectileBodySize/2))) + 1 {
+		if !boxesIntersect(projectileBody.boxAt(pos), ownerBox) {
 			break
 		}
 		for axis := range 3 {
 			pos[axis] += unit[axis] * (ProjectileBodySize / 2)
 		}
 	}
-	if boxesIntersect(projectileBody.boxAt(pos), playerBox(owner.pos)) {
+	if boxesIntersect(projectileBody.boxAt(pos), ownerBox) {
 		return 0, false
 	}
 
@@ -306,7 +308,7 @@ func (s *Sim) firstProjectileTargetLocked(proj *projectile, players []*Player, m
 			if player.entityID == proj.owner || !player.alive() {
 				continue
 			}
-			consider(player, player.entityID, playerBox(player.pos))
+			consider(player, player.entityID, player.box())
 		}
 	}
 	return best
@@ -317,7 +319,7 @@ func projectileTargetBox(target any) box {
 	case *mob:
 		return target.species().body.boxAt(target.pos)
 	case *Player:
-		return playerBox(target.pos)
+		return target.box()
 	default:
 		return box{}
 	}

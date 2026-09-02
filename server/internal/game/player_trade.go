@@ -166,7 +166,7 @@ func playersWithinTradeReach(a, b *Player) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	distance := boxDistance(playerBox(a.pos), playerBox(b.pos))
+	distance := boxDistance(a.box(), b.box())
 	return !math.IsNaN(distance) && distance <= TradeReach
 }
 

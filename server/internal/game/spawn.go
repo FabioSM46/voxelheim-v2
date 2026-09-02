@@ -508,7 +508,7 @@ func surfaceUnderSky(t Terrain, x, z, top, bottom int64) (int64, bool) {
 //
 // The caller holds Sim.mu.
 func (s *Sim) nearACampfireLocked(pos [3]float64) bool {
-	return s.stationWithinLocked(vnet.StructureKindCampfire, pos, CampfireSafeRadius)
+	return s.stationWithinLocked(vnet.StructureKindCampfire, playerBox(pos), CampfireSafeRadius)
 }
 
 // wardBarsLocked reports whether a creature of this species may not be on the ground at
@@ -586,7 +586,7 @@ func (s *Sim) spotIsClearLocked(pos [3]float64, arriving body) bool {
 	spot := arriving.boxAt(pos)
 
 	for _, p := range s.players {
-		if boxDistance(spot, playerBox(p.pos)) == 0 {
+		if boxDistance(spot, p.box()) == 0 {
 			return false
 		}
 	}

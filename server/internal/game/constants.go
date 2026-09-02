@@ -263,10 +263,7 @@ const (
 	//
 	// The walking body lies inside this one on every side — narrower by 0.2 per side,
 	// shorter by a block — which is what lets a dismount never need to move anybody:
-	// wherever the horse fitted, the walker fits. For now the mount admission in
-	// [Player.mountFitLocked] is this box's one reader; the movement sweep and
-	// everything that aims at a player still measure the walking body, and the
-	// second half of #811 is what moves them.
+	// wherever the horse fitted, the walker fits. See [Player.body].
 	MountedWidth  = 1.0
 	MountedHeight = 2.8
 

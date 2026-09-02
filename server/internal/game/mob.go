@@ -254,7 +254,7 @@ func (m *mob) step(s *Sim, players []*Player) {
 			// and one that landed on whoever happened to walk nearer while it played out
 			// would be unreadable — the player who reacted to it is not the one it hit.
 			target := huntable(players, m.target)
-			if target != nil && boxDistance(m.species().body.boxAt(m.pos), playerBox(target.pos)) > m.species().aggroRange {
+			if target != nil && boxDistance(m.species().body.boxAt(m.pos), target.box()) > m.species().aggroRange {
 				target = nil
 			}
 			m.stepWindup(s, target)
@@ -307,7 +307,7 @@ func (m *mob) nearestLivePlayer(players []*Player) (*Player, float64) {
 		if !p.alive() {
 			continue
 		}
-		distance := boxDistance(def.body.boxAt(m.pos), playerBox(p.pos))
+		distance := boxDistance(def.body.boxAt(m.pos), p.box())
 		if distance < bestDistance || (distance == bestDistance && (best == nil || p.entityID < best.entityID)) {
 			best, bestDistance = p, distance
 		}
@@ -357,7 +357,7 @@ func (m *mob) chooseTargetLocked(s *Sim, players []*Player) *Player {
 		if !p.alive() || p.protectionTicks > 0 {
 			continue
 		}
-		distance := boxDistance(def.body.boxAt(m.pos), playerBox(p.pos))
+		distance := boxDistance(def.body.boxAt(m.pos), p.box())
 		if distance > def.aggroRange {
 			continue
 		}
@@ -648,10 +648,11 @@ func (m *mob) beginWindup(s *Sim) {
 func (m *mob) inReach(t Terrain, target *Player) bool {
 	def := m.species()
 	body := def.body.boxAt(m.pos)
-	if boxDistance(body, playerBox(target.pos)) > def.attackRange {
+	prey := target.box()
+	if boxDistance(body, prey) > def.attackRange {
 		return false
 	}
-	return clearLineOfSight(t, boxCentre(body), boxCentre(playerBox(target.pos)))
+	return clearLineOfSight(t, boxCentre(body), boxCentre(prey))
 }
 
 // speedIn is how fast this creature may travel horizontally from where it is standing.
