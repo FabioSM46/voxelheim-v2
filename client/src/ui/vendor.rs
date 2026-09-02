@@ -12,8 +12,8 @@ use super::inventory::{refresh_silver_readout, spawn_silver_readout};
 use super::{BUTTON, FILLED_CELL, button_colour, icon, stack_style};
 use crate::net::{InventoryStack, Session, VendorEntry};
 use crate::player::{
-    InputMode, Inventory, Liveries, SHIFT_COUNT, SelfVitals, VendorTradeClick, VendorWindow,
-    item_label,
+    Appearances, InputMode, Inventory, Liveries, SHIFT_COUNT, SelfVitals, VendorTradeClick,
+    VendorWindow, item_label,
 };
 
 const WIDTH: f32 = 620.0;
@@ -129,13 +129,15 @@ fn spawn_window(mut commands: Commands) {
 fn rebuild_window(
     window: Res<VendorWindow>,
     inventory: Option<Res<Inventory>>,
+    appearances: Option<Res<Appearances>>,
     roots: Query<Entity, With<VendorRoot>>,
     mut commands: Commands,
     // Optional, because the UI stands up headlessly without the player plugin that owns it.
     liveries: Option<Res<Liveries>>,
 ) {
     let inventory_moved = inventory.as_ref().is_some_and(DetectChanges::is_changed);
-    if !window.is_changed() && !inventory_moved {
+    let identity_moved = appearances.as_ref().is_some_and(DetectChanges::is_changed);
+    if !window.is_changed() && !inventory_moved && !identity_moved {
         return;
     }
     for root in &roots {
@@ -145,7 +147,7 @@ fn rebuild_window(
         };
         commands.entity(root).with_children(|root| {
             root.spawn((
-                Text::new(format!("Trade | revision {}", state.revision)),
+                Text::new(vendor_title(appearances.as_deref(), state.entity_id)),
                 TextFont {
                     font_size: FontSize::Px(22.0),
                     ..default()
@@ -180,6 +182,17 @@ fn rebuild_window(
             spawn_silver_readout(root, PADDING);
         });
     }
+}
+
+/// The active resident's display identity, or the neutral title while it has not arrived.
+///
+/// No identity is stored beside [`VendorWindow`]. The price list and appearance streams
+/// are unordered, so deriving this on either resource's change makes both arrival orders
+/// the same operation and prevents a previous vendor's name surviving a switch or close.
+fn vendor_title(appearances: Option<&Appearances>, entity_id: u64) -> String {
+    appearances
+        .and_then(|appearances| appearances.resident_label(entity_id))
+        .unwrap_or_else(|| "Trade".to_owned())
 }
 
 /// How many of one item the last authoritative inventory holds, or `None` for none at all.
@@ -385,7 +398,7 @@ fn show_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::{ANY_TOKEN, SessionParams, VendorState};
+    use crate::net::{ANY_TOKEN, ResidentRole, SessionParams, VendorState};
     use crate::ui::inventory::SilverCount;
 
     /// Three ids from the smith's list in `server/internal/game/vendor.go`. Spelled as
@@ -395,6 +408,9 @@ mod tests {
     const PICKAXE: u16 = 17;
     const RAW_IRON: u16 = 6;
     const RAW_COAL: u16 = 5;
+
+    const SMITH: u64 = (1 << 62) | 55;
+    const COOK: u64 = (1 << 62) | 56;
 
     fn session() -> Session {
         Session(SessionParams {
@@ -416,7 +432,7 @@ mod tests {
     /// holding none of.
     fn smith() -> VendorState {
         VendorState {
-            entity_id: (1 << 62) | 55,
+            entity_id: SMITH,
             revision: 3,
             sells: vec![VendorEntry {
                 item_id: PICKAXE,
@@ -435,6 +451,18 @@ mod tests {
         }
     }
 
+    fn cook() -> VendorState {
+        VendorState {
+            entity_id: COOK,
+            revision: 8,
+            sells: vec![VendorEntry {
+                item_id: PICKAXE,
+                price: 30,
+            }],
+            buys: Vec::new(),
+        }
+    }
+
     /// One authoritative slot, as the server sends them.
     fn stack(item_id: u16, count: u16) -> InventoryStack {
         InventoryStack {
@@ -450,7 +478,7 @@ mod tests {
         Inventory::from_state(vec![stack(RAW_IRON, 4)], 12)
     }
 
-    fn app() -> App {
+    fn app_with_appearances(appearances: Option<Appearances>) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
@@ -458,8 +486,19 @@ mod tests {
             .insert_resource(VendorWindow::from_server(smith()))
             .insert_resource(carrying())
             .add_plugins(VendorUiPlugin);
+        if let Some(appearances) = appearances {
+            app.insert_resource(appearances);
+        }
         app.update();
         app
+    }
+
+    fn app() -> App {
+        app_with_appearances(Some(Appearances::with_resident(
+            SMITH,
+            "Sigrun",
+            ResidentRole::Smith,
+        )))
     }
 
     fn lines(app: &mut App) -> Vec<String> {
@@ -478,10 +517,7 @@ mod tests {
         assert_eq!(roots.single(world).unwrap(), &Visibility::Visible);
 
         let drawn = lines(&mut app);
-        assert!(
-            drawn.contains(&"Trade | revision 3".to_owned()),
-            "{drawn:?}"
-        );
+        assert!(drawn.contains(&"Sigrun | Smith".to_owned()), "{drawn:?}");
         assert!(drawn.contains(&"Buy".to_owned()) && drawn.contains(&"Sell".to_owned()));
         assert!(
             drawn.contains(&format!("{} | 25 silver", item_label(PICKAXE))),
@@ -504,6 +540,98 @@ mod tests {
         for line in lines(&mut app) {
             assert!(line.is_ascii(), "{line}");
         }
+    }
+
+    /// The appearance and price-list streams are unordered. Whichever arrives second
+    /// refreshes the title, and a correction for the active resident does the same.
+    #[test]
+    fn both_arrival_orders_and_a_later_identity_refresh_draw_the_resident() {
+        // Appearance first: it is already cached when the startup rebuild sees the list.
+        let mut appearance_first = app();
+        assert!(
+            lines(&mut appearance_first).contains(&"Sigrun | Smith".to_owned()),
+            "an appearance cached before the list was not used"
+        );
+
+        // List first: absence has a neutral title, then the cache change rebuilds it.
+        let mut list_first = app_with_appearances(None);
+        assert!(lines(&mut list_first).contains(&"Trade".to_owned()));
+        assert!(
+            !lines(&mut list_first)
+                .iter()
+                .any(|line| line.contains("revision")),
+            "protocol metadata reached the fallback title"
+        );
+        list_first.insert_resource(Appearances::with_resident(
+            SMITH,
+            "Sigrun",
+            ResidentRole::Smith,
+        ));
+        list_first.update();
+        assert!(
+            lines(&mut list_first).contains(&"Sigrun | Smith".to_owned()),
+            "a resident arriving after the list did not refresh the title"
+        );
+
+        list_first.insert_resource(Appearances::with_resident(
+            SMITH,
+            "Ingrid",
+            ResidentRole::Trader,
+        ));
+        list_first.update();
+        let drawn = lines(&mut list_first);
+        assert!(drawn.contains(&"Ingrid | Trader".to_owned()), "{drawn:?}");
+        assert!(!drawn.contains(&"Sigrun | Smith".to_owned()), "{drawn:?}");
+    }
+
+    /// Every role that owns a stall uses the same role word as the resident's plate.
+    /// An exhaustive match inside `Appearances::resident_label` keeps future roles from
+    /// silently falling through to `Trade`; these are the four roles a stall has today.
+    #[test]
+    fn every_vendor_role_has_an_identity_title() {
+        for (role, role_name) in [
+            (ResidentRole::Smith, "Smith"),
+            (ResidentRole::Cook, "Cook"),
+            (ResidentRole::Trader, "Trader"),
+            (ResidentRole::Stablemaster, "Stablemaster"),
+        ] {
+            let appearances = Appearances::with_resident(SMITH, "Sigrun", role);
+            assert_eq!(
+                vendor_title(Some(&appearances), SMITH),
+                format!("Sigrun | {role_name}")
+            );
+        }
+    }
+
+    /// Switching directly to an undescribed vendor falls back instead of retaining the
+    /// previous identity; closing the stall removes the title with the rest of its rows.
+    #[test]
+    fn switching_and_closing_cannot_leave_a_stale_vendor_identity() {
+        let mut app = app();
+        assert!(lines(&mut app).contains(&"Sigrun | Smith".to_owned()));
+
+        app.insert_resource(VendorWindow::from_server(cook()));
+        app.update();
+        let drawn = lines(&mut app);
+        assert!(drawn.contains(&"Trade".to_owned()), "{drawn:?}");
+        assert!(!drawn.contains(&"Sigrun | Smith".to_owned()), "{drawn:?}");
+
+        app.insert_resource(Appearances::with_resident(
+            COOK,
+            "Astrid",
+            ResidentRole::Cook,
+        ));
+        app.update();
+        assert!(lines(&mut app).contains(&"Astrid | Cook".to_owned()));
+
+        app.insert_resource(VendorWindow::default());
+        app.update();
+        let drawn = lines(&mut app);
+        assert!(!drawn.iter().any(|line| line == "Trade"), "{drawn:?}");
+        assert!(
+            !drawn.iter().any(|line| line.contains("Astrid")),
+            "{drawn:?}"
+        );
     }
 
     /// **Spending the last of a stack takes its row out of the sell column** — the half of
