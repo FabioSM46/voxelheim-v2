@@ -59,7 +59,7 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on, and the two questions about a voxel — `solid_at` for what stops a body, `targetable_at` for what the crosshair finds | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a flower for each cover id and a clump of foliage for a bush | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a flower for each cover id, a leafy bramble for a bush and a leafless thorn bramble for desert scrub | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the three materials, one entity per chunk with the water and cover halves as its children | mesh on the main schedule, or own a camera or a light |
 | `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), which are cover — there to be seen and broken but solid to nothing (`is_cover`) — and which the mesher grows a shape for rather than sweeping as a cube (`is_shaped`) | know about meshes or about the wire |
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
@@ -502,22 +502,22 @@ of the back-to-front sort water needs.
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
 once and grows a shape inside each one `palette::is_shaped` answers for: a stem, two leaves, a
 five-petal corolla and an eye for each of the three flower ids, and an arching bramble with leaves
-along its canes and flowers at their tips for a bush. Every vertex stays inside its own voxel, which
-lets
+along its canes and flowers at their tips for a bush, or a dry arching cane with short thorns and no
+bloom for desert scrub. Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
-and for the bush that is the point: it used to be an ordinary opaque cube, so a cluster of them
-merged into one flat green slab. Small per-voxel variations are drawn from a hash of the *chunk-local*
-coordinate, so a row of plants is a row of different plants and the buffers are still byte-identical
-on every remesh.
+and for either bramble that is the point: it used to be an ordinary opaque cube, so a cluster of
+them merged into one flat slab. Small per-voxel variations are drawn from a hash of the
+*chunk-local* coordinate, so a row of plants is a row of different plants and the buffers are still
+byte-identical on every remesh.
 
-**A bush is where `is_opaque` and `is_solid` part company, and it is the first id where they do.**
-`world.Bush` is `Solid` on the server, so a body is stopped by the whole cube and the drawn bramble
-has to span it — it reaches to within `BUSH_INSET` of every wall, which is close enough that there
-is no invisible wall and far enough that two neighbours never put coincident quads on the plane
-they share. But foliage has gaps, so the ground under a bush has to keep the top face the cube used
-to cull: `is_opaque` is false for it and `is_solid` is still true. Making `Bush` a `Cover` block
-would be a **server** change with three enforced consequences, and it is not this.
+**The two brambles are where `is_opaque` and `is_solid` part company.** `world.Bush` and
+`world.DesertShrub` are `Solid` on the server, so a body is stopped by the whole cube and each drawn
+bramble has to span it — it reaches to within `BUSH_INSET` of every wall, which is close enough that
+there is no invisible wall and far enough that two neighbours never put coincident quads on the
+plane they share. Their shapes have gaps, so the ground under either one has to keep the top face
+the cube used to cull: `is_opaque` is false and `is_solid` is still true. Making either id a `Cover`
+block would be a **server** change with three enforced consequences, and it is not this.
 
 **The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads and
@@ -525,6 +525,12 @@ a bush is 42. On a generated meadow chunk with 12 flowers and 9 bushes the cover
 where the two shapes before #634 cost 96, while the opaque half fell by 24 — the bush's cube left
 the sweep and the ground under it gained the faces that cube was culling.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
+The desert bramble is 46 quads. The dense desert fixture grows exactly 25 per chunk, so its cover
+half is 1,150 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
+7,645 quads while bare and shaped scrub were both 7,637. The new shape therefore adds 1,150 cover
+quads, removes a net 8 opaque quads after returning the sand tops the cubes hid, and adds 1,142
+quads in all. `a_desert_chunk_costs_the_scrub_quads_and_returns_the_sand_faces` pins the cover cost
+and exact restoration of the bare opaque buffer.
 
 **The queue still does not distinguish the shapes, and #788 re-measured that instead of assuming
 the larger bramble was free.** Meshing runs
@@ -544,6 +550,16 @@ mesh takes**, which is why they do not move: the same finding #642 made about
 `MAX_APPLIED_PER_FRAME`, one stage earlier. `measure_what_a_planted_chunk_costs_to_mesh` puts the
 new 510-quad cover buffer in context: the planted terrain chunk measured 4.218..5.197 ms (median
 4.354 ms), overlapping the bare terrain's 4.030..4.914 ms (median 4.314 ms).
+
+**#789 repeated the same controls for dense desert scrub.** In the optimized 343-chunk join,
+`DesertBare` / `CubeScrub` / `DesertPlanted` recorded peak `queued` ranges of 155..169 / 161..171 /
+151..158, peak `in_flight` of 326..337 / 328..335 / 318..328, and last mesh entities at
+1,254.7..1,330.4 / 1,132.5..1,544.7 / 565.4..687.3 ms. Over four walking crossings they recorded
+peak `queued` of 4..8 / 4..11 / 4..8, peak `in_flight` of 48..77 / 49..77 / 49..77, and last meshes
+at 173.5..259.3 / 165.3..278.8 / 164.6..274.3 ms. The queue and in-flight spreads overlap both
+controls; these runs provide no evidence that the 46-quad shape regressed streaming. The per-chunk
+measurement put the same result on one worker: `DesertPlanted` took 7.287..8.335 ms (median 7.338
+ms), overlapping `DesertBare` at 7.254..7.525 ms (median 7.305 ms).
 
 **A shaped plant costs the sweep nothing at all**, and since #652 that is asserted rather than
 counted: the opaque and water buffers over ground carrying twelve flowers and nine bushes are

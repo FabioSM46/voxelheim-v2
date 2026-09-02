@@ -369,21 +369,23 @@ pub fn is_cover(block: BlockId) -> bool {
 /// Whether the mesher grows this block a shape of its own inside its voxel rather than
 /// sweeping it as a cube.
 ///
-/// Exactly [`is_cover`] plus [`BUSH`], and it is a **third** question about a block
-/// rather than a synonym for either of the two above it. Cover answers what a body does
-/// with a voxel — mirrored from the server's `world.Cover` — and a bush is `world.Solid`
-/// there, so it stops a body while a flower does not. What the two share is only that
-/// neither is a cube: [`super::mesher::build_cover`] builds a stem, a corolla and leaves
-/// for one and a clump of foliage for the other, and the sweep never sees either.
+/// Exactly [`is_cover`] plus [`BUSH`] and [`DESERT_SHRUB`], and it is a **third**
+/// question about a block rather than a synonym for either of the two above it. Cover
+/// answers what a body does with a voxel — mirrored from the server's `world.Cover` —
+/// and both brambles are `world.Solid` there, so they stop a body while a flower does
+/// not. What the shapes share is only that none is a cube:
+/// [`super::mesher::build_cover`] builds a stem, a corolla and leaves for a flower, a
+/// leafy bramble for a bush and a bare thorn bramble for desert scrub; the sweep never
+/// sees any of them.
 ///
 /// **The consequence is [`is_opaque`], and it is the reason this predicate has to exist
 /// at all.** A shape does not fill the voxel the sweep would have culled against, so the
-/// grass under a bush keeps its top face and the dirt beside one keeps its side face —
-/// otherwise every gap between two clumps of foliage would look through the bush onto a
-/// face nobody drew. It says nothing about solidity: `is_solid` still reads [`is_cover`],
-/// so a bush stops a body exactly as it did before it was drawn as one.
+/// ground under a bramble keeps its top face and the block beside one keeps its side
+/// face — otherwise every gap between two shapes would look through the plant onto a
+/// face nobody drew. It says nothing about solidity: `is_solid` still reads
+/// [`is_cover`], so both brambles stop a body exactly as they did as cubes.
 pub fn is_shaped(block: BlockId) -> bool {
-    is_cover(block) || block == BUSH
+    is_cover(block) || matches!(block, BUSH | DESERT_SHRUB)
 }
 
 /// The server-authored water height in eighths. Falling is resolved by the mesher.
@@ -857,28 +859,42 @@ mod tests {
             );
         }
         assert!(is_opaque(999), "an unknown id is drawn, not seen through");
-        // The bush is where opacity and solidity part company, and #634 is what parted
-        // them: it is drawn as a clump of foliage with gaps, so the ground under it has
-        // to keep the faces the sweep used to cull, and it still stops a body.
+        // The two solid brambles are where opacity and solidity part company: they are
+        // drawn with gaps, so the ground under them keeps the faces their old cubes
+        // culled, and both still stop a body.
         assert!(!is_opaque(BUSH), "a bush is foliage with gaps in it");
         assert!(is_solid(BUSH), "and it still stops a body");
         assert!(
             !is_cover(BUSH),
             "which is what keeps it out of the cover family"
         );
+        assert!(
+            !is_opaque(DESERT_SHRUB),
+            "desert scrub is bare canes with gaps"
+        );
+        assert!(is_solid(DESERT_SHRUB), "and it still stops a body");
+        assert!(
+            !is_cover(DESERT_SHRUB),
+            "which is what keeps it out of the cover family"
+        );
     }
 
     #[test]
-    fn the_shaped_plants_are_the_bush_and_the_three_flowers() {
+    fn the_shaped_plants_are_the_two_brambles_and_the_three_flowers() {
         // The set the mesher grows geometry for, pinned the way `is_cover` is: an id
         // that starts answering `is_shaped` without being listed here is a block that
         // silently stopped hiding what is behind it.
-        for block in [BUSH, FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE] {
+        for block in [BUSH, DESERT_SHRUB, FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE] {
             assert!(is_shaped(block));
         }
         for block in PALETTE
             .into_iter()
-            .filter(|block| !matches!(*block, BUSH | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE))
+            .filter(|block| {
+                !matches!(
+                    *block,
+                    BUSH | DESERT_SHRUB | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE
+                )
+            })
             .chain([AIR, BlockId::MAX])
         {
             assert!(!is_shaped(block), "block {block} is swept as a cube");

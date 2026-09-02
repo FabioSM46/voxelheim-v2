@@ -443,6 +443,16 @@ const BUSH_CANE_LEAF_OUTER: f32 = 0.14;
 const BUSH_CANE_LEAF_HALF_WIDTH: f32 = 0.045;
 const BUSH_CANE_LEAF_RISE: f32 = 0.07;
 
+/// The desert bramble's dressing on the shared cane skeleton. Two short thorns leave
+/// every arch, while two low crossed canes reach the four horizontal walls. A crossed
+/// thorn at the highest crest reaches the ceiling; together with the low canes it makes
+/// the full-voxel collision visible without putting foliage or a filler box in the sand.
+const DESERT_THORNS_PER_CANE: usize = 2;
+const DESERT_THORN_REACH: f32 = 0.09;
+const DESERT_THORN_RISE: f32 = 0.035;
+const DESERT_BASE_CANES: usize = 2;
+const DESERT_CROWN_BLADES: usize = 2;
+
 /// Three flower specks sit at three cane tips. Their crossed blades are less than half
 /// the flower eye's width and height, so they remain punctuation rather than miniature
 /// flowers.
@@ -471,6 +481,14 @@ pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES
     + BRAMBLE_CANES * (BRAMBLE_CANE_SEGMENTS * 2 + BUSH_LEAVES_PER_CANE)
     + BUSH_SPECKS * 2;
+
+/// How many quads one desert bramble contributes: the shared four arches, two crossed
+/// low canes, two short thorns per arch and the crossed crown thorn.
+#[cfg(test)]
+pub(super) const QUADS_PER_DESERT_BRAMBLE: usize = BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2
+    + DESERT_BASE_CANES * 2
+    + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
+    + DESERT_CROWN_BLADES;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1044,7 +1062,8 @@ fn half_quad_corners(
 }
 
 /// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
-/// of the three cover ids, an arching bramble for a bush.
+/// of the three cover ids, a leafy bramble for a bush and a bare thorn bramble for
+/// desert scrub.
 ///
 /// A whole pass over the chunk rather than a third mask, because there is nothing here
 /// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a plant's
@@ -1077,6 +1096,8 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
                 let seed = plant_seed(x, y, z);
                 if block == palette::BUSH {
                     push_bush(mesh, floor, seed);
+                } else if block == palette::DESERT_SHRUB {
+                    push_desert_bramble(mesh, floor, seed);
                 } else {
                     push_flower(mesh, floor, seed, palette::linear_rgba(block));
                 }
@@ -1331,6 +1352,71 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
             2,
             colour,
         );
+    }
+}
+
+/// One desert bramble, filling the voxel whose minimum corner is `floor`.
+///
+/// Four [`push_cane`] arches carry the silhouette and two short thorns grow from each.
+/// Two crossed canes at the foot make the dry tangle broad without leaves; their ends
+/// reach the four horizontal walls, and the crossed thorn rising from the highest crest
+/// reaches the ceiling. Every part is the scrub's existing sun-bleached khaki — there
+/// are no flowers, berries, leaves or saturated accents in this biome.
+///
+/// `world.DesertShrub` is `Solid`, so the sparse geometry still has to show the whole
+/// cube a body is stopped by. The six extrema land at [`BUSH_INSET`] rather than on the
+/// voxel planes, keeping neighbouring scrubs apart without leaving an invisible wall.
+fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
+    let wood = palette::linear_rgba(palette::DESERT_SHRUB);
+    let canes: [Cane; BRAMBLE_CANES] =
+        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
+
+    // Two low canes cross through the roots. Their ribbons touch the floor inset and
+    // their centre lines touch the four horizontal insets: the full collision span is
+    // carried by wood, not by a leaf or a hidden box.
+    let base_axes: [usize; DESERT_BASE_CANES] = [0, 2];
+    for axis in base_axes {
+        let mut start = [
+            floor[0] + 0.5,
+            floor[1] + BUSH_INSET + BUSH_CANE_HALF_WIDTH,
+            floor[2] + 0.5,
+        ];
+        let mut end = start;
+        start[axis] = floor[axis] + BUSH_INSET;
+        end[axis] = floor[axis] + 1.0 - BUSH_INSET;
+        push_twig(mesh, start, end, BUSH_CANE_HALF_WIDTH, wood);
+    }
+
+    // Alternating sides make the thorns read as a tangle rather than a comb. Every
+    // endpoint is derived from the cane's deterministic yaw and joints, so no world or
+    // chunk coordinate has entered the shape.
+    for (index, cane) in canes.iter().enumerate() {
+        let thorn_joints: [[f32; 3]; DESERT_THORNS_PER_CANE] = [cane.shoulder, cane.crest];
+        for (thorn, joint) in thorn_joints.into_iter().enumerate() {
+            let side = if (index + thorn) % 2 == 0 { 1.0 } else { -1.0 };
+            let angle = cane.yaw + side * std::f32::consts::FRAC_PI_2;
+            let (sin, cos) = angle.sin_cos();
+            let end = [
+                joint[0] + cos * DESERT_THORN_REACH,
+                joint[1] + DESERT_THORN_RISE,
+                joint[2] + sin * DESERT_THORN_REACH,
+            ];
+            push_twig(mesh, joint, end, BUSH_CANE_HALF_WIDTH, wood);
+        }
+    }
+
+    // The highest arch owns the one vertical thorn that makes the solid voxel's ceiling
+    // visible. Crossed blades are the established tiny-detail primitive; here they use
+    // the same dry wood and meet the crest instead of pretending to be a flower.
+    let crown = canes
+        .iter()
+        .max_by(|left, right| left.crest[1].total_cmp(&right.crest[1]))
+        .expect("a bramble has canes")
+        .crest;
+    let top = floor[1] + 1.0 - BUSH_INSET;
+    let crown_axes: [usize; DESERT_CROWN_BLADES] = [0, 2];
+    for axis in crown_axes {
+        push_blade(mesh, crown, BUSH_CANE_HALF_WIDTH, top, axis, wood);
     }
 }
 
@@ -4119,6 +4205,111 @@ mod tests {
     }
 
     #[test]
+    fn a_desert_bramble_has_arches_thorns_and_fills_the_voxel_without_a_bloom() {
+        // `world.DesertShrub` has the bush's collision and none of its meadow dressing:
+        // the old cube leaves the sweep, the sand regains its top face, and bare wood
+        // alone has to make the stopped volume visible.
+        let mut chunk = solid(SIZE, palette::SAND);
+        chunk.set(4, 5, 6, palette::AIR);
+        let hole = super::mesh_chunk(&chunk, &alone());
+        chunk.set(4, 5, 6, palette::DESERT_SHRUB);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(
+            mesh.opaque, hole.opaque,
+            "desert scrub is drawn by itself, so the sweep sees the same hole"
+        );
+        assert!(mesh.water.is_empty());
+        assert_eq!(mesh.cover.quad_count(), QUADS_PER_DESERT_BRAMBLE);
+        assert_eq!(
+            quads_by_colour(&mesh.cover),
+            BTreeMap::from([(
+                palette::linear_rgba(palette::DESERT_SHRUB).map(f32::to_bits),
+                QUADS_PER_DESERT_BRAMBLE,
+            )]),
+            "bare sun-bleached wood, with no meadow leaf, flower or saturated accent"
+        );
+
+        let repeated = super::mesh_chunk(&chunk, &alone());
+        assert_eq!(
+            mesh.cover, repeated.cover,
+            "a remesh reshuffled the desert bramble"
+        );
+
+        // The shared primitive emits two ribbons for each of three segments, and the
+        // first four groups are the bramble's arches. Reading their centre lines back
+        // proves each one climbs through a shoulder and crest before descending.
+        let endpoint = |quad: usize, end: bool| {
+            let vertices = &mesh.cover.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+            let pair = if end {
+                [vertices[2], vertices[3]]
+            } else {
+                [vertices[0], vertices[1]]
+            };
+            [
+                (pair[0][0] + pair[1][0]) * 0.5,
+                (pair[0][1] + pair[1][1]) * 0.5,
+                (pair[0][2] + pair[1][2]) * 0.5,
+            ]
+        };
+        for cane in 0..BRAMBLE_CANES {
+            let first = cane * BRAMBLE_CANE_SEGMENTS * 2;
+            let base = endpoint(first, false);
+            let shoulder = endpoint(first, true);
+            let crest = endpoint(first + 2, true);
+            let tip = endpoint(first + 4, true);
+            assert!(
+                base[1] < shoulder[1] && shoulder[1] < crest[1] && tip[1] < crest[1],
+                "cane {cane} is not an arch: {base:?} -> {shoulder:?} -> {crest:?} -> {tip:?}"
+            );
+        }
+
+        // Beyond those arches, every short branch is still woody geometry: two basal
+        // canes, two thorns per arch and the crossed crown thorn.
+        let dressing = QUADS_PER_DESERT_BRAMBLE - BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2;
+        assert_eq!(
+            dressing,
+            DESERT_BASE_CANES * 2
+                + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
+                + DESERT_CROWN_BLADES
+        );
+
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+        for (axis, floor) in [(0, 4.0), (1, 5.0), (2, 6.0)] {
+            let (minimum, maximum) = (0..mesh.cover.quad_count()).fold(
+                (f32::INFINITY, f32::NEG_INFINITY),
+                |(low, high), quad| {
+                    let (quad_low, quad_high) = quad_extent(&mesh.cover, quad, axis);
+                    (low.min(quad_low), high.max(quad_high))
+                },
+            );
+            assert!(
+                (minimum - (floor + BUSH_INSET)).abs() < 1e-5
+                    && (maximum - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
+                "axis {axis}: the drawn desert bramble spans {minimum}..{maximum}, want \
+                 the voxel less the inset"
+            );
+        }
+    }
+
+    #[test]
+    fn every_desert_bramble_vertex_stays_inside_its_own_voxel() {
+        // `dial` is chunk-local, so sweep enough coordinates to exercise its several
+        // yaw, bend, height and thorn combinations instead of checking one lucky seed.
+        for y in 0..4 {
+            for z in 0..4 {
+                for x in 0..4 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let mut mesh = SurfaceMesh::default();
+                    push_desert_bramble(&mut mesh, floor, plant_seed(x, y, z));
+                    stays_inside_the_voxel(&mesh, floor);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn two_bushes_side_by_side_are_two_bushes() {
         // What #634 is for. A bush used to be an ordinary opaque cube, so the greedy
         // sweep merged a cluster of them into one slab with one flat top; `visitBush` on
@@ -4208,6 +4399,51 @@ mod tests {
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
         assert_eq!(mesh.cover.quad_count(), 2048);
+    }
+
+    #[test]
+    fn a_desert_chunk_costs_the_scrub_quads_and_returns_the_sand_faces() {
+        // One scrub in forty columns is about twenty-five in a 32 x 32 surface. Keep
+        // that dense case exact here: the cover half pays every unmerged bramble, while
+        // taking the old cubes out of the sweep returns the sand tops they hid.
+        let mut bare = air(SIZE);
+        for z in 0..SIZE {
+            for x in 0..SIZE {
+                bare.set(x, 4, z, palette::SAND);
+            }
+        }
+        let mut cubes = bare.clone();
+        let mut planted = bare.clone();
+        let mut shrubs = 0;
+        for z in (2..SIZE).step_by(6) {
+            for x in (2..SIZE).step_by(6) {
+                // THATCH is an ordinary opaque cube and stands in for the old sweep
+                // path; DESERT_SHRUB itself cannot take that path after this change.
+                cubes.set(x, 5, z, palette::THATCH);
+                planted.set(x, 5, z, palette::DESERT_SHRUB);
+                shrubs += 1;
+            }
+        }
+
+        let bare_mesh = super::mesh_chunk(&bare, &alone());
+        let cube_mesh = super::mesh_chunk(&cubes, &alone());
+        let planted_mesh = super::mesh_chunk(&planted, &alone());
+        assert_eq!(shrubs, 25);
+        assert_eq!(
+            planted_mesh.cover.quad_count(),
+            shrubs * QUADS_PER_DESERT_BRAMBLE
+        );
+        assert_eq!(planted_mesh.cover.quad_count(), 1150);
+        assert_eq!(
+            planted_mesh.opaque, bare_mesh.opaque,
+            "the shaped scrub must return every sand face and leave no cube in the sweep"
+        );
+        assert!(
+            cube_mesh.opaque.quad_count() > planted_mesh.opaque.quad_count(),
+            "the old opaque scrub proxy should cost more sweep quads: cube {} vs shaped {}",
+            cube_mesh.opaque.quad_count(),
+            planted_mesh.opaque.quad_count()
+        );
     }
 
     #[test]

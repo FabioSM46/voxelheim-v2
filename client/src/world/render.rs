@@ -2314,11 +2314,12 @@ mod tests {
     /// What a measurement's surface chunks grow on top of their grass, and the whole of
     /// how #652 attributes the cover half's cost.
     ///
-    /// Three plantings rather than two, because "with plants" and "without plants" cannot
-    /// separate *shape* from *presence*: a bush was an ordinary opaque cube before #634,
-    /// so the world before that change had the same plants standing in the same voxels
-    /// and paid the **sweep** for them instead of the cover pass. [`Planting::CubeBushes`]
-    /// is that world, and it is the only honest "before" this harness can build without
+    /// Three meadow plantings and three desert plantings, because "with plants" and
+    /// "without plants" cannot separate *shape* from *presence*: a bush was an ordinary
+    /// opaque cube before #634, so the world before that change had the same plants
+    /// standing in the same voxels and paid the **sweep** for them instead of the cover
+    /// pass. [`Planting::CubeBushes`] is that world, and it is the only honest "before"
+    /// this harness can build without
     /// resurrecting deleted geometry.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Planting {
@@ -2337,6 +2338,28 @@ mod tests {
         /// canes and flowers at their tips; a flower is a stem, a pair of leaves and a
         /// corolla.
         Planted,
+        /// Desert terrain without scrub: the control for attributing the denser biome's
+        /// cover cost.
+        DesertBare,
+        /// Desert scrub as the ordinary opaque cube it was before #789. THATCH supplies
+        /// the proxy id because DESERT_SHRUB itself is shaped in the shipping row.
+        CubeScrub,
+        /// Desert terrain as it ships: twenty-five bare thorn brambles per surface
+        /// chunk, the integer nearest one scrub in forty columns.
+        DesertPlanted,
+    }
+
+    impl Planting {
+        fn is_bare(self) -> bool {
+            matches!(self, Self::Bare | Self::DesertBare)
+        }
+
+        fn is_desert(self) -> bool {
+            matches!(
+                self,
+                Self::DesertBare | Self::CubeScrub | Self::DesertPlanted
+            )
+        }
     }
 
     /// How many plants of each kind every surface chunk carries.
@@ -2354,6 +2377,7 @@ mod tests {
     /// under-weights the bush by nearly half — the one shape the whole issue is about.
     const FLOWERS_PER_CHUNK: usize = 12;
     const BUSHES_PER_CHUNK: usize = 9;
+    const DESERT_SHRUBS_PER_CHUNK: usize = 25;
 
     /// How many columns a chunk's surface has. A power of two, which is what lets the
     /// permutation in [`plant_at`] be a permutation.
@@ -2369,7 +2393,7 @@ mod tests {
     /// to chunk. Derived from nothing but coordinates, so a chunk carries the same plants
     /// wherever the walk below reaches it and two runs mesh identical geometry.
     fn plant_at(cx: i32, cz: i32, x: usize, z: usize, planting: Planting) -> Option<BlockId> {
-        if planting == Planting::Bare {
+        if planting.is_bare() {
             return None;
         }
         let mut hash = (i64::from(cx) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -2385,6 +2409,14 @@ mod tests {
             .wrapping_add((hash >> 32) as usize)
             & mask;
 
+        if planting.is_desert() {
+            return (slot < DESERT_SHRUBS_PER_CHUNK).then_some(match planting {
+                Planting::CubeScrub => palette::THATCH,
+                Planting::DesertPlanted => palette::DESERT_SHRUB,
+                _ => unreachable!("bare desert returned before planting"),
+            });
+        }
+
         match slot {
             slot if slot < FLOWERS_PER_CHUNK => Some(match slot % 3 {
                 0 => palette::FLOWER_RED,
@@ -2395,7 +2427,8 @@ mod tests {
                 Planting::Planted => palette::BUSH,
                 // The pre-#634 bush: opaque, so the sweep draws it and the grass under
                 // it loses the top face a shaped bush leaves in place.
-                _ => palette::LEAVES,
+                Planting::CubeBushes => palette::LEAVES,
+                _ => unreachable!("only meadow plantings reach the meadow table"),
             }),
             _ => None,
         }
@@ -2433,8 +2466,8 @@ mod tests {
         encode_runs(&blocks)
     }
 
-    /// A chunk shaped like ground a player walks over: a ridged stone surface under a
-    /// grass skin, with air above it and whatever `planting` grows on it.
+    /// A chunk shaped like ground a player walks over: a ridged stone-and-grass meadow
+    /// or sandstone-and-sand desert, with air above it and whatever `planting` grows.
     ///
     /// Deliberately not flat and deliberately not solid. A solid chunk is two `u16` on
     /// the wire and six quads on screen, and measuring against one would understate
@@ -2442,6 +2475,11 @@ mod tests {
     fn terrain_runs(cx: i32, cz: i32, planting: Planting) -> Vec<u16> {
         let size = usize::from(SIZE);
         let mut blocks = vec![palette::AIR; size * size * size];
+        let (body, surface) = if planting.is_desert() {
+            (palette::SANDSTONE, palette::SAND)
+        } else {
+            (palette::STONE, palette::GRASS)
+        };
         for z in 0..size {
             for x in 0..size {
                 let wx = i64::from(cx) * size as i64 + x as i64;
@@ -2450,9 +2488,9 @@ mod tests {
                     + (wx * 7 + wz * 13).rem_euclid(9) as usize
                     + (wx * wz).rem_euclid(3) as usize;
                 for y in 0..height {
-                    blocks[at(size, x, y, z)] = palette::STONE;
+                    blocks[at(size, x, y, z)] = body;
                 }
-                blocks[at(size, x, height - 1, z)] = palette::GRASS;
+                blocks[at(size, x, height - 1, z)] = surface;
                 if let Some(plant) = plant_at(cx, cz, x, z, planting) {
                     blocks[at(size, x, height, z)] = plant;
                 }
@@ -2466,6 +2504,7 @@ mod tests {
         (-radius..=radius)
             .map(|cy| {
                 let runs = match cy {
+                    ..=-1 if planting.is_desert() => solid_chunk(palette::SANDSTONE),
                     ..=-1 => solid_chunk(palette::STONE),
                     0 => terrain_runs(cx, cz, planting),
                     _ => solid_chunk(palette::AIR),
@@ -2961,12 +3000,23 @@ mod tests {
     // `Assets<Mesh>::add` is not in any number below. What it *can* see is the whole of
     // what the main schedule does, which is where a hitch would have to live.
     //
-    // The three [`Planting`]s are the before, the after and the control, and the terrain
-    // is a **fixture** rather than generated: densities from the meadow chunk #634 and
-    // #647 measured, geometry from this file.
+    // Each biome's three [`Planting`]s are the before, the after and the control, and
+    // the terrain is a **fixture** rather than generated: meadow densities from #634
+    // and #647, desert density from the server's one-in-forty rule, geometry from here.
 
-    /// Every planting, in the order a report reads them.
-    const PLANTINGS: [Planting; 3] = [Planting::Bare, Planting::CubeBushes, Planting::Planted];
+    /// Every planting, grouped by biome and in the order a report reads them.
+    const PLANTINGS: [Planting; 6] = [
+        Planting::Bare,
+        Planting::CubeBushes,
+        Planting::Planted,
+        Planting::DesertBare,
+        Planting::CubeScrub,
+        Planting::DesertPlanted,
+    ];
+
+    /// The meadow-only rows used by #652's per-chunk comparison below.
+    const MEADOW_PLANTINGS: [Planting; 3] =
+        [Planting::Bare, Planting::CubeBushes, Planting::Planted];
 
     /// How many crossings one walk makes. Four, because the reading wanted is a range
     /// across crossings and one crossing is a number.
@@ -3069,7 +3119,7 @@ mod tests {
         );
 
         let mut meshes = Vec::new();
-        for planting in PLANTINGS {
+        for planting in MEADOW_PLANTINGS {
             let chunk =
                 VoxelChunk::from_runs(&terrain_runs(0, 0, planting), SIZE.into()).expect("valid");
             let (mesh, spread) = time_meshing(&chunk);
@@ -3083,6 +3133,9 @@ mod tests {
                 Planting::CubeBushes => flowers * mesher::QUADS_PER_COVER,
                 Planting::Planted => {
                     flowers * mesher::QUADS_PER_COVER + bushes * mesher::QUADS_PER_BUSH
+                }
+                Planting::DesertBare | Planting::CubeScrub | Planting::DesertPlanted => {
+                    unreachable!("the per-chunk comparison is meadow-only")
                 }
             };
             assert_eq!(
@@ -3110,6 +3163,56 @@ mod tests {
         assert_ne!(
             meshes[0].opaque, meshes[1].opaque,
             "a cube bush left the sweep alone"
+        );
+
+        // The desert comparison requested by #789 uses the same generated-terrain
+        // fixture as the join and walk below. Keep its exact density and both sides of
+        // the budget visible here: shaped scrub adds only cover quads, while removing
+        // the old opaque cubes returns the sand faces those cubes hid.
+        let shrubs = (0..usize::from(SIZE))
+            .flat_map(|z| (0..usize::from(SIZE)).map(move |x| (x, z)))
+            .filter(|&(x, z)| {
+                plant_at(0, 0, x, z, Planting::DesertPlanted) == Some(palette::DESERT_SHRUB)
+            })
+            .count();
+        assert_eq!(
+            shrubs, DESERT_SHRUBS_PER_CHUNK,
+            "the desert fixture does not grow the density it says it grows"
+        );
+        println!(
+            "one 32³ desert surface chunk, meshed {MESH_REPEATS} times; every chunk grows \
+             {shrubs} scrub plants"
+        );
+
+        let mut desert_meshes = Vec::new();
+        for planting in [
+            Planting::DesertBare,
+            Planting::CubeScrub,
+            Planting::DesertPlanted,
+        ] {
+            let chunk =
+                VoxelChunk::from_runs(&terrain_runs(0, 0, planting), SIZE.into()).expect("valid");
+            let (mesh, spread) = time_meshing(&chunk);
+            print_meshing(&format!("{planting:?}"), &mesh, spread);
+            let expected = match planting {
+                Planting::DesertPlanted => shrubs * mesher::QUADS_PER_DESERT_BRAMBLE,
+                Planting::DesertBare | Planting::CubeScrub => 0,
+                _ => unreachable!("the per-chunk comparison is desert-only"),
+            };
+            assert_eq!(
+                mesh.cover.quad_count(),
+                expected,
+                "{planting:?}: the fixture's cover half is not what its scrub costs"
+            );
+            desert_meshes.push(mesh);
+        }
+        assert_eq!(
+            desert_meshes[0].opaque, desert_meshes[2].opaque,
+            "shaped desert scrub moved the opaque half"
+        );
+        assert_ne!(
+            desert_meshes[0].opaque, desert_meshes[1].opaque,
+            "opaque desert scrub left the sweep alone"
         );
 
         // And the cover pass on its own, which is the number the rows above cannot
