@@ -20,6 +20,12 @@ var measureEmergentWater = flag.Bool(
 	"run the eight-chunk emergent-water persistence and tick-cost measurement",
 )
 
+var measureTerraceContainment = flag.Bool(
+	"measure-terrace-containment",
+	false,
+	"run the forty-chunk generated-terrace containment measurement",
+)
+
 // TestMeasureEmergentWater is a measurement, not a CI assertion. Run it explicitly:
 //
 //	GOMAXPROCS=1 go test ./internal/game -run '^TestMeasureEmergentWater$' \
@@ -116,6 +122,150 @@ func TestMeasureEmergentWater(t *testing.T) {
 	t.Logf("settling: ticks=%d changes=%d unique_deltas=%d deltas_per_chunk=%v disk_bytes=%d", settling.ticks, settling.changes, total, counts, bytes)
 	t.Logf("settling tick ns: p50=%d p90=%d max=%d", percentile(settling.durations, 50), percentile(settling.durations, 90), slices.Max(settling.durations))
 	t.Logf("steady state: ticks=%d changes=%d delta_growth=%d byte_growth=%d", steady.ticks, steady.changes, steadyTotal-total, steadyBytes-bytes)
+}
+
+// TestMeasureTerraceContainment records the runtime cost and visible residue of the
+// generated fall rule. It is a measurement, not a CI assertion. Run it explicitly:
+//
+//	GOMAXPROCS=1 go test ./internal/game -run '^TestMeasureTerraceContainment$' \
+//	  -measure-terrace-containment -count=5 -v
+//
+// The fixture composes forty real cache chunks at seed 1: the 4x4 core spanning x
+// 0..127 and z -1184..-1057, two vertical bands at y 32..95, plus the four chunks
+// immediately north in both bands so every north face in the measured window is
+// resident. The 96x96 measurement window is x 0..95, z -1184..-1089, y 32..95.
+// A non-resident west neighbour is solid by the live simulation's rule.
+//
+// # Recorded result and decision
+//
+// Recorded on 2026-09-02 over five back-to-back single-P runs after #784's block-width
+// channel and #785's all-face generated falls. Every run began with 8,467 water voxels
+// (8,455 sources and 12 flowing), settled in 262 ticks through 4,313 writes, and ended
+// with 8,901 water voxels — 5.1% more than generation, down from the reported 18.6%
+// before both fixes. At the fixed point two source voxels and 115 flowing voxels had a
+// horizontal face on air. Twelve exposed vertical runs were four blocks or taller: ten
+// were four blocks and two were five, down from the reported forty-nine. The cost is
+// paid once per composition and remains inside the unchanged authoritative scan/write
+// caps; the smaller permanent-water and wall residue is worth that bounded work.
+func TestMeasureTerraceContainment(t *testing.T) {
+	if !*measureTerraceContainment {
+		t.Skip("pass -measure-terrace-containment to run the recorded measurement")
+	}
+
+	const seed int64 = 1
+	store, err := world.OpenStore(t.TempDir(), seed)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	cache := world.NewPersistentCache(store, 1, 64)
+	sim, err := NewSim(DefaultTickRate, 1, seed, NewCacheTerrain(cache), cache, testEntityIDs(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	if err := sim.ConfigureWater(cache); err != nil {
+		t.Fatalf("ConfigureWater: %v", err)
+	}
+
+	coords := terraceContainmentChunks()
+	for _, coord := range coords {
+		if _, _, err := cache.Get(context.Background(), coord); err != nil {
+			t.Fatalf("Get %+v: %v", coord, err)
+		}
+	}
+	generated := measureTerraceContainmentWater(t, cache)
+	composed := cache.TakeWaterCompositions()
+	if len(composed) != len(coords) {
+		t.Fatalf("water compositions = %d, want one for each of %d chunks", len(composed), len(coords))
+	}
+	for _, chunk := range composed {
+		if err := sim.QueueUnstableWater(context.Background(), chunk.Coord, world.UnstableWater(chunk)); err != nil {
+			t.Fatalf("QueueUnstableWater %+v: %v", chunk.Coord, err)
+		}
+	}
+
+	settling := runWaterToFixedPoint(t, sim, 0)
+	settled := measureTerraceContainmentWater(t, cache)
+	t.Logf("fixture: seed=%d chunks=%d generated=%+v", seed, len(coords), generated)
+	t.Logf("settling: ticks=%d changes=%d", settling.ticks, settling.changes)
+	t.Logf("settled: %+v", settled)
+}
+
+func terraceContainmentChunks() []world.Coord {
+	coords := make([]world.Coord, 0, 40)
+	for y := int32(1); y <= 2; y++ {
+		for z := int32(-38); z <= -34; z++ {
+			for x := int32(0); x <= 3; x++ {
+				coords = append(coords, world.Coord{X: x, Y: y, Z: z})
+			}
+		}
+	}
+	return coords
+}
+
+type terraceContainmentWater struct {
+	water, sources, flowing        int
+	exposedSources, exposedFlowing int
+	exposedRuns                    map[int]int
+}
+
+func measureTerraceContainmentWater(t testing.TB, cache *world.Cache) terraceContainmentWater {
+	t.Helper()
+	measured := terraceContainmentWater{exposedRuns: make(map[int]int)}
+	blockAt := func(x, y, z int64) world.Block {
+		if x < 0 || x >= 128 || z < -1216 || z >= -1056 {
+			return world.Stone
+		}
+		chunk, err := cache.Peek(world.ChunkOf(x, y, z))
+		if err != nil {
+			t.Fatalf("Peek (%d, %d, %d): %v", x, y, z, err)
+		}
+		return chunk.At(world.Local(x), world.Local(y), world.Local(z))
+	}
+
+	for z := int64(-1184); z < -1088; z++ {
+		for x := int64(0); x < 96; x++ {
+			run := 0
+			for y := int64(32); y <= 95; y++ {
+				block := blockAt(x, y, z)
+				if !world.IsWater(block) {
+					if run > 0 {
+						measured.exposedRuns[run]++
+						run = 0
+					}
+					continue
+				}
+				measured.water++
+				source := world.WaterLevel(block) == 8
+				if source {
+					measured.sources++
+				} else {
+					measured.flowing++
+				}
+				exposed := false
+				for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+					if blockAt(x+step[0], y, z+step[1]) == world.Air {
+						exposed = true
+						break
+					}
+				}
+				if exposed {
+					run++
+					if source {
+						measured.exposedSources++
+					} else {
+						measured.exposedFlowing++
+					}
+				} else if run > 0 {
+					measured.exposedRuns[run]++
+					run = 0
+				}
+			}
+			if run > 0 {
+				measured.exposedRuns[run]++
+			}
+		}
+	}
+	return measured
 }
 
 func measurementWaterChunks() []world.Coord {

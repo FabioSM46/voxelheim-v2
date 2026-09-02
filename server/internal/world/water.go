@@ -496,9 +496,9 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 	return min(surface-riverBedDrop, base), surface, true
 }
 
-// riverFallTopAt is how high the water in a channel column stands because a higher
-// channel beside it points into it: the top of the fall that pours into this column,
-// or this column's own surface where nothing pours into it.
+// riverFallTopAt is how high the water in a channel column stands because the channel
+// beside it stands higher: the top of the fall that covers their shared terrace face,
+// or this column's own surface where no higher terrace touches it.
 //
 // **A terrace step is a fall, and until #654 nobody wrote one.** [riverSurfaceAt] floors
 // the smoothed land, so two adjacent channel columns can differ by a whole terrace; the
@@ -516,24 +516,22 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 // channel above stops feeding it, and it is what carries the falling bit the client
 // draws with.
 //
-// **Height permits a fall; current chooses it.** Before #696 every higher adjacent
-// channel raised this column's fall surface, including upstream and perpendicular
-// neighbours. Across a terrace that painted several broad curtains from one course.
-// The higher source now has to point across the shared face into this column, which is
-// the same [WaterFeedsToward] rule the runtime automaton applies after generation.
+// **Every terrace face is a fall, whichever way the source current points.** A current
+// says which neighbour the automaton feeds; it does not make the source's other faces
+// cease to exist. Leaving one of those faces open writes permanent source water against
+// air. #696 restricted this rule to downstream faces to avoid broad curtains, but that
+// was compensating for a channel whose field threshold could make it 27 blocks wide.
+// Since #784 the channel is measured in blocks, so covering every shared terrace face
+// produces narrow falls without weakening the containment rule.
 //
 // Four neighbours and no diagonals, because a fall pours across a shared face. Only
-// channel columns are asked, and only their field, current and surface: this is
+// channel columns are asked, and only their field and surface: this is
 // [riverChannelAt]'s two conditions, not a whole [columnAt].
 func riverFallTopAt(seed, worldX, worldZ int64, ownSurface int) int {
 	top := ownSurface
 	for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 		x, z := worldX+step[0], worldZ+step[1]
 		if !riverAt(seed, x, z) {
-			continue
-		}
-		current := waterCurrentBlock(riverCurrentAt(seed, x, z))
-		if !WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
 			continue
 		}
 		if surface := riverSurfaceAt(seed, x, z); surface >= seaLevel {
@@ -661,40 +659,22 @@ func (c *column) fillAt(worldY int) Block {
 // space the body opens into". One downward scan per water column, no neighbour read.
 //
 // **The other candidate was the four-neighbour containment test, and it was measured
-// and rejected.** Written as the issue describes it — a carved voxel takes the body's
-// water only where none of its four neighbours is air at that height — it costs
-// nothing worth measuring, because it is reached only by a carved voxel a body has
-// already filled: BenchmarkGenerate 3.90…4.08 ms against a 3.81…3.90 ms baseline,
-// inside the noise. What it does not do is work. A pocket is a *blob* of water, and a
-// one-step test on the unadjusted neighbour peels its outermost shell and exposes the
-// next one, so it converges on nothing:
+// and rejected.** Written as a carved voxel taking the body's water only where none of
+// its four neighbours is air at that height, it costs nothing worth measuring because
+// it is reached only by a carved voxel a body has already filled. What it does not do is
+// work. A pocket is a *blob* of water, and a one-step test on the unadjusted neighbour
+// peels its outermost shell and exposes the next one, so it converges on nothing. The
+// connectivity rule reaches that fixed point directly and also removes the sealed
+// pocket that filled for no reason.
 //
-//	source water standing against open air, 128x128 columns, y 20..110
-//
-//	                                    seed 1        seed 0x5EED   seed 7
-//	as #654 left it                     214/34423     63/41770      339/114578
-//	the four-neighbour test             214/34423     58/41711      296/114239
-//	the carved-run rule here            214/34423      4/41534        0/111425
-//	  and the bank rule beside it         2/34423      4/41534        0/111425
-//
-// Rows one, three and four are re-derivable from this tree by running
-// [TestNoSourceWaterStandsAgainstOpenAir] with the last line of [column.carvedAt] held
-// at `true`, which is the bank rule off. Row two is not: the four-neighbour test was
-// written to be measured and then deleted, so that row is a record of why it is not
-// here rather than a number anybody can check. Its rejection rests on the paragraph
-// above it, which is an argument rather than a reading.
-//
-// The connectivity rule is the fixed point that test is trying to reach, one scan at a
-// time, and it reaches it directly. It also removes the sealed pocket that filled for
-// no reason, which is a defect nobody had named.
-//
-// **Neither candidate moves seed 1, and that is what the classification found.** All
-// 214 of its exposed voxels are a *channel's own open water* — [column.fillAt]'s, in
-// the river where it belongs — standing beside a cave carved through the bank next to
-// it. Nothing may be done to that water. The answer is done to the carve instead, and
-// it lives in [column.carvedAt]: the residue of 2 and 4 is what no carving rule can
-// reach, a bank column whose ground is a block below the water beside it and which
-// holds no water of its own.
+// **The current containment counts live in the test that asserts them.** After #784
+// narrows the channel and #785 restores every terrace face as flowing water,
+// [TestNoSourceWaterStandsAgainstOpenAir] measures 27/24754, 0/41342 and 0/111425 in
+// the legacy three-seed window. Its wider seed-one report window measures 181/136744:
+// 175 channel sources beside dry ground and 6 beside a lower sea or basin surface. All
+// 181 are the named surface-bank residue owned by #786; none is a carved face this rule
+// could reach. The test pins those as counts rather than hiding them in a share, and
+// rejects any exposure it cannot classify.
 func (c *column) caveFillAt(worldY int) Block {
 	if c.standingWater && worldY <= c.waterSurface {
 		// A body fills the rock beneath it; a channel does not, above the dry-world
