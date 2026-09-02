@@ -2733,15 +2733,17 @@ Recorded here so the next reader does not mistake them for oversights:
   walks along the bed, because a mob has a path where a player has intent, and answering the swim
   rules for a path is a change to the pathing. The spawn director keeps that from being the common
   case by refusing every water-family voxel and the ice lid above one.
-- **A full water source is not necessarily an isotropic one.** Plain `Water` supplies all four
-  horizontal neighbours, as a lake or sea must. A `WaterCurrent*` source supplies only the
-  neighbour its id points toward. `world.WaterFeedsToward` is that distinction, and the three
-  server readers share it: `riverFallTopAt` paints a generated terrace fall only across the
-  higher source's downstream face, `NextWater` accepts side supply only across that face, and
+- **A full water source is not necessarily an isotropic supplier.** Plain `Water` supplies all
+  four horizontal neighbours, as a lake or sea must. A `WaterCurrent*` source supplies only the
+  neighbour its id points toward. `world.WaterFeedsToward` is that distinction, and its two
+  runtime readers share it: `NextWater` accepts side supply only across that face, and
   `FlowDirection` includes the same source in a flowing voxel's gradient. `WaterFlow1..7` has no
   encoded heading and keeps spreading by level. This is deliberately cardinal and local — not a
   finite-volume simulation — but it prevents one river source from feeding upstream and sideways
-  curtains while its current carries the swimmer somewhere else.
+  while its current carries the swimmer somewhere else. **Generated containment asks a different
+  question**: `riverFallTopAt` covers every shared terrace face, because a permanent source still
+  stands on all four sides even when it feeds only one. Those faces are flowing water rather than
+  sources, and #784's block-width channel plus the measured seed-one cascade keep them narrow.
 - **A water voxel is decided only from a neighbourhood that was actually read, and no scheduler
   path strands it (#717).** Floating sheets and mid-air truncated falls were never the automaton's
   answer — `NextWater`'s fixed point over the reported seed-1 cascades is clean — they were

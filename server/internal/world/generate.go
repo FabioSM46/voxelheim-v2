@@ -453,7 +453,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // field units. Channels keep a stable physical width across seeds instead of widening
 // into lakes where the field crosses its midpoint slowly, so river beds, water and
 // nearby composition all move and stored deltas need the new generated base.
-const WorldgenVersion uint32 = 23
+// 23 → 24: #785 restores every generated terrace face as flowing water rather than
+// leaving a permanent source exposed wherever its encoded current points elsewhere.
+// River beds, source water and terrain heights stay byte-identical, but flowing-water
+// voxels above lower terraces change, so stored deltas need the new generated base.
+const WorldgenVersion uint32 = 24
 
 // Generate builds the chunk at coord for seed.
 //

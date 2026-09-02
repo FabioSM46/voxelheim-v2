@@ -388,11 +388,11 @@ func TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand(t *testing.T) {
 // acceptance criterion; the window measures hundreds.
 const minimumTerraceSteps = 20
 
-// A lower terrace carries only the falls whose higher source points into it. A height
-// difference alone says where water *could* fall; the source's current says whether
-// that edge is downstream. Treating all four higher neighbours as suppliers turns a
-// terraced course into the broad water curtains this test rejects.
-func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
+// Every shared face between two channel terraces carries a fall. A source current says
+// where the automaton supplies water; it does not make a perpendicular source face stop
+// being a wall of permanent water. The fall is flowing water so the automaton still owns
+// it, and [TestTheSeedOneCascadeRejectsSidewaysTerraceCurtains] separately bounds its width.
+func TestEveryTerraceFaceCarriesItsFall(t *testing.T) {
 	t.Parallel()
 
 	// A contiguous window, because this is the one claim needing true adjacency: a
@@ -401,7 +401,7 @@ func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 	// neighbour.
 	const scanSize = 512
 
-	channels, higherEdges, feedingEdges, rejectedEdges := 0, 0, 0, 0
+	channels, higherEdges := 0, 0
 	for z := int64(waterAreaOriginZ); z < waterAreaOriginZ+scanSize; z++ {
 		for x := int64(waterAreaOriginX); x < waterAreaOriginX+scanSize; x++ {
 			col := columnAt(waterSeed, x, z)
@@ -425,17 +425,11 @@ func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 					t.Fatalf("adjacent channels (%d, %d) at %d and (%d, %d) at %d differ by %d, not a whole %d-block terrace",
 						x, z, col.waterSurface, nextX, nextZ, surface, drop, riverTerraceStep)
 				}
-				current := waterCurrentBlock(riverCurrentAt(waterSeed, nextX, nextZ))
-				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
-					feedingEdges++
-					wantTop = max(wantTop, surface)
-				} else {
-					rejectedEdges++
-				}
+				wantTop = max(wantTop, surface)
 			}
 
 			if col.fallSurface != wantTop {
-				t.Fatalf("fall top at (%d, %d) = %d, want highest feeding terrace %d",
+				t.Fatalf("fall top at (%d, %d) = %d, want highest adjacent terrace %d",
 					x, z, col.fallSurface, wantTop)
 			}
 			for y := col.waterSurface + 1; y <= wantTop; y++ {
@@ -451,66 +445,80 @@ func TestATerraceStepCarriesOnlyItsDownstreamFalls(t *testing.T) {
 		}
 	}
 
-	if channels == 0 || higherEdges == 0 || feedingEdges == 0 || rejectedEdges == 0 {
-		t.Fatalf("window measured channels=%d higher edges=%d feeding=%d rejected=%d; every directional case must be present",
-			channels, higherEdges, feedingEdges, rejectedEdges)
+	if channels == 0 || higherEdges == 0 {
+		t.Fatalf("window measured channels=%d higher edges=%d; a terrace fall must be present",
+			channels, higherEdges)
 	}
-	t.Logf("measured %d channels and %d higher terrace edges: %d feed this column, %d point elsewhere",
-		channels, higherEdges, feedingEdges, rejectedEdges)
+	t.Logf("measured %d channels and %d higher terrace edges; every shared face carries its fall",
+		channels, higherEdges)
 }
 
-// The seed-one cascade reported in #696, kept as a concrete instance beside the
-// general sweep above: the old rule raised a lower column to the highest terrace on
-// any side, while the directional rule keeps only the height supplied across a
-// downstream edge. Worldgen 23 narrows the reported 27-block body enough that its
-// original window no longer contains a sideways curtain, so the window is re-derived
-// on the same seed where both a downstream fall and a rejected sideways edge remain.
+// The seed-one cascade reported in #696, measured again after #784 narrowed the channel.
+// Restoring every terrace face is allowed only while it does not restore that broad
+// curtain: in this 128x128 window around the player report, the eight fall columns form
+// three components, the largest containing five columns. Seven is the channel-width
+// sweep's confluence bound, so a connected curtain larger than the channel itself is a
+// regression.
 func TestTheSeedOneCascadeRejectsSidewaysTerraceCurtains(t *testing.T) {
 	t.Parallel()
 
-	const seed int64 = 1
-	channels, keptFalls, shortenedCurtains, removedFallVoxels := 0, 0, 0, 0
-	for z := int64(1040); z < 1120; z++ {
-		for x := int64(-128); x < -64; x++ {
+	const (
+		seed              int64 = 1
+		originX                 = 0
+		originZ                 = -1184
+		scanSize                = 128
+		maxCurtainColumns       = 2*riverHalfWidthBlocks + 1
+	)
+	type fallColumn struct{ x, z int64 }
+	fallColumns := make(map[fallColumn]bool)
+	fallVoxels := 0
+	for z := int64(originZ); z < originZ+scanSize; z++ {
+		for x := int64(originX); x < originX+scanSize; x++ {
 			col := columnAt(seed, x, z)
-			if !col.river {
+			if col.fallSurface <= col.waterSurface {
 				continue
 			}
-			channels++
-			oldTop, wantTop := col.waterSurface, col.waterSurface
-			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
-				nextX, nextZ := x+step[0], z+step[1]
-				if !riverAt(seed, nextX, nextZ) {
-					continue
-				}
-				surface := riverSurfaceAt(seed, nextX, nextZ)
-				if surface < seaLevel || surface <= col.waterSurface {
-					continue
-				}
-				oldTop = max(oldTop, surface)
-				current := waterCurrentBlock(riverCurrentAt(seed, nextX, nextZ))
-				if WaterFeedsToward(current, int(-step[0]), int(-step[1])) {
-					wantTop = max(wantTop, surface)
-				}
-			}
-			if col.fallSurface != wantTop {
-				t.Fatalf("seed-one cascade fall top at (%d, %d) = %d, want %d", x, z, col.fallSurface, wantTop)
-			}
-			if wantTop > col.waterSurface {
-				keptFalls++
-			}
-			if oldTop > wantTop {
-				shortenedCurtains++
-				removedFallVoxels += oldTop - wantTop
-			}
+			fallColumns[fallColumn{x, z}] = true
+			fallVoxels += col.fallSurface - col.waterSurface
 		}
 	}
-	if channels == 0 || keptFalls == 0 || shortenedCurtains == 0 {
-		t.Fatalf("reported cascade measured channels=%d kept falls=%d shortened curtains=%d; all three must be present",
-			channels, keptFalls, shortenedCurtains)
+	if len(fallColumns) == 0 {
+		t.Fatal("the reported cascade window holds no generated fall, so no curtain was measured")
 	}
-	t.Logf("reported cascade: %d channel columns, %d downstream falls kept, %d sideways curtains shortened by %d fall voxels",
-		channels, keptFalls, shortenedCurtains, removedFallVoxels)
+
+	seen := make(map[fallColumn]bool, len(fallColumns))
+	components, largest := 0, 0
+	for start := range fallColumns {
+		if seen[start] {
+			continue
+		}
+		components++
+		seen[start] = true
+		queue, width := []fallColumn{start}, 0
+		for len(queue) > 0 {
+			at := queue[0]
+			queue = queue[1:]
+			width++
+			for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				next := fallColumn{at.x + step[0], at.z + step[1]}
+				if fallColumns[next] && !seen[next] {
+					seen[next] = true
+					queue = append(queue, next)
+				}
+			}
+		}
+		largest = max(largest, width)
+	}
+	if largest > maxCurtainColumns {
+		t.Errorf("the reported cascade has a connected %d-column fall curtain, larger than the channel's %d-column confluence bound",
+			largest, maxCurtainColumns)
+	}
+	if len(fallColumns) != 8 || fallVoxels != 32 || components != 3 || largest != 5 {
+		t.Errorf("reported cascade measured columns=%d voxels=%d components=%d largest=%d, want 8, 32, 3, 5",
+			len(fallColumns), fallVoxels, components, largest)
+	}
+	t.Logf("reported cascade: %d fall columns, %d voxels, %d components, largest %d columns",
+		len(fallColumns), fallVoxels, components, largest)
 }
 
 // Every channel column runs the way its own field and its own slope point, and the
@@ -994,41 +1002,105 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 	return 0, 0, 0, false
 }
 
-// The containment invariant, which this repository did not have and which is the part of
-// #654 that stops the defect coming back.
+// The containment invariant #654 established: no generated source water stands against
+// open air on any horizontal side. A source is permanent — [NextWater]'s first arm returns
+// it unchanged for ever — while flowing water is the automaton's and a fall deliberately
+// has air beside it. A current's heading is irrelevant here: it says where the source
+// feeds, not whether the player can see one of its other faces standing in the air.
 //
-// **A source is permanent — [NextWater]'s first arm returns it unchanged for ever — so a
-// source facing open air along a side it feeds is water that nothing holds and nothing
-// can correct.** Plain Water feeds every side; a current feeds only its encoded downstream
-// side. Air beside a current on another side is an ordinary river surface, not a leak.
-// Flowing water is deliberately not covered: it is the automaton's, it drains when its
-// feed stops, and a fall has air beside it by construction. So the property is about the
-// one class of voxel that can never be wrong for only a moment.
-//
-// **A share and not a count, and a ceiling and not zero, and both are deliberate.** The
-// share, because the three seeds below hold very different amounts of water and a count
-// would be a statement about how wet a window is. The ceiling, because the residue is
-// real and named. Measured over the same 128x128 window, y 20..110:
-//
-//	seed          sources   exposed   share      exposed at #654   share
-//	1               34423         2   0.006%                 214   0.62%
-//	0x5EED          41534         4   0.010%                  63   0.15%
-//	7              111425         0   0.000%                 339   0.30%
-//
-// **#654's residue was the bank, and #660 is what closed it.** Every one of those 214,
-// 63 and 339 had a *carved* voxel as the air beside it, and both halves of #660 aim at
-// that: [column.caveFillAt] drains the pocket the carved run never reached, and
-// [column.carvedAt] refuses the carve that would breach a wall of standing water. What
-// is left is six voxels across three seeds and none is a carved face — it is a bank
-// column whose *ground* sits a block below the water beside it and which stands no water
-// of its own, so there is no carve to refuse and no fill to drain. That is a channel
-// edge, not a cave.
-//
-// Five in ten thousand is a ceiling the fix clears by a factor of five and #654's
-// residue exceeds by twelve; before #654 the same window at seed 1 held 1655 of 39062,
-// which exceeds it by 84. What it is really guarding is a regression of the kind #654
-// and #660 removed: putting the channel aquifer back takes seed 1 from 2 to thousands,
-// and this fails long before anybody runs a measurement.
+// **Counts, not shares.** A wet window must not earn a proportionally larger allowance,
+// and an unnamed exposure is never tolerated. The exact residue below is temporarily
+// admitted because every voxel has been classified as the bank rule owned by #786: a
+// channel beside a dry bank, or beside a lower sea or basin surface. The reported 256x256
+// window carries 175 of the former and 6 of the latter; the legacy seed-one window carries
+// 27 dry-bank voxels. Additional smaller windows spread over thousands of blocks keep
+// this from being a test of one fortunate reach. #786 turns these named counts into zero.
+func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
+	t.Parallel()
+
+	type sample struct {
+		name               string
+		seed               int64
+		x, z, width, depth int64
+		want               sourceWaterExposure
+	}
+	samples := []sample{
+		{"legacy seed 1", 1, -64, 1040, 128, 128, sourceWaterExposure{sources: 24754, exposed: 27, dryBank: 27}},
+		{"legacy seed 0x5EED", 0x5EED, -64, 1040, 128, 128, sourceWaterExposure{sources: 41342}},
+		{"legacy seed 7", 7, -64, 1040, 128, 128, sourceWaterExposure{sources: 111425}},
+		{"reported seed-one cascade", 1, -64, -1240, 256, 256, sourceWaterExposure{sources: 136744, exposed: 181, dryBank: 175, lowerBody: 6}},
+		{"east seed-one reach", 1, 1984, 1984, 128, 128, sourceWaterExposure{sources: 24151}},
+		{"west seed-one reach", 1, -4160, 3008, 128, 128, sourceWaterExposure{sources: 38294, exposed: 6, dryBank: 6}},
+		{"far seed-one reach", 1, 8128, -8256, 128, 128, sourceWaterExposure{sources: 30768}},
+		{"water-statistics reach", waterSeed, waterAreaOriginX, waterAreaOriginZ, 128, 128, sourceWaterExposure{sources: 25282}},
+	}
+
+	for _, sample := range samples {
+		got := measureSourceWaterExposure(sample.seed, sample.x, sample.z, sample.width, sample.depth)
+		if got != sample.want {
+			t.Errorf("%s: exposure = %+v, want %+v", sample.name, got, sample.want)
+		}
+		t.Logf("%s: %d sources, %d exposed (%d dry-bank, %d lower-body, %d unnamed)",
+			sample.name, got.sources, got.exposed, got.dryBank, got.lowerBody, got.unnamed)
+	}
+}
+
+type sourceWaterExposure struct {
+	sources, exposed            int
+	dryBank, lowerBody, unnamed int
+}
+
+func measureSourceWaterExposure(seed, originX, originZ, width, depth int64) sourceWaterExposure {
+	var measured sourceWaterExposure
+	for z := originZ; z < originZ+depth; z++ {
+		for x := originX; x < originX+width; x++ {
+			col := columnAt(seed, x, z)
+			for y := int64(20); y <= 110; y++ {
+				block := col.voxelAt(seed, x, y, z)
+				if !waterSource(block) {
+					continue
+				}
+				measured.sources++
+				exposed, dryBank, lowerBody, unnamed := false, false, false, false
+				for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+					nx, nz := x+step[0], z+step[1]
+					neighbour := columnAt(seed, nx, nz)
+					if neighbour.voxelAt(seed, nx, y, nz) != Air {
+						continue
+					}
+					exposed = true
+					switch {
+					case col.river && !neighbour.standingWater:
+						dryBank = true
+					case col.river && neighbour.standingWater && neighbour.waterSurface < int(y):
+						lowerBody = true
+					default:
+						unnamed = true
+					}
+				}
+				if !exposed {
+					continue
+				}
+				measured.exposed++
+				if dryBank {
+					measured.dryBank++
+				}
+				if lowerBody {
+					measured.lowerBody++
+				}
+				if unnamed {
+					measured.unnamed++
+				}
+			}
+		}
+	}
+	return measured
+}
+
+// The automaton's distinct question stays pinned beside containment. Plain water feeds
+// every side; a current source feeds only its encoded downstream face. In the legacy
+// 128x128 window worldgen 24 measures 2 of 24754 at seed 1 and zero of 41342 and
+// 111425 at the other two seeds, all within the existing five-in-ten-thousand ceiling.
 func TestNoSourceWaterFeedsOpenAir(t *testing.T) {
 	t.Parallel()
 
