@@ -198,6 +198,21 @@ if [ "$CHECK_STATUS" -ne 0 ]; then
   exit 1
 fi
 
+# The bot login carries a bracket and `email_pattern` has none in its local-part class, so
+# this address is never extracted by the address scan at all. The rule has its own pass over
+# the body for that reason; without it the second table entry would be decorative here.
+bracket_login="github-""actions[bot]"
+printf 'Co-authored-by: %s <%s+%s''@users.noreply.github.com>\n' \
+  "$bracket_login" "$wrong_id" "$bracket_login" > "$TEST_ROOT/bracket.md"
+run_check "$CHECK" "$TEST_ROOT/bracket.md"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a bracketed login with another account's id to exit 1, got $CHECK_STATUS" >&2
+  echo "$CHECK_COMBINED" >&2
+  exit 1
+fi
+grep -Fqx 'body privacy: line 1 contains a misattributed GitHub account id' <<< "$CHECK_STDOUT"
+assert_absent "$wrong_id" "the rejected account id"
+
 # ---------------------------------------------------------------------- calling it wrong
 # The body arrives on stdin and never in argv, so an argument is a mistake rather than an
 # alternative spelling — and 2 rather than 1, because "the check could not run" and "the

@@ -126,6 +126,12 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
   table is deliberately narrow — for a login it names the id must match; about a login it does
   not name it says nothing, which is the approved-identity rule above and needs a reader.
   **Copy your noreply address from Settings → Emails; never type the number.**
+  The rule reads its own extraction of the address and not the general email pattern, which is
+  not a refinement but the difference between the table having two entries and having one: the
+  general pattern has no bracket in its local-part class, so the bot login this repository
+  publishes was not matched imprecisely, it was never extracted at all — invisible to the
+  message, body and file scans, and visible only to the author and committer fields, which are
+  read whole and never grepped. Caught in review on #797, on the change that added the table.
 - **A commit message is a published surface, and it is checked like one.** Two scripts divide the
   work: `bash scripts/check-publication-privacy.sh` scans tracked file content, and
   `bash scripts/check-commit-privacy.sh <base> <head>` walks the commits a branch adds and reads

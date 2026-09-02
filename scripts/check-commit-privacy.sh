@@ -108,6 +108,19 @@ github_noreply_ids=(
 # on any name.
 github_noreply_pattern='^(([0-9]*)\+)?([^@+]+)@users\.noreply\.github\.com$'
 
+# Extracted separately from the address pattern above, and this is not a refinement — it is
+# the difference between the table having two entries and having one. `email_pattern` has no
+# bracket in its local-part class, so an address whose login carries one is not merely
+# matched imprecisely, it is never extracted at all: the bot login this repository publishes
+# alongside the handle was invisible to every message-driven scan, and only the author and
+# committer fields, which are read whole and never grepped, could see it. Found in review on
+# #797, on the change that introduced the table.
+#
+# So the rule is driven from this pattern alone on every text surface. Anchoring it to the
+# domain is what lets the login part stay permissive: anything that is not whitespace and not
+# an angle bracket, which is a trailer's own delimiters and nothing else.
+github_noreply_extract_pattern='[^[:space:]<>]+@users\.noreply\.github\.com'
+
 is_misattributed_noreply() {
   local email=${1,,} plus prefix login entry
   [[ "$email" =~ $github_noreply_pattern ]] || return 1
@@ -183,15 +196,20 @@ for commit in "${commits[@]}"; do
   # about the content, and the category plus the commit is everything an author needs
   # to find it in a message they wrote.
   unapproved_email=0
-  misattributed_id=0
   while IFS= read -r email; do
     if ! is_approved_email "$email"; then
       unapproved_email=1
     fi
-    if is_misattributed_noreply "$email"; then
+  done < <(grep -Eo "$email_pattern" <<< "$message" || true)
+
+  # Its own pass over the message, not a second test inside the loop above. A login carrying
+  # a bracket never reaches that loop at all.
+  misattributed_id=0
+  while IFS= read -r noreply; do
+    if is_misattributed_noreply "$noreply"; then
       misattributed_id=1
     fi
-  done < <(grep -Eo "$email_pattern" <<< "$message" || true)
+  done < <(grep -Eo "$github_noreply_extract_pattern" <<< "$message" || true)
   if [ "$unapproved_email" -ne 0 ]; then
     echo "commit privacy: ${short_commit} message contains a non-public email address" >&2
     violations=$((violations + 1))

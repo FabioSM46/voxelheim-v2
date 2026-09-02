@@ -240,8 +240,14 @@ fi
 # A plus with nothing in front of it resolves to nobody. It is rejected whatever login
 # follows, because an address that credits no account is a defect on any name — and this
 # one reached develop too, in the same class of trailer.
+#
+# Split after the at-sign rather than before it, unlike every other fixture here. Before it,
+# the source line reads as an id-less plus to the rule's own extraction — which is wider than
+# the address pattern the other fixtures dodge — and this file would fail the check it is
+# testing on the one fixture whose whole point is that shape. The assembly point is chosen
+# against the check as it is now, and widening a pattern can move it.
 commit_as_noreply -m "chore: probe a trailer whose id is missing entirely" \
-  -m "Co-authored-by: FabioSM46 <+FabioSM46""@users.noreply.github.com>"
+  -m "Co-authored-by: FabioSM46 <+FabioSM46@""users.noreply.github.com>"
 empty_id_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
 run_check "$misattributed_commit" "$empty_id_commit"
 if [ "$CHECK_STATUS" -ne 1 ]; then
@@ -299,6 +305,43 @@ if grep -Fq 'exposes its author email' <<< "$CHECK_OUTPUT"; then
   exit 1
 fi
 assert_absent "$wrong_id" "the rejected account id"
+
+# The bot login this repository publishes alongside the handle carries a bracket, and
+# `email_pattern` has no bracket in its local-part class — so that address is not extracted
+# imprecisely by the address scan, it is not extracted at all. Driving the rule from that
+# loop made the second table entry decorative on every message-driven surface while the two
+# data pins stayed green; only the identity fields, read whole and never grepped, could see
+# it. Found in review on #797. This is the assertion that says the rule has its own reader.
+bracket_login="github-""actions[bot]"
+commit_as_noreply -m "chore: probe a login the address pattern cannot extract" \
+  -m "Co-authored-by: ${bracket_login} <${wrong_id}+${bracket_login}""@users.noreply.github.com>"
+bracket_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$misattributed_author_commit" "$bracket_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a bracketed login with another account's id to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a misattributed GitHub account id' <<< "$CHECK_OUTPUT"
+assert_absent "$wrong_id" "the rejected account id"
+
+# And the control that says the case above is real rather than incidental: the address
+# scan never sees this address, so a rule reached only through it would report nothing.
+if grep -Eoq "$(grep -E '^email_pattern=' "$CHECK" | cut -d"'" -f2)" \
+     <<< "${wrong_id}+${bracket_login}""@users.noreply.github.com"; then
+  echo "control failure: the address pattern extracts the bracketed login after all" >&2
+  exit 1
+fi
+
+# Its own id passes, so the rule is a check of the number and not a ban on the login.
+commit_as_noreply -m "chore: probe the bot login with its own id" \
+  -m "Co-authored-by: ${bracket_login} <41898282+${bracket_login}""@users.noreply.github.com>"
+bracket_ok_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$bracket_commit" "$bracket_ok_commit"
+if [ "$CHECK_STATUS" -ne 0 ]; then
+  echo "expected the bot login with its own id to pass, got $CHECK_STATUS" >&2
+  echo "$CHECK_OUTPUT" >&2
+  exit 1
+fi
 
 # An empty range still exits as it did before the message scan existed.
 run_check "$clean_commit" "$clean_commit"
@@ -379,6 +422,7 @@ pin_extracted "private-network pattern" extract_line '^private_network_pattern='
 pin_extracted "approved-email list" extract_line '^ +noreply@github\.com\|'
 pin_extracted "workstation path prefixes" extract_path_prefix_block
 pin_extracted "GitHub noreply pattern" extract_line '^github_noreply_pattern='
+pin_extracted "GitHub noreply extraction" extract_line '^github_noreply_extract_pattern='
 pin_extracted "GitHub account id table" extract_account_id_block
 pin_extracted "misattribution rule" extract_misattribution_function
 

@@ -75,6 +75,32 @@ if grep -Fq "$wrong_id" <<< "$id_output"; then
   exit 1
 fi
 
+# The bot login carries a bracket, which `email_pattern` cannot extract — so this file is
+# invisible to the address scan and only the rule's own pass can refuse it.
+git -C "$TEST_ROOT" rm -f -q trailer.txt
+bracket_login="github-""actions[bot]"
+printf 'Co-authored-by: %s <%s+%s''@users.noreply.github.com>\n' \
+  "$bracket_login" "$wrong_id" "$bracket_login" > "$TEST_ROOT/bracket.txt"
+git -C "$TEST_ROOT" add bracket.txt
+set +e
+bracket_output=$(cd "$TEST_ROOT" && bash scripts/check-publication-privacy.sh 2>&1)
+bracket_status=$?
+set -e
+if [ "$bracket_status" -ne 1 ]; then
+  echo "expected a bracketed login with another account's id to exit 1, got $bracket_status" >&2
+  exit 1
+fi
+grep -Fq 'bracket.txt:1 contains a misattributed GitHub account id' <<< "$bracket_output"
+if grep -Fq "$wrong_id" <<< "$bracket_output"; then
+  echo "privacy failure: the rejected account id reached the diagnostic" >&2
+  exit 1
+fi
+git -C "$TEST_ROOT" rm -f -q bracket.txt
+git -C "$TEST_ROOT" checkout -q -- . 2>/dev/null || true
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+  > "$TEST_ROOT/trailer.txt"
+git -C "$TEST_ROOT" add trailer.txt
+
 # The same handle with its own id passes, which is what keeps the rule from being a ban on
 # the address rather than a check of the number in it.
 git -C "$TEST_ROOT" rm -f -q trailer.txt
