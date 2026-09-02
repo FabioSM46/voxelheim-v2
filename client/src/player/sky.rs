@@ -1027,7 +1027,10 @@ fn sun_mesh() -> Mesh {
     let mut positions = Vec::with_capacity(SUN_VERTEX_COUNT);
     let mut colours = Vec::with_capacity(SUN_VERTEX_COUNT);
     let mut indices = Vec::with_capacity(SUN_TRIANGLE_COUNT * 3);
-    let colour = |alpha| [SUN_COLOUR[0], SUN_COLOUR[1], SUN_COLOUR[2], alpha];
+    let [red, green, blue, _] = Color::srgb(SUN_COLOUR[0], SUN_COLOUR[1], SUN_COLOUR[2])
+        .to_linear()
+        .to_f32_array();
+    let colour = |alpha| [red, green, blue, alpha];
 
     positions.push([0.0, 0.0, 0.0]);
     colours.push(colour(1.0));
@@ -2547,6 +2550,14 @@ mod tests {
         );
         assert_eq!(positions[0], [0.0, 0.0, 0.0]);
         assert_eq!(colours[0][3], 1.0);
+        let expected_rgb = Color::srgb(SUN_COLOUR[0], SUN_COLOUR[1], SUN_COLOUR[2])
+            .to_linear()
+            .to_f32_array();
+        assert!(
+            colours
+                .iter()
+                .all(|colour| colour[..3] == expected_rgb[..3])
+        );
 
         for (ring, (wanted_radius, wanted_alpha)) in [
             (SKY_BODY_RADIUS_DEGREES, 1.0),
