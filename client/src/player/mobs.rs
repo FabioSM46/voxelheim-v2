@@ -81,10 +81,11 @@ const VILLAGER_BODY: Body = Body {
 // A presentation envelope only. Paddock horses are deliberately absent from the
 // server's mob registry and this module routes them to `player/horse.rs`, so no combat,
 // marker or corpse path reads this row. Keeping `body` total still forces a new wire kind
-// to make its routing choice explicit.
+// to make its routing choice explicit. The width is the mounted body's, mirrored from the
+// server; the height is the drawn horse's own ear tips.
 const HORSE_BODY: Body = Body {
-    width: crate::player::constants::PLAYER_WIDTH,
-    height: 1.66,
+    width: crate::player::constants::MOUNTED_WIDTH,
+    height: super::horse::HORSE_HEIGHT,
 };
 
 /// The body envelope for one kind. It is the box the server collides for creatures and
@@ -2721,8 +2722,8 @@ mod tests {
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
         // `Horse` is drawn through the shared ridden-horse rig in `player/horse.rs`; that
-        // module pins the full mesh to the same 0.6 footprint. It has no server collision
-        // box because paddock horses are not mobs.
+        // module pins horse, tack and rider to the mounted body the server collides. It
+        // has no server collision box of its own because paddock horses are not mobs.
         assert_eq!(
             drawn.len(),
             crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 3,
