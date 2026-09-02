@@ -24,7 +24,7 @@
 //! two of the [`ChunkMesh`]'s three [`SurfaceMesh`]es: the opaque surface and the water
 //! surface. The third — cover — is not swept at all, because a plant has no coplanar
 //! face to merge with its neighbour; [`build_cover`] walks the voxels once and grows a
-//! flower or a bush in each voxel [`palette::is_shaped`] answers for. The reason each is
+//! flower or a bramble in each voxel [`palette::is_shaped`] answers for. The reason each is
 //! its own mesh is on [`ChunkMesh`] itself — blending is order-dependent and
 //! Bevy sorts per entity, so the two have to be separate draws. The face rules are
 //! on [`build_masks`]; the greedy merge below is shared and knows about neither.
@@ -418,44 +418,37 @@ const COVER_LEAF_RISE: f32 = 0.09;
 /// extent is 96% of its voxel on every axis rather than 100%.
 const BUSH_INSET: f32 = 0.02;
 
-/// How tall a bush's skirt stands, and how far that height varies per voxel, in blocks.
-///
-/// The skirt is the clump that reaches the voxel's floor and its four walls, so its size
-/// is fixed and only its **top** is jittered — which is the whole of what stops a row of
-/// bushes from having one flat surface across all of them at the same height.
-const BUSH_SKIRT_TOP: f32 = 0.3;
-const BUSH_SKIRT_JITTER: f32 = 0.16;
+/// The shared bramble skeleton: four canes, each bent through three woody segments.
+/// The meadow bush below dresses it with broad leaves and flowers; the desert and
+/// tundra bushes dress the same skeleton in #789 and #790 rather than growing copies.
+const BRAMBLE_CANES: usize = 4;
+const BRAMBLE_CANE_SEGMENTS: usize = 3;
+const BRAMBLE_CANE_REACH: f32 = 0.38;
+const BRAMBLE_CANE_REACH_JITTER: f32 = 0.06;
 
-/// The body clump: how wide and tall it is, where its underside starts and how far that
-/// start varies, in blocks. Its footprint is jittered inside the voxel, its overlap with
-/// the skirt below it is guaranteed by the arithmetic — see [`push_bush`].
-const BUSH_BODY_SPAN: f32 = 0.68;
-const BUSH_BODY_HEIGHT: f32 = 0.44;
-const BUSH_BODY_FLOOR: f32 = 0.2;
-const BUSH_BODY_JITTER: f32 = 0.1;
+/// The meadow bramble's cane and leaf proportions, in blocks. The four leaves at its
+/// foot are the honest dense tangle a bramble grows there and are what carry the solid
+/// bush's drawn extent to each horizontal wall. Two more leaves dress every cane: one
+/// on its rising shoulder and one at its crest, whose tip reaches the voxel's ceiling.
+const BUSH_CANE_HALF_WIDTH: f32 = 0.014;
+const BUSH_CANE_ARCH: f32 = 0.78;
+const BUSH_CANE_ARCH_JITTER: f32 = 0.1;
+const BUSH_CANE_TIP: f32 = 0.46;
+const BUSH_CANE_TIP_JITTER: f32 = 0.12;
+const BUSH_BASE_LEAVES: usize = 4;
+const BUSH_LEAVES_PER_CANE: usize = 2;
+const BUSH_BASE_LEAF_HALF_WIDTH: f32 = 0.055;
+const BUSH_BASE_LEAF_RISE: f32 = 0.12;
+const BUSH_CANE_LEAF_OUTER: f32 = 0.14;
+const BUSH_CANE_LEAF_HALF_WIDTH: f32 = 0.045;
+const BUSH_CANE_LEAF_RISE: f32 = 0.07;
 
-/// The crown clump: how wide it is, and where its underside starts. It reaches the
-/// voxel's ceiling, which is the other half of the fill guarantee.
-const BUSH_CROWN_SPAN: f32 = 0.56;
-const BUSH_CROWN_FLOOR: f32 = 0.52;
-const BUSH_CROWN_JITTER: f32 = 0.1;
-
-/// Four woody shoots cross the foliage, each as two double-sided ribbons. Fewer
-/// reads as a fork rather than a bush; more turns the low silhouette into a thicket.
-const BUSH_TWIGS: usize = 4;
-const BUSH_TWIG_HALF_WIDTH: f32 = 0.018;
-const BUSH_TWIG_OUTER: f32 = 0.4;
-const BUSH_TWIG_BASE: f32 = 0.13;
-const BUSH_TWIG_TIP: f32 = 0.76;
-const BUSH_TWIG_TIP_JITTER: f32 = 0.06;
-
-/// Three flower specks sit in the largest gap around the crown. Their crossed
-/// blades are less than half the flower eye's width and height, so they remain
-/// punctuation in the green mass rather than miniature flowers.
+/// Three flower specks sit at three cane tips. Their crossed blades are less than half
+/// the flower eye's width and height, so they remain punctuation rather than miniature
+/// flowers.
 const BUSH_SPECKS: usize = 3;
 const BUSH_SPECK_HALF_WIDTH: f32 = 0.018;
 const BUSH_SPECK_HEIGHT: f32 = 0.04;
-const BUSH_SPECK_FLOOR: f32 = 0.78;
 
 /// How many quads one flower contributes: two stem blades, two leaves,
 /// [`COVER_PETALS`] petals and the eye's two blades.
@@ -472,10 +465,12 @@ const BUSH_SPECK_FLOOR: f32 = 0.78;
 #[cfg(test)]
 pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
-/// How many quads one bush contributes: three six-face clumps, two ribbons per
-/// twig and two crossed blades per flower speck.
+/// How many quads one bush contributes: four low leaves, three two-ribbon segments
+/// per cane, two leaves per cane and two crossed blades per flower speck.
 #[cfg(test)]
-pub(super) const QUADS_PER_BUSH: usize = 18 + BUSH_TWIGS * 2 + BUSH_SPECKS * 2;
+pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES
+    + BRAMBLE_CANES * (BRAMBLE_CANE_SEGMENTS * 2 + BUSH_LEAVES_PER_CANE)
+    + BUSH_SPECKS * 2;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1049,7 +1044,7 @@ fn half_quad_corners(
 }
 
 /// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
-/// of the three cover ids, a clump of foliage for a bush.
+/// of the three cover ids, an arching bramble for a bush.
 ///
 /// A whole pass over the chunk rather than a third mask, because there is nothing here
 /// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a plant's
@@ -1188,142 +1183,151 @@ fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 
     push_blade(mesh, corolla, eye, top + COVER_EYE_HEIGHT, 2, eye_color);
 }
 
-/// One bush, filling the voxel whose minimum corner is `floor`.
-///
-/// Three overlapping clumps, four woody twigs and three flower specks. **The shape has to satisfy two things at
-/// once**, and they pull in opposite directions: `world.Bush` is `Solid` on the server, so
-/// a body is stopped by the whole cube and anything drawn smaller than it is a wall the
-/// player cannot see — while a cube is exactly what made a cluster of bushes read as one
-/// green slab. So the clumps between them span the voxel less [`BUSH_INSET`] on every
-/// axis, and everything that can vary without breaking that span does: the skirt's top,
-/// and the footprint and underside of the body and the crown.
-///
-/// The skirt still owns the floor and four walls and the crown still owns the ceiling;
-/// twigs and specks only add detail. The jitter ranges keep all three clumps overlapping.
-fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
-    let foliage = palette::linear_rgba(palette::BUSH);
-    let crown_color = opaque(palette::BUSH_CROWN_LINEAR);
-    let wood = palette::linear_rgba(palette::LOG);
+#[derive(Clone, Copy)]
+struct Cane {
+    shoulder: [f32; 3],
+    crest: [f32; 3],
+    tip: [f32; 3],
+    yaw: f32,
+}
 
-    let low = BUSH_INSET;
-    let high = 1.0 - BUSH_INSET;
-    let clump = |mesh: &mut SurfaceMesh,
-                 x: f32,
-                 z: f32,
-                 span: f32,
-                 bottom: f32,
-                 top: f32,
-                 color: [f32; 4]| {
-        push_box(
+/// One arching cane in the shared bramble skeleton.
+///
+/// Three [`push_twig`] segments leave the base, climb through a shoulder to a crest,
+/// then descend to the tip. Yaw, reach, arch height, sideways bend and tip height all
+/// come from separate [`dial`]s on the plant's word. The meadow bush dresses the
+/// returned joints with leaves and flowers; the desert and tundra bushes in #789 and
+/// #790 reuse this skeleton and dress it for their own biomes.
+fn push_cane(
+    mesh: &mut SurfaceMesh,
+    floor: [f32; 3],
+    seed: u32,
+    index: usize,
+    color: [f32; 4],
+) -> Cane {
+    let spacing = std::f32::consts::TAU / BRAMBLE_CANES as f32;
+    let dial_index = 1 + index as u32 * 5;
+    let yaw =
+        dial(seed, 0) * spacing + index as f32 * spacing + (dial(seed, dial_index) - 0.5) * 0.36;
+    let reach = BRAMBLE_CANE_REACH + dial(seed, dial_index + 1) * BRAMBLE_CANE_REACH_JITTER;
+    let arch = BUSH_CANE_ARCH + dial(seed, dial_index + 2) * BUSH_CANE_ARCH_JITTER;
+    let tip_height = BUSH_CANE_TIP + dial(seed, dial_index + 3) * BUSH_CANE_TIP_JITTER;
+    let bend = (dial(seed, dial_index + 4) - 0.5) * 0.1;
+    let (sin, cos) = yaw.sin_cos();
+    let along = [cos, 0.0, sin];
+    let across = [-sin, 0.0, cos];
+    let at = |distance: f32, sideways: f32, height: f32| {
+        [
+            floor[0] + 0.5 + along[0] * distance + across[0] * sideways,
+            floor[1] + height,
+            floor[2] + 0.5 + along[2] * distance + across[2] * sideways,
+        ]
+    };
+
+    let base = at(-0.06, 0.0, BUSH_INSET + BUSH_CANE_HALF_WIDTH);
+    let shoulder = at(reach * 0.32, bend * 0.5, arch * 0.72);
+    let crest = at(reach * 0.68, bend, arch);
+    let tip = at(reach, bend * 0.5, tip_height);
+    let joints = [base, shoulder, crest, tip];
+    for segment in 0..BRAMBLE_CANE_SEGMENTS {
+        push_twig(
             mesh,
-            [floor[0] + x, floor[1] + bottom, floor[2] + z],
-            [floor[0] + x + span, floor[1] + top, floor[2] + z + span],
+            joints[segment],
+            joints[segment + 1],
+            BUSH_CANE_HALF_WIDTH,
             color,
         );
-    };
-
-    // The skirt: the full inset footprint, standing on the voxel's floor. Only its top
-    // moves, which is what breaks the one flat surface a row of bushes used to share.
-    let skirt_top = BUSH_SKIRT_TOP + dial(seed, 0) * BUSH_SKIRT_JITTER;
-    clump(mesh, low, low, high - low, low, skirt_top, foliage);
-
-    // The body: a smaller box sliding inside the same footprint. Its underside is at most
-    // `BUSH_BODY_FLOOR + BUSH_BODY_JITTER`, which is below the skirt's lowest top, so the
-    // two always meet.
-    let slack = high - low - BUSH_BODY_SPAN;
-    let body_floor = BUSH_BODY_FLOOR + dial(seed, 1) * BUSH_BODY_JITTER;
-    let body_x = low + dial(seed, 2) * slack;
-    let body_z = low + dial(seed, 3) * slack;
-    clump(
-        mesh,
-        body_x,
-        body_z,
-        BUSH_BODY_SPAN,
-        body_floor,
-        body_floor + BUSH_BODY_HEIGHT,
-        foliage,
-    );
-
-    // The crown: smaller again, reaching the voxel's ceiling, and the lighter of the two
-    // tones because it is the half of a bush the sky reaches.
-    let crown_slack = high - low - BUSH_CROWN_SPAN;
-    let crown_x = low + dial(seed, 4) * crown_slack;
-    let crown_z = low + dial(seed, 5) * crown_slack;
-    clump(
-        mesh,
-        crown_x,
-        crown_z,
-        BUSH_CROWN_SPAN,
-        BUSH_CROWN_FLOOR + dial(seed, 6) * BUSH_CROWN_JITTER,
-        high,
-        crown_color,
-    );
-
-    // Each shoot starts inside the mass and reaches into the open ring around the
-    // smaller crown. Its two crossed ribbons keep the woody line visible from any
-    // walking direction without turning a twig into a solid box.
-    let centre = [floor[0] + 0.5, floor[1], floor[2] + 0.5];
-    let twig_yaw = dial(seed, 7) * std::f32::consts::FRAC_PI_2;
-    for twig in 0..BUSH_TWIGS {
-        let angle = twig_yaw + twig as f32 * std::f32::consts::FRAC_PI_2;
-        let (sin, cos) = angle.sin_cos();
-        let start = [
-            centre[0] + cos * 0.05,
-            floor[1] + BUSH_TWIG_BASE,
-            centre[2] + sin * 0.05,
-        ];
-        let end = [
-            centre[0] + cos * BUSH_TWIG_OUTER,
-            floor[1] + BUSH_TWIG_TIP + dial(seed, 8 + twig as u32) * BUSH_TWIG_TIP_JITTER,
-            centre[2] + sin * BUSH_TWIG_OUTER,
-        ];
-        push_twig(mesh, start, end, BUSH_TWIG_HALF_WIDTH, wood);
     }
 
-    // The crown leaves 0.4 blocks of horizontal slack in total. Put all three tiny
-    // eyes in its widest outside strip, where the body is already below them and no
-    // foliage can hide them. Their positions and colour rotation still come from seed.
-    let gaps = [
-        (0usize, false, crown_x - low),
-        (0, true, high - (crown_x + BUSH_CROWN_SPAN)),
-        (2, false, crown_z - low),
-        (2, true, high - (crown_z + BUSH_CROWN_SPAN)),
-    ];
-    let &(axis, positive, gap) = gaps
-        .iter()
-        .max_by(|left, right| left.2.total_cmp(&right.2))
-        .expect("a crown has four outside gaps");
-    let strip = if positive {
-        high - gap * 0.5
-    } else {
-        low + gap * 0.5
-    };
+    Cane {
+        shoulder,
+        crest,
+        tip,
+        yaw,
+    }
+}
+
+/// One meadow bramble, filling the voxel whose minimum corner is `floor`.
+///
+/// Four arching woody canes make the silhouette, broad upward-facing leaves follow
+/// them, and three cane tips flower. There is no solid foliage volume: the only dense
+/// part is the low tangle of four leaves a bramble genuinely grows at its foot.
+///
+/// **The shape still has to fill the cube**: `world.Bush` is `Solid` on the server, so a
+/// body is stopped by all of it. The low leaves reach to within [`BUSH_INSET`] of the
+/// floor and four walls, while the leaves at each crest reach the same distance from
+/// the ceiling. That makes the drawn bounding box honest without putting a cuboid back.
+fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
+    let foliage = palette::linear_rgba(palette::BUSH);
+    let leaf = opaque(palette::BUSH_CROWN_LINEAR);
+    let wood = palette::linear_rgba(palette::LOG);
+    let centre = [floor[0] + 0.5, floor[1] + BUSH_INSET, floor[2] + 0.5];
+
+    // A low, open tangle rather than a skirt box. The four cardinal tips are the exact
+    // horizontal fill guarantee; their inner edges overlap around the canes' feet.
+    for direction in 0..BUSH_BASE_LEAVES {
+        push_radial_blade(
+            mesh,
+            centre,
+            direction as f32 * std::f32::consts::FRAC_PI_2,
+            0.5 - BUSH_INSET,
+            BUSH_BASE_LEAF_HALF_WIDTH,
+            BUSH_BASE_LEAF_RISE,
+            foliage,
+        );
+    }
+
+    let canes: [Cane; BRAMBLE_CANES] =
+        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
+
+    // Two leaves follow every cane. The shoulder leaf lifts by a fixed amount; the
+    // crest leaf's outer edge lands exactly at the fill guarantee below the ceiling.
+    for (index, cane) in canes.iter().enumerate() {
+        let side = if index % 2 == 0 { 1.0 } else { -1.0 };
+        let leaf_yaw = cane.yaw + side * std::f32::consts::FRAC_PI_2 * 0.72;
+        let leaves: [([f32; 3], f32, f32); BUSH_LEAVES_PER_CANE] = [
+            (cane.shoulder, leaf_yaw, BUSH_CANE_LEAF_RISE),
+            (
+                cane.crest,
+                leaf_yaw + std::f32::consts::PI,
+                floor[1] + 1.0 - BUSH_INSET - cane.crest[1],
+            ),
+        ];
+        for (centre, yaw, rise) in leaves {
+            push_radial_blade(
+                mesh,
+                centre,
+                yaw,
+                BUSH_CANE_LEAF_OUTER,
+                BUSH_CANE_LEAF_HALF_WIDTH,
+                rise,
+                leaf,
+            );
+        }
+    }
+
+    // Three of the four tips flower. Which colour leads still turns with the seed, but
+    // the positions are the cane tips themselves rather than gaps beside a foliage box.
     let flowers = [
         palette::FLOWER_RED,
         palette::FLOWER_YELLOW,
         palette::FLOWER_BLUE,
     ];
-    for speck in 0..BUSH_SPECKS {
-        let mut base = [
-            floor[0] + low + 0.12 + dial(seed, 12 + speck as u32) * (high - low - 0.24),
-            floor[1] + BUSH_SPECK_FLOOR + dial(seed, 15 + speck as u32) * 0.04,
-            floor[2] + low + 0.12 + dial(seed, 18 + speck as u32) * (high - low - 0.24),
-        ];
-        base[axis] = floor[axis] + strip;
+    for (speck, cane) in canes.iter().take(BUSH_SPECKS).enumerate() {
         let colour = palette::linear_rgba(flowers[(seed as usize + speck) % flowers.len()]);
         push_blade(
             mesh,
-            base,
+            cane.tip,
             BUSH_SPECK_HALF_WIDTH,
-            base[1] + BUSH_SPECK_HEIGHT,
+            cane.tip[1] + BUSH_SPECK_HEIGHT,
             0,
             colour,
         );
         push_blade(
             mesh,
-            base,
+            cane.tip,
             BUSH_SPECK_HALF_WIDTH,
-            base[1] + BUSH_SPECK_HEIGHT,
+            cane.tip[1] + BUSH_SPECK_HEIGHT,
             2,
             colour,
         );
@@ -1475,34 +1479,6 @@ fn push_twig(
             sub(end, offset),
         ];
         mesh.push_quad(corners, face_normal(corners), color, None);
-    }
-}
-
-/// The six faces of an axis-aligned box, wound the way [`quad_corners`] winds a merged
-/// quad and for the same reason: (u, v, axis) is right-handed, so walking
-/// `origin -> +u -> +u+v -> +v` is counter-clockwise seen from `+axis`.
-fn push_box(mesh: &mut SurfaceMesh, min: [f32; 3], max: [f32; 3], color: [f32; 4]) {
-    let add = |a: [f32; 3], b: [f32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-
-    for axis in 0..3 {
-        let u = (axis + 1) % 3;
-        let v = (axis + 2) % 3;
-        let mut along_u = [0.0f32; 3];
-        along_u[u] = max[u] - min[u];
-        let mut along_v = [0.0f32; 3];
-        along_v[v] = max[v] - min[v];
-
-        for positive in [false, true] {
-            let mut origin = min;
-            origin[axis] = if positive { max[axis] } else { min[axis] };
-            let far = add(add(origin, along_u), along_v);
-            let corners = if positive {
-                [origin, add(origin, along_u), far, add(origin, along_v)]
-            } else {
-                [origin, add(origin, along_v), far, add(origin, along_u)]
-            };
-            mesh.push_quad(corners, normal(axis, positive), color, None);
-        }
     }
 }
 
@@ -3961,7 +3937,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bush_has_twigs_specks_and_still_fills_the_voxel_a_body_is_stopped_by() {
+    fn a_bramble_has_arches_leaves_flowers_and_fills_the_voxel_a_body_is_stopped_by() {
         // The constraint the bush has and the flower does not: `world.Bush` is `Solid` on
         // the server, so what is drawn has to span the cube collision uses. It is drawn
         // per voxel now, which means the opaque sweep must stop drawing its cube — and
@@ -3981,9 +3957,9 @@ mod tests {
         assert_eq!(
             quads_by_colour(&mesh.cover),
             BTreeMap::from([
-                (palette::linear_rgba(palette::BUSH).map(f32::to_bits), 12),
-                (tone(palette::BUSH_CROWN_LINEAR), 6),
-                (palette::linear_rgba(palette::LOG).map(f32::to_bits), 8),
+                (palette::linear_rgba(palette::BUSH).map(f32::to_bits), 4),
+                (tone(palette::BUSH_CROWN_LINEAR), 8),
+                (palette::linear_rgba(palette::LOG).map(f32::to_bits), 24),
                 (
                     palette::linear_rgba(palette::FLOWER_RED).map(f32::to_bits),
                     2
@@ -3997,7 +3973,7 @@ mod tests {
                     2
                 ),
             ]),
-            "foliage, a lighter crown, four woody twigs and three tiny flower specks"
+            "a low leaf tangle, leaves along four woody arches and three tip flowers"
         );
 
         let repeated = super::mesh_chunk(&chunk, &alone());
@@ -4007,6 +3983,7 @@ mod tests {
         let woody: Vec<usize> = (0..mesh.cover.quad_count())
             .filter(|quad| mesh.cover.colors[quad * VERTICES_PER_QUAD] == wood)
             .collect();
+        assert_eq!(woody.len(), BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2);
         let woody_height =
             woody
                 .iter()
@@ -4019,6 +3996,59 @@ mod tests {
             "the woody geometry does not cross the foliage mass: {woody_height:?}"
         );
 
+        // Two ribbons per segment and three segments per cane. Reading the centre line
+        // back out of one ribbon in each pair proves the stroke rises twice and then
+        // descends: a straight twig cannot satisfy this however it is yawed.
+        let endpoint = |quad: usize, end: bool| {
+            let vertices = &mesh.cover.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+            let pair = if end {
+                [vertices[2], vertices[3]]
+            } else {
+                [vertices[0], vertices[1]]
+            };
+            [
+                (pair[0][0] + pair[1][0]) * 0.5,
+                (pair[0][1] + pair[1][1]) * 0.5,
+                (pair[0][2] + pair[1][2]) * 0.5,
+            ]
+        };
+        let mut tips = Vec::new();
+        for (cane, quads) in woody.chunks_exact(BRAMBLE_CANE_SEGMENTS * 2).enumerate() {
+            let base = endpoint(quads[0], false);
+            let shoulder = endpoint(quads[0], true);
+            let shoulder_again = endpoint(quads[2], false);
+            let crest = endpoint(quads[2], true);
+            let crest_again = endpoint(quads[4], false);
+            let tip = endpoint(quads[4], true);
+            for axis in 0..3 {
+                assert!((shoulder[axis] - shoulder_again[axis]).abs() < 1e-5);
+                assert!((crest[axis] - crest_again[axis]).abs() < 1e-5);
+            }
+            assert!(
+                base[1] < shoulder[1] && shoulder[1] < crest[1] && tip[1] < crest[1],
+                "cane {cane} is not an arch: {base:?} -> {shoulder:?} -> {crest:?} -> {tip:?}"
+            );
+            tips.push(tip);
+        }
+
+        let foliage_colours = [
+            palette::linear_rgba(palette::BUSH),
+            opaque(palette::BUSH_CROWN_LINEAR),
+        ];
+        let leaves: Vec<usize> = (0..mesh.cover.quad_count())
+            .filter(|quad| foliage_colours.contains(&mesh.cover.colors[quad * VERTICES_PER_QUAD]))
+            .collect();
+        assert_eq!(
+            leaves.len(),
+            BUSH_BASE_LEAVES + BRAMBLE_CANES * BUSH_LEAVES_PER_CANE
+        );
+        assert!(
+            leaves
+                .iter()
+                .all(|quad| mesh.cover.normals[*quad * VERTICES_PER_QUAD][1] > 0.5),
+            "every broad leaf must present its upper face to the light"
+        );
+
         let flower_colours = [
             palette::linear_rgba(palette::FLOWER_RED),
             palette::linear_rgba(palette::FLOWER_YELLOW),
@@ -4028,6 +4058,31 @@ mod tests {
             .filter(|quad| flower_colours.contains(&mesh.cover.colors[quad * VERTICES_PER_QUAD]))
             .collect();
         assert_eq!(specks.len(), BUSH_SPECKS * 2);
+        for (speck, quads) in specks.chunks_exact(2).enumerate() {
+            let vertices =
+                &mesh.cover.positions[quads[0] * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+            let low = vertices
+                .iter()
+                .map(|vertex| vertex[1])
+                .fold(f32::INFINITY, f32::min);
+            let bottom: Vec<[f32; 3]> = vertices
+                .iter()
+                .copied()
+                .filter(|vertex| (vertex[1] - low).abs() < 1e-5)
+                .collect();
+            let flower_base = [
+                (bottom[0][0] + bottom[1][0]) * 0.5,
+                low,
+                (bottom[0][2] + bottom[1][2]) * 0.5,
+            ];
+            for axis in 0..3 {
+                assert!(
+                    (flower_base[axis] - tips[speck][axis]).abs() < 1e-5,
+                    "flower {speck} is not on its cane tip: {flower_base:?} vs {:?}",
+                    tips[speck]
+                );
+            }
+        }
         for quad in specks {
             let spans = [0, 1, 2].map(|axis| {
                 let (low, high) = quad_extent(&mesh.cover, quad, axis);
@@ -4068,8 +4123,8 @@ mod tests {
         // What #634 is for. A bush used to be an ordinary opaque cube, so the greedy
         // sweep merged a cluster of them into one slab with one flat top; `visitBush` on
         // the server grows clusters of up to three, so that was the common case rather
-        // than the corner one. Now each is its own thirty-two quads, and the per-voxel
-        // jitter puts their foliage and twig surfaces at different heights.
+        // than the corner one. Now each is its own bramble, and the per-voxel jitter
+        // puts their cane arches at different heights and angles.
         let mut chunk = air(SIZE);
         chunk.set(4, 5, 6, palette::BUSH);
         chunk.set(5, 5, 6, palette::BUSH);
@@ -4082,7 +4137,7 @@ mod tests {
         assert_eq!(mesh.cover.quad_count(), 2 * QUADS_PER_BUSH);
 
         // Neither bush leaves its own voxel, and the two are not the same shape shifted
-        // by one block: the skirt tops alone put a visible step between them.
+        // by one block: the cane crests alone put a visible step between them.
         let (first, second) = (0..mesh.cover.quad_count()).fold(
             (Vec::new(), Vec::new()),
             |(mut first, mut second), quad| {
@@ -4098,17 +4153,30 @@ mod tests {
         assert_eq!(first.len(), QUADS_PER_BUSH);
         assert_eq!(second.len(), QUADS_PER_BUSH);
 
-        let skirt_top = |quads: &[usize]| quad_extent(&mesh.cover, quads[0], 1).1;
+        let wood = palette::linear_rgba(palette::LOG);
+        let highest_cane = |quads: &[usize]| {
+            quads
+                .iter()
+                .filter(|quad| mesh.cover.colors[**quad * VERTICES_PER_QUAD] == wood)
+                .map(|quad| quad_extent(&mesh.cover, *quad, 1).1)
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
         assert_ne!(
-            skirt_top(&first),
-            skirt_top(&second),
-            "two neighbours drawn at the same height are the slab again"
+            highest_cane(&first),
+            highest_cane(&second),
+            "two neighbours grew the same arch"
         );
 
         // And the two never share a plane, which is what `BUSH_INSET` buys: coincident
         // quads on the boundary would fight the depth buffer along the whole seam.
-        let (_, first_high) = quad_extent(&mesh.cover, first[0], 0);
-        let (second_low, _) = quad_extent(&mesh.cover, second[0], 0);
+        let first_high = first
+            .iter()
+            .map(|quad| quad_extent(&mesh.cover, *quad, 0).1)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let second_low = second
+            .iter()
+            .map(|quad| quad_extent(&mesh.cover, *quad, 0).0)
+            .fold(f32::INFINITY, f32::min);
         assert!(
             first_high < second_low,
             "{first_high} and {second_low} meet on one plane"
@@ -4139,7 +4207,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 1728);
+        assert_eq!(mesh.cover.quad_count(), 2048);
     }
 
     #[test]
