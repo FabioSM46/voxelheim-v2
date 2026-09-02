@@ -85,7 +85,12 @@ impl Plugin for PlayerTradePlugin {
                     .after(ApplySnapshots)
                     .before(ApplyInputMode),
             )
-            .add_systems(Update, open_player_trade_prompt.after(OriginateInteract))
+            .add_systems(
+                Update,
+                open_player_trade_prompt
+                    .after(OriginateInteract)
+                    .after(send_player_trade_prompt_answer),
+            )
             .add_systems(
                 Update,
                 (send_player_trade_prompt_answer, send_player_trade_intents).after(ApplyInputMode),
@@ -391,7 +396,7 @@ mod tests {
         );
     }
 
-    fn answer_prompt(app: &mut App, accepted: bool) {
+    fn queue_prompt_answer(app: &mut App, accepted: bool) {
         let (answer, return_mode) = app
             .world_mut()
             .resource_mut::<ConfirmationPrompt>()
@@ -399,6 +404,10 @@ mod tests {
             .expect("open prompt");
         *app.world_mut().resource_mut::<InputMode>() = return_mode;
         app.world_mut().write_message(answer);
+    }
+
+    fn answer_prompt(app: &mut App, accepted: bool) {
+        queue_prompt_answer(app, accepted);
         app.update();
     }
 
@@ -433,6 +442,24 @@ mod tests {
             })]
         );
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+    }
+
+    #[test]
+    fn an_answer_precedes_a_same_frame_prompt_replacement() {
+        let mut app = app();
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound);
+
+        open_prompt(&mut app, 11, "Freya");
+        queue_prompt_answer(&mut app, true);
+        app.world_mut().write_message(PlayerTradePromptRequest {
+            target_entity_id: 13,
+            target_name: String::new(),
+        });
+
+        app.update();
+
+        assert_eq!(frames.try_iter().count(), 1, "the accepted prompt was lost");
     }
 
     #[test]
