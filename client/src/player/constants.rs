@@ -105,6 +105,20 @@ pub const MAX_REACH: f32 = 4.5;
 /// to agree.
 pub const BOOM_LENGTH: f32 = 4.0;
 
+/// How far behind the eyes the third-person camera sits while the player is mounted, in
+/// blocks.
+///
+/// The walking boom frames a body [`PLAYER_HEIGHT`] tall; a mounted body is
+/// [`MOUNTED_HEIGHT`] tall, and the same framing needs the camera further back by exactly
+/// that ratio — the whole animal on screen with the rider on it. Derived rather than typed
+/// for the reason [`EYE_HEIGHT`] is a fraction: change the mounted body and the boom
+/// follows, and the `const` assert below keeps it at least half again the walking one.
+///
+/// Presentation, exactly as [`BOOM_LENGTH`] is, and cut short indoors by the same raycast.
+/// `camera.rs` eases between the two on the eye height's clock, towards whichever the
+/// authoritative local mount projection names — never a predicted one.
+pub const MOUNTED_BOOM_LENGTH: f32 = BOOM_LENGTH * MOUNTED_HEIGHT / PLAYER_HEIGHT;
+
 /// How far in front of a wall the boom stops when the camera would otherwise be inside it.
 ///
 /// The near plane is what this is really about: a camera exactly on a face renders the
@@ -171,6 +185,10 @@ const _: () = assert!(EYE_HEIGHT > 0.0 && EYE_HEIGHT < PLAYER_HEIGHT);
 /// The walking body lies inside the mounted one on every side — the server's reason a
 /// dismount never has to move anybody: wherever the horse fitted, the walker fits.
 const _: () = assert!(MOUNTED_WIDTH > PLAYER_WIDTH && MOUNTED_HEIGHT > PLAYER_HEIGHT);
+
+/// A mounted boom shorter than half again the walking one frames the rider and loses the
+/// horse under them.
+const _: () = assert!(MOUNTED_BOOM_LENGTH >= BOOM_LENGTH * 1.5);
 
 /// At exactly ±π/2 the view direction is the up axis, every yaw looks identical, and the
 /// image flips as the pitch crosses it.
