@@ -1,29 +1,25 @@
 //! The Fimbulvetr warning as presentation state.
 //!
 //! A [`StormWarning`] is already the server's decision: this module keeps the newest one,
-//! repeats its milestone sentence in the notice and chat, and lets the compass subtract
+//! publishes its milestone sentence to chat, and lets the compass subtract
 //! elapsed wall time from the seconds the server stated. It never infers a storm from the
 //! weather snapshot and never writes weather back out of this resource.
 
 use std::time::Instant;
 
 use bevy::prelude::*;
-use bevy::time::Real;
 
 use crate::net::{ConnectionState, DrainNetwork, Session, StormInbox, StormPhase, StormWarning};
-use crate::player::{ApplyInputMode, InputMode};
 
-use super::chat::{ChatLog, RenderChat};
-use super::status::Notice;
+use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
-/// The last statement received about the Fimbulvetr, plus a notice waiting for the HUD.
+/// The last statement received about the Fimbulvetr.
 ///
 /// `received_at` anchors presentation only. The phase and seconds remain exactly the
 /// server's last values; no local timer advances either field.
 #[derive(Resource, Debug, Default)]
 pub(super) struct Storm {
     last: Option<ReceivedWarning>,
-    pending_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,16 +34,14 @@ impl Storm {
             warning,
             received_at,
         });
-        self.pending_notice = notice_text(warning);
     }
 
     fn is_clear(&self) -> bool {
-        self.last.is_none() && self.pending_notice.is_none()
+        self.last.is_none()
     }
 
     fn clear(&mut self) {
         self.last = None;
-        self.pending_notice = None;
     }
 
     /// What the compass reads at `now`, or no line when this phase has no countdown.
@@ -69,41 +63,30 @@ impl Plugin for StormUiPlugin {
         // path headlessly testable on its own, without a socket or the rest of the UI.
         app.init_resource::<Storm>()
             .init_resource::<StormInbox>()
-            .init_resource::<Notice>()
-            .init_resource::<ChatLog>()
-            .init_resource::<InputMode>()
+            .add_message::<PlayerMessage>()
             .add_systems(
                 Update,
                 ingest_storm_warnings
                     .in_set(IngestStorm)
-                    .after(DrainNetwork)
-                    .after(ApplyInputMode)
-                    .before(RenderChat),
+                    .in_set(PublishPlayerMessages)
+                    .after(DrainNetwork),
             );
     }
 }
 
 /// Reads every warning once, keeps the newest as state, and publishes each sentence once.
 ///
-/// Chat is written immediately in every input mode. The notice is held while a panel owns
-/// the screen, so opening the map at the wrong second cannot spend its four-second lifetime
-/// behind the panel; it begins when the HUD is visible again.
+/// Chat is written immediately and exactly once for every milestone sentence.
 #[derive(bevy::ecs::system::SystemParam)]
 struct StormPresentation<'w> {
     state: Option<Res<'w, ConnectionState>>,
     session: Option<Res<'w, Session>>,
-    mode: Res<'w, InputMode>,
     inbox: ResMut<'w, StormInbox>,
     storm: ResMut<'w, Storm>,
-    notice: ResMut<'w, Notice>,
-    chat: ResMut<'w, ChatLog>,
+    messages: MessageWriter<'w, PlayerMessage>,
 }
 
-fn ingest_storm_warnings(
-    time: Res<Time>,
-    real_time: Res<Time<Real>>,
-    mut presentation: StormPresentation<'_>,
-) {
+fn ingest_storm_warnings(mut presentation: StormPresentation<'_>) {
     let connected = presentation.state.as_deref().is_some_and(|state| {
         matches!(
             *state,
@@ -123,18 +106,13 @@ fn ingest_storm_warnings(
 
     if !presentation.inbox.is_empty() {
         for (warning, received_at) in presentation.inbox.take() {
-            if let Some(line) = notice_text(warning) {
+            if let Some(line) = milestone_text(warning) {
                 presentation
-                    .chat
-                    .push_highlighted(line.clone(), real_time.elapsed());
+                    .messages
+                    .write(PlayerMessage::new(PlayerMessageKind::Server, line));
             }
             presentation.storm.receive(warning, received_at);
         }
-    }
-
-    let hud_visible = matches!(*presentation.mode, InputMode::Playing | InputMode::Chat);
-    if hud_visible && let Some(line) = presentation.storm.pending_notice.take() {
-        presentation.notice.show(line, time.elapsed());
     }
 }
 
@@ -144,7 +122,7 @@ fn ingest_storm_warnings(
 /// dots: the source issue uses an ellipsis there, but the embedded fallback font contains
 /// only the 95 printable ASCII glyphs. A raging warning needs no second announcement; its
 /// remaining time is the persistent line under the compass.
-fn notice_text(warning: StormWarning) -> Option<String> {
+fn milestone_text(warning: StormWarning) -> Option<String> {
     match warning.phase {
         StormPhase::Approaching => Some(match warning.seconds_until {
             600 => "The Fimbulvetr comes in 10 minutes".to_owned(),
@@ -210,12 +188,11 @@ mod tests {
         }
     }
 
-    fn app(mode: InputMode) -> App {
+    fn app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
             .insert_resource(ConnectionState::Connected)
-            .insert_resource(mode)
             .add_plugins(StormUiPlugin);
         app
     }
@@ -228,28 +205,28 @@ mod tests {
     }
 
     #[test]
-    fn every_phase_has_the_notice_sentence_it_owns() {
+    fn every_phase_has_the_milestone_sentence_it_owns() {
         assert_eq!(
-            notice_text(warning(StormPhase::Approaching, 600)).as_deref(),
+            milestone_text(warning(StormPhase::Approaching, 600)).as_deref(),
             Some("The Fimbulvetr comes in 10 minutes")
         );
         assert_eq!(
-            notice_text(warning(StormPhase::Approaching, 60)).as_deref(),
+            milestone_text(warning(StormPhase::Approaching, 60)).as_deref(),
             Some("...in 1 minute")
         );
         assert_eq!(
-            notice_text(warning(StormPhase::Approaching, 10)).as_deref(),
+            milestone_text(warning(StormPhase::Approaching, 10)).as_deref(),
             Some("...in 10 seconds")
         );
-        assert_eq!(notice_text(warning(StormPhase::Raging, 300)), None);
+        assert_eq!(milestone_text(warning(StormPhase::Raging, 300)), None);
         assert_eq!(
-            notice_text(warning(StormPhase::Passed, 0)).as_deref(),
+            milestone_text(warning(StormPhase::Passed, 0)).as_deref(),
             Some("The Fimbulvetr has passed")
         );
     }
 
     #[test]
-    fn notices_are_also_kept_as_highlighted_chat_lines() {
+    fn milestones_emit_exactly_one_server_message() {
         let at = Instant::now();
         for (warning, expected) in [
             (
@@ -262,37 +239,17 @@ mod tests {
                 Some("The Fimbulvetr has passed"),
             ),
         ] {
-            let mut app = app(InputMode::Playing);
+            let mut app = app();
             deliver(&mut app, warning, at);
+            let messages = app.world().resource::<Messages<PlayerMessage>>();
+            let mut cursor = messages.get_cursor();
+            let actual: Vec<PlayerMessage> = cursor.read(messages).cloned().collect();
             assert_eq!(
-                app.world().resource::<ChatLog>().newest(),
-                expected.map(|line| (line, true))
-            );
-        }
-    }
-
-    #[test]
-    fn a_warning_behind_a_panel_reaches_chat_and_waits_to_show_its_notice() {
-        for mode in [InputMode::Map, InputMode::Inventory, InputMode::Menu] {
-            let mut app = app(mode);
-            deliver(
-                &mut app,
-                warning(StormPhase::Approaching, 60),
-                Instant::now(),
-            );
-            assert_eq!(
-                app.world().resource::<ChatLog>().newest(),
-                Some(("...in 1 minute", true)),
-                "mode {mode:?}"
-            );
-            assert_eq!(app.world().resource::<Notice>().line(), "", "mode {mode:?}");
-
-            *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
-            app.update();
-            assert_eq!(
-                app.world().resource::<Notice>().line(),
-                "...in 1 minute",
-                "mode {mode:?}"
+                actual,
+                expected
+                    .map(|line| PlayerMessage::new(PlayerMessageKind::Server, line))
+                    .into_iter()
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -324,8 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn disconnect_clears_the_last_warning_and_any_deferred_notice() {
-        let mut app = app(InputMode::Inventory);
+    fn disconnect_clears_the_last_warning() {
+        let mut app = app();
         deliver(&mut app, warning(StormPhase::Raging, 299), Instant::now());
         assert!(app.world().resource::<Storm>().last.is_some());
 
@@ -333,7 +290,6 @@ mod tests {
         app.update();
         let storm = app.world().resource::<Storm>();
         assert!(storm.last.is_none());
-        assert!(storm.pending_notice.is_none());
     }
 
     #[test]
@@ -341,7 +297,6 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
-            .insert_resource(InputMode::Playing)
             .add_plugins(StormUiPlugin);
 
         deliver(
@@ -352,6 +307,8 @@ mod tests {
 
         assert!(app.world().resource::<Storm>().is_clear());
         assert!(app.world().resource::<StormInbox>().is_empty());
-        assert_eq!(app.world().resource::<ChatLog>().newest(), None);
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        assert_eq!(cursor.read(messages).count(), 0);
     }
 }

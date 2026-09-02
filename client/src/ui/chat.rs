@@ -73,15 +73,8 @@ impl ChatLog {
         });
     }
 
-    pub(super) fn push_highlighted(&mut self, text: String, now: Duration) {
+    fn push_highlighted(&mut self, text: String, now: Duration) {
         self.push_kind(text, now, LogKind::Highlight);
-    }
-
-    #[cfg(test)]
-    pub(super) fn newest(&self) -> Option<(&str, bool)> {
-        self.0
-            .back()
-            .map(|line| (line.text.as_str(), line.kind != LogKind::Player))
     }
 }
 

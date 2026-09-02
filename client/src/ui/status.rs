@@ -27,6 +27,8 @@ use crate::player::{PlayerStats, PlayerTradeEnded};
 use crate::settings::{Corner, Settings};
 use crate::world::MeshStats;
 
+use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
+
 /// Distance from the top-left corner, in logical pixels.
 const MARGIN: f32 = 16.0;
 
@@ -40,16 +42,13 @@ const SECOND_LINE: f32 = MARGIN + 24.0;
 /// Vertical offset of the player line, one row further down.
 const THIRD_LINE: f32 = MARGIN + 48.0;
 
-/// Vertical offset of the transient notice, one row below the player line.
-const FOURTH_LINE: f32 = MARGIN + 72.0;
-
-/// Where the readout sits when it is in the **top-left** corner: one row below the notice.
+/// Where the readout sits when it is in the **top-left** corner: one row below the player line.
 ///
-/// The other three corners take [`MARGIN`] flat. This one cannot: the four debug lines own
+/// The other three corners take [`MARGIN`] flat. This one cannot: the three debug lines own
 /// the top-left already, and a readout laid over them would be two sentences in one place.
 /// It is still the top-left corner in the sense the setting means — it is simply the first
 /// free row of it.
-const READOUT_LINE: f32 = MARGIN + 96.0;
+const READOUT_LINE: f32 = MARGIN + 72.0;
 
 /// How much of each frame's measurement the frame-rate reading takes.
 ///
@@ -66,32 +65,17 @@ const FRAME_RATE_SMOOTHING: f32 = 0.1;
 /// the smoothing still sees every measurement; this interval bounds presentation only.
 const READOUT_PUBLICATION_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How long a notice stays on screen.
-///
-/// Long enough to read a short sentence and short enough that it is gone before the next
-/// thing the player tries. Measured from the frame it was shown, and reset by the next
-/// notice rather than queued behind it: the answer worth reading is the newest one.
-const NOTICE_LIFETIME: Duration = Duration::from_secs(4);
-
-/// The colour a notice is drawn in, as linear RGB.
-///
-/// The aiming outline's warm amber, deliberately: this line and that frame are the two
-/// pieces of interface that answer the same press, and a player who has just been refused
-/// should see the answer in the colour of the thing they were pointing at.
-const NOTICE_COLOUR: Color = Color::linear_rgb(1.0, 0.72, 0.25);
-
 /// Draws the connection state and the world counters, and keeps both current.
 pub struct StatusUiPlugin;
 
 impl Plugin for StatusUiPlugin {
     fn build(&self, app: &mut App) {
         // The settings own whether the readout is drawn and where. Initialised here as well
-        // as by `SettingsScreenPlugin`, for the reason `Notice` is beside it: this plugin has
-        // to stand on its own, and its own tests build it that way.
-        app.init_resource::<Notice>()
-            .init_resource::<ReadoutMeasurements>()
+        // as by `SettingsScreenPlugin` so this plugin stands on its own in headless tests.
+        app.init_resource::<ReadoutMeasurements>()
             .init_resource::<Settings>()
             .add_message::<PlayerTradeEnded>()
+            .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_status_text)
             .add_systems(
                 Update,
@@ -99,7 +83,7 @@ impl Plugin for StatusUiPlugin {
                     refresh_status_text,
                     refresh_world_text,
                     refresh_player_text,
-                    refresh_notice_text,
+                    publish_gameplay_messages.in_set(PublishPlayerMessages),
                     (sample_readout, refresh_readout).chain(),
                 ),
             );
@@ -118,10 +102,6 @@ struct WorldText;
 /// Marks the player line.
 #[derive(Component)]
 struct PlayerText;
-
-/// Marks the transient notice line.
-#[derive(Component)]
-struct NoticeText;
 
 /// Marks the frame-rate readout.
 #[derive(Component)]
@@ -148,48 +128,6 @@ impl Default for ReadoutPublication {
         Self {
             cadence: Timer::new(READOUT_PUBLICATION_INTERVAL, TimerMode::Repeating),
             was_visible: false,
-        }
-    }
-}
-
-/// The transient sentence on screen, and when it goes away.
-///
-/// **It holds a sentence, never a rule.** Whatever produced it — today, one refusal from
-/// the server — has already been decided somewhere else; this resource is the text and a
-/// deadline, and nothing reads it back to make a decision.
-#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
-pub struct Notice {
-    line: String,
-    /// When the line stops being shown, on `Time`'s elapsed clock. `None` when there is
-    /// nothing on screen.
-    until: Option<Duration>,
-}
-
-impl Notice {
-    /// What is on screen right now, or the empty string.
-    pub(super) fn line(&self) -> &str {
-        if self.until.is_some() { &self.line } else { "" }
-    }
-
-    /// Shows `line` for [`NOTICE_LIFETIME`] from `now`, replacing whatever was there.
-    ///
-    /// Replaces rather than queues, for the reason the inbox keeps the newest: two
-    /// refusals are two different answers, and the older one is about a press the player
-    /// has already stopped thinking about.
-    pub(super) fn show(&mut self, line: String, now: Duration) {
-        self.line = line;
-        self.until = Some(now + NOTICE_LIFETIME);
-    }
-
-    /// Clears the line if its time is up. Answers whether anything changed.
-    fn expire(&mut self, now: Duration) -> bool {
-        match self.until {
-            Some(until) if now >= until => {
-                self.until = None;
-                self.line.clear();
-                true
-            }
-            _ => false,
         }
     }
 }
@@ -243,29 +181,8 @@ fn spawn_status_text(mut commands: Commands) {
         },
     ));
 
-    // Spawned empty and stays empty until something is refused. A node with no text
-    // rather than a node that appears and disappears: the three lines above it never
-    // move, and a layout that reflowed under them would make the notice the loudest thing
-    // on screen instead of the briefest.
-    commands.spawn((
-        NoticeText,
-        Text::new(String::new()),
-        TextFont {
-            font_size: FONT_SIZE,
-            ..default()
-        },
-        TextColor(NOTICE_COLOUR),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(FOURTH_LINE),
-            left: Val::Px(MARGIN),
-            ..default()
-        },
-    ));
-
     // Spawned hidden, because the readout is off until a player switches it on. The node
-    // exists either way so that switching it on is a visibility change rather than a spawn —
-    // the same reasoning the notice line's empty node carries.
+    // exists either way so that switching it on is a visibility change rather than a spawn.
     commands.spawn((
         ReadoutText,
         Text::new(String::new()),
@@ -283,7 +200,7 @@ fn spawn_status_text(mut commands: Commands) {
 ///
 /// A pure function of the corner, so the placement is testable without a window — which
 /// matters more here than usual, since the failure it prevents is a readout drawn over the
-/// four debug lines rather than beside them.
+/// three debug lines rather than beside them.
 fn corner_node(corner: Corner) -> Node {
     let (top, bottom) = match corner {
         Corner::TopLeft => (Val::Px(READOUT_LINE), Val::Auto),
@@ -497,7 +414,7 @@ fn refresh_player_text(
     }
 }
 
-/// Shows the newest refusal for a few seconds, then clears it.
+/// Publishes every player-action answer into the common chat channel.
 ///
 /// **The client decides nothing here, and that is the whole design of this line.** It
 /// does not evaluate whether a placement was legal, does not keep a copy of the rule that
@@ -505,63 +422,49 @@ fn refresh_player_text(
 /// what the server said. The reason the server sends the answer at all is that it already
 /// computed it and used to throw it away.
 ///
-/// Both resources are optional so `StatusUiPlugin` still stands on its own: its tests
-/// build it without `NetPlugin`, and a UI plugin that panicked without a socket would be
-/// untestable exactly where it matters.
-fn refresh_notice_text(
-    time: Option<Res<Time>>,
+/// The inbox is optional so `StatusUiPlugin` still stands on its own: its tests build it
+/// without `NetPlugin`, and a UI plugin that panicked without a socket would be untestable
+/// exactly where it matters.
+fn publish_gameplay_messages(
     inbox: Option<ResMut<RefusalInbox>>,
     mut trade_ended: MessageReader<PlayerTradeEnded>,
-    mut notice: ResMut<Notice>,
-    mut nodes: Query<&mut Text, With<NoticeText>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
-    let Some(time) = time else {
-        return;
-    };
-    let now = time.elapsed();
-
-    // The newest, not all of them: two refusals are two different answers and only one
-    // line exists to show them in. Everything queued is still drained, so a burst cannot
-    // accumulate into an inbox that grows for the rest of the session.
-    let mut changed = notice.expire(now);
-    if let Some(mut inbox) = inbox
-        && let Some(refused) = inbox.take().into_iter().last()
-    {
-        match describe_refusal(&refused) {
-            Some(line) => {
-                notice.show(line, now);
-                changed = true;
+    if let Some(mut inbox) = inbox {
+        for refused in inbox.take() {
+            match describe_refusal(&refused) {
+                Some(line) => {
+                    messages.write(PlayerMessage::new(PlayerMessageKind::Warn, line));
+                }
+                // A silence this build chose: the reason is named and decoded, and the
+                // surface that will answer it does not exist yet. Logging it would put a line
+                // per refusal in front of an operator for a decision already recorded in
+                // `has_no_sentence_yet`.
+                None if has_no_sentence_yet(refused.reason) => {}
+                // A defect in this build, or a code from a contract this build has not read.
+                // Neither is news the player can act on, and inventing a sentence for the
+                // second would present a guess as the server's answer.
+                None => warn!(
+                    "the server refused {:?} with {:?}, which this build has no sentence for",
+                    refused.action, refused.reason
+                ),
             }
-            // A silence this build chose: the reason is named and decoded, and the
-            // surface that will answer it does not exist yet. Logging it would put a line
-            // per refusal in front of an operator for a decision already recorded in
-            // `has_no_sentence_yet`.
-            None if has_no_sentence_yet(refused.reason) => {}
-            // A defect in this build, or a code from a contract this build has not read.
-            // Neither is news the player can act on, and inventing a sentence for the
-            // second would present a guess as the server's answer.
-            None => warn!(
-                "the server refused {:?} with {:?}, which this build has no sentence for",
-                refused.action, refused.reason
-            ),
         }
     }
-    if let Some(ended) = trade_ended.read().last() {
+    for ended in trade_ended.read() {
         match trade_end_text(ended) {
             Some(line) => {
-                notice.show(line, now);
-                changed = true;
+                let kind = if ended.reason == PlayerTradeCloseReason::Completed {
+                    PlayerMessageKind::Info
+                } else if ended.reason == PlayerTradeCloseReason::Failed {
+                    PlayerMessageKind::Error
+                } else {
+                    PlayerMessageKind::Warn
+                };
+                messages.write(PlayerMessage::new(kind, line));
             }
             None => warn!("the server ended a player trade for a reason this build cannot name"),
         }
-    }
-
-    if !changed {
-        return;
-    }
-    for mut text in &mut nodes {
-        text.0.clear();
-        text.0.push_str(notice.line());
     }
 }
 
@@ -1362,7 +1265,7 @@ mod tests {
             assert!(line.is_ascii(), "{line}");
         }
 
-        // Every sentence a refusal can put on screen, through the same sweep: a notice is
+        // Every sentence a refusal can put in chat, through the same sweep: a line is
         // a line in the same font as the four above it, and a glyph it lacks would blank
         // exactly the message that exists to explain why nothing happened.
         for reason in EVERY_REASON {
@@ -1694,6 +1597,31 @@ mod tests {
                 want
             );
         }
+    }
+
+    #[test]
+    fn trade_endings_use_info_warning_and_error_severities() {
+        let mut app = headless_messages_ui();
+        for reason in [
+            PlayerTradeCloseReason::Completed,
+            PlayerTradeCloseReason::Cancelled,
+            PlayerTradeCloseReason::Failed,
+        ] {
+            app.world_mut().write_message(PlayerTradeEnded {
+                partner_name: "Eirik".to_owned(),
+                reason,
+            });
+        }
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [
+                PlayerMessage::new(PlayerMessageKind::Info, "Trade complete"),
+                PlayerMessage::new(PlayerMessageKind::Warn, "Eirik cancelled the trade"),
+                PlayerMessage::new(PlayerMessageKind::Error, "The trade ended"),
+            ]
+        );
     }
 
     /// Addressing somebody who keeps no stall says so, in those words.
@@ -2088,121 +2016,83 @@ mod tests {
         }
     }
 
-    /// The transient line, read off the node the player would be looking at.
-    fn notice_line(app: &mut App) -> String {
-        let world = app.world_mut();
-        let mut nodes = world.query_filtered::<&Text, With<NoticeText>>();
-        let lines: Vec<String> = nodes.iter(world).map(|text| text.0.clone()).collect();
-
-        assert_eq!(lines.len(), 1, "exactly one notice node exists");
-        lines.into_iter().next().expect("just counted one")
-    }
-
-    /// The step these tests advance the clock by, one per `update`.
-    ///
-    /// Small deliberately. `Time<Virtual>` clamps a frame's delta at 0.25s so a stalled
-    /// frame cannot teleport a simulation, and the notice reads that clock like every
-    /// other timed thing in this crate — so a test that asked for four seconds in one
-    /// update would get a quarter of one, and a timeout test that passed anyway would be
-    /// passing for the wrong reason.
+    /// The step the readout tests advance the clock by, one per `update`.
     const STEP: Duration = Duration::from_millis(100);
 
-    /// A status UI with a network inbox, on the fixed clock above.
-    fn headless_notice_ui() -> App {
+    fn headless_messages_ui() -> App {
         let mut app = headless_ui(ConnectionState::Connected);
-        app.init_resource::<RefusalInbox>()
-            .insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.init_resource::<RefusalInbox>();
         app
     }
 
-    /// Runs `count` frames of [`STEP`] each.
     fn steps(app: &mut App, count: u32) {
         for _ in 0..count {
             app.update();
         }
     }
 
-    /// Enough frames for [`NOTICE_LIFETIME`] to have passed, with one to spare.
-    fn frames_past_the_lifetime() -> u32 {
-        (NOTICE_LIFETIME.as_millis() / STEP.as_millis()) as u32 + 2
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
     }
 
-    /// A refusal from the server reaches the screen, and leaves it on its own.
-    ///
-    /// The whole point of the message: a placement that does not happen is an answer the
-    /// player can read, where before it was a click that vanished. Nothing here is
-    /// decided on this side — the reason arrived, and this is the sentence for it.
     #[test]
-    fn a_refusal_reaches_the_screen_and_then_goes_away() {
-        let mut app = headless_notice_ui();
-        steps(&mut app, 1);
-        assert_eq!(notice_line(&mut app), "", "nothing has been refused yet");
-
+    fn a_refusal_reaches_the_common_message_bus_as_a_warning() {
+        let mut app = headless_messages_ui();
         app.world_mut()
             .resource_mut::<RefusalInbox>()
             .push(refusal(RefusalReason::GroundIsAir));
-        steps(&mut app, 1);
+        app.update();
 
         assert_eq!(
-            notice_line(&mut app),
-            "Cannot build here: there is nothing solid to build on"
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Warn,
+                "Cannot build here: there is nothing solid to build on"
+            )]
         );
         assert_eq!(
             app.world().resource::<RefusalInbox>().pending(),
             0,
             "the inbox was drained rather than left to grow"
         );
-
-        // Still there halfway through, and gone once its time is up. Both halves matter:
-        // a line that vanished on the next frame would be a line nobody could read, and
-        // one that never left would be the last refusal sitting under a placement that
-        // has since worked.
-        steps(&mut app, frames_past_the_lifetime() / 2);
-        assert!(!notice_line(&mut app).is_empty(), "still readable");
-
-        steps(&mut app, frames_past_the_lifetime());
-        assert_eq!(notice_line(&mut app), "", "the notice expired");
     }
 
-    /// The newest refusal wins. The cap sentence fits both a second tent and a third
-    /// runestone because the server shares one reason and sends no structure kind.
-    ///
-    /// Two refusals are two different answers and there is one line to show them in. The
-    /// one worth reading is the one about the press the player just made.
     #[test]
-    fn the_newest_refusal_is_the_one_on_screen() {
-        let mut app = headless_notice_ui();
-        steps(&mut app, 1);
-
+    fn every_refusal_is_published_in_wire_order() {
+        let mut app = headless_messages_ui();
         {
             let mut inbox = app.world_mut().resource_mut::<RefusalInbox>();
             inbox.push(refusal(RefusalReason::GroundIsAir));
             inbox.push(refusal(RefusalReason::TentAlreadyPlaced));
         }
-        steps(&mut app, 1);
+        app.update();
 
         assert_eq!(
-            notice_line(&mut app),
-            "Cannot build here: you already have as many of these standing as allowed"
+            player_messages(&app),
+            [
+                PlayerMessage::new(
+                    PlayerMessageKind::Warn,
+                    "Cannot build here: there is nothing solid to build on"
+                ),
+                PlayerMessage::new(
+                    PlayerMessageKind::Warn,
+                    "Cannot build here: you already have as many of these standing as allowed"
+                ),
+            ]
         );
     }
 
-    /// A refusal that names this build's own defect reaches the log, never the player.
-    ///
-    /// The split `schemas/player.fbs` draws between its two reason groups, doing the one
-    /// thing it exists to do. A player who sent a malformed frame did nothing and can do
-    /// nothing about it; telling them would be noise about somebody else's bug.
     #[test]
     fn a_refusal_about_this_builds_own_defect_never_reaches_the_player() {
-        let mut app = headless_notice_ui();
-        steps(&mut app, 1);
-
+        let mut app = headless_messages_ui();
         app.world_mut()
             .resource_mut::<RefusalInbox>()
             .push(refusal(RefusalReason::MalformedFacing));
-        steps(&mut app, 1);
+        app.update();
 
-        assert_eq!(notice_line(&mut app), "");
+        assert!(player_messages(&app).is_empty());
         assert_eq!(
             app.world().resource::<RefusalInbox>().pending(),
             0,
@@ -2210,18 +2100,12 @@ mod tests {
         );
     }
 
-    /// The status plugin still stands on its own without a network.
-    ///
-    /// `StatusUiPlugin` is built here with no `NetPlugin`, so the inbox does not exist —
-    /// which is every frame of its own tests and would be a panic in a plugin that assumed
-    /// its sibling.
     #[test]
-    fn the_notice_line_is_harmless_without_a_session() {
+    fn the_message_publisher_is_harmless_without_a_network() {
         let mut app = headless_ui(ConnectionState::Connecting);
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
-        steps(&mut app, 2);
+        app.update();
 
-        assert_eq!(notice_line(&mut app), "");
+        assert!(player_messages(&app).is_empty());
     }
 
     // -------------------------------------------------------------------------
@@ -2266,7 +2150,7 @@ mod tests {
         );
     }
 
-    /// It moves to the corner the setting names, and the top-left one clears the four debug
+    /// It moves to the corner the setting names, and the top-left one clears the three debug
     /// lines rather than being drawn over them.
     #[test]
     fn the_readout_sits_in_the_corner_the_setting_names() {
@@ -2292,12 +2176,7 @@ mod tests {
 
         assert_eq!(corner_node(Corner::TopLeft).top, Val::Px(READOUT_LINE));
         assert_eq!(corner_node(Corner::TopRight).top, Val::Px(MARGIN));
-        const {
-            assert!(
-                READOUT_LINE > FOURTH_LINE,
-                "the top-left readout would be drawn over the notice line"
-            );
-        }
+        const { assert!(READOUT_LINE > THIRD_LINE) }
     }
 
     /// Sub-interval frames keep the string byte-for-byte stable, then one publication tick
