@@ -9,10 +9,12 @@
 //!
 //! The mesh is procedural — tapered solids from [`super::shapes`] where a body is not a
 //! box, cuboids where it is — cut to real proportions inside the mounted body the server
-//! collides. The gait is a transform on four leg children. Its only clock is
-//! [`WalkPose::phase`], which interpolation advances from horizontal distance: faster
-//! authoritative travel cycles the same rig faster, while elapsed time over no distance
-//! cannot move a hoof.
+//! collides. The gait is a transform on each of eight leg segments — an upper leg swinging
+//! at the shoulder or the hip and, under it, a cannon folding at the knee or the hock —
+//! and on the mane and the tail. Its only clock is [`WalkPose::phase`], which
+//! interpolation advances from horizontal distance and which a [`Gait`] rescales to a
+//! stride of its own: faster authoritative travel cycles the same rig faster, while
+//! elapsed time over no distance cannot move a hoof.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -24,7 +26,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::appearance::{BodyPiece, Limb};
-use super::interpolate::SnapshotBuffer;
+use super::interpolate::{SnapshotBuffer, WALK_STRIDE_BLOCKS};
 use super::shapes::hexahedron;
 use super::{Body, InputMode, WalkPose, merge_all};
 use crate::net::{MobKind, MountKind, Session};
@@ -85,23 +87,28 @@ const EYE_CENTRE: Vec3 = Vec3::new(0.135, 1.84, -1.14);
 /// envelope of a paddock horse.
 pub(super) const HORSE_HEIGHT: f32 = EAR_CENTRE.y + EAR.y / 2.0;
 
-// Each leg is one segment from its pivot — the shoulder for a foreleg, the hip for a hind
-// leg, both inside the barrel — down to a hoof that is wider at the ground. The swing is
-// sized so a hoof sweeps at most `HOOF_SWEEP` along the ground whatever the leg's length.
+// Each leg is two segments. The upper runs from its pivot — the shoulder for a foreleg,
+// the hip for a hind leg, both inside the barrel — down to the knee or the hock, cut at
+// one height for all four; the lower is the cannon and a hoof wider at the ground, a
+// child of the upper that pivots at that joint. The joint therefore follows the shoulder
+// for free, and nothing solves for where it is. Both segments are authored downwards from
+// their own pivot, so a rotation about the origin is a rotation about the joint.
 const LEG_PIVOT_X: f32 = 0.20;
 const LEG_PIVOT_Y: f32 = 1.12;
 const FRONT_PIVOT_Z: f32 = -0.45;
 const REAR_PIVOT_Z: f32 = 0.55;
+const KNEE_Y: f32 = 0.50;
 const HOOF_HEIGHT: f32 = 0.10;
-const HORSE_LEG: Vec3 = Vec3::new(0.12, LEG_PIVOT_Y - HOOF_HEIGHT, 0.14);
+const UPPER_LEG: Vec3 = Vec3::new(0.12, LEG_PIVOT_Y - KNEE_Y, 0.14);
+const LOWER_LEG: Vec3 = Vec3::new(0.12, KNEE_Y - HOOF_HEIGHT, 0.14);
+/// The knee in its upper segment's frame: straight below the pivot, where the segments meet.
+const KNEE: Vec3 = Vec3::new(0.0, -UPPER_LEG.y, 0.0);
 const HOOF_TOP: Deck = Deck::new(
-    HOOF_HEIGHT - LEG_PIVOT_Y,
-    HORSE_LEG.x / 2.0,
-    (-HORSE_LEG.z / 2.0, HORSE_LEG.z / 2.0),
+    HOOF_HEIGHT - KNEE_Y,
+    LOWER_LEG.x / 2.0,
+    (-LOWER_LEG.z / 2.0, LOWER_LEG.z / 2.0),
 );
-const HOOF_SOLE: Deck = Deck::new(-LEG_PIVOT_Y, 0.08, (-0.10, 0.08));
-const HOOF_SWEEP: f32 = 0.30;
-const HORSE_LEG_SWING: f32 = HOOF_SWEEP / (2.0 * LEG_PIVOT_Y);
+const HOOF_SOLE: Deck = Deck::new(-KNEE_Y, 0.08, (-0.10, 0.08));
 
 // The mane lies along the crest from the poll to the withers and the tail hangs from the
 // croup: each a strip authored downwards from its root and turned to rest along its line.
@@ -139,6 +146,7 @@ const _: () = assert!(MUZZLE.z < BROW.z && MUZZLE.half_x < BROW.half_x);
 const _: () = assert!(MUZZLE.y.1 - MUZZLE.y.0 < BROW.y.1 - BROW.y.0);
 const _: () = assert!(HOOF_TOP.y > HOOF_SOLE.y && HOOF_TOP.half_x < HOOF_SOLE.half_x);
 const _: () = assert!(HOOF_TOP.z.1 - HOOF_TOP.z.0 < HOOF_SOLE.z.1 - HOOF_SOLE.z.0);
+const _: () = assert!(KNEE_Y > HOOF_HEIGHT && KNEE_Y < LEG_PIVOT_Y);
 
 const COAT_EDGE: u32 = 32;
 const COAT_SEED: u32 = 0x0715_C0A7;
@@ -178,7 +186,8 @@ impl FromWorld for HorseCoats {
 pub(super) struct HorseVisuals {
     body: Handle<Mesh>,
     head: Handle<Mesh>,
-    leg: Handle<Mesh>,
+    upper_leg: Handle<Mesh>,
+    lower_leg: Handle<Mesh>,
     mane: Handle<Mesh>,
     tail: Handle<Mesh>,
     tack: Handle<Mesh>,
@@ -215,11 +224,15 @@ pub(super) struct PaddockHorse(u64);
 #[derive(Component)]
 struct HorsePart;
 
+/// One transform the gait writes, and which part of the horse it moves.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct HorseLeg(Leg);
+pub(super) enum HorseJoint {
+    Leg(Leg, Segment),
+    Hair(HorseHair),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Leg {
+pub(super) enum Leg {
     LeftFront,
     RightFront,
     LeftRear,
@@ -234,8 +247,18 @@ impl Leg {
         Self::RightRear,
     ];
 
+    /// This leg's place in [`Self::ALL`], and in every table written in that order.
+    const fn index(self) -> usize {
+        match self {
+            Self::LeftFront => 0,
+            Self::RightFront => 1,
+            Self::LeftRear => 2,
+            Self::RightRear => 3,
+        }
+    }
+
     /// Where the leg turns: the shoulder for a foreleg, the hip for a hind leg.
-    const fn hip(self) -> Vec3 {
+    const fn pivot(self) -> Vec3 {
         match self {
             Self::LeftFront => Vec3::new(-LEG_PIVOT_X, LEG_PIVOT_Y, FRONT_PIVOT_Z),
             Self::RightFront => Vec3::new(LEG_PIVOT_X, LEG_PIVOT_Y, FRONT_PIVOT_Z),
@@ -243,20 +266,75 @@ impl Leg {
             Self::RightRear => Vec3::new(LEG_PIVOT_X, LEG_PIVOT_Y, REAR_PIVOT_Z),
         }
     }
-
-    /// Diagonal pairs share a phase; the other pair is half a cycle away.
-    const fn phase_offset(self) -> f32 {
-        match self {
-            Self::LeftFront | Self::RightRear => 0.0,
-            Self::RightFront | Self::LeftRear => PI,
-        }
-    }
 }
 
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+/// The two pieces of one leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Segment {
+    /// Shoulder or hip down to the knee or the hock; a child of the horse.
+    Upper,
+    /// Cannon and hoof; a child of the upper segment, turning at the joint.
+    Lower,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HorseHair {
     Mane,
     Tail,
+}
+
+/// One way of moving: how far the horse travels in a cycle of its legs, when in that
+/// cycle each hoof lands, and how far the joints go.
+///
+/// A gait reads the distance phase and rescales it, and that is all it reads: nothing here
+/// is a speed, and no gait is chosen from one. The server holds a ridden horse at
+/// `MountSpeed` and the paddock lap at a walk, so which gait a horse uses follows from
+/// which kind of horse it is, and the phase alone says where in the cycle it stands.
+struct Gait {
+    /// Blocks per cycle. A drawn stride length, documented the way
+    /// `WALK_RADIANS_PER_BLOCK` is, and no more a speed than that one: the server still
+    /// owns how quickly the blocks are covered.
+    stride: f32,
+    /// Where in the cycle each leg lands, in [`Leg::ALL`] order.
+    beats: [f32; 4],
+    /// How far an upper segment swings either way from vertical.
+    swing: f32,
+    /// How far a lower segment folds back at the top of its swing.
+    fold: f32,
+}
+
+/// The walk: a lateral four-beat sequence — left rear, left front, right rear, right
+/// front — each a quarter of a cycle behind the last, one cycle per 1.7 blocks.
+const WALK: Gait = Gait {
+    stride: 1.7,
+    beats: [FRAC_PI_2, 3.0 * FRAC_PI_2, 0.0, PI],
+    swing: 0.32,
+    fold: 0.60,
+};
+
+impl Gait {
+    /// Where in this gait's cycle the horse is, or `None` standing.
+    fn cycle(&self, walk: WalkPose) -> Option<f32> {
+        walk.moving
+            .then(|| walk.phase * (WALK_STRIDE_BLOCKS / self.stride))
+    }
+
+    /// One leg's two angles: the upper segment's swing, positive forward, and the lower
+    /// segment's fold, positive folded. Both zero standing.
+    ///
+    /// A leg's own cycle starts at its footfall. The hoof is furthest forward there and
+    /// travels back through the stance to lift half a cycle later, so the swing is the
+    /// cosine; the cannon is straight for the whole of the stance and folds through the
+    /// swing, most at its middle, so the fold is the negative half of the sine — squared,
+    /// so it arrives at the ground and leaves it at rest.
+    fn leg(&self, leg: Leg, walk: WalkPose) -> (f32, f32) {
+        let Some(cycle) = self.cycle(walk) else {
+            return (0.0, 0.0);
+        };
+        let own = cycle - self.beats[leg.index()];
+        let lift = (-own.sin()).max(0.0);
+        (own.cos() * self.swing, lift * lift * self.fold)
+    }
 }
 
 fn coat_scatter(mark: u32, channel: u32) -> f32 {
@@ -348,7 +426,8 @@ pub(super) fn create_visuals(
     commands.insert_resource(HorseVisuals {
         body: meshes.add(horse_body_mesh()),
         head: meshes.add(horse_head_mesh()),
-        leg: meshes.add(horse_leg_mesh()),
+        upper_leg: meshes.add(horse_upper_leg_mesh()),
+        lower_leg: meshes.add(horse_lower_leg_mesh()),
         mane: meshes.add(horse_mane_mesh()),
         tail: meshes.add(horse_tail_mesh()),
         tack: meshes.add(horse_tack_mesh()),
@@ -427,11 +506,21 @@ fn horse_head_mesh() -> Mesh {
     head
 }
 
-/// One leg authored downwards from its pivot, shared by all four leg children.
-fn horse_leg_mesh() -> Mesh {
+/// Shoulder or hip to the knee, authored downwards from the pivot; shared by all four.
+fn horse_upper_leg_mesh() -> Mesh {
+    Mesh::from(Cuboid::from_size(UPPER_LEG)).translated_by(Vec3::Y * -UPPER_LEG.y / 2.0)
+}
+
+/// Knee to the ground — the cannon and the hoof — authored downwards from the knee;
+/// shared by all four.
+fn horse_lower_leg_mesh() -> Mesh {
     let mut leg =
-        Mesh::from(Cuboid::from_size(HORSE_LEG)).translated_by(Vec3::Y * -HORSE_LEG.y / 2.0);
-    merge_all(&mut leg, [lofted_along_y(HOOF_SOLE, HOOF_TOP)], "horse leg");
+        Mesh::from(Cuboid::from_size(LOWER_LEG)).translated_by(Vec3::Y * -LOWER_LEG.y / 2.0);
+    merge_all(
+        &mut leg,
+        [lofted_along_y(HOOF_SOLE, HOOF_TOP)],
+        "horse lower leg",
+    );
     leg
 }
 
@@ -546,17 +635,17 @@ fn spawn_horse_parts(
     ));
     horse.spawn((
         HorsePart,
-        HorseHair::Mane,
+        HorseJoint::Hair(HorseHair::Mane),
         Mesh3d(visuals.mane.clone()),
         MeshMaterial3d(visuals.hair.clone()),
-        hair_transform(HorseHair::Mane, WalkPose::default()),
+        rest_transform(HorseJoint::Hair(HorseHair::Mane)),
     ));
     horse.spawn((
         HorsePart,
-        HorseHair::Tail,
+        HorseJoint::Hair(HorseHair::Tail),
         Mesh3d(visuals.tail.clone()),
         MeshMaterial3d(visuals.hair.clone()),
-        hair_transform(HorseHair::Tail, WalkPose::default()),
+        rest_transform(HorseJoint::Hair(HorseHair::Tail)),
     ));
     horse.spawn((
         HorsePart,
@@ -571,12 +660,23 @@ fn spawn_horse_parts(
         Transform::default(),
     ));
     for leg in Leg::ALL {
-        horse.spawn((
-            HorseLeg(leg),
-            Mesh3d(visuals.leg.clone()),
-            MeshMaterial3d(material.clone()),
-            gait_transform(leg, WalkPose::default()),
-        ));
+        let upper = HorseJoint::Leg(leg, Segment::Upper);
+        let lower = HorseJoint::Leg(leg, Segment::Lower);
+        horse
+            .spawn((
+                upper,
+                Mesh3d(visuals.upper_leg.clone()),
+                MeshMaterial3d(material.clone()),
+                rest_transform(upper),
+            ))
+            .with_children(|upper| {
+                upper.spawn((
+                    lower,
+                    Mesh3d(visuals.lower_leg.clone()),
+                    MeshMaterial3d(material.clone()),
+                    rest_transform(lower),
+                ));
+            });
     }
 }
 
@@ -655,75 +755,84 @@ pub(super) fn sync_paddock_horses(
     }
 }
 
-pub(super) type MovingHorsePartQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Option<&'static HorseLeg>,
-        Option<&'static HorseHair>,
-        &'static mut Transform,
-    ),
-    Or<(With<HorseLeg>, With<HorseHair>)>,
->;
+pub(super) type MovingHorsePartQuery<'w, 's> =
+    Query<'w, 's, (&'static HorseJoint, &'static mut Transform)>;
 type RiddenHorseQuery<'w, 's> =
-    Query<'w, 's, (&'static ChildOf, &'static Children), (With<Horse>, Without<PaddockHorse>)>;
-type PaddockHorseQuery<'w, 's> =
-    Query<'w, 's, (&'static WalkPose, &'static Children), With<PaddockHorse>>;
+    Query<'w, 's, (Entity, &'static ChildOf), (With<Horse>, Without<PaddockHorse>)>;
+type PaddockHorseQuery<'w, 's> = Query<'w, 's, (Entity, &'static WalkPose), With<PaddockHorse>>;
 
-/// Poses four independently transformed legs from the owning body's distance sample.
+/// Poses every joint of every horse from its owning body's or its own row's distance
+/// sample.
 pub(super) fn animate_gait(
     bodies: Query<&WalkPose>,
     horses: RiddenHorseQuery<'_, '_>,
     paddock_horses: PaddockHorseQuery<'_, '_>,
-    mut moving_parts: MovingHorsePartQuery<'_, '_>,
+    children: Query<&Children>,
+    mut joints: MovingHorsePartQuery<'_, '_>,
 ) {
-    for (parent, children) in &horses {
+    for (horse, parent) in &horses {
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
-        pose_horse(children, *walk, &mut moving_parts);
+        pose_horse(horse, *walk, &WALK, &children, &mut joints);
     }
-    for (walk, children) in &paddock_horses {
-        pose_horse(children, *walk, &mut moving_parts);
+    for (horse, walk) in &paddock_horses {
+        pose_horse(horse, *walk, &WALK, &children, &mut joints);
     }
 }
 
+/// Writes every joint under one horse root, and only the ones that change: a lower leg
+/// is a grandchild, so this walks descendants rather than children.
 fn pose_horse(
-    children: &Children,
+    horse: Entity,
     walk: WalkPose,
-    moving_parts: &mut MovingHorsePartQuery<'_, '_>,
+    gait: &Gait,
+    children: &Query<&Children>,
+    joints: &mut MovingHorsePartQuery<'_, '_>,
 ) {
-    for child in children {
-        let Ok((leg, hair, mut transform)) = moving_parts.get_mut(*child) else {
+    for part in children.iter_descendants(horse) {
+        let Ok((joint, mut transform)) = joints.get_mut(part) else {
             continue;
         };
-        let next = match (leg, hair) {
-            (Some(leg), None) => gait_transform(leg.0, walk),
-            (None, Some(hair)) => hair_transform(*hair, walk),
-            _ => continue,
-        };
+        let next = joint_transform(*joint, gait, walk);
         if *transform != next {
             *transform = next;
         }
     }
 }
 
-fn gait_transform(leg: Leg, walk: WalkPose) -> Transform {
-    let angle = if walk.moving {
-        (walk.phase + leg.phase_offset()).sin() * HORSE_LEG_SWING
-    } else {
-        0.0
-    };
-    Transform::from_translation(leg.hip()).with_rotation(Quat::from_rotation_x(angle))
+fn joint_transform(joint: HorseJoint, gait: &Gait, walk: WalkPose) -> Transform {
+    match joint {
+        HorseJoint::Leg(leg, segment) => leg_transform(leg, segment, gait, walk),
+        HorseJoint::Hair(hair) => hair_transform(hair, gait, walk),
+    }
 }
 
-fn hair_transform(hair: HorseHair, walk: WalkPose) -> Transform {
-    let phase = if walk.moving { walk.phase.sin() } else { 0.0 };
-    let (root, rest, swing) = match hair {
+/// A joint standing still. The gait is immaterial there — every one puts every joint at
+/// rest — so the walk stands in for all of them.
+fn rest_transform(joint: HorseJoint) -> Transform {
+    joint_transform(joint, &WALK, WalkPose::default())
+}
+
+/// The upper segment turns about the shoulder or the hip, forward for a positive angle;
+/// the lower turns about the knee in the upper's frame, and folds backward — the hoof
+/// trails the joint through the swing, as a knee and a hock both bend.
+fn leg_transform(leg: Leg, segment: Segment, gait: &Gait, walk: WalkPose) -> Transform {
+    let (swing, fold) = gait.leg(leg, walk);
+    let (translation, angle) = match segment {
+        Segment::Upper => (leg.pivot(), swing),
+        Segment::Lower => (KNEE, -fold),
+    };
+    Transform::from_translation(translation).with_rotation(Quat::from_rotation_x(angle))
+}
+
+fn hair_transform(hair: HorseHair, gait: &Gait, walk: WalkPose) -> Transform {
+    let swing = gait.cycle(walk).map_or(0.0, f32::sin);
+    let (root, rest, reach) = match hair {
         HorseHair::Mane => (MANE_ROOT, MANE_REST, MANE_SWING),
         HorseHair::Tail => (TAIL_ROOT, TAIL_REST, TAIL_SWING),
     };
-    Transform::from_translation(root).with_rotation(Quat::from_rotation_x(rest + phase * swing))
+    Transform::from_translation(root).with_rotation(Quat::from_rotation_x(rest + swing * reach))
 }
 
 /// The existing humanoid piece in its seated pose: every pivot lifted onto the saddle,
@@ -743,13 +852,22 @@ pub(super) fn rider_piece_transform(piece: BodyPiece, blocking: bool) -> Transfo
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::TAU;
+
     use bevy::asset::AssetPlugin;
     use bevy::mesh::VertexAttributeValues;
 
     use super::super::constants::{MOUNTED_HEIGHT, MOUNTED_WIDTH, PLAYER_HEIGHT};
+    use super::super::interpolate::WALK_PHASE_PERIOD_BLOCKS;
     use super::super::{ANY_HAIR, piece_mesh};
     use super::*;
     use crate::net::HairModel;
+
+    /// How many phases a cycle is sampled at where a bound has to hold everywhere.
+    const STEPS: usize = 96;
+
+    /// The centre of a sole, in the lower segment's frame.
+    const SOLE_CENTRE: Vec3 = Vec3::new(0.0, HOOF_SOLE.y, (HOOF_SOLE.z.0 + HOOF_SOLE.z.1) / 2.0);
 
     fn positions(meshes: &[Mesh]) -> Vec<Vec3> {
         meshes
@@ -780,23 +898,71 @@ mod tests {
         }
     }
 
-    /// Standing, and the two extremes of the stride.
-    fn gaits() -> [WalkPose; 3] {
+    /// The distance phase after `blocks` of travel, as the interpolator counts it.
+    fn travelled(blocks: f32) -> WalkPose {
+        walking(TAU * blocks / WALK_STRIDE_BLOCKS)
+    }
+
+    /// `fraction` of the way through one cycle of `gait`.
+    fn through(gait: &Gait, fraction: f32) -> WalkPose {
+        travelled(gait.stride * fraction)
+    }
+
+    /// Standing, then eight phases through the walk.
+    fn poses() -> Vec<WalkPose> {
+        std::iter::once(WalkPose::default())
+            .chain((0..8).map(|eighth| through(&WALK, eighth as f32 / 8.0)))
+            .collect()
+    }
+
+    /// Both segments of one leg in horse space: the lower's transform composes with
+    /// the upper's, exactly as the hierarchy composes them.
+    fn leg_transforms(leg: Leg, gait: &Gait, pose: WalkPose) -> (Transform, Transform) {
+        let upper = leg_transform(leg, Segment::Upper, gait, pose);
+        let lower = upper * leg_transform(leg, Segment::Lower, gait, pose);
+        (upper, lower)
+    }
+
+    fn leg_meshes(leg: Leg, gait: &Gait, pose: WalkPose) -> [Mesh; 2] {
+        let (upper, lower) = leg_transforms(leg, gait, pose);
         [
-            WalkPose::default(),
-            walking(PI / 2.0),
-            walking(3.0 * PI / 2.0),
+            horse_upper_leg_mesh().transformed_by(upper),
+            horse_lower_leg_mesh().transformed_by(lower),
         ]
+    }
+
+    /// The centre of one sole, in horse space.
+    fn sole(leg: Leg, gait: &Gait, pose: WalkPose) -> Vec3 {
+        let (_, lower) = leg_transforms(leg, gait, pose);
+        lower.transform_point(SOLE_CENTRE)
+    }
+
+    /// The upper segment's angle, positive forward, and the lower's, negative folded back.
+    fn angles(leg: Leg, gait: &Gait, pose: WalkPose) -> (f32, f32) {
+        let pitch = |segment| {
+            leg_transform(leg, segment, gait, pose)
+                .rotation
+                .to_euler(EulerRot::XYZ)
+                .0
+        };
+        (pitch(Segment::Upper), pitch(Segment::Lower))
+    }
+
+    fn same_pose(a: Transform, b: Transform) -> bool {
+        a.translation.abs_diff_eq(b.translation, 1e-4) && a.rotation.abs_diff_eq(b.rotation, 1e-4)
     }
 
     /// Every part of the horse posed at `pose`, with no rider on it.
     fn horse_meshes(pose: WalkPose) -> Vec<Mesh> {
         let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
-        meshes
-            .extend(Leg::ALL.map(|leg| horse_leg_mesh().transformed_by(gait_transform(leg, pose))));
+        meshes.extend(
+            Leg::ALL
+                .into_iter()
+                .flat_map(|leg| leg_meshes(leg, &WALK, pose)),
+        );
         meshes.extend([
-            horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, pose)),
-            horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, pose)),
+            horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, &WALK, pose)),
+            horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, &WALK, pose)),
             horse_tack_mesh(),
             horse_eye_mesh(),
         ]);
@@ -877,7 +1043,7 @@ mod tests {
     #[test]
     fn horse_tack_and_rider_fit_the_mounted_body_across_and_up_at_every_gait_phase() {
         let half = MOUNTED_WIDTH / 2.0;
-        for pose in gaits() {
+        for pose in poses() {
             let mut meshes = horse_meshes(pose);
             for blocking in [false, true] {
                 meshes.extend(BodyPiece::FIXED.map(|piece| rider_mesh(piece, ANY_HAIR, blocking)));
@@ -919,22 +1085,40 @@ mod tests {
         }
     }
 
+    /// Standing, every joint is exactly at rest: identity rotation, rest translation,
+    /// and the hooves on the feet plane — whatever the phase says, once it is not moving.
     #[test]
-    fn hooves_rest_on_the_feet_plane_standing() {
-        for leg in Leg::ALL {
-            let standing =
-                horse_leg_mesh().transformed_by(gait_transform(leg, WalkPose::default()));
-            let (low, _) = extent(&[standing]);
-            assert!(low.y.abs() < 1e-3, "{leg:?} stands at y {}", low.y);
+    fn standing_every_joint_is_exactly_at_rest_and_the_hooves_are_on_the_ground() {
+        for standing in [
+            WalkPose::default(),
+            WalkPose {
+                phase: 2.3,
+                moving: false,
+            },
+        ] {
+            for leg in Leg::ALL {
+                let upper = leg_transform(leg, Segment::Upper, &WALK, standing);
+                let lower = leg_transform(leg, Segment::Lower, &WALK, standing);
+                assert_eq!(upper, Transform::from_translation(leg.pivot()), "{leg:?}");
+                assert_eq!(lower, Transform::from_translation(KNEE), "{leg:?}");
+                assert_eq!(upper, rest_transform(HorseJoint::Leg(leg, Segment::Upper)));
+                assert_eq!(lower, rest_transform(HorseJoint::Leg(leg, Segment::Lower)));
+                let (low, _) = extent(&leg_meshes(leg, &WALK, standing));
+                assert!(low.y.abs() < 1e-3, "{leg:?} stands at y {}", low.y);
+            }
+            for (hair, rest) in [(HorseHair::Mane, MANE_REST), (HorseHair::Tail, TAIL_REST)] {
+                let at_rest = hair_transform(hair, &WALK, standing);
+                assert_eq!(at_rest, rest_transform(HorseJoint::Hair(hair)));
+                assert_eq!(at_rest.rotation, Quat::from_rotation_x(rest));
+            }
         }
     }
 
     #[test]
-    fn legs_pivot_at_the_shoulder_and_the_hip_and_a_hoof_sweeps_under_a_third_of_a_block() {
+    fn legs_pivot_at_the_shoulder_and_the_hip_and_fold_at_one_knee_height() {
         let (belly, withers) = extent(&[horse_barrel_mesh()]);
-        let sole = Vec3::new(0.0, HOOF_SOLE.y, (HOOF_SOLE.z.0 + HOOF_SOLE.z.1) / 2.0);
         for leg in Leg::ALL {
-            let pivot = leg.hip();
+            let pivot = leg.pivot();
             let wanted_z = match leg {
                 Leg::LeftFront | Leg::RightFront => -0.45,
                 Leg::LeftRear | Leg::RightRear => 0.55,
@@ -948,11 +1132,166 @@ mod tests {
                 "{leg:?} pivots outside the barrel at y {}",
                 pivot.y
             );
-            let forward = gait_transform(leg, walking(PI / 2.0)).transform_point(sole);
-            let back = gait_transform(leg, walking(3.0 * PI / 2.0)).transform_point(sole);
-            let sweep = (forward.z - back.z).abs();
-            assert!(sweep > 0.2 && sweep <= HOOF_SWEEP, "{leg:?} sweeps {sweep}");
+
+            // The knee is where the lower segment's frame sits: straight under the pivot,
+            // at the cut, and the upper segment reaches exactly down to it.
+            let (_, lower) = leg_transforms(leg, &WALK, WalkPose::default());
+            let knee = lower.translation;
+            assert!(
+                (knee - Vec3::new(pivot.x, KNEE_Y, pivot.z)).length() < 1e-6,
+                "{leg:?} bends at {knee}"
+            );
+            let (upper_low, _) = extent(&[horse_upper_leg_mesh().transformed_by(leg_transform(
+                leg,
+                Segment::Upper,
+                &WALK,
+                WalkPose::default(),
+            ))]);
+            assert!((upper_low.y - KNEE_Y).abs() < 1e-6);
+
+            // At a walk the sole sweeps most of a block along the ground between its
+            // footfall and its lift — a real stride's worth for a 1.7-block cycle, and
+            // more than twice what one stiff segment used to be allowed.
+            let footfall = sole(leg, &WALK, through(&WALK, WALK.beats[leg.index()] / TAU));
+            let lift = sole(
+                leg,
+                &WALK,
+                through(&WALK, WALK.beats[leg.index()] / TAU + 0.5),
+            );
+            let sweep = lift.z - footfall.z;
+            assert!((0.6..=0.8).contains(&sweep), "{leg:?} sweeps {sweep}");
         }
+    }
+
+    /// The walk is lateral and four-beat: left rear, left front, right rear, right
+    /// front, each a quarter of a cycle behind the last. At each quarter exactly one
+    /// hoof lands — its upper segment is at full forward swing — the leg that landed
+    /// two quarters earlier is lifting, and the two between are vertical, one planted
+    /// with its cannon straight and one mid-swing with its cannon folded.
+    #[test]
+    fn the_walk_is_four_beats_a_quarter_of_a_cycle_apart() {
+        use Leg::*;
+        let landing = [LeftRear, LeftFront, RightRear, RightFront];
+        for quarter in 0..4 {
+            let pose = through(&WALK, quarter as f32 / 4.0);
+            let lands = landing[quarter];
+            let lifts = landing[(quarter + 2) % 4];
+            let folds = landing[(quarter + 1) % 4];
+            for leg in Leg::ALL {
+                let (swing, fold) = angles(leg, &WALK, pose);
+                let want = if leg == lands {
+                    WALK.swing
+                } else if leg == lifts {
+                    -WALK.swing
+                } else {
+                    0.0
+                };
+                assert!(
+                    (swing - want).abs() < 1e-5,
+                    "quarter {quarter}: {leg:?} swings {swing}, want {want}"
+                );
+                let want = if leg == folds { -WALK.fold } else { 0.0 };
+                assert!(
+                    (fold - want).abs() < 1e-5,
+                    "quarter {quarter}: {leg:?} folds {fold}, want {want}"
+                );
+            }
+        }
+    }
+
+    /// The cannon is straight for the whole of the stance and folds only through the
+    /// swing, backward, so the hoof trails the knee — and it never leaves the ground
+    /// while it is meant to be on it.
+    #[test]
+    fn the_cannon_folds_through_the_swing_and_is_straight_through_the_stance() {
+        for leg in Leg::ALL {
+            let beat = WALK.beats[leg.index()];
+            for step in 1..STEPS {
+                let own = TAU * step as f32 / STEPS as f32;
+                let pose = through(&WALK, (beat + own) / TAU);
+                let (swing, fold) = angles(leg, &WALK, pose);
+                if own < PI {
+                    assert!(
+                        fold.abs() < 1e-6,
+                        "{leg:?} folds {fold} at {own} into its stance"
+                    );
+                } else if own > PI {
+                    assert!(fold < 0.0, "{leg:?} is straight at {own} into its swing");
+                    // Folded back: in the upper segment's frame the sole sits behind
+                    // where a straight cannon would put it.
+                    let trailing = leg_transform(leg, Segment::Lower, &WALK, pose)
+                        .transform_point(SOLE_CENTRE);
+                    let straight = Transform::from_translation(KNEE).transform_point(SOLE_CENTRE);
+                    assert!(
+                        trailing.z > straight.z,
+                        "{leg:?} folds forward at {own}: sole at {trailing}"
+                    );
+                }
+                // Halfway through each half the upper is vertical.
+                if (own - FRAC_PI_2).abs() < 1e-4 || (own - 3.0 * FRAC_PI_2).abs() < 1e-4 {
+                    assert!(swing.abs() < 1e-5, "{leg:?} leans {swing} at {own}");
+                }
+            }
+            let planted = sole(leg, &WALK, through(&WALK, (beat + FRAC_PI_2) / TAU));
+            assert!(planted.y.abs() < 1e-4, "{leg:?} planted at y {}", planted.y);
+            let (_, fold) = angles(leg, &WALK, through(&WALK, (beat + 3.0 * FRAC_PI_2) / TAU));
+            assert!(
+                (fold + WALK.fold).abs() < 1e-5,
+                "{leg:?} folds {fold} mid-swing"
+            );
+        }
+    }
+
+    /// The sole is flat and the stance leg is stiff, so as it leans the sole's leading
+    /// or trailing edge digs in by `0.10 · sin θ − 1.12 · (1 − cos θ)`, which peaks at
+    /// four and a half millimetres near five degrees of lean. That is the floor of this
+    /// bound: a hoof through the ground would be centimetres.
+    #[test]
+    fn no_hoof_rises_above_a_third_of_a_block_or_sinks_under_the_ground() {
+        for leg in Leg::ALL {
+            let mut highest = 0.0_f32;
+            for step in 0..STEPS {
+                let pose = through(&WALK, step as f32 / STEPS as f32);
+                let (low, _) = extent(&leg_meshes(leg, &WALK, pose));
+                assert!(low.y > -0.005, "{leg:?} sinks to {} at {pose:?}", low.y);
+                let hoof = sole(leg, &WALK, pose).y;
+                assert!(hoof <= 0.35, "{leg:?} rises to {hoof} at {pose:?}");
+                highest = highest.max(hoof);
+            }
+            assert!(highest > 0.05, "{leg:?} never lifts: {highest}");
+        }
+    }
+
+    /// The stride is a drawn length: 1.7 blocks brings every joint back to where it
+    /// was, half of that does not, and the period the distance phase wraps at — which
+    /// is a whole number of strides — brings it back too, so the wrap moves nothing.
+    #[test]
+    fn a_walk_cycle_is_one_stride_and_the_phase_wrap_is_a_whole_number_of_them() {
+        let cycles = WALK_PHASE_PERIOD_BLOCKS / WALK.stride;
+        assert!(
+            (cycles - cycles.round()).abs() < 1e-4,
+            "{} blocks is {cycles} walk strides",
+            WALK_PHASE_PERIOD_BLOCKS
+        );
+        let joints = Leg::ALL
+            .into_iter()
+            .flat_map(|leg| {
+                [Segment::Upper, Segment::Lower].map(|segment| HorseJoint::Leg(leg, segment))
+            })
+            .chain([
+                HorseJoint::Hair(HorseHair::Mane),
+                HorseJoint::Hair(HorseHair::Tail),
+            ]);
+        for joint in joints {
+            let start = joint_transform(joint, &WALK, travelled(0.0));
+            let one_stride = joint_transform(joint, &WALK, travelled(WALK.stride));
+            let wrapped = joint_transform(joint, &WALK, travelled(WALK_PHASE_PERIOD_BLOCKS));
+            assert!(same_pose(start, one_stride), "{joint:?} after one stride");
+            assert!(same_pose(start, wrapped), "{joint:?} at the wrap");
+        }
+        let (swing, _) = angles(Leg::LeftRear, &WALK, travelled(0.0));
+        let (half, _) = angles(Leg::LeftRear, &WALK, travelled(WALK.stride / 2.0));
+        assert!((swing + WALK.swing).abs() > 1e-3 && (swing - half).abs() > 1e-3);
     }
 
     #[test]
@@ -1022,51 +1361,21 @@ mod tests {
         );
     }
 
-    fn angle(leg: Leg, pose: WalkPose) -> f32 {
-        gait_transform(leg, pose).rotation.to_euler(EulerRot::XYZ).0
-    }
-
     #[test]
-    fn four_legs_share_one_distance_phase_with_diagonal_offsets() {
-        let walking = WalkPose {
-            phase: PI / 2.0,
-            moving: true,
-        };
-        let left_front = angle(Leg::LeftFront, walking);
-        let right_front = angle(Leg::RightFront, walking);
-        assert!((left_front - HORSE_LEG_SWING).abs() < 1e-5);
-        assert!((right_front + HORSE_LEG_SWING).abs() < 1e-5);
-        assert_eq!(left_front, angle(Leg::RightRear, walking));
-        assert_eq!(right_front, angle(Leg::LeftRear, walking));
-
-        let standing = WalkPose {
-            phase: PI / 2.0,
-            moving: false,
-        };
-        for leg in Leg::ALL {
-            assert_eq!(angle(leg, standing), 0.0);
-        }
-    }
-
-    #[test]
-    fn mane_and_tail_read_the_legs_distance_phase_without_changing_it() {
-        let stride = walking(PI / 2.0);
+    fn mane_and_tail_read_the_gait_cycle_without_changing_it() {
+        let quarter = through(&WALK, 0.25);
         for (hair, rest, want) in [
             (HorseHair::Mane, MANE_REST, MANE_SWING),
             (HorseHair::Tail, TAIL_REST, TAIL_SWING),
         ] {
-            let pitch = hair_transform(hair, stride)
+            let pitch = hair_transform(hair, &WALK, quarter)
                 .rotation
                 .to_euler(EulerRot::XYZ)
                 .0;
             assert!((pitch - rest - want).abs() < 1e-5);
-            assert!(
-                hair_transform(hair, WalkPose::default())
-                    .rotation
-                    .abs_diff_eq(Quat::from_rotation_x(rest), 1e-6)
-            );
         }
-        assert!((angle(Leg::LeftFront, stride) - HORSE_LEG_SWING).abs() < 1e-5);
+        let (swing, _) = angles(Leg::LeftFront, &WALK, quarter);
+        assert!((swing - WALK.swing).abs() < 1e-5);
     }
 
     fn visual_app() -> App {
@@ -1110,7 +1419,12 @@ mod tests {
         assert_eq!(horse_eye_mesh().count_vertices(), 8);
         assert_eq!(horse_tack_mesh().count_vertices(), cuboid * 5);
         assert_ne!(HAIR_COLOUR, LEATHER_COLOUR);
-        for mesh in [horse_body_mesh(), horse_head_mesh(), horse_leg_mesh()] {
+        for mesh in [
+            horse_body_mesh(),
+            horse_head_mesh(),
+            horse_upper_leg_mesh(),
+            horse_lower_leg_mesh(),
+        ] {
             let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0)
             else {
                 panic!("a coat mesh has no UVs");
