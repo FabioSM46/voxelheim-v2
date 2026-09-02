@@ -1410,11 +1410,12 @@ func TestTwoSettlementsExactlyAsFarAwayComeBackInAFixedOrder(t *testing.T) {
 // settlements in its own cell, so the reach is invisible there. This column has none
 // within one cell and several within two, which is exactly the case the constant exists
 // to answer: a respawn or a station lookup on a quiet stretch of world must still be told
-// where the nearest settlement is rather than that there is none.
+// where the nearest settlement is rather than that there is none. Worldgen 23 moves the
+// sample because the narrower river admits a settlement inside the old one's first cell.
 func TestNearestSettlementReachesFurtherThanOneCell(t *testing.T) {
 	t.Parallel()
 
-	const x, z = 5000, 5000
+	const x, z = 5120, -8192
 
 	if own := SettlementsNear(settlementTestSeed, x, z, 1); len(own) != 0 {
 		t.Fatalf("(%d, %d) was chosen because one cell around it holds nothing; it now holds %d", x, z, len(own))
@@ -1463,13 +1464,14 @@ func TestNearestSettlementIsActuallyTheNearest(t *testing.T) {
 	}
 
 	// **A "none", and it is the contract rather than the defect.** A six-cell search
-	// finds twenty-one settlements around this column, the nearest 8576 blocks away —
+	// finds settlements around this column, the nearest 7081 blocks away —
 	// beyond the reach, and in a cell the six-kilometre square does not overlap. What
 	// the old behaviour got wrong was answering none while one stood 7201 blocks away
 	// *inside* the reach; what is asserted here is the boundary itself, so that moving
-	// it is a deliberate act.
+	// it is a deliberate act. Worldgen 23 re-derives the column because its narrower
+	// channel admits a settlement inside the old sample's reach.
 	{
-		const seed, x, z = 36, 3032, 7957
+		const seed, x, z = 36, 3072, 7168
 		if _, ok := NearestSettlement(seed, x, z); ok {
 			t.Errorf("seed %d now finds a settlement near (%d, %d); this column was chosen because the reach ends before the nearest one",
 				seed, x, z)

@@ -580,13 +580,19 @@ func plainsLowCoverDigest() (digest uint64, bushes, flowers int) {
 // every one of the 3107 columns that rooted still roots, and none moved row or colour —
 // but a digest cannot say "and three more", so the numbers are re-measured and the
 // reason is written down here rather than left to look like drift.
+//
+// **Worldgen 23 moves the baseline deliberately.** Giving a river a stable width in
+// blocks changes which columns this same window classifies as channel or bank-adjacent
+// ground. The low-cover draw is unchanged, while the resulting rooted population gains
+// five bushes and six flowers in aggregate; the digest and counts below are the
+// re-measured terrain contract after that worldgen break.
 func TestPlainsLowCoverIsUnchanged(t *testing.T) {
 	t.Parallel()
 
 	const (
-		wantDigest  = uint64(0x9f589a8663b340a5)
-		wantBushes  = 3108
-		wantFlowers = 1427
+		wantDigest  = uint64(0x237da4e2c490d713)
+		wantBushes  = 3113
+		wantFlowers = 1433
 	)
 	digest, bushes, flowers := plainsLowCoverDigest()
 	if digest != wantDigest || bushes != wantBushes || flowers != wantFlowers {
