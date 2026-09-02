@@ -2744,6 +2744,20 @@ Recorded here so the next reader does not mistake them for oversights:
   question**: `riverFallTopAt` covers every shared terrace face, because a permanent source still
   stands on all four sides even when it feeds only one. Those faces are flowing water rather than
   sources, and #784's block-width channel plus the measured seed-one cascade keep them narrow.
+- **A channel needs a bank, and the generator is where it has to exist (#786).** Cutting a bed and
+  filling it to a terrace says nothing about the ground *beside* the channel, so a river could
+  stand proud of its own bank with an open face over dry land — 181 of 136744 source voxels in the
+  reported seed-one window, once #784 and #785 were in. `riverBankAt` raises a non-channel column
+  to the water surface of the channel next to it, which is the surface half of the rule #660 gave
+  the carve half. **Raising the land beat lowering the water on measurement**: clamping a channel's
+  surface to its lowest neighbouring ground closed the same exposure but put 14 channel columns at
+  or under their own bed and broke the terrace invariant, while the raise moves 0.004% to 0.054% of
+  columns depending on the seed and leaves the sea-line statistic where it is. It reads its four neighbours, so it is
+  gated by `riverBankGateBlocks` — a widened `riverAt` band, one first-order distance rather than
+  four, which is the difference between 27% and 6% on `BenchmarkGenerateInOpenCountry`. **The one
+  place it cannot fire is a settlement**, whose plateau and blend own their columns' ground before
+  any water feature is asked; that residue is counted by name in
+  `TestNoSourceWaterStandsAgainstOpenAir` and owned by #828.
 - **A water voxel is decided only from a neighbourhood that was actually read, and no scheduler
   path strands it (#717).** Floating sheets and mid-air truncated falls were never the automaton's
   answer — `NextWater`'s fixed point over the reported seed-1 cascades is clean — they were

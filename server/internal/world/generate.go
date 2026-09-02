@@ -316,13 +316,23 @@ func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface
 // curve: [riverAt]'s block-width band selects a few percent of columns and only those
 // reach the expensive half. BenchmarkGenerate is the check.
 //
+// **A third feature moves the ground here and it moves it up.** [riverBankAt] raises a
+// column with no channel of its own to the surface of the channel beside it, because a
+// bed cut with no bank leaves the river standing over the land next door. It is applied
+// here rather than in [shapeAt] so that the settlement blend eases towards the ground
+// that is actually there, which is the same reason this function exists at all.
+//
 // riverSurface is meaningful only beside river, exactly as [column.waterSurface] is
 // beside [column.standingWater].
 func loweredHeightAt(seed, worldX, worldZ int64, base int, climate Climate) (surface, riverSurface int, river bool) {
 	if bed, waterSurface, ok := riverChannelAt(seed, worldX, worldZ, base); ok {
 		return bed, waterSurface, true
 	}
-	return base - basinAt(seed, worldX, worldZ, climate), 0, false
+	surface = base - basinAt(seed, worldX, worldZ, climate)
+	if bank, ok := riverBankAt(seed, worldX, worldZ); ok && bank > surface {
+		surface = bank
+	}
+	return surface, 0, false
 }
 
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole
@@ -457,7 +467,13 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // leaving a permanent source exposed wherever its encoded current points elsewhere.
 // River beds, source water and terrain heights stay byte-identical, but flowing-water
 // voxels above lower terraces change, so stored deltas need the new generated base.
-const WorldgenVersion uint32 = 24
+// 24 → 25: #786 gives a channel a bank. A column with no channel of its own that stands
+// below the water surface of one beside it is raised to that surface, so a river is held
+// between two banks instead of standing over the land next door. Terrain heights move on
+// the few columns either side of a channel — 0.004% to 0.054% of the map depending on the
+// seed, by one block for most of them — and everything rooted, carved or filled from
+// those heights moves with them, so stored deltas there need the new generated base.
+const WorldgenVersion uint32 = 25
 
 // Generate builds the chunk at coord for seed.
 //

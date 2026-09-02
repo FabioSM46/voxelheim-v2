@@ -287,8 +287,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 24 {
-		t.Fatalf("WorldgenVersion = %d, want 24 after every river terrace face regained its generated fall", WorldgenVersion)
+	if WorldgenVersion != 25 {
+		t.Fatalf("WorldgenVersion = %d, want 25 after a river channel gained a bank", WorldgenVersion)
 	}
 }
 
