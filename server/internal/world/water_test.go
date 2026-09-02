@@ -1002,6 +1002,47 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 	return 0, 0, 0, false
 }
 
+// A settlement stops source water, not the channel beneath it or the fall feeding it.
+// This is one of the 117 dry clamps measured across the five settlement windows: the
+// settlement ground meets the bed, so no source voxel can stand here, while the raw
+// terrace above it remains a flowing upstream face.
+func TestASettlementStopsSourceWaterWithoutBreakingTheChannel(t *testing.T) {
+	t.Parallel()
+
+	const (
+		seed = 0x5EED
+		x    = 795
+		z    = -3377
+	)
+	base := unloweredHeightAt(seed, x, z)
+	bed, terrace, ok := rawRiverChannelAt(seed, x, z, base)
+	if !ok {
+		t.Fatal("the measured settlement edge no longer carries the raw channel")
+	}
+	ground, lower := lowerSettlementGroundAt(seed, x, z, terrace)
+	if !lower || ground != bed {
+		t.Fatalf("settlement ground = %d (lower %t), want the channel bed %d below terrace %d",
+			ground, lower, bed, terrace)
+	}
+
+	col := columnAt(seed, x, z)
+	if !col.river || col.surface != bed {
+		t.Fatalf("column river=%t bed=%d, want the preserved channel at %d", col.river, col.surface, bed)
+	}
+	if col.waterSurface != bed {
+		t.Fatalf("source surface = %d, want clamp at dry bed %d", col.waterSurface, bed)
+	}
+	if col.fallSurface != terrace {
+		t.Fatalf("fall surface = %d, want the upstream terrace %d", col.fallSurface, terrace)
+	}
+	if got := col.voxelAt(seed, x, int64(bed)+1, z); got != WaterFlow7 {
+		t.Fatalf("first voxel over the dry bed is %d, want flowing fall water %d", got, WaterFlow7)
+	}
+	if surface, channel := channelSurfaceAt(seed, x, z); !channel || surface != terrace {
+		t.Fatalf("bank-facing channel surface = %d (channel %t), want raw terrace %d", surface, channel, terrace)
+	}
+}
+
 // The containment invariant #654 established: no generated source water stands against
 // open air on any horizontal side. A source is permanent — [NextWater]'s first arm returns
 // it unchanged for ever — while flowing water is the automaton's and a fall deliberately
@@ -1022,20 +1063,14 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 // fails here rather than going quiet, and TestARiverChannelStandsBetweenTwoBanks counts
 // the columns the bank rule actually raises.
 //
-// **The last two windows are not zero, and they are the one place a bank cannot be
-// raised.** A settlement owns its columns' ground — the plateau inside its radius and
-// the blend out to the end of its band — and "the ground under a village is the one
-// ground that must not move" is the rule [shapeAt] applies before it reaches any water
-// feature. So where a channel runs up against a settlement, [riverBankAt] is refused the
-// only column that could hold it, and the water stands against air exactly as it did
-// before #786. The two counts are **pre-existing and unchanged by the bank rule**: on
-// develop those windows measure 100 and 55, and what the rule removed from them is the
-// 6 and 4 whose neighbour no settlement owned. Three more settlement-and-river windows
-// measure 48, 48 and 102, all of them entirely this category.
-//
-// It is left here as a named count rather than fixed, because the fix is a decision
-// about settlements rather than about rivers: either the plateau moves, or a channel
-// stops short of one. See #828.
+// **The final five windows are the settlement edge #828 closes.** A settlement owns
+// its columns' ground — the plateau inside its radius and the blend out to the end of
+// its band — so [riverBankAt] may not raise the only column that could hold the channel.
+// Before the settlement clamp they measured 48, 48, 102, 94 and 51 exposed source
+// voxels, all in that named category. The channel now keeps its bed and identity but
+// stops source water at the lower settlement ground, taking all five to zero. Exact
+// source counts make deleting the channel fail too; the focused test above pins the
+// dry channel and flowing upstream face directly.
 func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 	t.Parallel()
 
@@ -1054,8 +1089,11 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 		{"west seed-one reach", 1, -4160, 3008, 128, 128, sourceWaterExposure{sources: 38294}},
 		{"far seed-one reach", 1, 8128, -8256, 128, 128, sourceWaterExposure{sources: 30768}},
 		{"water-statistics reach", waterSeed, waterAreaOriginX, waterAreaOriginZ, 128, 128, sourceWaterExposure{sources: 25282}},
-		{"seed-seven village on a river", 7, -3408, -4917, 137, 137, sourceWaterExposure{sources: 23109, exposed: 94, settlement: 94}},
-		{"seed-c0ffee capital on a river", 0xC0FFEE, -91, -242, 219, 219, sourceWaterExposure{sources: 84728, exposed: 51, settlement: 51}},
+		{"seed-5eed first village on a river", 0x5EED, 705, -3414, 93, 93, sourceWaterExposure{sources: 11814}},
+		{"seed-5eed second village on a river", 0x5EED, 2051, 4744, 93, 93, sourceWaterExposure{sources: 16372}},
+		{"seed-seven first village on a river", 7, 16544, -14643, 93, 93, sourceWaterExposure{sources: 13063}},
+		{"seed-seven second village on a river", 7, -3408, -4917, 137, 137, sourceWaterExposure{sources: 23005}},
+		{"seed-c0ffee capital on a river", 0xC0FFEE, -91, -242, 219, 219, sourceWaterExposure{sources: 84677}},
 	}
 
 	for _, sample := range samples {

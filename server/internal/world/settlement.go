@@ -859,12 +859,34 @@ func riverCrossesSite(seed int64, c settlementCandidate) bool {
 // column that is actually standing in a settlement. At most one settlement can reach a
 // column — the lattice is wider than two reaches — so the first hit is the answer.
 //
-// `base` is the unlowered land. What the blend eases towards is [loweredHeightAt] of it,
+// `base` is the unlowered land. What the blend eases towards is
+// [loweredHeightBeforeSettlementChannelRuleAt] of it,
 // so the outer edge of the band meets the terrain the next column out actually has —
 // see the paragraph in [shapeAt] about the cliff that blending towards `base` produced.
 // It is read inside the band and nowhere else: a column on the plateau never pays for
 // it, and a column with no settlement near it never reaches this function at all.
 func settlementShapeAt(seed int64, worldX, worldZ int64, base int, climate Climate) (surface int, inside, near bool) {
+	site, distance, ok := settlementAtColumn(seed, worldX, worldZ)
+	if !ok {
+		return base, false, false
+	}
+	if distance <= int64(site.radius) {
+		// Inside the radius nothing but the plateau is read, which is what keeps
+		// the feature affordable: only the sixteen-block blend band pays for its
+		// natural ground below.
+		return site.plateau, true, true
+	}
+	t := ((distance - int64(site.radius)) * one) / settlementBlendBlocks
+	natural, _, _ := loweredHeightBeforeSettlementChannelRuleAt(seed, worldX, worldZ, base, climate)
+	return int(lerp(int64(site.plateau), int64(natural), smoothstep(t))), false, true
+}
+
+// settlementAtColumn resolves the one site whose plateau or blend owns this column and
+// its integer distance from the centre. It deliberately stops before calculating the
+// blended surface: a neighbouring channel first needs to know whether settlement ground
+// is present, then asks [settlementShapeAt] for its height without making absence pay for
+// climate and terrain fields.
+func settlementAtColumn(seed, worldX, worldZ int64) (settlementSite, int64, bool) {
 	loX, hiX := settlementCellOf(worldX-settlementReach), settlementCellOf(worldX+settlementReach)
 	loZ, hiZ := settlementCellOf(worldZ-settlementReach), settlementCellOf(worldZ+settlementReach)
 
@@ -883,19 +905,10 @@ func settlementShapeAt(seed int64, worldX, worldZ int64, base int, climate Clima
 				continue
 			}
 
-			distance := isqrt(d2)
-			if distance <= int64(site.radius) {
-				// Inside the radius nothing but the plateau is read, which is what
-				// keeps the feature affordable: the columns that pay for a basin and a
-				// channel below are the sixteen-block band, never the disc.
-				return site.plateau, true, true
-			}
-			t := ((distance - int64(site.radius)) * one) / settlementBlendBlocks
-			natural, _, _ := loweredHeightAt(seed, worldX, worldZ, base, climate)
-			return int(lerp(int64(site.plateau), int64(natural), smoothstep(t))), false, true
+			return site, isqrt(d2), true
 		}
 	}
-	return base, false, false
+	return settlementSite{}, 0, false
 }
 
 // settlementFrom lays out a site: which buildings it has, where each stands and which
