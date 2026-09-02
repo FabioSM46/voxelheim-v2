@@ -14,9 +14,13 @@
 //! `player/hands.rs` owns one deliberate second camera for its render layer. It stays at the
 //! origin so sub-block view-model offsets never make a lossy round trip through a distant f32
 //! world position, draws after this camera without clearing its colour, and sees no world
-//! geometry. [`IsDefaultUiCamera`] keeps `bevy_ui` on this camera rather than on that overlay,
-//! so the status text still draws through the world view and `ui/status.rs` spawns none of its
-//! own.
+//! geometry. **`IsDefaultUiCamera` is on that overlay rather than here, and the reason is the
+//! whole of #808's regression**: `bevy_ui` draws its pass inside the target camera's own graph,
+//! and the last camera to render is what the window ends up showing, so UI assigned to this
+//! camera was drawn and then overwritten by the overlay's pass — every screen in the client went
+//! black, including the login screen, while every headless test stayed green because none of them
+//! renders. UI belongs on the highest-order camera on the window; `ui/status.rs` still spawns no
+//! camera of its own.
 //!
 //! ## Position from the server, direction from here
 //!
@@ -135,9 +139,6 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         WorldCamera,
         Camera3d::default(),
-        // The hands own a second, render-layer-only camera. UI without an explicit target
-        // still belongs here: this is the camera that owns the window and its viewport.
-        IsDefaultUiCamera,
         // The sky and the ambient light are set on the camera rather than through
         // `ClearColor` and `GlobalAmbientLight`, so they do not depend on this plugin
         // being built after the one that inserts those resources' defaults.

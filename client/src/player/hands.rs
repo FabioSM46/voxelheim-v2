@@ -2195,6 +2195,15 @@ fn spawn_view_model(
             clear_color: ClearColorConfig::None,
             ..default()
         },
+        // **The UI belongs on the last camera that draws to the window, and this is it.**
+        // `bevy_ui` renders its pass inside the target camera's own graph, so UI assigned to
+        // the world camera is drawn first and then replaced by this camera's pass — which is
+        // exactly what #808 did: every UI surface in the client vanished, the login screen
+        // included, leaving a window painted in nothing but the sky's clear colour. Nothing in
+        // the headless suite renders, so nothing went red. This camera sees only
+        // `VIEW_MODEL_RENDER_LAYER`, and that does not gate UI nodes: they carry no render
+        // layer of their own and `bevy_ui` draws them for the camera they target.
+        IsDefaultUiCamera,
         // Match the world's explicit tonemapper without requiring its LUT feature. The
         // material is unlit, but its colour still passes through the camera's tonemapper.
         Tonemapping::AcesFitted,
@@ -6758,8 +6767,8 @@ mod tests {
             "the hand pass erases the world behind it"
         );
         assert!(
-            !app.world().entity(parent).contains::<IsDefaultUiCamera>(),
-            "UI was assigned to the hand-only overlay"
+            app.world().entity(parent).contains::<IsDefaultUiCamera>(),
+            "UI is not on the last camera that draws to the window"
         );
         let world_camera = {
             let world = app.world_mut();
@@ -6769,10 +6778,10 @@ mod tests {
                 .expect("one world camera")
         };
         assert!(
-            app.world()
+            !app.world()
                 .entity(world_camera)
                 .contains::<IsDefaultUiCamera>(),
-            "the world camera is not the UI default"
+            "UI on the world camera is drawn and then overwritten by this overlay's pass"
         );
         let world = app.world_mut();
         let mut models = world.query_filtered::<&RenderLayers, With<ViewModel>>();
