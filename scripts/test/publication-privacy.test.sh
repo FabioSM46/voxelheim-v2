@@ -58,7 +58,7 @@ git -C "$TEST_ROOT" rm -f -q path.txt
 # approved handle and credits somebody else. Nothing above can see it — it is a GitHub
 # noreply address, which the approved-email list allows by shape — and that is the point.
 wrong_id="9999""999999999"
-printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46@''users.noreply.github.com>\n' "$wrong_id" \
   > "$TEST_ROOT/trailer.txt"
 git -C "$TEST_ROOT" add trailer.txt
 set +e
@@ -79,7 +79,7 @@ fi
 # invisible to the address scan and only the rule's own pass can refuse it.
 git -C "$TEST_ROOT" rm -f -q trailer.txt
 bracket_login="github-""actions[bot]"
-printf 'Co-authored-by: %s <%s+%s''@users.noreply.github.com>\n' \
+printf 'Co-authored-by: %s <%s+%s@''users.noreply.github.com>\n' \
   "$bracket_login" "$wrong_id" "$bracket_login" > "$TEST_ROOT/bracket.txt"
 git -C "$TEST_ROOT" add bracket.txt
 set +e
@@ -97,7 +97,7 @@ if grep -Fq "$wrong_id" <<< "$bracket_output"; then
 fi
 git -C "$TEST_ROOT" rm -f -q bracket.txt
 git -C "$TEST_ROOT" checkout -q -- . 2>/dev/null || true
-printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46@''users.noreply.github.com>\n' "$wrong_id" \
   > "$TEST_ROOT/trailer.txt"
 git -C "$TEST_ROOT" add trailer.txt
 

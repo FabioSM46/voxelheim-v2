@@ -113,10 +113,18 @@ github_noreply_pattern='^(([0-9]*)\+)?([^@+]+)@users\.noreply\.github\.com$'
 # committer fields, which are read whole and never grepped, could see it. Found in review on
 # #797, on the change that introduced the table.
 #
-# So the rule is driven from this pattern alone on every text surface. Anchoring it to the
-# domain is what lets the login part stay permissive: anything that is not whitespace and not
-# an angle bracket, which is a trailer's own delimiters and nothing else.
-github_noreply_extract_pattern='[^[:space:]<>]+@users\.noreply\.github\.com'
+# **It starts at the id, and that is the whole of what keeps it honest.** The first version
+# started at "anything that is not whitespace or an angle bracket", which reads as a harmless
+# widening and is not: `grep -Eo` takes the leftmost-longest run, so an address in parentheses
+# or after a comma is extracted *with* the punctuation, the anchored rule below cannot parse
+# what it is handed, and the address passes. Not a truncated diagnostic — a silent miss, in
+# the same direction as the defect the table exists to catch, found in review on #800.
+#
+# Requiring the plus costs nothing the rule uses. An address with no id is the legacy form,
+# about which the rule says nothing anyway, so declining to extract it removes only work; the
+# id-less plus is still reached, because `[0-9]*` matches empty. What it removes is every
+# character the match could have swallowed on its left.
+github_noreply_extract_pattern='[0-9]*\+[^@[:space:]<>]+@users\.noreply\.github\.com'
 
 is_misattributed_noreply() {
   local email=${1,,} plus prefix login entry

@@ -132,6 +132,13 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
   publishes was not matched imprecisely, it was never extracted at all — invisible to the
   message, body and file scans, and visible only to the author and committer fields, which are
   read whole and never grepped. Caught in review on #797, on the change that added the table.
+  That extraction starts at the id rather than at "any non-space character", and the difference
+  is not cosmetic: `grep -Eo` takes the leftmost-longest run, so a permissive left side returns
+  an address in parentheses or after a comma *with* the punctuation, the anchored rule cannot
+  parse what it is handed, and the address passes silently — the same direction as the defect
+  itself. Caught in review on #800, on the fix for #797. **Two reviews, two fail-open widenings
+  in the same rule**: a check that answers "no finding" for a shape it never parsed looks
+  identical to one that answered honestly, which is why both cases are pinned by tests.
 - **A commit message is a published surface, and it is checked like one.** Two scripts divide the
   work: `bash scripts/check-publication-privacy.sh` scans tracked file content, and
   `bash scripts/check-commit-privacy.sh <base> <head>` walks the commits a branch adds and reads

@@ -220,8 +220,16 @@ assert_absent "$other_anthropic" "the rejected email"
 # at random, it could name a real account, and the fixture would then say about a stranger
 # exactly what this rule exists to stop the repository saying.
 wrong_id="9999""999999999"
+# Every noreply fixture in the three privacy tests splits immediately after the at-sign, so
+# the source never spells a whole address. The split point is not a style choice, it is chosen
+# against the check as it stands: these fixtures used to split before the at-sign, and
+# narrowing the rule's extraction in #800 — starting the match at the id instead of at any
+# non-space character — made all fourteen of them visible to the file scanner at once. After
+# the at-sign the domain literal is broken, which no widening or narrowing of the local part
+# can reach. **A privacy fixture is a value the scanner will read: assemble it where the
+# pattern cannot be moved back over the seam.**
 commit_as_noreply -m "chore: probe a trailer naming the handle with another account's id" \
-  -m "Co-authored-by: FabioSM46 <${wrong_id}+FabioSM46""@users.noreply.github.com>"
+  -m "Co-authored-by: FabioSM46 <${wrong_id}+FabioSM46@""users.noreply.github.com>"
 misattributed_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
 run_check "$domain_commit" "$misattributed_commit"
 if [ "$CHECK_STATUS" -ne 1 ]; then
@@ -240,12 +248,6 @@ fi
 # A plus with nothing in front of it resolves to nobody. It is rejected whatever login
 # follows, because an address that credits no account is a defect on any name — and this
 # one reached develop too, in the same class of trailer.
-#
-# Split after the at-sign rather than before it, unlike every other fixture here. Before it,
-# the source line reads as an id-less plus to the rule's own extraction — which is wider than
-# the address pattern the other fixtures dodge — and this file would fail the check it is
-# testing on the one fixture whose whole point is that shape. The assembly point is chosen
-# against the check as it is now, and widening a pattern can move it.
 commit_as_noreply -m "chore: probe a trailer whose id is missing entirely" \
   -m "Co-authored-by: FabioSM46 <+FabioSM46@""users.noreply.github.com>"
 empty_id_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
@@ -276,7 +278,7 @@ fi
 # the network; who may appear at all is the approved-identity rule in AGENTS.md, and that
 # one needs a reader.
 commit_as_noreply -m "chore: probe a login the table says nothing about" \
-  -m "Co-authored-by: Stranger <${wrong_id}+Stranger""@users.noreply.github.com>"
+  -m "Co-authored-by: Stranger <${wrong_id}+Stranger@""users.noreply.github.com>"
 unknown_login_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
 run_check "$correct_id_commit" "$unknown_login_commit"
 if [ "$CHECK_STATUS" -ne 0 ]; then
@@ -289,7 +291,7 @@ fi
 # email is a perfectly private GitHub noreply, so the only thing wrong with it is who it
 # credits. A single rule covering both would have reported the wrong category here.
 GIT_AUTHOR_NAME=FabioSM46 \
-GIT_AUTHOR_EMAIL="${wrong_id}+FabioSM46""@users.noreply.github.com" \
+GIT_AUTHOR_EMAIL="${wrong_id}+FabioSM46@""users.noreply.github.com" \
 GIT_COMMITTER_NAME=PrivacyTest \
 GIT_COMMITTER_EMAIL=1000+privacy@users.noreply.github.com \
   git -C "$TEST_ROOT" commit -q --allow-empty -m "chore: probe a misattributed author field"
@@ -314,7 +316,7 @@ assert_absent "$wrong_id" "the rejected account id"
 # it. Found in review on #797. This is the assertion that says the rule has its own reader.
 bracket_login="github-""actions[bot]"
 commit_as_noreply -m "chore: probe a login the address pattern cannot extract" \
-  -m "Co-authored-by: ${bracket_login} <${wrong_id}+${bracket_login}""@users.noreply.github.com>"
+  -m "Co-authored-by: ${bracket_login} <${wrong_id}+${bracket_login}@""users.noreply.github.com>"
 bracket_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
 run_check "$misattributed_author_commit" "$bracket_commit"
 if [ "$CHECK_STATUS" -ne 1 ]; then
@@ -327,14 +329,14 @@ assert_absent "$wrong_id" "the rejected account id"
 # And the control that says the case above is real rather than incidental: the address
 # scan never sees this address, so a rule reached only through it would report nothing.
 if grep -Eoq "$(grep -E '^email_pattern=' "$CHECK" | cut -d"'" -f2)" \
-     <<< "${wrong_id}+${bracket_login}""@users.noreply.github.com"; then
+     <<< "${wrong_id}+${bracket_login}@""users.noreply.github.com"; then
   echo "control failure: the address pattern extracts the bracketed login after all" >&2
   exit 1
 fi
 
 # Its own id passes, so the rule is a check of the number and not a ban on the login.
 commit_as_noreply -m "chore: probe the bot login with its own id" \
-  -m "Co-authored-by: ${bracket_login} <41898282+${bracket_login}""@users.noreply.github.com>"
+  -m "Co-authored-by: ${bracket_login} <41898282+${bracket_login}@""users.noreply.github.com>"
 bracket_ok_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
 run_check "$bracket_commit" "$bracket_ok_commit"
 if [ "$CHECK_STATUS" -ne 0 ]; then
@@ -342,6 +344,35 @@ if [ "$CHECK_STATUS" -ne 0 ]; then
   echo "$CHECK_OUTPUT" >&2
   exit 1
 fi
+
+# An address is not always alone on its line, and `grep -Eo` takes the leftmost-longest run.
+# The first spelling of the extraction started at "not whitespace, not an angle bracket", so
+# an address in parentheses or after a comma came back carrying the punctuation, the anchored
+# rule could not parse what it was handed, and the address passed — a silent miss in the same
+# direction as the defect the table exists to catch. Found in review on #800. Starting the
+# match at the id is what fixes it, and this case is why the pattern may not be widened back.
+commit_as_noreply -m "chore: probe an address the surrounding punctuation could swallow" \
+  -m "Wrongly credited to (${wrong_id}+${bracket_login}@""users.noreply.github.com) in review."
+punctuated_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$bracket_ok_commit" "$punctuated_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a parenthesised misattribution to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a misattributed GitHub account id' <<< "$CHECK_OUTPUT"
+
+# The same shape with another address in front of it, which is the form the review reported:
+# the run that starts at the earlier address's local part reaches this domain without ever
+# passing through a space.
+commit_as_noreply -m "chore: probe an address preceded by another one" \
+  -m "Seen as fixture@example.invalid,${wrong_id}+${bracket_login}@""users.noreply.github.com here."
+adjacent_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$punctuated_commit" "$adjacent_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected an adjacent-address misattribution to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a misattributed GitHub account id' <<< "$CHECK_OUTPUT"
 
 # An empty range still exits as it did before the message scan existed.
 run_check "$clean_commit" "$clean_commit"
