@@ -23,6 +23,7 @@ mod loot;
 mod map;
 mod menu;
 mod party;
+mod prompt;
 mod servers;
 mod settings;
 mod status;
@@ -47,8 +48,9 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, CraftClick, ITEM_SILVER, InputMode, InventoryClick, Liveries,
-    PlayerTradeClick, SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
+    ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick,
+    ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick, SelfVitals, ViewMode,
+    item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -156,6 +158,7 @@ impl Plugin for UiPlugin {
             .add_message::<crate::player::VendorTradeClick>()
             .add_message::<crate::player::PlayerTradeClick>()
             .add_message::<crate::player::PlayerTradeEnded>()
+            .add_message::<ConfirmationAnswer>()
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
@@ -201,6 +204,7 @@ impl Plugin for UiPlugin {
                 (
                     loot::LootUiPlugin,
                     map::MapUiPlugin,
+                    prompt::ConfirmationPromptUiPlugin,
                     trade::PlayerTradeUiPlugin,
                     vendor::VendorUiPlugin,
                 ),
@@ -222,7 +226,9 @@ impl Plugin for UiPlugin {
 /// `choose_input_mode` runs relative to the snapshots it reads, and a registration
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
-    app.add_message::<CancelLeaveRequest>()
+    app.init_resource::<ConfirmationPrompt>()
+        .add_message::<CancelLeaveRequest>()
+        .add_message::<ConfirmationAnswer>()
         .add_message::<PlayerTradeClick>()
         // `WindowPlugin` owns this in the game. Registering it here too keeps the
         // pointer policy headlessly testable wherever this narrow system bundle is
@@ -286,6 +292,14 @@ struct Controls<'w> {
     keys: Option<Res<'w, ButtonInput<KeyCode>>>,
     settings: Option<Res<'w, Settings>>,
     cancel_leave: MessageWriter<'w, CancelLeaveRequest>,
+}
+
+/// The three modal outputs `choose_input_mode` owns together.
+#[derive(bevy::ecs::system::SystemParam)]
+struct ModalControls<'w> {
+    prompt: ResMut<'w, ConfirmationPrompt>,
+    prompt_answers: MessageWriter<'w, ConfirmationAnswer>,
+    trade_clicks: MessageWriter<'w, PlayerTradeClick>,
 }
 
 impl Controls<'_> {
@@ -369,7 +383,7 @@ fn choose_input_mode(
     vitals: Res<SelfVitals>,
     typing: Typing<'_>,
     mut mode: ResMut<InputMode>,
-    mut trade_clicks: MessageWriter<PlayerTradeClick>,
+    mut modals: ModalControls<'_>,
 ) {
     // **A full-screen overlay owns the input while one is up.** The game is running
     // behind them, so a click meant for a control would otherwise also reach the world as
@@ -379,6 +393,7 @@ fn choose_input_mode(
     // login screen has no "not now", the server list is where a client with no session
     // belongs, and a session that has been sent a character list is waiting for one.
     if overlays.any_is_up() {
+        reject_prompt(&mut modals.prompt, &mut modals.prompt_answers);
         set_mode(&mut mode, InputMode::Menu);
         return;
     }
@@ -411,6 +426,7 @@ fn choose_input_mode(
     }
 
     let Some(_session) = session else {
+        reject_prompt(&mut modals.prompt, &mut modals.prompt_answers);
         set_mode(&mut mode, InputMode::Playing);
         return;
     };
@@ -421,10 +437,12 @@ fn choose_input_mode(
             InputMode::Inventory
                 | InputMode::Loot
                 | InputMode::Vendor
+                | InputMode::TradePrompt
                 | InputMode::Trade
                 | InputMode::Map
         )
     {
+        reject_prompt(&mut modals.prompt, &mut modals.prompt_answers);
         set_mode(&mut mode, InputMode::Playing);
     }
 
@@ -471,16 +489,24 @@ fn choose_input_mode(
         if typing.a_field_owns_escape() && bindings.key(Control::Menu) == KeyCode::Escape {
             return;
         }
-        let next = match *mode {
-            InputMode::Trade => {
-                trade_clicks.write(PlayerTradeClick::Cancel);
-                InputMode::Playing
-            }
-            InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
-                InputMode::Playing
-            }
-            InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
-        };
+        let next =
+            match *mode {
+                InputMode::TradePrompt => modals.prompt.answer(false).map_or(
+                    InputMode::Playing,
+                    |(answer, return_mode)| {
+                        modals.prompt_answers.write(answer);
+                        return_mode
+                    },
+                ),
+                InputMode::Trade => {
+                    modals.trade_clicks.write(PlayerTradeClick::Cancel);
+                    InputMode::Playing
+                }
+                InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
+                    InputMode::Playing
+                }
+                InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
+            };
         set_mode(&mut mode, next);
         return;
     }
@@ -499,6 +525,7 @@ fn choose_input_mode(
             InputMode::Inventory => InputMode::Playing,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::TradePrompt => return,
             InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
@@ -524,11 +551,22 @@ fn choose_input_mode(
             InputMode::Inventory => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
+            InputMode::TradePrompt => return,
             InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };
         set_mode(&mut mode, next);
+    }
+}
+
+/// Dismisses a local confirmation as No while another surface takes the controls.
+fn reject_prompt(
+    prompt: &mut ConfirmationPrompt,
+    answers: &mut MessageWriter<'_, ConfirmationAnswer>,
+) {
+    if let Some((answer, _)) = prompt.answer(false) {
+        answers.write(answer);
     }
 }
 
@@ -1650,7 +1688,9 @@ mod tests {
             .insert_resource(initial)
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(life_state)))
+            .init_resource::<ConfirmationPrompt>()
             .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1696,6 +1736,44 @@ mod tests {
     }
 
     #[test]
+    fn escape_answers_no_to_a_confirmation_and_returns_to_its_mode() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+        let mut prompt = ConfirmationPrompt::default();
+        prompt.open("Trade with Freya?".to_owned(), InputMode::Playing);
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(keys)
+            .insert_resource(InputMode::TradePrompt)
+            .insert_resource(prompt)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
+            .add_message::<PlayerTradeClick>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert!(
+            app.world()
+                .resource::<ConfirmationPrompt>()
+                .current()
+                .is_none()
+        );
+        let answers: Vec<_> = app
+            .world_mut()
+            .resource_mut::<Messages<ConfirmationAnswer>>()
+            .drain()
+            .collect();
+        assert_eq!(answers.len(), 1);
+        assert!(!answers[0].accepted);
+    }
+
+    #[test]
     fn escape_during_leave_asks_but_only_the_server_answer_restores_play() {
         let mut keys = ButtonInput::default();
         keys.press(KeyCode::Escape);
@@ -1710,7 +1788,9 @@ mod tests {
                 seconds_remaining: Some(8),
             })
             .insert_resource(LeaveCancellation::Available)
+            .init_resource::<ConfirmationPrompt>()
             .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1808,7 +1888,9 @@ mod tests {
             .insert_resource(settings)
             .insert_resource(screen)
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<ConfirmationPrompt>()
             .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();

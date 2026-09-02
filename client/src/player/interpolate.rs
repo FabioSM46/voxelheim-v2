@@ -215,6 +215,38 @@ impl SnapshotBuffer {
             .map(|(_, entity_id)| entity_id)
     }
 
+    /// The nearest living player in reach, other than the snapshot recipient.
+    ///
+    /// The shape and tie-break are the resident search's exactly. The sparse dead-player
+    /// list is the newest snapshot's complete answer, so excluding it is not a health
+    /// inference; reach still only chooses which intent this client originates and the
+    /// server rechecks every rule.
+    pub(super) fn nearest_player(&self, player_id: u64, max_distance: f32) -> Option<u64> {
+        let latest = &self.latest.as_ref()?.snapshot;
+        let player = latest
+            .entities
+            .iter()
+            .find(|entity| entity.entity_id == player_id)
+            .map(|entity| Vec3::from_array(entity.pos))?;
+
+        latest
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.entity_id != player_id && !latest.dead_players.contains(&entity.entity_id)
+            })
+            .filter_map(|entity| {
+                let distance = player.distance_squared(Vec3::from_array(entity.pos));
+                (distance <= max_distance * max_distance).then_some((distance, entity.entity_id))
+            })
+            .min_by(|left, right| {
+                left.0
+                    .total_cmp(&right.0)
+                    .then_with(|| left.1.cmp(&right.1))
+            })
+            .map(|(_, entity_id)| entity_id)
+    }
+
     pub(super) fn accessible_loot_corpses(&self) -> &[u64] {
         self.latest
             .as_ref()
@@ -840,6 +872,25 @@ mod tests {
         assert!(buffer.accept(snapshot(2, vec![state(1, 4.0, 0.0)]), arrived));
 
         (buffer, arrived)
+    }
+
+    #[test]
+    fn nearest_player_excludes_self_and_dead_and_breaks_ties_by_id() {
+        let mut buffer = SnapshotBuffer::default();
+        let mut seen = snapshot(
+            1,
+            vec![
+                state(7, 0.0, 0.0),
+                state(30, 1.0, 0.0),
+                state(11, -2.0, 0.0),
+                state(10, 2.0, 0.0),
+            ],
+        );
+        seen.dead_players = vec![30];
+        assert!(buffer.accept(seen, Instant::now()));
+
+        assert_eq!(buffer.nearest_player(7, 3.0), Some(10));
+        assert_eq!(buffer.nearest_player(7, 1.5), None);
     }
 
     fn only(sampled: Vec<(u64, Interpolated)>) -> Interpolated {
