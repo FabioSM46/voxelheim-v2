@@ -711,7 +711,11 @@ fn a_frame_over_no_distance_moves_no_hoof() {
         .iter(world)
         .map(|(joint, transform)| (*joint, *transform))
         .collect();
-    assert_eq!(posed.len(), 10, "eight leg segments, a mane and a tail");
+    assert_eq!(
+        posed.len(),
+        14,
+        "eight leg segments, a barrel, a neck, a mane, a tail and two reins"
+    );
     assert!(
         posed.iter().any(|(joint, transform)| {
             matches!(joint, horse::HorseJoint::Leg(..)) && transform.rotation != Quat::IDENTITY
