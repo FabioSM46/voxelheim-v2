@@ -615,15 +615,43 @@ fn only_the_players_named_by_the_mount_projection_get_horses() {
         .expect("horse root has drawn parts")
         .iter()
         .collect();
-    let mut legs = world.query::<&horse::HorseLeg>();
+    let mut joints = world.query::<&horse::HorseJoint>();
+    let uppers: Vec<Entity> = children
+        .iter()
+        .copied()
+        .filter(|child| {
+            matches!(
+                joints.get(world, *child),
+                Ok(horse::HorseJoint::Leg(_, horse::Segment::Upper))
+            )
+        })
+        .collect();
     assert_eq!(
-        children
-            .iter()
-            .filter(|child| legs.get(world, **child).is_ok())
-            .count(),
+        uppers.len(),
         4,
         "the horse does not have four independently posed legs"
     );
+    for upper in uppers {
+        let Ok(horse::HorseJoint::Leg(leg, _)) = joints.get(world, upper) else {
+            unreachable!("filtered above");
+        };
+        let leg = *leg;
+        let below: Vec<Entity> = world
+            .get::<Children>(upper)
+            .map(|lower| lower.iter().collect())
+            .unwrap_or_default();
+        assert_eq!(
+            below.len(),
+            1,
+            "{leg:?} has {} children, want its one lower segment",
+            below.len()
+        );
+        assert_eq!(
+            joints.get(world, below[0]).ok().copied(),
+            Some(horse::HorseJoint::Leg(leg, horse::Segment::Lower)),
+            "the child of {leg:?} is not its lower segment"
+        );
+    }
     let mut bodies = world.query::<(&Body, &Transform)>();
     let (body, rider_transform) = bodies.get(world, parent).unwrap();
     assert_eq!(body.0, 99);
@@ -633,6 +661,80 @@ fn only_the_players_named_by_the_mount_projection_get_horses() {
         (rider_transform.rotation.to_euler(EulerRot::YXZ).0 - 0.75).abs() < 1e-5,
         "horse and rider did not inherit the snapshot yaw"
     );
+}
+
+/// Records, one entry per frame, whether any horse joint's transform was rewritten.
+fn log_moved_joints(
+    joints: Query<Entity, (With<horse::HorseJoint>, Changed<Transform>)>,
+    mut log: ResMut<ChangeLog>,
+) {
+    log.0.push(!joints.is_empty());
+}
+
+#[test]
+fn a_frame_over_no_distance_moves_no_hoof() {
+    // Time is not the gait's clock. Once an interpolated segment is spent the body holds
+    // its last position, and a frame that adds no distance rewrites no joint — observed
+    // from inside a system, because `App::update()` clears the trackers each frame.
+    let mut app = headless_player();
+    app.init_resource::<ChangeLog>()
+        .add_systems(Update, log_moved_joints.after(horse::animate_gait));
+    let mounted = || {
+        vec![MountState {
+            entity_id: 99,
+            mount: MountKind::GreyHorse,
+        }]
+    };
+    let long_ago = Instant::now() - Duration::from_secs(5);
+    deliver_mounts(
+        &mut app,
+        1,
+        vec![state(99, [0.0, 64.0, 0.0], 0.0)],
+        mounted(),
+        long_ago,
+    );
+    deliver_mounts(
+        &mut app,
+        2,
+        vec![state(99, [0.6, 64.0, 0.0], 0.0)],
+        mounted(),
+        long_ago + INTERVAL,
+    );
+    // One frame spawns the horse, the next is the first that can have posed every joint.
+    app.update();
+    app.update();
+
+    // The segment covered ground, so the legs are posed off rest ...
+    let world = app.world_mut();
+    let mut joints = world.query::<(&horse::HorseJoint, &Transform)>();
+    let posed: Vec<(horse::HorseJoint, Transform)> = joints
+        .iter(world)
+        .map(|(joint, transform)| (*joint, *transform))
+        .collect();
+    assert_eq!(posed.len(), 10, "eight leg segments, a mane and a tail");
+    assert!(
+        posed.iter().any(|(joint, transform)| {
+            matches!(joint, horse::HorseJoint::Leg(..)) && transform.rotation != Quat::IDENTITY
+        }),
+        "the horse covered ground and no leg moved"
+    );
+
+    // ... and frames that add no distance leave every one of them exactly where it is.
+    app.world_mut().resource_mut::<ChangeLog>().0.clear();
+    for _ in 0..4 {
+        app.update();
+    }
+    assert_eq!(
+        app.world().resource::<ChangeLog>().0,
+        vec![false; 4],
+        "a horse joint was rewritten on a frame that covered no distance"
+    );
+    let world = app.world_mut();
+    let held: Vec<(horse::HorseJoint, Transform)> = joints
+        .iter(world)
+        .map(|(joint, transform)| (*joint, *transform))
+        .collect();
+    assert_eq!(held, posed);
 }
 
 #[test]

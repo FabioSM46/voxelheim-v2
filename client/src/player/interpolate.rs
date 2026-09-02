@@ -46,8 +46,25 @@ pub struct Interpolated {
 /// One complete stride per 1.2 blocks of horizontal travel.
 ///
 /// This is a drawn stride length, not a speed. The server still owns how quickly the
-/// distance is covered; a faster answer merely advances this phase faster.
-const WALK_RADIANS_PER_BLOCK: f32 = TAU / 1.2;
+/// distance is covered; a faster answer merely advances this phase faster. Named in
+/// blocks as well as in radians because a rig with a stride of its own — the horse in
+/// `horse.rs` — rescales the phase by the ratio of the two lengths.
+pub(super) const WALK_STRIDE_BLOCKS: f32 = 1.2;
+const WALK_RADIANS_PER_BLOCK: f32 = TAU / WALK_STRIDE_BLOCKS;
+
+/// How far the phase runs before it wraps: 20.4 blocks, seventeen strides.
+///
+/// Not one stride. The phase is one clock read by more than one rig, and a rig with a
+/// stride of its own scales it — the horse walks 1.7 blocks to a cycle and canters 3.4 —
+/// so a wrap is invisible only to a rig whose cycle divides the period exactly and is a
+/// snap of most of a cycle to every other. 20.4 is the shortest distance every drawn
+/// stride divides: seventeen humanoid strides, twelve horse walks, six canters, and
+/// `horse.rs` pins its strides to it. A phase that never wrapped would need no such
+/// agreement, and would run out of resolution instead: the paddock horses lap without ever
+/// standing still, and a day into that lap an `f32` phase is past seven hundred thousand
+/// radians, where its step is a fifth of a leg's swing.
+pub(super) const WALK_PHASE_PERIOD_BLOCKS: f32 = 20.4;
+const WALK_PHASE_PERIOD: f32 = WALK_PHASE_PERIOD_BLOCKS * WALK_RADIANS_PER_BLOCK;
 
 /// Where one authoritative item drop should be drawn now.
 ///
@@ -735,7 +752,7 @@ fn horizontal_mob_distance(from: &MobState, to: &MobState) -> f32 {
 }
 
 fn advance_walk_phase(phase: f32, distance: f32) -> f32 {
-    (phase + distance * WALK_RADIANS_PER_BLOCK).rem_euclid(TAU)
+    (phase + distance * WALK_RADIANS_PER_BLOCK).rem_euclid(WALK_PHASE_PERIOD)
 }
 
 /// A mob drawn exactly where the snapshot puts it.
@@ -1098,6 +1115,36 @@ mod tests {
             "snapshot boundary restarted phase {} at {}",
             before.walk_phase,
             after.walk_phase
+        );
+    }
+
+    #[test]
+    fn the_walk_phase_wraps_after_seventeen_strides_rather_than_one() {
+        // A horse scales this phase to a stride of its own, so a wrap at one humanoid
+        // stride would snap its legs every 1.2 blocks. The period is the shortest distance
+        // every drawn stride divides, and the phase runs past one stride without wrapping.
+        let mut buffer = SnapshotBuffer::default();
+        let start = Instant::now();
+        buffer.accept(snapshot(1, vec![state(1, 0.0, 0.0)]), start);
+        buffer.accept(snapshot(2, vec![state(1, 1.5, 0.0)]), start + INTERVAL);
+        let past_one_stride = only(buffer.sample(start + INTERVAL * 2, INTERVAL));
+        assert!(past_one_stride.walking);
+        let want = 1.5 * WALK_RADIANS_PER_BLOCK;
+        assert!(
+            want > TAU && (past_one_stride.walk_phase - want).abs() < 1e-4,
+            "1.5 blocks of travel left the phase at {}, want {want}",
+            past_one_stride.walk_phase
+        );
+
+        // Past the period it wraps, and by exactly the period.
+        buffer.accept(snapshot(3, vec![state(1, 21.0, 0.0)]), start + INTERVAL * 2);
+        let past_the_period = only(buffer.sample(start + INTERVAL * 3, INTERVAL));
+        let want = (21.0 - WALK_PHASE_PERIOD_BLOCKS) * WALK_RADIANS_PER_BLOCK;
+        assert!(
+            past_the_period.walk_phase < WALK_PHASE_PERIOD
+                && (past_the_period.walk_phase - want).abs() < 1e-3,
+            "21 blocks of travel left the phase at {}, want {want}",
+            past_the_period.walk_phase
         );
     }
 
