@@ -1,7 +1,6 @@
 package game
 
 import (
-	"cmp"
 	"slices"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -166,15 +165,19 @@ func (s *Sim) materialiseSettlementsLocked(coord world.Coord) {
 			}
 		}
 
-		// Rotation changes which local paddock slot is west or north, so colour order is
-		// defined in world coordinates. Every chunk-enter call sees all three anchors and
-		// therefore assigns the same one-of-each variants even when only one horse belongs
-		// to the chunk being materialised.
-		slices.SortFunc(paddock, func(a, b world.PlacedAnchor) int {
-			return cmp.Or(cmp.Compare(a.X, b.X), cmp.Compare(a.Z, b.Z))
-		})
-		for variant, slot := range paddock {
-			s.materialisePaddockHorseLocked(coord, slot, uint8(variant))
+		// Rotation changes which local paddock slot is west or north, so the trio is
+		// ordered in world coordinates and two things are read off that order: the colour
+		// variants, one of each, and the route — the middle anchor is the oval's centre
+		// and first-to-third its long axis. Every chunk-enter call sees all three anchors
+		// and therefore derives the same variants and the same oval even when only one
+		// horse belongs to the chunk being materialised. A settlement without a stable
+		// offers no paddock slot and gets no horse.
+		if len(paddock) == paddockHorseVariants {
+			slices.SortFunc(paddock, paddockAnchorOrder)
+			route := paddockRouteOf([paddockHorseVariants]world.PlacedAnchor(paddock))
+			for variant, slot := range paddock {
+				s.materialisePaddockHorseLocked(coord, slot, route, uint8(variant))
+			}
 		}
 	}
 }
