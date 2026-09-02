@@ -880,6 +880,20 @@ impl Appearances {
             .map(|described| name_plate_name(&described.name))
     }
 
+    /// The display-safe identity of one resident, in the same words as their name plate.
+    ///
+    /// A vendor title asks for this rather than formatting [`ResidentRole`] again, so the
+    /// two player-facing surfaces cannot disagree about what a role is called. A player
+    /// description deliberately answers `None`: a [`VendorState`] names a resident, and a
+    /// mismatched cache entry is absence rather than an identity inferred from its level.
+    pub(crate) fn resident_label(&self, entity_id: u64) -> Option<String> {
+        let described = self.0.get(&entity_id)?;
+        let PlateLabel::Role(role) = described.label else {
+            return None;
+        };
+        Some(name_plate_text(PlateLabel::Role(role), &described.name))
+    }
+
     #[cfg(test)]
     pub(crate) fn with_player_name(entity_id: u64, name: &str) -> Self {
         Self(HashMap::from([(
@@ -888,6 +902,24 @@ impl Appearances {
                 appearance: PLACEHOLDER_APPEARANCE,
                 name: name.to_owned(),
                 label: PlateLabel::Level(1),
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
+                worn_offhand: 0,
+                at: Instant::now(),
+                drawn: true,
+            },
+        )]))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_resident(entity_id: u64, name: &str, role: ResidentRole) -> Self {
+        Self(HashMap::from([(
+            entity_id,
+            Described {
+                appearance: PLACEHOLDER_APPEARANCE,
+                name: name.to_owned(),
+                label: PlateLabel::Role(role),
                 worn_head: 0,
                 worn_chest: 0,
                 worn_legs: 0,
