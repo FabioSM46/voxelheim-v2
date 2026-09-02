@@ -2756,8 +2756,17 @@ Recorded here so the next reader does not mistake them for oversights:
   gated by `riverBankGateBlocks` — a widened `riverAt` band, one first-order distance rather than
   four, which is the difference between 27% and 6% on `BenchmarkGenerateInOpenCountry`. **The one
   place it cannot fire is a settlement**, whose plateau and blend own their columns' ground before
-  any water feature is asked; that residue is counted by name in
-  `TestNoSourceWaterStandsAgainstOpenAir` and owned by #828.
+  any water feature is asked. #828 closes that edge from the water side: `riverChannelAt` clamps
+  its source surface to the lowest settlement-owned horizontal neighbour, leaving its bed and
+  channel identity intact. If that ground is at or below the bed, the channel writes no source
+  water there; `riverFallTopAt` still carries a higher upstream terrace as flowing water. Across
+  the five reported settlement windows this removed 48, 48, 102, 94 and 51 exposed source voxels.
+  Stopping the channel removed 119 channel columns over the same windows; clamping retained every
+  one, left `TestWaterCoversItsShareOfTheWorld` at 8%, and kept the walked course continuous.
+  `channelSurfaceAt` deliberately keeps returning the raw terrace: the clamp does not lower #786's
+  bank on the other side, and the settlement blend reads the same pre-clamp natural ground it did
+  before. **Do not feed the clamp back into either ground rule** — the settlement is the fixed side
+  of this boundary, and only its neighbouring source water moves.
 - **A water voxel is decided only from a neighbourhood that was actually read, and no scheduler
   path strands it (#717).** Floating sheets and mid-air truncated falls were never the automaton's
   answer — `NextWater`'s fixed point over the reported seed-1 cascades is clean — they were

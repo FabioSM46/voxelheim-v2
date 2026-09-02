@@ -512,7 +512,34 @@ func waterCurrentBlock(dx, dz int) Block {
 // and riverBedDrop is 3, so the shallowest channel already cuts to 45. In the sweeps
 // above all 20748 beds under the sea line are under it with the min removed, and the
 // min moved 1 column of 192953.
+//
+// **A settlement is the one neighbour the bank rule may not raise, so the water stops
+// at its ground instead.** The bed and the channel remain: only the source surface is
+// clamped to the lowest settlement-owned horizontal neighbour. When that ground is at
+// or below the bed, [column.fillAt] consequently writes no source water at all, while
+// [riverFallTopAt] may still paint the upstream face as flowing water. Five reported
+// settlement windows held 48, 48, 102, 94 and 51 exposed source voxels before this
+// rule and none after it.
+//
+// Stopping the channel was measured too. It closes the same five exposures, but removes
+// 16, 16, 34, 36 and 17 channel columns respectively. Clamping keeps every one of the
+// 118, 259, 165, 898 and 527 raw channel columns in those windows, preserves the bed,
+// and leaves both the sampled eight-percent water share and the walked course unchanged.
 func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int, ok bool) {
+	bed, surface, ok := rawRiverChannelAt(seed, worldX, worldZ, base)
+	if !ok {
+		return 0, 0, false
+	}
+	if ground, lower := lowerSettlementGroundAt(seed, worldX, worldZ, surface); lower {
+		surface = ground
+	}
+	return bed, surface, true
+}
+
+// rawRiverChannelAt is the channel before the settlement-edge water clamp. Settlement
+// blending and river banks read this form because the clamp changes water, not either
+// side's ground; ordinary columns receive [riverChannelAt]'s final source surface.
+func rawRiverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int, ok bool) {
 	if !riverAt(seed, worldX, worldZ) {
 		return 0, 0, false
 	}
@@ -521,6 +548,25 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 		return 0, 0, false
 	}
 	return min(surface-riverBedDrop, base), surface, true
+}
+
+// lowerSettlementGroundAt reports the lowest settlement-owned horizontal neighbour
+// below surface. Four neighbours and no diagonals: the defect is an open shared face,
+// the same geometry [riverBankAt] and [riverFallTopAt] use.
+func lowerSettlementGroundAt(seed, worldX, worldZ int64, surface int) (int, bool) {
+	ground, lower := surface, false
+	for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		x, z := worldX+step[0], worldZ+step[1]
+		if _, _, settled := settlementAtColumn(seed, x, z); !settled {
+			continue
+		}
+		base := unloweredHeightAt(seed, x, z)
+		neighbour, _, _ := settlementShapeAt(seed, x, z, base, ClimateAt(seed, x, z))
+		if neighbour < ground {
+			ground, lower = neighbour, true
+		}
+	}
+	return ground, lower
 }
 
 // riverBankAt is the height a column with no channel of its own has to stand at in
@@ -611,19 +657,21 @@ func nearRiverBandAt(seed, worldX, worldZ int64) bool {
 // channelSurfaceAt is the water surface of the channel at one column, or ok = false
 // where that column carries none.
 //
-// **It is [shapeAt]'s channel arm rather than [shapeAt], because [shapeAt] now applies
-// [riverBankAt].** A bank reads its neighbours; a bank that read them through the
-// function carrying the bank rule would resolve its neighbours' neighbours, and that
-// recursion has no bottom. What this reads instead is exactly the three things that
-// decide whether a channel exists at a column — the origin square, the settlement
-// exemption and [riverChannelAt]'s own two — cheapest first, so the fbm2D behind
-// [riverAt] rejects most columns before anything else is paid for.
+// **It is [shapeAt]'s raw channel arm rather than [shapeAt], because [shapeAt] now
+// applies [riverBankAt].** A bank reads its neighbours; a bank that read them through
+// the function carrying the bank rule would resolve its neighbours' neighbours, and
+// that recursion has no bottom. The settlement-edge clamp is deliberately absent too:
+// it lowers source water, not the raw terrace the other bank was already raised to.
+// Keeping that terrace here leaves #786's bank and the settlement blend byte-identical.
+// What this reads instead is the origin square, the raw channel and the settlement
+// exemption, cheapest first, so the fbm2D behind [riverAt] rejects most columns before
+// anything else is paid for.
 //
 // **The settlement call terminates, and the argument is worth writing down.** It is
 // reached only once [riverAt] and the sea-line test have both passed, so this column
 // *is* a channel wherever the exemption does not apply; [settlementShapeAt]'s blend arm
-// asks [loweredHeightAt], which therefore returns on its channel branch without
-// reaching the bank rule.
+// asks [loweredHeightBeforeSettlementChannelRuleAt], which returns on its raw channel
+// branch without reaching the bank rule.
 func channelSurfaceAt(seed, worldX, worldZ int64) (int, bool) {
 	if nearOriginColumn(worldX, worldZ) {
 		return 0, false
@@ -669,6 +717,11 @@ func channelSurfaceAt(seed, worldX, worldZ int64) (int, bool) {
 // was compensating for a channel whose field threshold could make it 27 blocks wide.
 // Since #784 the channel is measured in blocks, so covering every shared terrace face
 // produces narrow falls without weakening the containment rule.
+//
+// **A settlement clamp does not erase the upstream face.** Its channel still exists,
+// and ownSurface is the clamped source height, while a higher raw terrace beside it
+// remains a fall. The voxels between the two are [WaterFlow7], never permanent sources:
+// the runtime automaton owns whether that face keeps being fed.
 //
 // Four neighbours and no diagonals, because a fall pours across a shared face. Only
 // channel columns are asked, and only their field and surface: this is

@@ -342,6 +342,21 @@ func loweredHeightAt(seed, worldX, worldZ int64, base int, climate Climate) (sur
 	return surface, 0, false
 }
 
+// loweredHeightBeforeSettlementChannelRuleAt is the natural ground a settlement blend
+// has always met: the raw river bed or the basin plus #786's bank. #828 clamps only a
+// channel's source water where settlement ground is lower; letting that answer feed
+// back into this blend would move the very ground the clamp is required to preserve.
+func loweredHeightBeforeSettlementChannelRuleAt(seed, worldX, worldZ int64, base int, climate Climate) (surface, riverSurface int, river bool) {
+	if bed, waterSurface, ok := rawRiverChannelAt(seed, worldX, worldZ, base); ok {
+		return bed, waterSurface, true
+	}
+	surface = base - basinAt(seed, worldX, worldZ, climate)
+	if bank, ok := riverBankAt(seed, worldX, worldZ); ok && bank > surface {
+		surface = bank
+	}
+	return surface, 0, false
+}
+
 // amplitudeAt is the peak-to-trough range in blocks at one column, in whole
 // blocks rather than fixed point.
 //
@@ -484,7 +499,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // the few columns either side of a channel — 0.004% to 0.054% of the map depending on the
 // seed, by one block for most of them — and everything rooted, carved or filled from
 // those heights moves with them, so stored deltas there need the new generated base.
-const WorldgenVersion uint32 = 26
+// 26 → 27: #828 clamps a channel's source water to a lower settlement-owned neighbour.
+// The river bed, settlement plateau and blend, and the bank on every other side remain
+// byte-identical; source water at the meeting edge becomes air or flowing fall water, so
+// a stored delta there still needs the new generated base.
+const WorldgenVersion uint32 = 27
 
 // Generate builds the chunk at coord for seed.
 //
