@@ -309,6 +309,7 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	// one plains column in five there, one taiga column in fifteen.
 	patchEligible, flowersInPatch, flowersOutsidePatch, flowerStrays := 0, 0, 0, 0
 	taigaEligible, taigaBushes := 0, 0
+	tundraEligible, tundraBrambles := 0, 0
 	taigaPatchEligible, taigaFlowersInPatch, taigaFlowersOutsidePatch := 0, 0, 0
 	flowerColours := map[Block]int{}
 	for _, tc := range []struct {
@@ -350,12 +351,14 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 						if inPatch {
 							taigaPatchEligible++
 						}
+					case Tundra:
+						tundraEligible++
 					}
 				}
 				species, h, rooted := plantAtColumn(climateSeed, x, z, col)
-				// Low cover reaches the taiga and stops there: the tundra square is
-				// the executable half of "absent from the switch is a decision".
-				if tc.climate == Tundra && rooted && (species == &plantSpeciesTable[4] || species == &plantSpeciesTable[5]) {
+				// The green bush and flower reach the taiga and stop there. Tundra's
+				// own low cover is the leafless snow-rooted row.
+				if tc.climate == Tundra && rooted && (species == &plantSpeciesTable[4] || species == &plantSpeciesTable[6]) {
 					t.Fatalf("%s is rooted in tundra at (%d, %d)", species.name, x, z)
 				}
 				// The broadleaf is a tree and stays the plains' alone.
@@ -366,13 +369,16 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 					switch species {
 					case &plantSpeciesTable[4]:
 						taigaBushes++
-					case &plantSpeciesTable[5]:
+					case &plantSpeciesTable[6]:
 						if inPatch {
 							taigaFlowersInPatch++
 						} else {
 							taigaFlowersOutsidePatch++
 						}
 					}
+				}
+				if tc.climate == Tundra && rooted && species == &plantSpeciesTable[5] {
+					tundraBrambles++
 				}
 				if tc.climate == Plains && rooted {
 					switch species {
@@ -385,7 +391,7 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 						} else {
 							bushPairs++
 						}
-					case &plantSpeciesTable[5]:
+					case &plantSpeciesTable[6]:
 						if inPatch {
 							flowersInPatch++
 						} else {
@@ -417,6 +423,11 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 	if densities[Taiga] <= densities[Tundra] || densities[Tundra] <= densities[Plains] {
 		t.Errorf("root densities taiga=%f, tundra=%f, plains=%f; want taiga > tundra > plains",
 			densities[Taiga], densities[Tundra], densities[Plains])
+	}
+	wantTundraBrambles := float64(tundraEligible) / float64(tundraBrambleChanceDenominator)
+	if ratio := float64(tundraBrambles) / wantTundraBrambles; tundraBrambles == 0 || wantTundraBrambles == 0 || ratio < 0.75 || ratio > 1.25 {
+		t.Errorf("tundra winter bramble count is %d over %d eligible snow columns; one in %d predicts %.1f (ratio %.2f, want within +/-25%%)",
+			tundraBrambles, tundraEligible, tundraBrambleChanceDenominator, wantTundraBrambles, ratio)
 	}
 	for _, tc := range []struct {
 		name        string
@@ -524,7 +535,7 @@ func TestTreeDensityFollowsItsClimate(t *testing.T) {
 				shrubs++
 			case &plantSpeciesTable[4]:
 				t.Fatalf("a bush is rooted in the desert at (%d, %d)", x, z)
-			case &plantSpeciesTable[5]:
+			case &plantSpeciesTable[6]:
 				t.Fatalf("a flower is rooted in the desert at (%d, %d)", x, z)
 			}
 		}

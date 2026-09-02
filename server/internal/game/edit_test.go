@@ -464,6 +464,19 @@ func TestPlacingIntoAFlowerReplacesIt(t *testing.T) {
 	if got := countOf(*result.Inventory, game.ItemStone); got != before-1 {
 		t.Errorf("Stone count after placing = %d, want %d: a placement into a flower spends one block like any other", got, before-1)
 	}
+
+	// A new cover id follows the same class rule, not a second id-specific rule.
+	h, chunks = editWorld(t)
+	player, _ = h.join(2, [3]float32{0.5, 200, 0.5})
+	giveBlock(t, h, player, chunks, world.Stone)
+	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.WinterBramble, nil); err != nil {
+		t.Fatalf("grow the target winter bramble: %v", err)
+	}
+	before = countOf(player.InventoryState(), game.ItemStone)
+	result, err = player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
+	if err != nil || result.Inventory == nil || countOf(*result.Inventory, game.ItemStone) != before-1 {
+		t.Fatalf("replace the winter bramble: result=%+v err=%v", result, err)
+	}
 }
 
 // A block placed inside a player would leave them stuck: moveAndCollide refuses to move a

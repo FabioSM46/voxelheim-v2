@@ -519,11 +519,12 @@ plane they share. Their shapes have gaps, so the ground under either one has to 
 the cube used to cull: `is_opaque` is false and `is_solid` is still true. Making either id a `Cover`
 block would be a **server** change with three enforced consequences, and it is not this.
 
-**The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
-unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads and
-a bush is 42. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 510 quads
-where the two shapes before #634 cost 96, while the opaque half fell by 24 — the bush's cube left
-the sweep and the ground under it gained the faces that cube was culling.
+**The quad budget is the thing to watch when any shape changes.** Cover is per voxel and
+unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads, a
+bush is 42, and a winter bramble is 36. On a generated meadow chunk with 12 flowers and 9 bushes
+the cover half is 510 quads where the two shapes before #634 cost 96, while the opaque half fell by
+24 — the bush's cube left the sweep and the ground under it gained the faces that cube was culling.
+The one-in-256 tundra fixture carries four winter brambles and therefore 144 cover quads.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 The desert bramble is 46 quads. The dense desert fixture grows exactly 25 per chunk, so its cover
 half is 1,150 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
@@ -560,6 +561,10 @@ at 173.5..259.3 / 165.3..278.8 / 164.6..274.3 ms. The queue and in-flight spread
 controls; these runs provide no evidence that the 46-quad shape regressed streaming. The per-chunk
 measurement put the same result on one worker: `DesertPlanted` took 7.287..8.335 ms (median 7.338
 ms), overlapping `DesertBare` at 7.254..7.525 ms (median 7.305 ms).
+
+**#790 measured the tundra fixture too.** Three winter joins recorded queued 155..163, in-flight
+327..330 and worst-frame 2.487..2.778 ms; four walks recorded 4..20, 49..76 and 1.603..2.461 ms.
+These are one optimized run's fixture readings, not bounds; exact cost and conservation are tests.
 
 **A shaped plant costs the sweep nothing at all**, and since #652 that is asserted rather than
 counted: the opaque and water buffers over ground carrying twelve flowers and nine bushes are

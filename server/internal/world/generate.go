@@ -162,15 +162,22 @@ const (
 	// grows under.** One column in 128 against the plains' 64 is undergrowth rather
 	// than a second meadow, and putting it behind taigaTreeChanceDenominator (96)
 	// keeps the wood the feature: a walk through the pines passes more trunks than
-	// bushes. Tundra and desert stay absent from bushChanceDenominator's switch,
-	// which is the same statement coniferChanceDenominator makes about the desert.
-	broadleafChanceDenominator        = 384
-	plainsBushChanceDenominator       = 64
-	taigaBushChanceDenominator        = 128
-	broadleafMinTrunkHeight           = 3
-	broadleafCanopyRadius             = 2
-	broadleafSeedOffset         int64 = 0x9B05688C
-	bushSeedOffset              int64 = 0x1F83D9AB
+	// bushes. Tundra and desert stay absent from bushChanceDenominator's switch:
+	// the winter bramble below is its own leafless species rather than this green
+	// meadow plant growing on snow.
+	broadleafChanceDenominator  = 384
+	plainsBushChanceDenominator = 64
+	taigaBushChanceDenominator  = 128
+	// One winter bramble in 256 tundra snow columns measured 892 roots across the
+	// fixed 512x512 tundra walk in TestTreeDensityFollowsItsClimate: about one per
+	// 259 eligible columns, sparser than either grass bush and still visible between
+	// conifers. Its lattice is independent so the fruit never tracks the tree line.
+	tundraBrambleChanceDenominator       = 256
+	broadleafMinTrunkHeight              = 3
+	broadleafCanopyRadius                = 2
+	broadleafSeedOffset            int64 = 0x9B05688C
+	bushSeedOffset                 int64 = 0x1F83D9AB
+	winterBrambleSeedOffset        int64 = 0x6A09E667
 
 	// gravelSeedOffset decorrelates the gravel field from every other 2D field. A
 	// patch that always sat on the same side of a climate boundary would be a
@@ -457,7 +464,11 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // leaving a permanent source exposed wherever its encoded current points elsewhere.
 // River beds, source water and terrain heights stay byte-identical, but flowing-water
 // voxels above lower terraces change, so stored deltas need the new generated base.
-const WorldgenVersion uint32 = 24
+// 24 → 25: a leafless winter bramble now roots sparsely in tundra snow. Heights,
+// underground materials, conifers and every non-tundra column stay byte-identical,
+// but selected tundra columns hold an appended cover block where version 24 held air,
+// so stored deltas there need the new generated base.
+const WorldgenVersion uint32 = 25
 
 // Generate builds the chunk at coord for seed.
 //
@@ -974,6 +985,15 @@ func plainsChanceDenominator(denominator uint64) func(Climate) uint64 {
 	}
 }
 
+func tundraChanceDenominator(denominator uint64) func(Climate) uint64 {
+	return func(climate Climate) uint64 {
+		if climate == Tundra {
+			return denominator
+		}
+		return 0
+	}
+}
+
 // bushChanceDenominator is one candidate column in how many that becomes a bush,
 // for a climate.
 //
@@ -1091,6 +1111,21 @@ var bush = plantSpecies{
 	visit:       visitBush,
 }
 
+// The winter bramble is separate from the green bush above: it roots only on snow,
+// carries bare canes and berries in one block id, and grows only where the tundra
+// denominator admits it. A snowy plains mountaintop therefore does not grow one.
+var winterBramble = plantSpecies{
+	name:       "winter bramble",
+	seedOffset: winterBrambleSeedOffset,
+	rootsOn: func(block Block) bool {
+		return block == Snow
+	},
+	denominator: tundraChanceDenominator(tundraBrambleChanceDenominator),
+	footprint:   0,
+	forest:      false,
+	visit:       visitWinterBramble,
+}
+
 // The flower is last, which is the whole of its priority: any plant that wants the
 // column takes it and a flower grows in what is left, so a drift never thins a wood.
 var flower = plantSpecies{
@@ -1106,7 +1141,7 @@ var flower = plantSpecies{
 	visit:       visitFlower,
 }
 
-var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush, flower}
+var plantSpeciesTable = []plantSpecies{conifer, palm, shrub, broadleaf, bush, winterBramble, flower}
 
 // flowerPatchAt reports whether a column lies inside a drift of flowers.
 func flowerPatchAt(seed, worldX, worldZ int64) bool {
@@ -1339,6 +1374,10 @@ func visitBush(_ int64, rootX, rootZ int64, surface int, h uint64, visit func(x,
 		return
 	}
 	visit(rootX, y, rootZ+1, Bush)
+}
+
+func visitWinterBramble(_ int64, rootX, rootZ int64, surface int, _ uint64, visit func(x, y, z int64, block Block)) {
+	visit(rootX, int64(surface+1), rootZ, WinterBramble)
 }
 
 // visitFlower yields one block at surface + 1: a flower stands in the voxel above the

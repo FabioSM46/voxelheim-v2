@@ -5,8 +5,8 @@ import "testing"
 func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 	t.Parallel()
 
-	if len(plantSpeciesTable) != 6 {
-		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm, shrub, broadleaf, bush and flower", len(plantSpeciesTable))
+	if len(plantSpeciesTable) != 7 {
+		t.Fatalf("plantSpeciesTable has %d rows, want conifer, palm, shrub, broadleaf, bush, winter bramble and flower", len(plantSpeciesTable))
 	}
 	conifer := plantSpeciesTable[0]
 	if conifer.name != "conifer" || conifer.seedOffset != treeSeedOffset || conifer.footprint != treeCanopyRadius || !conifer.forest {
@@ -68,31 +68,40 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 
 	// **An absent climate is the assertion, not a gap in the table.** A missing key
 	// reads back as zero, which is the one thing every denominator switch here means
-	// by it: nothing of this species grows in that climate. Tundra and desert are
-	// named in none of the three rows below and are checked in all of them.
-	for index, tc := range []struct {
+	// by it: nothing of this species grows in that climate. Every absent climate is
+	// named in the checks below; snow at altitude is not enough to admit the bramble
+	// outside Tundra.
+	for _, tc := range []struct {
+		index        int
 		name         string
 		seedOffset   int64
 		denominators map[Climate]uint64
+		root         Block
 		footprint    int
 		forest       bool
 	}{
 		// The broadleaf is a tree and stays the plains' alone; the two low-cover rows
 		// under it grow in the taiga too, at their own numbers rather than the plains'.
-		{"broadleaf", broadleafSeedOffset, map[Climate]uint64{Plains: broadleafChanceDenominator}, broadleafCanopyRadius, true},
-		{"bush", bushSeedOffset, map[Climate]uint64{Plains: plainsBushChanceDenominator, Taiga: taigaBushChanceDenominator}, 1, false},
+		{3, "broadleaf", broadleafSeedOffset, map[Climate]uint64{Plains: broadleafChanceDenominator}, Grass, broadleafCanopyRadius, true},
+		{4, "bush", bushSeedOffset, map[Climate]uint64{Plains: plainsBushChanceDenominator, Taiga: taigaBushChanceDenominator}, Grass, 1, false},
+		// One snow-rooted species, admitted only by the tundra's own denominator.
+		{5, "winter bramble", winterBrambleSeedOffset, map[Climate]uint64{Tundra: tundraBrambleChanceDenominator}, Snow, 0, false},
 		// The flower is last, which is its priority: every other plant is asked for
 		// a column first, so a drift never thins a wood.
-		{"flower", flowerSeedOffset, map[Climate]uint64{Plains: plainsFlowerChanceDenominator, Taiga: taigaFlowerChanceDenominator}, 0, false},
+		{6, "flower", flowerSeedOffset, map[Climate]uint64{Plains: plainsFlowerChanceDenominator, Taiga: taigaFlowerChanceDenominator}, Grass, 0, false},
 	} {
-		species := plantSpeciesTable[index+3]
+		species := plantSpeciesTable[tc.index]
 		if species.name != tc.name || species.seedOffset != tc.seedOffset || species.footprint != tc.footprint || species.forest != tc.forest {
 			t.Errorf("row %d = {name:%q seedOffset:%d footprint:%d forest:%t}, want %+v",
-				index+3, species.name, species.seedOffset, species.footprint, species.forest, tc)
+				tc.index, species.name, species.seedOffset, species.footprint, species.forest, tc)
 		}
-		if !species.rootsOn(Grass) || species.rootsOn(Snow) {
-			t.Errorf("%s rootsOn(Grass) = %t and rootsOn(Snow) = %t, want true and false",
-				tc.name, species.rootsOn(Grass), species.rootsOn(Snow))
+		if !species.rootsOn(tc.root) {
+			t.Errorf("%s does not root on block %d", tc.name, tc.root)
+		}
+		for _, block := range []Block{Grass, Snow} {
+			if block != tc.root && species.rootsOn(block) {
+				t.Errorf("%s roots on unintended block %d", tc.name, block)
+			}
 		}
 		for _, climate := range []Climate{Plains, Taiga, Tundra, Desert} {
 			if got := species.denominator(climate); got != tc.denominators[climate] {
@@ -104,10 +113,10 @@ func TestThePlantSpeciesTableNamesEveryRowInPriorityOrder(t *testing.T) {
 	// **The patch field is the flower's alone, and every tree's nil is the assertion.**
 	// A row that grew one by accident would silently start clustering, which a density
 	// test would attribute to the denominator.
-	if plantSpeciesTable[5].patch == nil {
+	if plantSpeciesTable[6].patch == nil {
 		t.Error("the flower row has no patch field: flowers would be a uniform sprinkle")
 	}
-	for i := range plantSpeciesTable[:5] {
+	for i := range plantSpeciesTable[:6] {
 		if species := &plantSpeciesTable[i]; species.patch != nil {
 			t.Errorf("%s carries a patch field; every tree row grows wherever its density says", species.name)
 		}
@@ -258,6 +267,18 @@ func TestShrubIsOneBlockAboveItsRoot(t *testing.T) {
 	})
 	if len(visited) != 1 || visited[[3]int64{4, 62, 9}] != DesertShrub {
 		t.Fatalf("shrub shape = %v, want one DesertShrub at (4, 62, 9)", visited)
+	}
+}
+
+func TestWinterBrambleIsOneBlockAboveItsSnowRoot(t *testing.T) {
+	t.Parallel()
+
+	visited := make(map[[3]int64]Block)
+	visitWinterBramble(0, 4, 9, 61, 0, func(x, y, z int64, block Block) {
+		visited[[3]int64{x, y, z}] = block
+	})
+	if len(visited) != 1 || visited[[3]int64{4, 62, 9}] != WinterBramble {
+		t.Fatalf("winter bramble shape = %v, want one WinterBramble at (4, 62, 9)", visited)
 	}
 }
 
@@ -547,7 +568,7 @@ func plainsLowCoverDigest() (digest uint64, bushes, flowers int) {
 			case &plantSpeciesTable[4]:
 				bushes++
 				digest = fnv64a(digest, x, z, 4, int64(h>>40)&1)
-			case &plantSpeciesTable[5]:
+			case &plantSpeciesTable[6]:
 				flowers++
 				digest = fnv64a(digest, x, z, 5, int64(flowerBlock(climateSeed, x, z, h)))
 			}

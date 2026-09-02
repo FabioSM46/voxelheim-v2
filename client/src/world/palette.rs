@@ -126,6 +126,10 @@ pub const SLATE_STAIR_EAST_TOP: BlockId = 51;
 pub const SLATE_STAIR_SOUTH_TOP: BlockId = 52;
 pub const SLATE_STAIR_WEST_TOP: BlockId = 53;
 
+/// A leafless tundra bramble: the block's colour is its berries while the mesher
+/// draws the canes in [`LOG`]'s bark. Mirrors the server's `world.WinterBramble`.
+pub const WINTER_BRAMBLE: BlockId = 54;
+
 /// Geometry one block occupies inside its voxel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeKind {
@@ -329,7 +333,7 @@ pub fn is_greedy_opaque(block: BlockId) -> bool {
     is_opaque(block) && !is_architectural_shape(block)
 }
 
-const COVER_FAMILY: [BlockId; 3] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE];
+const COVER_FAMILY: [BlockId; 4] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE, WINTER_BRAMBLE];
 
 const WATER_FAMILY: [BlockId; 12] = [
     WATER,
@@ -372,10 +376,10 @@ pub fn is_cover(block: BlockId) -> bool {
 /// Exactly [`is_cover`] plus [`BUSH`] and [`DESERT_SHRUB`], and it is a **third**
 /// question about a block rather than a synonym for either of the two above it. Cover
 /// answers what a body does with a voxel — mirrored from the server's `world.Cover` —
-/// and both brambles are `world.Solid` there, so they stop a body while a flower does
-/// not. What the shapes share is only that none is a cube:
+/// and the meadow/desert brambles are `world.Solid` there, while flowers and the winter
+/// bramble stop no body. What the shapes share is only that none is a cube:
 /// [`super::mesher::build_cover`] builds a stem, a corolla and leaves for a flower, a
-/// leafy bramble for a bush and a bare thorn bramble for desert scrub; the sweep never
+/// leafy bramble for a bush, and bare brambles for desert and winter; the sweep never
 /// sees any of them.
 ///
 /// **The consequence is [`is_opaque`], and it is the reason this predicate has to exist
@@ -458,7 +462,7 @@ pub fn is_opaque(block: BlockId) -> bool {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 53] = [
+pub const PALETTE: [BlockId; 54] = [
     STONE,
     DIRT,
     GRASS,
@@ -512,6 +516,7 @@ pub const PALETTE: [BlockId; 53] = [
     SLATE_STAIR_EAST_TOP,
     SLATE_STAIR_SOUTH_TOP,
     SLATE_STAIR_WEST_TOP,
+    WINTER_BRAMBLE,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -612,6 +617,11 @@ const FLOWER_YELLOW_LINEAR: [f32; 3] = [0.806_952, 0.564_712, 0.068_478];
 /// saturated than [`WATER_LINEAR`], which is what keeps a shore drift from reading as a
 /// puddle. `#5B76C8`.
 const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
+
+/// A cold, dark crimson berry that stays distinct from nearly white [`SNOW_LINEAR`]
+/// and from the much brighter meadow red above. Saturation carries the only colour
+/// in the leafless winter plant. `#761A3B`.
+const WINTER_BRAMBLE_LINEAR: [f32; 3] = [0.181_164, 0.010_330, 0.043_735];
 
 /// The darkest thing in the world, and a castle's trim rather than its wall: a line of
 /// it under a sill or along a threshold is what gives a face an edge. `#17151C`.
@@ -737,6 +747,7 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         FLOWER_RED => FLOWER_RED_LINEAR,
         FLOWER_YELLOW => FLOWER_YELLOW_LINEAR,
         FLOWER_BLUE => FLOWER_BLUE_LINEAR,
+        WINTER_BRAMBLE => WINTER_BRAMBLE_LINEAR,
         SMOOTH_BLACK_STONE => SMOOTH_BLACK_STONE_LINEAR,
         BASALT => BASALT_LINEAR,
         BLACK_BRICK => BLACK_BRICK_LINEAR,
@@ -780,7 +791,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 29] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 30] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -805,6 +816,7 @@ mod tests {
         ("flower red", [0xC4, 0x38, 0x3A], FLOWER_RED_LINEAR),
         ("flower yellow", [0xE8, 0xC6, 0x4A], FLOWER_YELLOW_LINEAR),
         ("flower blue", [0x5B, 0x76, 0xC8], FLOWER_BLUE_LINEAR),
+        ("winter bramble", [0x76, 0x1A, 0x3B], WINTER_BRAMBLE_LINEAR),
         ("stem", [0x3E, 0x6B, 0x2E], STEM_LINEAR),
         ("leaf", [0x4C, 0x84, 0x38], LEAF_LINEAR),
         ("flower centre", [0x7A, 0x5A, 0x1E], FLOWER_CENTRE_LINEAR),
@@ -884,7 +896,14 @@ mod tests {
         // The set the mesher grows geometry for, pinned the way `is_cover` is: an id
         // that starts answering `is_shaped` without being listed here is a block that
         // silently stopped hiding what is behind it.
-        for block in [BUSH, DESERT_SHRUB, FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE] {
+        for block in [
+            BUSH,
+            DESERT_SHRUB,
+            FLOWER_RED,
+            FLOWER_YELLOW,
+            FLOWER_BLUE,
+            WINTER_BRAMBLE,
+        ] {
             assert!(is_shaped(block));
         }
         for block in PALETTE
@@ -892,7 +911,7 @@ mod tests {
             .filter(|block| {
                 !matches!(
                     *block,
-                    BUSH | DESERT_SHRUB | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE
+                    BUSH | DESERT_SHRUB | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE
                 )
             })
             .chain([AIR, BlockId::MAX])
@@ -935,7 +954,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=SLATE_STAIR_WEST_TOP {
+        for block in 1..=WINTER_BRAMBLE {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
@@ -1120,11 +1139,11 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_exactly_the_three_flowers_and_stops_nothing() {
+    fn cover_is_exactly_the_three_flowers_and_winter_bramble_and_stops_nothing() {
         // The seam the next cover block is added at, pinned as a set rather than as a
         // predicate: an id that starts answering `is_cover` without being listed here is
         // a block a body would walk through by accident.
-        for block in [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE] {
+        for block in [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE, WINTER_BRAMBLE] {
             assert!(is_cover(block));
             assert!(!is_solid(block), "cover {block} must stop no body");
             assert!(!is_opaque(block), "cover {block} must hide nothing");
@@ -1137,7 +1156,12 @@ mod tests {
         }
         for block in PALETTE
             .into_iter()
-            .filter(|block| !matches!(*block, FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE))
+            .filter(|block| {
+                !matches!(
+                    *block,
+                    FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE
+                )
+            })
             .chain([AIR, BlockId::MAX])
         {
             assert!(!is_cover(block), "block {block} is not cover");

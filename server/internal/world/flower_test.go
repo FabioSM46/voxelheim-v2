@@ -28,6 +28,16 @@ func TestAPlantOverwritesAFlowerInEitherOrder(t *testing.T) {
 		}
 	}
 
+	// The new cover id obeys both orderings too.
+	for _, order := range [][2]Block{{Bush, WinterBramble}, {WinterBramble, Bush}} {
+		chunk := NewChunk(Coord{})
+		setTreeBlock(chunk, x, y, z, order[0])
+		setTreeBlock(chunk, x, y, z, order[1])
+		if got := chunk.At(x, y, z); got != Bush {
+			t.Errorf("winter bramble overlap starting with %d holds %d, want Bush", order[0], got)
+		}
+	}
+
 	// Cover is what a plant may write *over*, never what a flower may write over.
 	chunk := NewChunk(Coord{})
 	setTreeBlock(chunk, x, y, z, Stone)
