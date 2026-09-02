@@ -137,6 +137,33 @@ const (
 	// hundred blocks up is as deep as one at the shore.
 	riverBedDrop = 3
 
+	// riverBankGateBlocks is how far from the river field's level set a column still
+	// has to ask its four neighbours whether one of them carries a channel. See
+	// [riverBankAt], which is the rule this gates.
+	//
+	// **The rule is cheap where it fires; the question is not.** Four neighbour
+	// resolutions cost four [riverAt] — twenty fbm2D sums — on every non-channel
+	// column in the world, to move between four columns in a hundred thousand and five
+	// in ten thousand, depending on the seed. Asked
+	// unconditionally, BenchmarkGenerateInOpenCountry went from 6.37ms a chunk to
+	// 8.06ms: 27% for something that changes 0.02% of the map. The gate is [riverAt]'s
+	// own comparison over a wider half-width — one first-order distance to the level
+	// set, five sums — and the shipped rule measures 6.66ms against 7.04ms, 6%, on its
+	// own run of the same benchmark. BenchmarkGenerateInACapital does not move.
+	//
+	// **Twelve blocks is four times [riverHalfWidthBlocks], and the margin is what the
+	// number is for.** A gate that misses a bank leaves the water it was going to hold
+	// standing against air, so this has to be a superset of "has a channel neighbour"
+	// rather than a fit to it. Swept at seeds 1, 0x5EED, 7 and 0xC0FFEE over six
+	// 384x384 windows each, the worst first-order distance measured at a column that
+	// does have a channel neighbour is five blocks — the field's distance and the
+	// neighbour's disagree where their gradients do, which is the same slack
+	// TestRiverChannelsStayWithinTheirBlockWidth measures from the other side. Twelve
+	// is 2.4 times that, admits 5.5% of columns where seven would admit 2.5%, and the
+	// difference between the two is about one percent of generation.
+	// TestEveryBankColumnIsInsideTheBankGate is the pin.
+	riverBankGateBlocks = 4 * riverHalfWidthBlocks
+
 	// riverTerraceStep is how tall one step of a river's surface is.
 	//
 	// **A river that runs downhill in a voxel world runs down in steps.** The surface
@@ -496,6 +523,125 @@ func riverChannelAt(seed, worldX, worldZ int64, base int) (bed, waterSurface int
 	return min(surface-riverBedDrop, base), surface, true
 }
 
+// riverBankAt is the height a column with no channel of its own has to stand at in
+// order to hold the channel beside it: the highest water surface among the four
+// horizontally adjacent channels, or ok = false where none of them carries one.
+//
+// **A carve may not breach the wall of a standing body; the ground was never held to
+// the same rule.** #660 gave the carve side [column.waterStandsBesideAt], so a cave
+// may not open a face into water standing next door. Nothing said the same about the
+// surface: [riverChannelAt] cuts a bed and [column.fillAt] fills it to
+// [riverSurfaceAt] — a terrace of the *smoothed* land — and neither asks whether the
+// ground beside the channel reaches that surface. Where it does not, the river's own
+// source water stands with an open face over dry land, which is the shape a river has
+// and none of the substance. With #784 and #785 in, seed 1 over the reported 256x256
+// window measured 181 of 136744 source voxels standing that way: 175 beside a dry bank
+// and 6 beside a lower sea or basin. This rule takes both counts to zero, in that
+// window and in the seven others [TestNoSourceWaterStandsAgainstOpenAir] holds. Its
+// last two windows are deliberately not zero: a settlement owns its columns' ground,
+// so it is the one neighbour this rule may not raise. That residue is pre-existing,
+// counted by name there, and owned by #828.
+//
+// **Raising the land was measured against lowering the water, and the loser fails in
+// ways a count of exposed voxels cannot show.** The other candidate clamped a
+// channel's surface to its lowest neighbouring non-channel ground. It takes the
+// exposure to zero too, and it moves a comparable number of columns — 119 of the
+// window's 1771 channel columns against 120 non-channel columns raised, each by at
+// most three blocks. But 14 of those 119 clamp to or below their own bed, which is a
+// dry hole in a river rather than a shorter pool, and a clamp is not a multiple of
+// [riverTerraceStep]: it broke TestARiverSurfaceIsTerracedAndItsBedFollowsTheLand, it
+// broke TestEveryTerraceFaceCarriesItsFall on adjacent channels differing by one block
+// instead of a whole terrace, and it took #785's cascade measurement from 8 fall
+// columns in 3 components to 43 in 12. Raising the bank breaks nothing but the count
+// this rule exists to move.
+//
+// **It adds land, and how much is what it costs.** Swept at seeds 1, 0x5EED, 7 and
+// 0xC0FFEE over five 384x384 windows each — 737280 columns a seed — it raises 0.024%,
+// 0.054%, 0.004% and 0.017% of columns. Most raises are one block; the tail is a
+// channel pooled in a dip whose rim the bed followed down, and the worst measured is
+// ten blocks, at 0x5EED. **The sea-line statistic does not move**: the only window
+// where any raised column was under the sea line is the reported one, where 7 of 65536
+// stop standing in water — 0.011 percentage points of a band that runs from 3% to 15%,
+// and [TestWaterCoversItsShareOfTheWorld]'s sampled sweep does not see them at all.
+//
+// **The raise applies to a column under the sea line as well as to dry ground, and the
+// six lower-body exposures are why.** Where a channel's terrace stands above a sea or
+// basin it runs into, the shared face is open at exactly the heights between the two
+// surfaces. Excluding wet columns leaves those six standing; including them puts a
+// one-column sill at the river's mouth, level with the pool it holds back, and the
+// lake beside it a block lower. That is a weir, and it is what the invariant asks for.
+//
+// Four neighbours and no diagonals, for [riverFallTopAt]'s reason: a bank holds a
+// shared face.
+func riverBankAt(seed, worldX, worldZ int64) (top int, ok bool) {
+	if !nearRiverBandAt(seed, worldX, worldZ) {
+		return 0, false
+	}
+	for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+		surface, channel := channelSurfaceAt(seed, worldX+step[0], worldZ+step[1])
+		if !channel {
+			continue
+		}
+		if !ok || surface > top {
+			top, ok = surface, true
+		}
+	}
+	return top, ok
+}
+
+// nearRiverBandAt is [riverAt]'s comparison over [riverBankGateBlocks] instead of
+// [riverHalfWidthBlocks]: the columns close enough to the level set that a neighbour
+// could still be a channel.
+//
+// **A zero gradient answers inside the gate, where [riverAt] answers no channel.** The
+// two are the same decision read in opposite directions: without a local slope there
+// is no finite first-order distance, so a channel cannot be claimed and a neighbour
+// cannot be ruled out. A gate has to fail towards asking.
+func nearRiverBandAt(seed, worldX, worldZ int64) bool {
+	distanceInField := absInt64(riverField(seed, worldX, worldZ) - one/2)
+	gx, gz := riverGradientAt(seed, worldX, worldZ)
+	ax, az := absInt64(gx), absInt64(gz)
+	gradientMagnitude := max(ax, az) + min(ax, az)/2
+	if gradientMagnitude == 0 {
+		return true
+	}
+	return distanceInField*(2*riverGradientSpan) <= riverBankGateBlocks*gradientMagnitude
+}
+
+// channelSurfaceAt is the water surface of the channel at one column, or ok = false
+// where that column carries none.
+//
+// **It is [shapeAt]'s channel arm rather than [shapeAt], because [shapeAt] now applies
+// [riverBankAt].** A bank reads its neighbours; a bank that read them through the
+// function carrying the bank rule would resolve its neighbours' neighbours, and that
+// recursion has no bottom. What this reads instead is exactly the three things that
+// decide whether a channel exists at a column — the origin square, the settlement
+// exemption and [riverChannelAt]'s own two — cheapest first, so the fbm2D behind
+// [riverAt] rejects most columns before anything else is paid for.
+//
+// **The settlement call terminates, and the argument is worth writing down.** It is
+// reached only once [riverAt] and the sea-line test have both passed, so this column
+// *is* a channel wherever the exemption does not apply; [settlementShapeAt]'s blend arm
+// asks [loweredHeightAt], which therefore returns on its channel branch without
+// reaching the bank rule.
+func channelSurfaceAt(seed, worldX, worldZ int64) (int, bool) {
+	if nearOriginColumn(worldX, worldZ) {
+		return 0, false
+	}
+	if !riverAt(seed, worldX, worldZ) {
+		return 0, false
+	}
+	surface := riverSurfaceAt(seed, worldX, worldZ)
+	if surface < seaLevel {
+		return 0, false
+	}
+	base := unloweredHeightAt(seed, worldX, worldZ)
+	if _, _, near := settlementShapeAt(seed, worldX, worldZ, base, ClimateAt(seed, worldX, worldZ)); near {
+		return 0, false
+	}
+	return surface, true
+}
+
 // riverFallTopAt is how high the water in a channel column stands because the channel
 // beside it stands higher: the top of the fall that covers their shared terrace face,
 // or this column's own surface where no higher terrace touches it.
@@ -667,14 +813,14 @@ func (c *column) fillAt(worldY int) Block {
 // connectivity rule reaches that fixed point directly and also removes the sealed
 // pocket that filled for no reason.
 //
-// **The current containment counts live in the test that asserts them.** After #784
-// narrows the channel and #785 restores every terrace face as flowing water,
-// [TestNoSourceWaterStandsAgainstOpenAir] measures 27/24754, 0/41342 and 0/111425 in
-// the legacy three-seed window. Its wider seed-one report window measures 181/136744:
-// 175 channel sources beside dry ground and 6 beside a lower sea or basin surface. All
-// 181 are the named surface-bank residue owned by #786; none is a carved face this rule
-// could reach. The test pins those as counts rather than hiding them in a share, and
-// rejects any exposure it cannot classify.
+// **The current containment counts live in the test that asserts them, and since #786
+// they are zero.** #784 narrowed the channel, #785 restored every terrace face as
+// flowing water, and the residue those two left — 27 of 24754 in the legacy seed-one
+// window, 181 of 136744 in the wider report window — was never a carved face this rule
+// could reach: all of it was a channel standing above the ground beside it, which
+// [riverBankAt] now raises. [TestNoSourceWaterStandsAgainstOpenAir] measures no exposure
+// in any of its eight open-country windows, still rejects any it cannot classify, and
+// carries two settlement windows whose named residue #828 owns.
 func (c *column) caveFillAt(worldY int) Block {
 	if c.standingWater && worldY <= c.waterSurface {
 		// A body fills the rock beneath it; a channel does not, above the dry-world

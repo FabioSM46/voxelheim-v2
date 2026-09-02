@@ -1009,12 +1009,33 @@ func findGeneratedWaterVoxel(t *testing.T, chunks *Cache) (x, y, z int64, found 
 // feeds, not whether the player can see one of its other faces standing in the air.
 //
 // **Counts, not shares.** A wet window must not earn a proportionally larger allowance,
-// and an unnamed exposure is never tolerated. The exact residue below is temporarily
-// admitted because every voxel has been classified as the bank rule owned by #786: a
-// channel beside a dry bank, or beside a lower sea or basin surface. The reported 256x256
-// window carries 175 of the former and 6 of the latter; the legacy seed-one window carries
-// 27 dry-bank voxels. Additional smaller windows spread over thousands of blocks keep
-// this from being a test of one fortunate reach. #786 turns these named counts into zero.
+// and an unnamed exposure is never tolerated. **Every open-country window is now zero**,
+// which is what #786 did: the residue this test admitted by name was a channel above the
+// ground beside it, 27 voxels in the legacy seed-one window and 181 in the reported one —
+// 175 beside a dry bank and 6 beside a lower sea or basin — and [riverBankAt] raises that
+// ground to the water it has to hold. Additional smaller windows spread over thousands of
+// blocks keep this from being a test of one fortunate reach.
+//
+// **The zeros are the whole assertion and they are not enough on their own**, for
+// TestACarveDoesNotBreachTheWallOfAStandingBody's reason: a world with no rivers in it
+// would pass this too. `sources` is compared exactly, so a window that loses its water
+// fails here rather than going quiet, and TestARiverChannelStandsBetweenTwoBanks counts
+// the columns the bank rule actually raises.
+//
+// **The last two windows are not zero, and they are the one place a bank cannot be
+// raised.** A settlement owns its columns' ground — the plateau inside its radius and
+// the blend out to the end of its band — and "the ground under a village is the one
+// ground that must not move" is the rule [shapeAt] applies before it reaches any water
+// feature. So where a channel runs up against a settlement, [riverBankAt] is refused the
+// only column that could hold it, and the water stands against air exactly as it did
+// before #786. The two counts are **pre-existing and unchanged by the bank rule**: on
+// develop those windows measure 100 and 55, and what the rule removed from them is the
+// 6 and 4 whose neighbour no settlement owned. Three more settlement-and-river windows
+// measure 48, 48 and 102, all of them entirely this category.
+//
+// It is left here as a named count rather than fixed, because the fix is a decision
+// about settlements rather than about rivers: either the plateau moves, or a channel
+// stops short of one. See #828.
 func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 	t.Parallel()
 
@@ -1025,14 +1046,16 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 		want               sourceWaterExposure
 	}
 	samples := []sample{
-		{"legacy seed 1", 1, -64, 1040, 128, 128, sourceWaterExposure{sources: 24754, exposed: 27, dryBank: 27}},
+		{"legacy seed 1", 1, -64, 1040, 128, 128, sourceWaterExposure{sources: 24754}},
 		{"legacy seed 0x5EED", 0x5EED, -64, 1040, 128, 128, sourceWaterExposure{sources: 41342}},
 		{"legacy seed 7", 7, -64, 1040, 128, 128, sourceWaterExposure{sources: 111425}},
-		{"reported seed-one cascade", 1, -64, -1240, 256, 256, sourceWaterExposure{sources: 136744, exposed: 181, dryBank: 175, lowerBody: 6}},
+		{"reported seed-one cascade", 1, -64, -1240, 256, 256, sourceWaterExposure{sources: 136736}},
 		{"east seed-one reach", 1, 1984, 1984, 128, 128, sourceWaterExposure{sources: 24151}},
-		{"west seed-one reach", 1, -4160, 3008, 128, 128, sourceWaterExposure{sources: 38294, exposed: 6, dryBank: 6}},
+		{"west seed-one reach", 1, -4160, 3008, 128, 128, sourceWaterExposure{sources: 38294}},
 		{"far seed-one reach", 1, 8128, -8256, 128, 128, sourceWaterExposure{sources: 30768}},
 		{"water-statistics reach", waterSeed, waterAreaOriginX, waterAreaOriginZ, 128, 128, sourceWaterExposure{sources: 25282}},
+		{"seed-seven village on a river", 7, -3408, -4917, 137, 137, sourceWaterExposure{sources: 23109, exposed: 94, settlement: 94}},
+		{"seed-c0ffee capital on a river", 0xC0FFEE, -91, -242, 219, 219, sourceWaterExposure{sources: 84728, exposed: 51, settlement: 51}},
 	}
 
 	for _, sample := range samples {
@@ -1040,14 +1063,26 @@ func TestNoSourceWaterStandsAgainstOpenAir(t *testing.T) {
 		if got != sample.want {
 			t.Errorf("%s: exposure = %+v, want %+v", sample.name, got, sample.want)
 		}
-		t.Logf("%s: %d sources, %d exposed (%d dry-bank, %d lower-body, %d unnamed)",
-			sample.name, got.sources, got.exposed, got.dryBank, got.lowerBody, got.unnamed)
+		t.Logf("%s: %d sources, %d exposed (%d dry-bank, %d settlement, %d lower-body, %d unnamed)",
+			sample.name, got.sources, got.exposed, got.dryBank, got.settlement, got.lowerBody, got.unnamed)
 	}
 }
 
 type sourceWaterExposure struct {
-	sources, exposed            int
-	dryBank, lowerBody, unnamed int
+	sources, exposed                        int
+	dryBank, settlement, lowerBody, unnamed int
+}
+
+// settlementOwnsHeightAt reports whether a settlement decides this column's ground: the
+// plateau inside its radius, the blend out to the end of its band.
+//
+// **It is the one neighbour [riverBankAt] may not raise**, so an exposure toward such a
+// column is a category of its own rather than a dry bank. See the paragraph above
+// TestNoSourceWaterStandsAgainstOpenAir.
+func settlementOwnsHeightAt(seed, worldX, worldZ int64) bool {
+	base := unloweredHeightAt(seed, worldX, worldZ)
+	_, _, near := settlementShapeAt(seed, worldX, worldZ, base, ClimateAt(seed, worldX, worldZ))
+	return near
 }
 
 func measureSourceWaterExposure(seed, originX, originZ, width, depth int64) sourceWaterExposure {
@@ -1061,7 +1096,7 @@ func measureSourceWaterExposure(seed, originX, originZ, width, depth int64) sour
 					continue
 				}
 				measured.sources++
-				exposed, dryBank, lowerBody, unnamed := false, false, false, false
+				exposed, dryBank, settlement, lowerBody, unnamed := false, false, false, false, false
 				for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
 					nx, nz := x+step[0], z+step[1]
 					neighbour := columnAt(seed, nx, nz)
@@ -1070,6 +1105,8 @@ func measureSourceWaterExposure(seed, originX, originZ, width, depth int64) sour
 					}
 					exposed = true
 					switch {
+					case col.river && settlementOwnsHeightAt(seed, nx, nz):
+						settlement = true
 					case col.river && !neighbour.standingWater:
 						dryBank = true
 					case col.river && neighbour.standingWater && neighbour.waterSurface < int(y):
@@ -1084,6 +1121,9 @@ func measureSourceWaterExposure(seed, originX, originZ, width, depth int64) sour
 				measured.exposed++
 				if dryBank {
 					measured.dryBank++
+				}
+				if settlement {
+					measured.settlement++
 				}
 				if lowerBody {
 					measured.lowerBody++
@@ -1255,4 +1295,148 @@ func TestAColumnCarriesTheSameBankItResolvesAlone(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The bank rule, asserted where it fires rather than only through the zeros above.
+//
+// **A count that has fallen to zero is evidence the defect is gone; it is not evidence
+// the rule is there.** TestACarveDoesNotBreachTheWallOfAStandingBody says the same thing
+// about the carve half of the same idea, for the same reason: a window with no rivers in
+// it satisfies "no source water stands against open air" perfectly. So this one counts
+// the columns [riverBankAt] actually raises, fails if it finds none, and checks what
+// stands on them — the raise has to leave ground at or above the channel's water surface,
+// and it has to leave that column dry, because the lowest terrace a channel may stand on
+// is 48 and a column raised to one is therefore a step above the sea line.
+//
+// **The totals are per seed and the raise is rare by design**: 177 columns at seed 1,
+// 396 at 0x5EED, 30 at 7 and 128 at 0xC0FFEE, over five 384x384 windows each. Seed 7's
+// thirty are why the assertion is on the total rather than on each seed — a window can
+// hold a river whose banks already stand high enough everywhere.
+func TestARiverChannelStandsBetweenTwoBanks(t *testing.T) {
+	t.Parallel()
+
+	windows := [][2]int64{{-64, -1240}, {6144, -2048}, {-4160, 3008}, {8128, -8256}, {0, 0}}
+	total, worst := 0, 0
+	for _, seed := range []int64{1, 0x5EED, 7, 0xC0FFEE} {
+		raised := 0
+		for _, origin := range windows {
+			for z := origin[1]; z < origin[1]+384; z++ {
+				for x := origin[0]; x < origin[0]+384; x++ {
+					// The three exemptions [shapeAt] applies before it reaches the
+					// bank rule. Asked in its order, so that this test compares the
+					// height the generator produces against the height the rule asks
+					// for and never against a plateau that owns the column instead.
+					if nearOriginColumn(x, z) {
+						continue
+					}
+					climate := ClimateAt(seed, x, z)
+					base := unloweredHeightAt(seed, x, z)
+					if _, _, near := settlementShapeAt(seed, x, z, base, climate); near {
+						continue
+					}
+					if _, channel := channelSurfaceAt(seed, x, z); channel {
+						continue
+					}
+
+					bank, ok := riverBankAt(seed, x, z)
+					if !ok {
+						continue
+					}
+					natural := base - basinAt(seed, x, z, climate)
+					col := columnAt(seed, x, z)
+					if want := max(natural, bank); col.surface != want {
+						t.Fatalf("seed %d: the bank at (%d, %d) stands at %d, want %d from a channel holding %d over ground at %d",
+							seed, x, z, col.surface, want, bank, natural)
+					}
+					if natural >= bank {
+						continue // the ground here already reaches the channel's water
+					}
+					raised++
+					if raise := bank - natural; raise > worst {
+						worst = raise
+					}
+
+					// A bank is ground. Its top block is solid, and a column raised to a
+					// terrace — never below 48, one step over the sea line — no longer
+					// stands in water of its own: a raise that filled would have moved
+					// the wall rather than built one.
+					if top := col.voxelAt(seed, x, int64(col.surface), z); top == Air || IsWater(top) {
+						t.Fatalf("seed %d: the bank at (%d, %d) is %d at its own surface rather than ground",
+							seed, x, z, top)
+					}
+					if col.standingWater {
+						t.Fatalf("seed %d: the bank at (%d, %d) was raised to %d and still stands in water to %d",
+							seed, x, z, col.surface, col.waterSurface)
+					}
+				}
+			}
+		}
+		total += raised
+		t.Logf("seed %d: %d columns raised to the channel beside them", seed, raised)
+	}
+	if total == 0 {
+		t.Fatal("no seed holds a column the bank rule raises, so nothing was checked")
+	}
+	t.Logf("%d columns raised in all, the tallest by %d blocks", total, worst)
+}
+
+// [nearRiverBandAt] has to be a superset of "has a channel neighbour", and this is the
+// measurement that says it is.
+//
+// **The gate is an optimisation and it fails silently.** A column it wrongly excludes
+// never asks its neighbours, so its bank is never raised and the water it was going to
+// hold stands against air again — the exact defect #786 removed, back in a form that
+// turns nothing red. The gate is therefore checked the only way an approximation can be:
+// by sweeping the columns that do have a channel neighbour and asserting every one of
+// them is admitted.
+//
+// The margin is measured in the same sweep and logged: the worst first-order distance
+// among those columns is five blocks against a gate of twelve. See [riverBankGateBlocks].
+func TestEveryBankColumnIsInsideTheBankGate(t *testing.T) {
+	t.Parallel()
+
+	windows := [][2]int64{{-64, -1240}, {6144, -2048}, {-4160, 3008}, {8128, -8256}, {0, 0}, {-2048, -2048}}
+	banked, worst := 0, int64(0)
+	for _, seed := range []int64{1, 0x5EED, 7, 0xC0FFEE} {
+		for _, origin := range windows {
+			for z := origin[1]; z < origin[1]+384; z++ {
+				for x := origin[0]; x < origin[0]+384; x++ {
+					if _, channel := channelSurfaceAt(seed, x, z); channel {
+						continue
+					}
+					neighbour := false
+					for _, step := range [4][2]int64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+						if _, channel := channelSurfaceAt(seed, x+step[0], z+step[1]); channel {
+							neighbour = true
+							break
+						}
+					}
+					if !neighbour {
+						continue
+					}
+					banked++
+					if !nearRiverBandAt(seed, x, z) {
+						t.Fatalf("seed %d: the column at (%d, %d) has a channel neighbour and the %d-block gate excludes it",
+							seed, x, z, int64(riverBankGateBlocks))
+					}
+
+					// How much of the gate that column actually needed, in the same
+					// first-order block distance riverAt measures.
+					distance := absInt64(riverField(seed, x, z) - one/2)
+					gx, gz := riverGradientAt(seed, x, z)
+					ax, az := absInt64(gx), absInt64(gz)
+					if magnitude := max(ax, az) + min(ax, az)/2; magnitude > 0 {
+						if blocks := distance * (2 * riverGradientSpan) / magnitude; blocks > worst {
+							worst = blocks
+						}
+					}
+				}
+			}
+		}
+	}
+	if banked == 0 {
+		t.Fatal("no column in the sweep has a channel neighbour, so the gate was never exercised")
+	}
+	t.Logf("%d columns with a channel neighbour, all inside the gate; the worst needed %d of its %d blocks",
+		banked, worst, int64(riverBankGateBlocks))
 }
