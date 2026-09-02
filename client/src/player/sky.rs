@@ -271,6 +271,81 @@ const SKY_BODY_RADIUS_DEGREES: f32 = 1.5;
 /// true circle by `1 - cos(PI / 32)`: half a percent of [`SKY_BODY_RADIUS_DEGREES`].
 const DISC_SEGMENTS: usize = 32;
 
+/// The corona's two radii outside the unchanged solar disc, in degrees.
+///
+/// The inner ring carries the last visible glow and the outer one carries zero alpha, so
+/// interpolation across the triangles between them makes the corona disappear continuously
+/// instead of ending on a polygon edge. Both remain presentation sizes: placement and the
+/// horizon test continue to read [`SKY_BODY_RADIUS_DEGREES`], the authoritative disc.
+const SUN_CORONA_INNER_RADIUS_DEGREES: f32 = 2.1;
+const SUN_CORONA_OUTER_RADIUS_DEGREES: f32 = 2.8;
+const SUN_CORONA_INNER_ALPHA: f32 = 0.28;
+
+/// One deterministic ray: its direction around the disc, tip radius, and half-angle.
+#[derive(Debug, Clone, Copy)]
+struct SunRay {
+    angle_degrees: f32,
+    radius_degrees: f32,
+    half_span_degrees: f32,
+}
+
+/// The sparse, unequal rays around the sun.
+///
+/// Opposite quadrants carry comparable total reach, which keeps the silhouette balanced,
+/// while neither the angles nor the lengths form a mechanically repeated stamp. This is a
+/// fixed presentation table rather than a clock or a random seed: rebuilding it on another
+/// frame produces the same bytes and cannot flicker.
+const SUN_RAYS: [SunRay; 8] = [
+    SunRay {
+        angle_degrees: 2.0,
+        radius_degrees: 4.35,
+        half_span_degrees: 5.0,
+    },
+    SunRay {
+        angle_degrees: 47.0,
+        radius_degrees: 3.75,
+        half_span_degrees: 4.0,
+    },
+    SunRay {
+        angle_degrees: 88.0,
+        radius_degrees: 4.65,
+        half_span_degrees: 4.5,
+    },
+    SunRay {
+        angle_degrees: 136.0,
+        radius_degrees: 3.95,
+        half_span_degrees: 5.5,
+    },
+    SunRay {
+        angle_degrees: 184.0,
+        radius_degrees: 4.10,
+        half_span_degrees: 4.5,
+    },
+    SunRay {
+        angle_degrees: 224.0,
+        radius_degrees: 4.50,
+        half_span_degrees: 5.0,
+    },
+    SunRay {
+        angle_degrees: 272.0,
+        radius_degrees: 3.85,
+        half_span_degrees: 4.0,
+    },
+    SunRay {
+        angle_degrees: 316.0,
+        radius_degrees: 4.30,
+        half_span_degrees: 5.5,
+    },
+];
+
+const SUN_RAY_VERTICES: usize = 8;
+const SUN_RAY_TRIANGLES: usize = 8;
+/// 1 centre + 3 circular rings + 8 rays of 8 vertices: one 161-vertex draw.
+const SUN_VERTEX_COUNT: usize = 1 + 3 * DISC_SEGMENTS + SUN_RAYS.len() * SUN_RAY_VERTICES;
+/// 32 disc triangles + 128 corona triangles + 64 ray triangles.
+const SUN_TRIANGLE_COUNT: usize =
+    DISC_SEGMENTS + 4 * DISC_SEGMENTS + SUN_RAYS.len() * SUN_RAY_TRIANGLES;
+
 /// The sun's disc, as sRGB: a warm white, unlit, and unchanged by the hour. **It is not the
 /// light** — a disc that dimmed as it set would be a second day-night curve over the one
 /// [`DAY_ILLUMINANCE`] and [`NIGHT_ILLUMINANCE`] already draw.
@@ -824,20 +899,16 @@ pub(super) fn spawn_sky(
         SkyBody,
         SkyBodyKind::Sun,
         SkyPlacement::Facing(Vec3::Y),
-        Mesh3d(meshes.add(disc_mesh())),
-        MeshMaterial3d(materials.add(sky_material(Color::srgb(
-            SUN_COLOUR[0],
-            SUN_COLOUR[1],
-            SUN_COLOUR[2],
-        )))),
+        Mesh3d(meshes.add(sun_mesh())),
+        MeshMaterial3d(materials.add(sun_material())),
         Transform::default(),
         Visibility::Hidden,
     ));
 
-    // New moon begins empty. `drive_the_sky` replaces this tiny mesh from the persisted
-    // cycle phase before showing it; a separate handle is load-bearing because changing a
-    // shared disc would cut the same crescent out of the sun.
-    let moon = meshes.add(moon_phase_mesh(0.0));
+    // The clean disc is only a hidden placeholder. `drive_the_sky` replaces it from the
+    // persisted cycle phase before showing it; keeping this separate from the sun is
+    // load-bearing because the solar corona must never appear around the moon.
+    let moon = meshes.add(disc_mesh());
     commands.spawn((
         SkyBody,
         SkyBodyKind::Moon,
@@ -887,9 +958,37 @@ fn sky_material(colour: Color) -> StandardMaterial {
     }
 }
 
+/// The sun's one blended, vertex-coloured material.
+///
+/// Disc, corona and rays share one mesh and therefore one draw call. White leaves the warm
+/// per-vertex colour unchanged; blending is what lets the two alpha rings and the transparent
+/// ray boundaries reveal the real sky behind them.
+fn sun_material() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::WHITE,
+        alpha_mode: AlphaMode::Blend,
+        unlit: true,
+        fog_enabled: false,
+        cull_mode: None,
+        ..default()
+    }
+}
+
 /// Half the width of a disc at [`SKY_BODY_DISTANCE`], in blocks.
 fn disc_half_width() -> f32 {
-    SKY_BODY_DISTANCE * SKY_BODY_RADIUS_DEGREES.to_radians().tan()
+    angular_half_width(SKY_BODY_RADIUS_DEGREES)
+}
+
+/// The planar radius subtended by an angle at [`SKY_BODY_DISTANCE`].
+fn angular_half_width(radius_degrees: f32) -> f32 {
+    SKY_BODY_DISTANCE * radius_degrees.to_radians().tan()
+}
+
+/// One point in the billboard plane at an angular radius and polar angle.
+fn solar_vertex(radius_degrees: f32, angle_degrees: f32) -> [f32; 3] {
+    let radius = angular_half_width(radius_degrees);
+    let (sin, cos) = angle_degrees.to_radians().sin_cos();
+    [radius * cos, radius * sin, 0.0]
 }
 
 /// One disc in the XY plane at the angular size of the sun and the moon, built at its final
@@ -911,6 +1010,150 @@ fn disc_mesh() -> Mesh {
         indices.extend_from_slice(&[0, rim, 1 + (rim % DISC_SEGMENTS as u32)]);
     }
     sky_mesh(positions, uvs, indices, Vec3::NEG_Z)
+}
+
+/// The sun as one blended procedural mesh in the billboard's XY plane.
+///
+/// The first fan ends at the unchanged [`SKY_BODY_RADIUS_DEGREES`]. Two connected radial
+/// rings then fade from opaque to [`SUN_CORONA_INNER_ALPHA`] to zero, so the corona has no
+/// polygon boundary. Each ray is a narrow eight-vertex lozenge laid over that corona: only
+/// its two interior spine vertices carry alpha, while every vertex on its outline is fully
+/// transparent. That makes the ray taper in both directions without a visible triangle edge.
+///
+/// Cost, recorded at the builder that owns it: 161 vertices, 224 triangles, one mesh, one
+/// material and therefore one draw call. Nothing is rebuilt after startup and no clock value
+/// reaches this function, so the effect is stable frame to frame.
+fn sun_mesh() -> Mesh {
+    let mut positions = Vec::with_capacity(SUN_VERTEX_COUNT);
+    let mut colours = Vec::with_capacity(SUN_VERTEX_COUNT);
+    let mut indices = Vec::with_capacity(SUN_TRIANGLE_COUNT * 3);
+    let colour = |alpha| [SUN_COLOUR[0], SUN_COLOUR[1], SUN_COLOUR[2], alpha];
+
+    positions.push([0.0, 0.0, 0.0]);
+    colours.push(colour(1.0));
+
+    for (radius, alpha) in [
+        (SKY_BODY_RADIUS_DEGREES, 1.0),
+        (SUN_CORONA_INNER_RADIUS_DEGREES, SUN_CORONA_INNER_ALPHA),
+        (SUN_CORONA_OUTER_RADIUS_DEGREES, 0.0),
+    ] {
+        for segment in 0..DISC_SEGMENTS {
+            positions.push(solar_vertex(
+                radius,
+                360.0 * segment as f32 / DISC_SEGMENTS as f32,
+            ));
+            colours.push(colour(alpha));
+        }
+    }
+
+    // The opaque central fan.
+    for segment in 0..DISC_SEGMENTS {
+        let rim = 1 + segment as u32;
+        indices.extend_from_slice(&[0, rim, 1 + (rim % DISC_SEGMENTS as u32)]);
+    }
+
+    // The two connected corona annuli.
+    for ring in 0..2 {
+        let inner = 1 + ring * DISC_SEGMENTS;
+        let outer = inner + DISC_SEGMENTS;
+        for segment in 0..DISC_SEGMENTS {
+            let next = (segment + 1) % DISC_SEGMENTS;
+            let (inner, inner_next, outer, outer_next) = (
+                (inner + segment) as u32,
+                (inner + next) as u32,
+                (outer + segment) as u32,
+                (outer + next) as u32,
+            );
+            indices.extend_from_slice(&[inner, outer, outer_next, inner, outer_next, inner_next]);
+        }
+    }
+
+    for ray in SUN_RAYS {
+        let first = positions.len() as u32;
+        let inner_spine_radius = SUN_CORONA_INNER_RADIUS_DEGREES;
+        let outer_spine_radius = SUN_CORONA_OUTER_RADIUS_DEGREES
+            + 0.58 * (ray.radius_degrees - SUN_CORONA_OUTER_RADIUS_DEGREES);
+        let outer_side_radius = SUN_CORONA_OUTER_RADIUS_DEGREES
+            + 0.72 * (ray.radius_degrees - SUN_CORONA_OUTER_RADIUS_DEGREES);
+
+        positions.extend_from_slice(&[
+            solar_vertex(SKY_BODY_RADIUS_DEGREES, ray.angle_degrees),
+            solar_vertex(
+                SUN_CORONA_OUTER_RADIUS_DEGREES,
+                ray.angle_degrees + ray.half_span_degrees,
+            ),
+            solar_vertex(inner_spine_radius, ray.angle_degrees),
+            solar_vertex(
+                SUN_CORONA_OUTER_RADIUS_DEGREES,
+                ray.angle_degrees - ray.half_span_degrees,
+            ),
+            solar_vertex(
+                outer_side_radius,
+                ray.angle_degrees + ray.half_span_degrees * 0.42,
+            ),
+            solar_vertex(outer_spine_radius, ray.angle_degrees),
+            solar_vertex(
+                outer_side_radius,
+                ray.angle_degrees - ray.half_span_degrees * 0.42,
+            ),
+            solar_vertex(ray.radius_degrees, ray.angle_degrees),
+        ]);
+        colours.extend_from_slice(&[
+            colour(0.0),
+            colour(0.0),
+            colour(0.22),
+            colour(0.0),
+            colour(0.0),
+            colour(0.08),
+            colour(0.0),
+            colour(0.0),
+        ]);
+        indices.extend_from_slice(&[
+            first,
+            first + 1,
+            first + 2,
+            first,
+            first + 2,
+            first + 3,
+            first + 1,
+            first + 4,
+            first + 5,
+            first + 1,
+            first + 5,
+            first + 2,
+            first + 2,
+            first + 5,
+            first + 6,
+            first + 2,
+            first + 6,
+            first + 3,
+            first + 4,
+            first + 7,
+            first + 5,
+            first + 5,
+            first + 7,
+            first + 6,
+        ]);
+    }
+
+    let outer = angular_half_width(
+        SUN_RAYS
+            .iter()
+            .map(|ray| ray.radius_degrees)
+            .fold(SUN_CORONA_OUTER_RADIUS_DEGREES, f32::max),
+    );
+    let uvs = positions
+        .iter()
+        .map(|position| {
+            [
+                0.5 + position[0] / (2.0 * outer),
+                0.5 - position[1] / (2.0 * outer),
+            ]
+        })
+        .collect();
+    let mut mesh = sky_mesh(positions, uvs, indices, Vec3::NEG_Z);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
+    mesh
 }
 
 /// One illuminated lunar phase in the billboard's XY plane.
@@ -2251,10 +2494,10 @@ mod tests {
         }
     }
 
-    /// The sun and the moon are round: every rim vertex stands at exactly the radius
+    /// The moon's clean primitive is round: every rim vertex stands at exactly the radius
     /// [`SKY_BODY_RADIUS_DEGREES`] names, which a quad's corners overshoot by `sqrt(2)`.
     #[test]
-    fn the_sun_is_a_disc_and_not_a_square() {
+    fn the_clean_lunar_disc_is_round_and_not_a_square() {
         let mesh = disc_mesh();
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -2271,6 +2514,197 @@ mod tests {
                 "vertex {index} stood {radius} from the centre, not {wanted}"
             );
         }
+    }
+
+    fn angular_radius(position: [f32; 3]) -> f32 {
+        (Vec3::from_array(position).length() / SKY_BODY_DISTANCE)
+            .atan()
+            .to_degrees()
+    }
+
+    /// The central fan is still the original disc, and the two rings outside it are a
+    /// bounded, monotone fade. The exact geometry cost is pinned with the visual sizes so
+    /// a retune cannot silently turn one sky draw into a large mesh.
+    #[test]
+    fn the_sun_records_its_disc_corona_and_ray_cost() {
+        let mesh = sun_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the sun's positions are three floats each");
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colours)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the sun carries one colour per vertex");
+        };
+
+        assert_eq!(positions.len(), SUN_VERTEX_COUNT);
+        assert_eq!(colours.len(), SUN_VERTEX_COUNT);
+        assert_eq!(
+            mesh.indices().map(Indices::len),
+            Some(SUN_TRIANGLE_COUNT * 3)
+        );
+        assert_eq!(positions[0], [0.0, 0.0, 0.0]);
+        assert_eq!(colours[0][3], 1.0);
+
+        for (ring, (wanted_radius, wanted_alpha)) in [
+            (SKY_BODY_RADIUS_DEGREES, 1.0),
+            (SUN_CORONA_INNER_RADIUS_DEGREES, SUN_CORONA_INNER_ALPHA),
+            (SUN_CORONA_OUTER_RADIUS_DEGREES, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = 1 + ring * DISC_SEGMENTS;
+            for (segment, (position, colour)) in positions[start..start + DISC_SEGMENTS]
+                .iter()
+                .zip(&colours[start..start + DISC_SEGMENTS])
+                .enumerate()
+            {
+                assert!(
+                    (angular_radius(*position) - wanted_radius).abs() < 1e-4,
+                    "ring {ring} segment {segment} stood at {} degrees, not {wanted_radius}",
+                    angular_radius(*position)
+                );
+                assert_eq!(
+                    colour[3], wanted_alpha,
+                    "ring {ring} segment {segment} carried the wrong alpha"
+                );
+            }
+        }
+
+        const {
+            assert!(
+                1.0 > SUN_CORONA_INNER_ALPHA && SUN_CORONA_INNER_ALPHA > 0.0,
+                "the corona does not fall continuously towards its transparent edge"
+            );
+        }
+    }
+
+    /// Every ray has a distinct deterministic reach, and only its interior spine is
+    /// visible. Zero alpha around the complete outline is what prevents a triangle edge
+    /// from appearing against the dome.
+    #[test]
+    fn the_solar_rays_are_unequal_and_transparent_at_every_boundary() {
+        let mesh = sun_mesh();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the sun's positions are three floats each");
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colours)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the sun carries one colour per vertex");
+        };
+
+        let rays_start = 1 + 3 * DISC_SEGMENTS;
+        let mut reaches = Vec::with_capacity(SUN_RAYS.len());
+        let mut tip_balance = Vec2::ZERO;
+        let mut total_reach = 0.0;
+        for (ray_index, (ray, specification)) in positions[rays_start..]
+            .chunks_exact(SUN_RAY_VERTICES)
+            .zip(SUN_RAYS)
+            .enumerate()
+        {
+            let colours = &colours[rays_start + ray_index * SUN_RAY_VERTICES
+                ..rays_start + (ray_index + 1) * SUN_RAY_VERTICES];
+            let reach = angular_radius(ray[7]);
+            assert!(
+                (reach - specification.radius_degrees).abs() < 1e-4,
+                "ray {ray_index} reached {reach} degrees, not {}",
+                specification.radius_degrees
+            );
+            assert!(reach > SUN_CORONA_OUTER_RADIUS_DEGREES);
+            reaches.push(reach.to_bits());
+            tip_balance += Vec2::from_array([ray[7][0], ray[7][1]]);
+            total_reach += Vec2::from_array([ray[7][0], ray[7][1]]).length();
+
+            for boundary in [0, 1, 3, 4, 6, 7] {
+                assert_eq!(
+                    colours[boundary][3], 0.0,
+                    "ray {ray_index} boundary vertex {boundary} was visible"
+                );
+            }
+            assert!(colours[2][3] > colours[5][3] && colours[5][3] > 0.0);
+        }
+        reaches.sort_unstable();
+        reaches.dedup();
+        assert_eq!(reaches.len(), SUN_RAYS.len(), "two rays had the same reach");
+        assert!(
+            tip_balance.length() < total_reach * 0.01,
+            "the unequal rays pulled the silhouette off-centre by {tip_balance:?}"
+        );
+    }
+
+    /// Rebuilding the procedural geometry is exact: there is no time, entropy or mutable
+    /// state in the effect that could make it shimmer between frames or sessions.
+    #[test]
+    fn the_sun_mesh_is_byte_stable() {
+        let first = sun_mesh();
+        let again = sun_mesh();
+        for attribute in [
+            Mesh::ATTRIBUTE_POSITION,
+            Mesh::ATTRIBUTE_NORMAL,
+            Mesh::ATTRIBUTE_UV_0,
+            Mesh::ATTRIBUTE_COLOR,
+        ] {
+            assert_eq!(first.attribute(attribute), again.attribute(attribute));
+        }
+        assert_eq!(first.indices(), again.indices());
+    }
+
+    /// A full moon remains wholly inside the clean disc and carries no vertex-alpha corona.
+    /// Its phase mesh therefore cannot inherit either the solar rings or the rays.
+    #[test]
+    fn the_moon_geometry_remains_a_clean_phase_cut_disc() {
+        let moon = moon_phase_mesh(0.5);
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+            moon.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("the moon's positions are three floats each");
+        };
+        assert_eq!(positions.len(), DISC_SEGMENTS * 4);
+        assert!(moon.attribute(Mesh::ATTRIBUTE_COLOR).is_none());
+        for (index, position) in positions.iter().enumerate() {
+            assert!(
+                angular_radius(*position) <= SKY_BODY_RADIUS_DEGREES + 1e-4,
+                "moon vertex {index} escaped the clean disc"
+            );
+        }
+    }
+
+    /// One sun entity with one blended material is one transparent draw; the corona and
+    /// rays are not stacked as coplanar entities.
+    #[test]
+    fn the_sun_is_one_blended_draw() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Startup, spawn_sky);
+        app.update();
+
+        let material = {
+            let world = app.world_mut();
+            let mut query = world.query::<(&SkyBodyKind, &MeshMaterial3d<StandardMaterial>)>();
+            let mut suns = query
+                .iter(world)
+                .filter(|(kind, _)| **kind == SkyBodyKind::Sun)
+                .map(|(_, material)| material.0.clone());
+            let material = suns.next().expect("one sun draw");
+            assert!(
+                suns.next().is_none(),
+                "the sun was split into multiple draws"
+            );
+            material
+        };
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let material = materials.get(&material).expect("the sun material exists");
+        assert_eq!(material.alpha_mode, AlphaMode::Blend);
+        assert_eq!(material.base_color, Color::WHITE);
+        assert!(material.unlit && !material.fog_enabled);
     }
 
     fn star_directions(mesh: &Mesh) -> Vec<Vec3> {
@@ -2933,6 +3367,7 @@ mod dome_encloses_the_sky {
         let dome = furthest(&dome_mesh(Color::WHITE, Color::BLACK));
         let stars = furthest(&star_mesh());
         let disc = furthest(&disc_mesh());
+        let sun = furthest(&sun_mesh());
 
         assert!(
             stars < dome,
@@ -2940,7 +3375,11 @@ mod dome_encloses_the_sky {
         );
         assert!(
             disc < dome,
-            "a sun or moon disc reaches {disc} and the dome only {dome}; it is behind it"
+            "a moon disc reaches {disc} and the dome only {dome}; it is behind it"
+        );
+        assert!(
+            sun < dome,
+            "the complete solar silhouette reaches {sun} and the dome only {dome}; it is behind it"
         );
         // Not merely inside: far enough inside that depth precision at this range cannot
         // put them back on the same plane. See [`DOME_DISTANCE`].
