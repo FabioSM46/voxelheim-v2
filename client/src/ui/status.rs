@@ -10,10 +10,9 @@
 //! All three lines are pure functions of resources ([`describe`], [`describe_world`],
 //! [`describe_player`]), so what the player would read is testable without a window.
 //!
-//! **No camera is spawned here.** The player module owns the one camera, and it is a
-//! `Camera3d`; `bevy_ui` renders in the 3D graph as readily as the 2D one, and two
-//! cameras targeting one window would need explicit ordering and clear-colour
-//! configuration to avoid one erasing the other. See the module comment in
+//! **No camera is spawned here.** The player module owns the world `Camera3d` that is
+//! explicitly marked as the UI default. Its second camera is an ordered, no-clear overlay
+//! restricted to the hands' render layer, so UI never targets it. See the module comment in
 //! `player/camera.rs`.
 
 use std::time::Duration;

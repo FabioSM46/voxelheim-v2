@@ -1,4 +1,4 @@
-//! The first-person held item: a camera child, never a world entity.
+//! The first-person held item: camera-space geometry, never a world entity.
 //!
 //! The selected authoritative stack chooses only a presentation, and this module no
 //! longer holds an opinion about what that is: [`super::items`] owns the shape and the
@@ -18,13 +18,15 @@ use std::f32::consts::{PI, TAU};
 use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
 use bevy::mesh::{CylinderMeshBuilder, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use super::SelfVitals;
-use super::camera::{ViewMode, WorldCamera};
+use super::camera::ViewMode;
 use super::combat::SwingSent;
 use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
@@ -35,6 +37,9 @@ use super::{HeldItemSurface, InputMode, LocalMount, held_item_surface, stack_ite
 use super::{bundle_strap_linear_rgba, merge_all, rolled_bundle_parts};
 use crate::net::{PLACEHOLDER_APPEARANCE, Session};
 use crate::world::palette;
+
+/// The layer drawn by the origin-anchored view-model camera, and by nothing else.
+const VIEW_MODEL_RENDER_LAYER: usize = 1;
 
 /// How far the view model sits to the right of the eye.
 ///
@@ -1926,7 +1931,7 @@ impl Plugin for HandsPlugin {
             .add_systems(
                 Update,
                 (
-                    attach_to_camera,
+                    attach_to_view_model_camera,
                     ApplyDeferred,
                     refresh_held_item,
                     animate_view_model,
@@ -1967,6 +1972,15 @@ pub(super) struct HeldItem {
 
 #[derive(Component)]
 struct ViewModel;
+
+/// The origin-anchored camera that keeps view-model arithmetic in camera space.
+///
+/// Parenting the models to [`super::camera::WorldCamera`] first added their sub-block offsets to a moving
+/// f32 world position, then the vertex shader subtracted that position again. At coordinates
+/// in the thousands the discarded low bits became visible as movement. This camera and its
+/// layer make the values consumed by the shader the same small values authored below.
+#[derive(Component)]
+struct ViewModelCamera;
 
 /// The forearm hanging under one hand, as its own child entity.
 ///
@@ -2173,6 +2187,21 @@ fn spawn_view_model(
     mut materials: ResMut<Assets<StandardMaterial>>,
     liveries: Res<livery::Liveries>,
 ) {
+    commands.spawn((
+        ViewModelCamera,
+        Camera3d::default(),
+        Camera {
+            order: 1,
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        // Match the world's explicit tonemapper without requiring its LUT feature. The
+        // material is unlit, but its colour still passes through the camera's tonemapper.
+        Tonemapping::AcesFitted,
+        RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+        Transform::default(),
+    ));
+
     let appearance = selected_appearance(None);
     let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
     let mesh = meshes.add(held_mesh(skin_colour, appearance));
@@ -2213,6 +2242,7 @@ fn spawn_view_model(
             Mesh3d(mesh),
             MeshMaterial3d(material),
             forearm_transform(&HandAnimation::default()),
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
         )
     };
@@ -2229,6 +2259,7 @@ fn spawn_view_model(
             MeshMaterial3d(material.clone()),
             Transform::from_translation(base_translation(view_field_of_view(None))),
             Visibility::Hidden,
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
         ))
         .with_child(arm(forearm_mesh_handle.clone(), material.clone()));
@@ -2241,6 +2272,7 @@ fn spawn_view_model(
             Transform::from_translation(shield_translation(view_field_of_view(None)))
                 .with_rotation(Quat::from_rotation_z(-0.48)),
             Visibility::Hidden,
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
         ))
         // The off-hand entity carries no animation of its own, so its arm never leaves the
@@ -2250,10 +2282,10 @@ fn spawn_view_model(
     commands.insert_resource(visuals);
 }
 
-/// Attaches to the one camera after both startup systems have materialised.
-fn attach_to_camera(
+/// Attaches to the origin-anchored camera after the startup system has materialised it.
+fn attach_to_view_model_camera(
     mut commands: Commands,
-    cameras: Query<Entity, With<WorldCamera>>,
+    cameras: Query<Entity, With<ViewModelCamera>>,
     unattached: Query<Entity, (With<ViewModel>, Without<ChildOf>)>,
 ) {
     let Some(camera) = cameras.iter().next() else {
@@ -2582,7 +2614,7 @@ fn animate_view_model(
     mut animation: ResMut<HandAnimation>,
     mut held: Query<(Entity, &HeldItem, &mut Transform), Without<Forearm>>,
     mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
-    camera: Query<&Projection, With<WorldCamera>>,
+    camera: Query<&Projection, With<ViewModelCamera>>,
 ) {
     let field_of_view = view_field_of_view(camera.iter().next());
     let mut next_animation = *animation;
@@ -2683,7 +2715,7 @@ fn animate_view_model(
 /// that follows it while the off hand stays put is two hands at two heights the moment a
 /// player moves the slider. This writes the one axis that derives and leaves the roll alone.
 fn place_off_hand(
-    camera: Query<&Projection, With<WorldCamera>>,
+    camera: Query<&Projection, With<ViewModelCamera>>,
     mut shields: Query<&mut Transform, With<OffHandShield>>,
 ) {
     let translation = shield_translation(view_field_of_view(camera.iter().next()));
@@ -2784,6 +2816,7 @@ mod tests {
     use bevy::mesh::VertexAttributeValues;
     use bevy::time::TimeUpdateStrategy;
 
+    use super::super::camera::WorldCamera;
     use super::super::combat::ITEM_RUSTY_SWORD;
     use super::super::crafting::ITEM_IRON_SWORD;
     use super::super::target::BlockHit;
@@ -6698,19 +6731,62 @@ mod tests {
     }
 
     #[test]
-    fn the_view_model_is_parented_to_the_only_world_camera() {
+    fn the_view_model_has_an_origin_anchored_camera_and_its_own_render_layer() {
         let mut app = app();
         let parent = held(&mut app).2;
         assert!(
-            app.world().entity(parent).contains::<WorldCamera>(),
-            "the held item was left in world space"
+            app.world().entity(parent).contains::<ViewModelCamera>(),
+            "the held item is not under the view-model camera"
+        );
+        assert_eq!(
+            app.world().get::<Transform>(parent),
+            Some(&Transform::IDENTITY),
+            "the view-model camera inherited a world position"
+        );
+        assert_eq!(
+            app.world().get::<RenderLayers>(parent),
+            Some(&RenderLayers::layer(VIEW_MODEL_RENDER_LAYER)),
+            "the view-model camera sees the world layer"
+        );
+        let camera = app
+            .world()
+            .get::<Camera>(parent)
+            .expect("the overlay camera");
+        assert_eq!(camera.order, 1, "the hand is not drawn after the world");
+        assert!(
+            matches!(camera.clear_color, ClearColorConfig::None),
+            "the hand pass erases the world behind it"
+        );
+        assert!(
+            !app.world().entity(parent).contains::<IsDefaultUiCamera>(),
+            "UI was assigned to the hand-only overlay"
+        );
+        let world_camera = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<WorldCamera>>()
+                .single(world)
+                .expect("one world camera")
+        };
+        assert!(
+            app.world()
+                .entity(world_camera)
+                .contains::<IsDefaultUiCamera>(),
+            "the world camera is not the UI default"
+        );
+        let world = app.world_mut();
+        let mut models = world.query_filtered::<&RenderLayers, With<ViewModel>>();
+        assert!(
+            models
+                .iter(world)
+                .all(|layers| { *layers == RenderLayers::layer(VIEW_MODEL_RENDER_LAYER) })
         );
         let Projection::Perspective(projection) = app
             .world()
             .get::<Projection>(parent)
-            .expect("the world camera has a projection")
+            .expect("the view-model camera has a projection")
         else {
-            panic!("the world camera is perspective");
+            panic!("the view-model camera is perspective");
         };
         let largest_depth = HAND_SIZE
             .z
@@ -6724,6 +6800,142 @@ mod tests {
             -BASE_DEPTH - largest_depth / 2.0 > projection.near,
             "the held mesh crosses the camera near plane"
         );
+    }
+
+    /// Walking changes the world camera and nothing about a resting camera-space model.
+    ///
+    /// This follows the same f32 path as the mesh shader: propagate each model into world
+    /// space, then multiply its world-space vertices by the camera's world-to-clip matrix.
+    /// Comparing only `Transform` would miss precision lost between those two operations.
+    /// Before the camera split the unchanged locals measured 0.021 px of drift at the
+    /// origin and 112.604 px at 8 192 blocks on this 4K projection.
+    #[test]
+    fn a_resting_view_model_stays_pixel_still_while_the_camera_walks() {
+        const VIEWPORT: Vec2 = Vec2::new(3840.0, 2160.0);
+        const MAX_PIXEL_DRIFT: f32 = 0.1;
+
+        let mut app = app();
+        app.add_plugins(TransformPlugin);
+        app.update();
+        let presentation_camera = held(&mut app).2;
+        let world_camera = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<WorldCamera>>()
+                .single(world)
+                .expect("one world camera")
+        };
+        let models: Vec<Entity> = {
+            let world = app.world_mut();
+            let mut roots = world.query_filtered::<(Entity, Option<&Children>), With<ViewModel>>();
+            roots
+                .iter(world)
+                .flat_map(|(root, children)| {
+                    std::iter::once(root)
+                        .chain(children.into_iter().flat_map(|children| children.iter()))
+                })
+                .collect()
+        };
+        let resting_locals: Vec<Transform> = models
+            .iter()
+            .map(|entity| {
+                *app.world()
+                    .get::<Transform>(*entity)
+                    .expect("every drawn view-model part has a local transform")
+            })
+            .collect();
+        assert_eq!(models.len(), 4, "both hands and forearms are measured");
+        for entity in &models {
+            assert_eq!(
+                app.world().get::<RenderLayers>(*entity),
+                Some(&RenderLayers::layer(VIEW_MODEL_RENDER_LAYER)),
+                "a view-model part escaped the camera-relative layer"
+            );
+        }
+
+        let projected = |world: &World| {
+            let camera_global = world
+                .get::<GlobalTransform>(presentation_camera)
+                .expect("the presentation camera transform was propagated");
+            let projection = world
+                .get::<Projection>(presentation_camera)
+                .expect("the presentation camera has a projection")
+                .get_clip_from_view();
+            let clip_from_world = projection * camera_global.to_matrix().inverse();
+            let meshes = world.resource::<Assets<Mesh>>();
+
+            models
+                .iter()
+                .flat_map(|entity| {
+                    let model = world
+                        .get::<GlobalTransform>(*entity)
+                        .expect("the model transform was propagated")
+                        .to_matrix();
+                    let handle = world
+                        .get::<Mesh3d>(*entity)
+                        .expect("every view-model part draws a mesh");
+                    let mesh = meshes.get(&handle.0).expect("the view-model mesh exists");
+                    let Some(VertexAttributeValues::Float32x3(points)) =
+                        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                    else {
+                        panic!("the view-model mesh carries Float32x3 positions")
+                    };
+                    points.iter().map(move |point| {
+                        let world = model.transform_point3(Vec3::from_array(*point));
+                        let clip = clip_from_world * world.extend(1.0);
+                        (clip.xy() / clip.w * 0.5 + Vec2::splat(0.5)) * VIEWPORT
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for origin in [Vec3::ZERO, Vec3::splat(8_192.0)] {
+            let mut baseline = None;
+            let mut worst = 0.0_f32;
+            for frame in 0..64 {
+                let walked = frame as f32;
+                let transform = Transform {
+                    translation: origin
+                        + Vec3::new(walked * 0.037, walked * 0.003, -walked * 0.029),
+                    rotation: Quat::from_euler(
+                        EulerRot::YXZ,
+                        walked * 0.0017,
+                        -walked * 0.0009,
+                        0.0,
+                    ),
+                    ..default()
+                };
+                *app.world_mut()
+                    .get_mut::<Transform>(world_camera)
+                    .expect("the world camera") = transform;
+                app.update();
+                assert_eq!(
+                    app.world().get::<Transform>(world_camera),
+                    Some(&transform),
+                    "another system rewrote the camera walk"
+                );
+
+                for (entity, resting) in models.iter().zip(&resting_locals) {
+                    assert_eq!(
+                        app.world().get::<Transform>(*entity),
+                        Some(resting),
+                        "camera movement rewrote a view-model local transform"
+                    );
+                }
+
+                let now = projected(app.world());
+                assert!(!now.is_empty(), "the view-model vertices are measured");
+                assert!(now.iter().all(|point| point.is_finite()));
+                let reference = baseline.get_or_insert_with(|| now.clone());
+                for (at, first) in now.iter().zip(reference.iter()) {
+                    worst = worst.max(at.distance(*first));
+                }
+            }
+            assert!(
+                worst <= MAX_PIXEL_DRIFT,
+                "a resting view model drifted {worst:.3} px while the camera walked from {origin:?}"
+            );
+        }
     }
 
     #[test]

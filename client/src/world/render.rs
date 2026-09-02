@@ -53,8 +53,9 @@
 //! The camera was, until movement landed. A camera that follows a gameplay entity belongs
 //! to the module that knows where that entity is, so `player/camera.rs` owns it now —
 //! including the sky colour, the ambient term and the fog, which are attached to the
-//! camera rather than to global resources so they do not depend on plugin order. There is
-//! still exactly one camera, and `ui/status.rs` still spawns none of its own.
+//! camera rather than to global resources so they do not depend on plugin order. The only
+//! other camera is `player/hands.rs`'s isolated render-layer overlay, and `ui/status.rs`
+//! still spawns none of its own.
 //!
 //! The sun followed it, for the same reason one step later. It was a constant here for as
 //! long as it *was* a constant; the moment it became a function of a snapshot's

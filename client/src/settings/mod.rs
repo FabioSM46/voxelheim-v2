@@ -1306,10 +1306,10 @@ fn save_when_changed(settings: Res<Settings>, mut file: ResMut<SettingsFile>) {
 /// Pushes the five settings that live in somebody else's component rather than being read
 /// out of this resource every frame.
 ///
-/// The camera is queried by `Camera3d` rather than by `player/camera.rs`'s own marker,
-/// because this module has no business depending on that one and there is exactly one camera
-/// in this client by rule. `WinitSettings` is absent in every headless test, and a missing
-/// resource is "there is no window to pace", not a panic.
+/// Cameras are queried by `Camera3d` rather than by another module's marker because the world
+/// view and the view-model overlay must project the hand against the same field of view. This
+/// module has no business depending on either marker. `WinitSettings` is absent in every
+/// headless test, and a missing resource is "there is no window to pace", not a panic.
 fn apply_to_the_display(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
