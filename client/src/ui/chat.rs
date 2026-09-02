@@ -108,9 +108,7 @@ impl Plugin for ChatUiPlugin {
             .add_systems(
                 Update,
                 (
-                    ingest_server_lines
-                        .after(DrainNetwork)
-                        .in_set(PublishPlayerMessages),
+                    ingest_server_lines.after(DrainNetwork),
                     ingest_party_lines
                         .after(ApplySnapshots)
                         .in_set(PublishPlayerMessages),
@@ -176,7 +174,6 @@ fn ingest_server_lines(
     time: Res<Time<Real>>,
     mut chat: ResMut<ChatInbox>,
     mut log: ResMut<ChatLog>,
-    mut player_messages: MessageWriter<PlayerMessage>,
 ) {
     let now = time.elapsed();
     for entry in chat.take() {
@@ -184,7 +181,11 @@ fn ingest_server_lines(
             ChatEntry::Message(message) => {
                 let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
                 if message.sender_name == COMMAND_SENDER_NAME {
-                    player_messages.write(PlayerMessage::new(PlayerMessageKind::Server, text));
+                    push_player_message(
+                        &mut log,
+                        &PlayerMessage::new(PlayerMessageKind::Server, text),
+                        now,
+                    );
                 } else {
                     let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
                     log.push(format!("{sender}: {text}"), now);
@@ -223,13 +224,17 @@ fn ingest_player_messages(
 ) {
     let now = time.elapsed();
     for message in messages.read() {
-        let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
-        log.push_kind(
-            format!("{} {text}", message_tag(message.kind)),
-            now,
-            LogKind::System(message.kind),
-        );
+        push_player_message(&mut log, message, now);
     }
+}
+
+fn push_player_message(log: &mut ChatLog, message: &PlayerMessage, now: Duration) {
+    let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
+    log.push_kind(
+        format!("{} {text}", message_tag(message.kind)),
+        now,
+        LogKind::System(message.kind),
+    );
 }
 
 const fn message_tag(kind: PlayerMessageKind) -> &'static str {
@@ -657,6 +662,29 @@ mod tests {
         let line = app.world().resource::<ChatLog>().0.back().unwrap();
         assert_eq!(line.text, "[SERVER] Development commands are disabled.");
         assert_eq!(line.kind, LogKind::System(PlayerMessageKind::Server));
+    }
+
+    #[test]
+    fn command_and_player_lines_keep_their_wire_order() {
+        let mut app = server_ingest_app();
+        for (sender_name, text) in [(COMMAND_SENDER_NAME, "done"), ("Eivor", "hello")] {
+            app.world_mut()
+                .resource_mut::<ChatInbox>()
+                .push(ChatEntry::Message(ChatMessage {
+                    sender_entity_id: 7,
+                    sender_name: sender_name.to_owned(),
+                    text: text.to_owned(),
+                }));
+        }
+        app.update();
+        let lines: Vec<&str> = app
+            .world()
+            .resource::<ChatLog>()
+            .0
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        assert_eq!(lines, ["[SERVER] done", "Eivor: hello"]);
     }
 
     #[test]
