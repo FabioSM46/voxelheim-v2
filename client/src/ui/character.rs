@@ -870,7 +870,7 @@ fn preview_frame() -> PlacedBox {
 ///
 /// **The preview used to be flat nodes**, one per box of the rig, laid out by percentage
 /// inside a panel with the depth thrown away and a painter's `ZIndex` standing in for it.
-/// It is now the actual rig, in the world, in front of the one camera — the same meshes
+/// It is now the actual rig, in the world, in front of the world camera — the same meshes
 /// and the same materials the world dresses a body from, so the preview cannot disagree
 /// with what a player will see of themselves.
 ///

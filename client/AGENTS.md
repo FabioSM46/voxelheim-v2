@@ -69,13 +69,13 @@ keeps meaning "everything the client is".
 | `player/drops.rs` | one small visual per drop in the newest snapshot, plus local spin and bob | infer pickup, merging, expiry or any other reason a drop disappeared |
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
-| `player/hands.rs` | the camera-space held item, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
+| `player/hands.rs` | the camera-space held item, its origin-anchored render-layer camera, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
 | `player/saddle.rs` | the camera-space horse head, reins and fists shown by the newest authoritative local mount projection | draw a world horse, predict a mount transition, or decide any mounted action legality |
 | `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
 | `player/inventory.rs` | the latest complete server-sent slots, the locally selected slot index, and which of the four intents a cell press means | increment, decrement, move or merge a count, move a durability, or decide that a stack may be put down or consumed |
 | `player/crafting.rs` | the display-only mirror of the server's recipe table, and the craft intent one row originates | decide that a craft succeeds, consume a material, or produce an item |
 | `player/interpolate.rs` | the two-snapshot buffer and the interpolation | mention a Bevy world, or extrapolate |
-| `player/camera.rs` | the one camera, and what it follows | decide a gameplay outcome |
+| `player/camera.rs` | the world camera, and what it follows | decide a gameplay outcome |
 | `player/sky.rs` | the one directional light, the curve the sun, the sky colour, the ambient term and the fog are read from, and the sky and fog a submerged eye sees instead | hold a boundary the server sent, let anything read a rule back out of a colour, own a light that is not the sky's, or decide what being in water *does* |
 | `player/wards.rs` | the newest complete server-sent ward columns and the three translucent boundary meshes drawn from them | derive a ward, authorise an action, feed targeting or movement, draw a dome, or let presentation become gameplay state |
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
@@ -557,12 +557,9 @@ and glass was expected to be the id that separated them from *each other*; **the
 first**, because #634 draws it as foliage with gaps in it while the server still stops a body with
 the whole cube. Keep them as two functions.
 
-**`world/render.rs` owns the one camera, and it is a `Camera3d`.** Two cameras targeting one
-window need explicit ordering and clear-colour configuration to keep one from erasing the
-other, and `bevy_ui` renders in the 3D graph as readily as the 2D one — so the status text
-draws through this camera and `ui/status.rs` spawns none of its own. It is created at startup so
-the status line is visible before a session exists, and moved to `ServerWelcome.spawn` once the
-server says where that is.
+**`world/render.rs` owns no camera.** The world camera lives in `player/camera.rs`; the isolated
+view-model camera lives in `player/hands.rs`. Both are created at startup, so the status line and
+the held composition have their render paths before a session exists.
 
 ## The player: intent out, snapshots in
 
@@ -818,13 +815,14 @@ The client samples the controls, sends what the player is *trying* to do at the 
   voxel centre, and both differences push this side's answer down. Reconciling what is measured
   needs the server half merged and is its own issue; see the note on the constant.
 
-**`player/camera.rs` owns the one camera, and it is a `Camera3d`.** It moved there from
+**`player/camera.rs` owns the world `Camera3d`.** It moved there from
 `world/render.rs` when movement landed, because a camera that follows a gameplay entity belongs to
 the module that knows where that entity is; `world/render.rs` kept the chunk meshes and their
-material. There is still exactly one camera, and that is still a rule: two cameras targeting one
-window need explicit ordering and clear-colour configuration to keep one from erasing the other, and
-`bevy_ui` renders in the 3D graph as readily as the 2D one — so the status text draws through this
-camera and `ui/status.rs` spawns none of its own. `PlayerPlugin` is therefore built **before**
+material. `player/hands.rs` owns the deliberate second camera: an origin-anchored, no-clear pass
+that sees only the view-model render layer and draws after the world. Keeping its transforms small
+prevents the hand's sub-block offsets from being lost when a distant f32 world position is added
+and subtracted again. The world camera is marked as the UI default, so `bevy_ui` and the status text
+still draw through it rather than through the overlay. `PlayerPlugin` is therefore built **before**
 `StatusUiPlugin` in `main.rs`.
 
 **The targeted block is outlined with twelve bars, not a wireframe and not a tinted cube.** A
@@ -2135,13 +2133,13 @@ Recorded here so the next reader does not mistake them for oversights:
   for either — `schemas/handshake.fbs` reserves a list, a selection and a creation — so a roster
   that is full is full, and `--name` naming nobody on one says so and leaves the screen up. The
   server's store is where a deletion would have to start.
-- **The preview is the real rig, in the world, turning in front of the one camera.** It is dressed
+- **The preview is the real rig, in the world, turning in front of the world camera.** It is dressed
   out of the same wardrobe a body is — `player::BodyVisualsPlugin`, the same meshes and the same
   material per colour — so it cannot disagree with what a player will see of themselves. It was
   flat `bevy_ui` nodes until #181, with a hand-written painter's order standing in for a depth
   buffer; that went, and `PlacedBox::nearness` and `appearance::slots` went with it. **There is
-  still exactly one camera** — `player/camera.rs`'s rule is untouched, and this adds no second
-  camera and no render target.
+  still exactly one world camera** — the hands' second camera sees only its private layer, so the
+  preview adds no camera and no render target.
 - **The screen is not a window onto the world, and three things make that true together.** The
   camera clears to the screen's own flat `BACKDROP` while it is up and **puts back only what this
   screen put there** — restoring `Daylight::FIXED.sky` unconditionally would have overwritten

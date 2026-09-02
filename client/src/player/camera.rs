@@ -1,6 +1,6 @@
-//! The one camera, and the two different places its position and its direction come from.
+//! The world camera, and the two different places its position and its direction come from.
 //!
-//! ## This module owns the one camera
+//! ## This module owns the world camera
 //!
 //! It moved here from `world/render.rs` when movement landed, because a camera that
 //! follows a gameplay entity belongs to the module that knows where that entity is.
@@ -11,11 +11,12 @@
 //! decide any of them: [`super::sky`] owns the curve those three are read from, and this
 //! module only spawns them at the value a world with no clock keeps for ever.
 //!
-//! There is still exactly one camera, and that is a rule rather than a coincidence. Two
-//! cameras targeting one window need explicit ordering and clear-colour configuration to
-//! stop one erasing the other, and `bevy_ui` renders in the 3D graph as readily as the 2D
-//! one — so the status text draws through this camera and `ui/status.rs` spawns none of
-//! its own.
+//! `player/hands.rs` owns one deliberate second camera for its render layer. It stays at the
+//! origin so sub-block view-model offsets never make a lossy round trip through a distant f32
+//! world position, draws after this camera without clearing its colour, and sees no world
+//! geometry. [`IsDefaultUiCamera`] keeps `bevy_ui` on this camera rather than on that overlay,
+//! so the status text still draws through the world view and `ui/status.rs` spawns none of its
+//! own.
 //!
 //! ## Position from the server, direction from here
 //!
@@ -83,7 +84,7 @@ use crate::world::ChunkStore;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AimCamera;
 
-/// Spawns the one camera and keeps it on the player.
+/// Spawns the world camera and keeps it on the player.
 pub struct PlayerCameraPlugin;
 
 impl Plugin for PlayerCameraPlugin {
@@ -134,6 +135,9 @@ fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         WorldCamera,
         Camera3d::default(),
+        // The hands own a second, render-layer-only camera. UI without an explicit target
+        // still belongs here: this is the camera that owns the window and its viewport.
+        IsDefaultUiCamera,
         // The sky and the ambient light are set on the camera rather than through
         // `ClearColor` and `GlobalAmbientLight`, so they do not depend on this plugin
         // being built after the one that inserts those resources' defaults.

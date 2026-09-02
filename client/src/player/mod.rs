@@ -38,7 +38,7 @@
 //! | `items.rs` | one row per item id: what it is called, its held shape, its colour |
 //! | `inventory.rs` | the server-sent slots and the locally selected slot index |
 //! | `crafting.rs` | the display-only recipe mirror and the craft intent it originates |
-//! | `camera.rs` | the one camera, and what it follows |
+//! | `camera.rs` | the world camera, and what it follows |
 //! | `sky.rs` | the sun, the sky colour, the ambient term and the fog, on the server's clock |
 //! | `wards.rs` | the newest server-sent ward columns and their translucent boundary meshes |
 //! | `target.rs` | the voxel raycast, mining intent/progress, placement and outline |

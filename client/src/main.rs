@@ -265,8 +265,8 @@ fn run(start: Start) -> AppExit {
     // them. It is the whole of the file this client keeps for a player's preferences —
     // nothing here reaches the wire, and nothing here decides an outcome.
     .add_plugins(settings)
-    // The player before the UI: the player plugin owns the one camera, and `bevy_ui`
-    // draws through it. See the module comment in player/camera.rs.
+    // The player before the UI: the player plugin owns the world camera that `bevy_ui`
+    // explicitly defaults to. See the module comment in player/camera.rs.
     .add_plugins(PlayerPlugin)
     .add_plugins(UiPlugin);
 

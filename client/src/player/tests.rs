@@ -444,7 +444,7 @@ fn camera_transform(app: &mut App) -> Transform {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&Transform, With<camera::WorldCamera>>();
     let found: Vec<Transform> = query.iter(world).copied().collect();
-    assert_eq!(found.len(), 1, "exactly one camera owns the window");
+    assert_eq!(found.len(), 1, "exactly one world camera owns the window");
     found[0]
 }
 
@@ -4510,7 +4510,7 @@ fn sky_and_ambient(app: &mut App) -> (Color, f32) {
             (sky, ambient.brightness)
         })
         .collect();
-    assert_eq!(found.len(), 1, "exactly one camera owns the window");
+    assert_eq!(found.len(), 1, "exactly one world camera owns the window");
     found[0]
 }
 
@@ -4597,11 +4597,11 @@ fn fog(app: &mut App) -> DistanceFog {
     let world = app.world_mut();
     let mut query = world.query_filtered::<&DistanceFog, With<camera::WorldCamera>>();
     let found: Vec<DistanceFog> = query.iter(world).cloned().collect();
-    assert_eq!(found.len(), 1, "the one camera carries the one fog");
+    assert_eq!(found.len(), 1, "the world camera carries the one fog");
     found[0].clone()
 }
 
-/// Puts the one camera's eye at `at`. Nothing overwrites it in these tests: with no local
+/// Puts the world camera's eye at `at`. Nothing overwrites it in these tests: with no local
 /// body in the snapshot, `follow_the_player` returns before it places anything.
 fn put_the_eye_at(app: &mut App, at: Vec3) {
     let world = app.world_mut();
@@ -4611,7 +4611,7 @@ fn put_the_eye_at(app: &mut App, at: Vec3) {
         transform.translation = at;
         placed += 1;
     }
-    assert_eq!(placed, 1, "exactly one camera owns the window");
+    assert_eq!(placed, 1, "exactly one world camera owns the window");
 }
 
 /// A store holding one voxel of water at world block (2, 3, 4), and air everywhere else.
