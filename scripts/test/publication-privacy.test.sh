@@ -53,4 +53,34 @@ if grep -Fq "$internal_path" <<< "$path_output"; then
   exit 1
 fi
 
-echo "publication privacy — safe placeholders pass and private values fail without leaking"
+git -C "$TEST_ROOT" rm -f -q path.txt
+# The number in front of the plus is the whole identity: this address names the project's
+# approved handle and credits somebody else. Nothing above can see it — it is a GitHub
+# noreply address, which the approved-email list allows by shape — and that is the point.
+wrong_id="9999""999999999"
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+  > "$TEST_ROOT/trailer.txt"
+git -C "$TEST_ROOT" add trailer.txt
+set +e
+id_output=$(cd "$TEST_ROOT" && bash scripts/check-publication-privacy.sh 2>&1)
+id_status=$?
+set -e
+if [ "$id_status" -ne 1 ]; then
+  echo "expected a misattributed account id to exit 1, got $id_status" >&2
+  exit 1
+fi
+grep -Fq 'trailer.txt:1 contains a misattributed GitHub account id' <<< "$id_output"
+if grep -Fq "$wrong_id" <<< "$id_output"; then
+  echo "privacy failure: the rejected account id reached the diagnostic" >&2
+  exit 1
+fi
+
+# The same handle with its own id passes, which is what keeps the rule from being a ban on
+# the address rather than a check of the number in it.
+git -C "$TEST_ROOT" rm -f -q trailer.txt
+printf 'Co-authored-by: FabioSM46 <124870035+FabioSM46@users.noreply.github.com>\n' \
+  > "$TEST_ROOT/correct.txt"
+git -C "$TEST_ROOT" add correct.txt
+(cd "$TEST_ROOT" && bash scripts/check-publication-privacy.sh >/dev/null)
+
+echo "publication privacy — safe placeholders pass, private values fail without leaking, and a noreply address carrying another account's id is refused"

@@ -208,6 +208,98 @@ fi
 grep -Fq 'message contains a non-public email address' <<< "$CHECK_OUTPUT"
 assert_absent "$other_anthropic" "the rejected email"
 
+# ------------------------------------------------- the misattributed account id
+# GitHub resolves a noreply address by the number in front of the plus and ignores the
+# login beside it, so an address naming the right person with the wrong number is
+# well-formed, exposes nothing, satisfies every rule above — and credits a stranger.
+# Three reached develop in Co-authored-by trailers before anybody noticed, which is why
+# the message case comes first: the identity fields were never where this arrived.
+#
+# The number is assembled from pieces and is deliberately too long to be an account id.
+# Written whole, this file would fail the file scanner on the value it is testing; chosen
+# at random, it could name a real account, and the fixture would then say about a stranger
+# exactly what this rule exists to stop the repository saying.
+wrong_id="9999""999999999"
+commit_as_noreply -m "chore: probe a trailer naming the handle with another account's id" \
+  -m "Co-authored-by: FabioSM46 <${wrong_id}+FabioSM46""@users.noreply.github.com>"
+misattributed_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$domain_commit" "$misattributed_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a misattributed account id to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a misattributed GitHub account id' <<< "$CHECK_OUTPUT"
+assert_absent "$wrong_id" "the rejected account id"
+# And it is the new rule that fired, not the approved-email list catching it by accident:
+# the address is a GitHub noreply, which that list allows by shape.
+if grep -Fq 'non-public email address' <<< "$CHECK_OUTPUT"; then
+  echo "expected the id rule to fire alone; the approved-email list rejected it too" >&2
+  exit 1
+fi
+
+# A plus with nothing in front of it resolves to nobody. It is rejected whatever login
+# follows, because an address that credits no account is a defect on any name — and this
+# one reached develop too, in the same class of trailer.
+commit_as_noreply -m "chore: probe a trailer whose id is missing entirely" \
+  -m "Co-authored-by: FabioSM46 <+FabioSM46""@users.noreply.github.com>"
+empty_id_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$misattributed_commit" "$empty_id_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected an empty account id to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq 'message contains a misattributed GitHub account id' <<< "$CHECK_OUTPUT"
+
+# Both spellings the repository actually uses pass, and this is the assertion that keeps
+# the rule from being a ban on the address: the id form with the right number, and the
+# legacy form that carries no number at all and still resolves correctly.
+commit_as_noreply -m "chore: probe the two spellings the handle legitimately has
+
+Co-authored-by: FabioSM46 <124870035+FabioSM46@users.noreply.github.com>
+Co-authored-by: FabioSM46 <FabioSM46@users.noreply.github.com>"
+correct_id_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$empty_id_commit" "$correct_id_commit"
+if [ "$CHECK_STATUS" -ne 0 ]; then
+  echo "expected the handle's own id and the legacy form to pass, got $CHECK_STATUS" >&2
+  echo "$CHECK_OUTPUT" >&2
+  exit 1
+fi
+
+# A login the table does not name is left alone whatever its number, which is what the
+# whole fixture history above depends on. The rule claims only what can be checked without
+# the network; who may appear at all is the approved-identity rule in AGENTS.md, and that
+# one needs a reader.
+commit_as_noreply -m "chore: probe a login the table says nothing about" \
+  -m "Co-authored-by: Stranger <${wrong_id}+Stranger""@users.noreply.github.com>"
+unknown_login_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$correct_id_commit" "$unknown_login_commit"
+if [ "$CHECK_STATUS" -ne 0 ]; then
+  echo "expected an unknown login to pass whatever its id, got $CHECK_STATUS" >&2
+  echo "$CHECK_OUTPUT" >&2
+  exit 1
+fi
+
+# The identity fields are checked too, and separately from the exposure rule: this author
+# email is a perfectly private GitHub noreply, so the only thing wrong with it is who it
+# credits. A single rule covering both would have reported the wrong category here.
+GIT_AUTHOR_NAME=FabioSM46 \
+GIT_AUTHOR_EMAIL="${wrong_id}+FabioSM46""@users.noreply.github.com" \
+GIT_COMMITTER_NAME=PrivacyTest \
+GIT_COMMITTER_EMAIL=1000+privacy@users.noreply.github.com \
+  git -C "$TEST_ROOT" commit -q --allow-empty -m "chore: probe a misattributed author field"
+misattributed_author_commit=$(git -C "$TEST_ROOT" rev-parse HEAD)
+run_check "$unknown_login_commit" "$misattributed_author_commit"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a misattributed author field to exit 1, got $CHECK_STATUS" >&2
+  exit 1
+fi
+grep -Fq "author email credits another account's id" <<< "$CHECK_OUTPUT"
+if grep -Fq 'exposes its author email' <<< "$CHECK_OUTPUT"; then
+  echo "expected the id rule to fire; the exposure rule reported this address instead" >&2
+  exit 1
+fi
+assert_absent "$wrong_id" "the rejected account id"
+
 # An empty range still exits as it did before the message scan existed.
 run_check "$clean_commit" "$clean_commit"
 if [ "$CHECK_STATUS" -ne 2 ]; then
@@ -270,9 +362,24 @@ extract_path_prefix_block() {
   awk '/^slash=\/$/{f=1} f{print} f&&/^\)$/{exit}' "$1"
 }
 
+extract_account_id_block() {
+  awk '/^github_noreply_ids=\($/{f=1} f{print} f&&/^\)$/{exit}' "$1"
+}
+
+# Pinned as a whole function rather than as a pattern line. The table and the regex are
+# data; the rule that reads them is where the two ways of passing live — an id that
+# matches, and the legacy form that carries none — and a copy that quietly lost the second
+# would reject most of this repository's history while the two data pins stayed green.
+extract_misattribution_function() {
+  awk '/^is_misattributed_noreply\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$1"
+}
+
 pin_extracted "email pattern" extract_line '^email_pattern='
 pin_extracted "private-network pattern" extract_line '^private_network_pattern='
 pin_extracted "approved-email list" extract_line '^ +noreply@github\.com\|'
 pin_extracted "workstation path prefixes" extract_path_prefix_block
+pin_extracted "GitHub noreply pattern" extract_line '^github_noreply_pattern='
+pin_extracted "GitHub account id table" extract_account_id_block
+pin_extracted "misattribution rule" extract_misattribution_function
 
-echo "commit privacy — noreply identities and clean messages pass; exposed identities, private message content and generated session references fail without leaking; ${#PINNED_CHECKS[@]} privacy checks agree on the three patterns"
+echo "commit privacy — noreply identities and clean messages pass; exposed identities, misattributed account ids, private message content and generated session references fail without leaking; ${#PINNED_CHECKS[@]} privacy checks agree on the shared patterns"

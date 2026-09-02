@@ -110,6 +110,22 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
   `claude.ai/code/session_…` URL anywhere in a message, is an account-scoped endpoint. It is the one
   non-public endpoint a machine can recognise, and it recurs *because* it is generated rather than
   because anybody was careless — three of them reached `develop` before anything looked (#128).
+- **Never credit an account that is not yours, and know that the name is not what decides.** A
+  GitHub noreply address is resolved by the **number in front of the plus** and by nothing else:
+  `<id>+<login>@users.noreply.github.com` credits whoever owns `<id>`, and the login beside it is
+  decoration GitHub never reads. So an address naming the right person with the wrong number is
+  well-formed, publishes nothing private, satisfies every rule above, and hands a stranger's
+  account a commit they never wrote. Four did exactly that here — three in `Co-authored-by`
+  trailers now on `develop`, one on an open branch — and two unrelated accounts consequently
+  appear in this repository's contributor graph, one commit each. **Nothing was red**, because
+  `*@users.noreply.github.com` in the approved-email list is a claim about shape and this is a
+  claim about identity. It was found weeks later by a human who did not recognise two names.
+  Same family as the session trailer above: a machine-written value recurs *because* it is
+  generated. All three privacy scripts now hold a table pinning each login this repository
+  publishes to its account id, `scripts/test/commit-privacy.test.sh` pins the copies, and the
+  table is deliberately narrow — for a login it names the id must match; about a login it does
+  not name it says nothing, which is the approved-identity rule above and needs a reader.
+  **Copy your noreply address from Settings → Emails; never type the number.**
 - **A commit message is a published surface, and it is checked like one.** Two scripts divide the
   work: `bash scripts/check-publication-privacy.sh` scans tracked file content, and
   `bash scripts/check-commit-privacy.sh <base> <head>` walks the commits a branch adds and reads

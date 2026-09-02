@@ -73,6 +73,56 @@ is_approved_email() {
   esac
 }
 
+# A GitHub noreply address is resolved by the NUMBER in front of the plus, and by nothing
+# else. `<id>+<login>@users.noreply.github.com` credits whoever owns `<id>`; the login
+# beside it is decoration GitHub never reads. So an address naming the right person with
+# the wrong number is well-formed, passes every shape test above — `*@users.noreply…`
+# approves it — and silently credits a stranger's account for work they never did.
+#
+# It happened here three times, in co-author trailers a tool appended, and it was found
+# the only way it could be: by a human noticing two accounts nobody recognised in the
+# repository's contributor graph, one commit each, weeks later. Nothing was red. This is
+# the same family as the generated session trailer — a machine-written value recurs
+# *because* it is generated rather than because anybody was careless — and it earns a
+# rule for the same reason.
+#
+# The table is the only claim about the world that can be checked without the network,
+# and it is deliberately narrow: for a login it names, the id must be that login's; for a
+# login it does not name, it says nothing. That is the exact shape of the observed defect
+# — the right name beside the wrong number — and it is what keeps the rule from rejecting
+# the synthetic identities the privacy tests are built from. It does not attempt to
+# enumerate who may appear; that is the approved-identity rule in AGENTS.md, enforced by
+# a reader rather than by a pattern.
+github_noreply_ids=(
+  "fabiosm46:124870035"
+  "github-actions[bot]:41898282"
+)
+
+# The id group is optional because the legacy form `<login>@users.noreply.github.com`
+# carries no number and still resolves correctly — most of this repository's history uses
+# it. A plus with nothing before it is a different thing: it resolves to nobody, and it is
+# rejected whatever login follows, because an address that credits no account is a defect
+# on any name.
+github_noreply_pattern='^(([0-9]*)\+)?([^@+]+)@users\.noreply\.github\.com$'
+
+is_misattributed_noreply() {
+  local email=${1,,} plus prefix login entry
+  [[ "$email" =~ $github_noreply_pattern ]] || return 1
+  plus=${BASH_REMATCH[1]}
+  prefix=${BASH_REMATCH[2]}
+  login=${BASH_REMATCH[3]}
+  if [ -n "$plus" ] && [ -z "$prefix" ]; then
+    return 0
+  fi
+  for entry in "${github_noreply_ids[@]}"; do
+    [ "${entry%:*}" = "$login" ] || continue
+    [ -z "$prefix" ] && return 1
+    [ "$prefix" = "${entry##*:}" ] && return 1
+    return 0
+  done
+  return 1
+}
+
 email_pattern='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 
 # Assembled from pieces so this file does not itself contain a workstation path prefix.
@@ -102,13 +152,23 @@ while IFS= read -r match; do
   line=${match%%:*}
   content=${match#*:}
   unapproved=0
+  misattributed=0
   while IFS= read -r email; do
     if ! is_approved_email "$email"; then
       unapproved=1
     fi
+    if is_misattributed_noreply "$email"; then
+      misattributed=1
+    fi
   done < <(grep -Eo "$email_pattern" <<< "$content" || true)
   if [ "$unapproved" -ne 0 ]; then
     add_finding "$line" "a non-public email address"
+  fi
+  # Reported even though it is not private data, because this surface is where a body
+  # transcribes a trailer somebody is about to paste into a commit. Naming it here is the
+  # cheapest place to stop it: the other two checks refuse a push, this one only tells you.
+  if [ "$misattributed" -ne 0 ]; then
+    add_finding "$line" "a misattributed GitHub account id"
   fi
 done < <(grep -n -E "$email_pattern" <<< "$body" || true)
 

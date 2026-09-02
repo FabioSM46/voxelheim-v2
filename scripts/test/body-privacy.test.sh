@@ -164,6 +164,40 @@ if [ "$CHECK_STATUS" -ne 0 ]; then
   exit 1
 fi
 
+# --------------------------------------------------- the misattributed account id
+# A noreply address is resolved by the number in front of the plus and by nothing else, so
+# one naming the right person with the wrong number is well-formed, carries no private data
+# at all, and credits a stranger's account. Reported here even though it is not a leak:
+# this surface is where a body transcribes a trailer somebody is about to paste.
+#
+# Assembled from pieces like every other fixture in this file. Written whole it would fail
+# the file scanner on exactly the value it is testing — which is the same reason the
+# workstation path above is spelled the way it is.
+wrong_id="9999""999999999"
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+  > "$TEST_ROOT/misattributed.md"
+
+run_check "$CHECK" "$TEST_ROOT/misattributed.md"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a misattributed account id to exit 1, got $CHECK_STATUS" >&2
+  echo "$CHECK_COMBINED" >&2
+  exit 1
+fi
+grep -Fqx 'body privacy: line 1 contains a misattributed GitHub account id' <<< "$CHECK_STDOUT"
+assert_absent "$wrong_id" "the rejected account id"
+
+# The login is unknown to the table, so the same wrong-looking number says nothing about
+# it and the body passes. The rule claims only what it can check offline: for a login it
+# names, the id must be that login's.
+printf 'Co-authored-by: Stranger <%s+Stranger''@users.noreply.github.com>\n' "$wrong_id" \
+  > "$TEST_ROOT/unknown-login.md"
+run_check "$CHECK" "$TEST_ROOT/unknown-login.md"
+if [ "$CHECK_STATUS" -ne 0 ]; then
+  echo "expected an unknown login to pass whatever its id, got $CHECK_STATUS" >&2
+  echo "$CHECK_COMBINED" >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------- calling it wrong
 # The body arrives on stdin and never in argv, so an argument is a mistake rather than an
 # alternative spelling — and 2 rather than 1, because "the check could not run" and "the
