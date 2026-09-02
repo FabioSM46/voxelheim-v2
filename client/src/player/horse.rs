@@ -37,7 +37,7 @@ use crate::net::{MobKind, MountKind, Session};
 
 /// One end of a solid lofted along z: a rectangle in the x/y plane at one depth.
 #[derive(Debug, Clone, Copy)]
-struct Slice {
+pub(super) struct Slice {
     z: f32,
     half_x: f32,
     y: (f32, f32),
@@ -51,7 +51,7 @@ impl Slice {
 
 /// One end of a solid lofted along y: a rectangle in the x/z plane at one height.
 #[derive(Debug, Clone, Copy)]
-struct Deck {
+pub(super) struct Deck {
     y: f32,
     half_x: f32,
     z: (f32, f32),
@@ -72,12 +72,12 @@ const RUMP: Slice = Slice::new(0.78, 0.24, (1.10, 1.37));
 
 // The neck rises from the withers to the poll, narrowing as it goes; the head hangs from
 // the poll forward and down to a muzzle narrower and shallower than the brow.
-const NECK_BASE: Deck = Deck::new(1.44, 0.16, (-0.78, -0.40));
-const NECK_POLL: Deck = Deck::new(1.94, 0.11, (-1.12, -0.96));
-const BROW: Slice = Slice::new(-0.96, 0.15, (1.66, 2.08));
-const MUZZLE: Slice = Slice::new(-1.52, 0.09, (1.42, 1.64));
-const EAR: Vec3 = Vec3::new(0.06, 0.20, 0.05);
-const EAR_CENTRE: Vec3 = Vec3::new(0.09, 2.10, -1.02);
+pub(super) const NECK_BASE: Deck = Deck::new(1.44, 0.16, (-0.78, -0.40));
+pub(super) const NECK_POLL: Deck = Deck::new(1.94, 0.11, (-1.12, -0.96));
+pub(super) const BROW: Slice = Slice::new(-0.96, 0.15, (1.66, 2.08));
+pub(super) const MUZZLE: Slice = Slice::new(-1.52, 0.09, (1.42, 1.64));
+pub(super) const EAR: Vec3 = Vec3::new(0.06, 0.20, 0.05);
+pub(super) const EAR_CENTRE: Vec3 = Vec3::new(0.09, 2.10, -1.02);
 const EYE: Vec2 = Vec2::new(0.05, 0.05);
 const EYE_CENTRE: Vec3 = Vec3::new(0.135, 1.84, -1.14);
 
@@ -105,9 +105,9 @@ const HORSE_LEG_SWING: f32 = HOOF_SWEEP / (2.0 * LEG_PIVOT_Y);
 
 // The mane lies along the crest from the poll to the withers and the tail hangs from the
 // croup: each a strip authored downwards from its root and turned to rest along its line.
-const MANE_ROOT: Vec3 = Vec3::new(0.0, 1.96, -0.94);
-const MANE_STRIP: Vec3 = Vec3::new(0.055, 0.76, 0.05);
-const MANE_REST: f32 = -0.84;
+pub(super) const MANE_ROOT: Vec3 = Vec3::new(0.0, 1.96, -0.94);
+pub(super) const MANE_STRIP: Vec3 = Vec3::new(0.055, 0.76, 0.05);
+pub(super) const MANE_REST: f32 = -0.84;
 const MANE_SWING: f32 = 0.035;
 const TAIL_ROOT: Vec3 = Vec3::new(0.0, 1.38, 0.72);
 const TAIL_STRIP: Vec3 = Vec3::new(0.075, 0.74, 0.05);
@@ -120,9 +120,9 @@ const SADDLE: Vec3 = Vec3::new(0.44, 0.07, 0.36);
 const SADDLE_CENTRE: Vec3 = Vec3::new(0.0, 1.575, 0.02);
 const SADDLE_FLAP: Vec3 = Vec3::new(0.035, 0.30, 0.26);
 const SADDLE_FLAP_CENTRE: Vec3 = Vec3::new(0.345, 1.42, 0.02);
-const REIN_BIT: Vec3 = Vec3::new(0.095, 1.53, -1.40);
+pub(super) const REIN_BIT: Vec3 = Vec3::new(0.095, 1.53, -1.40);
 const REIN_HAND: Vec3 = Vec3::new(0.27, 1.82, -0.28);
-const REIN_WIDTH: f32 = 0.018;
+pub(super) const REIN_WIDTH: f32 = 0.018;
 
 // What the numbers above have to be to each other, checked when the crate compiles rather
 // than when a test runs: the barrel's slices run breast to rump and shallow behind the
@@ -369,7 +369,7 @@ pub(super) fn create_visuals(
 }
 
 /// A solid lofted along z between two slices, the rear one (+z) first.
-fn lofted_along_z(rear: Slice, front: Slice) -> Mesh {
+pub(super) fn lofted_along_z(rear: Slice, front: Slice) -> Mesh {
     hexahedron([
         Vec3::new(-rear.half_x, rear.y.0, rear.z),
         Vec3::new(rear.half_x, rear.y.0, rear.z),
@@ -383,7 +383,7 @@ fn lofted_along_z(rear: Slice, front: Slice) -> Mesh {
 }
 
 /// A solid lofted along y between two decks, the lower one first.
-fn lofted_along_y(bottom: Deck, top: Deck) -> Mesh {
+pub(super) fn lofted_along_y(bottom: Deck, top: Deck) -> Mesh {
     hexahedron([
         Vec3::new(-bottom.half_x, bottom.y, bottom.z.1),
         Vec3::new(bottom.half_x, bottom.y, bottom.z.1),

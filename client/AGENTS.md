@@ -70,7 +70,7 @@ keeps meaning "everything the client is".
 | `player/projectiles.rs` | one visual per projectile in the newest snapshot, oriented from its newest velocity | integrate velocity, test a hit, or keep a body the server omitted |
 | `player/mobs.rs` | one body per mob in the newest snapshot, the species boxes mirrored from the server, and the cosmetic lean, hit flash and death fall | read health as death, hold an AI, or advance an action local time did not receive |
 | `player/hands.rs` | the camera-space held item, its origin-anchored render-layer camera, its cosmetic swing/bump, and the mining punch the server's progress starts and stops | decide item legality, mining progress or any gameplay outcome |
-| `player/saddle.rs` | the camera-space horse head, reins and fists shown by the newest authoritative local mount projection | draw a world horse, predict a mount transition, or decide any mounted action legality |
+| `player/saddle.rs` | the camera-space saddle view shown by the newest authoritative local mount projection: the world horse's own head, ears, neck and mane at one scale, framed for the narrowest field of view, and the fists with the reins to the bit | draw a world horse, re-type a size the horse has, predict a mount transition, or decide any mounted action legality |
 | `player/horse.rs` | the world-space horse — under its rider's body when ridden, on a root of its own in the paddock — cut to real proportions from `shapes::hexahedron`, its gait, its tack, and the humanoid rig seated astride it, all drawn inside the mounted body the server collides (`MOUNTED_WIDTH` × `MOUNTED_HEIGHT`, mirrored in `constants.rs`) | decide that anyone is mounted, move a horse, or fit anything to the player's walking box |
 | `player/shapes.rs` | the eight-corner solid: one closed six-faced `Mesh` from eight free corners, flat-shaded, UVs on every face, carrying exactly the attributes a `Cuboid` mesh carries so `merge` joins the two | share a vertex between faces, average a normal across a crease, or grow a seventh face, a cylinder or a sphere |
 | `player/items.rs` | one row per item id: its display name, its held shape, and the block-derived or item-only colour it draws as | hold a capability, a stat, or anything a rule is read from |
@@ -793,9 +793,10 @@ The client samples the controls, sends what the player is *trying* to do at the 
   jitter in that number is a frame's worth of jitter in every position on screen.
 - **The camera's position comes from the server and its direction comes from here.** Its
   translation is the authoritative position, interpolated, an eye height above the feet. That
-  cosmetic eye height eases between walking and saddle height, but the saddle view itself, the
-  ordinary held item and the crosshair switch on the exact frame the complete server snapshot
-  adds or removes this player's mount. Its
+  cosmetic eye height eases between walking and saddle height — and the third-person boom
+  eases between `BOOM_LENGTH` and `MOUNTED_BOOM_LENGTH` on the same clock, from the same
+  authoritative answer — but the saddle view itself, the ordinary held item and the crosshair
+  switch on the exact frame the complete server snapshot adds or removes this player's mount. Its
   rotation is the local look state, applied the frame the pointer moves. That is not an exception
   to the rule — `schemas/player.fbs` says in as many words that "the camera is a client concern",
   and the yaw a snapshot echoes back came from here in the first place. Waiting a tick for that

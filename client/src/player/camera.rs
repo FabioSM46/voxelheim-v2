@@ -67,7 +67,7 @@ use std::time::Duration;
 
 use super::constants::{
     BOOM_CLEARANCE, BOOM_LENGTH, DEATH_EYE_HEIGHT, DEATH_FALL_TIME, EYE_HEIGHT, MAX_PITCH,
-    ORBIT_RETURN_PER_SECOND, ORBIT_SETTLED,
+    MOUNTED_BOOM_LENGTH, ORBIT_RETURN_PER_SECOND, ORBIT_SETTLED,
 };
 use super::sky::Daylight;
 use super::target::{BlockHit, raycast};
@@ -91,7 +91,7 @@ impl Plugin for PlayerCameraPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ViewMode>()
             .init_resource::<Orbit>()
-            .init_resource::<EyeHeight>()
+            .init_resource::<SaddlePresentation>()
             .init_resource::<LocalMount>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
@@ -202,39 +202,75 @@ struct Aim<'w> {
     view: Res<'w, ViewMode>,
     time: Res<'w, Time>,
     mount: Res<'w, LocalMount>,
-    eye: ResMut<'w, EyeHeight>,
+    saddle: ResMut<'w, SaddlePresentation>,
 }
 
-/// The eye height the camera is currently drawing, between walking and the saddle.
+/// What the camera is currently drawing of the walk-to-saddle change: the height the eye
+/// sits at, and how far back the third-person boom reaches, each on its way between two
+/// exact values.
 ///
 /// The target is an authoritative binary answer in [`LocalMount`]; this resource is only
-/// the cosmetic path between the two heights. It cannot move the player or keep the
-/// saddle composition alive after the server removes the mount entry.
+/// the cosmetic path between the two states. It cannot move the player or keep the saddle
+/// composition alive after the server removes the mount entry. The two fields advance
+/// together, from the same answer on the same clock, so the boom can never be at the saddle
+/// while the eye is still walking.
 #[derive(Resource, Debug, Clone, Copy, PartialEq)]
-struct EyeHeight(f32);
+struct SaddlePresentation {
+    eye_height: f32,
+    boom: f32,
+}
 
-impl Default for EyeHeight {
+impl Default for SaddlePresentation {
     fn default() -> Self {
-        Self(EYE_HEIGHT)
+        Self {
+            eye_height: EYE_HEIGHT,
+            boom: BOOM_LENGTH,
+        }
     }
 }
 
-const SADDLE_EYE_HEIGHT: f32 = EYE_HEIGHT + super::horse::RIDER_LIFT;
+impl SaddlePresentation {
+    /// Where both values rest once the transition onto the horse has finished.
+    #[cfg(test)]
+    const MOUNTED: Self = Self {
+        eye_height: SADDLE_EYE_HEIGHT,
+        boom: MOUNTED_BOOM_LENGTH,
+    };
+
+    /// One frame further towards whichever state `mounted` names.
+    fn advanced(self, mounted: bool, delta: Duration) -> Self {
+        Self {
+            eye_height: next_eye_height(self.eye_height, mounted, delta),
+            boom: next_boom_length(self.boom, mounted, delta),
+        }
+    }
+}
+
+/// The walking eye lifted by exactly what lifts the rider's rig onto the seat. Derived, so
+/// the horse's proportions move it without an edit here; `saddle.rs` reads it too.
+pub(super) const SADDLE_EYE_HEIGHT: f32 = EYE_HEIGHT + super::horse::RIDER_LIFT;
 const EYE_TRANSITION_TIME: Duration = Duration::from_millis(260);
 
-fn next_eye_height(current: f32, mounted: bool, delta: Duration) -> f32 {
-    let target = if mounted {
-        SADDLE_EYE_HEIGHT
-    } else {
-        EYE_HEIGHT
-    };
-    let step =
-        (SADDLE_EYE_HEIGHT - EYE_HEIGHT) * delta.as_secs_f32() / EYE_TRANSITION_TIME.as_secs_f32();
+/// One frame of a transition between two exact values, `walking` and `saddle`, towards
+/// whichever `mounted` names: a constant rate that crosses the span in
+/// [`EYE_TRANSITION_TIME`], clamped so the value *arrives* at exactly the endpoint. The eye
+/// height and the boom are the same shape with different endpoints — one function, two calls.
+fn next_between(current: f32, walking: f32, saddle: f32, mounted: bool, delta: Duration) -> f32 {
+    let target = if mounted { saddle } else { walking };
+    let step = (saddle - walking) * delta.as_secs_f32() / EYE_TRANSITION_TIME.as_secs_f32();
     if current < target {
         (current + step).min(target)
     } else {
         (current - step).max(target)
     }
+}
+
+fn next_eye_height(current: f32, mounted: bool, delta: Duration) -> f32 {
+    next_between(current, EYE_HEIGHT, SADDLE_EYE_HEIGHT, mounted, delta)
+}
+
+fn next_boom_length(current: f32, mounted: bool, delta: Duration) -> f32 {
+    next_between(current, BOOM_LENGTH, MOUNTED_BOOM_LENGTH, mounted, delta)
 }
 
 /// Keeps the camera at the player's eyes, looking where the player is looking.
@@ -267,16 +303,16 @@ fn follow_the_player(
         .as_deref()
         .zip(store.as_deref())
         .map(|(session, store)| (store, usize::from(session.0.chunk_size)));
-    let next_height = next_eye_height(aim.eye.0, aim.mount.mounted(), aim.time.delta());
-    if aim.eye.0 != next_height {
-        aim.eye.0 = next_height;
+    let next = aim.saddle.advanced(aim.mount.mounted(), aim.time.delta());
+    if *aim.saddle != next {
+        *aim.saddle = next;
     }
-    let placed = camera_placement_at_height(
+    let placed = camera_placement_with_saddle(
         feet,
         *aim.look,
         *aim.orbit,
         *aim.view,
-        aim.eye.0,
+        *aim.saddle,
         fallen,
         |voxel| {
             solid.is_some_and(|(store, size)| {
@@ -498,8 +534,9 @@ impl DeathFall {
 ///
 /// The eye is the same point in both: the character's feet plus the current walking-to-
 /// saddle presentation height. First person puts the camera there. Third person aims from
-/// there and then walks backwards along the view direction, which is why the two share a
-/// function rather than being two systems that have to agree about what an eye is.
+/// there and then walks backwards along the view direction by the presentation's boom,
+/// which is why the two share a function rather than being two systems that have to agree
+/// about what an eye is.
 ///
 /// **`fallen` is the one input the two views do not share.** In first person the camera is
 /// the eye, so the eye is what goes over; in third person it is an observer watching a body
@@ -514,18 +551,27 @@ fn camera_placement(
     fallen: f32,
     solid: impl FnMut(IVec3) -> bool,
 ) -> Transform {
-    camera_placement_at_height(feet, look, orbit, view, EYE_HEIGHT, fallen, solid)
+    camera_placement_with_saddle(
+        feet,
+        look,
+        orbit,
+        view,
+        SaddlePresentation::default(),
+        fallen,
+        solid,
+    )
 }
 
-fn camera_placement_at_height(
+fn camera_placement_with_saddle(
     feet: Vec3,
     look: LookState,
     orbit: Orbit,
     view: ViewMode,
-    eye_height: f32,
+    saddle: SaddlePresentation,
     fallen: f32,
     solid: impl FnMut(IVec3) -> bool,
 ) -> Transform {
+    let eye_height = saddle.eye_height;
     // Yaw about the world's up axis, then pitch about the camera's own right — in that
     // order, which is what keeps the horizon level. The other order rolls the view as soon
     // as both are non-zero.
@@ -561,7 +607,7 @@ fn camera_placement_at_height(
     // of it, so it has to be a unit vector for the quotient to be a length in blocks.
     let back = -(rotation * Vec3::NEG_Z).normalize_or_zero();
     Transform {
-        translation: eye + back * boom_length(eye, back, solid),
+        translation: eye + back * boom_length(eye, back, saddle.boom, solid),
         rotation,
         ..default()
     }
@@ -576,18 +622,22 @@ fn camera_placement_at_height(
 /// same answer `ChunkStore::solid_at` gives the aiming ray, and honest for the same
 /// reason.
 ///
+/// `reach` is how far the boom would go with nothing behind the player — [`BOOM_LENGTH`],
+/// [`MOUNTED_BOOM_LENGTH`], or the presentation's way between them. The rule is the same
+/// whichever it is: the ray, the face it hits, and [`BOOM_CLEARANCE`] in front of that.
+///
 /// Takes the predicate rather than the store, which is the shape [`raycast`] itself has
 /// and for the same reason: what a boom needs to know is whether a voxel stops it, and a
 /// test that has to assemble a chunk store to say "there is a wall here" is a test about
 /// chunk stores.
-fn boom_length(eye: Vec3, back: Vec3, solid: impl FnMut(IVec3) -> bool) -> f32 {
-    let Some(hit) = raycast(eye, back, BOOM_LENGTH, solid) else {
-        return BOOM_LENGTH;
+fn boom_length(eye: Vec3, back: Vec3, reach: f32, solid: impl FnMut(IVec3) -> bool) -> f32 {
+    let Some(hit) = raycast(eye, back, reach, solid) else {
+        return reach;
     };
 
     // Pulled forward off the face it hit, and never through the eye: a player wedged into
     // a corner gets a camera at their own eyes rather than one behind their forehead.
-    (face_distance(eye, back, hit) - BOOM_CLEARANCE).max(0.0)
+    (face_distance(eye, back, reach, hit) - BOOM_CLEARANCE).max(0.0)
 }
 
 /// How far along `direction` the eye is from the face the ray entered through.
@@ -597,7 +647,7 @@ fn boom_length(eye: Vec3, back: Vec3, solid: impl FnMut(IVec3) -> bool) -> f32 {
 /// length, so it is recovered from the two: the face is an outward unit axis, so the plane
 /// it lies in is the block's coordinate on that axis plus one for a positive face, and the
 /// distance is how far along the ray that plane is.
-fn face_distance(eye: Vec3, direction: Vec3, hit: BlockHit) -> f32 {
+fn face_distance(eye: Vec3, direction: Vec3, reach: f32, hit: BlockHit) -> f32 {
     let Some(axis) = (0..3).find(|axis| hit.face[*axis] != 0) else {
         // A zero face means the eye is already inside a solid voxel — see [`BlockHit`].
         // The camera goes nowhere, which is the same answer as being flush against a wall
@@ -611,9 +661,9 @@ fn face_distance(eye: Vec3, direction: Vec3, hit: BlockHit) -> f32 {
         // Unreachable: a face is crossed on the axis the ray is moving along, so the
         // component that named it cannot be zero. Answered rather than divided by, because
         // a camera is the last thing that should produce a NaN translation.
-        return BOOM_LENGTH;
+        return reach;
     }
-    ((plane - eye[axis]) / component).clamp(0.0, BOOM_LENGTH)
+    ((plane - eye[axis]) / component).clamp(0.0, reach)
 }
 
 #[cfg(test)]
@@ -650,16 +700,92 @@ mod tests {
 
         let (look, orbit) = looking_ahead();
         let feet = Vec3::new(1.5, 64.0, -2.5);
-        let mounted = camera_placement_at_height(
+        let mounted = camera_placement_with_saddle(
             feet,
             look,
             orbit,
             ViewMode::FirstPerson,
-            SADDLE_EYE_HEIGHT,
+            SaddlePresentation::MOUNTED,
             UPRIGHT,
             |_| false,
         );
         assert_eq!(mounted.translation, feet + Vec3::Y * SADDLE_EYE_HEIGHT);
+    }
+
+    /// The third-person boom backs off onto the horse and closes up on dismount between two
+    /// exact lengths, on the eye height's clock — the mirror of the test above.
+    #[test]
+    fn mount_and_dismount_back_the_boom_off_between_exact_lengths() {
+        let backing = next_boom_length(BOOM_LENGTH, true, EYE_TRANSITION_TIME / 2);
+        assert!(backing > BOOM_LENGTH && backing < MOUNTED_BOOM_LENGTH);
+        assert_eq!(
+            next_boom_length(backing, true, EYE_TRANSITION_TIME),
+            MOUNTED_BOOM_LENGTH
+        );
+
+        let closing = next_boom_length(MOUNTED_BOOM_LENGTH, false, EYE_TRANSITION_TIME / 2);
+        assert!(closing > BOOM_LENGTH && closing < MOUNTED_BOOM_LENGTH);
+        assert_eq!(
+            next_boom_length(closing, false, EYE_TRANSITION_TIME),
+            BOOM_LENGTH
+        );
+
+        // One clock: half way through the transition the boom is exactly as far along its
+        // span as the eye is along its own, and both arrive together.
+        let half = SaddlePresentation::default().advanced(true, EYE_TRANSITION_TIME / 2);
+        let eye_along = (half.eye_height - EYE_HEIGHT) / (SADDLE_EYE_HEIGHT - EYE_HEIGHT);
+        let boom_along = (half.boom - BOOM_LENGTH) / (MOUNTED_BOOM_LENGTH - BOOM_LENGTH);
+        assert!(
+            (eye_along - boom_along).abs() < 1e-5,
+            "the eye was {eye_along} of the way and the boom {boom_along}"
+        );
+        assert_eq!(
+            half.advanced(true, EYE_TRANSITION_TIME),
+            SaddlePresentation::MOUNTED
+        );
+        assert_eq!(
+            SaddlePresentation::MOUNTED.advanced(false, EYE_TRANSITION_TIME),
+            SaddlePresentation::default()
+        );
+
+        // Mounted, in third person, with nothing streamed to stop it: the camera sits the
+        // whole mounted boom behind the saddle eye.
+        let (look, orbit) = looking_ahead();
+        let feet = Vec3::new(1.5, 64.0, -2.5);
+        let eye = feet + Vec3::Y * SADDLE_EYE_HEIGHT;
+        let placed = camera_placement_with_saddle(
+            feet,
+            look,
+            orbit,
+            ViewMode::ThirdPerson,
+            SaddlePresentation::MOUNTED,
+            UPRIGHT,
+            |_| false,
+        );
+        assert!(
+            (placed.translation - (eye + Vec3::Z * MOUNTED_BOOM_LENGTH)).length() < 1e-4,
+            "the mounted boom put the camera at {}",
+            placed.translation
+        );
+
+        // And the obstruction rule is the one the walking boom has: the same wall 2.5
+        // blocks back stops the longer boom at the same clearance in front of it.
+        let feet = Vec3::new(0.5, 64.0, -2.5);
+        let eye = feet + Vec3::Y * SADDLE_EYE_HEIGHT;
+        let stopped = camera_placement_with_saddle(
+            feet,
+            look,
+            orbit,
+            ViewMode::ThirdPerson,
+            SaddlePresentation::MOUNTED,
+            UPRIGHT,
+            |voxel| voxel.z >= 0,
+        );
+        let travelled = stopped.translation.z - eye.z;
+        assert!(
+            (travelled - (2.5 - BOOM_CLEARANCE)).abs() < 1e-4,
+            "the mounted boom travelled {travelled} towards a wall 2.5 blocks away"
+        );
     }
 
     #[test]
