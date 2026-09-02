@@ -8,7 +8,8 @@
 //! reproduced here. [`FlowingWaterExtension`] is a `MaterialExtension`, so Bevy composes
 //! the standard PBR fragment shader with one of ours and the base half keeps answering
 //! for lighting, fog, tonemapping and alpha exactly as it did — the extension modulates
-//! diffuse brightness and gives moving foam a small emissive term, and nothing else.
+//! diffuse brightness, gives moving foam a small emissive term and perturbs the
+//! lighting normal from the ripple's analytic gradient. The surface itself stays flat.
 //!
 //! ## Nothing is decided here
 //!
@@ -230,6 +231,68 @@ mod tests {
             .unwrap_or_else(|error| panic!("{name} is not a float: {error}"))
     }
 
+    /// The three sampling branches in the WGSL, mirrored only for the arithmetic tests
+    /// below. Every number still comes out of [`SOURCE`]; these functions give Rust a
+    /// way to prove that each phase sees time without becoming another declaration.
+    #[derive(Clone, Copy, Debug)]
+    enum WaterKind {
+        Still,
+        Running,
+        Falling,
+    }
+
+    fn sample_point(kind: WaterKind, time: f32) -> [f32; 2] {
+        let world = [2.3_f32, 4.1, -1.7];
+        match kind {
+            WaterKind::Still => {
+                let drift = shader_const("STILL_DRIFT");
+                [world[0] + drift * 0.7 * time, world[2] + drift * time]
+            }
+            WaterKind::Running => {
+                // A full-strength flow in a non-axis-aligned direction exercises both
+                // components of the basis used by the shader.
+                let direction = [0.8_f32, 0.6];
+                let perpendicular = [-direction[1], direction[0]];
+                let xz = [world[0], world[2]];
+                let along =
+                    xz[0] * direction[0] + xz[1] * direction[1] - shader_const("FLOW_SPEED") * time;
+                let across = xz[0] * perpendicular[0] + xz[1] * perpendicular[1];
+                [along, across * shader_const("RUN_STRETCH")]
+            }
+            WaterKind::Falling => [
+                world[1] + shader_const("FALL_SPEED") * time,
+                (world[0] + world[2]) * shader_const("FALL_STRETCH"),
+            ],
+        }
+    }
+
+    fn ripple_phases(point: [f32; 2]) -> [f32; 3] {
+        let scale = shader_const("RIPPLE_SCALE");
+        let ratio = shader_const("OCTAVE_RATIO");
+        [
+            point[0] * scale,
+            point[1] * scale * 1.3 + point[0] * 0.21,
+            (point[0] + point[1]) * scale * ratio + 1.7,
+        ]
+    }
+
+    fn ripple_sample(point: [f32; 2]) -> [f32; 3] {
+        let phases = ripple_phases(point);
+        let scale = shader_const("RIPPLE_SCALE");
+        let ratio = shader_const("OCTAVE_RATIO");
+        let weight = shader_const("OCTAVE_WEIGHT");
+        let divisor = 1.0 + weight;
+        let value = (phases[0].sin() * phases[1].sin() + phases[2].sin() * weight) / divisor;
+        let gradient_x = (phases[0].cos() * scale * phases[1].sin()
+            + phases[0].sin() * phases[1].cos() * 0.21
+            + phases[2].cos() * scale * ratio * weight)
+            / divisor;
+        let gradient_y = (phases[0].sin() * phases[1].cos() * scale * 1.3
+            + phases[2].cos() * scale * ratio * weight)
+            / divisor;
+        [value, gradient_x, gradient_y]
+    }
+
     /// **This test used to pin `RIPPLE_DEPTH` at 0.08, and 0.08 was the defect.**
     ///
     /// #598 set one amplitude for all three waters and argued it as a ceiling: visible
@@ -296,17 +359,102 @@ mod tests {
         // Every octave in the numerator must appear in the divisor. Two octaves today:
         // the unit-weight coarse term and OCTAVE_WEIGHT's fine one.
         assert!(
-            SOURCE.contains("(coarse + fine * OCTAVE_WEIGHT) / (1.0 + OCTAVE_WEIGHT)"),
+            SOURCE.contains("let divisor = 1.0 + OCTAVE_WEIGHT;")
+                && SOURCE.contains("(coarse + fine * OCTAVE_WEIGHT) / divisor"),
             "ripple must divide by the sum of its octave weights, or it is no longer \
              bounded by one and every depth constant above it stops being a bound"
         );
         // And exactly two octaves: a third term would need its weight in that divisor,
         // and this is what notices one arriving without it.
         assert_eq!(
-            SOURCE.matches("let coarse").count() + SOURCE.matches("let fine").count(),
+            SOURCE.matches("let coarse =").count() + SOURCE.matches("let fine =").count(),
             2,
             "ripple gained or lost an octave; its divisor and the depth constants both \
              have to move with it"
+        );
+    }
+
+    /// Every sine in every branch must see time. The old still-water drift was
+    /// `(-d, +d)`, so the fine octave's `point.x + point.y` cancelled time exactly even
+    /// though the two-dimensional sample point itself moved. Checking all three phases,
+    /// rather than only the final sum, is what catches that frozen quarter of the wave.
+    #[test]
+    fn every_water_moves_every_ripple_phase() {
+        for branch in [
+            "point = world.xz + vec2<f32>(STILL_DRIFT * 0.7, STILL_DRIFT) * time;",
+            "point = vec2<f32>(along, across * RUN_STRETCH);",
+            "point = vec2<f32>(world.y + FALL_SPEED * time, (world.x + world.z) * FALL_STRETCH);",
+        ] {
+            assert!(
+                SOURCE.contains(branch),
+                "the Rust arithmetic no longer mirrors the shader branch: {branch}"
+            );
+        }
+        for kind in [WaterKind::Still, WaterKind::Running, WaterKind::Falling] {
+            let before_point = sample_point(kind, 2.25);
+            let after_point = sample_point(kind, 3.25);
+            let before = ripple_phases(before_point);
+            let after = ripple_phases(after_point);
+            for phase in 0..before.len() {
+                assert!(
+                    (after[phase] - before[phase]).abs() > 1.0e-4,
+                    "{kind:?} phase {phase} is frozen: {} then {}",
+                    before[phase],
+                    after[phase]
+                );
+            }
+            assert!(
+                (ripple_sample(after_point)[0] - ripple_sample(before_point)[0]).abs() > 1.0e-4,
+                "{kind:?} evaluates to the same ripple one second later"
+            );
+        }
+    }
+
+    /// The derivative returned beside the wave is what turns the flat face's PBR
+    /// normal. Compare it with a centred finite difference so a sign, scale or octave
+    /// omitted from either component cannot silently move the highlight the wrong way.
+    #[test]
+    fn the_analytic_ripple_gradient_matches_the_wave() {
+        let epsilon = 1.0e-3;
+        for point in [[0.3, -1.7], [2.8, 4.1], [-3.2, 0.9]] {
+            let sample = ripple_sample(point);
+            for axis in 0..2 {
+                let mut before = point;
+                let mut after = point;
+                before[axis] -= epsilon;
+                after[axis] += epsilon;
+                let numerical =
+                    (ripple_sample(after)[0] - ripple_sample(before)[0]) / (2.0 * epsilon);
+                assert!(
+                    (sample[axis + 1] - numerical).abs() < 2.0e-4,
+                    "gradient {axis} at {point:?}: analytic {} vs numerical {numerical}",
+                    sample[axis + 1]
+                );
+            }
+        }
+    }
+
+    /// A moving surface has to show motion on the timescale of looking at it, not on
+    /// the timescale of waiting beside it. The fine octave is the fastest visible cue;
+    /// currents and falls carry at least three quarters of a crest past a point each
+    /// second, while still water remains deliberately slower.
+    #[test]
+    fn moving_water_carries_a_fine_crest_past_in_about_a_second() {
+        let fine_rate = |kind| {
+            let before = ripple_phases(sample_point(kind, 2.25));
+            let after = ripple_phases(sample_point(kind, 3.25));
+            (after[2] - before[2]).abs() / std::f32::consts::TAU
+        };
+        let still = fine_rate(WaterKind::Still);
+        let running = fine_rate(WaterKind::Running);
+        let falling = fine_rate(WaterKind::Falling);
+        assert!(
+            running >= 0.75 && falling > running,
+            "moving fine-octave crest rates must be visible within about a second: {running} / {falling} Hz"
+        );
+        assert!(
+            still < running / 4.0,
+            "still water must remain much quieter than a current: {still} / {running} Hz"
         );
     }
 
@@ -372,6 +520,33 @@ mod tests {
         assert!(
             !SOURCE.contains("out.color.rgb * brightness"),
             "ripple brightness after lighting would also scale the specular highlight"
+        );
+    }
+
+    /// The low roughness in `render.rs` makes the highlight the water's strongest cue.
+    /// The analytic ripple gradient therefore has to reach PBR's lighting normal before
+    /// lighting runs, while leaving `world_normal` (and thus geometry/shadows) alone.
+    #[test]
+    fn the_ripple_moves_the_pbr_highlight_without_moving_the_surface() {
+        let normal = SOURCE
+            .find("pbr_input.N = normalize(pbr_input.N - NORMAL_STRENGTH * surface_gradient);")
+            .expect("the ripple gradient must perturb PBR's lighting normal");
+        let lighting = SOURCE
+            .find("out.color = apply_pbr_lighting(pbr_input);")
+            .expect("the shader must retain standard PBR lighting");
+        let strength = shader_const("NORMAL_STRENGTH");
+
+        assert!(
+            normal < lighting,
+            "the normal must move before PBR reads it"
+        );
+        assert!(
+            strength > 0.0 && strength <= 0.1,
+            "normal perturbation must stay subtle on a large flat quad, got {strength}"
+        );
+        assert!(
+            !SOURCE.contains("pbr_input.world_normal ="),
+            "the shader must not change the flat geometry normal used by shadows"
         );
     }
 
