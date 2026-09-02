@@ -20,8 +20,8 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
-use super::set_mode;
 use super::text_input::{TextEdit, apply_key};
+use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
 const LINE_COUNT: usize = 8;
 const LINE_LIFETIME: Duration = Duration::from_secs(12);
@@ -40,11 +40,18 @@ const LOG_BOTTOM: f32 = 70.0;
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct ChatLine(String);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogKind {
+    Player,
+    Highlight,
+    System(PlayerMessageKind),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct LogLine {
     text: String,
     added: Duration,
-    highlighted: bool,
+    kind: LogKind,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -52,32 +59,29 @@ pub(super) struct ChatLog(VecDeque<LogLine>);
 
 impl ChatLog {
     fn push(&mut self, text: String, now: Duration) {
+        self.push_kind(text, now, LogKind::Player);
+    }
+
+    fn push_kind(&mut self, text: String, now: Duration, kind: LogKind) {
         if self.0.len() == LINE_COUNT {
             self.0.pop_front();
         }
         self.0.push_back(LogLine {
             text,
             added: now,
-            highlighted: false,
+            kind,
         });
     }
 
     pub(super) fn push_highlighted(&mut self, text: String, now: Duration) {
-        if self.0.len() == LINE_COUNT {
-            self.0.pop_front();
-        }
-        self.0.push_back(LogLine {
-            text,
-            added: now,
-            highlighted: true,
-        });
+        self.push_kind(text, now, LogKind::Highlight);
     }
 
     #[cfg(test)]
     pub(super) fn newest(&self) -> Option<(&str, bool)> {
         self.0
             .back()
-            .map(|line| (line.text.as_str(), line.highlighted))
+            .map(|line| (line.text.as_str(), line.kind != LogKind::Player))
     }
 }
 
@@ -99,13 +103,19 @@ impl Plugin for ChatUiPlugin {
             .init_resource::<ChatInbox>()
             .init_resource::<PartyLogInbox>()
             .add_message::<KeyboardInput>()
+            .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_chat)
             .add_systems(
                 Update,
                 (
-                    ingest_server_lines.after(DrainNetwork),
-                    ingest_party_lines.after(ApplySnapshots),
+                    ingest_server_lines
+                        .after(DrainNetwork)
+                        .in_set(PublishPlayerMessages),
+                    ingest_party_lines
+                        .after(ApplySnapshots)
+                        .in_set(PublishPlayerMessages),
                     capture_chat.after(ApplyInputMode),
+                    ingest_player_messages.after(PublishPlayerMessages),
                     render_chat.in_set(RenderChat),
                 )
                     .chain(),
@@ -166,18 +176,18 @@ fn ingest_server_lines(
     time: Res<Time<Real>>,
     mut chat: ResMut<ChatInbox>,
     mut log: ResMut<ChatLog>,
+    mut player_messages: MessageWriter<PlayerMessage>,
 ) {
     let now = time.elapsed();
     for entry in chat.take() {
         match entry {
             ChatEntry::Message(message) => {
-                let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
                 let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
-                let line = format!("{sender}: {text}");
                 if message.sender_name == COMMAND_SENDER_NAME {
-                    log.push_highlighted(line, now);
+                    player_messages.write(PlayerMessage::new(PlayerMessageKind::Server, text));
                 } else {
-                    log.push(line, now);
+                    let sender = bounded_display(&message.sender_name, SENDER_CHARACTERS);
+                    log.push(format!("{sender}: {text}"), now);
                 }
             }
             ChatEntry::PartyInvite(invite) => {
@@ -204,6 +214,43 @@ fn ingest_party_lines(
     for line in inbox.take() {
         log.push(line, time.elapsed());
     }
+}
+
+fn ingest_player_messages(
+    time: Res<Time<Real>>,
+    mut messages: MessageReader<PlayerMessage>,
+    mut log: ResMut<ChatLog>,
+) {
+    let now = time.elapsed();
+    for message in messages.read() {
+        let text = bounded_display(&message.text, MESSAGE_CHARACTERS);
+        log.push_kind(
+            format!("{} {text}", message_tag(message.kind)),
+            now,
+            LogKind::System(message.kind),
+        );
+    }
+}
+
+const fn message_tag(kind: PlayerMessageKind) -> &'static str {
+    match kind {
+        PlayerMessageKind::Server => "[SERVER]",
+        PlayerMessageKind::Info => "[INFO]",
+        PlayerMessageKind::Warn => "[WARN]",
+        PlayerMessageKind::Error => "[ERROR]",
+    }
+}
+
+fn message_colour(kind: LogKind, alpha: f32) -> Color {
+    let (red, green, blue) = match kind {
+        LogKind::Player => (1.0, 1.0, 1.0),
+        LogKind::Highlight => (1.0, 0.72, 0.25),
+        LogKind::System(PlayerMessageKind::Server) => (1.0, 0.72, 0.25),
+        LogKind::System(PlayerMessageKind::Info) => (0.45, 0.78, 1.0),
+        LogKind::System(PlayerMessageKind::Warn) => (1.0, 0.52, 0.16),
+        LogKind::System(PlayerMessageKind::Error) => (1.0, 0.25, 0.22),
+    };
+    Color::srgba(red, green, blue, alpha)
 }
 
 fn capture_chat(
@@ -367,11 +414,7 @@ fn render_chat(
         };
         text.0.clone_from(&line.text);
         let alpha = line_alpha(*mode, visible, now.saturating_sub(line.added));
-        colour.0 = if line.highlighted {
-            Color::srgba(1.0, 0.72, 0.25, alpha)
-        } else {
-            Color::srgba(1.0, 1.0, 1.0, alpha)
-        };
+        colour.0 = message_colour(line.kind, alpha);
     }
 
     let Ok(mut input) = input.single_mut() else {
@@ -568,13 +611,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_invite_is_a_highlighted_line_with_both_commands() {
+    fn server_ingest_app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .init_resource::<ChatInbox>()
             .init_resource::<ChatLog>()
-            .add_systems(Update, ingest_server_lines);
+            .add_message::<PlayerMessage>()
+            .add_systems(
+                Update,
+                (ingest_server_lines, ingest_player_messages).chain(),
+            );
+        app
+    }
+
+    #[test]
+    fn an_invite_remains_a_highlighted_line_with_both_commands() {
+        let mut app = server_ingest_app();
         app.world_mut()
             .resource_mut::<ChatInbox>()
             .push(ChatEntry::PartyInvite(PartyInvite {
@@ -588,16 +640,12 @@ mod tests {
             line.text,
             "Eivor invites you to a party - /accept or /decline"
         );
-        assert!(line.highlighted);
+        assert_eq!(line.kind, LogKind::Highlight);
     }
 
     #[test]
-    fn the_reserved_command_answer_is_visibly_distinct() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<ChatInbox>()
-            .init_resource::<ChatLog>()
-            .add_systems(Update, ingest_server_lines);
+    fn the_reserved_command_answer_is_a_server_line() {
+        let mut app = server_ingest_app();
         app.world_mut()
             .resource_mut::<ChatInbox>()
             .push(ChatEntry::Message(ChatMessage {
@@ -607,8 +655,71 @@ mod tests {
             }));
         app.update();
         let line = app.world().resource::<ChatLog>().0.back().unwrap();
-        assert_eq!(line.text, "Server: Development commands are disabled.");
-        assert!(line.highlighted);
+        assert_eq!(line.text, "[SERVER] Development commands are disabled.");
+        assert_eq!(line.kind, LogKind::System(PlayerMessageKind::Server));
+    }
+
+    #[test]
+    fn ordinary_player_chat_keeps_name_and_has_no_system_tag() {
+        let mut app = server_ingest_app();
+        app.world_mut()
+            .resource_mut::<ChatInbox>()
+            .push(ChatEntry::Message(ChatMessage {
+                sender_entity_id: 7,
+                sender_name: "Eivor".to_owned(),
+                text: "hello".to_owned(),
+            }));
+        app.update();
+        let line = app.world().resource::<ChatLog>().0.back().unwrap();
+        assert_eq!(line.text, "Eivor: hello");
+        assert_eq!(line.kind, LogKind::Player);
+    }
+
+    #[test]
+    fn every_message_kind_has_one_tag_and_colour() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<ChatLog>()
+            .add_message::<PlayerMessage>()
+            .add_systems(Update, ingest_player_messages);
+        for kind in [
+            PlayerMessageKind::Server,
+            PlayerMessageKind::Info,
+            PlayerMessageKind::Warn,
+            PlayerMessageKind::Error,
+        ] {
+            app.world_mut()
+                .write_message(PlayerMessage::new(kind, "message"));
+        }
+        app.update();
+
+        let log = app.world().resource::<ChatLog>();
+        let expected = [
+            ("[SERVER] message", PlayerMessageKind::Server),
+            ("[INFO] message", PlayerMessageKind::Info),
+            ("[WARN] message", PlayerMessageKind::Warn),
+            ("[ERROR] message", PlayerMessageKind::Error),
+        ];
+        for (line, (text, kind)) in log.0.iter().zip(expected) {
+            assert_eq!(line.text, text);
+            assert_eq!(line.kind, LogKind::System(kind));
+        }
+        assert_eq!(
+            message_colour(LogKind::System(PlayerMessageKind::Server), 0.5),
+            Color::srgba(1.0, 0.72, 0.25, 0.5)
+        );
+        assert_eq!(
+            message_colour(LogKind::System(PlayerMessageKind::Info), 0.5),
+            Color::srgba(0.45, 0.78, 1.0, 0.5)
+        );
+        assert_eq!(
+            message_colour(LogKind::System(PlayerMessageKind::Warn), 0.5),
+            Color::srgba(1.0, 0.52, 0.16, 0.5)
+        );
+        assert_eq!(
+            message_colour(LogKind::System(PlayerMessageKind::Error), 0.5),
+            Color::srgba(1.0, 0.25, 0.22, 0.5)
+        );
     }
 
     #[test]
@@ -617,7 +728,8 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<PartyLogInbox>()
             .init_resource::<ChatLog>()
-            .add_systems(Update, ingest_party_lines);
+            .add_message::<PlayerMessage>()
+            .add_systems(Update, (ingest_party_lines, ingest_player_messages).chain());
         app.world_mut()
             .resource_mut::<PartyLogInbox>()
             .push("Eivor joined the party".to_owned());

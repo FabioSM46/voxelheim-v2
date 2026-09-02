@@ -111,7 +111,7 @@ pub(crate) use items::known_item_ids;
 pub(crate) use items::{ITEM_SILVER, ItemShape, Livery, item_linear_rgba, item_livery, item_shape};
 pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
-pub use mounts::{LearnedMounts, MountFeedback, mount_label, preference_from_mount};
+pub use mounts::{LearnedMounts, mount_label, preference_from_mount};
 pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 // The sky the low-health vignette has to be visible against. Test-only and deliberately
 // so: `ui/health.rs` reads the colour to assert that its edge is not one the night has

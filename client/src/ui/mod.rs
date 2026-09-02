@@ -58,6 +58,46 @@ use crate::settings::{Bindings, Control, Settings};
 use crate::world::palette;
 use settings::SettingsScreen;
 
+/// The kinds of general gameplay communication the chat surface presents.
+///
+/// Producers choose only the meaning of a line. Chat owns its tag, colour, lifetime and
+/// position, so a new producer cannot accidentally grow another notification surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlayerMessageKind {
+    Server,
+    #[allow(
+        dead_code,
+        reason = "the second reviewable half of issue 840 migrates info producers"
+    )]
+    Info,
+    Warn,
+    #[allow(
+        dead_code,
+        reason = "the second reviewable half of issue 840 migrates error producers"
+    )]
+    Error,
+}
+
+/// One player-facing gameplay line waiting for the chat log.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlayerMessage {
+    pub(crate) kind: PlayerMessageKind,
+    pub(crate) text: String,
+}
+
+impl PlayerMessage {
+    pub(crate) fn new(kind: PlayerMessageKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+        }
+    }
+}
+
+/// All gameplay-message producers run before chat consumes their lines for this frame.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PublishPlayerMessages;
+
 /// One square in either inventory view, in logical pixels.
 pub(super) const CELL_SIZE: f32 = 52.0;
 
@@ -174,6 +214,7 @@ impl Plugin for UiPlugin {
             .add_message::<RefreshServerList>()
             .add_message::<AppExit>()
             .add_message::<ChooseCharacter>()
+            .add_message::<PlayerMessage>()
             .add_plugins((
                 character::CharacterUiPlugin,
                 chat::ChatUiPlugin,

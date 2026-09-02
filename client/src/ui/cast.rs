@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use crate::net::{CastKind, Session};
-use crate::player::{MountFeedback, SnapshotBuffer};
+use crate::player::SnapshotBuffer;
 
 #[derive(Component)]
 struct CastRoot;
@@ -12,17 +12,13 @@ struct CastFill;
 #[derive(Component)]
 struct CastLabel;
 
-#[derive(Component)]
-struct MountFeedbackText;
-
 pub(super) struct CastUiPlugin;
 
 impl Plugin for CastUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapshotBuffer>()
-            .init_resource::<MountFeedback>()
             .add_systems(Startup, spawn_cast_ui)
-            .add_systems(Update, (refresh_cast, refresh_feedback));
+            .add_systems(Update, refresh_cast);
     }
 }
 
@@ -72,24 +68,6 @@ fn spawn_cast_ui(mut commands: Commands) {
                 BackgroundColor(Color::srgb(0.83, 0.62, 0.22)),
             ));
         });
-    commands.spawn((
-        MountFeedbackText,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(18.0),
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(30.0),
-            bottom: Val::Px(62.0),
-            width: Val::Percent(40.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        GlobalZIndex(14),
-    ));
 }
 
 fn refresh_cast(
@@ -118,17 +96,5 @@ fn refresh_cast(
     };
     for mut text in &mut labels {
         text.0 = format!("{label}  {}%", u16::from(state.progress) * 100 / 255);
-    }
-}
-
-fn refresh_feedback(
-    feedback: Res<MountFeedback>,
-    mut labels: Query<&mut Text, With<MountFeedbackText>>,
-) {
-    if !feedback.is_changed() {
-        return;
-    }
-    for mut text in &mut labels {
-        text.0 = feedback.line().unwrap_or_default().to_owned();
     }
 }
