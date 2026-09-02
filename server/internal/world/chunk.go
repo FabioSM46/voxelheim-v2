@@ -202,6 +202,12 @@ const (
 	SlateStairEastTop     Block = 51
 	SlateStairSouthTop    Block = 52
 	SlateStairWestTop     Block = 53
+
+	// A leafless winter bramble rooted in tundra snow. One id carries both the
+	// canes and berries because fruit placement is presentation, not a second
+	// worldgen outcome. It is appended after every persisted and wire-visible id,
+	// has no item or drop, and is [Cover]: a body walks through the sparse canes.
+	WinterBramble Block = 54
 )
 
 // ShapeKind is the geometry a block occupies inside its voxel.
@@ -390,7 +396,8 @@ func Solid(b Block) bool {
 // Cover reports whether a block is ground cover: a thing that stands in a voxel
 // without filling it.
 //
-// **Exactly the three flowers today, and three consequences, each enforced elsewhere:**
+// **The three flowers and the winter bramble today, and three consequences, each
+// enforced elsewhere:**
 //
 //   - A body passes through it — [Solid] is false, so the collision sweep, the
 //     standable-floor test and a creature's step-up probe all refuse it.
@@ -402,7 +409,7 @@ func Solid(b Block) bool {
 // Not folded into [Fluid]: a swim rule reading it would have players treading water
 // in a meadow. NextWater has a fourth arm for the same reason.
 func Cover(b Block) bool {
-	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue
+	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue || b == WinterBramble
 }
 
 // Fluid reports whether a block is one a body wades and swims in rather than walks
