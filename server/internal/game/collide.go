@@ -218,9 +218,8 @@ type body struct {
 
 // playerBody is the box a player on foot occupies, and the only body until drops
 // arrived. mountedBody is the one a mounted player occupies — horse and rider as one
-// square — and for now the mount admission is its only reader: the movement sweep and
-// everything that aims at a player still measure playerBody, and the second half of
-// #811 is what moves them.
+// square — and [Player.body] is where the two are chosen between, so that no caller
+// picks for itself.
 var (
 	playerBody  = body{width: PlayerWidth, height: PlayerHeight}
 	mountedBody = body{width: MountedWidth, height: MountedHeight}
@@ -247,7 +246,12 @@ func (bd body) positionOf(b box) [3]float64 {
 	return [3]float64{b.min[0] + half, b.min[1], b.min[2] + half}
 }
 
-// playerBox is the box a player standing at pos occupies.
+// playerBox is the box a player on foot standing at pos occupies.
+//
+// For a player who exists, ask [Player.box] instead: it answers with the mounted body
+// while a horse is under them, and this one never does. What is left for this
+// function is the player who is not there yet — a respawn column being searched, a
+// station radius measured from a position nobody is standing on — and the tests.
 func playerBox(pos [3]float64) box { return playerBody.boxAt(pos) }
 
 // translate moves the box along one axis.

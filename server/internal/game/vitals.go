@@ -466,7 +466,7 @@ func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
 		bed[2] += (deathZ - bed[2]) / reach * respawnSettlementOffset
 	}
 
-	if !p.sim.respawnColumnFitsLocked(bed, int64(town.Plateau)) {
+	if !p.sim.respawnColumnFitsLocked(p.body(), bed, int64(town.Plateau)) {
 		p.sim.log.Debug("respawn fell through to the capital gate square: the settlement column is not standable",
 			"entity_id", p.entityID, "settlement", [2]int64{town.CentreX, town.CentreZ},
 			"bed", bed)
@@ -475,8 +475,10 @@ func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
 	return bed, true
 }
 
-// respawnColumnFitsLocked reports whether a body put down at pos would be standing on
-// generated ground with the space it occupies clear.
+// respawnColumnFitsLocked reports whether body bd put down at pos would be standing on
+// generated ground with the space it occupies clear. The caller hands in [Player.body]:
+// death dismounts, so by the time a respawn is computed it is the walking one, and if
+// that ever stops being true the column is still asked about the right box.
 //
 // [Sim.footprintFitsLocked]'s two questions asked about a body instead of a structure's
 // cells, and asked through the same [Terrain.Block] read: resident, because a tick may
@@ -488,11 +490,11 @@ func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
 // solid" rather than "all of them are clear".
 //
 // The caller holds sim.mu.
-func (s *Sim) respawnColumnFitsLocked(pos [3]float64, ground int64) bool {
-	body := playerBox(pos)
-	x0, x1 := voxelSpan(body.min[0], body.max[0])
-	z0, z1 := voxelSpan(body.min[2], body.max[2])
-	top := int64(math.Ceil(body.max[1])) - 1
+func (s *Sim) respawnColumnFitsLocked(bd body, pos [3]float64, ground int64) bool {
+	column := bd.boxAt(pos)
+	x0, x1 := voxelSpan(column.min[0], column.max[0])
+	z0, z1 := voxelSpan(column.min[2], column.max[2])
+	top := int64(math.Ceil(column.max[1])) - 1
 
 	for z := z0; z <= z1; z++ {
 		for x := x0; x <= x1; x++ {
@@ -545,9 +547,11 @@ func fallDamage(impact float64) uint16 {
 // least one of them must be something. Anything else is answered conservatively, which
 // here means no damage.
 //
+// feet is the box that just landed — [Player.box], so a rider's wider footprint reads
+// the wider layer.
+//
 // A non-generating read, on the tick, by contract: Terrain.Block never waits.
-func landedOnResidentTerrain(t Terrain, pos [3]float64) bool {
-	feet := playerBox(pos)
+func landedOnResidentTerrain(t Terrain, feet box) bool {
 	// The layer immediately below the feet. collisionSkin holds the box a hair above the
 	// face it landed on, so the voxel that stopped it is the one under that gap.
 	y := int64(math.Floor(feet.min[1] - collisionSkin*2))

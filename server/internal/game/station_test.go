@@ -281,10 +281,10 @@ func TestAVillageForgeIsAStationToWorkAt(t *testing.T) {
 
 	h.sim.mu.Lock()
 	defer h.sim.mu.Unlock()
-	if !h.sim.stationWithinLocked(vnet.StructureKindForge, beside, ForgeCraftRadius) {
+	if !h.sim.stationWithinLocked(vnet.StructureKindForge, playerBox(beside), ForgeCraftRadius) {
 		t.Error("standing beside the village forge is not standing at a forge")
 	}
-	if h.sim.stationWithinLocked(vnet.StructureKindForge, away, ForgeCraftRadius) {
+	if h.sim.stationWithinLocked(vnet.StructureKindForge, playerBox(away), ForgeCraftRadius) {
 		t.Error("the village forge reaches forty blocks")
 	}
 }

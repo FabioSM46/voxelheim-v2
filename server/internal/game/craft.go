@@ -270,8 +270,9 @@ func (t *slotTable) craft(r recipe) bool {
 	return true
 }
 
-// stationWithinLocked reports whether a structure of this kind stands within radius of a
-// position, whoever owns it.
+// stationWithinLocked reports whether a structure of this kind stands within radius of
+// the centre of a body's box, whoever owns it. A crafter hands in [Player.box]; the
+// spawn director, asking about a spot nobody stands on yet, hands in [playerBox] of it.
 //
 // **Ownership is deliberately not consulted.** A forge is a place, not a possession: any
 // player may work at any forge they can walk to, and the owner field exists for removal
@@ -290,12 +291,12 @@ func (t *slotTable) craft(r recipe) bool {
 // this costs every other kind one already-loaded bool.
 //
 // The caller holds Sim.mu.
-func (s *Sim) stationWithinLocked(kind vnet.StructureKind, pos [3]float64, radius float64) bool {
+func (s *Sim) stationWithinLocked(kind vnet.StructureKind, from box, radius float64) bool {
 	for _, held := range s.structures {
 		if held.kind != kind || held.doused {
 			continue
 		}
-		if distanceToVoxel(pos, held.anchorVoxel()) <= radius {
+		if distanceToVoxel(from, held.anchorVoxel()) <= radius {
 			return true
 		}
 	}
@@ -337,7 +338,7 @@ func (p *Player) Craft(req protocol.CraftRequest) (protocol.InventoryState, erro
 		if !configured {
 			return protocol.InventoryState{}, fmt.Errorf("station %s has no crafting radius", r.station)
 		}
-		if !p.sim.stationWithinLocked(r.station, p.pos, radius) {
+		if !p.sim.stationWithinLocked(r.station, p.box(), radius) {
 			return protocol.InventoryState{}, fmt.Errorf("no %s stands within %.1f blocks", r.station, radius)
 		}
 	}

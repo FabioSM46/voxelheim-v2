@@ -191,7 +191,7 @@ func TestHeavyRainDousesACampfireAndLightRainRelightsIt(t *testing.T) {
 
 	h.sim.mu.Lock()
 	doused := fire.doused
-	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.box(), CampfireCookRadius)
 	safe := h.sim.nearACampfireLocked(player.pos)
 	h.sim.mu.Unlock()
 	if !doused || station || safe {
@@ -209,7 +209,7 @@ func TestHeavyRainDousesACampfireAndLightRainRelightsIt(t *testing.T) {
 	h.step()
 	h.sim.mu.Lock()
 	doused = fire.doused
-	station = h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	station = h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.box(), CampfireCookRadius)
 	safe = h.sim.nearACampfireLocked(player.pos)
 	h.sim.mu.Unlock()
 	if doused || !station || !safe {
@@ -242,7 +242,7 @@ func TestCampfirePlacedAfterTheWeatherPassIsDousedImmediately(t *testing.T) {
 	fire := h.plantCampfire(player, 1, [3]int32{0, 63, 0})
 	h.sim.mu.Lock()
 	doused := fire.doused
-	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.pos, CampfireCookRadius)
+	station := h.sim.stationWithinLocked(vnet.StructureKindCampfire, player.box(), CampfireCookRadius)
 	safe := h.sim.nearACampfireLocked(player.pos)
 	h.sim.mu.Unlock()
 	if !doused || station || safe {

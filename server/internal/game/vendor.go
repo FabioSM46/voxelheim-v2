@@ -208,7 +208,7 @@ func (p *Player) tradeableLocked(r *resident) bool {
 	if !withinView(p.chunk, r.chunk, p.sim.viewDistance) {
 		return false
 	}
-	distance := boxDistance(playerBox(p.pos), residentBody.boxAt(r.pos))
+	distance := boxDistance(p.box(), residentBody.boxAt(r.pos))
 	return !math.IsNaN(distance) && distance <= p.reachLocked()
 }
 

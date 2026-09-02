@@ -624,7 +624,7 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	if reason, err := p.mountedActionLocked(); err != nil {
 		return protocol.InventoryState{}, reason, err
 	}
-	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, anchor); distance > reach {
+	if reach, distance := p.reachLocked(), distanceToVoxel(p.box(), anchor); distance > reach {
 		return protocol.InventoryState{}, vnet.RefusalReasonOutOfReach, fmt.Errorf("the anchor is %.2f blocks from the player, past the reach of %.1f", distance, reach)
 	}
 	// Beside the reach check and under this lock, which is where every ward check in this
@@ -762,7 +762,7 @@ func (p *Player) removeOwnStructure(structureID uint64) (structure, [3]int64, er
 		// two players apart rather than to hold either one's key.
 		return structure{}, [3]int64{}, fmt.Errorf("structure %d belongs to player %s", structureID, held.owner.Short())
 	}
-	if reach, distance := p.reachLocked(), distanceToVoxel(p.pos, held.anchorVoxel()); distance > reach {
+	if reach, distance := p.reachLocked(), distanceToVoxel(p.box(), held.anchorVoxel()); distance > reach {
 		return structure{}, [3]int64{}, fmt.Errorf("structure %d is %.2f blocks away, past the reach of %.1f", structureID, distance, reach)
 	}
 	// Beside the reach check, like every other ward check. Removal is the one refused

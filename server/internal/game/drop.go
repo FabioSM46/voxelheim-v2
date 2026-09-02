@@ -355,7 +355,7 @@ func (s *Sim) collectDropsLocked(players []*Player, drops []*itemDrop) []*itemDr
 			if d.count == 0 {
 				break
 			}
-			if boxDistance(d.box(), playerBox(p.pos)) > DropPickupRadius {
+			if boxDistance(d.box(), p.box()) > DropPickupRadius {
 				continue
 			}
 
