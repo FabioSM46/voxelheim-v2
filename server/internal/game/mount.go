@@ -144,10 +144,16 @@ func (p *Player) mountedActionLocked() (vnet.RefusalReason, error) {
 	return vnet.RefusalReasonActionForbiddenWhileMounted, ErrActionForbiddenWhileMounted
 }
 
-// mountFitLocked distinguishes the two spatial refusals. A solid inside the three-
-// block rider volume is a low ceiling; a solid above that volume but below the top
-// of the authoritative streamed cube means the player is indoors. Movement keeps
-// using playerBody after mounting, so this is the only enlarged box in the server.
+// mountFitLocked distinguishes the two spatial refusals, and it is asked twice — at
+// admission and again on the completion tick — because a block placed beside the
+// caster during the two seconds is a block the completion must not embed the body in.
+//
+// **The admission sweep is the mounted body itself.** A solid that mountedBody at
+// this position overlaps is a low ceiling, whether it is the roof the walking body
+// clears by a block or the wall it clears by a tenth; the predicate is [overlaps], the
+// same one the movement sweep answers "already inside something" with, so what is
+// admitted here is exactly what the next tick can move. A solid above that box but
+// below the top of the authoritative streamed cube means the player is indoors.
 //
 // The caller holds Sim.mu. Terrain reads are non-generating.
 func (p *Player) mountFitLocked() (vnet.RefusalReason, error) {
@@ -155,21 +161,14 @@ func (p *Player) mountFitLocked() (vnet.RefusalReason, error) {
 		return vnet.RefusalReasonMountNotGrounded, errors.New("mounting requires authoritative ground contact")
 	}
 
-	clearance := (body{width: PlayerWidth, height: MountClearanceHeight}).boxAt(p.pos)
-	x0, x1 := voxelSpan(clearance.min[0], clearance.max[0])
-	z0, z1 := voxelSpan(clearance.min[2], clearance.max[2])
-	y0, y1 := voxelSpan(clearance.min[1], clearance.max[1])
-	for y := y0; y <= y1; y++ {
-		for z := z0; z <= z1; z++ {
-			for x := x0; x <= x1; x++ {
-				if p.sim.terrain.Solid(x, y, z) {
-					return vnet.RefusalReasonMountLowCeiling, fmt.Errorf("mount clearance is blocked at [%d %d %d]", x, y, z)
-				}
-			}
-		}
+	fit := mountedBody.boxAt(p.pos)
+	if overlaps(p.sim.terrain, fit) {
+		return vnet.RefusalReasonMountLowCeiling, fmt.Errorf("the mounted body does not fit at [%.2f %.2f %.2f]", p.pos[0], p.pos[1], p.pos[2])
 	}
 
-	roofBottom := int64(math.Ceil(clearance.max[1]))
+	x0, x1 := voxelSpan(fit.min[0], fit.max[0])
+	z0, z1 := voxelSpan(fit.min[2], fit.max[2])
+	roofBottom := int64(math.Ceil(fit.max[1]))
 	roofTop := (int64(p.chunk.Y)+int64(p.sim.viewDistance)+1)*world.ChunkSize - 1
 	for y := roofBottom; y <= roofTop; y++ {
 		for z := z0; z <= z1; z++ {
