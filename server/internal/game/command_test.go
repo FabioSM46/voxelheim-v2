@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -214,6 +215,8 @@ func TestAddItemValidatesIDCountAndCapacity(t *testing.T) {
 		{line: "/additem 65535 1", word: "unknown"},
 		{line: "/additem 1 none", word: "count"},
 		{line: "/additem 1 0", word: "greater than zero"},
+		{line: "/additem 35 none", word: "count"},
+		{line: "/additem 35 0", word: "greater than zero"},
 		{line: "/additem 1 2305", word: "capacity"},
 	} {
 		_, player, _ := commandPlayer(t, true)
@@ -228,6 +231,61 @@ func TestAddItemValidatesIDCountAndCapacity(t *testing.T) {
 		if got := player.InventoryState(); !reflect.DeepEqual(got, before) {
 			t.Errorf("Chat(%q) changed inventory", test.line)
 		}
+	}
+}
+
+func TestAddItemSilverUpdatesThePurseWithoutUsingASlot(t *testing.T) {
+	t.Parallel()
+
+	_, player, _ := commandPlayer(t, true)
+	before := player.InventoryState()
+	outcome, err := player.Chat("/additem 35 1000")
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if outcome.PrivateText != "Added 1000 silver." {
+		t.Errorf("answer = %q, want silver confirmation", outcome.PrivateText)
+	}
+	if outcome.Inventory == nil {
+		t.Fatal("accepted silver additem returned no inventory state")
+	}
+	if outcome.Inventory.Silver != before.Silver+1000 {
+		t.Errorf("returned silver = %d, want %d", outcome.Inventory.Silver, before.Silver+1000)
+	}
+	if !reflect.DeepEqual(outcome.Inventory.Stacks, before.Stacks) {
+		t.Error("silver additem changed an inventory slot")
+	}
+	if got := player.InventoryState(); !reflect.DeepEqual(got, *outcome.Inventory) {
+		t.Errorf("authoritative inventory = %+v, want returned state %+v", got, *outcome.Inventory)
+	}
+}
+
+func TestAddItemSilverChecksOverflowBeforeMutation(t *testing.T) {
+	t.Parallel()
+
+	_, player, _ := commandPlayer(t, true)
+	player.inventory.mu.Lock()
+	player.inventory.silver = math.MaxUint32 - 1000
+	player.inventory.mu.Unlock()
+
+	accepted, err := player.Chat("/additem 35 1000")
+	if err != nil {
+		t.Fatalf("exact-boundary Chat: %v", err)
+	}
+	if accepted.Inventory == nil || accepted.Inventory.Silver != math.MaxUint32 {
+		t.Fatalf("exact-boundary outcome = %+v, want a full purse", accepted)
+	}
+
+	before := player.InventoryState()
+	refusal, err := player.Chat("/additem 35 1")
+	if err != nil {
+		t.Fatalf("overflow Chat: %v", err)
+	}
+	if !strings.Contains(refusal.PrivateText, "overflow") || refusal.Inventory != nil {
+		t.Errorf("overflow outcome = %+v", refusal)
+	}
+	if got := player.InventoryState(); !reflect.DeepEqual(got, before) {
+		t.Errorf("overflow changed inventory to %+v from %+v", got, before)
 	}
 }
 
@@ -271,8 +329,16 @@ func TestAcceptedCommandsAreInfoLoggedWithActorAndArguments(t *testing.T) {
 	if _, err := player.Chat("/teleport 1 70 2"); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
+	if _, err := player.Chat("/additem 35 1000"); err != nil {
+		t.Fatalf("silver Chat: %v", err)
+	}
 	line := output.String()
 	for _, want := range []string{"level=INFO", "entity_id=1", "command=/teleport", "arguments=\"[1 70 2]\""} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log %q does not contain %q", line, want)
+		}
+	}
+	for _, want := range []string{"command=/additem", "arguments=\"[35 1000]\""} {
 		if !strings.Contains(line, want) {
 			t.Errorf("log %q does not contain %q", line, want)
 		}
