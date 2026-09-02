@@ -460,11 +460,11 @@ func TestChunkOfAgreesWithContainingChunk(t *testing.T) {
 // equivalence water started. **Cover is checked exhaustively over the palette rather
 // than over three ids**: what is worth pinning is that nothing *else* is cover, since
 // a fourth block in that class would make a wall a player walks through.
-func TestTheFlowerBlocksAreCoverAndNotGround(t *testing.T) {
+func TestTheGroundCoverBlocksAreCoverAndNotGround(t *testing.T) {
 	t.Parallel()
 
-	flowers := map[Block]Block{FlowerRed: 33, FlowerYellow: 34, FlowerBlue: 35}
-	for block, id := range flowers {
+	coverBlocks := map[Block]Block{FlowerRed: 33, FlowerYellow: 34, FlowerBlue: 35, WinterBramble: 54}
+	for block, id := range coverBlocks {
 		if block != id {
 			t.Errorf("flower block id = %d, want appended id %d", block, id)
 		}
@@ -485,10 +485,10 @@ func TestTheFlowerBlocksAreCoverAndNotGround(t *testing.T) {
 		}
 	}
 
-	for block := Air; block <= FlowerBlue; block++ {
-		_, flower := flowers[block]
-		if got := Cover(block); got != flower {
-			t.Errorf("Cover(%d) = %t, want %t", block, got, flower)
+	for block := Air; block <= WinterBramble; block++ {
+		_, cover := coverBlocks[block]
+		if got := Cover(block); got != cover {
+			t.Errorf("Cover(%d) = %t, want %t", block, got, cover)
 		}
 	}
 	if Cover(Block(65535)) {

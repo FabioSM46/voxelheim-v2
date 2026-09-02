@@ -287,8 +287,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 24 {
-		t.Fatalf("WorldgenVersion = %d, want 24 after every river terrace face regained its generated fall", WorldgenVersion)
+	if WorldgenVersion != 25 {
+		t.Fatalf("WorldgenVersion = %d, want 25 after winter brambles grew on tundra snow", WorldgenVersion)
 	}
 }
 
@@ -493,6 +493,12 @@ func assertColumn(t *testing.T, c *Chunk, x, z int, seed int64) bool {
 			if terrain != Air || !plantCanPlace(seed, worldX, worldY, worldZ, got) {
 				t.Fatalf("desert plant block %d at (%d, %d, %d) is not part of a deterministic species shape",
 					got, worldX, worldY, worldZ)
+			}
+		case WinterBramble:
+			featured = true
+			if terrain != Air || !plantCanPlace(seed, worldX, worldY, worldZ, got) {
+				t.Fatalf("winter bramble at (%d, %d, %d) is not part of a deterministic species shape",
+					worldX, worldY, worldZ)
 			}
 		case Snow:
 			if terrain == Snow {

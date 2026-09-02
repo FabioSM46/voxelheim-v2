@@ -460,6 +460,11 @@ const BUSH_SPECKS: usize = 3;
 const BUSH_SPECK_HALF_WIDTH: f32 = 0.018;
 const BUSH_SPECK_HEIGHT: f32 = 0.04;
 
+/// One crossed-blade berry per tip, plus two at crests.
+const WINTER_BRAMBLE_BERRIES: usize = BRAMBLE_CANES + 2;
+const WINTER_BERRY_HALF_WIDTH: f32 = 0.025;
+const WINTER_BERRY_HEIGHT: f32 = 0.05;
+
 /// How many quads one flower contributes: two stem blades, two leaves,
 /// [`COVER_PETALS`] petals and the eye's two blades.
 ///
@@ -489,6 +494,11 @@ pub(super) const QUADS_PER_DESERT_BRAMBLE: usize = BRAMBLE_CANES * BRAMBLE_CANE_
     + DESERT_BASE_CANES * 2
     + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
     + DESERT_CROWN_BLADES;
+
+/// Four bare canes plus two crossed blades per berry.
+#[cfg(test)]
+pub(super) const QUADS_PER_WINTER_BRAMBLE: usize =
+    BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2 + WINTER_BRAMBLE_BERRIES * 2;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1062,8 +1072,8 @@ fn half_quad_corners(
 }
 
 /// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
-/// of the three cover ids, a leafy bramble for a bush and a bare thorn bramble for
-/// desert scrub.
+/// of the three flower ids, a leafy bramble for a bush, a bare thorn bramble for
+/// desert scrub or a berry-dressed winter bramble.
 ///
 /// A whole pass over the chunk rather than a third mask, because there is nothing here
 /// for a mask to do — see [`ChunkMesh::cover`]. It reads no neighbour either: a plant's
@@ -1098,6 +1108,8 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
                     push_bush(mesh, floor, seed);
                 } else if block == palette::DESERT_SHRUB {
                     push_desert_bramble(mesh, floor, seed);
+                } else if block == palette::WINTER_BRAMBLE {
+                    push_winter_bramble(mesh, floor, seed);
                 } else {
                     push_flower(mesh, floor, seed, palette::linear_rgba(block));
                 }
@@ -1418,6 +1430,29 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     for axis in crown_axes {
         push_blade(mesh, crown, BUSH_CANE_HALF_WIDTH, top, axis, wood);
     }
+}
+
+/// Bare shared canes with dark berries; `world.Cover`, so it has no fill guarantee.
+fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
+    let wood = palette::linear_rgba(palette::LOG);
+    let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
+    let canes: [Cane; BRAMBLE_CANES] =
+        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
+
+    for cane in &canes {
+        push_berry(mesh, cane.tip, berry);
+    }
+    for cane in canes.iter().take(WINTER_BRAMBLE_BERRIES - BRAMBLE_CANES) {
+        push_berry(mesh, cane.crest, berry);
+    }
+}
+
+/// One small round-ish berry made from two crossed, double-sided blades.
+fn push_berry(mesh: &mut SurfaceMesh, centre: [f32; 3], color: [f32; 4]) {
+    let base = [centre[0], centre[1] - WINTER_BERRY_HEIGHT * 0.5, centre[2]];
+    let top = centre[1] + WINTER_BERRY_HEIGHT * 0.5;
+    push_blade(mesh, base, WINTER_BERRY_HALF_WIDTH, top, 0, color);
+    push_blade(mesh, base, WINTER_BERRY_HALF_WIDTH, top, 2, color);
 }
 
 /// A palette tone as the opaque RGBA a vertex carries. The cover half has no alpha of its
@@ -4310,6 +4345,45 @@ mod tests {
     }
 
     #[test]
+    fn a_winter_bramble_has_bare_canes_and_small_berries() {
+        // Unlike the solid meadow bush, `world.WinterBramble` is Cover on the server:
+        // the snow beneath it stays visible and a body walks through the sparse canes.
+        let mut chunk = air(SIZE);
+        chunk.set(4, 4, 6, palette::SNOW);
+        let bare = super::mesh_chunk(&chunk, &alone());
+        chunk.set(4, 5, 6, palette::WINTER_BRAMBLE);
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(
+            mesh.opaque, bare.opaque,
+            "the shaped bramble changed the snow sweep instead of growing over it"
+        );
+        assert!(mesh.water.is_empty());
+        assert_eq!(mesh.cover.quad_count(), QUADS_PER_WINTER_BRAMBLE);
+        assert_eq!(
+            quads_by_colour(&mesh.cover),
+            BTreeMap::from([
+                (
+                    palette::linear_rgba(palette::LOG).map(f32::to_bits),
+                    BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2,
+                ),
+                (
+                    palette::linear_rgba(palette::WINTER_BRAMBLE).map(f32::to_bits),
+                    WINTER_BRAMBLE_BERRIES * 2,
+                ),
+            ]),
+            "bare wood and berries are the whole winter shape"
+        );
+
+        const {
+            assert!(WINTER_BERRY_HEIGHT <= 0.05 && WINTER_BERRY_HALF_WIDTH * 2.0 <= 0.05);
+        }
+
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+    }
+
+    #[test]
     fn two_bushes_side_by_side_are_two_bushes() {
         // What #634 is for. A bush used to be an ordinary opaque cube, so the greedy
         // sweep merged a cluster of them into one slab with one flat top; `visitBush` on
@@ -4444,6 +4518,26 @@ mod tests {
             cube_mesh.opaque.quad_count(),
             planted_mesh.opaque.quad_count()
         );
+    }
+
+    #[test]
+    fn a_winter_chunk_costs_the_quads_it_is_recorded_as_costing() {
+        // The measured one-in-256 worldgen density is four candidates per 32x32
+        // surface chunk before conifer priority. Keep the per-voxel cost explicit:
+        // cover is never merged, so each bramble pays the whole shape.
+        let mut chunk = air(SIZE);
+        let mut brambles = 0;
+        for z in [8, 24] {
+            for x in [8, 24] {
+                chunk.set(x, 5, z, palette::WINTER_BRAMBLE);
+                brambles += 1;
+            }
+        }
+        let mesh = super::mesh_chunk(&chunk, &alone());
+
+        assert_eq!(brambles, 4);
+        assert_eq!(mesh.cover.quad_count(), brambles * QUADS_PER_WINTER_BRAMBLE);
+        assert_eq!(mesh.cover.quad_count(), 144);
     }
 
     #[test]

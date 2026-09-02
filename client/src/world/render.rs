@@ -2314,7 +2314,8 @@ mod tests {
     /// What a measurement's surface chunks grow on top of their grass, and the whole of
     /// how #652 attributes the cover half's cost.
     ///
-    /// Three meadow plantings and three desert plantings, because "with plants" and
+    /// Three meadow plantings, three desert plantings and one winter planting, because
+    /// "with plants" and
     /// "without plants" cannot separate *shape* from *presence*: a bush was an ordinary
     /// opaque cube before #634, so the world before that change had the same plants
     /// standing in the same voxels and paid the **sweep** for them instead of the cover
@@ -2347,6 +2348,8 @@ mod tests {
         /// Desert terrain as it ships: twenty-five bare thorn brambles per surface
         /// chunk, the integer nearest one scrub in forty columns.
         DesertPlanted,
+        /// Snow terrain with four sparse, leafless winter brambles per chunk.
+        Winter,
     }
 
     impl Planting {
@@ -2365,10 +2368,11 @@ mod tests {
     /// How many plants of each kind every surface chunk carries.
     ///
     /// **Taken from the generated meadow chunk #634 and #647 reported against** — twelve
-    /// flowers and nine bushes — so this fixture costs what that chunk costs while
-    /// staying a fixture. It *is* a fixture: the world generator is the server's, and a
-    /// client measurement that needed a live session could not live in `cargo test`. Any
-    /// report quoting a number from here has to say which of the two it is.
+    /// flowers and nine bushes — so the meadow fixture costs what that chunk costs. The
+    /// winter fixture carries four brambles, the one-in-256 candidate count for a 32x32
+    /// surface. Both are fixtures: the world generator is the server's, and a client
+    /// measurement that needed a live session could not live in `cargo test`. Any report
+    /// quoting a number from here has to say which kind it is.
     ///
     /// **Exact per chunk, not an average**, and that is the whole reason [`plant_at`]
     /// permutes an index instead of thresholding a hash. A hash gets the density right
@@ -2378,6 +2382,7 @@ mod tests {
     const FLOWERS_PER_CHUNK: usize = 12;
     const BUSHES_PER_CHUNK: usize = 9;
     const DESERT_SHRUBS_PER_CHUNK: usize = 25;
+    const WINTER_BRAMBLES_PER_CHUNK: usize = 4;
 
     /// How many columns a chunk's surface has. A power of two, which is what lets the
     /// permutation in [`plant_at`] be a permutation.
@@ -2387,11 +2392,11 @@ mod tests {
     ///
     /// The column's index is run through a **permutation** of `0..COLUMNS` — xor by a
     /// per-chunk word, multiply by an odd number, add another, all modulo a power of two
-    /// — and the first [`FLOWERS_PER_CHUNK`] slots grow a flower while the next
-    /// [`BUSHES_PER_CHUNK`] grow a bush. Since a permutation hits every slot exactly
-    /// once, every chunk grows exactly that many of each, in places that move from chunk
-    /// to chunk. Derived from nothing but coordinates, so a chunk carries the same plants
-    /// wherever the walk below reaches it and two runs mesh identical geometry.
+    /// — and the first slots grow exactly the count for the requested planting: meadow
+    /// flowers then bushes, or winter brambles. Since a permutation hits every slot
+    /// exactly once, every chunk grows exactly that many of each, in places that move
+    /// from chunk to chunk. Derived from nothing but coordinates, so a chunk carries the
+    /// same plants wherever the walk below reaches it and two runs mesh identical geometry.
     fn plant_at(cx: i32, cz: i32, x: usize, z: usize, planting: Planting) -> Option<BlockId> {
         if planting.is_bare() {
             return None;
@@ -2415,6 +2420,9 @@ mod tests {
                 Planting::DesertPlanted => palette::DESERT_SHRUB,
                 _ => unreachable!("bare desert returned before planting"),
             });
+        }
+        if planting == Planting::Winter {
+            return (slot < WINTER_BRAMBLES_PER_CHUNK).then_some(palette::WINTER_BRAMBLE);
         }
 
         match slot {
@@ -2477,6 +2485,8 @@ mod tests {
         let mut blocks = vec![palette::AIR; size * size * size];
         let (body, surface) = if planting.is_desert() {
             (palette::SANDSTONE, palette::SAND)
+        } else if planting == Planting::Winter {
+            (palette::STONE, palette::SNOW)
         } else {
             (palette::STONE, palette::GRASS)
         };
@@ -3000,18 +3010,19 @@ mod tests {
     // `Assets<Mesh>::add` is not in any number below. What it *can* see is the whole of
     // what the main schedule does, which is where a hitch would have to live.
     //
-    // Each biome's three [`Planting`]s are the before, the after and the control, and
-    // the terrain is a **fixture** rather than generated: meadow densities from #634
-    // and #647, desert density from the server's one-in-forty rule, geometry from here.
+    // Each biome's [`Planting`] rows are **fixtures** rather than generated: meadow
+    // densities from #634 and #647, desert density from its one-in-forty rule, and
+    // winter density from its one-in-256 rule; geometry comes from here.
 
     /// Every planting, grouped by biome and in the order a report reads them.
-    const PLANTINGS: [Planting; 6] = [
+    const PLANTINGS: [Planting; 7] = [
         Planting::Bare,
         Planting::CubeBushes,
         Planting::Planted,
         Planting::DesertBare,
         Planting::CubeScrub,
         Planting::DesertPlanted,
+        Planting::Winter,
     ];
 
     /// The meadow-only rows used by #652's per-chunk comparison below.
@@ -3134,7 +3145,10 @@ mod tests {
                 Planting::Planted => {
                     flowers * mesher::QUADS_PER_COVER + bushes * mesher::QUADS_PER_BUSH
                 }
-                Planting::DesertBare | Planting::CubeScrub | Planting::DesertPlanted => {
+                Planting::DesertBare
+                | Planting::CubeScrub
+                | Planting::DesertPlanted
+                | Planting::Winter => {
                     unreachable!("the per-chunk comparison is meadow-only")
                 }
             };
