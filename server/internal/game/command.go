@@ -2,6 +2,7 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -122,6 +123,9 @@ func (p *Player) addItemCommandLocked(args []string) (ChatOutcome, bool) {
 		return privateCommand(fmt.Sprintf("/additem item id %q is not a number in 1..65535.", args[0])), false
 	}
 	itemID := ItemID(rawID)
+	if itemID == ItemSilver {
+		return p.addSilverCommandLocked(args[1])
+	}
 	definition, registered := itemByID(itemID)
 	if !registered || itemID == ItemNone {
 		return privateCommand(fmt.Sprintf("/additem item id %d is unknown.", rawID)), false
@@ -167,6 +171,31 @@ func (p *Player) addItemCommandLocked(args []string) (ChatOutcome, bool) {
 	state := p.inventory.stateLocked()
 	return ChatOutcome{
 		PrivateText: fmt.Sprintf("Added %d of item id %d.", rawCount, rawID),
+		Inventory:   &state,
+	}, true
+}
+
+func (p *Player) addSilverCommandLocked(argument string) (ChatOutcome, bool) {
+	rawCount, err := strconv.ParseUint(argument, 10, 16)
+	if err != nil {
+		return privateCommand(fmt.Sprintf("/additem count %q is not a number in 1..65535.", argument)), false
+	}
+	if rawCount == 0 {
+		return privateCommand("/additem count must be greater than zero."), false
+	}
+
+	if !p.inventory.mu.TryLock() {
+		return privateCommand("/additem refused: the inventory is busy."), false
+	}
+	defer p.inventory.mu.Unlock()
+
+	if rawCount > uint64(math.MaxUint32-p.inventory.silver) {
+		return privateCommand("/additem refused: the silver purse would overflow."), false
+	}
+	p.inventory.silver += uint32(rawCount)
+	state := p.inventory.stateLocked()
+	return ChatOutcome{
+		PrivateText: fmt.Sprintf("Added %d silver.", rawCount),
 		Inventory:   &state,
 	}, true
 }
