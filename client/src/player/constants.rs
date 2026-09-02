@@ -3,10 +3,11 @@
 //! # These mirror the server, and must stay in sync with it
 //!
 //! [`PLAYER_WIDTH`] and [`PLAYER_HEIGHT`] are copies of `game.PlayerWidth` and
-//! `game.PlayerHeight` in `server/internal/game/constants.go`. **Change one and change
-//! the other**: the server collides a box of that size and this module draws a body
-//! inside it, so a mismatch is a body that visibly does not fit the space the server says
-//! it fits.
+//! `game.PlayerHeight` in `server/internal/game/constants.go`, and [`MOUNTED_WIDTH`] and
+//! [`MOUNTED_HEIGHT`] of `game.MountedWidth` and `game.MountedHeight` beside them. **Change
+//! one and change the other**: the server collides a box of that size and this module
+//! draws a body inside it, so a mismatch is a body that visibly does not fit the space the
+//! server says it fits.
 //!
 //! They are also the **grid a character is cut on**: [`super::appearance`] divides them
 //! into twelfths across and thirty-sixths up rather than holding a size of its own, so a
@@ -31,6 +32,16 @@ pub const PLAYER_WIDTH: f32 = 0.6;
 
 /// How tall the player's body is, in blocks. Mirrors `game.PlayerHeight`.
 pub const PLAYER_HEIGHT: f32 = 1.8;
+
+/// The edge of a mounted player's square footprint, in blocks — horse and rider as one
+/// body. Mirrors `game.MountedWidth`; change both sides together, exactly as for
+/// [`PLAYER_WIDTH`]. Square, and set from the horse's width rather than its length: that
+/// is the server's decision, and the reason the drawn horse overhangs it nose and tail.
+pub const MOUNTED_WIDTH: f32 = 1.0;
+
+/// How tall a mounted player's body is, in blocks. Mirrors `game.MountedHeight`; change
+/// both sides together, exactly as for [`PLAYER_HEIGHT`].
+pub const MOUNTED_HEIGHT: f32 = 2.8;
 
 /// How far above the feet the camera sits, in blocks.
 ///
@@ -156,6 +167,10 @@ pub const DEATH_BODY_PITCH: f32 = FRAC_PI_2;
 /// A camera above the head renders from outside the thing it follows; one at the feet
 /// renders from inside the ground.
 const _: () = assert!(EYE_HEIGHT > 0.0 && EYE_HEIGHT < PLAYER_HEIGHT);
+
+/// The walking body lies inside the mounted one on every side — the server's reason a
+/// dismount never has to move anybody: wherever the horse fitted, the walker fits.
+const _: () = assert!(MOUNTED_WIDTH > PLAYER_WIDTH && MOUNTED_HEIGHT > PLAYER_HEIGHT);
 
 /// At exactly ±π/2 the view direction is the up axis, every yaw looks identical, and the
 /// image flips as the pitch crosses it.

@@ -5,15 +5,17 @@
 //! feet position, yaw and visibility; dismounting removes only this child tree and never
 //! replaces the person. A capital paddock horse arrives as a `MobKind::Horse` row and
 //! owns a world-space root instead. Both routes spawn the same mesh children. The rider
-//! remains the ordinary twelve-piece humanoid rig.
+//! remains the ordinary twelve-piece humanoid rig, lifted onto the saddle.
 //!
-//! The mesh is procedural cuboids and the gait is a transform on four leg children. Its
-//! only clock is [`WalkPose::phase`], which interpolation advances from horizontal
-//! distance: faster authoritative travel cycles the same rig faster, while elapsed time
-//! over no distance cannot move a hoof.
+//! The mesh is procedural — tapered solids from [`super::shapes`] where a body is not a
+//! box, cuboids where it is — cut to real proportions inside the mounted body the server
+//! collides. The gait is a transform on four leg children. Its only clock is
+//! [`WalkPose::phase`], which interpolation advances from horizontal distance: faster
+//! authoritative travel cycles the same rig faster, while elapsed time over no distance
+//! cannot move a hoof.
 
 use std::collections::HashMap;
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
@@ -23,46 +25,132 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::appearance::{BodyPiece, Limb};
 use super::interpolate::SnapshotBuffer;
+use super::shapes::hexahedron;
 use super::{Body, InputMode, WalkPose, merge_all};
 use crate::net::{MobKind, MountKind, Session};
 
-/// The horse stays inside the same 0.6-square footprint the authoritative player body
-/// collides. It may be taller: the rider is visibly seated above a mount, while gameplay
-/// continues to collide the server's unchanged player box.
-const HORSE_TORSO: Vec3 = Vec3::new(0.42, 0.40, 0.56);
-const HORSE_TORSO_CENTRE: Vec3 = Vec3::new(0.0, 0.92, 0.0);
-const HORSE_NECK: Vec3 = Vec3::new(0.20, 0.50, 0.16);
-const HORSE_NECK_CENTRE: Vec3 = Vec3::new(0.0, 1.17, -0.12);
-const HORSE_HEAD: Vec3 = Vec3::new(0.30, 0.24, 0.20);
-const HORSE_HEAD_CENTRE: Vec3 = Vec3::new(0.0, 1.38, -0.20);
-const HORSE_EAR: Vec3 = Vec3::new(0.07, 0.16, 0.07);
-const HORSE_LEG: Vec3 = Vec3::new(0.11, 0.72, 0.11);
-const HORSE_HOOF: Vec3 = Vec3::new(0.13, 0.12, 0.16);
-const HORSE_HIP_X: f32 = 0.21;
-const HORSE_HIP_Z: f32 = 0.11;
-const HORSE_LEG_SWING: f32 = 0.13;
+// The horse is drawn to real proportions — one block is one metre — inside the mounted
+// body the server collides: `MOUNTED_WIDTH` square and `MOUNTED_HEIGHT` tall, mirrored in
+// `super::constants`. Width and height fit; length does not, because that footprint is
+// square and set from the horse's width rather than its length (the server's own reasoning
+// at `MountedWidth`). Feet at y = 0, yaw 0 facing -Z, so the nose is the most negative z.
 
-const MANE_ROOT: Vec3 = Vec3::new(0.0, 1.48, -0.015);
-const MANE_STRIP: Vec3 = Vec3::new(0.055, 0.44, 0.045);
-const TAIL_ROOT: Vec3 = Vec3::new(0.0, 1.02, 0.23);
-const TAIL_STRIP: Vec3 = Vec3::new(0.075, 0.46, 0.045);
+/// One end of a solid lofted along z: a rectangle in the x/y plane at one depth.
+#[derive(Debug, Clone, Copy)]
+struct Slice {
+    z: f32,
+    half_x: f32,
+    y: (f32, f32),
+}
+
+impl Slice {
+    const fn new(z: f32, half_x: f32, y: (f32, f32)) -> Self {
+        Self { z, half_x, y }
+    }
+}
+
+/// One end of a solid lofted along y: a rectangle in the x/z plane at one height.
+#[derive(Debug, Clone, Copy)]
+struct Deck {
+    y: f32,
+    half_x: f32,
+    z: (f32, f32),
+}
+
+impl Deck {
+    const fn new(y: f32, half_x: f32, z: (f32, f32)) -> Self {
+        Self { y, half_x, z }
+    }
+}
+
+// The barrel, breast to rump: a chest that is deepest at the girth, a loin that shallows
+// behind it, and a croup that falls away to the tail.
+const BREAST: Slice = Slice::new(-0.80, 0.26, (0.92, 1.48));
+const GIRTH: Slice = Slice::new(-0.10, 0.33, (0.85, 1.55));
+const LOIN: Slice = Slice::new(0.50, 0.31, (1.00, 1.52));
+const RUMP: Slice = Slice::new(0.78, 0.24, (1.10, 1.37));
+
+// The neck rises from the withers to the poll, narrowing as it goes; the head hangs from
+// the poll forward and down to a muzzle narrower and shallower than the brow.
+const NECK_BASE: Deck = Deck::new(1.44, 0.16, (-0.78, -0.40));
+const NECK_POLL: Deck = Deck::new(1.94, 0.11, (-1.12, -0.96));
+const BROW: Slice = Slice::new(-0.96, 0.15, (1.66, 2.08));
+const MUZZLE: Slice = Slice::new(-1.52, 0.09, (1.42, 1.64));
+const EAR: Vec3 = Vec3::new(0.06, 0.20, 0.05);
+const EAR_CENTRE: Vec3 = Vec3::new(0.09, 2.10, -1.02);
+const EYE: Vec2 = Vec2::new(0.05, 0.05);
+const EYE_CENTRE: Vec3 = Vec3::new(0.135, 1.84, -1.14);
+
+/// How tall the drawn horse is: its ear tips. `mobs.rs` reads it as the presentation
+/// envelope of a paddock horse.
+pub(super) const HORSE_HEIGHT: f32 = EAR_CENTRE.y + EAR.y / 2.0;
+
+// Each leg is one segment from its pivot — the shoulder for a foreleg, the hip for a hind
+// leg, both inside the barrel — down to a hoof that is wider at the ground. The swing is
+// sized so a hoof sweeps at most `HOOF_SWEEP` along the ground whatever the leg's length.
+const LEG_PIVOT_X: f32 = 0.20;
+const LEG_PIVOT_Y: f32 = 1.12;
+const FRONT_PIVOT_Z: f32 = -0.45;
+const REAR_PIVOT_Z: f32 = 0.55;
+const HOOF_HEIGHT: f32 = 0.10;
+const HORSE_LEG: Vec3 = Vec3::new(0.12, LEG_PIVOT_Y - HOOF_HEIGHT, 0.14);
+const HOOF_TOP: Deck = Deck::new(
+    HOOF_HEIGHT - LEG_PIVOT_Y,
+    HORSE_LEG.x / 2.0,
+    (-HORSE_LEG.z / 2.0, HORSE_LEG.z / 2.0),
+);
+const HOOF_SOLE: Deck = Deck::new(-LEG_PIVOT_Y, 0.08, (-0.10, 0.08));
+const HOOF_SWEEP: f32 = 0.30;
+const HORSE_LEG_SWING: f32 = HOOF_SWEEP / (2.0 * LEG_PIVOT_Y);
+
+// The mane lies along the crest from the poll to the withers and the tail hangs from the
+// croup: each a strip authored downwards from its root and turned to rest along its line.
+const MANE_ROOT: Vec3 = Vec3::new(0.0, 1.96, -0.94);
+const MANE_STRIP: Vec3 = Vec3::new(0.055, 0.76, 0.05);
+const MANE_REST: f32 = -0.84;
 const MANE_SWING: f32 = 0.035;
+const TAIL_ROOT: Vec3 = Vec3::new(0.0, 1.38, 0.72);
+const TAIL_STRIP: Vec3 = Vec3::new(0.075, 0.74, 0.05);
+const TAIL_REST: f32 = -0.12;
 const TAIL_SWING: f32 = 0.10;
 
-const SADDLE: Vec3 = Vec3::new(0.50, 0.08, 0.26);
-const SADDLE_CENTRE: Vec3 = Vec3::new(0.0, 1.15, 0.045);
-const SADDLE_FLAP: Vec3 = Vec3::new(0.035, 0.25, 0.18);
-const EYE: Vec2 = Vec2::new(0.045, 0.045);
+// The saddle seat sits on the back behind the withers with a flap down each side; the
+// reins run from the corners of the mouth along the neck to the rider's fists.
+const SADDLE: Vec3 = Vec3::new(0.44, 0.07, 0.36);
+const SADDLE_CENTRE: Vec3 = Vec3::new(0.0, 1.575, 0.02);
+const SADDLE_FLAP: Vec3 = Vec3::new(0.035, 0.30, 0.26);
+const SADDLE_FLAP_CENTRE: Vec3 = Vec3::new(0.345, 1.42, 0.02);
+const REIN_BIT: Vec3 = Vec3::new(0.095, 1.53, -1.40);
+const REIN_HAND: Vec3 = Vec3::new(0.27, 1.82, -0.28);
+const REIN_WIDTH: f32 = 0.018;
+
+// What the numbers above have to be to each other, checked when the crate compiles rather
+// than when a test runs: the barrel's slices run breast to rump and shallow behind the
+// girth; the neck rises from inside the chest and narrows; the head hangs from the poll
+// forward to a muzzle narrower and shallower than the brow; a hoof narrows upward.
+const _: () = assert!(BREAST.z < GIRTH.z && GIRTH.z < LOIN.z && LOIN.z < RUMP.z);
+const _: () = assert!(GIRTH.y.1 - GIRTH.y.0 > LOIN.y.1 - LOIN.y.0);
+const _: () = assert!(LOIN.y.1 - LOIN.y.0 > RUMP.y.1 - RUMP.y.0);
+const _: () = assert!(NECK_BASE.y > GIRTH.y.0 && NECK_BASE.y < GIRTH.y.1);
+const _: () = assert!(NECK_BASE.z.0 > BREAST.z && NECK_BASE.z.1 < GIRTH.z);
+const _: () = assert!(NECK_POLL.half_x < NECK_BASE.half_x);
+const _: () = assert!(BROW.y.1 > NECK_POLL.y && BROW.y.0 < NECK_POLL.y && BROW.z >= NECK_POLL.z.1);
+const _: () = assert!(MUZZLE.z < BROW.z && MUZZLE.half_x < BROW.half_x);
+const _: () = assert!(MUZZLE.y.1 - MUZZLE.y.0 < BROW.y.1 - BROW.y.0);
+const _: () = assert!(HOOF_TOP.y > HOOF_SOLE.y && HOOF_TOP.half_x < HOOF_SOLE.half_x);
+const _: () = assert!(HOOF_TOP.z.1 - HOOF_TOP.z.0 < HOOF_SOLE.z.1 - HOOF_SOLE.z.0);
 
 const COAT_EDGE: u32 = 32;
 const COAT_SEED: u32 = 0x0715_C0A7;
 
-/// Raising the existing humanoid by this amount puts its hip on the top of the horse's
-/// back. The legs then fold from that same hip; the rider is seated rather than standing
-/// on the torso, and no second humanoid rig is introduced.
-pub(super) const RIDER_LIFT: f32 = 0.42;
+/// Raising the existing humanoid by this amount puts its hip pivot on the saddle seat.
+/// The legs then fold forward and splay outward from that same hip, so the rider sits
+/// astride the barrel rather than through it, and no second humanoid rig is introduced.
+/// `camera.rs` reads it for the mounted eye height.
+pub(super) const RIDER_LIFT: f32 = 0.90;
 const RIDER_LEG_ANGLE: f32 = 1.05;
-const RIDER_ARM_ANGLE: f32 = 0.68;
+const RIDER_LEG_SPLAY: f32 = 0.34;
+const RIDER_ARM_ANGLE: f32 = 0.75;
 
 const BLACK_COAT: Color = Color::srgb(0.075, 0.065, 0.055);
 const BROWN_COAT: Color = Color::srgb(0.30, 0.16, 0.075);
@@ -146,12 +234,13 @@ impl Leg {
         Self::RightRear,
     ];
 
+    /// Where the leg turns: the shoulder for a foreleg, the hip for a hind leg.
     const fn hip(self) -> Vec3 {
         match self {
-            Self::LeftFront => Vec3::new(-HORSE_HIP_X, HORSE_LEG.y, -HORSE_HIP_Z),
-            Self::RightFront => Vec3::new(HORSE_HIP_X, HORSE_LEG.y, -HORSE_HIP_Z),
-            Self::LeftRear => Vec3::new(-HORSE_HIP_X, HORSE_LEG.y, HORSE_HIP_Z),
-            Self::RightRear => Vec3::new(HORSE_HIP_X, HORSE_LEG.y, HORSE_HIP_Z),
+            Self::LeftFront => Vec3::new(-LEG_PIVOT_X, LEG_PIVOT_Y, FRONT_PIVOT_Z),
+            Self::RightFront => Vec3::new(LEG_PIVOT_X, LEG_PIVOT_Y, FRONT_PIVOT_Z),
+            Self::LeftRear => Vec3::new(-LEG_PIVOT_X, LEG_PIVOT_Y, REAR_PIVOT_Z),
+            Self::RightRear => Vec3::new(LEG_PIVOT_X, LEG_PIVOT_Y, REAR_PIVOT_Z),
         }
     }
 
@@ -279,39 +368,70 @@ pub(super) fn create_visuals(
     });
 }
 
+/// A solid lofted along z between two slices, the rear one (+z) first.
+fn lofted_along_z(rear: Slice, front: Slice) -> Mesh {
+    hexahedron([
+        Vec3::new(-rear.half_x, rear.y.0, rear.z),
+        Vec3::new(rear.half_x, rear.y.0, rear.z),
+        Vec3::new(front.half_x, front.y.0, front.z),
+        Vec3::new(-front.half_x, front.y.0, front.z),
+        Vec3::new(-rear.half_x, rear.y.1, rear.z),
+        Vec3::new(rear.half_x, rear.y.1, rear.z),
+        Vec3::new(front.half_x, front.y.1, front.z),
+        Vec3::new(-front.half_x, front.y.1, front.z),
+    ])
+}
+
+/// A solid lofted along y between two decks, the lower one first.
+fn lofted_along_y(bottom: Deck, top: Deck) -> Mesh {
+    hexahedron([
+        Vec3::new(-bottom.half_x, bottom.y, bottom.z.1),
+        Vec3::new(bottom.half_x, bottom.y, bottom.z.1),
+        Vec3::new(bottom.half_x, bottom.y, bottom.z.0),
+        Vec3::new(-bottom.half_x, bottom.y, bottom.z.0),
+        Vec3::new(-top.half_x, top.y, top.z.1),
+        Vec3::new(top.half_x, top.y, top.z.1),
+        Vec3::new(top.half_x, top.y, top.z.0),
+        Vec3::new(-top.half_x, top.y, top.z.0),
+    ])
+}
+
+/// Chest, loin and croup alone, so a back and a belly can be measured with no neck in
+/// the way.
+fn horse_barrel_mesh() -> Mesh {
+    let mut barrel = lofted_along_z(GIRTH, BREAST);
+    merge_all(
+        &mut barrel,
+        [lofted_along_z(LOIN, GIRTH), lofted_along_z(RUMP, LOIN)],
+        "horse barrel",
+    );
+    barrel
+}
+
 fn horse_body_mesh() -> Mesh {
-    let mut torso = Mesh::from(Cuboid::from_size(HORSE_TORSO)).translated_by(HORSE_TORSO_CENTRE);
-    let neck = Mesh::from(Cuboid::from_size(HORSE_NECK)).translated_by(HORSE_NECK_CENTRE);
-    merge_all(&mut torso, [neck], "horse body");
-    torso
+    let mut body = horse_barrel_mesh();
+    merge_all(
+        &mut body,
+        [lofted_along_y(NECK_BASE, NECK_POLL)],
+        "horse body",
+    );
+    body
 }
 
 fn horse_head_mesh() -> Mesh {
-    let mut head = Mesh::from(Cuboid::from_size(HORSE_HEAD)).translated_by(HORSE_HEAD_CENTRE);
+    let mut head = lofted_along_z(BROW, MUZZLE);
     let ears = [-1.0, 1.0].map(|side| {
-        Mesh::from(Cuboid::from_size(HORSE_EAR)).translated_by(Vec3::new(
-            side * 0.09,
-            HORSE_HEAD_CENTRE.y + HORSE_HEAD.y / 2.0 + HORSE_EAR.y / 2.0,
-            -0.20,
-        ))
+        Mesh::from(Cuboid::from_size(EAR)).translated_by(EAR_CENTRE * Vec3::new(side, 1.0, 1.0))
     });
     merge_all(&mut head, ears, "horse head");
     head
 }
 
-/// One leg authored downwards from its hip, shared by all four leg children.
+/// One leg authored downwards from its pivot, shared by all four leg children.
 fn horse_leg_mesh() -> Mesh {
-    let mut leg = Mesh::from(Cuboid::from_size(HORSE_LEG)).translated_by(Vec3::new(
-        0.0,
-        -HORSE_LEG.y / 2.0,
-        0.0,
-    ));
-    let hoof = Mesh::from(Cuboid::from_size(HORSE_HOOF)).translated_by(Vec3::new(
-        0.0,
-        -HORSE_LEG.y + HORSE_HOOF.y / 2.0,
-        -0.015,
-    ));
-    merge_all(&mut leg, [hoof], "horse leg");
+    let mut leg =
+        Mesh::from(Cuboid::from_size(HORSE_LEG)).translated_by(Vec3::Y * -HORSE_LEG.y / 2.0);
+    merge_all(&mut leg, [lofted_along_y(HOOF_SOLE, HOOF_TOP)], "horse leg");
     leg
 }
 
@@ -333,36 +453,27 @@ fn bar_between(start: Vec3, end: Vec3, width: f32) -> Mesh {
 
 fn horse_tack_mesh() -> Mesh {
     let mut saddle = Mesh::from(Cuboid::from_size(SADDLE)).translated_by(SADDLE_CENTRE);
-    let flap_x = SADDLE.x / 2.0 - SADDLE_FLAP.x / 2.0;
     let flaps = [-1.0, 1.0].map(|side| {
-        Mesh::from(Cuboid::from_size(SADDLE_FLAP)).translated_by(Vec3::new(
-            side * flap_x,
-            1.045,
-            SADDLE_CENTRE.z,
-        ))
+        Mesh::from(Cuboid::from_size(SADDLE_FLAP))
+            .translated_by(SADDLE_FLAP_CENTRE * Vec3::new(side, 1.0, 1.0))
     });
     let reins = [-1.0, 1.0].map(|side| {
-        bar_between(
-            Vec3::new(side * 0.11, 1.35, -0.29),
-            Vec3::new(side * 0.20, 1.18, 0.13),
-            0.018,
-        )
+        let mirror = Vec3::new(side, 1.0, 1.0);
+        bar_between(REIN_BIT * mirror, REIN_HAND * mirror, REIN_WIDTH)
     });
     merge_all(&mut saddle, flaps.into_iter().chain(reins), "horse tack");
     saddle
 }
 
+/// Two eyes on the sides of the head, where a horse's are: each a rectangle turned to
+/// face its own side and set a hair proud of the tapering cheek.
 fn horse_eye_mesh() -> Mesh {
-    let mut left = Mesh::from(Rectangle::new(EYE.x, EYE.y)).translated_by(Vec3::new(
-        -0.08,
-        HORSE_HEAD_CENTRE.y + 0.02,
-        HORSE_HEAD_CENTRE.z - HORSE_HEAD.z / 2.0,
-    ));
-    let right = Mesh::from(Rectangle::new(EYE.x, EYE.y)).translated_by(Vec3::new(
-        0.08,
-        HORSE_HEAD_CENTRE.y + 0.02,
-        HORSE_HEAD_CENTRE.z - HORSE_HEAD.z / 2.0,
-    ));
+    let [mut left, right] = [-1.0_f32, 1.0].map(|side| {
+        Mesh::from(Rectangle::new(EYE.x, EYE.y)).transformed_by(
+            Transform::from_translation(EYE_CENTRE * Vec3::new(side, 1.0, 1.0))
+                .with_rotation(Quat::from_rotation_y(side * FRAC_PI_2)),
+        )
+    });
     merge_all(&mut left, [right], "horse eyes");
     left
 }
@@ -608,23 +719,26 @@ fn gait_transform(leg: Leg, walk: WalkPose) -> Transform {
 
 fn hair_transform(hair: HorseHair, walk: WalkPose) -> Transform {
     let phase = if walk.moving { walk.phase.sin() } else { 0.0 };
-    let (root, swing) = match hair {
-        HorseHair::Mane => (MANE_ROOT, MANE_SWING),
-        HorseHair::Tail => (TAIL_ROOT, TAIL_SWING),
+    let (root, rest, swing) = match hair {
+        HorseHair::Mane => (MANE_ROOT, MANE_REST, MANE_SWING),
+        HorseHair::Tail => (TAIL_ROOT, TAIL_REST, TAIL_SWING),
     };
-    Transform::from_translation(root).with_rotation(Quat::from_rotation_x(phase * swing))
+    Transform::from_translation(root).with_rotation(Quat::from_rotation_x(rest + phase * swing))
 }
 
-/// The existing humanoid piece in its seated pose.
+/// The existing humanoid piece in its seated pose: every pivot lifted onto the saddle,
+/// the arms forward to the reins, and each leg folded forward after a second rotation —
+/// about the forward axis, at the same hip — that splays it outward over the barrel.
 pub(super) fn rider_piece_transform(piece: BodyPiece, blocking: bool) -> Transform {
-    let angle = match piece.limb() {
-        Some(Limb::LeftArm) if blocking => -1.05,
-        Some(Limb::LeftArm | Limb::RightArm) => RIDER_ARM_ANGLE,
-        Some(Limb::LeftLeg | Limb::RightLeg) => RIDER_LEG_ANGLE,
-        None => 0.0,
+    let (angle, splay) = match piece.limb() {
+        Some(Limb::LeftArm) if blocking => (-1.05, 0.0),
+        Some(Limb::LeftArm | Limb::RightArm) => (RIDER_ARM_ANGLE, 0.0),
+        Some(Limb::LeftLeg) => (RIDER_LEG_ANGLE, -RIDER_LEG_SPLAY),
+        Some(Limb::RightLeg) => (RIDER_LEG_ANGLE, RIDER_LEG_SPLAY),
+        None => (0.0, 0.0),
     };
     Transform::from_translation(piece.pivot() + Vec3::Y * RIDER_LIFT)
-        .with_rotation(Quat::from_rotation_x(angle))
+        .with_rotation(Quat::from_rotation_x(angle) * Quat::from_rotation_z(splay))
 }
 
 #[cfg(test)]
@@ -632,67 +746,280 @@ mod tests {
     use bevy::asset::AssetPlugin;
     use bevy::mesh::VertexAttributeValues;
 
-    use super::super::constants::PLAYER_WIDTH;
+    use super::super::constants::{MOUNTED_HEIGHT, MOUNTED_WIDTH, PLAYER_HEIGHT};
+    use super::super::{ANY_HAIR, piece_mesh};
     use super::*;
+    use crate::net::HairModel;
+
+    fn positions(meshes: &[Mesh]) -> Vec<Vec3> {
+        meshes
+            .iter()
+            .flat_map(|mesh| {
+                let Some(VertexAttributeValues::Float32x3(positions)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("horse mesh has no positions");
+                };
+                positions.iter().copied().map(Vec3::from_array)
+            })
+            .collect()
+    }
 
     fn extent(meshes: &[Mesh]) -> (Vec3, Vec3) {
-        let mut low = Vec3::MAX;
-        let mut high = Vec3::MIN;
-        for mesh in meshes {
-            let Some(VertexAttributeValues::Float32x3(positions)) =
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-            else {
-                panic!("horse mesh has no positions");
-            };
-            for position in positions {
-                let point = Vec3::from_array(*position);
-                low = low.min(point);
-                high = high.max(point);
-            }
+        positions(meshes)
+            .into_iter()
+            .fold((Vec3::MAX, Vec3::MIN), |(low, high), point| {
+                (low.min(point), high.max(point))
+            })
+    }
+
+    fn walking(phase: f32) -> WalkPose {
+        WalkPose {
+            phase,
+            moving: true,
         }
-        (low, high)
+    }
+
+    /// Standing, and the two extremes of the stride.
+    fn gaits() -> [WalkPose; 3] {
+        [
+            WalkPose::default(),
+            walking(PI / 2.0),
+            walking(3.0 * PI / 2.0),
+        ]
+    }
+
+    /// Every part of the horse posed at `pose`, with no rider on it.
+    fn horse_meshes(pose: WalkPose) -> Vec<Mesh> {
+        let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
+        meshes
+            .extend(Leg::ALL.map(|leg| horse_leg_mesh().transformed_by(gait_transform(leg, pose))));
+        meshes.extend([
+            horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, pose)),
+            horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, pose)),
+            horse_tack_mesh(),
+            horse_eye_mesh(),
+        ]);
+        meshes
+    }
+
+    /// One piece of the humanoid rig in the saddle.
+    fn rider_mesh(piece: BodyPiece, model: HairModel, blocking: bool) -> Mesh {
+        piece_mesh(piece, model).transformed_by(rider_piece_transform(piece, blocking))
     }
 
     #[test]
-    fn the_horse_stays_inside_the_authoritative_player_footprint() {
-        let half = PLAYER_WIDTH / 2.0;
-        for pose in [
-            WalkPose::default(),
-            WalkPose {
-                phase: PI / 2.0,
-                moving: true,
-            },
-            WalkPose {
-                phase: 3.0 * PI / 2.0,
-                moving: true,
-            },
-        ] {
-            let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
-            meshes.extend(
-                Leg::ALL.map(|leg| horse_leg_mesh().transformed_by(gait_transform(leg, pose))),
-            );
-            meshes.extend([
-                horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, pose)),
-                horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, pose)),
-                horse_tack_mesh(),
-                horse_eye_mesh(),
-            ]);
+    fn the_standing_horse_has_the_proportions_of_a_horse() {
+        let (belly, withers) = extent(&[horse_barrel_mesh()]);
+        assert!(
+            (1.50..=1.60).contains(&withers.y),
+            "back top at {}",
+            withers.y
+        );
+        assert!(belly.y >= 0.80, "belly bottom at {}", belly.y);
+        let width = withers.x - belly.x;
+        assert!((0.62..=0.70).contains(&width), "barrel {width} wide");
+        assert!(
+            (withers.x + belly.x).abs() < 1e-6,
+            "barrel off the centre line"
+        );
+
+        let (nose, ears) = extent(&[horse_head_mesh()]);
+        assert!((2.15..=2.25).contains(&ears.y), "ear tips at {}", ears.y);
+        assert!(
+            (ears.y - HORSE_HEIGHT).abs() < 1e-6,
+            "HORSE_HEIGHT is not the ear tips"
+        );
+        assert!(
+            nose.z <= -1.10,
+            "nose at z {}: the head is above the chest",
+            nose.z
+        );
+        let length = withers.z - nose.z;
+        assert!((2.20..=2.40).contains(&length), "nose to rump {length}");
+
+        let (_, whole) = extent(&horse_meshes(WalkPose::default()));
+        assert!(
+            whole.y <= HORSE_HEIGHT + 1e-6,
+            "something stands above the ears: {}",
+            whole.y
+        );
+    }
+
+    /// What the `const` asserts beside the constants cannot state: a slope, and a
+    /// measurement on the mesh itself.
+    #[test]
+    fn the_neck_rises_at_a_lean_and_the_head_narrows_to_the_muzzle() {
+        let base_z = (NECK_BASE.z.0 + NECK_BASE.z.1) / 2.0;
+        let poll_z = (NECK_POLL.z.0 + NECK_POLL.z.1) / 2.0;
+        let rise = (NECK_POLL.y - NECK_BASE.y)
+            .atan2(base_z - poll_z)
+            .to_degrees();
+        assert!((45.0..=60.0).contains(&rise), "the neck rises at {rise}°");
+
+        let muzzle = positions(&[horse_head_mesh()])
+            .into_iter()
+            .filter(|point| point.z <= MUZZLE.z + 1e-4)
+            .map(|point| point.x.abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            muzzle < BROW.half_x,
+            "the muzzle is as wide as the brow: {muzzle}"
+        );
+    }
+
+    /// The server collides a mounted body `MOUNTED_WIDTH` square and `MOUNTED_HEIGHT`
+    /// tall; horse, tack and rider are drawn inside it across and up at every gait phase.
+    /// **Not along.** That footprint is square and set from the horse's *width* — the
+    /// server's own reasoning at `MountedWidth` — so a horse over two blocks long
+    /// overhangs the square at the nose and the tail by construction, and the test says
+    /// so rather than pretending otherwise.
+    #[test]
+    fn horse_tack_and_rider_fit_the_mounted_body_across_and_up_at_every_gait_phase() {
+        let half = MOUNTED_WIDTH / 2.0;
+        for pose in gaits() {
+            let mut meshes = horse_meshes(pose);
+            for blocking in [false, true] {
+                meshes.extend(BodyPiece::FIXED.map(|piece| rider_mesh(piece, ANY_HAIR, blocking)));
+            }
             let (low, high) = extent(&meshes);
             assert!(
                 low.x >= -half && high.x <= half,
-                "horse at {pose:?} has x = {low:?}..{high:?}"
+                "at {pose:?} x = {}..{}",
+                low.x,
+                high.x
             );
             assert!(
-                low.z >= -half && high.z <= half,
-                "horse at {pose:?} has z = {low:?}..{high:?}"
+                low.y >= -1e-2 && high.y <= MOUNTED_HEIGHT,
+                "at {pose:?} y = {}..{}",
+                low.y,
+                high.y
             );
-            if !pose.moving {
-                assert!(
-                    low.y.abs() < 1e-5,
-                    "standing horse does not reach the rider's feet plane"
-                );
-            }
+            assert!(
+                high.z - low.z > MOUNTED_WIDTH,
+                "at {pose:?} the horse fits the square lengthways too, so the box was set \
+                 from the length rather than the width"
+            );
         }
+
+        // Hair is the one part that may leave the box, and that is the rig's decision
+        // rather than the saddle's: `appearance::envelope` names the topknot as leaving
+        // the walking box upwards. The saddle adds no overshoot of its own — whatever a
+        // model pokes above this box, it already pokes above the walking box by at least
+        // as much.
+        for model in HairModel::ALL {
+            let (_, on_foot) = extent(&[piece_mesh(BodyPiece::Hair, model)]);
+            let (_, mounted) = extent(&[rider_mesh(BodyPiece::Hair, model, false)]);
+            let allowed = (on_foot.y - PLAYER_HEIGHT).max(0.0);
+            assert!(
+                mounted.y - MOUNTED_HEIGHT <= allowed + 1e-6,
+                "{model:?} leaves the mounted box by {} and the walking box by only {allowed}",
+                mounted.y - MOUNTED_HEIGHT
+            );
+        }
+    }
+
+    #[test]
+    fn hooves_rest_on_the_feet_plane_standing() {
+        for leg in Leg::ALL {
+            let standing =
+                horse_leg_mesh().transformed_by(gait_transform(leg, WalkPose::default()));
+            let (low, _) = extent(&[standing]);
+            assert!(low.y.abs() < 1e-3, "{leg:?} stands at y {}", low.y);
+        }
+    }
+
+    #[test]
+    fn legs_pivot_at_the_shoulder_and_the_hip_and_a_hoof_sweeps_under_a_third_of_a_block() {
+        let (belly, withers) = extent(&[horse_barrel_mesh()]);
+        let sole = Vec3::new(0.0, HOOF_SOLE.y, (HOOF_SOLE.z.0 + HOOF_SOLE.z.1) / 2.0);
+        for leg in Leg::ALL {
+            let pivot = leg.hip();
+            let wanted_z = match leg {
+                Leg::LeftFront | Leg::RightFront => -0.45,
+                Leg::LeftRear | Leg::RightRear => 0.55,
+            };
+            assert!(
+                (pivot.x.abs() - 0.20).abs() < 1e-6 && (pivot.z - wanted_z).abs() < 1e-6,
+                "{leg:?} pivots at {pivot}"
+            );
+            assert!(
+                pivot.y > belly.y && pivot.y < withers.y,
+                "{leg:?} pivots outside the barrel at y {}",
+                pivot.y
+            );
+            let forward = gait_transform(leg, walking(PI / 2.0)).transform_point(sole);
+            let back = gait_transform(leg, walking(3.0 * PI / 2.0)).transform_point(sole);
+            let sweep = (forward.z - back.z).abs();
+            assert!(sweep > 0.2 && sweep <= HOOF_SWEEP, "{leg:?} sweeps {sweep}");
+        }
+    }
+
+    #[test]
+    fn the_rider_sits_on_the_saddle_astride_the_barrel_with_the_reins_in_hand() {
+        let hip = BodyPiece::LeftTrouser.pivot().y + RIDER_LIFT;
+        let seat = SADDLE_CENTRE.y + SADDLE.y / 2.0;
+        assert!(
+            (hip - seat).abs() < 0.02,
+            "hip at {hip}, saddle seat at {seat}"
+        );
+
+        // Each leg is splayed outward as well as folded forward, so the foot hangs beside
+        // the barrel rather than through it. The foot is taken at the centre of its sole:
+        // the rig's shoe is 0.25 wide, and no rotation about the hip fits all of a sole
+        // that wide between the barrel's side at 0.33 and the box's at 0.50 — its inner
+        // edge sits against the horse, as a rider's heel does.
+        let (belly, _) = extent(&[horse_barrel_mesh()]);
+        for (shoe, side) in [(BodyPiece::LeftShoe, -1.0), (BodyPiece::RightShoe, 1.0)] {
+            let mesh = piece_mesh(shoe, ANY_HAIR);
+            let (low, _) = extent(std::slice::from_ref(&mesh));
+            let sole: Vec<Vec3> = positions(std::slice::from_ref(&mesh))
+                .into_iter()
+                .filter(|point| (point.y - low.y).abs() < 1e-6)
+                .collect();
+            let sole = sole.iter().sum::<Vec3>() / sole.len() as f32;
+            let seated = rider_piece_transform(shoe, false);
+            let foot = seated.transform_point(sole);
+            assert!(
+                foot.x * side >= GIRTH.half_x,
+                "the {shoe:?} hangs through the barrel at x {}",
+                foot.x
+            );
+            assert!(
+                foot.y > belly.y,
+                "the {shoe:?} hangs below the belly at y {}",
+                foot.y
+            );
+            let (fold, _, splay) = seated.rotation.to_euler(EulerRot::XYZ);
+            assert!(
+                (fold - RIDER_LEG_ANGLE).abs() < 1e-5,
+                "{shoe:?} folded by {fold}"
+            );
+            assert!(
+                (splay - side * RIDER_LEG_SPLAY).abs() < 1e-5,
+                "{shoe:?} splayed by {splay}"
+            );
+        }
+
+        // The arms reach the reins: each rein ends inside the fist on its side, and starts
+        // at the mouth.
+        for (fist, side) in [(BodyPiece::LeftFist, -1.0), (BodyPiece::RightFist, 1.0)] {
+            let hand = REIN_HAND * Vec3::new(side, 1.0, 1.0);
+            let held = rider_piece_transform(fist, false)
+                .compute_affine()
+                .inverse()
+                .transform_point3(hand);
+            let (low, high) = extent(&[piece_mesh(fist, ANY_HAIR)]);
+            assert!(
+                held.cmpge(low).all() && held.cmple(high).all(),
+                "the {fist:?} does not hold its rein: {held} outside {low}..{high}"
+            );
+        }
+        let (low, high) = extent(&[lofted_along_z(BROW, MUZZLE)]);
+        assert!(
+            REIN_BIT.cmpge(low).all() && REIN_BIT.cmple(high).all(),
+            "the bit is not in the mouth"
+        );
     }
 
     fn angle(leg: Leg, pose: WalkPose) -> f32 {
@@ -723,22 +1050,23 @@ mod tests {
 
     #[test]
     fn mane_and_tail_read_the_legs_distance_phase_without_changing_it() {
-        let walking = WalkPose {
-            phase: PI / 2.0,
-            moving: true,
-        };
-        for (hair, want) in [(HorseHair::Mane, MANE_SWING), (HorseHair::Tail, TAIL_SWING)] {
-            let pitch = hair_transform(hair, walking)
+        let stride = walking(PI / 2.0);
+        for (hair, rest, want) in [
+            (HorseHair::Mane, MANE_REST, MANE_SWING),
+            (HorseHair::Tail, TAIL_REST, TAIL_SWING),
+        ] {
+            let pitch = hair_transform(hair, stride)
                 .rotation
                 .to_euler(EulerRot::XYZ)
                 .0;
-            assert!((pitch - want).abs() < 1e-5);
-            assert_eq!(
-                hair_transform(hair, WalkPose::default()).rotation,
-                Quat::IDENTITY
+            assert!((pitch - rest - want).abs() < 1e-5);
+            assert!(
+                hair_transform(hair, WalkPose::default())
+                    .rotation
+                    .abs_diff_eq(Quat::from_rotation_x(rest), 1e-6)
             );
         }
-        assert!((angle(Leg::LeftFront, walking) - HORSE_LEG_SWING).abs() < 1e-5);
+        assert!((angle(Leg::LeftFront, stride) - HORSE_LEG_SWING).abs() < 1e-5);
     }
 
     fn visual_app() -> App {

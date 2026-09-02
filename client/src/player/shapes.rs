@@ -78,8 +78,6 @@ const FACE_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 /// silently skipping an attribute and leaving them different lengths (the warning at
 /// `finish` in [`super::hands`]), and `translated_by` and `transformed_by` apply as they do
 /// to a box.
-// #813 puts the horse on this; until then nothing in the running client calls it.
-#[allow(dead_code)]
 pub(super) fn hexahedron(corners: [Vec3; 8]) -> Mesh {
     let mut positions = Vec::with_capacity(FACES.len() * 4);
     let mut normals = Vec::with_capacity(FACES.len() * 4);
