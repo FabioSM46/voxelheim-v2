@@ -67,6 +67,7 @@ mod precipitation;
 mod projectiles;
 mod prompt;
 mod saddle;
+mod shapes;
 mod sky;
 mod structures;
 mod target;
