@@ -499,8 +499,9 @@ of the back-to-front sort water needs.
 
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
 once and grows a shape inside each one `palette::is_shaped` answers for: a stem, two leaves, a
-five-petal corolla and an eye for each of the three flower ids, and three overlapping foliage
-clumps with twig and flower detail for a bush. Every vertex stays inside its own voxel, which lets
+five-petal corolla and an eye for each of the three flower ids, and an arching bramble with leaves
+along its canes and flowers at their tips for a bush. Every vertex stays inside its own voxel, which
+lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
 and for the bush that is the point: it used to be an ordinary opaque cube, so a cluster of them
@@ -509,8 +510,8 @@ coordinate, so a row of plants is a row of different plants and the buffers are 
 on every remesh.
 
 **A bush is where `is_opaque` and `is_solid` part company, and it is the first id where they do.**
-`world.Bush` is `Solid` on the server, so a body is stopped by the whole cube and the drawn clumps
-have to span it — they reach to within `BUSH_INSET` of every wall, which is close enough that there
+`world.Bush` is `Solid` on the server, so a body is stopped by the whole cube and the drawn bramble
+has to span it — it reaches to within `BUSH_INSET` of every wall, which is close enough that there
 is no invisible wall and far enough that two neighbours never put coincident quads on the plane
 they share. But foliage has gaps, so the ground under a bush has to keep the top face the cube used
 to cull: `is_opaque` is false for it and `is_solid` is still true. Making `Bush` a `Cover` block
@@ -518,27 +519,29 @@ would be a **server** change with three enforced consequences, and it is not thi
 
 **The quad budget is the thing to watch when either shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads and
-a bush is 32. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 420 quads
+a bush is 42. On a generated meadow chunk with 12 flowers and 9 bushes the cover half is 510 quads
 where the two shapes before #634 cost 96, while the opaque half fell by 24 — the bush's cube left
 the sweep and the ground under it gained the faces that cube was culling.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 
-**The queue does not notice, and #652 is where that was measured instead of argued.** Meshing runs
+**The queue still does not distinguish the shapes, and #788 re-measured that instead of assuming
+the larger bramble was free.** Meshing runs
 on `AsyncComputeTaskPool`, so a mesh that takes longer is throughput and not a hitch; the readings
 that would show a cost anyone pays are `MeshStats::queued`, `MeshStats::in_flight` and how long a
 chunk waits between arriving and having a mesh entity. `measure_a_planted_join` and
 `measure_a_planted_walk` stream one terrain three ways — no plants, bushes as the opaque cube they
-were before #634, and the world as it ships — and the three answers are one answer. Over a join of
-343 chunks, optimized, peak `queued` is 153..165 and peak `in_flight` 332..340 **for every
-planting**, and the last mesh entity lands 415..681 ms after the burst, again for every planting.
-Over a walk of four crossings, peak `queued` is 4..20 and peak `in_flight` 49..77 whichever plants
-are standing. Unoptimized — where a chunk meshes eleven times slower — the three still coincide.
+were before #634, and the world as it ships. In the #788 optimized rerun over a 343-chunk join,
+`Bare` / `CubeBushes` / `Planted` respectively recorded peak `queued` ranges of 144..146 /
+138..141 / 134..138, peak `in_flight` of 310..323 / 315..319 / 315..317, and last mesh entities at
+229.2..321.2 / 250.7..335.5 / 244.1..322.9 ms. Over four walking crossings the same three modes
+recorded peak `queued` of 4..17 / 4..20 / 4..20, peak `in_flight` of 46..73 / 48..73 / 48..76, and
+last meshes at 47.4..71.5 / 37.0..56.1 / 35.4..61.0 ms. Those overlapping spreads provide no
+evidence that the bramble moved the streaming queue.
 **The queue depths are set by `MAX_JOBS_PER_FRAME` and the rate chunks arrive at, not by how long a
 mesh takes**, which is why they do not move: the same finding #642 made about
-`MAX_APPLIED_PER_FRAME`, one stage earlier. The cover pass itself is about 0.2 ms of a 6.5 ms chunk
-optimized and 0.55 ms of 72 ms unoptimized, isolated against an empty chunk by
-`measure_what_a_planted_chunk_costs_to_mesh` because on terrain this broken it is inside the
-run-to-run spread.
+`MAX_APPLIED_PER_FRAME`, one stage earlier. `measure_what_a_planted_chunk_costs_to_mesh` puts the
+new 510-quad cover buffer in context: the planted terrain chunk measured 4.218..5.197 ms (median
+4.354 ms), overlapping the bare terrain's 4.030..4.914 ms (median 4.314 ms).
 
 **A shaped plant costs the sweep nothing at all**, and since #652 that is asserted rather than
 counted: the opaque and water buffers over ground carrying twelve flowers and nine bushes are

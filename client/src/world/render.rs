@@ -2332,8 +2332,9 @@ mod tests {
         /// here to [`Planting::Planted`] is #634's bush and nothing else, and the three
         /// quads a flower gained sit inside *both* of those numbers.
         CubeBushes,
-        /// The world as it ships: a bush is three unmerged clumps with twig and flower
-        /// detail; a flower is a stem, a pair of leaves and a corolla.
+        /// The world as it ships: a bush is an arching bramble with leaves along its
+        /// canes and flowers at their tips; a flower is a stem, a pair of leaves and a
+        /// corolla.
         Planted,
     }
 
