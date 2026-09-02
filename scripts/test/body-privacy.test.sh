@@ -174,7 +174,7 @@ fi
 # the file scanner on exactly the value it is testing — which is the same reason the
 # workstation path above is spelled the way it is.
 wrong_id="9999""999999999"
-printf 'Co-authored-by: FabioSM46 <%s+FabioSM46''@users.noreply.github.com>\n' "$wrong_id" \
+printf 'Co-authored-by: FabioSM46 <%s+FabioSM46@''users.noreply.github.com>\n' "$wrong_id" \
   > "$TEST_ROOT/misattributed.md"
 
 run_check "$CHECK" "$TEST_ROOT/misattributed.md"
@@ -189,7 +189,7 @@ assert_absent "$wrong_id" "the rejected account id"
 # The login is unknown to the table, so the same wrong-looking number says nothing about
 # it and the body passes. The rule claims only what it can check offline: for a login it
 # names, the id must be that login's.
-printf 'Co-authored-by: Stranger <%s+Stranger''@users.noreply.github.com>\n' "$wrong_id" \
+printf 'Co-authored-by: Stranger <%s+Stranger@''users.noreply.github.com>\n' "$wrong_id" \
   > "$TEST_ROOT/unknown-login.md"
 run_check "$CHECK" "$TEST_ROOT/unknown-login.md"
 if [ "$CHECK_STATUS" -ne 0 ]; then
@@ -197,6 +197,35 @@ if [ "$CHECK_STATUS" -ne 0 ]; then
   echo "$CHECK_COMBINED" >&2
   exit 1
 fi
+
+# The bot login carries a bracket and `email_pattern` has none in its local-part class, so
+# this address is never extracted by the address scan at all. The rule has its own pass over
+# the body for that reason; without it the second table entry would be decorative here.
+bracket_login="github-""actions[bot]"
+printf 'Co-authored-by: %s <%s+%s@''users.noreply.github.com>\n' \
+  "$bracket_login" "$wrong_id" "$bracket_login" > "$TEST_ROOT/bracket.md"
+run_check "$CHECK" "$TEST_ROOT/bracket.md"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a bracketed login with another account's id to exit 1, got $CHECK_STATUS" >&2
+  echo "$CHECK_COMBINED" >&2
+  exit 1
+fi
+grep -Fqx 'body privacy: line 1 contains a misattributed GitHub account id' <<< "$CHECK_STDOUT"
+assert_absent "$wrong_id" "the rejected account id"
+
+# `grep -Eo` takes the leftmost-longest run, so an address in parentheses came back carrying
+# them while the extraction started at "not whitespace, not an angle bracket" — and the
+# anchored rule then could not parse it, so it passed. Found in review on #800; a body is
+# prose, which makes this the surface where an address is least likely to stand alone.
+printf 'Wrongly credited to (%s+%s@''users.noreply.github.com) in the review.\n' \
+  "$wrong_id" "$bracket_login" > "$TEST_ROOT/punctuated.md"
+run_check "$CHECK" "$TEST_ROOT/punctuated.md"
+if [ "$CHECK_STATUS" -ne 1 ]; then
+  echo "expected a parenthesised misattribution to exit 1, got $CHECK_STATUS" >&2
+  echo "$CHECK_COMBINED" >&2
+  exit 1
+fi
+grep -Fqx 'body privacy: line 1 contains a misattributed GitHub account id' <<< "$CHECK_STDOUT"
 
 # ---------------------------------------------------------------------- calling it wrong
 # The body arrives on stdin and never in argv, so an argument is a mistake rather than an

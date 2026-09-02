@@ -105,6 +105,27 @@ github_noreply_ids=(
 # on any name.
 github_noreply_pattern='^(([0-9]*)\+)?([^@+]+)@users\.noreply\.github\.com$'
 
+# Extracted separately from the address pattern above, and this is not a refinement — it is
+# the difference between the table having two entries and having one. `email_pattern` has no
+# bracket in its local-part class, so an address whose login carries one is not merely
+# matched imprecisely, it is never extracted at all: the bot login this repository publishes
+# alongside the handle was invisible to every message-driven scan, and only the author and
+# committer fields, which are read whole and never grepped, could see it. Found in review on
+# #797, on the change that introduced the table.
+#
+# **It starts at the id, and that is the whole of what keeps it honest.** The first version
+# started at "anything that is not whitespace or an angle bracket", which reads as a harmless
+# widening and is not: `grep -Eo` takes the leftmost-longest run, so an address in parentheses
+# or after a comma is extracted *with* the punctuation, the anchored rule below cannot parse
+# what it is handed, and the address passes. Not a truncated diagnostic — a silent miss, in
+# the same direction as the defect the table exists to catch, found in review on #800.
+#
+# Requiring the plus costs nothing the rule uses. An address with no id is the legacy form,
+# about which the rule says nothing anyway, so declining to extract it removes only work; the
+# id-less plus is still reached, because `[0-9]*` matches empty. What it removes is every
+# character the match could have swallowed on its left.
+github_noreply_extract_pattern='[0-9]*\+[^@[:space:]<>]+@users\.noreply\.github\.com'
+
 is_misattributed_noreply() {
   local email=${1,,} plus prefix login entry
   [[ "$email" =~ $github_noreply_pattern ]] || return 1
@@ -152,25 +173,29 @@ while IFS= read -r match; do
   line=${match%%:*}
   content=${match#*:}
   unapproved=0
-  misattributed=0
   while IFS= read -r email; do
     if ! is_approved_email "$email"; then
       unapproved=1
-    fi
-    if is_misattributed_noreply "$email"; then
-      misattributed=1
     fi
   done < <(grep -Eo "$email_pattern" <<< "$content" || true)
   if [ "$unapproved" -ne 0 ]; then
     add_finding "$line" "a non-public email address"
   fi
-  # Reported even though it is not private data, because this surface is where a body
-  # transcribes a trailer somebody is about to paste into a commit. Naming it here is the
-  # cheapest place to stop it: the other two checks refuse a push, this one only tells you.
-  if [ "$misattributed" -ne 0 ]; then
-    add_finding "$line" "a misattributed GitHub account id"
-  fi
 done < <(grep -n -E "$email_pattern" <<< "$body" || true)
+
+# Its own pass, for the reason given beside the pattern. Reported even though it is not
+# private data, because this surface is where a body transcribes a trailer somebody is about
+# to paste into a commit: the other two checks refuse a push, this one only tells you.
+while IFS= read -r match; do
+  line=${match%%:*}
+  content=${match#*:}
+  while IFS= read -r noreply; do
+    if is_misattributed_noreply "$noreply"; then
+      add_finding "$line" "a misattributed GitHub account id"
+      break
+    fi
+  done < <(grep -Eo "$github_noreply_extract_pattern" <<< "$content" || true)
+done < <(grep -n -E "$github_noreply_extract_pattern" <<< "$body" || true)
 
 # Collected across every prefix and then deduplicated, so a line matching two of them is
 # one finding rather than two.
