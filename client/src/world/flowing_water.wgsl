@@ -2,8 +2,8 @@
 // into the vertex attributes.
 //
 // Shading only. The surface stays exactly where `mesher.rs` put it — the level the
-// server sent — and nothing here displaces a vertex, so what moves on the screen is
-// colour and never geometry.
+// server sent — and nothing here displaces a vertex. Colour and the lighting normal
+// move; geometry never does.
 //
 // Three inputs, all of them per-vertex and all of them derived from block ids the
 // server chose:
@@ -30,15 +30,17 @@ struct FlowingWater {
 // Binding 100 by convention: the base StandardMaterial owns 0-99 of this group.
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> flowing_water: FlowingWater;
 
-// Blocks a ripple travels per second along a full-strength flow. A little under
-// walking pace, so a river reads as moving without the surface looking blown along.
-const FLOW_SPEED: f32 = 1.4;
-// Blocks per second the pattern drifts where there is no flow at all. Slow enough to
-// read as a lake breathing rather than as a current nobody can swim against.
-const STILL_DRIFT: f32 = 0.06;
+// Blocks a ripple travels per second along a full-strength flow. At the wavelengths
+// below the fine octave passes in about a second, while the coarse one takes just under
+// three: motion is legible without the whole sheet sliding as one long wave.
+const FLOW_SPEED: f32 = 5.0;
+// Blocks per second the pattern drifts where there is no flow at all. Both components
+// point the same way so the fine octave, which samples x + y, cannot cancel their time
+// terms. It stays far slower than a current: a lake breathes without reading as one.
+const STILL_DRIFT: f32 = 0.35;
 // Blocks per second a falling column streaks along -Y. Faster than any horizontal
 // flow, because a waterfall is the one place the eye expects speed.
-const FALL_SPEED: f32 = 5.0;
+const FALL_SPEED: f32 = 7.0;
 
 // ── The three waters ──────────────────────────────────────────────────────────────
 //
@@ -70,8 +72,9 @@ const RUN_FOAM: f32 = 0.12;
 const FALL_FOAM: f32 = 0.28;
 
 // How much longer a streak is than it is wide. The ripple is sampled in a basis whose
-// first axis lies along the direction of travel, and that axis is divided by this — so
-// the pattern varies slowly along the flow and quickly across it, which is a streak.
+// second axis lies across the direction of travel, and that axis is multiplied by this
+// — so the pattern varies slowly along the flow and quickly across it, which is a streak.
+// Keeping the animated first axis unscaled lets shape and crest rate be tuned apart.
 // Both are kept modest: past about five the pattern stops varying along the flow at
 // all, and a band that does not vary cannot be seen to move.
 const RUN_STRETCH: f32 = 3.5;
@@ -86,14 +89,20 @@ const OCTAVE_RATIO: f32 = 2.7;
 // How much of the pattern the second octave contributes.
 const OCTAVE_WEIGHT: f32 = 0.35;
 
-// Two octaves of sine, in [-1, 1]. No texture, no hash table, no asset — the whole
-// pattern is four sines of the sample point.
+// How far the ripple's analytic slope tilts the lighting normal. This is deliberately
+// small: the surface is one flat quad over many blocks, and a large value would turn it
+// into a warped mirror. It changes only the normal handed to PBR, never the geometry.
+const NORMAL_STRENGTH: f32 = 0.08;
+
+// Two octaves of sine. The returned x component is the value in [-1, 1]; y and z are
+// its analytic derivatives. No texture, no hash table, no asset — the whole pattern is
+// four sines of the sample point.
 //
 // **The range is exact, it is proved by the last line, and every depth constant above
 // depends on it.** `coarse` is a product of two sines, so |coarse| <= 1; `fine` is one
 // sine, so |fine| <= 1; therefore |coarse + fine * OCTAVE_WEIGHT| <= 1 + OCTAVE_WEIGHT,
 // and dividing by exactly that is what closes it at one. Nothing here clamps, and that
-// is deliberate: with |ripple| <= 1 the fragment below cannot leave its range —
+// is deliberate: with |ripple.x| <= 1 the fragment below cannot leave its range —
 // brightness stays in [1 - FALL_DEPTH, 1 + FALL_DEPTH] and the foam crest in
 // [0, FALL_FOAM] — so a clamp would protect nothing that holds and would hide the one
 // thing that could break it.
@@ -104,11 +113,28 @@ const OCTAVE_WEIGHT: f32 = 0.35;
 // negative. So the divisor is not decoration and it is not optional —
 // `the_ripple_is_normalised_and_the_depths_depend_on_it` in `water_material.rs` fails if
 // this line stops naming every octave weight in the sum above it.
-fn ripple(point: vec2<f32>) -> f32 {
-    let coarse = sin(point.x * RIPPLE_SCALE)
-        * sin(point.y * RIPPLE_SCALE * 1.3 + point.x * 0.21);
-    let fine = sin((point.x + point.y) * RIPPLE_SCALE * OCTAVE_RATIO + 1.7);
-    return (coarse + fine * OCTAVE_WEIGHT) / (1.0 + OCTAVE_WEIGHT);
+fn ripple(point: vec2<f32>) -> vec3<f32> {
+    let coarse_x = point.x * RIPPLE_SCALE;
+    let coarse_y = point.y * RIPPLE_SCALE * 1.3 + point.x * 0.21;
+    let fine_phase = (point.x + point.y) * RIPPLE_SCALE * OCTAVE_RATIO + 1.7;
+
+    let coarse = sin(coarse_x) * sin(coarse_y);
+    let fine = sin(fine_phase);
+    let divisor = 1.0 + OCTAVE_WEIGHT;
+
+    // Analytic derivatives in the two coordinates of `point`. Returning them with the
+    // value keeps the normal and colour on exactly the same procedural wave.
+    let gradient_x = (
+        cos(coarse_x) * RIPPLE_SCALE * sin(coarse_y)
+        + sin(coarse_x) * cos(coarse_y) * 0.21
+        + cos(fine_phase) * RIPPLE_SCALE * OCTAVE_RATIO * OCTAVE_WEIGHT
+    ) / divisor;
+    let gradient_y = (
+        sin(coarse_x) * cos(coarse_y) * RIPPLE_SCALE * 1.3
+        + cos(fine_phase) * RIPPLE_SCALE * OCTAVE_RATIO * OCTAVE_WEIGHT
+    ) / divisor;
+
+    return vec3<f32>((coarse + fine * OCTAVE_WEIGHT) / divisor, gradient_x, gradient_y);
 }
 
 @fragment
@@ -135,37 +161,53 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // that go with it. One branch chain and no second material: the state is per-vertex
     // data the mesher wrote from block ids the server chose.
     var point: vec2<f32>;
+    // World-space gradients of point.x and point.y. They turn `ripple`'s two analytic
+    // derivatives back into a slope on whichever plane this water face occupies.
+    var point_x_gradient: vec3<f32>;
+    var point_y_gradient: vec3<f32>;
     var depth: f32;
     var foam: f32;
 
     if falling > 0.5 {
-        // A fall is read down its own wall: the vertical axis is the stretched one, so
+        // A fall is read down its own wall: the transverse axis is compressed, so
         // the water breaks into columns rather than into ripples, and the whole pattern
-        // travels down it.
-        point = vec2<f32>((world.y + FALL_SPEED * time) / FALL_STRETCH, world.x + world.z);
+        // travels down an unscaled animated axis.
+        point = vec2<f32>(world.y + FALL_SPEED * time, (world.x + world.z) * FALL_STRETCH);
+        point_x_gradient = vec3<f32>(0.0, 1.0, 0.0);
+        point_y_gradient = vec3<f32>(FALL_STRETCH, 0.0, FALL_STRETCH);
         depth = FALL_DEPTH;
         foam = FALL_FOAM;
     } else if dot(flow, flow) > 0.0 {
         // A current, in the basis it runs in: `along` down the flow, `across` at right
         // angles to it. Subtracting the travelled distance from `along` is what makes
-        // the pattern appear to move forwards; dividing it by the stretch is what makes
-        // it a streak rather than a swell.
+        // the pattern appear to move forwards; multiplying `across` by the stretch is
+        // what makes it a streak without also slowing that motion.
         let direction = normalize(flow);
+        let perpendicular = vec2<f32>(-direction.y, direction.x);
         let speed = FLOW_SPEED * length(flow);
         let along = dot(world.xz, direction) - speed * time;
-        let across = dot(world.xz, vec2<f32>(-direction.y, direction.x));
-        point = vec2<f32>(along / RUN_STRETCH, across);
+        let across = dot(world.xz, perpendicular);
+        point = vec2<f32>(along, across * RUN_STRETCH);
+        point_x_gradient = vec3<f32>(direction.x, 0.0, direction.y);
+        point_y_gradient = vec3<f32>(
+            perpendicular.x * RUN_STRETCH,
+            0.0,
+            perpendicular.y * RUN_STRETCH,
+        );
         depth = RUN_DEPTH;
         foam = RUN_FOAM;
     } else {
         // Still water: a slow diagonal shimmer that belongs to no direction, and no
         // foam, because a lake has none.
-        point = world.xz + vec2<f32>(-STILL_DRIFT, STILL_DRIFT) * time;
+        point = world.xz + vec2<f32>(STILL_DRIFT * 0.7, STILL_DRIFT) * time;
+        point_x_gradient = vec3<f32>(1.0, 0.0, 0.0);
+        point_y_gradient = vec3<f32>(0.0, 0.0, 1.0);
         depth = STILL_DEPTH;
         foam = 0.0;
     }
 
-    let wave = ripple(point);
+    let sample = ripple(point);
+    let wave = sample.x;
     let brightness = 1.0 + depth * wave;
     // Only the crest foams. `max(wave, 0.0)` rather than `abs`, so a trough stays water
     // instead of turning the pattern into a row of white bars at twice the frequency.
@@ -184,6 +226,15 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         pbr_input.material.emissive.rgb + vec3<f32>(1.0, 1.0, 1.0) * crest,
         pbr_input.material.emissive.a,
     );
+
+    // PBR reads `N` for direct and specular lighting. Projecting the analytic gradient
+    // into the actual face plane keeps the same arithmetic valid for a horizontal
+    // surface and for either orientation of a falling wall. `world_normal` stays flat:
+    // shadows and geometry still describe the server-sent surface.
+    let world_gradient = sample.y * point_x_gradient + sample.z * point_y_gradient;
+    let surface_gradient = world_gradient
+        - pbr_input.N * dot(world_gradient, pbr_input.N);
+    pbr_input.N = normalize(pbr_input.N - NORMAL_STRENGTH * surface_gradient);
 
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
