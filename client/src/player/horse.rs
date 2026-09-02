@@ -15,6 +15,9 @@
 //! interpolation advances from horizontal distance and which a [`Gait`] rescales to a
 //! stride of its own: faster authoritative travel cycles the same rig faster, while
 //! elapsed time over no distance cannot move a hoof.
+//!
+//! Which gait a horse uses is which kind of horse it is — a ridden one canters, a paddock
+//! one walks — and no speed is read, mirrored or inferred to decide it.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -83,6 +86,12 @@ pub(super) const EAR_CENTRE: Vec3 = Vec3::new(0.09, 2.10, -1.02);
 const EYE: Vec2 = Vec2::new(0.05, 0.05);
 const EYE_CENTRE: Vec3 = Vec3::new(0.135, 1.84, -1.14);
 
+// The barrel turns about the girth and the neck about its own base, each where it
+// stands: every mesh stays authored in horse space and a part at rest is the identity.
+const BARREL_PIVOT: Vec3 = Vec3::new(0.0, (GIRTH.y.0 + GIRTH.y.1) / 2.0, GIRTH.z);
+const NECK_PIVOT: Vec3 = Vec3::new(0.0, NECK_BASE.y, (NECK_BASE.z.0 + NECK_BASE.z.1) / 2.0);
+const DEGREE: f32 = PI / 180.0;
+
 /// How tall the drawn horse is: its ear tips. `mobs.rs` reads it as the presentation
 /// envelope of a paddock horse.
 pub(super) const HORSE_HEIGHT: f32 = EAR_CENTRE.y + EAR.y / 2.0;
@@ -122,7 +131,8 @@ const TAIL_REST: f32 = -0.12;
 const TAIL_SWING: f32 = 0.10;
 
 // The saddle seat sits on the back behind the withers with a flap down each side; the
-// reins run from the corners of the mouth along the neck to the rider's fists.
+// reins run from the corners of the mouth along the neck to the rider's fists, and are
+// re-aimed every frame because the mouth moves with the neck and the fists do not.
 const SADDLE: Vec3 = Vec3::new(0.44, 0.07, 0.36);
 const SADDLE_CENTRE: Vec3 = Vec3::new(0.0, 1.575, 0.02);
 const SADDLE_FLAP: Vec3 = Vec3::new(0.035, 0.30, 0.26);
@@ -184,8 +194,10 @@ impl FromWorld for HorseCoats {
 
 #[derive(Resource)]
 pub(super) struct HorseVisuals {
-    body: Handle<Mesh>,
+    barrel: Handle<Mesh>,
+    neck: Handle<Mesh>,
     head: Handle<Mesh>,
+    rein: Handle<Mesh>,
     upper_leg: Handle<Mesh>,
     lower_leg: Handle<Mesh>,
     mane: Handle<Mesh>,
@@ -229,6 +241,30 @@ struct HorsePart;
 pub(super) enum HorseJoint {
     Leg(Leg, Segment),
     Hair(HorseHair),
+    /// Chest, loin and croup, bobbing or rocking about the girth; carries the neck, the
+    /// tack and the tail, while the legs hang from the root so the hooves stay down.
+    Barrel,
+    /// The neck, nodding or leaning about its base; carries the head, eyes and mane.
+    Neck,
+    /// One rein, aimed from the bit where the neck has put it to the fist on its side.
+    Rein(Side),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    const BOTH: [Self; 2] = [Self::Left, Self::Right];
+
+    const fn mirror(self) -> Vec3 {
+        match self {
+            Self::Left => Vec3::new(-1.0, 1.0, 1.0),
+            Self::Right => Vec3::ONE,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +337,16 @@ struct Gait {
     swing: f32,
     /// How far a lower segment folds back at the top of its swing.
     fold: f32,
+    /// How many times a cycle the body moves: twice at a walk, once for each fore hoof,
+    /// and once at a canter, with the leading fore.
+    sways: f32,
+    /// How far the girth rises and falls, and how far the barrel pitches about it.
+    bob: f32,
+    rock: f32,
+    /// The neck's pitch forward of rest while moving — negative lowers the poll — and
+    /// how far it nods either way of that.
+    lean: f32,
+    nod: f32,
 }
 
 /// The walk: a lateral four-beat sequence — left rear, left front, right rear, right
@@ -310,6 +356,27 @@ const WALK: Gait = Gait {
     beats: [FRAC_PI_2, 3.0 * FRAC_PI_2, 0.0, PI],
     swing: 0.32,
     fold: 0.60,
+    sways: 2.0,
+    bob: 0.02,
+    rock: 0.0,
+    lean: 0.0,
+    nod: 4.0 * DEGREE,
+};
+
+/// The canter: three beats and a suspension, one cycle per 3.4 blocks. On the right
+/// lead the trailing hind — the left — lands first, the diagonal pair a quarter later,
+/// the leading fore — the right — a quarter after that, and in the fourth quarter
+/// nothing lands. The neck stretches forward and the barrel rocks once a stride.
+const CANTER: Gait = Gait {
+    stride: 3.4,
+    beats: [FRAC_PI_2, PI, 0.0, FRAC_PI_2],
+    swing: 0.45,
+    fold: 1.0,
+    sways: 1.0,
+    bob: 0.0,
+    rock: 3.0 * DEGREE,
+    lean: -10.0 * DEGREE,
+    nod: 3.0 * DEGREE,
 };
 
 impl Gait {
@@ -317,6 +384,11 @@ impl Gait {
     fn cycle(&self, walk: WalkPose) -> Option<f32> {
         walk.moving
             .then(|| walk.phase * (WALK_STRIDE_BLOCKS / self.stride))
+    }
+
+    /// Where in its sway the body is, `sways` times a cycle, or `None` standing.
+    fn sway(&self, walk: WalkPose) -> Option<f32> {
+        self.cycle(walk).map(|cycle| (cycle * self.sways).sin())
     }
 
     /// One leg's two angles: the upper segment's swing, positive forward, and the lower
@@ -424,8 +496,10 @@ pub(super) fn create_visuals(
     coats: Res<HorseCoats>,
 ) {
     commands.insert_resource(HorseVisuals {
-        body: meshes.add(horse_body_mesh()),
+        barrel: meshes.add(horse_barrel_mesh()),
+        neck: meshes.add(horse_neck_mesh()),
         head: meshes.add(horse_head_mesh()),
+        rein: meshes.add(horse_rein_mesh()),
         upper_leg: meshes.add(horse_upper_leg_mesh()),
         lower_leg: meshes.add(horse_lower_leg_mesh()),
         mane: meshes.add(horse_mane_mesh()),
@@ -487,14 +561,9 @@ fn horse_barrel_mesh() -> Mesh {
     barrel
 }
 
-fn horse_body_mesh() -> Mesh {
-    let mut body = horse_barrel_mesh();
-    merge_all(
-        &mut body,
-        [lofted_along_y(NECK_BASE, NECK_POLL)],
-        "horse body",
-    );
-    body
+/// The neck alone, from the withers to the poll.
+fn horse_neck_mesh() -> Mesh {
+    lofted_along_y(NECK_BASE, NECK_POLL)
 }
 
 fn horse_head_mesh() -> Mesh {
@@ -532,26 +601,31 @@ fn horse_tail_mesh() -> Mesh {
     Mesh::from(Cuboid::from_size(TAIL_STRIP)).translated_by(Vec3::Y * -TAIL_STRIP.y / 2.0)
 }
 
-fn bar_between(start: Vec3, end: Vec3, width: f32) -> Mesh {
+/// The transform that lays a unit bar along z from `start` to `end`.
+fn bar_between(start: Vec3, end: Vec3) -> Transform {
     let axis = end - start;
-    Mesh::from(Cuboid::new(width, width, axis.length())).transformed_by(
-        Transform::from_translation((start + end) / 2.0)
-            .with_rotation(Quat::from_rotation_arc(Vec3::Z, axis.normalize())),
-    )
+    Transform {
+        translation: (start + end) / 2.0,
+        rotation: Quat::from_rotation_arc(Vec3::Z, axis.normalize()),
+        scale: Vec3::new(1.0, 1.0, axis.length()),
+    }
 }
 
+/// The saddle and its flaps: the reins are a joint of their own.
 fn horse_tack_mesh() -> Mesh {
     let mut saddle = Mesh::from(Cuboid::from_size(SADDLE)).translated_by(SADDLE_CENTRE);
     let flaps = [-1.0, 1.0].map(|side| {
         Mesh::from(Cuboid::from_size(SADDLE_FLAP))
             .translated_by(SADDLE_FLAP_CENTRE * Vec3::new(side, 1.0, 1.0))
     });
-    let reins = [-1.0, 1.0].map(|side| {
-        let mirror = Vec3::new(side, 1.0, 1.0);
-        bar_between(REIN_BIT * mirror, REIN_HAND * mirror, REIN_WIDTH)
-    });
-    merge_all(&mut saddle, flaps.into_iter().chain(reins), "horse tack");
+    merge_all(&mut saddle, flaps, "horse tack");
     saddle
+}
+
+/// One rein: a unit bar along z that [`rein_transform`] aims and stretches from the bit
+/// to the fist through [`bar_between`].
+fn horse_rein_mesh() -> Mesh {
+    Mesh::from(Cuboid::new(REIN_WIDTH, REIN_WIDTH, 1.0))
 }
 
 /// Two eyes on the sides of the head, where a horse's are: each a rectangle turned to
@@ -621,44 +695,31 @@ fn spawn_horse_parts(
     visuals: &HorseVisuals,
     material: &Handle<StandardMaterial>,
 ) {
-    horse.spawn((
-        HorsePart,
-        Mesh3d(visuals.body.clone()),
-        MeshMaterial3d(material.clone()),
-        Transform::default(),
-    ));
-    horse.spawn((
-        HorsePart,
-        Mesh3d(visuals.head.clone()),
-        MeshMaterial3d(material.clone()),
-        Transform::default(),
-    ));
-    horse.spawn((
-        HorsePart,
-        HorseJoint::Hair(HorseHair::Mane),
-        Mesh3d(visuals.mane.clone()),
-        MeshMaterial3d(visuals.hair.clone()),
-        rest_transform(HorseJoint::Hair(HorseHair::Mane)),
-    ));
-    horse.spawn((
-        HorsePart,
-        HorseJoint::Hair(HorseHair::Tail),
-        Mesh3d(visuals.tail.clone()),
-        MeshMaterial3d(visuals.hair.clone()),
-        rest_transform(HorseJoint::Hair(HorseHair::Tail)),
-    ));
-    horse.spawn((
-        HorsePart,
-        Mesh3d(visuals.tack.clone()),
-        MeshMaterial3d(visuals.leather.clone()),
-        Transform::default(),
-    ));
-    horse.spawn((
-        HorsePart,
-        Mesh3d(visuals.eyes.clone()),
-        MeshMaterial3d(visuals.eye.clone()),
-        Transform::default(),
-    ));
+    // The barrel carries the neck, the tack and the tail; the neck carries the head, the
+    // eyes and the mane; the legs and the reins hang from the root, where the ground and
+    // the fists are.
+    horse
+        .spawn(jointed(HorseJoint::Barrel, &visuals.barrel, material))
+        .with_children(|barrel| {
+            barrel
+                .spawn(jointed(HorseJoint::Neck, &visuals.neck, material))
+                .with_children(|neck| {
+                    neck.spawn(fixed(&visuals.head, material));
+                    neck.spawn(fixed(&visuals.eyes, &visuals.eye));
+                    let mane = HorseJoint::Hair(HorseHair::Mane);
+                    neck.spawn(jointed(mane, &visuals.mane, &visuals.hair));
+                });
+            let tail = HorseJoint::Hair(HorseHair::Tail);
+            barrel.spawn(jointed(tail, &visuals.tail, &visuals.hair));
+            barrel.spawn(fixed(&visuals.tack, &visuals.leather));
+        });
+    for side in Side::BOTH {
+        horse.spawn(jointed(
+            HorseJoint::Rein(side),
+            &visuals.rein,
+            &visuals.leather,
+        ));
+    }
     for leg in Leg::ALL {
         let upper = HorseJoint::Leg(leg, Segment::Upper);
         let lower = HorseJoint::Leg(leg, Segment::Lower);
@@ -678,6 +739,31 @@ fn spawn_horse_parts(
                 ));
             });
     }
+}
+
+/// A part that never moves, drawn where its mesh was authored.
+fn fixed(mesh: &Handle<Mesh>, material: &Handle<StandardMaterial>) -> impl Bundle {
+    (
+        HorsePart,
+        Mesh3d(mesh.clone()),
+        MeshMaterial3d(material.clone()),
+        Transform::default(),
+    )
+}
+
+/// A part the gait moves, spawned at rest.
+fn jointed(
+    joint: HorseJoint,
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+) -> impl Bundle {
+    (
+        HorsePart,
+        joint,
+        Mesh3d(mesh.clone()),
+        MeshMaterial3d(material.clone()),
+        rest_transform(joint),
+    )
 }
 
 // The server leaves entity ids opaque to gameplay. Its three stable anchors receive
@@ -763,6 +849,11 @@ type PaddockHorseQuery<'w, 's> = Query<'w, 's, (Entity, &'static WalkPose), With
 
 /// Poses every joint of every horse from its owning body's or its own row's distance
 /// sample.
+///
+/// A ridden horse canters whenever it moves and a paddock horse walks, because the
+/// server holds the one at `MountSpeed` and the other on a lap at a walk: the selection
+/// is which route spawned the horse. No speed is mirrored here to compare against and
+/// none is inferred from the phase, which would be the same mirror one step removed.
 pub(super) fn animate_gait(
     bodies: Query<&WalkPose>,
     horses: RiddenHorseQuery<'_, '_>,
@@ -774,7 +865,7 @@ pub(super) fn animate_gait(
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
-        pose_horse(horse, *walk, &WALK, &children, &mut joints);
+        pose_horse(horse, *walk, &CANTER, &children, &mut joints);
     }
     for (horse, walk) in &paddock_horses {
         pose_horse(horse, *walk, &WALK, &children, &mut joints);
@@ -805,7 +896,52 @@ fn joint_transform(joint: HorseJoint, gait: &Gait, walk: WalkPose) -> Transform 
     match joint {
         HorseJoint::Leg(leg, segment) => leg_transform(leg, segment, gait, walk),
         HorseJoint::Hair(hair) => hair_transform(hair, gait, walk),
+        HorseJoint::Barrel => barrel_transform(gait, walk),
+        HorseJoint::Neck => neck_transform(gait, walk),
+        HorseJoint::Rein(side) => rein_transform(side, gait, walk),
     }
+}
+
+/// A part authored in horse space, turned about `pivot` where it stands and raised by
+/// `rise`: its rest is the identity, and so is every fixed part's under it.
+fn turned_in_place(pivot: Vec3, rotation: Quat, rise: f32) -> Transform {
+    Transform {
+        translation: pivot - rotation * pivot + Vec3::Y * rise,
+        rotation,
+        scale: Vec3::ONE,
+    }
+}
+
+/// The barrel bobs and rocks about the girth, `sways` times a cycle.
+fn barrel_transform(gait: &Gait, walk: WalkPose) -> Transform {
+    let Some(sway) = gait.sway(walk) else {
+        return Transform::default();
+    };
+    turned_in_place(
+        BARREL_PIVOT,
+        Quat::from_rotation_x(sway * gait.rock),
+        sway * gait.bob,
+    )
+}
+
+/// The neck leans forward while moving and nods about its base, in the barrel's frame.
+fn neck_transform(gait: &Gait, walk: WalkPose) -> Transform {
+    let Some(sway) = gait.sway(walk) else {
+        return Transform::default();
+    };
+    turned_in_place(
+        NECK_PIVOT,
+        Quat::from_rotation_x(gait.lean + sway * gait.nod),
+        0.0,
+    )
+}
+
+/// One rein from the bit, wherever the barrel and the neck have carried it, to the fist
+/// on its side, which sits on the rider and moves with neither.
+fn rein_transform(side: Side, gait: &Gait, walk: WalkPose) -> Transform {
+    let bit = (barrel_transform(gait, walk) * neck_transform(gait, walk))
+        .transform_point(REIN_BIT * side.mirror());
+    bar_between(bit, REIN_HAND * side.mirror())
 }
 
 /// A joint standing still. The gait is immaterial there — every one puts every joint at
@@ -866,6 +1002,12 @@ mod tests {
     /// How many phases a cycle is sampled at where a bound has to hold everywhere.
     const STEPS: usize = 96;
 
+    /// Both gaits, named, for every bound that has to hold whatever the horse is doing.
+    const GAITS: [(&str, &Gait); 2] = [("walk", &WALK), ("canter", &CANTER)];
+
+    /// The top of the neck, standing.
+    const POLL: Vec3 = Vec3::new(0.0, NECK_POLL.y, (NECK_POLL.z.0 + NECK_POLL.z.1) / 2.0);
+
     /// The centre of a sole, in the lower segment's frame.
     const SOLE_CENTRE: Vec3 = Vec3::new(0.0, HOOF_SOLE.y, (HOOF_SOLE.z.0 + HOOF_SOLE.z.1) / 2.0);
 
@@ -908,10 +1050,12 @@ mod tests {
         travelled(gait.stride * fraction)
     }
 
-    /// Standing, then eight phases through the walk.
-    fn poses() -> Vec<WalkPose> {
-        std::iter::once(WalkPose::default())
-            .chain((0..8).map(|eighth| through(&WALK, eighth as f32 / 8.0)))
+    /// Standing, then eight phases through each gait.
+    fn poses() -> Vec<(&'static Gait, WalkPose)> {
+        std::iter::once((&WALK, WalkPose::default()))
+            .chain(GAITS.into_iter().flat_map(|(_, gait)| {
+                (0..8).map(move |eighth| (gait, through(gait, eighth as f32 / 8.0)))
+            }))
             .collect()
     }
 
@@ -949,23 +1093,63 @@ mod tests {
     }
 
     fn same_pose(a: Transform, b: Transform) -> bool {
-        a.translation.abs_diff_eq(b.translation, 1e-4) && a.rotation.abs_diff_eq(b.rotation, 1e-4)
+        a.translation.abs_diff_eq(b.translation, 1e-4)
+            && a.rotation.abs_diff_eq(b.rotation, 1e-4)
+            && a.scale.abs_diff_eq(b.scale, 1e-4)
     }
 
-    /// Every part of the horse posed at `pose`, with no rider on it.
-    fn horse_meshes(pose: WalkPose) -> Vec<Mesh> {
-        let mut meshes = vec![horse_body_mesh(), horse_head_mesh()];
+    fn all_joints() -> Vec<HorseJoint> {
+        Leg::ALL
+            .into_iter()
+            .flat_map(|leg| {
+                [Segment::Upper, Segment::Lower].map(|segment| HorseJoint::Leg(leg, segment))
+            })
+            .chain([
+                HorseJoint::Hair(HorseHair::Mane),
+                HorseJoint::Hair(HorseHair::Tail),
+                HorseJoint::Barrel,
+                HorseJoint::Neck,
+            ])
+            .chain(Side::BOTH.map(HorseJoint::Rein))
+            .collect()
+    }
+
+    /// The neck's pitch at `pose`: forward of rest for negative.
+    fn neck_pitch(gait: &Gait, pose: WalkPose) -> f32 {
+        neck_transform(gait, pose)
+            .rotation
+            .to_euler(EulerRot::XYZ)
+            .0
+    }
+
+    /// The head in horse space at `pose`, under the barrel and the neck.
+    fn head_mesh(gait: &Gait, pose: WalkPose) -> Mesh {
+        horse_head_mesh().transformed_by(barrel_transform(gait, pose) * neck_transform(gait, pose))
+    }
+
+    /// Every part of the horse posed at `pose`, with no rider on it: the hierarchy
+    /// composed exactly as the spawn nests it.
+    fn horse_meshes(gait: &Gait, pose: WalkPose) -> Vec<Mesh> {
+        let barrel = barrel_transform(gait, pose);
+        let neck = barrel * neck_transform(gait, pose);
+        let mut meshes = vec![
+            horse_barrel_mesh().transformed_by(barrel),
+            horse_neck_mesh().transformed_by(neck),
+            horse_head_mesh().transformed_by(neck),
+            horse_eye_mesh().transformed_by(neck),
+            horse_mane_mesh().transformed_by(neck * hair_transform(HorseHair::Mane, gait, pose)),
+            horse_tail_mesh().transformed_by(barrel * hair_transform(HorseHair::Tail, gait, pose)),
+            horse_tack_mesh().transformed_by(barrel),
+        ];
+        meshes.extend(
+            Side::BOTH
+                .map(|side| horse_rein_mesh().transformed_by(rein_transform(side, gait, pose))),
+        );
         meshes.extend(
             Leg::ALL
                 .into_iter()
-                .flat_map(|leg| leg_meshes(leg, &WALK, pose)),
+                .flat_map(|leg| leg_meshes(leg, gait, pose)),
         );
-        meshes.extend([
-            horse_mane_mesh().transformed_by(hair_transform(HorseHair::Mane, &WALK, pose)),
-            horse_tail_mesh().transformed_by(hair_transform(HorseHair::Tail, &WALK, pose)),
-            horse_tack_mesh(),
-            horse_eye_mesh(),
-        ]);
         meshes
     }
 
@@ -1004,7 +1188,7 @@ mod tests {
         let length = withers.z - nose.z;
         assert!((2.20..=2.40).contains(&length), "nose to rump {length}");
 
-        let (_, whole) = extent(&horse_meshes(WalkPose::default()));
+        let (_, whole) = extent(&horse_meshes(&WALK, WalkPose::default()));
         assert!(
             whole.y <= HORSE_HEIGHT + 1e-6,
             "something stands above the ears: {}",
@@ -1043,8 +1227,8 @@ mod tests {
     #[test]
     fn horse_tack_and_rider_fit_the_mounted_body_across_and_up_at_every_gait_phase() {
         let half = MOUNTED_WIDTH / 2.0;
-        for pose in poses() {
-            let mut meshes = horse_meshes(pose);
+        for (gait, pose) in poses() {
+            let mut meshes = horse_meshes(gait, pose);
             for blocking in [false, true] {
                 meshes.extend(BodyPiece::FIXED.map(|piece| rider_mesh(piece, ANY_HAIR, blocking)));
             }
@@ -1086,9 +1270,15 @@ mod tests {
     }
 
     /// Standing, every joint is exactly at rest: identity rotation, rest translation,
-    /// and the hooves on the feet plane — whatever the phase says, once it is not moving.
+    /// and the hooves on the feet plane — whatever the phase and whichever gait.
     #[test]
     fn standing_every_joint_is_exactly_at_rest_and_the_hooves_are_on_the_ground() {
+        for (_, gait) in GAITS {
+            every_joint_rests(gait);
+        }
+    }
+
+    fn every_joint_rests(gait: &Gait) {
         for standing in [
             WalkPose::default(),
             WalkPose {
@@ -1097,19 +1287,32 @@ mod tests {
             },
         ] {
             for leg in Leg::ALL {
-                let upper = leg_transform(leg, Segment::Upper, &WALK, standing);
-                let lower = leg_transform(leg, Segment::Lower, &WALK, standing);
+                let upper = leg_transform(leg, Segment::Upper, gait, standing);
+                let lower = leg_transform(leg, Segment::Lower, gait, standing);
                 assert_eq!(upper, Transform::from_translation(leg.pivot()), "{leg:?}");
                 assert_eq!(lower, Transform::from_translation(KNEE), "{leg:?}");
                 assert_eq!(upper, rest_transform(HorseJoint::Leg(leg, Segment::Upper)));
                 assert_eq!(lower, rest_transform(HorseJoint::Leg(leg, Segment::Lower)));
-                let (low, _) = extent(&leg_meshes(leg, &WALK, standing));
+                let (low, _) = extent(&leg_meshes(leg, gait, standing));
                 assert!(low.y.abs() < 1e-3, "{leg:?} stands at y {}", low.y);
             }
             for (hair, rest) in [(HorseHair::Mane, MANE_REST), (HorseHair::Tail, TAIL_REST)] {
-                let at_rest = hair_transform(hair, &WALK, standing);
+                let at_rest = hair_transform(hair, gait, standing);
                 assert_eq!(at_rest, rest_transform(HorseJoint::Hair(hair)));
                 assert_eq!(at_rest.rotation, Quat::from_rotation_x(rest));
+            }
+            // The barrel and the neck turn in place, so their rest is the identity —
+            // the canter's lean included, which is a pose of moving, not of standing.
+            assert_eq!(barrel_transform(gait, standing), Transform::IDENTITY);
+            assert_eq!(neck_transform(gait, standing), Transform::IDENTITY);
+            // A rein at rest is the bar that used to be merged into the tack.
+            for side in Side::BOTH {
+                let rein = rein_transform(side, gait, standing);
+                assert_eq!(
+                    rein,
+                    bar_between(REIN_BIT * side.mirror(), REIN_HAND * side.mirror())
+                );
+                assert_eq!(rein, rest_transform(HorseJoint::Rein(side)));
             }
         }
     }
@@ -1149,17 +1352,21 @@ mod tests {
             ))]);
             assert!((upper_low.y - KNEE_Y).abs() < 1e-6);
 
-            // At a walk the sole sweeps most of a block along the ground between its
-            // footfall and its lift — a real stride's worth for a 1.7-block cycle, and
-            // more than twice what one stiff segment used to be allowed.
-            let footfall = sole(leg, &WALK, through(&WALK, WALK.beats[leg.index()] / TAU));
-            let lift = sole(
-                leg,
-                &WALK,
-                through(&WALK, WALK.beats[leg.index()] / TAU + 0.5),
-            );
-            let sweep = lift.z - footfall.z;
-            assert!((0.6..=0.8).contains(&sweep), "{leg:?} sweeps {sweep}");
+            // Between its footfall and its lift the sole sweeps most of a block along the
+            // ground at a walk — a real stride's worth for a 1.7-block cycle, and more than
+            // twice what one stiff segment used to be allowed — and about a block at a
+            // canter.
+            for ((name, gait), band) in GAITS.into_iter().zip([0.6..=0.8, 0.9..=1.1]) {
+                let beat = gait.beats[leg.index()] / TAU;
+                let footfall = sole(leg, gait, through(gait, beat));
+                let lift = sole(leg, gait, through(gait, beat + 0.5));
+                let sweep = lift.z - footfall.z;
+                assert!(
+                    band.contains(&sweep),
+                    "{leg:?} sweeps {sweep} at a {}",
+                    name
+                );
+            }
         }
     }
 
@@ -1201,26 +1408,35 @@ mod tests {
 
     /// The cannon is straight for the whole of the stance and folds only through the
     /// swing, backward, so the hoof trails the knee — and it never leaves the ground
-    /// while it is meant to be on it.
+    /// while it is meant to be on it. At either gait.
     #[test]
     fn the_cannon_folds_through_the_swing_and_is_straight_through_the_stance() {
+        for (name, gait) in GAITS {
+            cannon_folds_through_the_swing(name, gait);
+        }
+    }
+
+    fn cannon_folds_through_the_swing(name: &str, gait: &Gait) {
         for leg in Leg::ALL {
-            let beat = WALK.beats[leg.index()];
+            let beat = gait.beats[leg.index()];
             for step in 1..STEPS {
                 let own = TAU * step as f32 / STEPS as f32;
-                let pose = through(&WALK, (beat + own) / TAU);
-                let (swing, fold) = angles(leg, &WALK, pose);
+                let pose = through(gait, (beat + own) / TAU);
+                let (swing, fold) = angles(leg, gait, pose);
                 if own < PI {
                     assert!(
                         fold.abs() < 1e-6,
-                        "{leg:?} folds {fold} at {own} into its stance"
+                        "{leg:?} folds {fold} at {own} into its stance at a {name}"
                     );
                 } else if own > PI {
-                    assert!(fold < 0.0, "{leg:?} is straight at {own} into its swing");
+                    assert!(
+                        fold < 0.0,
+                        "{leg:?} is straight at {own} into its swing at a {name}"
+                    );
                     // Folded back: in the upper segment's frame the sole sits behind
                     // where a straight cannon would put it.
-                    let trailing = leg_transform(leg, Segment::Lower, &WALK, pose)
-                        .transform_point(SOLE_CENTRE);
+                    let trailing =
+                        leg_transform(leg, Segment::Lower, gait, pose).transform_point(SOLE_CENTRE);
                     let straight = Transform::from_translation(KNEE).transform_point(SOLE_CENTRE);
                     assert!(
                         trailing.z > straight.z,
@@ -1232,12 +1448,12 @@ mod tests {
                     assert!(swing.abs() < 1e-5, "{leg:?} leans {swing} at {own}");
                 }
             }
-            let planted = sole(leg, &WALK, through(&WALK, (beat + FRAC_PI_2) / TAU));
+            let planted = sole(leg, gait, through(gait, (beat + FRAC_PI_2) / TAU));
             assert!(planted.y.abs() < 1e-4, "{leg:?} planted at y {}", planted.y);
-            let (_, fold) = angles(leg, &WALK, through(&WALK, (beat + 3.0 * FRAC_PI_2) / TAU));
+            let (_, fold) = angles(leg, gait, through(gait, (beat + 3.0 * FRAC_PI_2) / TAU));
             assert!(
-                (fold + WALK.fold).abs() < 1e-5,
-                "{leg:?} folds {fold} mid-swing"
+                (fold + gait.fold).abs() < 1e-5,
+                "{leg:?} folds {fold} mid-swing at a {name}"
             );
         }
     }
@@ -1248,50 +1464,305 @@ mod tests {
     /// bound: a hoof through the ground would be centimetres.
     #[test]
     fn no_hoof_rises_above_a_third_of_a_block_or_sinks_under_the_ground() {
-        for leg in Leg::ALL {
-            let mut highest = 0.0_f32;
-            for step in 0..STEPS {
-                let pose = through(&WALK, step as f32 / STEPS as f32);
-                let (low, _) = extent(&leg_meshes(leg, &WALK, pose));
-                assert!(low.y > -0.005, "{leg:?} sinks to {} at {pose:?}", low.y);
-                let hoof = sole(leg, &WALK, pose).y;
-                assert!(hoof <= 0.35, "{leg:?} rises to {hoof} at {pose:?}");
-                highest = highest.max(hoof);
-            }
-            assert!(highest > 0.05, "{leg:?} never lifts: {highest}");
+        for (name, gait) in GAITS {
+            hooves_stay_between_the_ground_and_a_third_of_a_block(name, gait);
         }
     }
 
-    /// The stride is a drawn length: 1.7 blocks brings every joint back to where it
-    /// was, half of that does not, and the period the distance phase wraps at — which
-    /// is a whole number of strides — brings it back too, so the wrap moves nothing.
+    fn hooves_stay_between_the_ground_and_a_third_of_a_block(name: &str, gait: &Gait) {
+        for leg in Leg::ALL {
+            let mut highest = 0.0_f32;
+            for step in 0..STEPS {
+                let pose = through(gait, step as f32 / STEPS as f32);
+                let (low, _) = extent(&leg_meshes(leg, gait, pose));
+                assert!(
+                    low.y > -0.005,
+                    "{leg:?} sinks to {} at {pose:?} at a {name}",
+                    low.y
+                );
+                let hoof = sole(leg, gait, pose).y;
+                assert!(
+                    hoof <= 0.35,
+                    "{leg:?} rises to {hoof} at {pose:?} at a {name}"
+                );
+                highest = highest.max(hoof);
+            }
+            assert!(highest > 0.05, "{leg:?} never lifts at a {name}: {highest}");
+        }
+    }
+
+    /// A stride is a drawn length: one brings every joint back to where it was, half of
+    /// one does not, and the period the distance phase wraps at — a whole number of
+    /// either gait's strides — brings it back too, so the wrap moves nothing.
     #[test]
-    fn a_walk_cycle_is_one_stride_and_the_phase_wrap_is_a_whole_number_of_them() {
-        let cycles = WALK_PHASE_PERIOD_BLOCKS / WALK.stride;
+    fn a_cycle_is_one_stride_and_the_phase_wrap_is_a_whole_number_of_them() {
+        assert!((CANTER.stride - 2.0 * WALK.stride).abs() < 1e-6);
+        for (name, gait) in GAITS {
+            one_stride_and_the_wrap_move_nothing(name, gait);
+        }
+    }
+
+    fn one_stride_and_the_wrap_move_nothing(name: &str, gait: &Gait) {
+        let cycles = WALK_PHASE_PERIOD_BLOCKS / gait.stride;
         assert!(
             (cycles - cycles.round()).abs() < 1e-4,
-            "{} blocks is {cycles} walk strides",
+            "{} blocks is {cycles} {name} strides",
             WALK_PHASE_PERIOD_BLOCKS
         );
-        let joints = Leg::ALL
-            .into_iter()
-            .flat_map(|leg| {
-                [Segment::Upper, Segment::Lower].map(|segment| HorseJoint::Leg(leg, segment))
-            })
-            .chain([
-                HorseJoint::Hair(HorseHair::Mane),
-                HorseJoint::Hair(HorseHair::Tail),
-            ]);
-        for joint in joints {
-            let start = joint_transform(joint, &WALK, travelled(0.0));
-            let one_stride = joint_transform(joint, &WALK, travelled(WALK.stride));
-            let wrapped = joint_transform(joint, &WALK, travelled(WALK_PHASE_PERIOD_BLOCKS));
-            assert!(same_pose(start, one_stride), "{joint:?} after one stride");
-            assert!(same_pose(start, wrapped), "{joint:?} at the wrap");
+        for joint in all_joints() {
+            let start = joint_transform(joint, gait, travelled(0.0));
+            let one_stride = joint_transform(joint, gait, travelled(gait.stride));
+            let wrapped = joint_transform(joint, gait, travelled(WALK_PHASE_PERIOD_BLOCKS));
+            assert!(
+                same_pose(start, one_stride),
+                "{joint:?} after one {name} stride"
+            );
+            assert!(
+                same_pose(start, wrapped),
+                "{joint:?} at the wrap at a {name}"
+            );
         }
-        let (swing, _) = angles(Leg::LeftRear, &WALK, travelled(0.0));
-        let (half, _) = angles(Leg::LeftRear, &WALK, travelled(WALK.stride / 2.0));
-        assert!((swing + WALK.swing).abs() > 1e-3 && (swing - half).abs() > 1e-3);
+        let (swing, _) = angles(Leg::LeftRear, gait, travelled(0.0));
+        let (half, _) = angles(Leg::LeftRear, gait, travelled(gait.stride / 2.0));
+        assert!((swing + gait.swing).abs() > 1e-3 && (swing - half).abs() > 1e-3);
+    }
+
+    /// The canter is three beats and a suspension. Right lead: at the first quarter the
+    /// trailing hind lands, at the second the diagonal pair, at the third the leading
+    /// fore, and at the fourth nothing lands — every upper segment pinned at each
+    /// quarter, in units of the swing, in `Leg::ALL` order: a 1 is a hoof landing.
+    #[test]
+    fn the_canter_is_three_beats_and_a_suspension() {
+        let table: [[f32; 4]; 4] = [
+            [0.0, -1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, -1.0, 0.0],
+            [-1.0, 0.0, 0.0, -1.0],
+        ];
+        for (quarter, row) in table.iter().enumerate() {
+            let pose = through(&CANTER, quarter as f32 / 4.0);
+            for leg in Leg::ALL {
+                let (swing, _) = angles(leg, &CANTER, pose);
+                let want = row[leg.index()] * CANTER.swing;
+                assert!(
+                    (swing - want).abs() < 1e-5,
+                    "quarter {quarter}: {leg:?} swings {swing}, want {want}"
+                );
+            }
+        }
+    }
+
+    /// At a walk the neck nods ±4° and never leans and the girth rises and falls at most
+    /// 0.04 with no pitch, both twice a cycle and up together. At a canter the neck holds
+    /// forward of rest at every phase, nodding ±3° about that lean, so the poll reaches
+    /// ahead and the head is carried lower — the nose itself hangs almost level with the
+    /// neck's base, so the lean takes it down rather than out — while the girth stays put
+    /// and the barrel rocks ±3° about it, one end up as the other goes down.
+    #[test]
+    fn the_neck_and_the_barrel_nod_and_bob_at_a_walk_and_stretch_and_rock_at_a_canter() {
+        let standing = extent(&[head_mesh(&WALK, WalkPose::default())]).1.y;
+        assert!((standing - HORSE_HEIGHT).abs() < 1e-6);
+        let girth = |gait: &Gait, pose| {
+            barrel_transform(gait, pose).transform_point(BARREL_PIVOT) - BARREL_PIVOT
+        };
+
+        let (mut nod, mut rise, mut fall) = (0.0_f32, 0.0_f32, 0.0_f32);
+        for step in 0..STEPS {
+            let pose = through(&WALK, step as f32 / STEPS as f32);
+            let pitch = neck_pitch(&WALK, pose);
+            assert!(
+                pitch.abs() <= 4.0 * DEGREE + 1e-6,
+                "the walk nods {}°",
+                pitch / DEGREE
+            );
+            nod = nod.max(pitch.abs());
+            let barrel = barrel_transform(&WALK, pose);
+            assert!(
+                barrel.rotation.abs_diff_eq(Quat::IDENTITY, 1e-6),
+                "the walk pitches"
+            );
+            let moved = girth(&WALK, pose);
+            assert!(
+                moved.x.abs() < 1e-6 && moved.z.abs() < 1e-6 && moved.y.abs() <= 0.04 + 1e-6,
+                "the girth moved {moved}"
+            );
+            rise = rise.max(moved.y);
+            fall = fall.min(moved.y);
+        }
+        assert!(
+            (nod - 4.0 * DEGREE).abs() < 1e-3,
+            "the walk nods only {}°",
+            nod / DEGREE
+        );
+        assert!(
+            (rise - WALK.bob).abs() < 1e-3 && (fall + WALK.bob).abs() < 1e-3,
+            "the walk bobs {fall}..{rise}"
+        );
+        assert!(
+            neck_pitch(&WALK, through(&WALK, 0.0)).abs() < 1e-6,
+            "the walk leans"
+        );
+        // Twice a cycle and together: up at the first eighth, down at the third.
+        for (eighth, sign) in [(1, 1.0), (3, -1.0)] {
+            let pose = through(&WALK, eighth as f32 / 8.0);
+            let pitch = neck_pitch(&WALK, pose);
+            assert!(
+                (pitch - sign * 4.0 * DEGREE).abs() < 1e-4,
+                "eighth {eighth}: {pitch}"
+            );
+            let moved = girth(&WALK, pose).y;
+            assert!(
+                (moved - sign * WALK.bob).abs() < 1e-4,
+                "eighth {eighth}: {moved}"
+            );
+        }
+        let (_, nodded_up) = extent(&[head_mesh(&WALK, through(&WALK, 1.0 / 8.0))]);
+        assert!(
+            nodded_up.y > standing + 0.02,
+            "a nod up left the ears at {}",
+            nodded_up.y
+        );
+
+        // The lean outreaches the nod, so the neck is forward of rest at every phase.
+        let held = (CANTER.lean - CANTER.nod - 1e-6)..=(CANTER.lean + CANTER.nod + 1e-6);
+        assert!(*held.end() < 0.0);
+        let mut rock = 0.0_f32;
+        for step in 0..STEPS {
+            let pose = through(&CANTER, step as f32 / STEPS as f32);
+            let pitch = neck_pitch(&CANTER, pose);
+            assert!(
+                held.contains(&pitch),
+                "the canter's neck is at {}°",
+                pitch / DEGREE
+            );
+            let (_, ears) = extent(&[head_mesh(&CANTER, pose)]);
+            assert!(ears.y < standing, "the ears came back up at {pose:?}");
+            // The stretch is the neck's own, measured in the barrel's frame: the
+            // barrel's nose-up rock lifts the whole front at the phase the neck nods up.
+            let poll = neck_transform(&CANTER, pose).transform_point(POLL);
+            assert!(
+                poll.z < POLL.z - 0.04 && poll.y < POLL.y - 0.04,
+                "the poll did not stretch at {pose:?}: {poll}"
+            );
+            assert!(
+                girth(&CANTER, pose).length() < 1e-5,
+                "the girth moved at a canter"
+            );
+            let tilt = barrel_transform(&CANTER, pose)
+                .rotation
+                .to_euler(EulerRot::XYZ)
+                .0;
+            assert!(
+                tilt.abs() <= 3.0 * DEGREE + 1e-6,
+                "the canter rocks {}°",
+                tilt / DEGREE
+            );
+            rock = rock.max(tilt.abs());
+        }
+        assert!(
+            (rock - 3.0 * DEGREE).abs() < 1e-3,
+            "the canter rocks only {}°",
+            rock / DEGREE
+        );
+        // A rock about the girth lifts one end of the barrel as it lowers the other.
+        let quarter = barrel_transform(&CANTER, through(&CANTER, 0.25));
+        let end = |z| quarter.transform_point(Vec3::new(0.0, BARREL_PIVOT.y, z)).y - BARREL_PIVOT.y;
+        assert!(end(BREAST.z) * end(RUMP.z) < 0.0 && end(RUMP.z).abs() > 0.03);
+    }
+
+    /// A rein runs from the bit to the fist at every pose of either gait: the bit is
+    /// wherever the barrel and the neck have carried it, the fist rides on the body.
+    #[test]
+    fn the_reins_follow_the_bit_and_stay_in_the_fists() {
+        for (gait, pose) in poses() {
+            let mouth = barrel_transform(gait, pose) * neck_transform(gait, pose);
+            for side in Side::BOTH {
+                let rein = rein_transform(side, gait, pose);
+                let bit_end = rein.transform_point(Vec3::Z * -0.5);
+                let hand_end = rein.transform_point(Vec3::Z * 0.5);
+                let bit = mouth.transform_point(REIN_BIT * side.mirror());
+                assert!(
+                    (bit_end - bit).length() < 1e-4,
+                    "{side:?} rein starts at {bit_end}, bit at {bit}"
+                );
+                assert!(
+                    (hand_end - REIN_HAND * side.mirror()).length() < 1e-4,
+                    "{side:?} rein ends at {hand_end}"
+                );
+            }
+        }
+    }
+
+    /// One horse's joints after `animate_gait` has run once over what `spawn` put in
+    /// the world.
+    fn posed_by_the_system(
+        spawn: impl FnOnce(&mut World, &HorseVisuals),
+    ) -> Vec<(HorseJoint, Transform)> {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = visual_app();
+        let world = app.world_mut();
+        world.resource_scope(|world, visuals: Mut<HorseVisuals>| spawn(world, &visuals));
+        world.flush();
+        world
+            .run_system_once(animate_gait)
+            .expect("animate_gait runs");
+        let mut joints = world.query::<(&HorseJoint, &Transform)>();
+        joints
+            .iter(world)
+            .map(|(joint, transform)| (*joint, *transform))
+            .collect()
+    }
+
+    /// The same phase on the two routes is two gaits: the horse under a rider canters,
+    /// the paddock horse walks, and no speed was consulted — the system reads only which
+    /// query the root came from.
+    #[test]
+    fn a_ridden_horse_canters_and_a_paddock_horse_walks_from_the_same_phase() {
+        let pose = travelled(0.6);
+        let kind = MountKind::BlackHorse;
+        let ridden = posed_by_the_system(|world, visuals| {
+            let rider = world
+                .spawn((Body(1), pose, Transform::default(), Visibility::default()))
+                .id();
+            let mut commands = world.commands();
+            spawn_horse(&mut commands, visuals, rider, kind);
+        });
+        let paddock = posed_by_the_system(|world, visuals| {
+            let material = visuals.material(kind);
+            world
+                .commands()
+                .spawn((
+                    Horse { kind },
+                    PaddockHorse(0),
+                    pose,
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .with_children(|horse| spawn_horse_parts(horse, visuals, &material));
+        });
+        assert_eq!(
+            (ridden.len(), paddock.len()),
+            (all_joints().len(), all_joints().len())
+        );
+        for (joint, transform) in &ridden {
+            assert_eq!(
+                *transform,
+                joint_transform(*joint, &CANTER, pose),
+                "{joint:?} under a rider"
+            );
+        }
+        for (joint, transform) in &paddock {
+            assert_eq!(
+                *transform,
+                joint_transform(*joint, &WALK, pose),
+                "{joint:?} in the paddock"
+            );
+        }
+        let lead = HorseJoint::Leg(Leg::LeftRear, Segment::Upper);
+        assert_ne!(
+            joint_transform(lead, &CANTER, pose),
+            joint_transform(lead, &WALK, pose)
+        );
     }
 
     #[test]
@@ -1417,10 +1888,12 @@ mod tests {
         let cuboid = Mesh::from(Cuboid::from_size(Vec3::ONE)).count_vertices();
         assert_eq!(horse_head_mesh().count_vertices(), cuboid * 3);
         assert_eq!(horse_eye_mesh().count_vertices(), 8);
-        assert_eq!(horse_tack_mesh().count_vertices(), cuboid * 5);
+        assert_eq!(horse_tack_mesh().count_vertices(), cuboid * 3);
+        assert_eq!(horse_rein_mesh().count_vertices(), cuboid);
         assert_ne!(HAIR_COLOUR, LEATHER_COLOUR);
         for mesh in [
-            horse_body_mesh(),
+            horse_barrel_mesh(),
+            horse_neck_mesh(),
             horse_head_mesh(),
             horse_upper_leg_mesh(),
             horse_lower_leg_mesh(),
