@@ -216,8 +216,15 @@ type body struct {
 	height float64
 }
 
-// playerBody is the box a player occupies, and the only body until drops arrived.
-var playerBody = body{width: PlayerWidth, height: PlayerHeight}
+// playerBody is the box a player on foot occupies, and the only body until drops
+// arrived. mountedBody is the one a mounted player occupies — horse and rider as one
+// square — and for now the mount admission is its only reader: the movement sweep and
+// everything that aims at a player still measure playerBody, and the second half of
+// #811 is what moves them.
+var (
+	playerBody  = body{width: PlayerWidth, height: PlayerHeight}
+	mountedBody = body{width: MountedWidth, height: MountedHeight}
+)
 
 // boxAt is the box a body standing at pos occupies.
 //

@@ -49,6 +49,21 @@ func forceMounted(p *Player, kind vnet.MountKind) {
 	p.mounted = kind
 }
 
+// embedded reports whether the player's walking body overlaps a solid, under the lock.
+func embedded(h *vitalsHarness, p *Player) bool {
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	return overlaps(h.sim.terrain, playerBox(p.pos))
+}
+
+// builtOn is flat ground with the solids somebody built on it, described by a closure
+// so a test raises a wall, a lintel or a corridor in one line — and, because a closure
+// can read a variable, puts a block down between two ticks, which is what a neighbour
+// with stone in hand does during a two-second cast.
+func builtOn(wall func(x, y, z int64) bool) walledTerrain {
+	return walledTerrain{dropTerrain: dropTerrain{groundTop: 63}, wall: wall}
+}
+
 func TestMountAdmissionNamesEveryAuthoritativeRefusal(t *testing.T) {
 	t.Parallel()
 
@@ -184,6 +199,69 @@ func TestMountedMovementUsesHorseNumbersWithoutChangingTheBodyOrWater(t *testing
 	if swimState.Vel[1] >= float32(MountJumpImpulse) {
 		t.Errorf("mounted swim rise = %v, carried land jump impulse %v", swimState.Vel[1], MountJumpImpulse)
 	}
+}
+
+// Mounting is admitted only where the mounted body fits, and the completion asks again.
+func TestMountingNeedsTheMountedBodyToFitAtAdmissionAndAtCompletion(t *testing.T) {
+	t.Parallel()
+
+	// A wall whose face is 0.4 blocks from the player's centre line: a tenth clear of the
+	// walking body's side and a tenth inside the mounted one's.
+	const playerX = 0.6
+	beside := func(x, y, _ int64) bool { return x >= 1 && y >= 64 && y <= 67 }
+
+	t.Run("a wall beside the walking body refuses admission", func(t *testing.T) {
+		t.Parallel()
+
+		h := newVitalsHarness(t, DefaultTickRate, builtOn(beside))
+		player, _ := h.join(1, [3]float32{playerX, 64, 0.5})
+		prepareMount(player, vnet.MountKindBlackHorse, true)
+		// The walking body is clear of that wall, so the refusal below is about the body
+		// the player is asking to become and nothing else.
+		if embedded(h, player) {
+			t.Fatal("the walking body overlaps the wall, so a refusal would prove nothing about the mounted one")
+		}
+
+		reason, err := player.Mount(vnet.MountKindBlackHorse)
+		if err == nil || reason != vnet.RefusalReasonMountLowCeiling {
+			t.Fatalf("Mount beside a wall: reason %s, error %v; want %s", reason, err, vnet.RefusalReasonMountLowCeiling)
+		}
+		if castRunning(player) {
+			t.Error("a refused mount request started a cast")
+		}
+	})
+
+	t.Run("a block placed beside the caster refuses the completion", func(t *testing.T) {
+		t.Parallel()
+
+		placed := false
+		h := newVitalsHarness(t, DefaultTickRate, builtOn(func(x, y, z int64) bool {
+			return placed && x == 1 && y == 64 && z == 0
+		}))
+		player, out := h.join(1, [3]float32{playerX, 64, 0.5})
+		prepareMount(player, vnet.MountKindBlackHorse, true)
+		if reason, err := player.Mount(vnet.MountKindBlackHorse); err != nil || reason != vnet.RefusalReasonUnknown {
+			t.Fatalf("Mount in the open: reason %s, error %v", reason, err)
+		}
+
+		h.advance(int(h.sim.castTicks) / 2)
+		placed = true // a neighbour puts stone down beside the caster's knee
+		h.advance(int(h.sim.castTicks))
+
+		if got := mountedKind(player); got != vnet.MountKindUnknown {
+			t.Fatalf("the completion mounted a %s inside the block placed beside it", got)
+		}
+		if castRunning(player) {
+			t.Error("the refused completion left the cast running")
+		}
+		if embedded(h, player) {
+			t.Error("the player on foot overlaps the placed block, so the completion had a body to refuse for")
+		}
+		want := protocol.ActionRefused{Action: vnet.RefusedActionMount, Reason: vnet.RefusalReasonMountLowCeiling}
+		if refusals := actionRefusals(t, out); len(refusals) != 1 || refusals[0] != want {
+			t.Errorf("refusals = %+v, want exactly %+v", refusals, want)
+		}
+	})
 }
 
 func TestMountedFallUsesTheExistingImpactRule(t *testing.T) {

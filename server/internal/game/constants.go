@@ -67,8 +67,9 @@ const (
 // Movement constants — the authoritative numbers, and the only copy on this side.
 //
 // **They must stay in sync with `client/src/player/constants.rs`.** The client
-// mirrors the two that describe the *body*, because it has to draw a capsule of the
-// right size and put the camera at the right height inside it. It deliberately does
+// mirrors the four that describe a *body* — the walking pair and the mounted pair —
+// because it has to draw a capsule and a horse of the right size and put the camera
+// at the right height inside them. It deliberately does
 // **not** mirror the three that describe the *physics*: with no client-side
 // prediction nothing there integrates, and a duplicated number with no reader is a
 // synchronisation hazard that buys nothing. When prediction lands it will need
@@ -165,12 +166,6 @@ const (
 	// JumpImpulse would give a flight-like 5.8 blocks.
 	MountJumpImpulse = 11.0
 
-	// MountClearanceHeight is the vertical room a horse and rider need before the
-	// cast may begin. It is deliberately not a collision-body height: mounted
-	// movement keeps sweeping playerBody, and this one admission check pays for the
-	// larger thing the client will draw without widening every collision path.
-	MountClearanceHeight = 3.0
-
 	// TerminalFallSpeed caps downward velocity, in blocks per second.
 	//
 	// Not for realism: it bounds how far a player moves in one tick, which is what
@@ -247,6 +242,33 @@ const (
 
 	// PlayerHeight is how tall the player's box is, in blocks.
 	PlayerHeight = 1.8
+
+	// MountedWidth and MountedHeight are the body a mounted player occupies — horse
+	// and rider as one square footprint and one height, in blocks. The client mirrors
+	// this pair exactly as it mirrors the two above, because it fits the horse it
+	// draws inside this box; change both sides together.
+	//
+	// **Square, and set from the horse's width rather than its length.** Every body in
+	// collide.go is a square footprint plus a height and the sweeps are axis-aligned,
+	// and that does not change here: there is no oriented box and no yaw in the
+	// collision. The horse the client draws is 2.3 blocks nose to rump and 0.66 wide,
+	// and a 2.3 square would block it in every alley of the capital, while a 1.0
+	// square lets the nose clip into a wall the way Minecraft's horse does. One block
+	// is the barrel plus the rider's knees; the drawn length exceeds the box by
+	// design, and the box is what collides, is aimed at and has to fit.
+	//
+	// Height 2.8 is the rider's head: the humanoid hip pivot sits on a saddle at 1.6,
+	// which puts the top of the head at PlayerHeight + 0.9 = 2.7, with a tenth to
+	// spare. MountJumpImpulse clears its 2.16 blocks under the same box.
+	//
+	// The walking body lies inside this one on every side — narrower by 0.2 per side,
+	// shorter by a block — which is what lets a dismount never need to move anybody:
+	// wherever the horse fitted, the walker fits. For now the mount admission in
+	// [Player.mountFitLocked] is this box's one reader; the movement sweep and
+	// everything that aims at a player still measure the walking body, and the
+	// second half of #811 is what moves them.
+	MountedWidth  = 1.0
+	MountedHeight = 2.8
 
 	// PlayerMaxHealth is the level-one health maximum. Higher levels add
 	// HealthPerLevel through maxHealthFor, and the resulting per-player value is the
