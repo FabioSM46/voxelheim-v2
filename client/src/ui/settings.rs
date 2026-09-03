@@ -31,11 +31,10 @@ pub(super) struct SettingsScreen {
     capturing: Option<Control>,
     /// The line under the panel: what was refused, or what is being waited for.
     notice: String,
-    /// Whether the Monitor row's dropdown is open. It overlays the rows below it rather
-    /// than expanding the panel, so this is the one place its lifecycle is decided —
-    /// [`Self::open`] and [`Self::close`] both start it shut, `switch_settings_tabs`
-    /// closes it on a tab change, `settings_actions` closes it on a graphics reset, and
-    /// `read_settings_keys` gives Escape to it before Escape can close the screen.
+    /// Whether the Monitor row's dropdown is open. [`Self::open`] and [`Self::close`] both
+    /// start it shut; `switch_settings_tabs` closes it on a tab change, `settings_actions`
+    /// on a graphics reset, and `read_settings_keys` gives Escape to it before Escape can
+    /// close the screen.
     monitor_dropdown_open: bool,
 }
 
@@ -136,16 +135,14 @@ struct RowControls;
 struct MonitorSelectButton;
 
 /// The Monitor row's dropdown: an absolutely positioned overlay anchored under
-/// [`MonitorSelectButton`] rather than a row that expands the panel, so it must be given a
-/// deliberate stacking position — see [`MONITOR_DROPDOWN_LAYER`] — and its own open/close
-/// lifecycle rather than inheriting the panel's.
+/// [`MonitorSelectButton`], with its own stacking position ([`MONITOR_DROPDOWN_LAYER`]) and
+/// its own open/close lifecycle rather than the panel's.
 #[derive(Component)]
 struct MonitorDropdownPanel;
 
 /// One option inside the open dropdown, naming its index into
-/// [`MonitorChoices::preferences`]. Rebuilt whenever the live choices change, never hand
-/// patched, so an index here always names the row [`rebuild_monitor_options`] gave it this
-/// frame.
+/// [`MonitorChoices::preferences`]. Rebuilt whenever the live choices change, so an index
+/// here always names [`rebuild_monitor_options`]'s current row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct MonitorOption(usize);
 
@@ -174,10 +171,8 @@ enum Reading {
     ReadoutCorner,
     Binding(Control),
     /// The Monitor row's closed control: the current monitor plus the open indicator, as
-    /// one centred string. Distinct from `Knob(Knob::Monitor)` — that reading is still
-    /// what `Settings::reading_with_monitors` answers for the knob, but nothing spawns a
-    /// text node for it any more now that Monitor draws as [`MonitorSelectButton`] instead
-    /// of a stepper.
+    /// one centred string. Distinct from `Knob(Knob::Monitor)`, which nothing spawns a
+    /// text node for any more — Monitor draws as [`MonitorSelectButton`], not a stepper.
     MonitorControl,
     /// The line under the panel.
     Notice,
@@ -232,13 +227,11 @@ const CONTROL_BUTTON_HEIGHT: f32 = ROW_HEIGHT - 4.0;
 /// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
 const WIDE_BUTTON: f32 = 40.0;
 
-/// The Monitor dropdown's stacking position. `SettingsRoot` sits at 45 (see
-/// [`spawn_settings_screen`]); the dropdown overlays rows nested inside its own row rather
-/// than expanding the panel, so without a `GlobalZIndex` of its own it would paint inside
-/// that row's slot in the panel's normal tree order — *behind* every row spawned after it,
-/// exactly where it must appear *above* all of them. One more than the screen it belongs to
-/// is enough, the same margin `ui/mod.rs`'s own `GlobalZIndex(31)` keeps over the HUD
-/// overlays it must sit above.
+/// The Monitor dropdown's stacking position. Without a `GlobalZIndex` of its own it would
+/// paint inside the Monitor row's slot in the panel's tree order — behind every row spawned
+/// after it, exactly where it must appear above all of them. One more than `SettingsRoot`'s
+/// own 45 (see [`spawn_settings_screen`]) is enough, the same margin `ui/mod.rs`'s
+/// `GlobalZIndex(31)` keeps over the HUD overlays it sits above.
 const MONITOR_DROPDOWN_LAYER: i32 = 46;
 
 /// The most rows any one tab may draw.
@@ -615,10 +608,10 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
 }
 
 /// The Monitor row: one control occupying the whole stepper column, rather than the three
-/// a numeric knob draws into it. Pressing it is [`monitor_select_toggle`]'s job; painting
-/// the current value is [`describe`]'s, through [`Reading::MonitorControl`]; the option list
-/// itself is built and torn down by [`rebuild_monitor_options`], never here — this only
-/// spawns the empty [`MonitorDropdownPanel`] those options are added to.
+/// a numeric knob draws. Pressing it is [`monitor_select_toggle`]'s job; the value is
+/// [`describe`]'s, through [`Reading::MonitorControl`]; the option list is built and torn
+/// down by [`rebuild_monitor_options`] — this only spawns the empty [`MonitorDropdownPanel`]
+/// those options are added to.
 fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
     parent
         .spawn((
@@ -636,10 +629,9 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
             BackgroundColor(BUTTON),
         ))
         .with_children(|button| {
-            // The value and the open indicator are one string rather than two nodes, so
-            // "horizontally and vertically centred" is one property (`Justify::Center` on
-            // this box, `AlignItems::Center` on the button around it) instead of two
-            // children whose combined width would have to be centred separately.
+            // Value and indicator are one string, so "centred" is one property
+            // (`Justify::Center` here, `AlignItems::Center` on the button) rather than two
+            // children whose combined width would need centring separately.
             button.spawn((
                 Reading::MonitorControl,
                 Text::new(String::new()),
@@ -657,13 +649,11 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
                 },
             ));
 
-            // Anchored directly below the control it belongs to and exactly its width, so
-            // it reads as this row's own overlay rather than a menu floating over the
-            // panel. `GlobalZIndex` — not a plain `ZIndex` — is what lets it paint over
-            // every row beneath it: without one it would stack inside this row's own slot
-            // in the panel's tree order, behind whichever rows were spawned after Monitor.
-            // See [`MONITOR_DROPDOWN_LAYER`]. Closed by default; [`show_monitor_dropdown`]
-            // is the only writer of its `Display`.
+            // Anchored directly below the control, at its exact width. `GlobalZIndex` —
+            // not a plain `ZIndex` — is what lets it paint over every row beneath it rather
+            // than stacking inside this row's own slot in the panel's tree order; see
+            // [`MONITOR_DROPDOWN_LAYER`]. Closed by default; [`show_monitor_dropdown`] is
+            // the only writer of its `Display`.
             button.spawn((
                 MonitorDropdownPanel,
                 GlobalZIndex(MONITOR_DROPDOWN_LAYER),
@@ -683,9 +673,8 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
         });
 }
 
-/// One option inside the open Monitor dropdown. `index` is this option's place in
-/// [`MonitorChoices::preferences`] at the moment [`rebuild_monitor_options`] last ran, and
-/// pressing it is [`monitor_dropdown_actions`]'s job.
+/// One option inside the open Monitor dropdown, at `index` in
+/// [`MonitorChoices::preferences`]. Pressing it is [`monitor_dropdown_actions`]'s job.
 fn spawn_monitor_option(parent: &mut ChildSpawnerCommands<'_>, index: usize, label: String) {
     parent
         .spawn((
@@ -852,10 +841,9 @@ fn switch_settings_tabs(
             if screen.capturing.is_some() {
                 screen.capturing = None;
             }
-            // The Monitor dropdown is the same trap one row over: it overlays rows rather
-            // than living inside the panel's own reset, so leaving Graphics has to close it
-            // explicitly or it would go on floating over whichever rows Controls draws in
-            // its place.
+            // The Monitor dropdown is the same trap one row over: leaving Graphics has to
+            // close it explicitly, or it goes on floating over whichever rows Controls
+            // draws in its place.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
             }
@@ -922,9 +910,8 @@ fn settings_actions(
                 // binding that has just been replaced, so the next key press would answer a
                 // question the player can no longer see the state of.
                 screen.capturing = None;
-                // And a graphics reset puts the Monitor preference itself back, which is
-                // exactly the state an open dropdown was showing options for — so it closes
-                // too, rather than going on floating over the value it named a moment ago.
+                // A graphics reset puts the Monitor preference back too, so the dropdown
+                // closes rather than floating over the value it just replaced.
                 screen.monitor_dropdown_open = false;
             }
             SettingsAction::Capture(control) => {
@@ -980,10 +967,8 @@ fn read_settings_keys(
 
     let Some(control) = screen.capturing else {
         if keys.just_pressed(KeyCode::Escape) {
-            // The dropdown answers to Escape before the screen does: it overlays rows
-            // rather than being a panel of its own, so the player's first Escape should
-            // take down the thing they most recently opened, not the whole screen behind
-            // it.
+            // The dropdown answers to Escape before the screen does: the first press
+            // closes what was most recently opened, not the whole screen behind it.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
             } else {
@@ -1010,13 +995,11 @@ fn read_settings_keys(
 
 /// Opens or closes the Monitor dropdown from its own control.
 ///
-/// Not a [`SettingsAction`]: that enum's buttons are all painted by [`settings_actions`]'s
-/// single `colour.0 = button_colour(interaction)` line, which has no notion of a button
-/// that is sometimes drawn a *selected* colour instead — exactly the distinction tabs
-/// already needed, and exactly why tabs are not `SettingsAction` either. Folding this
-/// control into that enum would mean [`colour_monitor_controls`] and `settings_actions`
-/// both writing this entity's `BackgroundColor` in the same frame, in an order nothing
-/// pins.
+/// Not a [`SettingsAction`]: that enum's buttons are all painted by `settings_actions`'s
+/// unconditional `button_colour(interaction)`, which has no notion of a *selected* colour —
+/// the same reason tabs are not `SettingsAction` either. Folding this in would mean
+/// [`colour_monitor_controls`] and `settings_actions` both writing this entity's
+/// `BackgroundColor` in the same frame, in an order nothing pins.
 fn monitor_select_toggle(
     mut buttons: Query<&Interaction, (With<MonitorSelectButton>, Changed<Interaction>)>,
     mut screen: ResMut<SettingsScreen>,
@@ -1030,12 +1013,10 @@ fn monitor_select_toggle(
 
 /// Applies a press inside the open Monitor dropdown, and closes it either way.
 ///
-/// `monitors.preferences()` is read fresh rather than cached from spawn time: the option's
-/// `index` only names a live preference for as long as the list [`rebuild_monitor_options`]
-/// built it from has not moved under it. A vanished index — the operating system dropped a
-/// display between the click and this system running — is answered by doing nothing rather
-/// than by guessing, which is the same shape of refusal a missing chunk or an unheld item
-/// answers elsewhere in this client.
+/// `monitors.preferences()` is read fresh rather than cached from spawn time: an index that
+/// no longer names a live preference — the operating system dropped a display between the
+/// click and this system running — is answered by doing nothing, the same refusal a missing
+/// chunk or an unheld item answers elsewhere in this client.
 fn monitor_dropdown_actions(
     mut options: Query<(&MonitorOption, &Interaction), Changed<Interaction>>,
     monitors: Res<MonitorChoices>,
@@ -1053,15 +1034,11 @@ fn monitor_dropdown_actions(
     }
 }
 
-/// Rebuilds the dropdown's options whenever the live monitors change, and only then.
-///
-/// `is_changed` rather than every frame, for the reason `ui/servers.rs`'s `rebuild_rows`
-/// gives one screen over: despawning and respawning on every frame is a pointer that can
-/// never finish a press, since the entity under it stops existing mid-interaction. The
-/// panel starts with no children at all — [`spawn_monitor_select`] builds it empty — so the
-/// first change `MonitorChoices` reports, which change detection sees on this system's very
-/// first run whether that change came from a real display being found or from a test
-/// inserting the resource directly, is what populates it.
+/// Rebuilds the dropdown's options whenever the live monitors change, and only then —
+/// `ui/servers.rs`'s `rebuild_rows` gives the same reason one screen over: rebuilding every
+/// frame would despawn and respawn the entity under a pointer mid-press. The panel starts
+/// with no children — [`spawn_monitor_select`] builds it empty — so the first change
+/// `MonitorChoices` reports, real or a test's initial insert, is what populates it.
 fn rebuild_monitor_options(
     monitors: Res<MonitorChoices>,
     panels: Query<Entity, With<MonitorDropdownPanel>>,
@@ -1083,12 +1060,10 @@ fn rebuild_monitor_options(
     }
 }
 
-/// Gives the dropdown panel a `Display` and takes it away — never a `Visibility`, for the
-/// same reason [`show_the_active_settings_tab`] gives `TabPanel` one: a hidden node still
-/// occupies its layout box, and this one is positioned `Absolute` specifically so it can sit
-/// over rows it must not otherwise disturb. `Display::None` is also what keeps a closed
-/// dropdown out of hit-testing, so a row a closed dropdown used to cover is clickable again
-/// the moment it closes.
+/// Gives the dropdown panel a `Display` and takes it away — never a `Visibility`, the same
+/// reason [`show_the_active_settings_tab`] gives `TabPanel` one: a hidden node still
+/// occupies its layout box. `Display::None` also keeps a closed dropdown out of
+/// hit-testing, so a row it used to cover is clickable again the moment it closes.
 fn show_monitor_dropdown(
     screen: Res<SettingsScreen>,
     mut panels: Query<&mut Node, With<MonitorDropdownPanel>>,
@@ -1106,8 +1081,8 @@ fn show_monitor_dropdown(
 }
 
 /// Paints the closed control and every open option — the pointer's three states for both,
-/// plus the one extra state an option can be in that a plain [`button_colour`] has no arm
-/// for: the preference that is actually applied, coloured exactly as the active tab is.
+/// plus the one extra state [`button_colour`] has no arm for: the applied preference,
+/// coloured exactly as the active tab is.
 fn colour_monitor_controls(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
@@ -1171,9 +1146,8 @@ fn describe(
         Reading::Vsync => on_or_off(settings.vsync()),
         Reading::Readout => on_or_off(settings.readout_shown()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
-        // "v" is the ASCII stand-in for a down chevron: `ascii_guard` in `ui/mod.rs` holds
-        // every string this client composes to the 95 codepoints Bevy's embedded font can
-        // draw, and a real chevron is not one of them.
+        // "v" stands in for a down chevron: `ascii_guard` in `ui/mod.rs` holds every
+        // string here to the 95 codepoints Bevy's embedded font can draw.
         Reading::MonitorControl => {
             format!(
                 "{} v",
@@ -1356,10 +1330,8 @@ mod tests {
             .expect("a button has an interaction") = Interaction::None;
     }
 
-    /// Whether the dropdown panel is currently drawn — `Display`, matching what
-    /// [`show_monitor_dropdown`] actually writes rather than the resource flag alone, so a
-    /// test here catches that system failing to run as readily as it catches the flag
-    /// itself being wrong.
+    /// Whether the dropdown panel is currently drawn, read from `Display` — what
+    /// [`show_monitor_dropdown`] actually writes — rather than the resource flag alone.
     fn monitor_dropdown_shown(app: &mut App) -> bool {
         let world = app.world_mut();
         let mut query = world.query_filtered::<&Node, With<MonitorDropdownPanel>>();
@@ -1838,8 +1810,7 @@ mod tests {
     }
 
     /// Pressing the closed control opens it, and the list holds exactly `Primary` plus
-    /// every live entry `MonitorChoices` reports — never the closed control's own value,
-    /// which is a separate reading.
+    /// every live entry `MonitorChoices` reports.
     #[test]
     fn clicking_the_closed_control_opens_a_list_of_primary_and_every_live_monitor() {
         let mut app = screen_app();
@@ -1882,9 +1853,8 @@ mod tests {
     }
 
     /// A saved monitor the operating system no longer reports stays on screen as
-    /// `<value> (unavailable)`, rather than being silently discarded, and it is not one of
-    /// the options offered — there is nothing live for the player to reselect it from. It
-    /// is replaced, not merged, the moment they pick something else.
+    /// `<value> (unavailable)` rather than being silently discarded, and it is not one of
+    /// the options offered. It is replaced the moment the player picks something else.
     #[test]
     fn an_unavailable_saved_monitor_is_shown_but_not_offered_and_is_replaced_on_selection() {
         let mut app = screen_app();
@@ -2004,10 +1974,9 @@ mod tests {
         assert!(!monitor_dropdown_shown(&mut app));
     }
 
-    /// The geometry the acceptance criteria name: the closed control fills exactly the
-    /// stepper column, the dropdown is anchored directly under it at the same width, and
-    /// it sits above every other row through a `GlobalZIndex` of its own rather than the
-    /// panel's ordinary tree order.
+    /// The geometry the acceptance criteria name: the closed control fills the stepper
+    /// column, the dropdown is anchored directly under it at the same width, and a
+    /// `GlobalZIndex` of its own sits it above every other row.
     #[test]
     fn the_dropdown_is_anchored_below_the_control_at_the_same_width_and_above_other_rows() {
         let mut app = screen_app();
