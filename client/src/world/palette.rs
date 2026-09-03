@@ -697,6 +697,21 @@ pub const FLOWER_CENTRE_LINEAR: [f32; 3] = [0.194_618, 0.102_242, 0.012_983];
 /// is the second tone the mesher reaches for directly.
 pub const BUSH_CROWN_LINEAR: [f32; 3] = [0.093_059, 0.296_138, 0.102_242];
 
+/// The bleached outer wood of a desert scrub: its forks and its thorns. `#A8A170`.
+///
+/// Lighter than [`DESERT_SHRUB_LINEAR`] so the outer tangle separates from the mass
+/// behind it — the cover material is lit and double-sided, and a twig this thin catches
+/// too little variation on its own to read as anything but a flat khaki wire.
+/// **Its whole difficulty is the background**: this biome's ground is
+/// [`SAND_LINEAR`] `#C9B383`, so a tone bleached toward white walks straight into it.
+/// `#A8A170` therefore bleaches *and* holds the scrub's olive cast: it is greener and
+/// darker than sand while still being paler than the scrub's own wood, which puts it
+/// 42 apart from sand and 52 apart from [`DESERT_SHRUB_LINEAR`] in sRGB — separable
+/// from the background it is seen against as well as from the wood it dresses.
+/// **Not a block colour**: [`linear_rgba`] answers [`DESERT_SHRUB_LINEAR`] for [`DESERT_SHRUB`], and
+/// this is the second tone the mesher reaches for directly.
+pub const DESERT_SHRUB_TIP_LINEAR: [f32; 3] = [0.391_572, 0.356_400, 0.162_029];
+
 /// The colour of "this build has no colour for that id". `#C81E96`.
 ///
 /// Magenta on purpose: a server one contract ahead sends a block this client has
@@ -789,7 +804,7 @@ mod tests {
 
     /// The colours as they are written in the doc comments above — the readable
     /// definition each linear constant is derived from.
-    const SRGB: [(&str, [u8; 3], [f32; 3]); 30] = [
+    const SRGB: [(&str, [u8; 3], [f32; 3]); 31] = [
         ("stone", [0x78, 0x78, 0x7D], STONE_LINEAR),
         ("dirt", [0x6B, 0x4F, 0x32], DIRT_LINEAR),
         ("grass", [0x4F, 0x7A, 0x3A], GRASS_LINEAR),
@@ -819,6 +834,11 @@ mod tests {
         ("leaf", [0x4C, 0x84, 0x38], LEAF_LINEAR),
         ("flower centre", [0x7A, 0x5A, 0x1E], FLOWER_CENTRE_LINEAR),
         ("bush crown", [0x56, 0x94, 0x5A], BUSH_CROWN_LINEAR),
+        (
+            "desert shrub tip",
+            [0xA8, 0xA1, 0x70],
+            DESERT_SHRUB_TIP_LINEAR,
+        ),
         ("unknown", [0xC8, 0x1E, 0x96], UNKNOWN_LINEAR),
     ];
 
@@ -1134,14 +1154,16 @@ mod tests {
         {
             assert!(!is_cover(block), "block {block} is not cover");
         }
-        // The stem, the leaf, the corolla's eye and the bush's sunlit crown are colours
-        // and not blocks: nothing renders as one through this function, which is what
-        // keeps all four out of the distinctness test above.
+        // The stem, the leaf, the corolla's eye, the bush's sunlit crown and the
+        // desert scrub's bleached tips are colours and not blocks: nothing renders as
+        // one through this function, which is what keeps all five out of the
+        // distinctness test above.
         for tone in [
             STEM_LINEAR,
             LEAF_LINEAR,
             FLOWER_CENTRE_LINEAR,
             BUSH_CROWN_LINEAR,
+            DESERT_SHRUB_TIP_LINEAR,
         ] {
             let rgba = [tone[0], tone[1], tone[2], 1.0];
             for block in PALETTE.into_iter().chain([AIR, BlockId::MAX]) {

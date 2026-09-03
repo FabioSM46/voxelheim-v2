@@ -670,11 +670,44 @@ const DESERT_KINK_MIN: f32 = 0.45;
 const DESERT_KINK_SPAN: f32 = 0.35;
 const DESERT_COMB: f32 = 0.55;
 
-/// The two floors the shape is held to, and nothing production reads either: how far the
-/// mean of a scrub's tips sits from the axis it grew out of, and how far apart two of its
-/// feet land. Floors rather than descriptions — over the 512-plant population the narrowest
-/// lean measured 0.141 against this 0.10 and the narrowest feet 0.0632 against this 0.06 —
-/// so tuning [`DESERT_COMB`] or [`BUSH_ROOT_SPREAD`] has margin before it has a verdict.
+/// The thorns, and why they are a tangle rather than a comb.
+///
+/// One leaves each of a shoot's three joints above its foot, so there are
+/// [`BUSH_SHOOTS`] × [`DESERT_THORNS_PER_SHOOT`] of them and never two per cane at fixed
+/// alternating sides. Three things vary independently:
+///
+/// - **Length by station.** A thorn's band is [`DESERT_THORN_REACH`] wide at the shoulder
+///   and [`DESERT_THORN_SHORTEN`] of the previous band at each joint beyond it. The bands
+///   are *disjoint*, so "at least three different lengths" is a property of the
+///   construction rather than of three dials happening to disagree.
+/// - **Direction by dial, backward by construction.** A thorn leaves at `PI + splay` from
+///   its shoot's own yaw, with `splay` inside [`DESERT_THORN_SPLAY`] < `PI/2` — retrorse
+///   whatever the dial says, pointing into the half-plane its foot is in rather than
+///   radiating outward the way the comb this replaces did.
+/// - **Pitch by dial**, so the tangle is not one horizontal fan.
+///
+/// **The taper is what makes it a thorn and not a peg**: the tip is
+/// [`DESERT_THORN_TIP_SCALE`] of the parent twig's half-width at the joint it leaves,
+/// inside the third #836 asks for, and the root is [`DESERT_THORN_ROOT_SCALE`] of it.
+/// `a_desert_thorn_band_never_meets_the_one_below_it` is where all of that is arithmetic.
+const DESERT_THORNS_PER_SHOOT: usize = 3;
+const DESERT_THORN_REACH: f32 = 0.055;
+const DESERT_THORN_SPAN: f32 = 0.030;
+const DESERT_THORN_SHORTEN: f32 = 0.60;
+const DESERT_THORN_SPLAY: f32 = 1.05;
+const DESERT_THORN_PITCH: f32 = 0.10;
+const DESERT_THORN_PITCH_SPAN: f32 = 0.55;
+const DESERT_THORN_ROOT_SCALE: f32 = 0.90;
+const DESERT_THORN_TIP_SCALE: f32 = 0.28;
+
+/// The three floors the shape is held to, and nothing production reads any of them: how
+/// many thorns a scrub carries, how far the mean of its tips sits from the axis it grew out
+/// of, and how far apart two of its feet land. Floors rather than descriptions — over the
+/// 512-plant population the narrowest lean measured 0.141 against this 0.10 and the
+/// narrowest feet 0.0632 against this 0.06 — so tuning [`DESERT_COMB`] or
+/// [`BUSH_ROOT_SPREAD`] has margin before it has a verdict.
+#[cfg(test)]
+const DESERT_THORNS_MIN: usize = 8;
 #[cfg(test)]
 const DESERT_LEAN_MIN: f32 = 0.10;
 #[cfg(test)]
@@ -689,6 +722,8 @@ const DESERT_FOOT_GAP: f32 = 0.06;
 const DESERT_DIAL_LEAN_YAW: u32 = 32;
 const DESERT_DIAL_KINK: u32 = 36;
 const DESERT_DIALS_PER_SHOOT: u32 = 4;
+const DESERT_DIAL_THORN: u32 = 48;
+const DESERT_DIALS_PER_THORN: u32 = 3;
 
 /// Three flower specks sit at three cane tips. Their crossed blades are less than half
 /// the flower eye's width and height, so they remain punctuation rather than miniature
@@ -771,15 +806,15 @@ pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES * LEAF_SEGMENTS
     + BUSH_SPECKS * 2;
 
 /// How many quads one desert scrub contributes: two ribbons for each of a shoot's segments
-/// and each of its fork's.
+/// and each of its fork's, and two more for every thorn.
 ///
-/// **30**, where the four-cane umbrella with two thorns per arch cost 46, against #836's
-/// ceiling of 72; the thorn dressing spends the rest of the budget in #836's second half.
-/// The dense desert fixture grows 25 scrubs in one chunk, so every quad here is paid 25
-/// times there, which is why this ceiling is tighter than the meadow's.
+/// **48**, where the four-cane umbrella with two thorns per arch cost 46 and this shape's
+/// skeleton alone cost 30, against #836's ceiling of 72. The dense desert fixture grows 25
+/// scrubs in one chunk, so every quad here is paid 25 times there, which is why this
+/// ceiling is tighter than the meadow's — lower a thorn count before raising it.
 #[cfg(test)]
 pub(super) const QUADS_PER_DESERT_BRAMBLE: usize =
-    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
+    BUSH_SHOOTS * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + DESERT_THORNS_PER_SHOOT * 2);
 
 /// How many quads one winter bramble contributes: two ribbons for each segment of a
 /// shoot and of its fork, one snow cap on every segment but the foot's, one pedicel per
@@ -1597,6 +1632,9 @@ fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
 /// draw. A species that turns its stroke should set `profile.bend` to zero — the sideways
 /// wander is an unsigned wobble of the same size, and "this joint's deviation alternates in
 /// sign" cannot be read off a stroke carrying both.
+///
+/// `fork_color` is the child twig's, so a species may set its outer wood apart from the mass
+/// it leaves; the two that do not want that pass `color` twice.
 #[expect(
     clippy::too_many_arguments,
     reason = "the plant's frame, its dials and the species proportions; bundling the \
@@ -1612,6 +1650,7 @@ fn push_shoot(
     profile: &ShootProfile,
     turns: [f32; BUSH_SHOOT_SEGMENTS],
     color: [f32; 4],
+    fork_color: [f32; 4],
 ) -> Shoot {
     let dials = BUSH_DIAL_SHOOT + index as u32 * BUSH_DIALS_PER_SHOOT;
     // The two bands never meet, which is what makes apical dominance arithmetic.
@@ -1706,7 +1745,7 @@ fn push_shoot(
             fork_joints[segment + 1],
             shoulder_half * BUSH_FORK_HALF_SCALES[segment],
             shoulder_half * BUSH_FORK_HALF_SCALES[segment + 1],
-            color,
+            fork_color,
         );
     }
 
@@ -1749,6 +1788,7 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
             shoot == leader,
             &BUSH_SHOOT_PROFILE,
             [0.0; BUSH_SHOOT_SEGMENTS],
+            wood,
             wood,
         )
     });
@@ -1907,10 +1947,10 @@ fn desert_kinks(seed: u32, index: usize) -> [f32; BUSH_SHOOT_SEGMENTS] {
 
 /// One desert scrub, standing in the voxel whose minimum corner is `floor`.
 ///
-/// Three kinked, combed shoots of the shared [`push_shoot`] skeleton, each forking once.
-/// Bare dry wood and nothing else: no leaf, no bloom, no fruit, no saturated accent, because
-/// the desert's statement is that nothing blooms in it. **The thorns are #836's second
-/// half** — this is the skeleton they hang on.
+/// Three kinked, combed shoots of the shared [`push_shoot`] skeleton, each forking once,
+/// with a thorn hooked backward off every joint above the foot. Bare dry wood in two tones
+/// and nothing else: no leaf, no bloom, no fruit, no saturated accent, because the desert's
+/// statement is that nothing blooms in it.
 ///
 /// **It used to be an umbrella and a comb**: four cane ribs a quarter turn apart from one
 /// hub at one constant thickness, two axis-aligned canes crossed through the roots and a
@@ -1920,21 +1960,56 @@ fn desert_kinks(seed: u32, index: usize) -> [f32; BUSH_SHOOT_SEGMENTS] {
 /// the file.
 fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let wood = palette::linear_rgba(palette::DESERT_SHRUB);
+    let bleached = opaque(palette::DESERT_SHRUB_TIP_LINEAR);
     let lean_yaw = desert_lean_yaw(seed);
     let yaws = desert_shoot_yaws(seed, lean_yaw);
     let leader = bush_leader(seed);
-    for (shoot, yaw) in yaws.into_iter().enumerate() {
+    let shoots: [Shoot; BUSH_SHOOTS] = std::array::from_fn(|shoot| {
         push_shoot(
             mesh,
             floor,
             seed,
             shoot,
-            yaw,
+            yaws[shoot],
             shoot == leader,
             &DESERT_SHOOT_PROFILE,
             desert_kinks(seed, shoot),
             wood,
-        );
+            bleached,
+        )
+    });
+
+    // One thorn off every joint above the foot. Retrorse by construction — the direction is
+    // measured from the shoot's own yaw and turned through half a turn before the
+    // dial-driven splay is added — and shortening from joint to joint through bands that
+    // never meet, so a plant carries three thorn lengths whatever its dials say.
+    for (index, shoot) in shoots.iter().enumerate() {
+        for thorn in 0..DESERT_THORNS_PER_SHOOT {
+            // Joint 0 is the foot; a thorn leaves each of the three above it.
+            let joint = shoot.joints[thorn + 1];
+            let dials = DESERT_DIAL_THORN
+                + (index * DESERT_THORNS_PER_SHOOT + thorn) as u32 * DESERT_DIALS_PER_THORN;
+            let parent_half = DESERT_SHOOT_PROFILE.half_widths[thorn + 1];
+            let length = (DESERT_THORN_REACH + dial(seed, dials) * DESERT_THORN_SPAN)
+                * DESERT_THORN_SHORTEN.powi(thorn as i32);
+            let splay = (dial(seed, dials + 1) - 0.5) * 2.0 * DESERT_THORN_SPLAY;
+            let pitch = -(DESERT_THORN_PITCH + dial(seed, dials + 2) * DESERT_THORN_PITCH_SPAN);
+            let (yaw_sin, yaw_cos) = (shoot.yaw + std::f32::consts::PI + splay).sin_cos();
+            let (pitch_sin, pitch_cos) = pitch.sin_cos();
+            let end = [
+                joint[0] + yaw_cos * pitch_cos * length,
+                joint[1] + pitch_sin * length,
+                joint[2] + yaw_sin * pitch_cos * length,
+            ];
+            push_tapered_twig(
+                mesh,
+                joint,
+                end,
+                parent_half * DESERT_THORN_ROOT_SCALE,
+                parent_half * DESERT_THORN_TIP_SCALE,
+                bleached,
+            );
+        }
     }
 }
 
@@ -1997,6 +2072,7 @@ fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
             shoot == leader,
             &WINTER_SHOOT_PROFILE,
             [0.0; BUSH_SHOOT_SEGMENTS],
+            wood,
             wood,
         )
     });
@@ -4876,6 +4952,45 @@ mod tests {
         // all-or-nothing invariant true for it and what keeps `to_bevy_mesh` from
         // inserting a UV attribute nothing reads.
         assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
+
+        // Two neighbours are two plants, not one drawn twice.
+        let mut pair = air(SIZE);
+        pair.set(4, 5, 6, palette::DESERT_SHRUB);
+        pair.set(5, 5, 6, palette::DESERT_SHRUB);
+        let pair = super::mesh_chunk(&pair, &alone()).cover;
+        let shifted: Vec<[f32; 3]> = pair.positions[..QUADS_PER_DESERT_BRAMBLE * VERTICES_PER_QUAD]
+            .iter()
+            .map(|point| [point[0] + 1.0, point[1], point[2]])
+            .collect();
+        assert_ne!(
+            shifted,
+            pair.positions[QUADS_PER_DESERT_BRAMBLE * VERTICES_PER_QUAD..].to_vec(),
+            "two neighbouring scrubs are the same plant translated"
+        );
+    }
+
+    #[test]
+    fn a_desert_thorn_band_never_meets_the_one_below_it() {
+        // "At least three different lengths" as arithmetic rather than as three dials
+        // happening to disagree: a thorn at one joint is drawn from a band, and the band at
+        // the next joint out is shorter than the shortest of it.
+        const {
+            assert!(
+                (DESERT_THORN_REACH + DESERT_THORN_SPAN) * DESERT_THORN_SHORTEN
+                    < DESERT_THORN_REACH
+            )
+        };
+        // One thorn per joint above the foot, which is what makes the parent's half-width at
+        // that joint readable from the profile's table.
+        const { assert!(DESERT_THORNS_PER_SHOOT == BUSH_SHOOT_SEGMENTS) };
+        const { assert!(BUSH_SHOOTS * DESERT_THORNS_PER_SHOOT >= DESERT_THORNS_MIN) };
+        // Retrorse by construction: a thorn leaves at `PI + splay` from its shoot's yaw, so
+        // a splay inside a quarter turn cannot point it outward.
+        const { assert!(DESERT_THORN_SPLAY < std::f32::consts::FRAC_PI_2) };
+        // And a thorn's tip is inside the third of its parent #836 asks for, while its root
+        // is thinner than the wood it grows from.
+        const { assert!(DESERT_THORN_TIP_SCALE <= 1.0 / 3.0) };
+        const { assert!(DESERT_THORN_ROOT_SCALE < 1.0) };
     }
 
     /// One bush in the fixture voxel, fixed at (4, 5, 6) so a test can recompute the
@@ -5337,12 +5452,18 @@ mod tests {
         (0..8).flat_map(|x| (0..8).flat_map(move |y| (0..8).map(move |z| [x, y, z])))
     }
 
-    /// The quads of one desert shoot: its segments then its fork's, two ribbons each.
+    /// The quads of one desert shoot: its segments then its fork's, two ribbons each. Every
+    /// shoot's thorns follow all three shoots.
     const DESERT_QUADS_PER_SHOOT: usize = (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
 
     /// The first ribbon of one segment of one shoot.
     fn desert_segment_quad(shoot: usize, segment: usize) -> usize {
         shoot * DESERT_QUADS_PER_SHOOT + segment * 2
+    }
+
+    /// The first ribbon of one thorn.
+    fn desert_thorn_quad(shoot: usize, thorn: usize) -> usize {
+        BUSH_SHOOTS * DESERT_QUADS_PER_SHOOT + (shoot * DESERT_THORNS_PER_SHOOT + thorn) * 2
     }
 
     /// The compass bearing from one point to another, ignoring height.
@@ -5369,7 +5490,7 @@ mod tests {
     }
 
     #[test]
-    fn a_desert_scrub_is_kinked_combed_wood_and_nothing_else() {
+    fn a_desert_scrub_is_kinked_combed_wood_in_two_dry_tones_and_nothing_else() {
         // `world.DesertShrub` has the bush's shape family and none of its meadow dressing:
         // the old cube leaves the sweep, the sand regains its top face, and what is drawn is
         // bare wood with no leaf, flower or saturated accent.
@@ -5386,18 +5507,25 @@ mod tests {
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_DESERT_BRAMBLE);
         // What `client/AGENTS.md`'s quad budget is written down as, and #836's ceiling.
-        assert_eq!(QUADS_PER_DESERT_BRAMBLE, 30);
+        assert_eq!(QUADS_PER_DESERT_BRAMBLE, 48);
         const { assert!(QUADS_PER_DESERT_BRAMBLE <= 72) };
 
         // **The whole of "no leaves, no bloom, no fruit, no accent"**: the census is
-        // exhaustive, so any other colour fails here whatever part introduced it.
+        // exhaustive, so a colour outside the scrub's two declared dry-wood tones fails
+        // here whatever part introduced it.
         assert_eq!(
             quads_by_colour(&mesh.cover),
-            BTreeMap::from([(
-                palette::linear_rgba(palette::DESERT_SHRUB).map(f32::to_bits),
-                QUADS_PER_DESERT_BRAMBLE
-            )]),
-            "sun-bleached dry wood, with no meadow leaf, flower or saturated accent"
+            BTreeMap::from([
+                (
+                    palette::linear_rgba(palette::DESERT_SHRUB).map(f32::to_bits),
+                    BUSH_SHOOTS * BUSH_SHOOT_SEGMENTS * 2
+                ),
+                (
+                    tone(palette::DESERT_SHRUB_TIP_LINEAR),
+                    BUSH_SHOOTS * (BUSH_FORK_SEGMENTS * 2 + DESERT_THORNS_PER_SHOOT * 2)
+                ),
+            ]),
+            "dry wood and bleached outer twigs, with no leaf, flower or saturated accent"
         );
 
         let repeated = super::mesh_chunk(&chunk, &alone());
@@ -5523,6 +5651,99 @@ mod tests {
                     "{cell:?} shoot {shoot} sits {turn} from the lean, outside the fan"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_desert_thorn_hooks_back_toward_its_foot_and_tapers_to_a_point() {
+        // Three things at once, because they are one claim about one part: a thorn is
+        // *retrorse* (it points into the half-plane its foot is in rather than radiating
+        // outward like the comb this replaces), it *tapers* (a thorn as thick at its tip as
+        // at its root is a peg), and a plant carries thorns of *several* lengths. The wood
+        // they leave is measured here too, for the same reason.
+        for cell in every_desert_cell() {
+            let floor = [cell[0] as f32, cell[1] as f32, cell[2] as f32];
+            let mesh = a_desert_scrub(cell);
+            let mut lengths: BTreeSet<u32> = BTreeSet::new();
+            let mut thorns = 0;
+
+            for shoot in 0..BUSH_SHOOTS {
+                let outward = desert_shoot_yaw(&mesh, floor, shoot);
+                for thorn in 0..DESERT_THORNS_PER_SHOOT {
+                    let quad = desert_thorn_quad(shoot, thorn);
+                    let root = centre_line(&mesh, quad, false);
+                    let tip = centre_line(&mesh, quad, true);
+                    thorns += 1;
+
+                    let bearing = horizontal_yaw(root, tip);
+                    assert!(
+                        angle_between(bearing, outward) > std::f32::consts::FRAC_PI_2,
+                        "{cell:?} shoot {shoot} thorn {thorn} radiates outward: {bearing} \
+                         against a shoot at {outward}"
+                    );
+                    assert!(
+                        signed_turn(outward + std::f32::consts::PI, bearing).abs()
+                            <= DESERT_THORN_SPLAY + 1e-4,
+                        "{cell:?} shoot {shoot} thorn {thorn} leaves its splay"
+                    );
+
+                    // The parent's drawn half-width where this thorn leaves it: the far end
+                    // of the segment that arrives at the joint.
+                    let parent = drawn_half_width(&mesh, desert_segment_quad(shoot, thorn), true);
+                    let at_root = drawn_half_width(&mesh, quad, false);
+                    let at_tip = drawn_half_width(&mesh, quad, true);
+                    assert!(
+                        at_root < parent + 1e-6,
+                        "{cell:?} shoot {shoot} thorn {thorn} is thicker than the twig it \
+                         leaves: {at_root} against {parent}"
+                    );
+                    assert!(
+                        at_tip <= parent / 3.0 + 1e-6,
+                        "{cell:?} shoot {shoot} thorn {thorn} ends at {at_tip}, over a third \
+                         of its parent's {parent}"
+                    );
+                    assert!(
+                        at_tip < at_root - 1e-6,
+                        "{cell:?} shoot {shoot} thorn {thorn} is a peg: {at_root} to {at_tip}"
+                    );
+
+                    lengths.insert(distance(root, tip).to_bits());
+                }
+
+                // And the wood itself tapers, foot to tip, the way the meadow's does.
+                let mut widths = vec![drawn_half_width(
+                    &mesh,
+                    desert_segment_quad(shoot, 0),
+                    false,
+                )];
+                for segment in 0..BUSH_SHOOT_SEGMENTS {
+                    widths.push(drawn_half_width(
+                        &mesh,
+                        desert_segment_quad(shoot, segment),
+                        true,
+                    ));
+                }
+                for pair in widths.windows(2) {
+                    assert!(
+                        pair[1] <= pair[0] + 1e-6,
+                        "{cell:?} shoot {shoot} widens along its stroke: {widths:?}"
+                    );
+                }
+                assert!(
+                    *widths.last().expect("a shoot has stations") < widths[0] - 1e-6,
+                    "{cell:?} shoot {shoot} is one width from root to tip: {widths:?}"
+                );
+            }
+
+            assert!(
+                thorns >= DESERT_THORNS_MIN,
+                "{cell:?} grew {thorns} thorns, under DESERT_THORNS_MIN"
+            );
+            assert!(
+                lengths.len() >= 3,
+                "{cell:?} grew {} distinct thorn lengths; the comb this replaces had one",
+                lengths.len()
+            );
         }
     }
 
@@ -6143,7 +6364,7 @@ mod tests {
             planted_mesh.cover.quad_count(),
             shrubs * QUADS_PER_DESERT_BRAMBLE
         );
-        assert_eq!(planted_mesh.cover.quad_count(), 750);
+        assert_eq!(planted_mesh.cover.quad_count(), 1200);
         assert_eq!(
             planted_mesh.opaque, bare_mesh.opaque,
             "the shaped scrub must return every sand face and leave no cube in the sweep"
