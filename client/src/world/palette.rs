@@ -450,8 +450,9 @@ pub fn is_solid(block: BlockId) -> bool {
 /// top face, and the water beside one keeps its surface, because both mask arms
 /// already read "see-through" rather than "air". Before #874 a bush was the id where
 /// that was a rendering answer and not a physical one — drawn with gaps while still
-/// stopping a body. Now `is_cover` is false for it here for the same reason `is_solid`
-/// is false for it above: neither is a rendering-only exception any more.
+/// stopping a body. Now `is_cover` is **true** for it, and that one answer is why both
+/// this predicate and [`is_solid`] are false for it: a bush is no longer a
+/// rendering-only exception to either.
 pub fn is_opaque(block: BlockId) -> bool {
     block != AIR && !is_water(block) && !is_cover(block)
 }
