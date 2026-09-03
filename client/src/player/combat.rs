@@ -17,6 +17,7 @@ use super::inventory::{Inventory, SelectedSlot};
 use super::{ApplySnapshots, InputCadence, InputGate, ViewMode};
 use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
 use crate::net::{BlockRequest, ConnectionState, encode_block_request};
+use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
 /// what [`attack_item_in_hand`] decides.
@@ -77,10 +78,12 @@ impl Plugin for CombatPlugin {
         app.init_resource::<ViewMode>();
         app.init_resource::<BlockIntent>()
             .add_message::<SwingSent>()
+            .add_message::<PlayerMessage>()
             .add_systems(
                 Update,
                 send_attacks
                     .in_set(ApplyCombatInput)
+                    .in_set(PublishPlayerMessages)
                     // After the structure pick, because a press on this player's own camp is
                     // a removal rather than a swing and the pick is what says so.
                     .after(super::structures::AimStructures)
@@ -98,6 +101,7 @@ impl Plugin for CombatPlugin {
                 Update,
                 send_block_edges
                     .in_set(ApplyCombatInput)
+                    .in_set(PublishPlayerMessages)
                     .after(ApplySnapshots)
                     .after(super::send_player_input),
             );
@@ -112,6 +116,7 @@ fn send_block_edges(
     state: Option<Res<ConnectionState>>,
     mut intent: ResMut<BlockIntent>,
     outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     let pressed = buttons
         .as_deref()
@@ -138,6 +143,17 @@ fn send_block_edges(
             client_tick: cadence.client_tick,
         }))
     });
+    if sent == Sent::Dropped {
+        warn!(
+            "the outbound queue was full; a shield block active={active} never reached the server"
+        );
+        let text = if active {
+            "Raising your shield did not reach the server; try again."
+        } else {
+            "Lowering your shield did not reach the server; try again."
+        };
+        messages.write(PlayerMessage::new(PlayerMessageKind::Error, text));
+    }
     if active {
         intent.raised = sent == Sent::Queued;
     } else {
@@ -240,6 +256,10 @@ impl HeldItem<'_> {
 /// `just_pressed`, never `pressed`: a swing is an event and the server refuses a second
 /// one inside its cooldown anyway, so holding the button down would only fill the
 /// outbound queue with frames that are declined on arrival.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one intent-sending system; the chat report needs an eighth parameter"
+)]
 fn send_attacks(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     gate: InputGate<'_>,
@@ -248,6 +268,7 @@ fn send_attacks(
     outbound: Option<ResMut<Outbound>>,
     structure: Res<super::structures::StructureTarget>,
     mut swings: MessageWriter<SwingSent>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     if !gate.may_act() {
         return;
@@ -291,6 +312,10 @@ fn send_attacks(
                 "the outbound queue was full; a swing from slot {} never reached the server",
                 request.slot
             );
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your attack did not reach the server; try again.",
+            ));
         }
         // The session is ending. There is nowhere to send and nothing to celebrate.
         Sent::Closed => {}
@@ -354,6 +379,65 @@ mod tests {
         app.update();
         drain(&sent);
         (app, sent)
+    }
+
+    /// [`clicking_app`], with an outbound queue that has no room for anything.
+    ///
+    /// A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+    /// receiver is parked in a blocking `recv`, which nothing here ever is, so every send
+    /// reads as `Sent::Dropped`. The receiver is returned rather than discarded — dropping
+    /// it would disconnect the channel and turn every later send into the silent
+    /// `Sent::Closed` instead.
+    fn clicking_app_that_drops(slot_zero: InventoryStack) -> (App, Receiver<Vec<u8>>) {
+        let mut app = App::new();
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .insert_resource(session())
+            .insert_resource(ConnectionState::Connected)
+            .insert_resource(outbound)
+            .add_plugins(PlayerPlugin);
+
+        deliver(&mut app, slot_zero);
+        app.update();
+        (app, never_received)
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn a_dropped_swing_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = clicking_app_that_drops(blade());
+        click(&mut app);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your attack did not reach the server; try again."
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dropped_shield_raise_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = clicking_app_that_drops(InventoryStack::default());
+        block_button(&mut app, ButtonState::Pressed);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Raising your shield did not reach the server; try again."
+            )]
+        );
     }
 
     /// Replaces the pack wholesale, as one more complete `InventoryState` from the server.

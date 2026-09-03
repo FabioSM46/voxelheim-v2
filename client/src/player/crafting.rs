@@ -31,6 +31,7 @@ use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
 };
 use crate::net::{CraftRequest, Outbound, RecipeId, Sent, StructureKind, encode_craft_request};
+use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// Item id 10, the forge's blade, as `server/internal/game/items.go` appends it.
 ///
@@ -550,6 +551,7 @@ pub(super) struct CraftingPlugin;
 impl Plugin for CraftingPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<CraftClick>()
+            .add_message::<PlayerMessage>()
             // PlayerPlugin and InventoryPlugin own these in the game; initialising them
             // here keeps this module testable on its own, exactly as they do.
             .init_resource::<Inventory>()
@@ -560,6 +562,7 @@ impl Plugin for CraftingPlugin {
             .add_systems(
                 Update,
                 request_craft
+                    .in_set(PublishPlayerMessages)
                     // After the newest complete inventory, so a row activated on the frame
                     // a server state lands is judged against that state rather than the
                     // one it replaced.
@@ -585,6 +588,7 @@ fn request_craft(
     inventory: Res<Inventory>,
     cadence: Res<InputCadence>,
     outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     // The screen these rows live on is closed while the server says this player is dead,
     // and the toggle that would reopen it is refused in `ui/mod.rs`. This is the wire half
@@ -618,10 +622,16 @@ fn request_craft(
         };
         match outbound.send(encode_craft_request(&request)) {
             Sent::Queued => {}
-            Sent::Dropped => warn!(
-                "the outbound queue was full; a craft of {:?} never reached the server",
-                request.recipe
-            ),
+            Sent::Dropped => {
+                warn!(
+                    "the outbound queue was full; a craft of {:?} never reached the server",
+                    request.recipe
+                );
+                messages.write(PlayerMessage::new(
+                    PlayerMessageKind::Error,
+                    "Your crafting request did not reach the server; try again.",
+                ));
+            }
             Sent::Closed => {}
         }
     }
@@ -671,6 +681,37 @@ mod tests {
     fn activate(app: &mut App, recipe: RecipeId) {
         app.world_mut().write_message(CraftClick { recipe });
         app.update();
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn a_dropped_craft_reaches_chat_as_one_error() {
+        let mut app = App::new();
+        // A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+        // receiver is parked in a blocking `recv`, which nothing here ever is, so every
+        // send reads as `Sent::Dropped`. The receiver has to outlive this test — dropping
+        // it would disconnect the channel and turn the send into the silent `Sent::Closed`.
+        let (outbound, _never_received) = Outbound::to_a_test(0);
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(CraftingPlugin)
+            .insert_resource(outbound)
+            .insert_resource(Inventory::from_stacks(vec![stack(ITEM_LOG, 8)]))
+            .insert_resource(InputMode::Inventory);
+
+        activate(&mut app, RecipeId::Tent);
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your crafting request did not reach the server; try again."
+            )]
+        );
     }
 
     /// Replaces the vitals exactly as an accepted snapshot does.
