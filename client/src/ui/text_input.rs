@@ -115,11 +115,13 @@ mod tests {
                 Key::Backspace,
                 Key::Shift,
                 Key::ArrowLeft,
+                Key::ArrowUp,
             ],
         );
         assert_eq!(line, "hi ther");
         assert_eq!(answers[5], None, "a modifier is not an edit");
         assert_eq!(answers[6], None, "and neither is an arrow");
+        assert_eq!(answers[7], None, "ArrowUp stays history-agnostic here");
     }
 
     #[test]

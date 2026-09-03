@@ -8,9 +8,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use bevy::input::keyboard::KeyboardInput;
-#[cfg(test)]
-use bevy::input::{ButtonState, keyboard::Key};
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::time::Real;
 
@@ -39,6 +38,14 @@ const LOG_BOTTOM: f32 = 70.0;
 
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct ChatLine(String);
+
+/// The one submitted line this process can recall.
+///
+/// This stays beside the draft rather than in the shared text-input helper: remembering a
+/// submission is chat behaviour, and the map's note field must keep treating arrows as no-op
+/// keys. It is deliberately a single optional line rather than a growing session log.
+#[derive(Resource, Debug, Default, PartialEq, Eq)]
+struct ChatHistory(Option<String>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LogKind {
@@ -92,6 +99,7 @@ pub(super) struct RenderChat;
 impl Plugin for ChatUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ChatLine>()
+            .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
             .init_resource::<ChatInbox>()
             .init_resource::<PartyLogInbox>()
@@ -255,6 +263,7 @@ fn capture_chat(
     mut typed: MessageReader<KeyboardInput>,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
+    mut history: ResMut<ChatHistory>,
     mut outbound: Option<ResMut<Outbound>>,
 ) {
     if *mode != InputMode::Chat || mode.is_changed() {
@@ -265,6 +274,13 @@ fn capture_chat(
     }
 
     for key in typed.read() {
+        if key.state == ButtonState::Pressed && key.logical_key == Key::ArrowUp {
+            if let Some(last) = &history.0 {
+                draft.0.clone_from(last);
+            }
+            continue;
+        }
+
         // The reading of a key is `ui/text_input.rs`'s, shared with the map's note field.
         // What stays here is what makes this line chat's: the mode it lives in, and that
         // `Enter` is a message to the world rather than a mark on a map.
@@ -276,6 +292,9 @@ fn capture_chat(
             }
             Some(TextEdit::Submitted) => {
                 let line = std::mem::take(&mut draft.0);
+                if !line.trim().is_empty() {
+                    history.0 = Some(line.clone());
+                }
                 send_line(line, outbound.as_deref_mut());
                 set_mode(&mut mode, InputMode::Playing);
                 return;
@@ -462,6 +481,7 @@ mod tests {
             .add_message::<KeyboardInput>()
             .insert_resource(InputMode::Chat)
             .init_resource::<ChatLine>()
+            .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
             .add_systems(Update, capture_chat);
         if let Some(outbound) = outbound {
@@ -799,6 +819,70 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
+    fn reopen_chat(app: &mut App) {
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0, "");
+    }
+
+    #[test]
+    fn arrow_up_recalls_one_message_repeatedly_and_the_draft_stays_editable() {
+        let mut app = capture_app(None);
+        type_key(&mut app, Key::Character("hello".into()));
+        type_key(&mut app, Key::Enter);
+        app.update();
+
+        reopen_chat(&mut app);
+        type_key(&mut app, Key::ArrowUp);
+        type_key(&mut app, Key::ArrowUp);
+        type_key(&mut app, Key::Backspace);
+        type_key(&mut app, Key::Character("!".into()));
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0, "hell!");
+
+        for _ in 0..5 {
+            type_key(&mut app, Key::Backspace);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0, "");
+    }
+
+    #[test]
+    fn arrow_up_recalls_a_slash_command_byte_for_byte() {
+        let mut app = capture_app(None);
+        type_key(&mut app, Key::Character("/teleport 1 2 3  ".into()));
+        type_key(&mut app, Key::Enter);
+        app.update();
+
+        reopen_chat(&mut app);
+        type_key(&mut app, Key::ArrowUp);
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0, "/teleport 1 2 3  ");
+    }
+
+    #[test]
+    fn empty_submission_and_escape_do_not_replace_recall() {
+        let mut app = capture_app(None);
+        type_key(&mut app, Key::Character("remember me".into()));
+        type_key(&mut app, Key::Enter);
+        app.update();
+
+        reopen_chat(&mut app);
+        type_key(&mut app, Key::Character("   ".into()));
+        type_key(&mut app, Key::Enter);
+        app.update();
+
+        reopen_chat(&mut app);
+        type_key(&mut app, Key::Character("discard me".into()));
+        type_key(&mut app, Key::Escape);
+        app.update();
+
+        reopen_chat(&mut app);
+        type_key(&mut app, Key::ArrowUp);
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0, "remember me");
+    }
+
     #[test]
     fn opening_frame_is_drained_and_fade_uses_real_elapsed_time() {
         let mut app = App::new();
@@ -806,6 +890,7 @@ mod tests {
             .add_message::<KeyboardInput>()
             .insert_resource(InputMode::Chat)
             .init_resource::<ChatLine>()
+            .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
             .add_systems(Update, capture_chat);
         type_key(&mut app, Key::Character("t".into()));
