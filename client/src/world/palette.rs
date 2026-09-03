@@ -333,7 +333,14 @@ pub fn is_greedy_opaque(block: BlockId) -> bool {
     is_opaque(block) && !is_architectural_shape(block)
 }
 
-const COVER_FAMILY: [BlockId; 4] = [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE, WINTER_BRAMBLE];
+const COVER_FAMILY: [BlockId; 6] = [
+    FLOWER_RED,
+    FLOWER_YELLOW,
+    FLOWER_BLUE,
+    WINTER_BRAMBLE,
+    BUSH,
+    DESERT_SHRUB,
+];
 
 const WATER_FAMILY: [BlockId; 12] = [
     WATER,
@@ -361,35 +368,23 @@ pub fn is_water(block: BlockId) -> bool {
 /// palette gives about a block: cover stops no body ([`is_solid`] is false) and hides
 /// nothing ([`is_opaque`] is false), yet it is still a voxel a player can outline and
 /// break. `ChunkStore::targetable_at` is what puts those two facts together; nothing
-/// else needs to ask.
+/// else needs to ask. [`super::mesher::build_cover`] is what draws it: a stem, a
+/// corolla and leaves for a flower, a leafy bramble for a bush, bare brambles for
+/// desert and winter — the sweep never sees any of them.
+///
+/// **`BUSH` and `DESERT_SHRUB` joined this family in #874.** Until then they were
+/// `world.Solid` on the server, and this file carried a second predicate,
+/// `is_shaped`, for exactly the two questions that used to disagree about them:
+/// which ids get a grown shape instead of a cube, and which of those are still
+/// opaque. Once both are `Cover`, `is_shaped` answered nothing `is_cover` did not —
+/// same ids, every time — so it was removed rather than kept as a second name for
+/// one set; [`is_opaque`] below reads `is_cover` directly.
 ///
 /// Not the complement of anything. Air is neither solid nor cover, water is neither,
 /// and an id from a newer contract is solid rather than cover for the reason it is
 /// opaque — this build draws what the server sent.
 pub fn is_cover(block: BlockId) -> bool {
     COVER_FAMILY.contains(&block)
-}
-
-/// Whether the mesher grows this block a shape of its own inside its voxel rather than
-/// sweeping it as a cube.
-///
-/// Exactly [`is_cover`] plus [`BUSH`] and [`DESERT_SHRUB`], and it is a **third**
-/// question about a block rather than a synonym for either of the two above it. Cover
-/// answers what a body does with a voxel — mirrored from the server's `world.Cover` —
-/// and the meadow/desert brambles are `world.Solid` there, while flowers and the winter
-/// bramble stop no body. What the shapes share is only that none is a cube:
-/// [`super::mesher::build_cover`] builds a stem, a corolla and leaves for a flower, a
-/// leafy bramble for a bush, and bare brambles for desert and winter; the sweep never
-/// sees any of them.
-///
-/// **The consequence is [`is_opaque`], and it is the reason this predicate has to exist
-/// at all.** A shape does not fill the voxel the sweep would have culled against, so the
-/// ground under a bramble keeps its top face and the block beside one keeps its side
-/// face — otherwise every gap between two shapes would look through the plant onto a
-/// face nobody drew. It says nothing about solidity: `is_solid` still reads
-/// [`is_cover`], so both brambles stop a body exactly as they did as cubes.
-pub fn is_shaped(block: BlockId) -> bool {
-    is_cover(block) || matches!(block, BUSH | DESERT_SHRUB)
 }
 
 /// The server-authored water height in eighths. Falling is resolved by the mesher.
@@ -450,13 +445,15 @@ pub fn is_solid(block: BlockId) -> bool {
 /// An id from a newer contract is opaque, for the reason it is solid: this build draws
 /// what the server sent rather than deciding an id it never heard of is see-through.
 ///
-/// [`is_shaped`] is not opaque, and that is the whole of what the two masks need to learn
-/// about a plant: the grass under a flower or a bush keeps its top face, and the water
-/// beside one keeps its surface, because both mask arms already read "see-through" rather
-/// than "air". A bush is the id where that is a rendering answer and not a physical one —
-/// it still stops a body, and `is_solid` above is where that is said.
+/// [`is_cover`] is not opaque, and that is the whole of what the two masks need to
+/// learn about a plant: the grass under a flower, a bush or a desert shrub keeps its
+/// top face, and the water beside one keeps its surface, because both mask arms
+/// already read "see-through" rather than "air". Before #874 a bush was the id where
+/// that was a rendering answer and not a physical one — drawn with gaps while still
+/// stopping a body. Now `is_cover` is false for it here for the same reason `is_solid`
+/// is false for it above: neither is a rendering-only exception any more.
 pub fn is_opaque(block: BlockId) -> bool {
-    block != AIR && !is_water(block) && !is_shaped(block)
+    block != AIR && !is_water(block) && !is_cover(block)
 }
 
 /// The palette in the order a reader wants to see it. Test-only: production code
@@ -857,11 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn air_water_and_the_shaped_plants_are_the_ids_you_can_see_through() {
+    fn air_water_and_cover_are_the_ids_you_can_see_through() {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if is_water(block) || is_shaped(block) {
+            if is_water(block) || is_cover(block) {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;
             }
@@ -871,52 +868,14 @@ mod tests {
             );
         }
         assert!(is_opaque(999), "an unknown id is drawn, not seen through");
-        // The two solid brambles are where opacity and solidity part company: they are
-        // drawn with gaps, so the ground under them keeps the faces their old cubes
-        // culled, and both still stop a body.
-        assert!(!is_opaque(BUSH), "a bush is foliage with gaps in it");
-        assert!(is_solid(BUSH), "and it still stops a body");
-        assert!(
-            !is_cover(BUSH),
-            "which is what keeps it out of the cover family"
-        );
-        assert!(
-            !is_opaque(DESERT_SHRUB),
-            "desert scrub is bare canes with gaps"
-        );
-        assert!(is_solid(DESERT_SHRUB), "and it still stops a body");
-        assert!(
-            !is_cover(DESERT_SHRUB),
-            "which is what keeps it out of the cover family"
-        );
-    }
-
-    #[test]
-    fn the_shaped_plants_are_the_two_brambles_and_the_three_flowers() {
-        // The set the mesher grows geometry for, pinned the way `is_cover` is: an id
-        // that starts answering `is_shaped` without being listed here is a block that
-        // silently stopped hiding what is behind it.
-        for block in [
-            BUSH,
-            DESERT_SHRUB,
-            FLOWER_RED,
-            FLOWER_YELLOW,
-            FLOWER_BLUE,
-            WINTER_BRAMBLE,
-        ] {
-            assert!(is_shaped(block));
-        }
-        for block in PALETTE
-            .into_iter()
-            .filter(|block| {
-                !matches!(
-                    *block,
-                    BUSH | DESERT_SHRUB | FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE
-                )
-            })
-            .chain([AIR, BlockId::MAX])
-        {
-            assert!(!is_shaped(block), "block {block} is swept as a cube");
+        // Before #874 the two brambles were where opacity and solidity parted
+        // company: drawn with gaps while still `world.Solid`. Now that both are
+        // `Cover`, `is_opaque` and `is_solid` agree about them exactly as they
+        // already agreed about a flower — see
+        // `cover_is_exactly_six_ids_and_stops_nothing` for the exhaustive set.
+        for block in [BUSH, DESERT_SHRUB] {
+            assert!(!is_opaque(block), "cover {block} must hide nothing");
+            assert!(!is_solid(block), "cover {block} must stop no body");
         }
     }
 
@@ -1139,11 +1098,19 @@ mod tests {
     }
 
     #[test]
-    fn cover_is_exactly_the_three_flowers_and_winter_bramble_and_stops_nothing() {
+    fn cover_is_exactly_six_ids_and_stops_nothing() {
         // The seam the next cover block is added at, pinned as a set rather than as a
         // predicate: an id that starts answering `is_cover` without being listed here is
-        // a block a body would walk through by accident.
-        for block in [FLOWER_RED, FLOWER_YELLOW, FLOWER_BLUE, WINTER_BRAMBLE] {
+        // a block a body would walk through by accident. `BUSH` and `DESERT_SHRUB`
+        // joined the other four in #874 — both were `world.Solid` before it.
+        for block in [
+            FLOWER_RED,
+            FLOWER_YELLOW,
+            FLOWER_BLUE,
+            WINTER_BRAMBLE,
+            BUSH,
+            DESERT_SHRUB,
+        ] {
             assert!(is_cover(block));
             assert!(!is_solid(block), "cover {block} must stop no body");
             assert!(!is_opaque(block), "cover {block} must hide nothing");
@@ -1159,7 +1126,7 @@ mod tests {
             .filter(|block| {
                 !matches!(
                     *block,
-                    FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE
+                    FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE | WINTER_BRAMBLE | BUSH | DESERT_SHRUB
                 )
             })
             .chain([AIR, BlockId::MAX])

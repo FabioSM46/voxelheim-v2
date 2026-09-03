@@ -24,7 +24,7 @@
 //! two of the [`ChunkMesh`]'s three [`SurfaceMesh`]es: the opaque surface and the water
 //! surface. The third — cover — is not swept at all, because a plant has no coplanar
 //! face to merge with its neighbour; [`build_cover`] walks the voxels once and grows a
-//! flower or a bramble in each voxel [`palette::is_shaped`] answers for. The reason each is
+//! flower or a bramble in each voxel [`palette::is_cover`] answers for. The reason each is
 //! its own mesh is on [`ChunkMesh`] itself — blending is order-dependent and
 //! Bevy sorts per entity, so the two have to be separate draws. The face rules are
 //! on [`build_masks`]; the greedy merge below is shared and knows about neither.
@@ -408,14 +408,18 @@ const COVER_LEAF_RISE: f32 = 0.09;
 
 /// How far a bush's foliage keeps back from the walls of its voxel, in blocks.
 ///
-/// A bush is `world.Solid` on the server, so what is drawn has to fill the cube a body is
-/// stopped by — but bushes grow in clusters of up to three (`visitBush` on the server),
-/// and a face exactly on the plane two of them share would be coincident with the
-/// neighbour's, two quads fighting the depth buffer over one surface. The same plane is
-/// the one the ground under a bush now draws its top face on, since a bush stopped being
-/// opaque when it stopped being a cube. Two percent is far too small to be a wall a
-/// player can walk into unseen and far too large to z-fight, and it is why a bush's drawn
-/// extent is 96% of its voxel on every axis rather than 100%.
+/// Bushes grow in clusters of up to three (`visitBush` on the server), and a face
+/// exactly on the plane two of them share would be coincident with the neighbour's —
+/// two quads fighting the depth buffer over one surface. Two percent is far too small
+/// to read as a gap and far too large to z-fight, which is why a bush's drawn extent
+/// is 96% of its voxel on every axis rather than 100%.
+///
+/// **It no longer has anything to do with filling the collision box.** Until #874
+/// `world.Bush` was `world.Solid`, so the drawn shape had to reach every wall or a
+/// player would walk into a cube nothing showed them. Now that `Bush` is `Cover`,
+/// nothing is stopped by the voxel at all — the inset survives for the z-fighting
+/// reason alone, and `stays_inside_the_voxel` is the one guarantee left to assert
+/// about it, not a claim that the shape reaches every wall.
 const BUSH_INSET: f32 = 0.02;
 
 /// The umbrella frame the two undressed brambles still stand on: four canes at equal
@@ -1193,7 +1197,7 @@ fn half_quad_corners(
     }
 }
 
-/// Fills the cover half: one plant per [`palette::is_shaped`] voxel — a flower for each
+/// Fills the cover half: one plant per [`palette::is_cover`] voxel — a flower for each
 /// of the three flower ids, a leafy bramble for a bush, a bare thorn bramble for
 /// desert scrub or a berry-dressed winter bramble.
 ///
@@ -1212,15 +1216,15 @@ fn build_cover(mesh: &mut SurfaceMesh, chunk: &VoxelChunk) {
         for z in 0..size {
             for x in 0..size {
                 let block = chunk.block([x, y, z]);
-                // The gate is [`palette::is_shaped`] and not the two ids read apart,
+                // The gate is [`palette::is_cover`] and not the six ids read apart,
                 // because that predicate is a statement *about this loop*: it is what
                 // makes [`palette::is_opaque`] false, so the sweep emits nothing at all
-                // for a shaped voxel. An id that answers it and reaches no branch here
+                // for a cover voxel. An id that answers it and reaches no branch here
                 // is not drawn as a cube — it is not drawn at all. Asking it once is
                 // what keeps that from happening silently, for the reason
                 // `player::inventory`'s `KITS` is a table and not a comparison: the
                 // failure that costs something is the omission, not the extra entry.
-                if !palette::is_shaped(block) {
+                if !palette::is_cover(block) {
                     continue;
                 }
 
@@ -1551,13 +1555,13 @@ fn push_shoot(
 /// any more: the shoots leave three separate feet in three sectors of unequal width, one of
 /// them leads, and the leaves on each follow the golden angle rather than an index parity.
 ///
-/// **The shape still has to fill the cube**: `world.Bush` is `Solid` on the server, so a
-/// body is stopped by all of it. Five of the six extrema are the four low leaves — their
-/// petioles on the floor inset, their widest stations on the four horizontal insets — and
-/// the sixth is the leading shoot's crest leaf, sized from the ceiling it has to reach.
-/// **Those are named parts on purpose**:
-/// the test asserts which quads carry each of the six extrema, because the next person to
-/// tune a constant is the one who would otherwise reintroduce the invisible wall.
+/// **Reaching every wall used to be a requirement and is now a leftover.** Before #874
+/// `world.Bush` was `Solid`, so the shape had to fill the cube a body was stopped by:
+/// the four low leaves reached the floor and the four horizontal insets, and the
+/// leading shoot's crest leaf was sized from the ceiling rather than from the table.
+/// `Bush` is `Cover` now, nothing is stopped by this voxel, and the shape is unchanged
+/// because this issue draws nothing new — `stays_inside_the_voxel` is the one thing
+/// still asserted about it.
 fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let foliage = palette::linear_rgba(palette::BUSH);
     let leaf = opaque(palette::BUSH_CROWN_LINEAR);
@@ -1654,16 +1658,19 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 /// reaches the ceiling. Every part is the scrub's existing sun-bleached khaki — there
 /// are no flowers, berries, leaves or saturated accents in this biome.
 ///
-/// `world.DesertShrub` is `Solid`, so the sparse geometry still has to show the whole
-/// cube a body is stopped by. The six extrema land at [`BUSH_INSET`] rather than on the
-/// voxel planes, keeping neighbouring scrubs apart without leaving an invisible wall.
+/// **Reaching every wall used to be a requirement and is now a leftover.** Before #874
+/// `world.DesertShrub` was `Solid`, so the sparse geometry had to show the whole cube a
+/// body was stopped by. `DesertShrub` is `Cover` now, nothing is stopped by this voxel,
+/// and the shape is unchanged because this issue draws nothing new. The six extrema
+/// still land at [`BUSH_INSET`] rather than on the voxel planes — that keeps
+/// neighbouring scrubs from sharing a plane, which is the reason `BUSH_INSET` survives.
 fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let wood = palette::linear_rgba(palette::DESERT_SHRUB);
     let canes: [Cane; BRAMBLE_CANES] =
         std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
 
     // Two low canes cross through the roots. Their ribbons touch the floor inset and
-    // their centre lines touch the four horizontal insets: the full collision span is
+    // their centre lines touch the four horizontal insets: the full drawn span is
     // carried by wood, not by a leaf or a hidden box.
     let base_axes: [usize; DESERT_BASE_CANES] = [0, 2];
     for axis in base_axes {
@@ -1696,9 +1703,9 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
         }
     }
 
-    // The highest arch owns the one vertical thorn that makes the solid voxel's ceiling
-    // visible. Crossed blades are the established tiny-detail primitive; here they use
-    // the same dry wood and meet the crest instead of pretending to be a flower.
+    // The highest arch owns the one vertical thorn that reaches the voxel's ceiling.
+    // Crossed blades are the established tiny-detail primitive; here they use the same
+    // dry wood and meet the crest instead of pretending to be a flower.
     let crown = canes
         .iter()
         .max_by(|left, right| left.crest[1].total_cmp(&right.crest[1]))
@@ -4604,114 +4611,6 @@ mod tests {
     }
 
     #[test]
-    fn a_meadow_bush_fills_the_voxel_and_every_extremum_is_a_named_part() {
-        // The whole of why `BUSH_INSET` is 2% and not 20%: a bush a player is stopped by
-        // has to be a bush they can see, on every axis. **Which part carries each of the
-        // six is asserted and not merely the distance**, because moving an extremum onto
-        // something else would otherwise leave an invisible wall with every test green.
-        let mesh = one_bush();
-        let base_leaves = quads_coloured(&mesh, palette::linear_rgba(palette::BUSH));
-        let shoot_leaves = quads_coloured(&mesh, opaque(palette::BUSH_CROWN_LINEAR));
-        // Two leaves per shoot in order, so the leader's crest leaf is the second of its
-        // pair: this is the one part sized from the ceiling rather than from the table.
-        let leader = bush_leader(fixture_seed());
-        let crest_leaf =
-            &shoot_leaves[(leader * BUSH_LEAVES_PER_SHOOT + 1) * LEAF_SEGMENTS..][..LEAF_SEGMENTS];
-
-        let extent = |quads: &[usize], axis: usize| {
-            quads
-                .iter()
-                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), quad| {
-                    let (quad_low, quad_high) = quad_extent(&mesh, *quad, axis);
-                    (low.min(quad_low), high.max(quad_high))
-                })
-        };
-        let everything: Vec<usize> = (0..mesh.quad_count()).collect();
-
-        for (axis, floor) in [(0, 4.0), (1, 5.0), (2, 6.0)] {
-            let (minimum, maximum) = extent(&everything, axis);
-            assert!(
-                (minimum - (floor + BUSH_INSET)).abs() < 1e-5
-                    && (maximum - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
-                "axis {axis}: the drawn bush spans {minimum}..{maximum}, want the voxel \
-                 less the inset"
-            );
-        }
-
-        // Five of the six are the low tangle: on the floor inset, and out to all four
-        // horizontal ones.
-        let (base_low, _) = extent(&base_leaves, 1);
-        assert!(
-            (base_low - (5.0 + BUSH_INSET)).abs() < 1e-5,
-            "the floor extremum is not the low leaves' petioles: {base_low}"
-        );
-        for axis in [0, 2] {
-            let (low, high) = extent(&base_leaves, axis);
-            let floor = BUSH_FIXTURE_FLOOR[axis];
-            assert!(
-                (low - (floor + BUSH_INSET)).abs() < 1e-5
-                    && (high - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
-                "axis {axis}: the low leaves span {low}..{high} and are supposed to be \
-                 what reaches both walls"
-            );
-        }
-
-        // And the sixth is the leading shoot's crest leaf, which is the reason it is
-        // grown from the ceiling instead of the size table.
-        let (_, crest_high) = extent(crest_leaf, 1);
-        assert!(
-            (crest_high - (5.0 + 1.0 - BUSH_INSET)).abs() < 1e-5,
-            "the ceiling extremum is not the leader's crest leaf: {crest_high}"
-        );
-        let others: Vec<usize> = shoot_leaves
-            .iter()
-            .copied()
-            .filter(|quad| !crest_leaf.contains(quad))
-            .collect();
-        let (_, others_high) = extent(&others, 1);
-        assert!(
-            others_high < crest_high - 1e-5,
-            "another leaf reached the ceiling too: {others_high} vs {crest_high}"
-        );
-
-        // **Not a needle at the wall.** The vertices carrying a horizontal extremum are the
-        // two corners of the rib's widest station, a full blade apart — which is the
-        // difference between a leaf touching the wall and a point touching it. The width
-        // runs along the leaf's own `across`, which is its yaw and not an axis, so this is
-        // the distance between the furthest two corners on the plane rather than their
-        // spread down one column of the array.
-        let widest = |half_width: f32| 2.0 * half_width * LEAF_WIDTH_PROFILE[1];
-        let spread_at = |quads: &[usize], axis: usize, plane: f32| {
-            let touching: Vec<[f32; 3]> = quads
-                .iter()
-                .flat_map(|quad| {
-                    mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD].to_vec()
-                })
-                .filter(|corner| (corner[axis] - plane).abs() < 1e-5)
-                .collect();
-            assert!(touching.len() >= 2, "nothing touches the plane at {plane}");
-            touching
-                .iter()
-                .flat_map(|first| touching.iter().map(|second| distance(*first, *second)))
-                .fold(f32::NEG_INFINITY, f32::max)
-        };
-        assert!(
-            (spread_at(&base_leaves, 0, 4.0 + 1.0 - BUSH_INSET)
-                - widest(BUSH_BASE_LEAF_HALF_WIDTH))
-            .abs()
-                < 1e-5,
-            "the wall is carried by something other than a low leaf's widest station"
-        );
-        assert!(
-            (spread_at(crest_leaf, 1, 5.0 + 1.0 - BUSH_INSET)
-                - widest(BUSH_SHOOT_LEAF_HALF_WIDTH * BUSH_LEAF_SHRINK))
-            .abs()
-                < 1e-5,
-            "the ceiling is carried by something other than the crest leaf's widest station"
-        );
-    }
-
-    #[test]
     fn a_sector_is_always_wider_than_the_guard_pair_it_has_to_hold() {
         // **The claim the sweep below cannot make.** A sweep answers for the seeds it
         // draws; this answers for every seed there is, because the narrowest sector the
@@ -4986,10 +4885,10 @@ mod tests {
     }
 
     #[test]
-    fn a_desert_bramble_has_arches_thorns_and_fills_the_voxel_without_a_bloom() {
-        // `world.DesertShrub` has the bush's collision and none of its meadow dressing:
-        // the old cube leaves the sweep, the sand regains its top face, and bare wood
-        // alone has to make the stopped volume visible.
+    fn a_desert_bramble_has_arches_thorns_and_no_bloom() {
+        // `world.DesertShrub` has the bush's shape family and none of its meadow
+        // dressing: the old cube leaves the sweep, the sand regains its top face, and
+        // the drawn geometry is bare wood with no leaf, flower or saturated accent.
         let mut chunk = solid(SIZE, palette::SAND);
         chunk.set(4, 5, 6, palette::AIR);
         let hole = super::mesh_chunk(&chunk, &alone());
@@ -5057,21 +4956,6 @@ mod tests {
 
         winding_agrees_with_every_normal(&mesh.cover);
         stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
-        for (axis, floor) in [(0, 4.0), (1, 5.0), (2, 6.0)] {
-            let (minimum, maximum) = (0..mesh.cover.quad_count()).fold(
-                (f32::INFINITY, f32::NEG_INFINITY),
-                |(low, high), quad| {
-                    let (quad_low, quad_high) = quad_extent(&mesh.cover, quad, axis);
-                    (low.min(quad_low), high.max(quad_high))
-                },
-            );
-            assert!(
-                (minimum - (floor + BUSH_INSET)).abs() < 1e-5
-                    && (maximum - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
-                "axis {axis}: the drawn desert bramble spans {minimum}..{maximum}, want \
-                 the voxel less the inset"
-            );
-        }
     }
 
     #[test]
@@ -5332,25 +5216,25 @@ mod tests {
     }
 
     #[test]
-    fn every_shaped_id_grows_geometry_and_no_other_id_does() {
-        // The lockstep `palette::is_shaped` claims and `palette::is_opaque` leans on.
-        // A shaped voxel is see-through to the sweep, so it emits no mask face at all;
+    fn every_cover_id_grows_geometry_and_no_other_id_does() {
+        // The lockstep `palette::is_cover` claims and `palette::is_opaque` leans on.
+        // A cover voxel is see-through to the sweep, so it emits no mask face at all;
         // if `build_cover` skipped it too the block would be *invisible*, not a cube.
-        // Driven off the palette rather than off a list typed here, so a fifth shaped
+        // Driven off the palette rather than off a list typed here, so a seventh cover
         // id is caught by this test instead of by somebody noticing a hole in a hill.
         const EDGE: usize = 4;
         for block in palette::PALETTE {
             let mut chunk = air(EDGE);
             chunk.set(2, 2, 2, block);
             let mesh = super::mesh_chunk(&chunk, &alone());
-            if palette::is_shaped(block) {
+            if palette::is_cover(block) {
                 assert!(
                     mesh.cover.quad_count() > 0,
-                    "shaped block {block} grows no geometry anywhere"
+                    "cover block {block} grows no geometry anywhere"
                 );
                 assert!(
                     mesh.opaque.is_empty() && mesh.water.is_empty(),
-                    "shaped block {block} is drawn by nothing but the cover half"
+                    "cover block {block} is drawn by nothing but the cover half"
                 );
             } else {
                 assert_eq!(

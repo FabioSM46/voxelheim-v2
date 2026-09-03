@@ -1312,13 +1312,19 @@ mod tests {
     }
 
     /// The shelter predicate is solidity, not visibility or merely occupying a voxel.
-    /// Water and flowers stop no body and no weather; a solid pane does both even if a
-    /// future translucent pass changes whether terrain can be seen through it.
+    /// Water, flowers and — since #874 — a bush stop no body and no weather; a solid
+    /// pane does both even if a future translucent pass changes whether terrain can be
+    /// seen through it.
     #[test]
     fn only_solid_cover_is_a_roof() {
         let eye = Vec3::new(15.5, 16.0, 15.5);
         let below = Vec3::new(15.5, 15.5, 15.5);
-        for block in [palette::AIR, palette::WATER, palette::FLOWER_RED] {
+        for block in [
+            palette::AIR,
+            palette::WATER,
+            palette::FLOWER_RED,
+            palette::BUSH,
+        ] {
             let store = roof_store(block, 0..usize::from(SIZE));
             let mut cache = PrecipitationShelter::default();
             cache.prepare(eye, usize::from(SIZE), 0);
@@ -1327,7 +1333,7 @@ mod tests {
                 "non-solid block {block} stopped precipitation"
             );
         }
-        for block in [palette::STONE, palette::BUSH, palette::DARK_GLASS] {
+        for block in [palette::STONE, palette::DARK_GLASS] {
             let store = roof_store(block, 0..usize::from(SIZE));
             let mut cache = PrecipitationShelter::default();
             cache.prepare(eye, usize::from(SIZE), 0);

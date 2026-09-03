@@ -59,9 +59,9 @@ keeps meaning "everything the client is".
 | `net/http.rs` | the smallest HTTP/1.1 the account service needs, its pinned-TLS transport, plus URL and query shapes | grow into a general HTTP client, quote a body in an error, or gain a way to reach a service unencrypted |
 | `net/json.rs` | reading the account service's JSON, the one array of flat objects the server list is, and the RFC 3339 timestamps inside it | quote its input in an error, or read anything nested deeper than that one array |
 | `world/mod.rs` | `WorldPlugin`, `ChunkStore`, `DecodeQueue`, the RLE expansion and its invariants, applying a `BlockUpdate`, asking for an evicted chunk back, gathering the chunks a mesh depends on, and the two questions about a voxel — `solid_at` for what stops a body, `targetable_at` for what the crosshair finds | mesh, or spawn anything |
-| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_shaped` block, a flower for each cover id, a leafy bramble for a bush and a leafless thorn bramble for desert scrub | mention a Bevy type, or read a chunk it was not given |
+| `world/mesher.rs` | greedy meshing, including the cull against the neighbours it is handed, the per-vertex `Occlusion` the opaque surface's corners carry, the per-vertex `WaterFlow` the water surface carries, and the third half — the per-voxel plant `build_cover` grows for every `is_cover` block, a flower for each flower id, a leafy bramble for a bush and a leafless thorn bramble for desert scrub | mention a Bevy type, or read a chunk it was not given |
 | `world/render.rs` | the meshing tasks, the mesh assets, the three materials, one entity per chunk with the water and cover halves as its children | mesh on the main schedule, or own a camera or a light |
-| `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), which are cover — there to be seen and broken but solid to nothing (`is_cover`) — and which the mesher grows a shape for rather than sweeping as a cube (`is_shaped`) | know about meshes or about the wire |
+| `world/palette.rs` | block id → colour and alpha, which ids stop a body (`is_solid`), which hide what is behind them (`is_opaque`), and which are cover — there to be seen and broken, solid to nothing, and the set the mesher grows a shape for rather than sweeping as a cube (`is_cover`) | know about meshes or about the wire |
 | `world/water_material.rs` | what water looks like: the `ExtendedMaterial` over `StandardMaterial`, its embedded WGSL and the one `time` uniform | decide anything, or reproduce what the base material already answers for |
 | `player/mod.rs` | input sampling, the send cadence, one body per entity the server sends, the authoritative vitals and the one gate every playing control is read through | decide where anything is, or decide that a player is alive or dead |
 | `player/ambience.rs` | the cosmetic ground look sampled from the loaded voxels around the eye | be read by anything that decides an outcome, be sent, or be derived from anything the server said about climate or weather |
@@ -500,7 +500,7 @@ material is a pipeline, so it is an entity. It is otherwise `AlphaMode::Opaque`,
 of the back-to-front sort water needs.
 
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
-once and grows a shape inside each one `palette::is_shaped` answers for: a stem, two leaves, a
+once and grows a shape inside each one `palette::is_cover` answers for: a stem, two leaves, a
 five-petal corolla and an eye for each of the three flower ids, and an arching bramble with leaves
 along its canes and flowers at their tips for either bramble that has not been redrawn yet, or a dry
 arching cane with short thorns and no bloom for desert scrub. **The meadow bush left that frame in
@@ -515,13 +515,19 @@ them merged into one flat slab. Small per-voxel variations are drawn from a hash
 *chunk-local* coordinate, so a row of plants is a row of different plants and the buffers are still
 byte-identical on every remesh.
 
-**The two brambles are where `is_opaque` and `is_solid` part company.** `world.Bush` and
-`world.DesertShrub` are `Solid` on the server, so a body is stopped by the whole cube and each drawn
-bramble has to span it — it reaches to within `BUSH_INSET` of every wall, which is close enough that
-there is no invisible wall and far enough that two neighbours never put coincident quads on the
-plane they share. Their shapes have gaps, so the ground under either one has to keep the top face
-the cube used to cull: `is_opaque` is false and `is_solid` is still true. Making either id a `Cover`
-block would be a **server** change with three enforced consequences, and it is not this.
+**The two brambles used to be where `is_opaque` and `is_solid` parted company, and #874 is the change
+that ends it.** Until then, `world.Bush` and `world.DesertShrub` were `Solid` on the server, so a
+body was stopped by the whole cube and each drawn bramble had to span it — reaching to within
+`BUSH_INSET` of every wall was what kept the collision box from being an invisible wall. #874 makes
+both ids `world.Cover`, the **server** change with three enforced consequences this file used to say
+was not being made: a body now passes through either one, a placement displaces it, and a plant may
+overwrite it, exactly as a flower or the winter bramble already worked. `is_opaque` was already false
+for both — drawn with gaps, so the ground underneath kept the top face the old cube culled — and now
+`is_solid` agrees: neither predicate needed to change, because both already read `is_cover`. What
+changed is `BUSH_INSET`'s reason: it no longer keeps a collision box from being invisible, because
+there is no collision box. It survives for the reason that was always the second one — two
+neighbouring bushes or scrubs must not put coincident quads on the plane they share — and the shapes
+themselves are unchanged, because #874 draws nothing new.
 
 **The quad budget is the thing to watch when any shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads, a
@@ -585,10 +591,13 @@ culls the grass face under it.
 
 **`palette.rs` answers two questions and they are not the same question.** `is_solid` is "does
 this stop a body and can it be aimed at" — `solid_at`, the raycast, the camera boom. `is_opaque`
-is "does this hide what is behind it" — the mesher, and only the mesher. Water answers no to both,
-and glass was expected to be the id that separated them from *each other*; **the bush got there
-first**, because #634 draws it as foliage with gaps in it while the server still stops a body with
-the whole cube. Keep them as two functions.
+is "does this hide what is behind it" — the mesher, and only the mesher. Water answers no to both.
+**The bush and the desert scrub were the first ids to separate them from each other**, between #634
+and #874: drawn as foliage with gaps in it while the server still stopped a body with the whole
+cube. #874 puts both ids back in step with everything else — `is_cover` is what both predicates
+read, so nothing separates them today — but the two functions stay two functions, for the reason
+they always were: glass is still expected to be the id that reopens the gap, and the day it does,
+only one of these two has to learn about it.
 
 **`world/render.rs` owns no camera.** The world camera lives in `player/camera.rs`; the isolated
 view-model camera lives in `player/hands.rs`. Both are created at startup, so the status line and
