@@ -501,16 +501,24 @@ of the back-to-front sort water needs.
 
 **Nothing in the cover half is swept, and that is what it is for.** `build_cover` walks the voxels
 once and grows a shape inside each one `palette::is_cover` answers for: a stem, two leaves, a
-five-petal corolla and an eye for each of the three flower ids, and a dry arching cane with short
-thorns and no bloom for desert scrub. **The meadow bush left that frame in
+five-petal corolla and an eye for each of the three flower ids. **The meadow bush left the old
+four-cane frame in
 #835**: three forked shoots of unequal length leave three separate feet in sectors of unequal width,
 their wood tapers from foot to tip, and ten leaves follow the golden angle round them — each a midrib
 of three quads that opens, recurves and closes to a point rather than a card. **The winter bramble
 followed in #837** and shares that `push_shoot` through a `ShootProfile` rather than a copy of it:
 the same branching drawn at crushed proportions — lower and wider than the meadow bush — with a thin
 near-white ribbon of snow along the upper side of every segment standing above the drift, and three
-bunches of dark berries hanging from dial-chosen twig joints on short pedicels. The desert scrub
-(#836) is the last caller of the old four-cane frame and the issue that retires it. Every vertex stays inside its own voxel, which lets
+bunches of dark berries hanging from dial-chosen twig joints on short pedicels. **The desert scrub
+followed in #836, which took the frame out of the file** — it was the last caller — and it is the same
+branching shaped rather than resized: `push_shoot` walks the arch and turns each segment by the
+deviation it is handed, and the desert hands it alternating deviations of at least
+`DESERT_KINK_MIN`, so the twig zigzags instead of curving. Every shoot's yaw is then drawn
+`DESERT_COMB` of the way toward one per-plant lean, so the fan closes and the tangle combs one way as
+scrub in wind does. A shear was tried for that lean and rejected: on a descending segment it
+subtracts from the joint's deviation, and it cancelled the kink outright on the population's worst
+seed. The retrorse thorns and a second bleached tone are #836's second half.
+Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
 and for either bramble that is the point: it used to be an ordinary opaque cube, so a cluster of
@@ -563,11 +571,17 @@ beads — and the dressing took it to 70, 12 of snow and 28 of fruit where the s
 last: it is what ties the plant to the white it stands on, which is the whole of why it reads at
 distance. The one-in-256 tundra fixture carries four winter brambles and therefore 280 cover quads.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
-The desert bramble is 46 quads. The dense desert fixture grows exactly 25 per chunk, so its cover
-half is 1,150 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
-7,645 quads while bare and shaped scrub were both 7,637. The new shape therefore adds 1,150 cover
-quads, removes a net 8 opaque quads after returning the sand tops the cubes hid, and adds 1,142
-quads in all. `a_desert_chunk_costs_the_scrub_quads_and_returns_the_sand_faces` pins the cover cost
+**The desert scrub was 46 quads before #836 and its skeleton alone is 30**, against a ceiling of 72;
+the thorn dressing spends the rest in #836's second half. It gained the shared fork on every shoot
+and lost the two axis-aligned low canes and the crossed crown blade, which made a collision box
+visible and stopped meaning anything once #874 made `DesertShrub` `Cover`. The dense desert fixture
+grows exactly 25 per chunk, so its cover
+half is 750 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
+7,645 quads while bare and shaped scrub were both 7,637. The new shape therefore adds 750 cover
+quads, removes a net 8 opaque quads after returning the sand tops the cubes hid, and adds 742
+quads in all. **This ceiling is tighter than the meadow's for that density alone** — every quad here
+is paid 25 times in one chunk where a bush's is paid 9.
+`a_desert_chunk_costs_the_scrub_quads_and_returns_the_sand_faces` pins the cover cost
 and exact restoration of the bare opaque buffer.
 
 **The queue still does not distinguish the shapes, and #788 re-measured that instead of assuming
