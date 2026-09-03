@@ -571,8 +571,7 @@ const BUSH_SHOOT_PROFILE: ShootProfile = ShootProfile {
 /// coincident quads on the plane they share.
 ///
 /// The tip falls only a little way back from the crest, which is what keeps the descending
-/// segment shallow: a crushed shrub sprawls rather than arching, and #837's second half
-/// needs that shallowness again to lay a ribbon of snow along it.
+/// segment shallow enough to hold snow — see [`push_snow_cap`].
 const WINTER_SHOOT_PROFILE: ShootProfile = ShootProfile {
     root_spread: 0.15,
     reach: 0.26,
@@ -593,6 +592,24 @@ const WINTER_SHOOT_PROFILE: ShootProfile = ShootProfile {
 /// has a cube to fill. This is a ceiling the shape stays under, not a station anything
 /// reaches for.
 const WINTER_BRAMBLE_HEIGHT: f32 = 0.42;
+
+/// The snow line: no cap is drawn on a segment with an end below this height.
+///
+/// **Snow lies on what stands above the drift, and the foot of a crushed shrub is in it.**
+/// The `const` assertions in [`push_winter_bramble`] are what make this a rule with a fixed
+/// cost: the foot joint is below the line and every other joint is above it whatever the
+/// dials do, so [`QUADS_PER_WINTER_BRAMBLE`] stays an exact number.
+const WINTER_SNOW_CAP_HEIGHT: f32 = 0.10;
+/// How far clear of the wood the cap floats, and how much wider than the wood it spreads.
+const WINTER_SNOW_LIFT: f32 = 0.004;
+const WINTER_SNOW_SPREAD: f32 = 2.2;
+/// The segments of one shoot that carry snow: all of them but the foot's.
+///
+/// Test-only for the reason [`QUADS_PER_WINTER_BRAMBLE`] is: production emits the caps from
+/// the snow line rather than from a count, and a constant nothing reads is a claim nothing
+/// checks. Here it is read by the assertion that pins the shape's cost.
+#[cfg(test)]
+const WINTER_CAPPED_SEGMENTS: usize = BUSH_SHOOT_SEGMENTS - 1 + BUSH_FORK_SEGMENTS;
 
 /// The meadow bush's leaves, in blocks.
 ///
@@ -671,22 +688,47 @@ const BUSH_SPECKS: usize = 3;
 const BUSH_SPECK_HALF_WIDTH: f32 = 0.018;
 const BUSH_SPECK_HEIGHT: f32 = 0.04;
 
-/// One crossed-blade berry at each shoot's crest and tip.
+/// The winter bramble's fruit: [`WINTER_CLUSTERS`] bunches hanging from twig joints, one
+/// per shoot, each on its own pedicel.
 ///
-/// **A placeholder, and named as one.** #837's second half replaces every one of these with
-/// a bunch of three to five berries hanging from a short pedicel: a bead centred on a joint
-/// is the wrong botany, and against a white field one bead is punctuation where three
-/// hanging together are a shape. The tone is not what changes — `WINTER_BRAMBLE`'s dark
-/// crimson was chosen in #790 to stay readable against near-white snow and stays the only
-/// saturated tone on the plant.
+/// **The total is fixed and only its distribution turns with the seed.** A dial-driven
+/// count per plant would make [`QUADS_PER_WINTER_BRAMBLE`] a maximum instead of a number,
+/// and the exactness of that number is what has been catching shape regressions in this
+/// file. Every cluster starts at [`WINTER_BERRIES_PER_CLUSTER`] and the
+/// [`WINTER_SPARE_BERRIES`] left over are handed out by dial, so the sizes vary, the sites
+/// vary, and the sum does not.
 ///
-/// Test-only for the reason [`QUADS_PER_WINTER_BRAMBLE`] is: production walks the shoots and
-/// emits a berry per joint rather than counting them, and a constant nothing reads is a
-/// claim nothing checks.
-#[cfg(test)]
-const WINTER_BRAMBLE_BERRIES: usize = BUSH_SHOOTS * 2;
+/// One berry centred on a cane tip is what this replaces: a bead is punctuation, and three
+/// to five hanging together are a shape.
+const WINTER_CLUSTERS: usize = BUSH_SHOOTS;
+const WINTER_BERRIES_PER_CLUSTER: usize = 3;
+const WINTER_BRAMBLE_BERRIES: usize = 11;
+const WINTER_SPARE_BERRIES: usize =
+    WINTER_BRAMBLE_BERRIES - WINTER_CLUSTERS * WINTER_BERRIES_PER_CLUSTER;
+
+/// The joints a cluster may hang from: the shoulder, the crest, and the fork's two.
+///
+/// **Not the tip**, and that is a containment rule rather than a taste one: the tip is the
+/// furthest point of the widest shoot, and a bunch of berries hung there would reach past
+/// the voxel's inset. The crest is the outermost site, and it clears it.
+const WINTER_CLUSTER_SITES: usize = 4;
+/// The pedicel: how far the bunch hangs below its joint, how far it leans off the vertical
+/// (a `push_tapered_twig` with no horizontal run has no side vector), and how thick it is.
+const WINTER_PEDICEL_DROP: f32 = 0.045;
+const WINTER_PEDICEL_LEAN: f32 = 0.02;
+const WINTER_PEDICEL_HALF_WIDTH: f32 = 0.005;
+/// How far the berries spread around the pedicel's end and how much further each one down
+/// the bunch hangs, so a cluster is a bunch rather than a rosette.
+const WINTER_CLUSTER_RADIUS: f32 = 0.022;
+const WINTER_CLUSTER_DROP: f32 = 0.018;
 const WINTER_BERRY_HALF_WIDTH: f32 = 0.025;
 const WINTER_BERRY_HEIGHT: f32 = 0.05;
+
+/// The winter bramble's own dials, clear of the [`BUSH_DIAL_SHOOT`] block the shared
+/// skeleton spends (16 through 27) so a cluster and a shoot never move together.
+const WINTER_DIAL_CLUSTER_SITE: u32 = 32;
+const WINTER_DIAL_CLUSTER_HANG: u32 = 36;
+const WINTER_DIAL_CLUSTER_SIZE: u32 = 40;
 
 /// How many quads one flower contributes: two stem blades, two leaves,
 /// [`COVER_PETALS`] petals and the eye's two blades.
@@ -727,16 +769,21 @@ pub(super) const QUADS_PER_DESERT_BRAMBLE: usize = BRAMBLE_CANES * BRAMBLE_CANE_
     + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
     + DESERT_CROWN_BLADES;
 
-/// How many quads one winter bramble contributes: two ribbons for each segment of a shoot
-/// and of its fork, and two crossed blades per berry.
+/// How many quads one winter bramble contributes: two ribbons for each segment of a
+/// shoot and of its fork, one snow cap on every segment but the foot's, one pedicel per
+/// cluster and two crossed blades per berry.
 ///
-/// **42**, where the four-cane umbrella with a bead on each joint cost 36, against #837's
-/// ceiling of 72. Thirty of those are wood where four constant-width canes cost 24. #837's
-/// second half spends the thirty that are left on the snow load and on turning six beads
-/// into hanging clusters.
+/// **70**, where the umbrella frame with a bead on each cane cost 36, against #837's
+/// ceiling of 72. Thirty of those are wood, twelve are the snow — the highest-value quads
+/// in the shape, because they are what ties the plant to the white it stands on — and
+/// twenty-eight are the fruit. It is an exact number and not a maximum: see
+/// [`WINTER_BRAMBLE_BERRIES`] for why the berry total is fixed while its distribution is
+/// not.
 #[cfg(test)]
-pub(super) const QUADS_PER_WINTER_BRAMBLE: usize =
-    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + WINTER_BRAMBLE_BERRIES * 2;
+pub(super) const QUADS_PER_WINTER_BRAMBLE: usize = BUSH_SHOOTS
+    * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + WINTER_CAPPED_SEGMENTS)
+    + WINTER_CLUSTERS * 2
+    + WINTER_BRAMBLE_BERRIES * 2;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1517,13 +1564,30 @@ fn push_cane(
 }
 
 /// The joints one shoot's dressing needs, the way [`Cane`] answers for the old frame.
+///
+/// The whole polyline rather than three named joints, because the winter bramble dresses
+/// the *segments* — one snow cap each — where the meadow bush dresses the joints. The three
+/// accessors keep `push_bush` reading as it did.
 #[derive(Clone, Copy)]
 struct Shoot {
-    shoulder: [f32; 3],
-    crest: [f32; 3],
-    tip: [f32; 3],
+    joints: [[f32; 3]; BUSH_SHOOT_SEGMENTS + 1],
+    fork_joints: [[f32; 3]; BUSH_FORK_SEGMENTS + 1],
     yaw: f32,
     leader: bool,
+}
+
+impl Shoot {
+    fn shoulder(&self) -> [f32; 3] {
+        self.joints[1]
+    }
+
+    fn crest(&self) -> [f32; 3] {
+        self.joints[BUSH_SHOOT_SEGMENTS - 1]
+    }
+
+    fn tip(&self) -> [f32; 3] {
+        self.joints[BUSH_SHOOT_SEGMENTS]
+    }
 }
 
 /// Which of a bush's shoots leads. One dial, read in one place, so the shoot that draws
@@ -1664,9 +1728,8 @@ fn push_shoot(
     }
 
     Shoot {
-        shoulder,
-        crest,
-        tip,
+        joints,
+        fork_joints,
         yaw,
         leader,
     }
@@ -1731,17 +1794,17 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
         for index in 0..BUSH_LEAVES_PER_SHOOT {
             let (attach, pitch, length) = if index == 0 {
                 (
-                    shoot.shoulder,
+                    shoot.shoulder(),
                     BUSH_SHOOT_LEAF_PITCH,
                     BUSH_SHOOT_LEAF_LENGTH,
                 )
             } else {
                 let length = if shoot.leader {
-                    (ceiling - shoot.crest[1]) / leaf_lift_factor(BUSH_CREST_LEAF_PITCH)
+                    (ceiling - shoot.crest()[1]) / leaf_lift_factor(BUSH_CREST_LEAF_PITCH)
                 } else {
                     BUSH_SHOOT_LEAF_LENGTH * BUSH_LEAF_SHRINK
                 };
-                (shoot.crest, BUSH_CREST_LEAF_PITCH, length)
+                (shoot.crest(), BUSH_CREST_LEAF_PITCH, length)
             };
             push_leaf(
                 mesh,
@@ -1764,19 +1827,20 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     ];
     for (speck, shoot) in shoots.iter().take(BUSH_SPECKS).enumerate() {
         let colour = palette::linear_rgba(flowers[(seed as usize + speck) % flowers.len()]);
+        let tip = shoot.tip();
         push_blade(
             mesh,
-            shoot.tip,
+            tip,
             BUSH_SPECK_HALF_WIDTH,
-            shoot.tip[1] + BUSH_SPECK_HEIGHT,
+            tip[1] + BUSH_SPECK_HEIGHT,
             0,
             colour,
         );
         push_blade(
             mesh,
-            shoot.tip,
+            tip,
             BUSH_SPECK_HALF_WIDTH,
-            shoot.tip[1] + BUSH_SPECK_HEIGHT,
+            tip[1] + BUSH_SPECK_HEIGHT,
             2,
             colour,
         );
@@ -1853,9 +1917,11 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 
 /// One winter bramble, standing in the voxel whose minimum corner is `floor`.
 ///
-/// Three forked woody shoots at [`WINTER_SHOOT_PROFILE`]'s crushed proportions carry a dark
-/// berry at each crest and each tip. It shares [`push_shoot`] with the meadow bush and no
-/// longer touches [`push_cane`]: nothing here is `n` of anything at `TAU / n`.
+/// Three forked woody shoots at [`WINTER_SHOOT_PROFILE`]'s crushed proportions carry a thin
+/// snow cap along the upper side of every segment above the drift, and three bunches of
+/// dark berries hang from three dial-chosen twig joints. It shares [`push_shoot`] with the
+/// meadow bush and no longer touches [`push_cane`]: nothing here is `n` of anything at
+/// `TAU / n`.
 ///
 /// **This species has no fill guarantee and must not grow one.** `world.WinterBramble` is
 /// `Cover` on the server, so no body is stopped by the cube and there is no collision span
@@ -1863,28 +1929,39 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 /// only span rule left is that every vertex stays inside the voxel, which is
 /// [`BUSH_INSET`]'s second reason and applies to every plant here.
 ///
-/// The snow this plant is crushed by is drawn by #837's second half, along the upper side of
-/// these same segments. What is here is the silhouette it will lie on.
+/// The snow is the point of the shape. A woody plant in a tundra carries snow, the cover
+/// material is lit and double-sided, and an upward-facing near-white ribbon is what reads
+/// against dark wood from ten metres away on a white field.
 fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     const {
-        // Why the crushed ceiling holds: the highest joint is a crest at full vigour, and
-        // the ribbon around it reaches a wood half-width past that.
+        // Why the cap count is fixed: the foot joint is the only one under the snow line,
+        // at every vigour and every jitter. `arch` and `tip_fall` are their own minima.
+        assert!(BUSH_INSET + WINTER_SHOOT_PROFILE.half_widths[0] < WINTER_SNOW_CAP_HEIGHT);
+        assert!(WINTER_SHOOT_PROFILE.arch * SHOOT_SHOULDER_RISE > WINTER_SNOW_CAP_HEIGHT);
+        assert!(WINTER_SHOOT_PROFILE.arch * WINTER_SHOOT_PROFILE.tip_fall > WINTER_SNOW_CAP_HEIGHT);
+        // Why the crushed ceiling holds: the highest joint is a crest at full vigour and
+        // the cap floats a wood half-width plus the lift above it.
         assert!(
             WINTER_SHOOT_PROFILE.arch
                 + WINTER_SHOOT_PROFILE.arch_span
                 + WINTER_SHOOT_PROFILE.half_widths[1]
+                + WINTER_SNOW_LIFT
                 < WINTER_BRAMBLE_HEIGHT
         );
         assert!(WINTER_BRAMBLE_HEIGHT < 1.0 - BUSH_INSET);
-        // And why a berry on the lowest joint still clears the floor inset.
+        // And why a bunch hung from the lowest possible site still clears the floor inset.
         assert!(
-            WINTER_SHOOT_PROFILE.arch * WINTER_SHOOT_PROFILE.tip_fall - WINTER_BERRY_HEIGHT * 0.5
+            WINTER_SHOOT_PROFILE.arch * WINTER_SHOOT_PROFILE.tip_fall
+                - WINTER_PEDICEL_DROP
+                - WINTER_CLUSTER_DROP
+                - WINTER_BERRY_HEIGHT * 0.5
                 > BUSH_INSET
         );
     }
 
     let wood = palette::linear_rgba(palette::LOG);
     let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
+    let snow = palette::linear_rgba(palette::SNOW);
 
     let yaws = bush_shoot_yaws(seed);
     let leader = bush_leader(seed);
@@ -1901,11 +1978,123 @@ fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
         )
     });
 
-    // The fruit. Still a bead on a joint, which is what #837's second half replaces with a
-    // bunch on a pedicel; the wood and the snow above are what this half is.
+    // The snow load. The rule is the drift and not an index: a segment carries a cap when
+    // both its ends stand above [`WINTER_SNOW_CAP_HEIGHT`], which the `const` block above
+    // proves is every segment but the foot's whatever the dials did.
+    let widths = WINTER_SHOOT_PROFILE.half_widths;
+    let shoulder_half = widths[1];
     for shoot in &shoots {
-        push_berry(mesh, shoot.crest, berry);
-        push_berry(mesh, shoot.tip, berry);
+        let mut cap = |start: [f32; 3], end: [f32; 3], half_at_start, half_at_end| {
+            if (start[1] - floor[1]).min(end[1] - floor[1]) > WINTER_SNOW_CAP_HEIGHT {
+                push_snow_cap(mesh, start, end, half_at_start, half_at_end, snow);
+            }
+        };
+        for segment in 0..BUSH_SHOOT_SEGMENTS {
+            cap(
+                shoot.joints[segment],
+                shoot.joints[segment + 1],
+                widths[segment],
+                widths[segment + 1],
+            );
+        }
+        for segment in 0..BUSH_FORK_SEGMENTS {
+            cap(
+                shoot.fork_joints[segment],
+                shoot.fork_joints[segment + 1],
+                shoulder_half * BUSH_FORK_HALF_SCALES[segment],
+                shoulder_half * BUSH_FORK_HALF_SCALES[segment + 1],
+            );
+        }
+    }
+
+    // One bunch per shoot, hanging from a joint the seed picks.
+    let sizes = winter_cluster_sizes(seed);
+    for (index, shoot) in shoots.iter().enumerate() {
+        let dials = index as u32;
+        let site = (dial(seed, WINTER_DIAL_CLUSTER_SITE + dials) * WINTER_CLUSTER_SITES as f32)
+            as usize
+            % WINTER_CLUSTER_SITES;
+        let joint = match site {
+            0 => shoot.shoulder(),
+            1 => shoot.crest(),
+            2 => shoot.fork_joints[1],
+            _ => shoot.fork_joints[BUSH_FORK_SEGMENTS],
+        };
+        push_berry_cluster(
+            mesh,
+            joint,
+            sizes[index],
+            dial(seed, WINTER_DIAL_CLUSTER_HANG + dials),
+            wood,
+            berry,
+        );
+    }
+}
+
+/// How many berries each of the [`WINTER_CLUSTERS`] bunches carries.
+///
+/// Every bunch starts at [`WINTER_BERRIES_PER_CLUSTER`] and the spare berries are handed
+/// out one dial at a time, so the **sum is [`WINTER_BRAMBLE_BERRIES`] by construction**.
+/// That is what lets the plant's berry count vary with the seed while
+/// [`QUADS_PER_WINTER_BRAMBLE`] stays an exact number rather than a maximum.
+fn winter_cluster_sizes(seed: u32) -> [usize; WINTER_CLUSTERS] {
+    let mut sizes = [WINTER_BERRIES_PER_CLUSTER; WINTER_CLUSTERS];
+    for spare in 0..WINTER_SPARE_BERRIES {
+        let pick = (dial(seed, WINTER_DIAL_CLUSTER_SIZE + spare as u32) * WINTER_CLUSTERS as f32)
+            as usize
+            % WINTER_CLUSTERS;
+        sizes[pick] += 1;
+    }
+    sizes
+}
+
+/// One hanging bunch: a short tapered pedicel leaving `joint`, and `berries` crossed-blade
+/// berries spread around and below its end.
+///
+/// **Every berry hangs below the joint it grows from**, which is the whole difference from
+/// the bead this replaces: the pedicel drops before a berry is placed and each berry down
+/// the bunch drops further, so the assertion is a property of the construction rather than
+/// of the numbers. `hang` turns the bunch around the joint and leans the pedicel off the
+/// vertical — [`push_tapered_twig`] builds its side vector from the horizontal run, so a
+/// pedicel with none would have no ribbon at all.
+fn push_berry_cluster(
+    mesh: &mut SurfaceMesh,
+    joint: [f32; 3],
+    berries: usize,
+    hang: f32,
+    wood: [f32; 4],
+    color: [f32; 4],
+) {
+    let (lean_sin, lean_cos) = (hang * std::f32::consts::TAU).sin_cos();
+    let hub = [
+        joint[0] + lean_cos * WINTER_PEDICEL_LEAN,
+        joint[1] - WINTER_PEDICEL_DROP,
+        joint[2] + lean_sin * WINTER_PEDICEL_LEAN,
+    ];
+    push_tapered_twig(
+        mesh,
+        joint,
+        hub,
+        WINTER_PEDICEL_HALF_WIDTH,
+        WINTER_PEDICEL_HALF_WIDTH * 0.5,
+        wood,
+    );
+
+    // The golden angle again, and for the reason it is used on a shoot: it is what stops a
+    // bunch of any size from putting one berry directly over another.
+    for berry in 0..berries {
+        let step = (berry + 1) as f32 / berries as f32;
+        let angle = hang * std::f32::consts::TAU + berry as f32 * GOLDEN_ANGLE;
+        let (sin, cos) = angle.sin_cos();
+        push_berry(
+            mesh,
+            [
+                hub[0] + cos * WINTER_CLUSTER_RADIUS * step,
+                hub[1] - WINTER_CLUSTER_DROP * step,
+                hub[2] + sin * WINTER_CLUSTER_RADIUS * step,
+            ],
+            color,
+        );
     }
 }
 
@@ -1915,6 +2104,62 @@ fn push_berry(mesh: &mut SurfaceMesh, centre: [f32; 3], color: [f32; 4]) {
     let top = centre[1] + WINTER_BERRY_HEIGHT * 0.5;
     push_blade(mesh, base, WINTER_BERRY_HALF_WIDTH, top, 0, color);
     push_blade(mesh, base, WINTER_BERRY_HALF_WIDTH, top, 2, color);
+}
+
+/// The snow lying along the upper side of one woody segment: a single near-horizontal
+/// ribbon, floated clear of the wood and spread wider than it.
+///
+/// **Snow sits on top of a twig and never under it, and that is the difference between snow
+/// and paint.** The quad is offset along the segment's *upward* perpendicular and wound so
+/// its normal points that way, so a cap on a segment steep enough to shed its load shows up
+/// as a normal falling over rather than as a white streak on an underside —
+/// `every_winter_snow_cap_faces_upward` is the assertion, and `n.y > 0.5` is what it says.
+/// The tip fall in [`WINTER_SHOOT_PROFILE`] is chosen to keep every capped segment well
+/// inside that.
+fn push_snow_cap(
+    mesh: &mut SurfaceMesh,
+    start: [f32; 3],
+    end: [f32; 3],
+    half_at_start: f32,
+    half_at_end: f32,
+    color: [f32; 4],
+) {
+    let direction = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+    let horizontal_length = direction[0].hypot(direction[2]);
+    let length =
+        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
+            .sqrt();
+    let side = [
+        -direction[2] / horizontal_length,
+        0.0,
+        direction[0] / horizontal_length,
+    ];
+    // [`push_tapered_twig`] builds the same perpendicular and does not care which way it
+    // points, because a ribbon is drawn from both sides. A cap does care, and this one
+    // points up: the cross product of the segment with its horizontal side points down.
+    let up = [
+        -(direction[1] * side[2] - direction[2] * side[1]) / length,
+        -(direction[2] * side[0] - direction[0] * side[2]) / length,
+        -(direction[0] * side[1] - direction[1] * side[0]) / length,
+    ];
+    let corner = |point: [f32; 3], wood_half: f32, sign: f32| {
+        let lift = wood_half + WINTER_SNOW_LIFT;
+        let half = wood_half * WINTER_SNOW_SPREAD;
+        [
+            point[0] + up[0] * lift + side[0] * half * sign,
+            point[1] + up[1] * lift + side[1] * half * sign,
+            point[2] + up[2] * lift + side[2] * half * sign,
+        ]
+    };
+    // The `near(-w), near(+w), far(+w), far(-w)` order every primitive here is wound in,
+    // with the normal derived from the corners so the two cannot disagree.
+    let corners = [
+        corner(start, half_at_start, -1.0),
+        corner(start, half_at_start, 1.0),
+        corner(end, half_at_end, 1.0),
+        corner(end, half_at_end, -1.0),
+    ];
+    mesh.push_quad(corners, face_normal(corners), color, None);
 }
 
 /// A palette tone as the opaque RGBA a vertex carries. The cover half has no alpha of its
@@ -5169,6 +5414,10 @@ mod tests {
     }
 
     /// The wood of one winter shoot, in the order `push_shoot` pushes it.
+    ///
+    /// The cluster pedicels are wood too, and they come after every shoot, so slicing the
+    /// leading `BUSH_SHOOTS * quads_per_shoot` is what separates the skeleton from the
+    /// fruit rather than a second colour nobody would see.
     fn winter_shoot_wood(mesh: &SurfaceMesh, shoot: usize) -> Vec<usize> {
         let quads_per_shoot = (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
         quads_coloured(mesh, palette::linear_rgba(palette::LOG))[shoot * quads_per_shoot..]
@@ -5217,7 +5466,7 @@ mod tests {
     }
 
     #[test]
-    fn a_winter_bramble_is_three_crushed_forked_shoots_with_berries() {
+    fn a_winter_bramble_is_crushed_shoots_under_snow_with_hanging_berry_clusters() {
         // `world.WinterBramble` is `Cover` on the server, so the snow beneath it stays
         // visible and a body walks through it. **No fill guarantee is asserted here and
         // none should be**: this species has no cube a body is stopped by, which is what
@@ -5236,7 +5485,7 @@ mod tests {
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_WINTER_BRAMBLE);
         // What `client/AGENTS.md`'s quad budget is written down as, and #837's ceiling.
-        assert_eq!(QUADS_PER_WINTER_BRAMBLE, 42);
+        assert_eq!(QUADS_PER_WINTER_BRAMBLE, 70);
         const { assert!(QUADS_PER_WINTER_BRAMBLE <= 72) };
 
         assert_eq!(
@@ -5244,14 +5493,20 @@ mod tests {
             BTreeMap::from([
                 (
                     palette::linear_rgba(palette::LOG).map(f32::to_bits),
-                    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2,
+                    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2
+                        + WINTER_CLUSTERS * 2,
+                ),
+                (
+                    palette::linear_rgba(palette::SNOW).map(f32::to_bits),
+                    BUSH_SHOOTS * WINTER_CAPPED_SEGMENTS,
                 ),
                 (
                     palette::linear_rgba(palette::WINTER_BRAMBLE).map(f32::to_bits),
                     WINTER_BRAMBLE_BERRIES * 2,
                 ),
             ]),
-            "forked tapering shoots and a berry at each crest and tip"
+            "forked tapering shoots with pedicels, a snow cap above the drift on every \
+             other segment, and eleven hanging berries"
         );
 
         const {
@@ -5273,10 +5528,14 @@ mod tests {
     fn the_berry_is_the_only_saturated_tone_a_winter_bramble_emits() {
         // #790 chose `#761A3B` to stay readable against near-white snow and #837 does not
         // reopen it. What is asserted is that nothing else on the plant competes with it:
-        // the wood is a dark brown, so the berry is the one place colour goes.
+        // the wood is a dark brown and the load is snow's own near-white, so the berry is
+        // the one place colour goes.
         let mesh = one_winter_bramble();
         let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
-        let others = [palette::linear_rgba(palette::LOG)];
+        let others = [
+            palette::linear_rgba(palette::LOG),
+            palette::linear_rgba(palette::SNOW),
+        ];
         for colour in others {
             assert!(
                 chroma(berry) > chroma(colour) * 1.5,
@@ -5289,7 +5548,7 @@ mod tests {
         assert_eq!(
             quads_by_colour(&mesh).len(),
             1 + others.len(),
-            "the winter bramble emits a tone that is neither wood nor berry"
+            "the winter bramble emits a tone that is neither wood, snow nor berry"
         );
     }
 
@@ -5445,6 +5704,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_winter_snow_cap_faces_upward_and_only_above_the_snow_line() {
+        // **The difference between snow and paint.** A cap is a ribbon on the upper side of
+        // a twig, so its normal points up; a cap whose segment had gone steep enough to
+        // shed its load, or one drawn on the underside, shows up here as a normal that has
+        // fallen over. The second half is the drift: nothing below the snow line carries a
+        // cap, which is also what keeps the quad count exact.
+        let snow = palette::linear_rgba(palette::SNOW);
+        for y in 0..4 {
+            for z in 0..4 {
+                for x in 0..4 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let mut mesh = SurfaceMesh::default();
+                    push_winter_bramble(&mut mesh, floor, plant_seed(x, y, z));
+
+                    let caps = quads_coloured(&mesh, snow);
+                    assert_eq!(
+                        caps.len(),
+                        BUSH_SHOOTS * WINTER_CAPPED_SEGMENTS,
+                        "({x},{y},{z}) the snow load is not the fixed cost it is budgeted as"
+                    );
+                    for cap in caps {
+                        let normal = mesh.normals[cap * VERTICES_PER_QUAD];
+                        assert!(
+                            normal[1] > 0.5,
+                            "({x},{y},{z}) cap {cap} faces {normal:?}: snow sits on top of \
+                             a twig, never under it"
+                        );
+                        let (low, _) = quad_extent(&mesh, cap, 1);
+                        assert!(
+                            low - floor[1] > WINTER_SNOW_CAP_HEIGHT,
+                            "({x},{y},{z}) cap {cap} reaches {} into the drift",
+                            low - floor[1]
+                        );
+                    }
+
+                    // And the foot segment of every shoot is bare, which is the only way
+                    // the count above can be right.
+                    for shoot in 0..BUSH_SHOOTS {
+                        let foot = winter_shoot_joints(&mesh, shoot)[0][1] - floor[1];
+                        assert!(
+                            foot < WINTER_SNOW_CAP_HEIGHT,
+                            "({x},{y},{z}) shoot {shoot} leaves the floor at {foot}, above \
+                             the snow line: its foot segment would be capped too"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn winter_berries_hang_in_bunches_below_the_joints_they_grow_from() {
+        // One bead centred on a cane tip is what this replaces. Every berry is below the
+        // joint its pedicel leaves, which is a property of the construction — the pedicel
+        // drops before a berry is placed — rather than of the numbers.
+        let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
+        let wood = palette::linear_rgba(palette::LOG);
+        for y in 0..4 {
+            for z in 0..4 {
+                for x in 0..4 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let seed = plant_seed(x, y, z);
+                    let mut mesh = SurfaceMesh::default();
+                    push_winter_bramble(&mut mesh, floor, seed);
+
+                    // The pedicels are the wood quads after every shoot's, two per bunch,
+                    // and each one starts at the joint its bunch hangs from.
+                    let skeleton = BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
+                    let pedicels = &quads_coloured(&mesh, wood)[skeleton..];
+                    assert_eq!(pedicels.len(), WINTER_CLUSTERS * 2);
+
+                    let sizes = winter_cluster_sizes(seed);
+                    assert_eq!(
+                        sizes.iter().sum::<usize>(),
+                        WINTER_BRAMBLE_BERRIES,
+                        "({x},{y},{z}) the berry total moved with the seed"
+                    );
+                    let beads = quads_coloured(&mesh, berry);
+                    assert_eq!(beads.len(), WINTER_BRAMBLE_BERRIES * 2);
+
+                    let mut bead = 0;
+                    for (cluster, size) in sizes.into_iter().enumerate() {
+                        assert!(
+                            size >= WINTER_BERRIES_PER_CLUSTER,
+                            "({x},{y},{z}) bunch {cluster} carries {size} berries"
+                        );
+                        let joint = centre_line(&mesh, pedicels[cluster * 2], false);
+                        for _ in 0..size {
+                            // A berry is two crossed vertical blades; the pair's shared
+                            // centre is the mid-height of either one.
+                            let (low, high) = quad_extent(&mesh, beads[bead], 1);
+                            let centre = (low + high) * 0.5;
+                            assert!(
+                                centre < joint[1] - 1e-5,
+                                "({x},{y},{z}) a berry of bunch {cluster} sits at {centre}, \
+                                 not below its joint at {}",
+                                joint[1]
+                            );
+                            bead += 2;
+                        }
+                    }
+                    assert_eq!(bead, beads.len());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn two_winter_brambles_carry_different_bunches_in_different_places() {
+        // The distribution turns with the seed even though the total does not, and the
+        // sites turn with it too — so a row of brambles is a row of different plants and
+        // not one plant drawn four times.
+        let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
+        let mut chunk = air(SIZE);
+        chunk.set(4, 5, 6, palette::WINTER_BRAMBLE);
+        chunk.set(5, 5, 6, palette::WINTER_BRAMBLE);
+        let mesh = super::mesh_chunk(&chunk, &alone()).cover;
+        assert_eq!(mesh.quad_count(), 2 * QUADS_PER_WINTER_BRAMBLE);
+
+        let mut sizes: Vec<[usize; WINTER_CLUSTERS]> = Vec::new();
+        for x in 0..8 {
+            for z in 0..8 {
+                sizes.push(winter_cluster_sizes(plant_seed(x, 5, z)));
+            }
+        }
+        assert!(
+            sizes.iter().any(|shape| shape != &sizes[0]),
+            "every bramble distributes its berries the same way: {:?}",
+            sizes[0]
+        );
+
+        // And the berries are in different places, which the counts alone would not say.
+        let places = |shift: f32| {
+            quads_coloured(&mesh, berry)
+                .into_iter()
+                .map(|quad| {
+                    let centre = centre_line(&mesh, quad, false);
+                    [centre[0] - shift, centre[1], centre[2]]
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = places(0.0);
+        let second = places(1.0);
+        let (left, right) = first.split_at(WINTER_BRAMBLE_BERRIES * 2);
+        assert_eq!(right.len(), WINTER_BRAMBLE_BERRIES * 2);
+        assert!(
+            left.iter()
+                .zip(second[WINTER_BRAMBLE_BERRIES * 2..].iter())
+                .any(|(near, far)| (near[0] - far[0]).abs() > 1e-4
+                    || (near[1] - far[1]).abs() > 1e-4
+                    || (near[2] - far[2]).abs() > 1e-4),
+            "two neighbouring brambles hang their berries in the same places"
+        );
     }
 
     #[test]
@@ -5620,7 +6035,7 @@ mod tests {
 
         assert_eq!(brambles, 4);
         assert_eq!(mesh.cover.quad_count(), brambles * QUADS_PER_WINTER_BRAMBLE);
-        assert_eq!(mesh.cover.quad_count(), 168);
+        assert_eq!(mesh.cover.quad_count(), 280);
     }
 
     #[test]

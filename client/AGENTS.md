@@ -507,10 +507,10 @@ thorns and no bloom for desert scrub. **The meadow bush left that frame in
 their wood tapers from foot to tip, and ten leaves follow the golden angle round them — each a midrib
 of three quads that opens, recurves and closes to a point rather than a card. **The winter bramble
 followed in #837** and shares that `push_shoot` through a `ShootProfile` rather than a copy of it:
-the same branching drawn at crushed proportions, lower and wider than the meadow bush. Its snow load
-and its hanging berry clusters are #837's second half; today its berries are still one bead per
-joint. The desert scrub (#836) is the last caller of the old four-cane frame and the issue that
-retires it. Every vertex stays inside its own voxel, which lets
+the same branching drawn at crushed proportions — lower and wider than the meadow bush — with a thin
+near-white ribbon of snow along the upper side of every segment standing above the drift, and three
+bunches of dark berries hanging from dial-chosen twig joints on short pedicels. The desert scrub
+(#836) is the last caller of the old four-cane frame and the issue that retires it. Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
 and for either bramble that is the point: it used to be an ordinary opaque cube, so a cluster of
@@ -525,7 +525,13 @@ makes it correct for it to be crushed, lopsided and short of every wall. A test 
 span for it would be pinning a guarantee the server does not make. `BUSH_INSET` still applies for
 the reason the paragraph below leaves it — two neighbouring plants must not put coincident quads on
 the plane they share — and `WINTER_BRAMBLE_HEIGHT` is the crushed ceiling the shape stays under,
-held by a `const` assertion against the profile rather than by a measurement nobody repeats.
+held by a `const` assertion against the profile rather than by a measurement nobody repeats. The
+snow is a rule and not a decoration: a cap is drawn only on a segment with both ends above
+`WINTER_SNOW_CAP_HEIGHT`, and it faces upward, which
+`every_winter_snow_cap_faces_upward_and_only_above_the_snow_line` asserts as `n.y > 0.5` — snow sits
+on top of a twig, never under it. The berry **total** is fixed and only its distribution across the
+three bunches turns with the seed, which is what keeps the quad count an exact number rather than a
+maximum.
 
 **The two brambles used to be where `is_opaque` and `is_solid` parted company, and #874 is the change
 that ends it.** Until then, `world.Bush` and `world.DesertShrub` were `Solid` on the server, so a
@@ -543,17 +549,19 @@ themselves are unchanged, because #874 draws nothing new.
 
 **The quad budget is the thing to watch when any shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads, a
-bush is 66, and a winter bramble is 42. On a generated meadow chunk with 12 flowers and 9 bushes
+bush is 66, and a winter bramble is 70. On a generated meadow chunk with 12 flowers and 9 bushes
 the cover half is 726 quads where the two shapes before #634 cost 96, while the opaque half fell by
 24 — the bush's cube left the sweep and the ground under it gained the faces that cube was culling.
 **The bush was 42 before #835 and 66 after it**, in three steps: three shoots for four canes took it
 to 34, their forks to 46, and leaves that are pointed surfaces rather than one quad each to 66. The
 taper cost nothing, because a trapezoid has the rectangle's four corners. #835 caps the shape at 96
 and says to lower the leaf count before raising that.
-**The winter bramble was 36 before #837 and 42 after its first half**: 30 quads of forked tapering
-wood where four constant-width canes cost 24, and 12 of berries. #837 caps the shape at 72, so its
-second half has 30 quads for the snow load and the hanging clusters. The one-in-256 tundra fixture
-carries four winter brambles and therefore 168 cover quads.
+**The winter bramble was 36 before #837 and 70 after it**, in two steps: the shared branching shoot
+took it to 42 — 30 quads of forked tapering wood where four constant-width canes cost 24, plus six
+beads — and the dressing took it to 70, 12 of snow and 28 of fruit where the six beads cost 12.
+#837 caps the shape at 72. The snow is the twelve to defend
+last: it is what ties the plant to the white it stands on, which is the whole of why it reads at
+distance. The one-in-256 tundra fixture carries four winter brambles and therefore 280 cover quads.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 The desert bramble is 46 quads. The dense desert fixture grows exactly 25 per chunk, so its cover
 half is 1,150 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
