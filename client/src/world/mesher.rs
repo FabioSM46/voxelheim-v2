@@ -460,6 +460,7 @@ const BRAMBLE_CANE_TIP_JITTER: f32 = 0.12;
 /// now holds this, because the 512-bush sweep did not: those seeds never drew the extreme.
 const BUSH_SHOOTS: usize = 3;
 const BUSH_SHOOT_SEGMENTS: usize = 3;
+const BUSH_FORK_SEGMENTS: usize = 2;
 const BUSH_ROOT_SPREAD: f32 = 0.12;
 const BUSH_SHOOT_GUARD: f32 = 0.58;
 const BUSH_SHOOT_SECTOR_MIN: f32 = 0.55;
@@ -483,6 +484,17 @@ const BUSH_SHOOT_ARCH_SPAN: f32 = 0.38;
 const BUSH_SHOOT_TIP_FALL: f32 = 0.50;
 const BUSH_SHOOT_TIP_FALL_JITTER: f32 = 0.04;
 const BUSH_SHOOT_BEND: f32 = 0.08;
+
+/// The half-width the wood is drawn at, at each of a shoot's four joints and a fork's
+/// three. A table rather than an interpolation, so "monotonically non-increasing from
+/// foot to tip" is visible here instead of emergent. The fork's are fractions of the
+/// parent's half-width **at the shoulder it leaves**, which is what makes a child thinner
+/// at its fork than its parent is there by construction.
+const BUSH_SHOOT_HALF_WIDTHS: [f32; BUSH_SHOOT_SEGMENTS + 1] = [0.020, 0.014, 0.009, 0.005];
+const BUSH_FORK_HALF_SCALES: [f32; BUSH_FORK_SEGMENTS + 1] = [0.60, 0.42, 0.25];
+const BUSH_FORK_REACH: f32 = 0.09;
+const BUSH_FORK_RISE: f32 = 0.10;
+const BUSH_FORK_YAW_SPREAD: f32 = 1.2;
 
 /// The meadow bush's leaves, in blocks. Four low ones at the foot carry five of the six
 /// fill extrema; two more dress every shoot, one on its shoulder and one at its crest,
@@ -549,16 +561,17 @@ const WINTER_BERRY_HEIGHT: f32 = 0.05;
 pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
 /// How many quads one meadow bush contributes: one blade per leaf for the four at the
-/// foot and the two on every shoot, two ribbons per shoot segment, and two crossed blades
-/// per flower speck.
+/// foot and the two on every shoot, two ribbons for each of a shoot's segments and each of
+/// its fork's, and two crossed blades per flower speck.
 ///
-/// **34, down from the 42 the umbrella frame cost**, because three shoots carry the
-/// silhouette where four canes did. #835's later halves spend that back — forks are a
-/// second branch order and a leaf stops being one quad — against a ceiling of 96. Cover is
-/// per voxel and unmerged, so every quad here is paid once per plant in the world.
+/// **46**, where three shoots alone cost 34 and the umbrella frame cost 42. The twelve the
+/// shoots gained are their forks — the second branch order — and the taper costs nothing,
+/// because a trapezoid has the rectangle's four corners. #835's last half raises it again
+/// when a leaf stops being one quad, against a ceiling of 96. Cover is per voxel and
+/// unmerged, so every quad here is paid once per plant in the world.
 #[cfg(test)]
 pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES
-    + BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS * 2 + BUSH_LEAVES_PER_SHOOT)
+    + BUSH_SHOOTS * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + BUSH_LEAVES_PER_SHOOT)
     + BUSH_SPECKS * 2;
 
 /// How many quads one desert bramble contributes: the shared four arches, two crossed
@@ -1402,8 +1415,10 @@ fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
 /// [`BUSH_SHOOT_SEGMENTS`] segments climb from a foot displaced along `yaw` through a
 /// shoulder to a crest and back down to a tip. The returned joints are what [`push_bush`]
 /// dresses, exactly as [`Cane`] is for the frame the other two brambles still stand on.
-/// **Its wood is still one width and it forks nothing** — that is #835's next half; this
-/// one is where the shoots leave the ground and how long they grow.
+///
+/// Each segment is drawn narrower than the last, and one child twig leaves the shoulder at
+/// a dial-driven deviation — shorter than its parent and thinner than the parent is at that
+/// joint. Two levels is the whole of it: this is a knee-high plant inside one voxel.
 fn push_shoot(
     mesh: &mut SurfaceMesh,
     floor: [f32; 3],
@@ -1440,17 +1455,46 @@ fn push_shoot(
 
     // The foot sits its own half-width above the floor inset, so the ribbon around the
     // first segment cannot dip below the extent the low leaves are what carries.
-    let foot = at(BUSH_ROOT_SPREAD, 0.0, BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH);
+    let foot = at(
+        BUSH_ROOT_SPREAD,
+        0.0,
+        BUSH_INSET + BUSH_SHOOT_HALF_WIDTHS[0],
+    );
     let shoulder = at(BUSH_ROOT_SPREAD + reach * 0.32, bend * 0.5, arch * 0.72);
     let crest = at(BUSH_ROOT_SPREAD + reach * 0.68, bend, arch);
     let tip = at(BUSH_ROOT_SPREAD + reach, bend * 0.5, arch * fall);
     let joints = [foot, shoulder, crest, tip];
     for segment in 0..BUSH_SHOOT_SEGMENTS {
-        push_twig(
+        push_tapered_twig(
             mesh,
             joints[segment],
             joints[segment + 1],
-            BRAMBLE_CANE_HALF_WIDTH,
+            BUSH_SHOOT_HALF_WIDTHS[segment],
+            BUSH_SHOOT_HALF_WIDTHS[segment + 1],
+            color,
+        );
+    }
+
+    // The fork leaves the shoulder, which is the joint that keeps a child inside the
+    // voxel whatever the leader's reach turned out to be.
+    let fork_yaw = yaw + (dial(seed, dials + 3) - 0.5) * BUSH_FORK_YAW_SPREAD;
+    let (fork_sin, fork_cos) = fork_yaw.sin_cos();
+    let fork_at = |step: f32| {
+        [
+            shoulder[0] + fork_cos * BUSH_FORK_REACH * step,
+            shoulder[1] + BUSH_FORK_RISE * step,
+            shoulder[2] + fork_sin * BUSH_FORK_REACH * step,
+        ]
+    };
+    let shoulder_half = BUSH_SHOOT_HALF_WIDTHS[1];
+    let fork_joints = [shoulder, fork_at(0.55), fork_at(1.0)];
+    for segment in 0..BUSH_FORK_SEGMENTS {
+        push_tapered_twig(
+            mesh,
+            fork_joints[segment],
+            fork_joints[segment + 1],
+            shoulder_half * BUSH_FORK_HALF_SCALES[segment],
+            shoulder_half * BUSH_FORK_HALF_SCALES[segment + 1],
             color,
         );
     }
@@ -1745,21 +1789,28 @@ fn push_blade(
     );
 }
 
-/// Two crossed ribbons around one sloping segment. The cover material is double-sided,
-/// so each ribbon is one quad and the pair reads as a twig from every horizontal view.
-fn push_twig(
+/// Two crossed ribbons around one sloping segment, `half_at_start` across where it leaves
+/// and `half_at_end` where it arrives. The cover material is double-sided, so each ribbon
+/// is one quad and the pair reads as a twig from every horizontal view.
+///
+/// **The taper is what separates a branch from a wire, and it costs no quads**: a
+/// trapezoid has the rectangle's four corners. [`push_twig`] is this with equal ends, so
+/// there is one implementation of the crossed ribbon rather than two that can drift.
+fn push_tapered_twig(
     mesh: &mut SurfaceMesh,
     start: [f32; 3],
     end: [f32; 3],
-    half_width: f32,
+    half_at_start: f32,
+    half_at_end: f32,
     color: [f32; 4],
 ) {
     let direction = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
     let horizontal_length = direction[0].hypot(direction[2]);
+    // Unit rather than pre-scaled, since the two ends are no longer the same width.
     let side = [
-        -direction[2] / horizontal_length * half_width,
+        -direction[2] / horizontal_length,
         0.0,
-        direction[0] / horizontal_length * half_width,
+        direction[0] / horizontal_length,
     ];
     let length =
         (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
@@ -1769,29 +1820,33 @@ fn push_twig(
         (direction[2] * side[0] - direction[0] * side[2]) / length,
         (direction[0] * side[1] - direction[1] * side[0]) / length,
     ];
-    let add = |point: [f32; 3], offset: [f32; 3]| {
+    let offset = |unit: [f32; 3], point: [f32; 3], half: f32, sign: f32| {
         [
-            point[0] + offset[0],
-            point[1] + offset[1],
-            point[2] + offset[2],
+            point[0] + unit[0] * half * sign,
+            point[1] + unit[1] * half * sign,
+            point[2] + unit[2] * half * sign,
         ]
     };
-    let sub = |point: [f32; 3], offset: [f32; 3]| {
-        [
-            point[0] - offset[0],
-            point[1] - offset[1],
-            point[2] - offset[2],
-        ]
-    };
-    for offset in [side, across] {
+    for unit in [side, across] {
         let corners = [
-            sub(start, offset),
-            add(start, offset),
-            add(end, offset),
-            sub(end, offset),
+            offset(unit, start, half_at_start, -1.0),
+            offset(unit, start, half_at_start, 1.0),
+            offset(unit, end, half_at_end, 1.0),
+            offset(unit, end, half_at_end, -1.0),
         ];
         mesh.push_quad(corners, face_normal(corners), color, None);
     }
+}
+
+/// Two crossed ribbons of one constant width around one sloping segment.
+fn push_twig(
+    mesh: &mut SurfaceMesh,
+    start: [f32; 3],
+    end: [f32; 3],
+    half_width: f32,
+    color: [f32; 4],
+) {
+    push_tapered_twig(mesh, start, end, half_width, half_width, color);
 }
 
 /// Fills both masks with the faces on the plane at `axis = plane`.
@@ -4269,6 +4324,20 @@ mod tests {
             .collect()
     }
 
+    /// Half the width a ribbon is drawn at, at one of its two ends. The near pair is
+    /// corners 0 and 1 and the far pair is 2 and 3, for every primitive in the cover half.
+    fn drawn_half_width(mesh: &SurfaceMesh, quad: usize, far: bool) -> f32 {
+        let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+        let (left, right) = if far {
+            (corners[3], corners[2])
+        } else {
+            (corners[0], corners[1])
+        };
+        ((right[0] - left[0]).powi(2) + (right[1] - left[1]).powi(2) + (right[2] - left[2]).powi(2))
+            .sqrt()
+            / 2.0
+    }
+
     /// The middle of a quad's near or far edge: the centre line of a ribbon or a midrib.
     fn centre_line(mesh: &SurfaceMesh, quad: usize, far: bool) -> [f32; 3] {
         let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
@@ -4297,10 +4366,10 @@ mod tests {
         difference
     }
 
-    /// The wood of one shoot: its [`BUSH_SHOOT_SEGMENTS`] segments, two ribbons each,
-    /// in the order `push_shoot` pushes them.
+    /// The wood of one shoot: its [`BUSH_SHOOT_SEGMENTS`] segments then its fork's, two
+    /// ribbons each, in the order `push_shoot` pushes them.
     fn shoot_wood(mesh: &SurfaceMesh, shoot: usize) -> Vec<usize> {
-        let quads_per_shoot = BUSH_SHOOT_SEGMENTS * 2;
+        let quads_per_shoot = (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
         quads_coloured(mesh, palette::linear_rgba(palette::LOG))[shoot * quads_per_shoot..]
             [..quads_per_shoot]
             .to_vec()
@@ -4342,7 +4411,7 @@ mod tests {
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_BUSH);
         // What `client/AGENTS.md`'s quad budget is written down as, and #835's ceiling.
-        assert_eq!(QUADS_PER_BUSH, 34);
+        assert_eq!(QUADS_PER_BUSH, 46);
         const { assert!(QUADS_PER_BUSH <= 96) };
 
         assert_eq!(
@@ -4358,7 +4427,7 @@ mod tests {
                 ),
                 (
                     palette::linear_rgba(palette::LOG).map(f32::to_bits),
-                    BUSH_SHOOTS * BUSH_SHOOT_SEGMENTS * 2
+                    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2
                 ),
                 (
                     palette::linear_rgba(palette::FLOWER_RED).map(f32::to_bits),
@@ -4570,6 +4639,57 @@ mod tests {
                      turn apart"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_meadow_shoot_tapers_from_foot_to_tip_and_forks_a_shorter_thinner_child() {
+        // Branch order two, and wood that is wood rather than wire. Both are read back out
+        // of the drawn quads: a constant width from root to tip would show up here as a
+        // flat profile, and a fork drawn at the parent's width as an equal one.
+        let mesh = one_bush();
+        for shoot in 0..BUSH_SHOOTS {
+            let wood = shoot_wood(&mesh, shoot);
+            let mut widths = vec![drawn_half_width(&mesh, wood[0], false)];
+            for segment in 0..BUSH_SHOOT_SEGMENTS {
+                widths.push(drawn_half_width(&mesh, wood[segment * 2], true));
+            }
+            for pair in widths.windows(2) {
+                assert!(
+                    pair[1] <= pair[0] + 1e-6,
+                    "shoot {shoot} widens along its stroke: {widths:?}"
+                );
+            }
+            assert!(
+                *widths.last().expect("a shoot has stations") < widths[0] - 1e-6,
+                "shoot {shoot} is drawn at one width from root to tip: {widths:?}"
+            );
+
+            // The fork leaves the shoulder, which is station 1 of the parent.
+            let fork = &wood[BUSH_SHOOT_SEGMENTS * 2..];
+            let at_fork = drawn_half_width(&mesh, fork[0], false);
+            assert!(
+                at_fork < widths[1] - 1e-6,
+                "shoot {shoot}'s child is not thinner at its fork: {at_fork} vs {}",
+                widths[1]
+            );
+            let mut fork_joints = vec![centre_line(&mesh, fork[0], false)];
+            for segment in 0..BUSH_FORK_SEGMENTS {
+                fork_joints.push(centre_line(&mesh, fork[segment * 2], true));
+            }
+            let shoulder = shoot_joints(&mesh, shoot)[1];
+            for (child, parent) in fork_joints[0].iter().zip(shoulder.iter()) {
+                assert!(
+                    (child - parent).abs() < 1e-5,
+                    "shoot {shoot}'s child does not leave its shoulder"
+                );
+            }
+            let child = polyline_length(&fork_joints);
+            let parent = polyline_length(&shoot_joints(&mesh, shoot));
+            assert!(
+                child < parent - 1e-6,
+                "shoot {shoot}'s child is not shorter: {child} vs {parent}"
+            );
         }
     }
 
@@ -4806,7 +4926,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 1792);
+        assert_eq!(mesh.cover.quad_count(), 2176);
     }
 
     #[test]
