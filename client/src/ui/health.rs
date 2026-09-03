@@ -87,7 +87,10 @@ const LINE_HEIGHT_RATIO: f32 = 1.2;
 
 /// The track's interior: what an absolutely positioned child inset to zero on both sides
 /// actually spans, since an inset is measured from the padding box inside the border.
-const TRACK_INNER_WIDTH: f32 = BAR_WIDTH - 2.0 * BAR_BORDER;
+///
+/// `pub(super)` since #872: `ui/cast.rs` bounds its own reading against this the same way
+/// the three asserts below bound theirs, rather than restating `BAR_WIDTH - 2.0 * BAR_BORDER`.
+pub(super) const TRACK_INNER_WIDTH: f32 = BAR_WIDTH - 2.0 * BAR_BORDER;
 const TRACK_INNER_HEIGHT: f32 = BAR_HEIGHT - 2.0 * BAR_BORDER;
 
 /// The reading is drawn inside its track on one line, so both directions are bounds the
@@ -106,7 +109,12 @@ const _: () = assert!(
     "a reading that does not fit is answered by a wider BAR_WIDTH, not smaller text"
 );
 
-const BAR_CORNER_RADIUS: f32 = 3.0;
+/// Corner radius shared by every vital track.
+///
+/// `pub(super)` since #872, the same widening [`BAR_LABEL_SIZE`] already had: `ui/cast.rs`
+/// reads it back off the spawned track to prove its border radius is this one and not a
+/// second number that happens to agree.
+pub(super) const BAR_CORNER_RADIUS: f32 = 3.0;
 
 /// Distance from the bottom of the window to the experience bar, in logical pixels. It
 /// clears the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
