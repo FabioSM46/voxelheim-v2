@@ -105,7 +105,6 @@ pub use codec::{
 #[cfg(test)]
 pub use codec::ANY_TOKEN;
 pub use codec::encode_block_request;
-pub use codec::encode_mount_request;
 #[allow(unused_imports)] // V28 outbound encoder precedes the player-trade UI.
 pub use codec::encode_player_trade_request;
 #[allow(unused_imports)] // V20 outbound encoders precede their UI controls.
@@ -118,6 +117,7 @@ pub use codec::{
     encode_party_request, encode_place_structure_request, encode_player_input,
     encode_remove_structure_request, encode_repair_request,
 };
+pub use codec::{encode_dismount_request, encode_mount_request};
 #[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
 pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
