@@ -418,30 +418,91 @@ const COVER_LEAF_RISE: f32 = 0.09;
 /// extent is 96% of its voxel on every axis rather than 100%.
 const BUSH_INSET: f32 = 0.02;
 
-/// The shared bramble skeleton: four canes, each bent through three woody segments.
-/// The meadow bush below dresses it with broad leaves and flowers; the desert and
-/// tundra bushes dress the same skeleton in #789 and #790 rather than growing copies.
+/// The umbrella frame the two undressed brambles still stand on: four canes at equal
+/// angles from one hub, each bent through three woody segments of one constant width.
+///
+/// **It is being retired one biome at a time, and this is the middle of that.** The meadow
+/// bush left it in #835 for [`push_shoot`]; the desert scrub (#836) and the winter bramble
+/// (#837) dress it until they follow, and retiring it here would have redrawn both, which
+/// #835 puts out of scope by name. `BRAMBLE_` rather than `BUSH_` because the meadow bush
+/// is exactly what no longer reads them.
 const BRAMBLE_CANES: usize = 4;
 const BRAMBLE_CANE_SEGMENTS: usize = 3;
 const BRAMBLE_CANE_REACH: f32 = 0.38;
 const BRAMBLE_CANE_REACH_JITTER: f32 = 0.06;
+const BRAMBLE_CANE_HALF_WIDTH: f32 = 0.014;
+const BRAMBLE_CANE_ARCH: f32 = 0.78;
+const BRAMBLE_CANE_ARCH_JITTER: f32 = 0.1;
+const BRAMBLE_CANE_TIP: f32 = 0.46;
+const BRAMBLE_CANE_TIP_JITTER: f32 = 0.12;
 
-/// The meadow bramble's cane and leaf proportions, in blocks. The four leaves at its
-/// foot are the honest dense tangle a bramble grows there and are what carry the solid
-/// bush's drawn extent to each horizontal wall. Two more leaves dress every cane: one
-/// on its rising shoulder and one at its crest, whose tip reaches the voxel's ceiling.
-const BUSH_CANE_HALF_WIDTH: f32 = 0.014;
-const BUSH_CANE_ARCH: f32 = 0.78;
-const BUSH_CANE_ARCH_JITTER: f32 = 0.1;
-const BUSH_CANE_TIP: f32 = 0.46;
-const BUSH_CANE_TIP_JITTER: f32 = 0.12;
+/// The meadow bush's shoot skeleton, in blocks. Three numbers answer the three ways the
+/// old frame gave itself away:
+///
+/// - [`BUSH_ROOT_SPREAD`] displaces every foot from the voxel's axis along its own yaw,
+///   so the shoots leave three distinct feet on the floor instead of one hub.
+/// - [`BUSH_SHOOT_SECTOR_MIN`] and `_MAX` partition the turn into sectors of *unequal*
+///   width — normalised so they still close — and the shoot is jittered inside its own.
+///   Deliberately not a free yaw per shoot: free dials let all three clump into one
+///   quadrant, and the fill guarantee would then be carried by nothing.
+/// - [`BUSH_SHOOT_GUARD`] is what each sector keeps clear at both edges, and it makes the
+///   feet's spacing a property rather than a hope: two feet at radius `r` and angle `t`
+///   apart are `2 r sin(t / 2)` apart, so guarding both edges of two adjacent sectors puts
+///   any two over [`BUSH_ROOT_SPREAD`] apart on the floor. The narrowest sector the
+///   normalisation can produce is wider than twice the guard, which leaves the jitter
+///   somewhere to move.
+const BUSH_SHOOTS: usize = 3;
+const BUSH_SHOOT_SEGMENTS: usize = 3;
+const BUSH_ROOT_SPREAD: f32 = 0.12;
+const BUSH_SHOOT_GUARD: f32 = 0.58;
+const BUSH_SHOOT_SECTOR_MIN: f32 = 0.55;
+const BUSH_SHOOT_SECTOR_MAX: f32 = 1.45;
+
+/// Apical dominance, as two ranges driven by one dial per shoot.
+///
+/// The leading shoot draws that dial from [`BUSH_LEADER_VIGOUR`] up to one and every other
+/// from zero up to [`BUSH_FOLLOWER_VIGOUR`]; a shoot's reach and arch are both that number
+/// read off their ranges. **The gap between the bands is what makes "the leader is at
+/// least 1.3x the shortest" arithmetic rather than luck** — 1.36 at the worst. The tip
+/// falls back to a fraction of the arch, so a shoot is an arch and not a mast, and that
+/// fraction's jitter is narrow on purpose: a wide one could lengthen a follower's
+/// descending segment past a leader's and take the ratio with it.
+const BUSH_LEADER_VIGOUR: f32 = 0.85;
+const BUSH_FOLLOWER_VIGOUR: f32 = 0.35;
+const BUSH_SHOOT_REACH: f32 = 0.14;
+const BUSH_SHOOT_REACH_SPAN: f32 = 0.17;
+const BUSH_SHOOT_ARCH: f32 = 0.42;
+const BUSH_SHOOT_ARCH_SPAN: f32 = 0.38;
+const BUSH_SHOOT_TIP_FALL: f32 = 0.50;
+const BUSH_SHOOT_TIP_FALL_JITTER: f32 = 0.04;
+const BUSH_SHOOT_BEND: f32 = 0.08;
+
+/// The meadow bush's leaves, in blocks. Four low ones at the foot carry five of the six
+/// fill extrema; two more dress every shoot, one on its shoulder and one at its crest,
+/// whose outer edge lands on the ceiling.
+///
+/// **Still [`push_radial_blade`], and that is a later half of #835**: every one is a
+/// rectangle tipped up at its far edge, because that is all that primitive can be.
 const BUSH_BASE_LEAVES: usize = 4;
-const BUSH_LEAVES_PER_CANE: usize = 2;
+const BUSH_LEAVES_PER_SHOOT: usize = 2;
 const BUSH_BASE_LEAF_HALF_WIDTH: f32 = 0.055;
 const BUSH_BASE_LEAF_RISE: f32 = 0.12;
-const BUSH_CANE_LEAF_OUTER: f32 = 0.14;
-const BUSH_CANE_LEAF_HALF_WIDTH: f32 = 0.045;
-const BUSH_CANE_LEAF_RISE: f32 = 0.07;
+const BUSH_SHOOT_LEAF_OUTER: f32 = 0.14;
+const BUSH_SHOOT_LEAF_HALF_WIDTH: f32 = 0.045;
+const BUSH_SHOOT_LEAF_RISE: f32 = 0.07;
+
+/// Every dial index a meadow bush draws, allocated in one place.
+///
+/// **Two features sharing an index move together**, which is the correlated-jitter bug
+/// that makes a plant look stamped rather than grown. The old frame reserved five per cane
+/// with an arithmetic `1 + index * 5`; these are named and deliberately sparse, so a later
+/// dressing takes a new one rather than borrowing a neighbour's.
+const BUSH_DIAL_TURN: u32 = 0;
+const BUSH_DIAL_LEADER: u32 = 1;
+const BUSH_DIAL_SECTOR: u32 = 4;
+const BUSH_DIAL_SHOOT_YAW: u32 = 8;
+const BUSH_DIAL_SHOOT: u32 = 16;
+const BUSH_DIALS_PER_SHOOT: u32 = 4;
 
 /// The desert bramble's dressing on the shared cane skeleton. Two short thorns leave
 /// every arch, while two low crossed canes reach the four horizontal walls. A crossed
@@ -480,11 +541,17 @@ const WINTER_BERRY_HEIGHT: f32 = 0.05;
 #[cfg(test)]
 pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 
-/// How many quads one bush contributes: four low leaves, three two-ribbon segments
-/// per cane, two leaves per cane and two crossed blades per flower speck.
+/// How many quads one meadow bush contributes: one blade per leaf for the four at the
+/// foot and the two on every shoot, two ribbons per shoot segment, and two crossed blades
+/// per flower speck.
+///
+/// **34, down from the 42 the umbrella frame cost**, because three shoots carry the
+/// silhouette where four canes did. #835's later halves spend that back — forks are a
+/// second branch order and a leaf stops being one quad — against a ceiling of 96. Cover is
+/// per voxel and unmerged, so every quad here is paid once per plant in the world.
 #[cfg(test)]
 pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES
-    + BRAMBLE_CANES * (BRAMBLE_CANE_SEGMENTS * 2 + BUSH_LEAVES_PER_CANE)
+    + BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS * 2 + BUSH_LEAVES_PER_SHOOT)
     + BUSH_SPECKS * 2;
 
 /// How many quads one desert bramble contributes: the shared four arches, two crossed
@@ -1243,8 +1310,8 @@ fn push_cane(
     let yaw =
         dial(seed, 0) * spacing + index as f32 * spacing + (dial(seed, dial_index) - 0.5) * 0.36;
     let reach = BRAMBLE_CANE_REACH + dial(seed, dial_index + 1) * BRAMBLE_CANE_REACH_JITTER;
-    let arch = BUSH_CANE_ARCH + dial(seed, dial_index + 2) * BUSH_CANE_ARCH_JITTER;
-    let tip_height = BUSH_CANE_TIP + dial(seed, dial_index + 3) * BUSH_CANE_TIP_JITTER;
+    let arch = BRAMBLE_CANE_ARCH + dial(seed, dial_index + 2) * BRAMBLE_CANE_ARCH_JITTER;
+    let tip_height = BRAMBLE_CANE_TIP + dial(seed, dial_index + 3) * BRAMBLE_CANE_TIP_JITTER;
     let bend = (dial(seed, dial_index + 4) - 0.5) * 0.1;
     let (sin, cos) = yaw.sin_cos();
     let along = [cos, 0.0, sin];
@@ -1257,7 +1324,7 @@ fn push_cane(
         ]
     };
 
-    let base = at(-0.06, 0.0, BUSH_INSET + BUSH_CANE_HALF_WIDTH);
+    let base = at(-0.06, 0.0, BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH);
     let shoulder = at(reach * 0.32, bend * 0.5, arch * 0.72);
     let crest = at(reach * 0.68, bend, arch);
     let tip = at(reach, bend * 0.5, tip_height);
@@ -1267,7 +1334,7 @@ fn push_cane(
             mesh,
             joints[segment],
             joints[segment + 1],
-            BUSH_CANE_HALF_WIDTH,
+            BRAMBLE_CANE_HALF_WIDTH,
             color,
         );
     }
@@ -1280,24 +1347,142 @@ fn push_cane(
     }
 }
 
-/// One meadow bramble, filling the voxel whose minimum corner is `floor`.
+/// The joints one shoot's dressing needs, the way [`Cane`] answers for the old frame.
+#[derive(Clone, Copy)]
+struct Shoot {
+    shoulder: [f32; 3],
+    crest: [f32; 3],
+    tip: [f32; 3],
+    yaw: f32,
+}
+
+/// Which of a bush's shoots leads. One dial, read in one place, so the shoot that draws
+/// its vigour from the top of the range is the same one the ceiling leaf is grown on.
+fn bush_leader(seed: u32) -> usize {
+    (dial(seed, BUSH_DIAL_LEADER) * BUSH_SHOOTS as f32) as usize % BUSH_SHOOTS
+}
+
+/// Where each shoot's foot leaves the floor, as a yaw per shoot.
 ///
-/// Four arching woody canes make the silhouette, broad upward-facing leaves follow
-/// them, and three cane tips flower. There is no solid foliage volume: the only dense
-/// part is the low tangle of four leaves a bramble genuinely grows at its foot.
+/// The turn is partitioned into sectors of unequal width — a dial each, normalised so they
+/// still close — and every shoot is jittered inside its own, clear of
+/// [`BUSH_SHOOT_GUARD`] at both edges. Two shoots are therefore never `TAU / n` apart
+/// except by coincidence, and never closer than twice the guard, which is what puts their
+/// feet more than [`BUSH_ROOT_SPREAD`] apart on the floor.
+fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
+    let widths: [f32; BUSH_SHOOTS] = std::array::from_fn(|shoot| {
+        BUSH_SHOOT_SECTOR_MIN
+            + dial(seed, BUSH_DIAL_SECTOR + shoot as u32)
+                * (BUSH_SHOOT_SECTOR_MAX - BUSH_SHOOT_SECTOR_MIN)
+    });
+    let total: f32 = widths.iter().sum();
+
+    let mut edge = dial(seed, BUSH_DIAL_TURN) * std::f32::consts::TAU;
+    let mut yaws = [0.0; BUSH_SHOOTS];
+    for (shoot, yaw) in yaws.iter_mut().enumerate() {
+        let sector = widths[shoot] / total * std::f32::consts::TAU;
+        // The narrowest sector the normalisation can produce is wider than twice the
+        // guard, so this is always somewhere to move rather than a negative span.
+        let free = sector - 2.0 * BUSH_SHOOT_GUARD;
+        *yaw = edge + BUSH_SHOOT_GUARD + free * dial(seed, BUSH_DIAL_SHOOT_YAW + shoot as u32);
+        edge += sector;
+    }
+    yaws
+}
+
+/// One shoot of the meadow bush's skeleton.
+///
+/// [`BUSH_SHOOT_SEGMENTS`] segments climb from a foot displaced along `yaw` through a
+/// shoulder to a crest and back down to a tip. The returned joints are what [`push_bush`]
+/// dresses, exactly as [`Cane`] is for the frame the other two brambles still stand on.
+/// **Its wood is still one width and it forks nothing** — that is #835's next half; this
+/// one is where the shoots leave the ground and how long they grow.
+fn push_shoot(
+    mesh: &mut SurfaceMesh,
+    floor: [f32; 3],
+    seed: u32,
+    index: usize,
+    yaw: f32,
+    leader: bool,
+    color: [f32; 4],
+) -> Shoot {
+    let dials = BUSH_DIAL_SHOOT + index as u32 * BUSH_DIALS_PER_SHOOT;
+    // The two bands never meet, which is what makes apical dominance arithmetic.
+    let vigour = if leader {
+        BUSH_LEADER_VIGOUR + (1.0 - BUSH_LEADER_VIGOUR) * dial(seed, dials)
+    } else {
+        BUSH_FOLLOWER_VIGOUR * dial(seed, dials)
+    };
+    let reach = BUSH_SHOOT_REACH + vigour * BUSH_SHOOT_REACH_SPAN;
+    let arch = BUSH_SHOOT_ARCH + vigour * BUSH_SHOOT_ARCH_SPAN;
+    let fall = BUSH_SHOOT_TIP_FALL + dial(seed, dials + 1) * BUSH_SHOOT_TIP_FALL_JITTER;
+    let bend = (dial(seed, dials + 2) - 0.5) * BUSH_SHOOT_BEND;
+
+    let (sin, cos) = yaw.sin_cos();
+    let along = [cos, 0.0, sin];
+    let across = [-sin, 0.0, cos];
+    // Radius from the voxel's vertical axis, not from a hub: every joint of this shoot
+    // starts BUSH_ROOT_SPREAD out along its own yaw.
+    let at = |radius: f32, sideways: f32, height: f32| {
+        [
+            floor[0] + 0.5 + along[0] * radius + across[0] * sideways,
+            floor[1] + height,
+            floor[2] + 0.5 + along[2] * radius + across[2] * sideways,
+        ]
+    };
+
+    // The foot sits its own half-width above the floor inset, so the ribbon around the
+    // first segment cannot dip below the extent the low leaves are what carries.
+    let foot = at(BUSH_ROOT_SPREAD, 0.0, BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH);
+    let shoulder = at(BUSH_ROOT_SPREAD + reach * 0.32, bend * 0.5, arch * 0.72);
+    let crest = at(BUSH_ROOT_SPREAD + reach * 0.68, bend, arch);
+    let tip = at(BUSH_ROOT_SPREAD + reach, bend * 0.5, arch * fall);
+    let joints = [foot, shoulder, crest, tip];
+    for segment in 0..BUSH_SHOOT_SEGMENTS {
+        push_twig(
+            mesh,
+            joints[segment],
+            joints[segment + 1],
+            BRAMBLE_CANE_HALF_WIDTH,
+            color,
+        );
+    }
+
+    Shoot {
+        shoulder,
+        crest,
+        tip,
+        yaw,
+    }
+}
+
+/// One meadow bush, filling the voxel whose minimum corner is `floor`.
+///
+/// Three woody shoots of unequal length make the silhouette, broad leaves follow them,
+/// and three shoot tips flower. Nothing in the skeleton is `n` of anything at `TAU / n`
+/// any more: the shoots leave three separate feet in three sectors of unequal width, and
+/// one of them leads.
 ///
 /// **The shape still has to fill the cube**: `world.Bush` is `Solid` on the server, so a
-/// body is stopped by all of it. The low leaves reach to within [`BUSH_INSET`] of the
-/// floor and four walls, while the leaves at each crest reach the same distance from
-/// the ceiling. That makes the drawn bounding box honest without putting a cuboid back.
+/// body is stopped by all of it. The four low leaves carry the floor and the four walls,
+/// and every shoot's crest leaf reaches the ceiling. **Those are named parts on purpose**:
+/// the test asserts which quads carry each of the six extrema, because the next person to
+/// tune a constant is the one who would otherwise reintroduce the invisible wall.
 fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let foliage = palette::linear_rgba(palette::BUSH);
     let leaf = opaque(palette::BUSH_CROWN_LINEAR);
     let wood = palette::linear_rgba(palette::LOG);
-    let centre = [floor[0] + 0.5, floor[1] + BUSH_INSET, floor[2] + 0.5];
 
-    // A low, open tangle rather than a skirt box. The four cardinal tips are the exact
-    // horizontal fill guarantee; their inner edges overlap around the canes' feet.
+    let yaws = bush_shoot_yaws(seed);
+    let leader = bush_leader(seed);
+    let shoots: [Shoot; BUSH_SHOOTS] = std::array::from_fn(|shoot| {
+        push_shoot(mesh, floor, seed, shoot, yaws[shoot], shoot == leader, wood)
+    });
+
+    // The low tangle. Cardinal yaws exactly, because these four are the fill guarantee on
+    // the four horizontal walls and a jittered yaw would land the extremum short of it by
+    // its own cosine.
+    let centre = [floor[0] + 0.5, floor[1] + BUSH_INSET, floor[2] + 0.5];
     for direction in 0..BUSH_BASE_LEAVES {
         push_radial_blade(
             mesh,
@@ -1310,57 +1495,56 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
         );
     }
 
-    let canes: [Cane; BRAMBLE_CANES] =
-        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
-
-    // Two leaves follow every cane. The shoulder leaf lifts by a fixed amount; the
-    // crest leaf's outer edge lands exactly at the fill guarantee below the ceiling.
-    for (index, cane) in canes.iter().enumerate() {
+    // Two leaves follow every shoot. The shoulder one lifts by a fixed amount; the crest
+    // one's outer edge lands exactly at the fill guarantee below the ceiling. **Both are
+    // rectangles placed by an index parity**, unchanged on purpose: this change is the
+    // skeleton, and a later half of #835 replaces them with `push_leaf`.
+    for (index, shoot) in shoots.iter().enumerate() {
         let side = if index % 2 == 0 { 1.0 } else { -1.0 };
-        let leaf_yaw = cane.yaw + side * std::f32::consts::FRAC_PI_2 * 0.72;
-        let leaves: [([f32; 3], f32, f32); BUSH_LEAVES_PER_CANE] = [
-            (cane.shoulder, leaf_yaw, BUSH_CANE_LEAF_RISE),
+        let leaf_yaw = shoot.yaw + side * std::f32::consts::FRAC_PI_2 * 0.72;
+        let leaves: [([f32; 3], f32, f32); BUSH_LEAVES_PER_SHOOT] = [
+            (shoot.shoulder, leaf_yaw, BUSH_SHOOT_LEAF_RISE),
             (
-                cane.crest,
+                shoot.crest,
                 leaf_yaw + std::f32::consts::PI,
-                floor[1] + 1.0 - BUSH_INSET - cane.crest[1],
+                floor[1] + 1.0 - BUSH_INSET - shoot.crest[1],
             ),
         ];
-        for (centre, yaw, rise) in leaves {
+        for (attach, yaw, rise) in leaves {
             push_radial_blade(
                 mesh,
-                centre,
+                attach,
                 yaw,
-                BUSH_CANE_LEAF_OUTER,
-                BUSH_CANE_LEAF_HALF_WIDTH,
+                BUSH_SHOOT_LEAF_OUTER,
+                BUSH_SHOOT_LEAF_HALF_WIDTH,
                 rise,
                 leaf,
             );
         }
     }
 
-    // Three of the four tips flower. Which colour leads still turns with the seed, but
-    // the positions are the cane tips themselves rather than gaps beside a foliage box.
+    // Every tip flowers. Which colour leads still turns with the seed, and the rotation
+    // is what keeps a bush showing three different ones rather than three of one.
     let flowers = [
         palette::FLOWER_RED,
         palette::FLOWER_YELLOW,
         palette::FLOWER_BLUE,
     ];
-    for (speck, cane) in canes.iter().take(BUSH_SPECKS).enumerate() {
+    for (speck, shoot) in shoots.iter().take(BUSH_SPECKS).enumerate() {
         let colour = palette::linear_rgba(flowers[(seed as usize + speck) % flowers.len()]);
         push_blade(
             mesh,
-            cane.tip,
+            shoot.tip,
             BUSH_SPECK_HALF_WIDTH,
-            cane.tip[1] + BUSH_SPECK_HEIGHT,
+            shoot.tip[1] + BUSH_SPECK_HEIGHT,
             0,
             colour,
         );
         push_blade(
             mesh,
-            cane.tip,
+            shoot.tip,
             BUSH_SPECK_HALF_WIDTH,
-            cane.tip[1] + BUSH_SPECK_HEIGHT,
+            shoot.tip[1] + BUSH_SPECK_HEIGHT,
             2,
             colour,
         );
@@ -1390,13 +1574,13 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     for axis in base_axes {
         let mut start = [
             floor[0] + 0.5,
-            floor[1] + BUSH_INSET + BUSH_CANE_HALF_WIDTH,
+            floor[1] + BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH,
             floor[2] + 0.5,
         ];
         let mut end = start;
         start[axis] = floor[axis] + BUSH_INSET;
         end[axis] = floor[axis] + 1.0 - BUSH_INSET;
-        push_twig(mesh, start, end, BUSH_CANE_HALF_WIDTH, wood);
+        push_twig(mesh, start, end, BRAMBLE_CANE_HALF_WIDTH, wood);
     }
 
     // Alternating sides make the thorns read as a tangle rather than a comb. Every
@@ -1413,7 +1597,7 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
                 joint[1] + DESERT_THORN_RISE,
                 joint[2] + sin * DESERT_THORN_REACH,
             ];
-            push_twig(mesh, joint, end, BUSH_CANE_HALF_WIDTH, wood);
+            push_twig(mesh, joint, end, BRAMBLE_CANE_HALF_WIDTH, wood);
         }
     }
 
@@ -1428,7 +1612,7 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let top = floor[1] + 1.0 - BUSH_INSET;
     let crown_axes: [usize; DESERT_CROWN_BLADES] = [0, 2];
     for axis in crown_axes {
-        push_blade(mesh, crown, BUSH_CANE_HALF_WIDTH, top, axis, wood);
+        push_blade(mesh, crown, BRAMBLE_CANE_HALF_WIDTH, top, axis, wood);
     }
 }
 
@@ -4057,12 +4241,87 @@ mod tests {
         assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
     }
 
+    /// One bush in the fixture voxel, fixed at (4, 5, 6) so a test can recompute the
+    /// plant's own dials from [`plant_seed`] and name the parts it asserts about.
+    fn one_bush() -> SurfaceMesh {
+        let mut chunk = solid(SIZE, palette::GRASS);
+        chunk.set(4, 5, 6, palette::BUSH);
+        super::mesh_chunk(&chunk, &alone()).cover
+    }
+
+    const BUSH_FIXTURE: [usize; 3] = [4, 5, 6];
+    const BUSH_FIXTURE_FLOOR: [f32; 3] = [4.0, 5.0, 6.0];
+    fn fixture_seed() -> u32 {
+        plant_seed(BUSH_FIXTURE[0], BUSH_FIXTURE[1], BUSH_FIXTURE[2])
+    }
+
+    /// The quads of one part, in the order [`push_bush`] emits them.
+    fn quads_coloured(mesh: &SurfaceMesh, colour: [f32; 4]) -> Vec<usize> {
+        (0..mesh.quad_count())
+            .filter(|quad| mesh.colors[quad * VERTICES_PER_QUAD] == colour)
+            .collect()
+    }
+
+    /// The middle of a quad's near or far edge: the centre line of a ribbon or a midrib.
+    fn centre_line(mesh: &SurfaceMesh, quad: usize, far: bool) -> [f32; 3] {
+        let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+        let pair = if far {
+            [corners[2], corners[3]]
+        } else {
+            [corners[0], corners[1]]
+        };
+        [
+            (pair[0][0] + pair[1][0]) * 0.5,
+            (pair[0][1] + pair[1][1]) * 0.5,
+            (pair[0][2] + pair[1][2]) * 0.5,
+        ]
+    }
+
+    fn distance(from: [f32; 3], to: [f32; 3]) -> f32 {
+        ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt()
+    }
+
+    /// The shortest angle between two yaws, in `[0, PI]`.
+    fn angle_between(first: f32, second: f32) -> f32 {
+        let mut difference = (first - second).abs() % std::f32::consts::TAU;
+        if difference > std::f32::consts::PI {
+            difference = std::f32::consts::TAU - difference;
+        }
+        difference
+    }
+
+    /// The wood of one shoot: its [`BUSH_SHOOT_SEGMENTS`] segments, two ribbons each,
+    /// in the order `push_shoot` pushes them.
+    fn shoot_wood(mesh: &SurfaceMesh, shoot: usize) -> Vec<usize> {
+        let quads_per_shoot = BUSH_SHOOT_SEGMENTS * 2;
+        quads_coloured(mesh, palette::linear_rgba(palette::LOG))[shoot * quads_per_shoot..]
+            [..quads_per_shoot]
+            .to_vec()
+    }
+
+    /// The centre line of one shoot, foot to tip, read out of its `side` ribbons.
+    fn shoot_joints(mesh: &SurfaceMesh, shoot: usize) -> Vec<[f32; 3]> {
+        let wood = shoot_wood(mesh, shoot);
+        let mut joints = vec![centre_line(mesh, wood[0], false)];
+        for segment in 0..BUSH_SHOOT_SEGMENTS {
+            joints.push(centre_line(mesh, wood[segment * 2], true));
+        }
+        joints
+    }
+
+    fn polyline_length(joints: &[[f32; 3]]) -> f32 {
+        joints
+            .windows(2)
+            .map(|pair| distance(pair[0], pair[1]))
+            .sum()
+    }
+
     #[test]
-    fn a_bramble_has_arches_leaves_flowers_and_fills_the_voxel_a_body_is_stopped_by() {
+    fn a_meadow_bush_is_three_forked_shoots_ten_leaves_and_three_specks() {
         // The constraint the bush has and the flower does not: `world.Bush` is `Solid` on
         // the server, so what is drawn has to span the cube collision uses. It is drawn
-        // per voxel now, which means the opaque sweep must stop drawing its cube — and
-        // the grass under it must start drawing the top face that cube used to cull.
+        // per voxel, which means the opaque sweep must stop drawing its cube — and the
+        // grass under it must start drawing the top face that cube used to cull.
         let mut chunk = solid(SIZE, palette::GRASS);
         chunk.set(4, 5, 6, palette::AIR);
         let hole = super::mesh_chunk(&chunk, &alone());
@@ -4071,16 +4330,29 @@ mod tests {
 
         assert_eq!(
             mesh.opaque, hole.opaque,
-            "a bush is drawn by itself now, so the sweep sees the same hole as before"
+            "a bush is drawn by itself, so the sweep sees the same hole as before"
         );
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_BUSH);
+        // What `client/AGENTS.md`'s quad budget is written down as, and #835's ceiling.
+        assert_eq!(QUADS_PER_BUSH, 34);
+        const { assert!(QUADS_PER_BUSH <= 96) };
+
         assert_eq!(
             quads_by_colour(&mesh.cover),
             BTreeMap::from([
-                (palette::linear_rgba(palette::BUSH).map(f32::to_bits), 4),
-                (tone(palette::BUSH_CROWN_LINEAR), 8),
-                (palette::linear_rgba(palette::LOG).map(f32::to_bits), 24),
+                (
+                    palette::linear_rgba(palette::BUSH).map(f32::to_bits),
+                    BUSH_BASE_LEAVES
+                ),
+                (
+                    tone(palette::BUSH_CROWN_LINEAR),
+                    BUSH_SHOOTS * BUSH_LEAVES_PER_SHOOT
+                ),
+                (
+                    palette::linear_rgba(palette::LOG).map(f32::to_bits),
+                    BUSH_SHOOTS * BUSH_SHOOT_SEGMENTS * 2
+                ),
                 (
                     palette::linear_rgba(palette::FLOWER_RED).map(f32::to_bits),
                     2
@@ -4094,148 +4366,177 @@ mod tests {
                     2
                 ),
             ]),
-            "a low leaf tangle, leaves along four woody arches and three tip flowers"
+            "a low leaf tangle, forked tapering shoots, two leaves on each and three \
+             tip flowers"
         );
 
         let repeated = super::mesh_chunk(&chunk, &alone());
         assert_eq!(mesh.cover, repeated.cover, "a remesh reshuffled the bush");
 
-        let wood = palette::linear_rgba(palette::LOG);
-        let woody: Vec<usize> = (0..mesh.cover.quad_count())
-            .filter(|quad| mesh.cover.colors[quad * VERTICES_PER_QUAD] == wood)
+        winding_agrees_with_every_normal(&mesh.cover);
+        stays_inside_the_voxel(&mesh.cover, BUSH_FIXTURE_FLOOR);
+
+        // The cover half carries no flow, which is what keeps `SurfaceMesh`'s
+        // all-or-nothing invariant true for it.
+        assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
+    }
+
+    #[test]
+    fn a_meadow_bush_fills_the_voxel_and_every_extremum_is_a_named_part() {
+        // The whole of why `BUSH_INSET` is 2% and not 20%: a bush a player is stopped by
+        // has to be a bush they can see, on every axis. **Which part carries each of the
+        // six is asserted and not merely the distance**, because moving an extremum onto
+        // something else would otherwise leave an invisible wall with every test green.
+        let mesh = one_bush();
+        let base_leaves = quads_coloured(&mesh, palette::linear_rgba(palette::BUSH));
+        let shoot_leaves = quads_coloured(&mesh, opaque(palette::BUSH_CROWN_LINEAR));
+        // Two leaves per shoot in order, so every second one is a crest blade.
+        let crest_leaves: Vec<usize> = shoot_leaves
+            .iter()
+            .copied()
+            .skip(1)
+            .step_by(BUSH_LEAVES_PER_SHOOT)
             .collect();
-        assert_eq!(woody.len(), BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2);
-        let woody_height =
-            woody
+        assert_eq!(crest_leaves.len(), BUSH_SHOOTS);
+
+        let extent = |quads: &[usize], axis: usize| {
+            quads
                 .iter()
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), quad| {
-                    let (quad_low, quad_high) = quad_extent(&mesh.cover, *quad, 1);
+                    let (quad_low, quad_high) = quad_extent(&mesh, *quad, axis);
                     (low.min(quad_low), high.max(quad_high))
-                });
-        assert!(
-            woody_height.0 < 5.2 && woody_height.1 > 5.75,
-            "the woody geometry does not cross the foliage mass: {woody_height:?}"
-        );
-
-        // Two ribbons per segment and three segments per cane. Reading the centre line
-        // back out of one ribbon in each pair proves the stroke rises twice and then
-        // descends: a straight twig cannot satisfy this however it is yawed.
-        let endpoint = |quad: usize, end: bool| {
-            let vertices = &mesh.cover.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
-            let pair = if end {
-                [vertices[2], vertices[3]]
-            } else {
-                [vertices[0], vertices[1]]
-            };
-            [
-                (pair[0][0] + pair[1][0]) * 0.5,
-                (pair[0][1] + pair[1][1]) * 0.5,
-                (pair[0][2] + pair[1][2]) * 0.5,
-            ]
+                })
         };
-        let mut tips = Vec::new();
-        for (cane, quads) in woody.chunks_exact(BRAMBLE_CANE_SEGMENTS * 2).enumerate() {
-            let base = endpoint(quads[0], false);
-            let shoulder = endpoint(quads[0], true);
-            let shoulder_again = endpoint(quads[2], false);
-            let crest = endpoint(quads[2], true);
-            let crest_again = endpoint(quads[4], false);
-            let tip = endpoint(quads[4], true);
-            for axis in 0..3 {
-                assert!((shoulder[axis] - shoulder_again[axis]).abs() < 1e-5);
-                assert!((crest[axis] - crest_again[axis]).abs() < 1e-5);
-            }
-            assert!(
-                base[1] < shoulder[1] && shoulder[1] < crest[1] && tip[1] < crest[1],
-                "cane {cane} is not an arch: {base:?} -> {shoulder:?} -> {crest:?} -> {tip:?}"
-            );
-            tips.push(tip);
-        }
+        let everything: Vec<usize> = (0..mesh.quad_count()).collect();
 
-        let foliage_colours = [
-            palette::linear_rgba(palette::BUSH),
-            opaque(palette::BUSH_CROWN_LINEAR),
-        ];
-        let leaves: Vec<usize> = (0..mesh.cover.quad_count())
-            .filter(|quad| foliage_colours.contains(&mesh.cover.colors[quad * VERTICES_PER_QUAD]))
-            .collect();
-        assert_eq!(
-            leaves.len(),
-            BUSH_BASE_LEAVES + BRAMBLE_CANES * BUSH_LEAVES_PER_CANE
-        );
-        assert!(
-            leaves
-                .iter()
-                .all(|quad| mesh.cover.normals[*quad * VERTICES_PER_QUAD][1] > 0.5),
-            "every broad leaf must present its upper face to the light"
-        );
-
-        let flower_colours = [
-            palette::linear_rgba(palette::FLOWER_RED),
-            palette::linear_rgba(palette::FLOWER_YELLOW),
-            palette::linear_rgba(palette::FLOWER_BLUE),
-        ];
-        let specks: Vec<usize> = (0..mesh.cover.quad_count())
-            .filter(|quad| flower_colours.contains(&mesh.cover.colors[quad * VERTICES_PER_QUAD]))
-            .collect();
-        assert_eq!(specks.len(), BUSH_SPECKS * 2);
-        for (speck, quads) in specks.chunks_exact(2).enumerate() {
-            let vertices =
-                &mesh.cover.positions[quads[0] * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
-            let low = vertices
-                .iter()
-                .map(|vertex| vertex[1])
-                .fold(f32::INFINITY, f32::min);
-            let bottom: Vec<[f32; 3]> = vertices
-                .iter()
-                .copied()
-                .filter(|vertex| (vertex[1] - low).abs() < 1e-5)
-                .collect();
-            let flower_base = [
-                (bottom[0][0] + bottom[1][0]) * 0.5,
-                low,
-                (bottom[0][2] + bottom[1][2]) * 0.5,
-            ];
-            for axis in 0..3 {
-                assert!(
-                    (flower_base[axis] - tips[speck][axis]).abs() < 1e-5,
-                    "flower {speck} is not on its cane tip: {flower_base:?} vs {:?}",
-                    tips[speck]
-                );
-            }
-        }
-        for quad in specks {
-            let spans = [0, 1, 2].map(|axis| {
-                let (low, high) = quad_extent(&mesh.cover, quad, axis);
-                high - low
-            });
-            assert!(
-                spans
-                    .into_iter()
-                    .all(|span| span <= BUSH_SPECK_HEIGHT + 1e-5),
-                "flower speck quad {quad} grew to {spans:?}"
-            );
-        }
-
-        winding_agrees_with_every_normal(&mesh.cover);
-        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
-
-        // The whole of why `BUSH_INSET` is 2% and not 20%: a bush a player is stopped by
-        // has to be a bush they can see, on every axis.
         for (axis, floor) in [(0, 4.0), (1, 5.0), (2, 6.0)] {
-            let (minimum, maximum) = (0..mesh.cover.quad_count()).fold(
-                (f32::INFINITY, f32::NEG_INFINITY),
-                |(low, high), quad| {
-                    let (quad_low, quad_high) = quad_extent(&mesh.cover, quad, axis);
-                    (low.min(quad_low), high.max(quad_high))
-                },
-            );
+            let (minimum, maximum) = extent(&everything, axis);
             assert!(
                 (minimum - (floor + BUSH_INSET)).abs() < 1e-5
                     && (maximum - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
                 "axis {axis}: the drawn bush spans {minimum}..{maximum}, want the voxel \
                  less the inset"
             );
+        }
+
+        // Five of the six are the low tangle: on the floor inset, and out to all four
+        // horizontal ones.
+        let (base_low, _) = extent(&base_leaves, 1);
+        assert!(
+            (base_low - (5.0 + BUSH_INSET)).abs() < 1e-5,
+            "the floor extremum is not the low leaves' petioles: {base_low}"
+        );
+        for axis in [0, 2] {
+            let (low, high) = extent(&base_leaves, axis);
+            let floor = BUSH_FIXTURE_FLOOR[axis];
+            assert!(
+                (low - (floor + BUSH_INSET)).abs() < 1e-5
+                    && (high - (floor + 1.0 - BUSH_INSET)).abs() < 1e-5,
+                "axis {axis}: the low leaves span {low}..{high} and are supposed to be \
+                 what reaches both walls"
+            );
+        }
+
+        // And the sixth is the crest blades, whose rise lands them on the ceiling.
+        let (_, crest_high) = extent(&crest_leaves, 1);
+        assert!(
+            (crest_high - (5.0 + 1.0 - BUSH_INSET)).abs() < 1e-5,
+            "the ceiling extremum is not a crest leaf: {crest_high}"
+        );
+        let wood = quads_coloured(&mesh, palette::linear_rgba(palette::LOG));
+        let (_, wood_high) = extent(&wood, 1);
+        assert!(
+            wood_high < crest_high - 1e-5,
+            "the wood reached the ceiling instead of the crest leaves: {wood_high}"
+        );
+    }
+
+    #[test]
+    fn every_meadow_bush_leaves_three_separate_feet_and_one_leading_shoot() {
+        // The umbrella frame's arithmetic was `i * TAU / n` from one hub with under a
+        // fifth of a radian of wobble, which cannot break a fourfold symmetry and gave
+        // every cane the same length besides. **The sweep is every plant in the first eight
+        // voxels of each axis**: `plant_seed` is a pure function of them, so this is a
+        // fixed set of 512 bushes and not a sample.
+        let third = std::f32::consts::TAU / BUSH_SHOOTS as f32;
+        let (mut narrowest, mut widest) = (f32::INFINITY, f32::NEG_INFINITY);
+        for x in 0..8 {
+            for y in 0..8 {
+                for z in 0..8 {
+                    let seed = plant_seed(x, y, z);
+                    let yaws = bush_shoot_yaws(seed);
+                    let foot = |yaw: f32| {
+                        [
+                            BUSH_ROOT_SPREAD * yaw.cos(),
+                            0.0,
+                            BUSH_ROOT_SPREAD * yaw.sin(),
+                        ]
+                    };
+                    for first in 0..BUSH_SHOOTS {
+                        for second in first + 1..BUSH_SHOOTS {
+                            let separation = angle_between(yaws[first], yaws[second]);
+                            assert!(
+                                separation >= 2.0 * BUSH_SHOOT_GUARD - 1e-4,
+                                "({x},{y},{z}) shoots {first} and {second} are \
+                                 {separation} apart, closer than the guard allows"
+                            );
+                            narrowest = narrowest.min(separation);
+                            widest = widest.max(separation);
+                            let gap = distance(foot(yaws[first]), foot(yaws[second]));
+                            assert!(
+                                gap >= BUSH_ROOT_SPREAD,
+                                "({x},{y},{z}) feet {first} and {second} are {gap} apart, \
+                                 inside BUSH_ROOT_SPREAD"
+                            );
+                        }
+                    }
+
+                    // Apical dominance, and it is a property of the two vigour bands
+                    // rather than of a lucky seed.
+                    let mut chunk = air(SIZE);
+                    chunk.set(x, y, z, palette::BUSH);
+                    let mesh = super::mesh_chunk(&chunk, &alone()).cover;
+                    let lengths: Vec<f32> = (0..BUSH_SHOOTS)
+                        .map(|shoot| polyline_length(&shoot_joints(&mesh, shoot)))
+                        .collect();
+                    let longest = lengths.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let shortest = lengths.iter().copied().fold(f32::INFINITY, f32::min);
+                    assert!(
+                        longest >= shortest * 1.3,
+                        "({x},{y},{z}) has no leading shoot: {lengths:?}"
+                    );
+                    let leader = bush_leader(seed);
+                    assert!(
+                        (lengths[leader] - longest).abs() < 1e-5,
+                        "({x},{y},{z}) the shoot drawn from the leader's vigour band is \
+                         not the longest: {lengths:?}, leader {leader}"
+                    );
+                }
+            }
+        }
+
+        // **The even partition is a property of the population, and that is the level it
+        // is asserted at.** One bush whose two shoots happen to sit a third of the turn
+        // apart is a coincidence and not the frame this replaces — (1, 0, 1) is such a
+        // bush, and a per-pair "never exactly a third" assertion fails on it while
+        // describing nothing. What the frame could not do is vary.
+        assert!(
+            narrowest < third - 0.3 && widest > third + 0.3,
+            "shoot separations only ran {narrowest}..{widest} around {third}: the turn is \
+             still being partitioned evenly with a wobble on top"
+        );
+
+        // And on the one bush every other test here reads, no two shoots are a third of
+        // the turn apart at all.
+        let fixture = bush_shoot_yaws(fixture_seed());
+        for first in 0..BUSH_SHOOTS {
+            for second in first + 1..BUSH_SHOOTS {
+                assert!(
+                    (angle_between(fixture[first], fixture[second]) - third).abs() > 1e-3,
+                    "the fixture's shoots {first} and {second} are exactly a third of the \
+                     turn apart"
+                );
+            }
         }
     }
 
@@ -4472,7 +4773,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 2048);
+        assert_eq!(mesh.cover.quad_count(), 1792);
     }
 
     #[test]
