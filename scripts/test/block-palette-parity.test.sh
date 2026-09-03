@@ -139,7 +139,13 @@ if server_water != client_water:
     )
 
 # --- the cover family ---------------------------------------------------------------
-cover_fn = re.search(r"func Cover\(b Block\) bool \{\n\treturn ([^\n]+)\n\}", chunk)
+# **The body may be wrapped over several lines and this must not care.** How a Go
+# function body is broken across lines is gofmt's decision, not the author's: this
+# return was one line while Cover named four ids and became two the moment #874 added
+# a fifth and a sixth. An extractor anchored to `[^\n]+` stopped matching at that
+# exact commit, and because it fails closed it said so — which is the only reason the
+# breakage was visible at all rather than silently reporting an empty server family.
+cover_fn = re.search(r"func Cover\(b Block\) bool \{\n\treturn (.+?)\n\}", chunk, re.S)
 if not cover_fn:
     failures.append("could not read the server's Cover — the extractor is broken")
     server_cover = set()
