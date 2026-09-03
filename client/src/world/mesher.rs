@@ -496,19 +496,52 @@ const BUSH_FORK_REACH: f32 = 0.09;
 const BUSH_FORK_RISE: f32 = 0.10;
 const BUSH_FORK_YAW_SPREAD: f32 = 1.2;
 
-/// The meadow bush's leaves, in blocks. Four low ones at the foot carry five of the six
-/// fill extrema; two more dress every shoot, one on its shoulder and one at its crest,
-/// whose outer edge lands on the ceiling.
+/// The meadow bush's leaves, in blocks.
 ///
-/// **Still [`push_radial_blade`], and that is a later half of #835**: every one is a
-/// rectangle tipped up at its far edge, because that is all that primitive can be.
+/// Four low ones at the foot are the dense tangle a bramble genuinely grows there, and they
+/// carry five of the six fill extrema: their petioles sit on the floor inset and their
+/// **widest station** — not their tip — lands on each of the four horizontal insets, which
+/// is the difference between a leaf touching the wall and a needle touching it.
+///
+/// Two more dress every shoot, by phyllotaxis rather than by index parity: each is
+/// [`GOLDEN_ANGLE`] further round its shoot than the last and smaller than it, which is
+/// what stops a pair from reading as a fixed pair of wings. The crest leaf stands up
+/// ([`BUSH_CREST_LEAF_PITCH`]), and on the **leading** shoot it is sized from the ceiling
+/// it has to reach rather than from the table — so the sixth extremum is a widest station
+/// too. [`BUSH_SHOOT_LEAF_LENGTH`] is above the longest that derivation can ask for, which
+/// is what keeps the pair's sizes non-increasing on the leader as well.
 const BUSH_BASE_LEAVES: usize = 4;
 const BUSH_LEAVES_PER_SHOOT: usize = 2;
-const BUSH_BASE_LEAF_HALF_WIDTH: f32 = 0.055;
-const BUSH_BASE_LEAF_RISE: f32 = 0.12;
-const BUSH_SHOOT_LEAF_OUTER: f32 = 0.14;
-const BUSH_SHOOT_LEAF_HALF_WIDTH: f32 = 0.045;
-const BUSH_SHOOT_LEAF_RISE: f32 = 0.07;
+const BUSH_BASE_LEAF_PITCH: f32 = 0.22;
+const BUSH_BASE_LEAF_HALF_WIDTH: f32 = 0.075;
+const BUSH_SHOOT_LEAF_LENGTH: f32 = 0.24;
+const BUSH_SHOOT_LEAF_HALF_WIDTH: f32 = 0.05;
+const BUSH_SHOOT_LEAF_PITCH: f32 = 0.35;
+const BUSH_CREST_LEAF_PITCH: f32 = std::f32::consts::FRAC_PI_2;
+const BUSH_LEAF_SHRINK: f32 = 0.72;
+
+/// The angle successive leaves on one shoot are apart around it. `137.5` degrees.
+///
+/// The one number here that is not a tuning dial: it is the divergence real shoots put
+/// between successive leaves, and the reason a spiral of them never puts one leaf directly
+/// above another however many there are.
+const GOLDEN_ANGLE: f32 = 2.399_963_2;
+
+/// One leaf's midrib, as three profiles read at [`LEAF_SEGMENTS`] + 1 stations.
+///
+/// **A leaf is not a rectangle and this is where that is decided.** The width profile runs
+/// narrow at the petiole, widest at about a third, and closes to a point, so the last
+/// station is zero and the outermost quad is a triangle. The rib's two profiles make the
+/// blade a surface rather than a plate: `ALONG` reaches its furthest at the widest station
+/// and then *recurves*, while `RISE` lifts and then droops, so the three quads carry three
+/// different normals and the curled half presents its underside to the light. That is the
+/// whole point of the lit double-sided cover material: one leaf gets several tones of one
+/// green for free.
+const LEAF_SEGMENTS: usize = 3;
+const LEAF_STATIONS: usize = LEAF_SEGMENTS + 1;
+const LEAF_WIDTH_PROFILE: [f32; LEAF_STATIONS] = [0.30, 1.00, 0.62, 0.00];
+const LEAF_RIB_ALONG: [f32; LEAF_STATIONS] = [0.00, 1.00, 0.97, 0.82];
+const LEAF_RIB_RISE: [f32; LEAF_STATIONS] = [0.00, 0.35, 0.30, 0.05];
 
 /// Every dial index a meadow bush draws, allocated in one place.
 ///
@@ -564,14 +597,16 @@ pub(super) const QUADS_PER_COVER: usize = 4 + COVER_PETALS + 2;
 /// foot and the two on every shoot, two ribbons for each of a shoot's segments and each of
 /// its fork's, and two crossed blades per flower speck.
 ///
-/// **46**, where three shoots alone cost 34 and the umbrella frame cost 42. The twelve the
-/// shoots gained are their forks — the second branch order — and the taper costs nothing,
-/// because a trapezoid has the rectangle's four corners. #835's last half raises it again
-/// when a leaf stops being one quad, against a ceiling of 96. Cover is per voxel and
-/// unmerged, so every quad here is paid once per plant in the world.
+/// **66**, where the umbrella frame cost 42, three shoots alone cost 34 and their forks
+/// took it to 46. The twenty this half adds are the leaves: ten of them at
+/// [`LEAF_SEGMENTS`] quads each rather than one, because a leaf is now a pointed surface
+/// and not a card. That is the whole of #835's cost, against a ceiling of 96 — cover is per
+/// voxel and unmerged, so every quad is paid once per plant in the world, which is why the
+/// issue says to lower the leaf count before raising the ceiling.
 #[cfg(test)]
-pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES
-    + BUSH_SHOOTS * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + BUSH_LEAVES_PER_SHOOT)
+pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES * LEAF_SEGMENTS
+    + BUSH_SHOOTS
+        * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + BUSH_LEAVES_PER_SHOOT * LEAF_SEGMENTS)
     + BUSH_SPECKS * 2;
 
 /// How many quads one desert bramble contributes: the shared four arches, two crossed
@@ -1374,6 +1409,7 @@ struct Shoot {
     crest: [f32; 3],
     tip: [f32; 3],
     yaw: f32,
+    leader: bool,
 }
 
 /// Which of a bush's shoots leads. One dial, read in one place, so the shoot that draws
@@ -1504,19 +1540,22 @@ fn push_shoot(
         crest,
         tip,
         yaw,
+        leader,
     }
 }
 
 /// One meadow bush, filling the voxel whose minimum corner is `floor`.
 ///
-/// Three woody shoots of unequal length make the silhouette, broad leaves follow them,
-/// and three shoot tips flower. Nothing in the skeleton is `n` of anything at `TAU / n`
-/// any more: the shoots leave three separate feet in three sectors of unequal width, and
-/// one of them leads.
+/// Three forked woody shoots of unequal length make the silhouette, ten pointed leaves
+/// dress them, and three shoot tips flower. Nothing here is `n` of anything at `TAU / n`
+/// any more: the shoots leave three separate feet in three sectors of unequal width, one of
+/// them leads, and the leaves on each follow the golden angle rather than an index parity.
 ///
 /// **The shape still has to fill the cube**: `world.Bush` is `Solid` on the server, so a
-/// body is stopped by all of it. The four low leaves carry the floor and the four walls,
-/// and every shoot's crest leaf reaches the ceiling. **Those are named parts on purpose**:
+/// body is stopped by all of it. Five of the six extrema are the four low leaves — their
+/// petioles on the floor inset, their widest stations on the four horizontal insets — and
+/// the sixth is the leading shoot's crest leaf, sized from the ceiling it has to reach.
+/// **Those are named parts on purpose**:
 /// the test asserts which quads carry each of the six extrema, because the next person to
 /// tune a constant is the one who would otherwise reintroduce the invisible wall.
 fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
@@ -1532,43 +1571,48 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 
     // The low tangle. Cardinal yaws exactly, because these four are the fill guarantee on
     // the four horizontal walls and a jittered yaw would land the extremum short of it by
-    // its own cosine.
-    let centre = [floor[0] + 0.5, floor[1] + BUSH_INSET, floor[2] + 0.5];
+    // its own cosine. The length is derived rather than tuned: it is whatever puts the
+    // widest station of the rib on the inset at this pitch.
+    let petiole = [floor[0] + 0.5, floor[1] + BUSH_INSET, floor[2] + 0.5];
+    let base_length = (0.5 - BUSH_INSET) / leaf_reach_factor(BUSH_BASE_LEAF_PITCH);
     for direction in 0..BUSH_BASE_LEAVES {
-        push_radial_blade(
+        push_leaf(
             mesh,
-            centre,
+            petiole,
             direction as f32 * std::f32::consts::FRAC_PI_2,
-            0.5 - BUSH_INSET,
+            BUSH_BASE_LEAF_PITCH,
+            base_length,
             BUSH_BASE_LEAF_HALF_WIDTH,
-            BUSH_BASE_LEAF_RISE,
             foliage,
         );
     }
 
-    // Two leaves follow every shoot. The shoulder one lifts by a fixed amount; the crest
-    // one's outer edge lands exactly at the fill guarantee below the ceiling. **Both are
-    // rectangles placed by an index parity**, unchanged on purpose: this change is the
-    // skeleton, and a later half of #835 replaces them with `push_leaf`.
-    for (index, shoot) in shoots.iter().enumerate() {
-        let side = if index % 2 == 0 { 1.0 } else { -1.0 };
-        let leaf_yaw = shoot.yaw + side * std::f32::consts::FRAC_PI_2 * 0.72;
-        let leaves: [([f32; 3], f32, f32); BUSH_LEAVES_PER_SHOOT] = [
-            (shoot.shoulder, leaf_yaw, BUSH_SHOOT_LEAF_RISE),
-            (
-                shoot.crest,
-                leaf_yaw + std::f32::consts::PI,
-                floor[1] + 1.0 - BUSH_INSET - shoot.crest[1],
-            ),
-        ];
-        for (attach, yaw, rise) in leaves {
-            push_radial_blade(
+    // Two leaves per shoot, each a golden angle further round it than the last and smaller
+    // than it. The crest one stands up; on the leader it is grown to the ceiling.
+    let ceiling = floor[1] + 1.0 - BUSH_INSET;
+    for shoot in &shoots {
+        for index in 0..BUSH_LEAVES_PER_SHOOT {
+            let (attach, pitch, length) = if index == 0 {
+                (
+                    shoot.shoulder,
+                    BUSH_SHOOT_LEAF_PITCH,
+                    BUSH_SHOOT_LEAF_LENGTH,
+                )
+            } else {
+                let length = if shoot.leader {
+                    (ceiling - shoot.crest[1]) / leaf_lift_factor(BUSH_CREST_LEAF_PITCH)
+                } else {
+                    BUSH_SHOOT_LEAF_LENGTH * BUSH_LEAF_SHRINK
+                };
+                (shoot.crest, BUSH_CREST_LEAF_PITCH, length)
+            };
+            push_leaf(
                 mesh,
                 attach,
-                yaw,
-                BUSH_SHOOT_LEAF_OUTER,
-                BUSH_SHOOT_LEAF_HALF_WIDTH,
-                rise,
+                shoot.yaw + (index + 1) as f32 * GOLDEN_ANGLE,
+                pitch,
+                length,
+                BUSH_SHOOT_LEAF_HALF_WIDTH * BUSH_LEAF_SHRINK.powi(index as i32),
                 leaf,
             );
         }
@@ -1847,6 +1891,97 @@ fn push_twig(
     color: [f32; 4],
 ) {
     push_tapered_twig(mesh, start, end, half_width, half_width, color);
+}
+
+/// The furthest a leaf of unit length reaches from its petiole, at `pitch`.
+///
+/// The maximum over the rib's stations and not the last one, because the profile recurves:
+/// the outermost station is the **widest** one rather than the tip. A caller that has to
+/// land a leaf's outer edge exactly on a wall divides by this, which is why no leaf length
+/// in this file is a tuned literal.
+fn leaf_reach_factor(pitch: f32) -> f32 {
+    let (sin, cos) = pitch.sin_cos();
+    LEAF_RIB_ALONG
+        .into_iter()
+        .zip(LEAF_RIB_RISE)
+        .map(|(along, rise)| along * cos - rise * sin)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// The highest a leaf of unit length lifts above its petiole, at `pitch`, for the same
+/// reason and read by the one leaf that is grown to the voxel's ceiling.
+fn leaf_lift_factor(pitch: f32) -> f32 {
+    let (sin, cos) = pitch.sin_cos();
+    LEAF_RIB_ALONG
+        .into_iter()
+        .zip(LEAF_RIB_RISE)
+        .map(|(along, rise)| along * sin + rise * cos)
+        .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// One leaf: a midrib of [`LEAF_SEGMENTS`] quads leaving `attach` along `yaw`, tilted out
+/// of the horizontal by `pitch`, with a width that opens and then closes to a point.
+///
+/// **This is the primitive that replaces a rectangle with a leaf.** [`push_radial_blade`]
+/// takes one half-width and uses it at both ends, so what it draws is a card however it is
+/// aimed; here the width is a profile and the rib is two more, so the blade widens,
+/// recurves, droops and closes. The three quads therefore carry three different normals,
+/// and on the lit double-sided cover material that is what turns a cluster of leaves into a
+/// volume instead of one flat tone.
+///
+/// The width runs horizontally across the rib at every pitch, deliberately: it keeps a
+/// leaf's height a function of the rib alone, which is what lets [`leaf_lift_factor`]
+/// answer exactly for the one leaf that has to touch the ceiling.
+///
+/// The corner order is `near(-w), near(+w), far(+w), far(-w)`, the order
+/// [`push_radial_blade`] documents as load-bearing, and the normal is derived from the
+/// corners rather than declared beside them so the two cannot disagree. The last station is
+/// zero wide, so the outermost quad is a triangle with two coincident corners — that is the
+/// point, and [`face_normal`] reads corners 0, 1 and 3, none of which are the pair.
+fn push_leaf(
+    mesh: &mut SurfaceMesh,
+    attach: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    length: f32,
+    half_width: f32,
+    color: [f32; 4],
+) {
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
+    let (sin_pitch, cos_pitch) = pitch.sin_cos();
+    let across = [-sin_yaw, 0.0, cos_yaw];
+    let station = |index: usize| {
+        let along = LEAF_RIB_ALONG[index] * length;
+        let rise = LEAF_RIB_RISE[index] * length;
+        let out = along * cos_pitch - rise * sin_pitch;
+        (
+            [
+                attach[0] + cos_yaw * out,
+                attach[1] + along * sin_pitch + rise * cos_pitch,
+                attach[2] + sin_yaw * out,
+            ],
+            half_width * LEAF_WIDTH_PROFILE[index],
+        )
+    };
+    let edge = |point: [f32; 3], half: f32, sign: f32| {
+        [
+            point[0] + across[0] * half * sign,
+            point[1],
+            point[2] + across[2] * half * sign,
+        ]
+    };
+
+    for segment in 0..LEAF_SEGMENTS {
+        let (near, near_half) = station(segment);
+        let (far, far_half) = station(segment + 1);
+        let corners = [
+            edge(near, near_half, -1.0),
+            edge(near, near_half, 1.0),
+            edge(far, far_half, 1.0),
+            edge(far, far_half, -1.0),
+        ];
+        mesh.push_quad(corners, face_normal(corners), color, None);
+    }
 }
 
 /// Fills both masks with the faces on the plane at `axis = plane`.
@@ -2543,7 +2678,7 @@ fn normal(axis: usize, positive: bool) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -4357,6 +4492,17 @@ mod tests {
         ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2) + (to[2] - from[2]).powi(2)).sqrt()
     }
 
+    /// The yaw a leaf was pushed at, read back from the direction of its petiole edge.
+    ///
+    /// `push_leaf` lays every station's width along `(-sin yaw, 0, cos yaw)`, so corner 1
+    /// minus corner 0 is that vector scaled — which makes the phyllotaxis assertion a
+    /// measurement of the drawn geometry rather than a repetition of the source.
+    fn leaf_yaw(mesh: &SurfaceMesh, quad: usize) -> f32 {
+        let corners = &mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
+        let across = [corners[1][0] - corners[0][0], corners[1][2] - corners[0][2]];
+        (-across[0]).atan2(across[1])
+    }
+
     /// The shortest angle between two yaws, in `[0, PI]`.
     fn angle_between(first: f32, second: f32) -> f32 {
         let mut difference = (first - second).abs() % std::f32::consts::TAU;
@@ -4411,7 +4557,7 @@ mod tests {
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_BUSH);
         // What `client/AGENTS.md`'s quad budget is written down as, and #835's ceiling.
-        assert_eq!(QUADS_PER_BUSH, 46);
+        assert_eq!(QUADS_PER_BUSH, 66);
         const { assert!(QUADS_PER_BUSH <= 96) };
 
         assert_eq!(
@@ -4419,11 +4565,11 @@ mod tests {
             BTreeMap::from([
                 (
                     palette::linear_rgba(palette::BUSH).map(f32::to_bits),
-                    BUSH_BASE_LEAVES
+                    BUSH_BASE_LEAVES * LEAF_SEGMENTS
                 ),
                 (
                     tone(palette::BUSH_CROWN_LINEAR),
-                    BUSH_SHOOTS * BUSH_LEAVES_PER_SHOOT
+                    BUSH_SHOOTS * BUSH_LEAVES_PER_SHOOT * LEAF_SEGMENTS
                 ),
                 (
                     palette::linear_rgba(palette::LOG).map(f32::to_bits),
@@ -4466,14 +4612,11 @@ mod tests {
         let mesh = one_bush();
         let base_leaves = quads_coloured(&mesh, palette::linear_rgba(palette::BUSH));
         let shoot_leaves = quads_coloured(&mesh, opaque(palette::BUSH_CROWN_LINEAR));
-        // Two leaves per shoot in order, so every second one is a crest blade.
-        let crest_leaves: Vec<usize> = shoot_leaves
-            .iter()
-            .copied()
-            .skip(1)
-            .step_by(BUSH_LEAVES_PER_SHOOT)
-            .collect();
-        assert_eq!(crest_leaves.len(), BUSH_SHOOTS);
+        // Two leaves per shoot in order, so the leader's crest leaf is the second of its
+        // pair: this is the one part sized from the ceiling rather than from the table.
+        let leader = bush_leader(fixture_seed());
+        let crest_leaf =
+            &shoot_leaves[(leader * BUSH_LEAVES_PER_SHOOT + 1) * LEAF_SEGMENTS..][..LEAF_SEGMENTS];
 
         let extent = |quads: &[usize], axis: usize| {
             quads
@@ -4513,17 +4656,58 @@ mod tests {
             );
         }
 
-        // And the sixth is the crest blades, whose rise lands them on the ceiling.
-        let (_, crest_high) = extent(&crest_leaves, 1);
+        // And the sixth is the leading shoot's crest leaf, which is the reason it is
+        // grown from the ceiling instead of the size table.
+        let (_, crest_high) = extent(crest_leaf, 1);
         assert!(
             (crest_high - (5.0 + 1.0 - BUSH_INSET)).abs() < 1e-5,
-            "the ceiling extremum is not a crest leaf: {crest_high}"
+            "the ceiling extremum is not the leader's crest leaf: {crest_high}"
         );
-        let wood = quads_coloured(&mesh, palette::linear_rgba(palette::LOG));
-        let (_, wood_high) = extent(&wood, 1);
+        let others: Vec<usize> = shoot_leaves
+            .iter()
+            .copied()
+            .filter(|quad| !crest_leaf.contains(quad))
+            .collect();
+        let (_, others_high) = extent(&others, 1);
         assert!(
-            wood_high < crest_high - 1e-5,
-            "the wood reached the ceiling instead of the crest leaves: {wood_high}"
+            others_high < crest_high - 1e-5,
+            "another leaf reached the ceiling too: {others_high} vs {crest_high}"
+        );
+
+        // **Not a needle at the wall.** The vertices carrying a horizontal extremum are the
+        // two corners of the rib's widest station, a full blade apart — which is the
+        // difference between a leaf touching the wall and a point touching it. The width
+        // runs along the leaf's own `across`, which is its yaw and not an axis, so this is
+        // the distance between the furthest two corners on the plane rather than their
+        // spread down one column of the array.
+        let widest = |half_width: f32| 2.0 * half_width * LEAF_WIDTH_PROFILE[1];
+        let spread_at = |quads: &[usize], axis: usize, plane: f32| {
+            let touching: Vec<[f32; 3]> = quads
+                .iter()
+                .flat_map(|quad| {
+                    mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD].to_vec()
+                })
+                .filter(|corner| (corner[axis] - plane).abs() < 1e-5)
+                .collect();
+            assert!(touching.len() >= 2, "nothing touches the plane at {plane}");
+            touching
+                .iter()
+                .flat_map(|first| touching.iter().map(|second| distance(*first, *second)))
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        assert!(
+            (spread_at(&base_leaves, 0, 4.0 + 1.0 - BUSH_INSET)
+                - widest(BUSH_BASE_LEAF_HALF_WIDTH))
+            .abs()
+                < 1e-5,
+            "the wall is carried by something other than a low leaf's widest station"
+        );
+        assert!(
+            (spread_at(crest_leaf, 1, 5.0 + 1.0 - BUSH_INSET)
+                - widest(BUSH_SHOOT_LEAF_HALF_WIDTH * BUSH_LEAF_SHRINK))
+            .abs()
+                < 1e-5,
+            "the ceiling is carried by something other than the crest leaf's widest station"
         );
     }
 
@@ -4690,6 +4874,114 @@ mod tests {
                 child < parent - 1e-6,
                 "shoot {shoot}'s child is not shorter: {child} vs {parent}"
             );
+        }
+    }
+
+    #[test]
+    fn a_leaf_widens_to_a_point_and_carries_more_than_one_normal() {
+        // What replaces `push_radial_blade` for foliage. Its four corners are
+        // `inner(-w), inner(+w), outer(+w), outer(-w)` — the same half-width at both ends
+        // for every caller — so a leaf drawn with it is a rectangle whatever numbers it is
+        // passed. This is the assertion that a leaf is no longer one.
+        let mut mesh = SurfaceMesh::default();
+        push_leaf(
+            &mut mesh,
+            [0.5, 0.0, 0.5],
+            0.7,
+            BUSH_SHOOT_LEAF_PITCH,
+            0.30,
+            0.06,
+            opaque(palette::BUSH_CROWN_LINEAR),
+        );
+
+        const { assert!(LEAF_SEGMENTS >= 3) };
+        assert_eq!(mesh.quad_count(), LEAF_SEGMENTS);
+
+        let mut widths = vec![drawn_half_width(&mesh, 0, false)];
+        for quad in 0..LEAF_SEGMENTS {
+            widths.push(drawn_half_width(&mesh, quad, true));
+        }
+        assert!(
+            widths[0] < widths[1] - 1e-6,
+            "a leaf must open from its petiole: {widths:?}"
+        );
+        for pair in widths[1..].windows(2) {
+            assert!(
+                pair[1] < pair[0] - 1e-6,
+                "a leaf must close after its widest station: {widths:?}"
+            );
+        }
+        assert_eq!(
+            *widths.last().expect("a leaf has stations"),
+            0.0,
+            "a leaf must end in a point, not an edge"
+        );
+
+        let normals: BTreeSet<[u32; 3]> = (0..mesh.quad_count())
+            .map(|quad| mesh.normals[quad * VERTICES_PER_QUAD].map(f32::to_bits))
+            .collect();
+        assert!(
+            normals.len() > 1,
+            "every quad of the leaf shares one normal, so the midrib is flat"
+        );
+        winding_agrees_with_every_normal(&mesh);
+    }
+
+    #[test]
+    fn a_meadow_bush_tilts_its_leaves_out_of_the_horizontal_fan() {
+        // The lever this half of #835 is really buying: the cover material is lit and
+        // double-sided, so a leaf whose quads face different ways gets different tones of
+        // one green for free. Every leaf normal used to point nearly straight up, which is
+        // why the plant shaded as one flat tone whatever its silhouette was.
+        let mesh = one_bush();
+        let leaves: Vec<usize> = quads_coloured(&mesh, palette::linear_rgba(palette::BUSH))
+            .into_iter()
+            .chain(quads_coloured(&mesh, opaque(palette::BUSH_CROWN_LINEAR)))
+            .collect();
+        let tilted: BTreeSet<[u32; 3]> = leaves
+            .iter()
+            .map(|quad| mesh.normals[quad * VERTICES_PER_QUAD])
+            .filter(|normal| normal[1].abs() < 0.8)
+            .map(|normal| normal.map(f32::to_bits))
+            .collect();
+        assert!(
+            tilted.len() >= 3,
+            "only {} distinct steeply-tilted leaf normals; the foliage is still a \
+             horizontal fan",
+            tilted.len()
+        );
+    }
+
+    #[test]
+    fn leaves_follow_the_golden_angle_round_a_shoot_and_shrink_toward_its_tip() {
+        // Phyllotaxis rather than index parity, which is what the pair of leaves per cane
+        // was: a fixed `+-0.72 * FRAC_PI_2` from the cane's own yaw, so every cane wore the
+        // same two wings.
+        let mesh = one_bush();
+        let shoot_leaves = quads_coloured(&mesh, opaque(palette::BUSH_CROWN_LINEAR));
+        for shoot in 0..BUSH_SHOOTS {
+            let mut sizes = Vec::new();
+            let mut yaws = Vec::new();
+            for leaf in 0..BUSH_LEAVES_PER_SHOOT {
+                let first = shoot_leaves[(shoot * BUSH_LEAVES_PER_SHOOT + leaf) * LEAF_SEGMENTS];
+                sizes.push(drawn_half_width(&mesh, first, true));
+                yaws.push(leaf_yaw(&mesh, first));
+            }
+            for pair in sizes.windows(2) {
+                assert!(
+                    pair[1] <= pair[0] + 1e-6,
+                    "shoot {shoot}'s leaves grow toward its tip: {sizes:?}"
+                );
+            }
+            for pair in yaws.windows(2) {
+                let turn = angle_between(pair[0], pair[1]);
+                let golden = angle_between(GOLDEN_ANGLE, 0.0);
+                assert!(
+                    (turn - golden).abs() < 1e-4,
+                    "shoot {shoot}'s successive leaves are {turn} apart, not the golden \
+                     angle {golden}"
+                );
+            }
         }
     }
 
@@ -4926,7 +5218,7 @@ mod tests {
             mesh.cover.quad_count(),
             flowers * QUADS_PER_COVER + bushes * QUADS_PER_BUSH
         );
-        assert_eq!(mesh.cover.quad_count(), 2176);
+        assert_eq!(mesh.cover.quad_count(), 2816);
     }
 
     #[test]
