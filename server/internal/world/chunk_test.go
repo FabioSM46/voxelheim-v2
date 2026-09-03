@@ -184,23 +184,27 @@ func TestTheSettlementBlocksAreOrdinaryGround(t *testing.T) {
 	}
 }
 
+// DesertShrub carried Solid here until #874 moved it to [Cover]: a body no longer
+// stops on it, which is asserted per row rather than assumed of the whole table now
+// that palm wood and desert scrub disagree about it.
 func TestTheDesertPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		block     Block
 		id        Block
+		solid     bool
 		placeable bool
 	}{
-		{PalmLog, 17, true},
-		{PalmFronds, 18, true},
-		{DesertShrub, 19, false},
+		{PalmLog, 17, true, true},
+		{PalmFronds, 18, true, true},
+		{DesertShrub, 19, false, false},
 	} {
 		if tc.block != tc.id {
 			t.Errorf("desert plant block id = %d, want appended id %d", tc.block, tc.id)
 		}
-		if !Solid(tc.block) {
-			t.Errorf("Solid(%d) = false, want true", tc.block)
+		if got := Solid(tc.block); got != tc.solid {
+			t.Errorf("Solid(%d) = %t, want %t", tc.block, got, tc.solid)
 		}
 		if Fluid(tc.block) {
 			t.Errorf("Fluid(%d) = true, want false", tc.block)
@@ -211,22 +215,26 @@ func TestTheDesertPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T
 	}
 }
 
+// Bush carried Solid here until #874 moved it to [Cover]: a body no longer stops on
+// it, which is asserted per row rather than assumed of the whole table now that
+// broad leaves and the meadow bush disagree about it.
 func TestThePlainsPlantBlocksCarryAppendedIDsAndFailClosedPlacement(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
 		block     Block
 		id        Block
+		solid     bool
 		placeable bool
 	}{
-		{BroadLeaves, 20, true},
-		{Bush, 21, false},
+		{BroadLeaves, 20, true, true},
+		{Bush, 21, false, false},
 	} {
 		if tc.block != tc.id {
 			t.Errorf("plains plant block id = %d, want appended id %d", tc.block, tc.id)
 		}
-		if !Solid(tc.block) {
-			t.Errorf("Solid(%d) = false, want true", tc.block)
+		if got := Solid(tc.block); got != tc.solid {
+			t.Errorf("Solid(%d) = %t, want %t", tc.block, got, tc.solid)
 		}
 		if Fluid(tc.block) {
 			t.Errorf("Fluid(%d) = true, want false", tc.block)
@@ -456,32 +464,50 @@ func TestChunkOfAgreesWithContainingChunk(t *testing.T) {
 	}
 }
 
-// The three flowers, and the second id class that ends the "not air means solid"
-// equivalence water started. **Cover is checked exhaustively over the palette rather
-// than over three ids**: what is worth pinning is that nothing *else* is cover, since
-// a fourth block in that class would make a wall a player walks through.
+// The three flowers, the winter bramble, the meadow bush and the desert shrub — the
+// second id class that ends the "not air means solid" equivalence water started.
+// **Cover is checked exhaustively over the palette rather than over these six ids**:
+// what is worth pinning is that nothing *else* is cover, since a seventh block in
+// that class would make a wall a player walks through, and that trees, canopies,
+// logs and palm fronds are not among them: they keep their collision.
 func TestTheGroundCoverBlocksAreCoverAndNotGround(t *testing.T) {
 	t.Parallel()
 
-	coverBlocks := map[Block]Block{FlowerRed: 33, FlowerYellow: 34, FlowerBlue: 35, WinterBramble: 54}
+	coverBlocks := map[Block]Block{
+		FlowerRed:     33,
+		FlowerYellow:  34,
+		FlowerBlue:    35,
+		WinterBramble: 54,
+		Bush:          21,
+		DesertShrub:   19,
+	}
 	for block, id := range coverBlocks {
 		if block != id {
-			t.Errorf("flower block id = %d, want appended id %d", block, id)
+			t.Errorf("cover block id = %d, want appended id %d", block, id)
 		}
 		if !Cover(block) {
 			t.Errorf("Cover(%d) = false, want true", block)
 		}
 		if Solid(block) {
-			t.Errorf("Solid(%d) = true, want false: a body walks through a flower", block)
+			t.Errorf("Solid(%d) = true, want false: a body walks through cover", block)
 		}
 		if Fluid(block) {
-			t.Errorf("Fluid(%d) = true, want false: a flower is not something to swim in", block)
+			t.Errorf("Fluid(%d) = true, want false: cover is not something to swim in", block)
 		}
 		if IsWater(block) {
 			t.Errorf("IsWater(%d) = true, want false", block)
 		}
 		if Placeable(block) {
-			t.Errorf("Placeable(%d) = true, want false: there is no flower item to hold", block)
+			t.Errorf("Placeable(%d) = true, want false: there is no item to hold for cover", block)
+		}
+	}
+
+	for _, tree := range []Block{Leaves, BroadLeaves, Log, PalmLog, PalmFronds} {
+		if Cover(tree) {
+			t.Errorf("Cover(%d) = true, want false: trees keep their collision", tree)
+		}
+		if !Solid(tree) {
+			t.Errorf("Solid(%d) = false, want true: trees keep their collision", tree)
 		}
 	}
 

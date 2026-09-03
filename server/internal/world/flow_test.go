@@ -293,6 +293,28 @@ func TestWaterBesideGroundCoverKeepsItsLevel(t *testing.T) {
 	}
 }
 
+// #874 adds Bush and DesertShrub to [Cover]. NextWater reads the predicate rather
+// than an id list, so nothing here needed to learn about either one — this is the
+// direct check the issue's Test Strategy names, rather than an inference from the
+// flower and winter bramble cases above.
+func TestNextWaterTreatsABushOrADesertShrubAsGroundCoverToo(t *testing.T) {
+	t.Parallel()
+
+	grounded := [4]Block{Stone, Stone, Stone, Stone}
+	for _, block := range []Block{Bush, DesertShrub} {
+		if got := NextWater(block, Air, Grass, [4]Block{Air, Air, Air, Air}, grounded); got != block {
+			t.Errorf("NextWater(%d, ...) = %d, want it left alone like any other cover", block, got)
+		}
+		want := NextWater(Water, Air, Grass, [4]Block{Air, Air, Air, Air}, grounded)
+		if got := NextWater(Water, Air, Grass, [4]Block{block, Air, Air, Air}, grounded); got != want {
+			t.Errorf("a source beside %d became %d, want %d as with air", block, got, want)
+		}
+		if got := WaterLevel(block); got != 0 {
+			t.Errorf("WaterLevel(%d) = %d, want 0: cover carries no water level", block, got)
+		}
+	}
+}
+
 // A pool on a ledge, which before #653 was a fixed point of [NextWater]: it settled in
 // one step with zero changes, and no water ever left it. The three things asserted here
 // are the three halves of "water either rests in a container or falls" — it spills, the

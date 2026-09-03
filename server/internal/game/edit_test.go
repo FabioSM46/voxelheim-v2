@@ -465,17 +465,21 @@ func TestPlacingIntoAFlowerReplacesIt(t *testing.T) {
 		t.Errorf("Stone count after placing = %d, want %d: a placement into a flower spends one block like any other", got, before-1)
 	}
 
-	// A new cover id follows the same class rule, not a second id-specific rule.
-	h, chunks = editWorld(t)
-	player, _ = h.join(2, [3]float32{0.5, 200, 0.5})
-	giveBlock(t, h, player, chunks, world.Stone)
-	if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), world.WinterBramble, nil); err != nil {
-		t.Fatalf("grow the target winter bramble: %v", err)
-	}
-	before = countOf(player.InventoryState(), game.ItemStone)
-	result, err = player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
-	if err != nil || result.Inventory == nil || countOf(*result.Inventory, game.ItemStone) != before-1 {
-		t.Fatalf("replace the winter bramble: result=%+v err=%v", result, err)
+	// Every other cover id follows the same class rule, not a second id-specific one —
+	// the winter bramble already did, and #874 adds the meadow bush and the desert
+	// shrub to [world.Cover] beside it.
+	for i, cover := range []world.Block{world.WinterBramble, world.Bush, world.DesertShrub} {
+		h, chunks = editWorld(t)
+		player, _ = h.join(uint64(i+2), [3]float32{0.5, 200, 0.5})
+		giveBlock(t, h, player, chunks, world.Stone)
+		if err := chunks.Apply(context.Background(), int64(target[0]), int64(target[1]), int64(target[2]), cover, nil); err != nil {
+			t.Fatalf("grow the target block %d: %v", cover, err)
+		}
+		before = countOf(player.InventoryState(), game.ItemStone)
+		result, err = player.Edit(context.Background(), placeAt(t, player, target, world.Stone))
+		if err != nil || result.Inventory == nil || countOf(*result.Inventory, game.ItemStone) != before-1 {
+			t.Fatalf("replace block %d: result=%+v err=%v", cover, result, err)
+		}
 	}
 }
 
