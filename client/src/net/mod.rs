@@ -902,6 +902,42 @@ impl ChatInbox {
     }
 }
 
+/// How many times an established session has ended for a reason the player was not told,
+/// since the UI last consumed the count.
+///
+/// **Carries no detail, deliberately.** The full error text belongs to tracing —
+/// [`drain_session_events`] already logs it with `warn!`, per [`SessionEvent::Ended`] — and
+/// what reaches the player is one fixed, sanitized sentence naming nothing about a socket,
+/// a protocol byte or a file. A counter rather than a `bool` is what keeps a burst from
+/// being silently collapsed into one line the way a flag would, even though one connection
+/// can end at most once.
+///
+/// Only pushed for an ending that interrupted a session the player was actually inside
+/// (`Connected` or `Leaving`) and that carried a reason (`Ended(Some(_))`): the ordinary,
+/// reasonless close that follows a completed leave is not a failure, and a close while a
+/// character was still being chosen has its own screen and its own sentence — see
+/// `peer_closed` in `session.rs`.
+#[derive(Resource, Debug, Default)]
+pub struct SessionEndingInbox(u32);
+
+impl SessionEndingInbox {
+    /// Takes every queued notice, leaving the count at zero.
+    pub fn take(&mut self) -> u32 {
+        std::mem::take(&mut self.0)
+    }
+
+    fn push(&mut self) {
+        self.0 = self.0.saturating_add(1);
+    }
+
+    /// Queues one notice as `drain_session_events` would. Test-only, so the UI consumer
+    /// can be driven without a socket or a real established-and-broken session.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self) {
+        self.push();
+    }
+}
+
 /// The ECS end of the frames this client sends.
 ///
 /// Present exactly while there is a net thread to send to: [`drain_session_events`]
@@ -1222,6 +1258,7 @@ impl Plugin for NetPlugin {
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
             .init_resource::<ChatInbox>()
+            .init_resource::<SessionEndingInbox>()
             .insert_resource(settings.clone())
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
@@ -1820,6 +1857,7 @@ struct Inboxes<'w> {
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
+    endings: ResMut<'w, SessionEndingInbox>,
 }
 
 /// Resources that exist only while an established session is suspended for leave.
@@ -2182,9 +2220,23 @@ fn drain_session_events(
             }
 
             Ok(SessionEvent::Ended(detail)) => {
+                // A game the player was actually inside, ending for a reason beyond an
+                // ordinary leave. The ordinary leave carries no detail (`Ended(None)`,
+                // see `peer_closed`), so only the detailed case is worth a chat line —
+                // and only when there was a game on screen to interrupt: a character
+                // still being chosen has no established session and its own screen
+                // already says "that session ended".
+                let interrupted_a_game = detail.is_some()
+                    && matches!(
+                        *state,
+                        ConnectionState::Connected | ConnectionState::Leaving { .. }
+                    );
                 match detail {
                     Some(detail) => warn!("session ended: {detail}"),
                     None => info!("the server closed the connection"),
+                }
+                if interrupted_a_game {
+                    inboxes.endings.push();
                 }
                 if !reopening_character {
                     *state = ConnectionState::Disconnected;
@@ -4256,6 +4308,62 @@ mod tests {
         );
     }
 
+    /// A game the player was inside, ending for a reason: one notice for the UI to turn
+    /// into a chat line, on top of the `warn!` this already reached.
+    #[test]
+    fn an_established_session_that_ends_with_a_reason_queues_one_ending_notice() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+
+        events
+            .send(SessionEvent::Ended(Some("the peer went away".to_owned())))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<SessionEndingInbox>().take(),
+            1,
+            "an established session ending with a reason must queue exactly one notice"
+        );
+    }
+
+    /// The ordinary, reasonless close that follows a completed leave is not a failure:
+    /// nothing is queued for chat, only for the log.
+    #[test]
+    fn an_established_session_that_ends_without_a_reason_queues_no_notice() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+
+        events
+            .send(SessionEvent::Ended(None))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<SessionEndingInbox>().take(),
+            0,
+            "an ordinary close must not reach chat"
+        );
+    }
+
+    /// A close while a character is still being chosen has its own screen already; it must
+    /// not also produce a chat line for a game that was never established.
+    #[test]
+    fn a_session_ending_while_choosing_a_character_queues_no_notice() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Choosing);
+
+        events
+            .send(SessionEvent::Ended(Some(
+                "closed while a character was being chosen".to_owned(),
+            )))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<SessionEndingInbox>().take(),
+            0,
+            "a character-choosing screen must answer for its own ending"
+        );
+    }
+
     /// A refusal keeps its reason, and a rejoin that is refused keeps that one too.
     ///
     /// The fourth acceptance criterion, and the half of it that has teeth: returning to a
@@ -5048,6 +5156,7 @@ mod tests {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<SessionEndingInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,
                 commands: command_tx,

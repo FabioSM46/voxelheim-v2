@@ -32,6 +32,7 @@ use crate::net::{
     encode_inventory_move_request, encode_repair_request,
 };
 use crate::settings::{Control, Settings};
+use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// Number keys available to the minimal hotbar.
 const HOTBAR_KEYS: [KeyCode; 9] = [
@@ -192,6 +193,7 @@ impl Plugin for InventoryPlugin {
             .init_resource::<ViewMode>()
             .add_message::<InventoryClick>()
             .add_message::<ConsumeSent>()
+            .add_message::<PlayerMessage>()
             // NetPlugin initialises the same inbox. Whichever plugin is built first
             // creates it and the other finds it.
             .init_resource::<InventoryInbox>()
@@ -200,8 +202,8 @@ impl Plugin for InventoryPlugin {
                 (
                     ingest_inventory,
                     select_hotbar,
-                    consume_selected,
-                    request_inventory_action,
+                    consume_selected.in_set(PublishPlayerMessages),
+                    request_inventory_action.in_set(PublishPlayerMessages),
                 )
                     .chain()
                     .in_set(ApplyInventory)
@@ -324,7 +326,11 @@ struct ConsumeIntent<'w> {
 /// and answers with its authoritative state, or with a refusal or silence. The stack count,
 /// learned mounts and vitals move then and only then; what leaves this function is a request
 /// and, when that request was queued, one cosmetic [`ConsumeSent`] for the hand to play.
-fn consume_selected(intent: ConsumeIntent<'_>, mut consumed: MessageWriter<ConsumeSent>) {
+fn consume_selected(
+    intent: ConsumeIntent<'_>,
+    mut consumed: MessageWriter<ConsumeSent>,
+    mut messages: MessageWriter<PlayerMessage>,
+) {
     let ConsumeIntent {
         keys,
         settings,
@@ -362,10 +368,16 @@ fn consume_selected(intent: ConsumeIntent<'_>, mut consumed: MessageWriter<Consu
         Sent::Queued => {
             consumed.write(ConsumeSent);
         }
-        Sent::Dropped => warn!(
-            "the outbound queue was full; consuming from slot {} never reached the server",
-            request.slot
-        ),
+        Sent::Dropped => {
+            warn!(
+                "the outbound queue was full; consuming from slot {} never reached the server",
+                request.slot
+            );
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Using that item did not reach the server; try again.",
+            ));
+        }
         // The session is ending. There is nowhere to send and nothing to animate.
         Sent::Closed => {}
     }
@@ -387,6 +399,10 @@ fn consume_selected(intent: ConsumeIntent<'_>, mut consumed: MessageWriter<Consu
 /// leaves the cursor exactly as it found it: a picked slot is a source waiting for a
 /// destination, and neither independent gesture is that destination. Clearing it would
 /// silently cancel a move the player was half-way through.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one click-routing system; the chat report needs an eighth parameter"
+)]
 fn request_inventory_action(
     mut clicks: MessageReader<InventoryClick>,
     session: Option<Res<Session>>,
@@ -395,6 +411,7 @@ fn request_inventory_action(
     cadence: Res<InputCadence>,
     outbound: Option<ResMut<Outbound>>,
     mut picked: ResMut<PickedStack>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     // The inventory screen is closed while the server says this player is dead, and the
     // toggle that would reopen it is refused in `ui/mod.rs`. This is the wire half of that
@@ -441,10 +458,16 @@ fn request_inventory_action(
             {
                 match outbound.send(encode_consume_request(&request)) {
                     Sent::Queued => {}
-                    Sent::Dropped => warn!(
-                        "the outbound queue was full; consuming from slot {} never reached the server",
-                        request.slot
-                    ),
+                    Sent::Dropped => {
+                        warn!(
+                            "the outbound queue was full; consuming from slot {} never reached the server",
+                            request.slot
+                        );
+                        messages.write(PlayerMessage::new(
+                            PlayerMessageKind::Error,
+                            "Using that item did not reach the server; try again.",
+                        ));
+                    }
                     Sent::Closed => {}
                 }
             }
@@ -460,10 +483,16 @@ fn request_inventory_action(
             {
                 match outbound.send(encode_drop_item_request(&request)) {
                     Sent::Queued => {}
-                    Sent::Dropped => warn!(
-                        "the outbound queue was full; a drop of slot {} never reached the server",
-                        request.slot
-                    ),
+                    Sent::Dropped => {
+                        warn!(
+                            "the outbound queue was full; a drop of slot {} never reached the server",
+                            request.slot
+                        );
+                        messages.write(PlayerMessage::new(
+                            PlayerMessageKind::Error,
+                            "Dropping that item did not reach the server; try again.",
+                        ));
+                    }
                     Sent::Closed => {}
                 }
             }
@@ -512,10 +541,16 @@ fn request_inventory_action(
             if let Some(outbound) = outbound.as_deref_mut() {
                 match outbound.send(encode_repair_request(&request)) {
                     Sent::Queued => {}
-                    Sent::Dropped => warn!(
-                        "the outbound queue was full; a repair of slot {} with slot {} never reached the server",
-                        request.target_slot, request.kit_slot
-                    ),
+                    Sent::Dropped => {
+                        warn!(
+                            "the outbound queue was full; a repair of slot {} with slot {} never reached the server",
+                            request.target_slot, request.kit_slot
+                        );
+                        messages.write(PlayerMessage::new(
+                            PlayerMessageKind::Error,
+                            "Your repair did not reach the server; try again.",
+                        ));
+                    }
                     Sent::Closed => {}
                 }
             }
@@ -553,10 +588,16 @@ fn request_inventory_action(
         };
         match outbound.send(encode_inventory_move_request(&request)) {
             Sent::Queued => {}
-            Sent::Dropped => warn!(
-                "the outbound queue was full; an inventory move from {} to {} never reached the server",
-                request.from, request.to
-            ),
+            Sent::Dropped => {
+                warn!(
+                    "the outbound queue was full; an inventory move from {} to {} never reached the server",
+                    request.from, request.to
+                );
+                messages.write(PlayerMessage::new(
+                    PlayerMessageKind::Error,
+                    "Moving that item did not reach the server; try again.",
+                ));
+            }
             Sent::Closed => {}
         }
     }
@@ -943,6 +984,94 @@ mod tests {
     fn inventory_click(app: &mut App, slot: u8, kind: InventoryClickKind) {
         app.world_mut().write_message(InventoryClick { slot, kind });
         app.update();
+    }
+
+    /// [`move_app`], with an outbound queue that has no room for anything.
+    ///
+    /// A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+    /// receiver is parked in a blocking `recv`, which nothing here ever is, so every send
+    /// reads as `Sent::Dropped`. The receiver is returned rather than discarded — dropping
+    /// it would disconnect the channel and turn every later send into the silent
+    /// `Sent::Closed` instead.
+    fn move_app_that_drops() -> (App, Receiver<Vec<u8>>) {
+        let mut app = app(false);
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.insert_resource(outbound);
+        deliver(&mut app, slots(&[(0, 1, 5), (1, 2, 4)]));
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        (app, never_received)
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn a_dropped_move_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = move_app_that_drops();
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        inventory_click(&mut app, 2, InventoryClickKind::Full);
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Moving that item did not reach the server; try again."
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dropped_drop_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = move_app_that_drops();
+
+        inventory_click(&mut app, 1, InventoryClickKind::Drop);
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Dropping that item did not reach the server; try again."
+            )]
+        );
+    }
+
+    /// [`mend_app`], with an outbound queue that has no room for anything — see
+    /// [`move_app_that_drops`] for why the receiver has to be returned rather than
+    /// discarded.
+    fn mend_app_that_drops(stacks: Vec<InventoryStack>) -> (App, Receiver<Vec<u8>>) {
+        let mut app = app(false);
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.insert_resource(outbound);
+        deliver(&mut app, stacks);
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        (app, never_received)
+    }
+
+    #[test]
+    fn a_dropped_repair_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = mend_app_that_drops(pack(&[
+            (0, stack(ITEM_SHARPENING_STONE, 3)),
+            (1, worn(ITEM_IRON_SWORD, 40, 100)),
+        ]));
+
+        inventory_click(&mut app, 0, InventoryClickKind::Full);
+        inventory_click(&mut app, 1, InventoryClickKind::Full);
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your repair did not reach the server; try again."
+            )]
+        );
     }
 
     #[test]
@@ -1924,6 +2053,37 @@ mod tests {
         app.update();
         app.update();
         (app, sent)
+    }
+
+    /// [`hotbar_app`], with an outbound queue that has no room for anything — see
+    /// [`move_app_that_drops`] for why the receiver has to be returned rather than
+    /// discarded.
+    fn hotbar_app_that_drops(stacks: Vec<InventoryStack>) -> (App, Receiver<Vec<u8>>) {
+        let mut app = app(true);
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.insert_resource(outbound);
+        deliver(&mut app, stacks);
+        app.update();
+        app.update();
+        (app, never_received)
+    }
+
+    #[test]
+    fn a_dropped_hotbar_consume_reaches_chat_as_one_error() {
+        let (mut app, _never_received) =
+            hotbar_app_that_drops(pack(&[(0, stack(ITEM_COOKED_MEAT, 3))]));
+
+        app.world_mut()
+            .write_message(key_event(consume_key(), ButtonState::Pressed, false));
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Using that item did not reach the server; try again."
+            )]
+        );
     }
 
     /// Runs one frame after delivering the events winit would have delivered for it, and
