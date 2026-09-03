@@ -672,7 +672,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   fixed inventory frame. Filtering uses `Display::None`, resets the viewport to the top and
   neither creates nor removes a mirrored recipe.
 - **One cell press, four possible intents, and choosing between them is routing rather
-  than authority.** A consume press on known food sends a `ConsumeRequest` naming one slot;
+  than authority.** A consume press on a known consumable sends a `ConsumeRequest` naming one slot;
   a picked sharpening stone dropped on a slot that wears out sends a `RepairRequest` naming
   the two slots; a shift-click sends a `DropItemRequest` naming one; every other pair sends
   the `InventoryMoveRequest`
@@ -695,7 +695,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   by `InputGate::may_act`, which is `Playing` and nothing else, so the one key still has
   exactly one reader in any frame. What the two branches share is the half that would
   otherwise have drifted: both end at `consume_request`, still the only place a
-  `ConsumeRequest` is built and the only place `FOODS` is read. Only the slot differs — the
+  `ConsumeRequest` is built and the only place `CONSUMABLES` is read. Only the slot differs — the
   cell under the pointer, or the hotbar index `SelectedSlot` already carries for a place
   request, out of the leading slots of the same authoritative pack.
 
@@ -734,12 +734,12 @@ The client samples the controls, sends what the player is *trying* to do at the 
   one per thing the interact key now means. All four also press again after a release,
   because a test that only proved "one" would pass just as well with the key dead.
 
-  **Food routing follows the kit pattern without copying the server's capability table.**
-  `FOODS` names the ids whose consume press is worth sending, and `consume_request` is the
+  **Consumable routing follows the kit pattern without copying the server's capability table.**
+  `CONSUMABLES` names the ids whose consume press is worth sending, and `consume_request` is the
   only place a `ConsumeRequest` is built. It deliberately does not ask how much hunger an
-  item restores, whether the reserve is full or whether the server will still consider the
-  stack edible: all three are authoritative answers. A mistaken extra id grants nothing;
-  an omitted id makes supported food unreachable, so the list fails open toward asking.
+  item restores, whether a mount is already learned or whether the server will still consider
+  the stack consumable: all are authoritative answers. A mistaken extra id grants nothing;
+  an omitted id makes a supported consumable unreachable, so the list fails open toward asking.
 
   Repair's separate judgement is read from the durability already beside every stack —
   `max_durability > 0` answers *does this wear out* with no registry and no second copy of
@@ -1181,8 +1181,11 @@ products in `crafting.rs`, and `inventory.rs` reads the kit's from `crafting` ra
 copying the number. Ids nothing acts on, which is every plain block and material, are declared
 in `items.rs` because drawing them is all anyone does — including bones, a vargr pelt and
 raw meat. Products this side routes live with their recipes: a leather patch is a repair
-kit and cooked meat is food. The registry names all twenty from wherever they live: one declaration read from several places cannot
-drift the way two declarations of the same number can.
+kit and cooked meat is food. The stablemaster tokens are the narrow exception: their canonical
+mount presentation was established in `items.rs`, and `inventory.rs` imports those same constants
+for consume-intent routing instead of moving or copying their identity. The registry names every
+id from wherever it lives: one declaration read from several places cannot drift the way two
+declarations of the same number can.
 
 **Nothing in a row is ever a gameplay fact, and a fourth field must not make one.** What an item
 can do is the server's registry; a client-side copy of it is a cheat vector however carefully it

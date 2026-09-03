@@ -6,12 +6,12 @@
 //! next request, while the server decides whether that slot exists and may be spent.
 //!
 //! **One cell, four possible intents, and the choice between them is routing rather than
-//! authority.** A consume press on known food asks to eat one; a picked sharpening stone
+//! authority.** A consume press on a known consumable asks to use one; a picked sharpening stone
 //! dropped on a slot that wears out asks for a mend; a shift-click asks for the stack to be
 //! put on the ground; every other pair asks for the move it has always asked for. Which item
-//! is edible or a legal kit, how much hunger or wear comes back, whether a stack may be let
+//! is consumable or a legal kit, how much hunger or wear comes back, whether a stack may be let
 //! go of at all and what appears on the ground are the server's answers. No branch moves a
-//! count, durability or vital here.
+//! count, durability, learned mount or vital here.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
@@ -21,7 +21,7 @@ use super::crafting::{
     ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_SHARPENING_STONE,
     ITEM_WOODEN_SHIELD,
 };
-use super::items::ITEM_RAW_MEAT;
+use super::items::{ITEM_BLACK_HORSE, ITEM_BROWN_HORSE, ITEM_GREY_HORSE, ITEM_RAW_MEAT};
 use super::{
     ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode, SelfVitals, ViewMode,
     set_if_changed,
@@ -142,14 +142,13 @@ pub struct InventoryClick {
 /// **The same shape, and the same reason, as `super::combat`'s `SwingSent`.** It is written
 /// on the frame a `ConsumeRequest` was *queued*, so the hand plays for a frame that left
 /// rather than for a press that was made: a dropped frame is not a request, and animating one
-/// would tell the player they ate when nothing was asked of the server. It is emphatically
+/// would tell the player they consumed something when nothing was asked of the server. It is emphatically
 /// not feedback for the *outcome* — whether the server spends the stack and restores any
-/// hunger is its own answer, and it arrives as the next complete `InventoryState` and
-/// `PlayerVitals` like every other one.
+/// hunger or learns a mount is its own answer, and it arrives in authoritative server state.
 ///
-/// It carries nothing. There is one eating arc for every food, so there is no id for
+/// It carries nothing. There is one consume arc for every consumable, so there is no id for
 /// `super::hands` to route on, and a message with no payload cannot grow into a second
-/// opinion about what was eaten.
+/// opinion about what was consumed.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ConsumeSent;
 
@@ -301,12 +300,12 @@ struct ConsumeIntent<'w> {
     outbound: Option<ResMut<'w, Outbound>>,
 }
 
-/// Asks to eat what the hotbar has selected, once per press, while the world owns the input.
+/// Asks to consume what the hotbar has selected, once per press, while the world owns the input.
 ///
 /// **The pack's consume press is unchanged and this is not a second copy of it.** Both
 /// spellings — a cell press in [`InputMode::Inventory`], and this key in play — end at
 /// [`consume_request`], which is still the only place a [`ConsumeRequest`] is built and the
-/// only place [`FOODS`] is read. What differs is which slot is named: the pack names the cell
+/// only place [`CONSUMABLES`] is read. What differs is which slot is named: the pack names the cell
 /// under the pointer, and this names [`SelectedSlot`], which the hotbar has already chosen
 /// out of the leading slots of the very same authoritative inventory.
 ///
@@ -317,16 +316,15 @@ struct ConsumeIntent<'w> {
 /// **[`InputGate::may_act`] is the whole of the mode and death question**, so a screen that
 /// owns the pointer — the pack, chat, the pause menu, the map, a stall, a corpse — closes
 /// this press with no list of modes to keep in step with the enum. The frame a mode changes
-/// on is closed too, which is what keeps the key that *left* the pack from also eating on its
+/// on is closed too, which is what keeps the key that *left* the pack from also consuming on its
 /// way out. `ui/inventory.rs` reads the same key only while the pack is open, so the two
 /// readers are mutually exclusive by mode and one press can never become two frames.
 ///
-/// **Nothing here decides that anything was eaten.** The server re-reads its own
-/// `restoresHunger` column and answers with a complete `InventoryState` and `PlayerVitals`,
-/// or with silence. The stack count, the hunger bar and the pack all move then and only then;
-/// what leaves this function is a request and, when that request was queued, one cosmetic
-/// [`ConsumeSent`] for the hand to play.
-fn consume_selected(intent: ConsumeIntent<'_>, mut eaten: MessageWriter<ConsumeSent>) {
+/// **Nothing here decides that anything was consumed.** The server re-reads its own registry
+/// and answers with its authoritative state, or with a refusal or silence. The stack count,
+/// learned mounts and vitals move then and only then; what leaves this function is a request
+/// and, when that request was queued, one cosmetic [`ConsumeSent`] for the hand to play.
+fn consume_selected(intent: ConsumeIntent<'_>, mut consumed: MessageWriter<ConsumeSent>) {
     let ConsumeIntent {
         keys,
         settings,
@@ -362,7 +360,7 @@ fn consume_selected(intent: ConsumeIntent<'_>, mut eaten: MessageWriter<ConsumeS
     match outbound.send(encode_consume_request(&request)) {
         // The arc plays for a frame that left, and for nothing else. See [`ConsumeSent`].
         Sent::Queued => {
-            eaten.write(ConsumeSent);
+            consumed.write(ConsumeSent);
         }
         Sent::Dropped => warn!(
             "the outbound queue was full; consuming from slot {} never reached the server",
@@ -434,7 +432,7 @@ fn request_inventory_action(
         }
 
         if click.kind == InventoryClickKind::Consume {
-            // Like a drop, eating names one cell and is unrelated to the source cursor.
+            // Like a drop, consuming names one cell and is unrelated to the source cursor.
             // It runs ahead of the pair below and leaves that cursor untouched, so a
             // consume press cannot silently cancel a move or repair in progress.
             if let Some(request) =
@@ -608,15 +606,21 @@ fn drop_request(
 /// so this list — and every check below it — is read once per intent rather than once per
 /// spelling.
 ///
-/// A table rather than an `item_id == ITEM_RAW_MEAT` comparison, following [`KITS`]: a
-/// second food is an entry, not another branch. This remains routing, never eligibility
-/// authority. The server re-reads its `restoresHunger` registry column and may refuse any
-/// request silently; an extra entry here can grant nothing, while a missing entry would
-/// make server-supported food unreachable from this UI.
-const FOODS: &[u16] = &[ITEM_RAW_MEAT, ITEM_COOKED_MEAT];
+/// A table rather than an `item_id == ITEM_RAW_MEAT` comparison, following [`KITS`]: another
+/// consumable is an entry, not another branch. This remains routing, never eligibility
+/// authority. The server re-reads its registry and may refuse any request; an extra entry here
+/// can grant nothing, while a missing entry would make a server-supported consumable unreachable
+/// from this UI. Horse tokens are still spent and learned only by the authoritative response.
+const CONSUMABLES: &[u16] = &[
+    ITEM_RAW_MEAT,
+    ITEM_COOKED_MEAT,
+    ITEM_BLACK_HORSE,
+    ITEM_BROWN_HORSE,
+    ITEM_GREY_HORSE,
+];
 
-fn item_is_food(item_id: u16) -> bool {
-    FOODS.contains(&item_id)
+fn item_is_consumable(item_id: u16) -> bool {
+    CONSUMABLES.contains(&item_id)
 }
 
 /// Whether one cell is worth asking the server to consume from.
@@ -632,10 +636,12 @@ fn consume_request(
 ) -> Option<ConsumeRequest> {
     let stack = inventory.slot(slot)?;
 
-    (slot < slots && stack.count > 0 && item_is_food(stack.item_id)).then_some(ConsumeRequest {
-        slot: u16::from(slot),
-        client_tick,
-    })
+    (slot < slots && stack.count > 0 && item_is_consumable(stack.item_id)).then_some(
+        ConsumeRequest {
+            slot: u16::from(slot),
+            client_tick,
+        },
+    )
 }
 
 /// Every item id this client routes a click onto a worn item to a mend for.
@@ -739,9 +745,10 @@ mod tests {
     use bevy::input::{ButtonState, InputPlugin};
 
     use super::*;
-    use crate::net::{InventoryState, SessionParams};
+    use crate::net::{InventoryState, MountKind, SessionParams};
     use crate::player::crafting::ITEM_IRON_SWORD;
     use crate::player::items::{ITEM_STONE, ITEM_VARGR_PELT, item_label};
+    use crate::player::mounts::LearnedMounts;
     use crate::settings::Bindings;
     use crate::wire::voxelheim::net as fb;
 
@@ -1543,42 +1550,45 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn every_food_is_named_routed_and_appears_once() {
-        assert!(!FOODS.is_empty(), "no id routes consumption at all");
+    fn every_consumable_is_named_routed_and_appears_once() {
+        assert!(!CONSUMABLES.is_empty(), "no id routes consumption at all");
 
-        for &food in FOODS {
-            assert!(item_is_food(food), "food {food} is not routed by its list");
-            assert_ne!(
-                item_label(food),
-                "unknown item",
-                "food {food} can be eaten but the inventory cannot name it"
+        for &item in CONSUMABLES {
+            assert!(
+                item_is_consumable(item),
+                "consumable {item} is not routed by its list"
             );
-            let inventory = Inventory::from_stacks(vec![stack(food, 1)]);
+            assert_ne!(
+                item_label(item),
+                "unknown item",
+                "consumable {item} can be used but the inventory cannot name it"
+            );
+            let inventory = Inventory::from_stacks(vec![stack(item, 1)]);
             assert!(
                 consume_request(&inventory, 0, 7, 1).is_some(),
-                "food {food} does not produce a consume request"
+                "consumable {item} does not produce a consume request"
             );
         }
 
-        for not_food in [ITEM_STONE, ITEM_VARGR_PELT, ITEM_LEATHER_PATCH, u16::MAX] {
+        for not_consumable in [ITEM_STONE, ITEM_VARGR_PELT, ITEM_LEATHER_PATCH, u16::MAX] {
             assert!(
-                !item_is_food(not_food),
-                "item {not_food} routes consumption"
+                !item_is_consumable(not_consumable),
+                "item {not_consumable} routes consumption"
             );
         }
 
-        let mut once = FOODS.to_vec();
+        let mut once = CONSUMABLES.to_vec();
         once.sort_unstable();
         once.dedup();
         assert_eq!(
             once.len(),
-            FOODS.len(),
-            "an id appears twice in the food list"
+            CONSUMABLES.len(),
+            "an id appears twice in the consumable list"
         );
     }
 
     #[test]
-    fn only_a_nonempty_food_slot_inside_the_pack_is_asked_to_be_consumed() {
+    fn only_a_nonempty_consumable_slot_inside_the_pack_is_asked_to_be_consumed() {
         for (name, inventory, slot, slots, want) in [
             (
                 "raw meat",
@@ -1588,14 +1598,14 @@ mod tests {
                 true,
             ),
             (
-                "an empty food stack",
+                "an empty consumable stack",
                 Inventory::from_stacks(vec![stack(ITEM_RAW_MEAT, 0)]),
                 0,
                 1,
                 false,
             ),
             (
-                "a non-food",
+                "a non-consumable",
                 Inventory::from_stacks(vec![stack(ITEM_STONE, 2)]),
                 0,
                 1,
@@ -1616,6 +1626,70 @@ mod tests {
                     client_tick: 77,
                 }),
                 "{name}"
+            );
+        }
+    }
+
+    /// Every stablemaster token reaches the one shared request builder from both input
+    /// routes. The learned set deliberately already contains that same horse: duplicate
+    /// eligibility is the server's decision, so this client must still ask and wait for
+    /// `MountAlreadyLearned` without spending the token or editing the learned set locally.
+    #[test]
+    fn every_horse_token_routes_from_the_hovered_pack_cell_and_selected_hotbar_slot() {
+        for (item_id, mount) in [
+            (ITEM_BLACK_HORSE, MountKind::BlackHorse),
+            (ITEM_BROWN_HORSE, MountKind::BrownHorse),
+            (ITEM_GREY_HORSE, MountKind::GreyHorse),
+        ] {
+            let (mut pack_app, pack_sent) = mend_app(pack(&[(2, stack(item_id, 1))]));
+            pack_app.insert_resource(LearnedMounts::for_test(vec![mount]));
+            let pack_before = pack_app.world().resource::<Inventory>().clone();
+            let learned_before = pack_app.world().resource::<LearnedMounts>().clone();
+
+            // `ui::inventory::inventory_clicks` emits this exact message for the hovered
+            // cell after C or middle-click; item routing remains here, on the shared seam.
+            inventory_click(&mut pack_app, 2, InventoryClickKind::Consume);
+
+            assert_eq!(
+                asked(&pack_sent),
+                vec![Asked::Consume { slot: 2 }],
+                "horse token {item_id} was filtered out of the hovered-cell route"
+            );
+            assert_eq!(*pack_app.world().resource::<Inventory>(), pack_before);
+            assert_eq!(
+                *pack_app.world().resource::<LearnedMounts>(),
+                learned_before,
+                "horse token {item_id} was learned before a server response"
+            );
+
+            let (mut hotbar_app, hotbar_sent) = hotbar_app(pack(&[(1, stack(item_id, 1))]));
+            hotbar_app.insert_resource(LearnedMounts::for_test(vec![mount]));
+            press(&mut hotbar_app, KeyCode::Digit2, "2");
+            hotbar_app.update();
+            assert_eq!(
+                *hotbar_app.world().resource::<SelectedSlot>(),
+                SelectedSlot(1)
+            );
+            let hotbar_before = hotbar_app.world().resource::<Inventory>().clone();
+            let learned_before = hotbar_app.world().resource::<LearnedMounts>().clone();
+
+            let (left, played) = consume_frame(
+                &mut hotbar_app,
+                &hotbar_sent,
+                [key_event(consume_key(), ButtonState::Pressed, false)],
+            );
+
+            assert_eq!(
+                left,
+                vec![Asked::Consume { slot: 1 }],
+                "horse token {item_id} was filtered out of the selected-hotbar route"
+            );
+            assert_eq!(played, 1, "one queued request plays one consume arc");
+            assert_eq!(*hotbar_app.world().resource::<Inventory>(), hotbar_before);
+            assert_eq!(
+                *hotbar_app.world().resource::<LearnedMounts>(),
+                learned_before,
+                "horse token {item_id} was learned before a server response"
             );
         }
     }
@@ -1878,7 +1952,7 @@ mod tests {
     /// carries for a place request. The pack it is read against is not touched: no count
     /// moves here, and the server's next complete state is the only thing that can move one.
     #[test]
-    fn the_consume_key_in_play_asks_to_eat_the_selected_hotbar_slot() {
+    fn the_consume_key_in_play_asks_to_use_the_selected_hotbar_slot() {
         let (mut app, sent) = hotbar_app(pack(&[
             (0, stack(ITEM_STONE, 4)),
             (1, stack(ITEM_COOKED_MEAT, 3)),
@@ -1904,7 +1978,7 @@ mod tests {
         assert_eq!(
             app.world().resource::<PickedStack>().slot(),
             None,
-            "eating in play picked a source for a move nobody started"
+            "consuming in play picked a source for a move nobody started"
         );
     }
 
@@ -2025,8 +2099,11 @@ mod tests {
                 [key_event(consume_key(), ButtonState::Pressed, false)],
             );
 
-            assert!(left.is_empty(), "{name} asked the server to eat: {left:?}");
-            assert_eq!(played, 0, "{name} played the eating arc");
+            assert!(
+                left.is_empty(),
+                "{name} asked the server to consume: {left:?}"
+            );
+            assert_eq!(played, 0, "{name} played the consume arc");
         }
     }
 
@@ -2054,18 +2131,22 @@ mod tests {
     /// **One predicate for both spellings**, which is the point of reusing
     /// [`consume_request`] rather than writing a second one beside the hotbar.
     ///
-    /// Read as a routing question the two paths ask identically: whatever [`FOODS`] contains,
+    /// Read as a routing question the two paths ask identically: whatever [`CONSUMABLES`] contains,
     /// a cell press in the pack and this key in play agree about it, so the table cannot
-    /// acquire a second copy that drifts. A new food is one entry and both paths gain it.
+    /// acquire a second copy that drifts. A new consumable is one entry and both paths gain it.
     #[test]
     fn the_hotbar_and_the_pack_route_the_same_press_through_one_predicate() {
-        for item_id in FOODS.iter().copied().chain([ITEM_STONE, ITEM_IRON_SWORD]) {
+        for item_id in CONSUMABLES
+            .iter()
+            .copied()
+            .chain([ITEM_STONE, ITEM_IRON_SWORD])
+        {
             let stacks = pack(&[(0, stack(item_id, 2))]);
             let inventory = Inventory::from_stacks(stacks.clone());
             let routed = consume_request(&inventory, 0, 0, 4).is_some();
             assert_eq!(
                 routed,
-                item_is_food(item_id),
+                item_is_consumable(item_id),
                 "item {item_id} is routed by the table and not by the caller"
             );
 

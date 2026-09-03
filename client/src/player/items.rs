@@ -103,9 +103,10 @@ pub(super) const ITEM_PALM_LOG: u16 = 40;
 
 /// The three horse tokens sold by a stablemaster.
 ///
-/// They live here until a client action routes on them: presentation is all this issue adds,
-/// while the authoritative server still owns purchase, learning and selection. The ids are the
-/// append-only values already persisted in server inventories.
+/// They live here because the display registry owns their canonical mount presentation;
+/// `super::inventory` imports these same constants for consume-intent routing rather than
+/// declaring another copy. The authoritative server still owns purchase, learning and selection.
+/// The ids are the append-only values already persisted in server inventories.
 pub(super) const ITEM_BLACK_HORSE: u16 = 41;
 pub(super) const ITEM_BROWN_HORSE: u16 = 42;
 pub(super) const ITEM_GREY_HORSE: u16 = 43;
