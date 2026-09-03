@@ -408,6 +408,9 @@ mod tests {
     const PICKAXE: u16 = 17;
     const RAW_IRON: u16 = 6;
     const RAW_COAL: u16 = 5;
+    const BLACK_HORSE: u16 = 41;
+    const BROWN_HORSE: u16 = 42;
+    const GREY_HORSE: u16 = 43;
 
     const SMITH: u64 = (1 << 62) | 55;
     const COOK: u64 = (1 << 62) | 56;
@@ -459,6 +462,22 @@ mod tests {
                 item_id: PICKAXE,
                 price: 30,
             }],
+            buys: Vec::new(),
+        }
+    }
+
+    fn stablemaster() -> VendorState {
+        VendorState {
+            entity_id: SMITH,
+            revision: 1,
+            sells: [BLACK_HORSE, BROWN_HORSE, GREY_HORSE]
+                .into_iter()
+                .enumerate()
+                .map(|(index, item_id)| VendorEntry {
+                    item_id,
+                    price: 100 + index as u16,
+                })
+                .collect(),
             buys: Vec::new(),
         }
     }
@@ -540,6 +559,39 @@ mod tests {
         for line in lines(&mut app) {
             assert!(line.is_ascii(), "{line}");
         }
+    }
+
+    #[test]
+    fn stablemaster_rows_use_the_canonical_breed_names() {
+        let mut app = app();
+        app.insert_resource(VendorWindow::from_server(stablemaster()));
+        app.insert_resource(Appearances::with_resident(
+            SMITH,
+            "Eira",
+            ResidentRole::Stablemaster,
+        ));
+        app.update();
+
+        let drawn = lines(&mut app);
+        assert!(
+            drawn.contains(&"Eira | Stablemaster".to_owned()),
+            "{drawn:?}"
+        );
+        for (item_id, name, price) in [
+            (BLACK_HORSE, "Raven Friesian", 100),
+            (BROWN_HORSE, "Chestnut Icelandic", 101),
+            (GREY_HORSE, "Silver Fjord", 102),
+        ] {
+            assert_eq!(item_label(item_id), name);
+            assert!(
+                drawn.contains(&format!("{name} | {price} silver")),
+                "stablemaster row {item_id} was not canonical: {drawn:?}"
+            );
+        }
+        assert!(
+            !drawn.iter().any(|line| line.contains("unknown item")),
+            "a stablemaster row still fell through the registry: {drawn:?}"
+        );
     }
 
     /// The appearance and price-list streams are unordered. Whichever arrives second

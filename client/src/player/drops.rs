@@ -17,6 +17,7 @@ use super::hands::{
 };
 #[cfg(test)]
 use super::hands::{sword_blade_span, sword_grip_centre, sword_guard_span};
+use super::horse::horse_head_item_mesh;
 use super::interpolate::{InterpolatedDrop, SnapshotBuffer};
 use super::items::{ItemShape, item_linear_rgba, item_shape};
 use super::items::{Livery, item_livery, liveried_shapes};
@@ -120,7 +121,8 @@ fn mesh_varies_with_livery(shape: ItemShape) -> bool {
         | ItemShape::Shield
         | ItemShape::Bow
         | ItemShape::Sceptre
-        | ItemShape::Coin => false,
+        | ItemShape::Coin
+        | ItemShape::HorseHead => false,
     }
 }
 
@@ -426,6 +428,9 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
         // `every_shape_is_drawn_from_its_own_silhouette` insists on and what stops a purse
         // on the ground looking like a pile of ore.
         ItemShape::Coin => Mesh::from(Cylinder::new(DROP_EDGE * 0.34, DROP_EDGE * 0.10)),
+        // The stablemaster token keeps the actual world rig's head, ears, poll and neck;
+        // only the scale is local to a ground drop.
+        ItemShape::HorseHead => horse_head_item_mesh(DROP_EDGE * 1.15),
     }
 }
 

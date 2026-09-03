@@ -27,6 +27,7 @@ use super::crafting::{
     ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL, ITEM_WOODEN_SCEPTRE,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
+use crate::net::MountKind;
 use crate::world::{BlockId, palette};
 
 // Presentation-only item ids. The server registry remains the sole authority on whether
@@ -100,6 +101,15 @@ pub(super) const ITEM_THATCH: u16 = 38;
 /// acts on the id; this module only draws and names it.
 pub(super) const ITEM_PALM_LOG: u16 = 40;
 
+/// The three horse tokens sold by a stablemaster.
+///
+/// They live here until a client action routes on them: presentation is all this issue adds,
+/// while the authoritative server still owns purchase, learning and selection. The ids are the
+/// append-only values already persisted in server inventories.
+pub(super) const ITEM_BLACK_HORSE: u16 = 41;
+pub(super) const ITEM_BROWN_HORSE: u16 = 42;
+pub(super) const ITEM_GREY_HORSE: u16 = 43;
+
 /// The shapes an item is drawn in.
 ///
 /// Four variants and no "nothing": an empty hand is not an item's shape, so
@@ -162,6 +172,12 @@ pub(crate) enum ItemShape {
     /// surfaces instead of on one — which is what `docs/ADDING_AN_ITEM.md` means by
     /// budgeting three drawings for a new shape.
     Coin,
+    /// A horse's long face, poll, ears and neck connection.
+    ///
+    /// The stablemaster's three tokens share the silhouette and take their distinct coats from
+    /// the same palette as the world horse rig. A shape remains presentation only: learning a
+    /// mount is still an authoritative server outcome.
+    HorseHead,
 }
 
 impl ItemShape {
@@ -193,7 +209,7 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Block,
         Self::Material,
         Self::Blade,
@@ -204,6 +220,7 @@ impl ItemShape {
         Self::Bow,
         Self::Sceptre,
         Self::Coin,
+        Self::HorseHead,
     ];
 }
 
@@ -233,6 +250,8 @@ enum ItemColour {
     /// Struck silver: paler and cooler than forged steel, so a coin is not a small ingot.
     /// sRGB `#BFC7D2`.
     Silver,
+    /// One of the world horse rig's three exact coat colours.
+    Horse(MountKind),
 }
 
 /// `#59636D`, converted from sRGB to the linear space vertex colours use.
@@ -281,6 +300,10 @@ impl ItemColour {
             Self::Silver => {
                 let [r, g, b] = SILVER_LINEAR;
                 [r, g, b, 1.0]
+            }
+            Self::Horse(kind) => {
+                let colour = super::horse::coat_colour(kind).to_linear();
+                [colour.red, colour.green, colour.blue, colour.alpha]
             }
         }
     }
@@ -383,7 +406,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 40] = [
+pub(super) const ITEMS: [ItemDisplay; 43] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -724,7 +747,43 @@ pub(super) const ITEMS: [ItemDisplay; 40] = [
         colour: ItemColour::Block(palette::PALM_LOG),
         livery: Some(Livery::Wood),
     },
+    // Stablemaster tokens. Their names are the one canonical presentation used by the vendor,
+    // inventory and mount-selection rows; their colour resolves through `horse::coat_colour`,
+    // the same function that builds the world rig's three coat materials.
+    ItemDisplay {
+        item_id: ITEM_BLACK_HORSE,
+        name: "Raven Friesian",
+        shape: ItemShape::HorseHead,
+        colour: ItemColour::Horse(MountKind::BlackHorse),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_BROWN_HORSE,
+        name: "Chestnut Icelandic",
+        shape: ItemShape::HorseHead,
+        colour: ItemColour::Horse(MountKind::BrownHorse),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_GREY_HORSE,
+        name: "Silver Fjord",
+        shape: ItemShape::HorseHead,
+        colour: ItemColour::Horse(MountKind::GreyHorse),
+        livery: None,
+    },
 ];
+
+/// The stablemaster item whose canonical label belongs to one wire mount kind.
+///
+/// This is presentation mapping only. It is read by the mount screen to share the registry's
+/// name; no learning or selection decision is made from the item id.
+pub(super) const fn mount_item_id(kind: MountKind) -> u16 {
+    match kind {
+        MountKind::BlackHorse => ITEM_BLACK_HORSE,
+        MountKind::BrownHorse => ITEM_BROWN_HORSE,
+        MountKind::GreyHorse => ITEM_GREY_HORSE,
+    }
+}
 
 /// The row one item id has, when this build has one.
 ///
@@ -947,6 +1006,9 @@ mod tests {
             ITEM_THATCH,
             ITEM_RUNESTONE,
             ITEM_PALM_LOG,
+            ITEM_BLACK_HORSE,
+            ITEM_BROWN_HORSE,
+            ITEM_GREY_HORSE,
         ];
         for item_id in declared {
             assert!(
@@ -1060,6 +1122,36 @@ mod tests {
         assert_eq!(palm_log.shape, ItemShape::Block);
         assert_eq!(palm_log.colour, ItemColour::Block(palette::PALM_LOG));
         assert_eq!(palm_log.livery, Some(Livery::Wood));
+    }
+
+    #[test]
+    fn stablemaster_horses_have_pinned_ids_names_shapes_and_world_coats() {
+        for (item_id, kind, name) in [
+            (ITEM_BLACK_HORSE, MountKind::BlackHorse, "Raven Friesian"),
+            (
+                ITEM_BROWN_HORSE,
+                MountKind::BrownHorse,
+                "Chestnut Icelandic",
+            ),
+            (ITEM_GREY_HORSE, MountKind::GreyHorse, "Silver Fjord"),
+        ] {
+            assert_eq!(mount_item_id(kind), item_id);
+            assert_eq!(item_label(item_id), name);
+            assert_eq!(item_shape(item_id), ItemShape::HorseHead);
+            let colour = crate::player::horse::coat_colour(kind).to_linear();
+            assert_eq!(
+                item_linear_rgba(item_id),
+                [colour.red, colour.green, colour.blue, colour.alpha],
+                "item {item_id} drifted from the {kind:?} world coat"
+            );
+            let row = display(item_id).expect("stablemaster horse is registered");
+            assert_eq!(row.colour, ItemColour::Horse(kind));
+            assert_eq!(row.livery, None);
+        }
+        assert_eq!(
+            [ITEM_BLACK_HORSE, ITEM_BROWN_HORSE, ITEM_GREY_HORSE],
+            [41, 42, 43]
+        );
     }
 
     /// The three the recipe-driven name table could never have covered.

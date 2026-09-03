@@ -29,6 +29,7 @@ use super::SelfVitals;
 use super::camera::ViewMode;
 use super::combat::SwingSent;
 use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
+use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
 use super::livery;
@@ -436,6 +437,8 @@ const REST_PITCH_RADIANS: f32 = -0.18;
 const REST_ROLL_RADIANS: f32 = -0.12;
 
 const BLOCK_EDGE: f32 = 0.055;
+/// Longest extent of the world horse's head-and-neck silhouette in the held view.
+const HORSE_HEAD_EDGE: f32 = 0.075;
 const MATERIAL_RADIUS: f32 = 0.020;
 const MATERIAL_LENGTH: f32 = 0.050;
 
@@ -1782,6 +1785,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
             Mesh::from(Cylinder::new(COIN_RADIUS, COIN_THICKNESS))
                 .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ),
+        ItemShape::HorseHead => neutral(horse_head_item_mesh(HORSE_HEAD_EDGE)),
     }
 }
 
@@ -1826,6 +1830,8 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // Stood on the top of the fist by its radius, which is the block's and the stub's
         // arrangement: the coin is turned face-on, so its radius is its half height.
         ItemShape::Coin => hand_top + COIN_RADIUS - HOLD_OVERLAP,
+        // The shared horse silhouette is centred; its Y extent is 0.68 of its longest axis.
+        ItemShape::HorseHead => hand_top + HORSE_HEAD_EDGE * 0.34 - HOLD_OVERLAP,
     };
     Vec3::new(0.0, y, 0.0)
 }
@@ -2881,6 +2887,7 @@ mod tests {
             (ItemShape::Bow, crafting::ITEM_BOW),
             (ItemShape::Sceptre, crafting::ITEM_WOODEN_SCEPTRE),
             (ItemShape::Coin, items::ITEM_SILVER),
+            (ItemShape::HorseHead, items::ITEM_BLACK_HORSE),
         ]
     }
 
