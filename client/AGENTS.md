@@ -505,9 +505,9 @@ five-petal corolla and an eye for each of the three flower ids, and an arching b
 along its canes and flowers at their tips for either bramble that has not been redrawn yet, or a dry
 arching cane with short thorns and no bloom for desert scrub. **The meadow bush left that frame in
 #835**: three forked shoots of unequal length leave three separate feet in sectors of unequal width,
-and their wood tapers from foot to tip. Its leaves are still broad blades — #835's last half makes
-them pointed surfaces placed by phyllotaxis. The desert scrub (#836) and the winter bramble (#837)
-still stand on the old skeleton and are the two issues that retire it. Every vertex stays inside its own voxel, which lets
+their wood tapers from foot to tip, and ten leaves follow the golden angle round them — each a midrib
+of three quads that opens, recurves and closes to a point rather than a card. The desert scrub (#836)
+and the winter bramble (#837) still stand on the old skeleton and are the two issues that retire it. Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
 and for either bramble that is the point: it used to be an ordinary opaque cube, so a cluster of
@@ -525,12 +525,13 @@ block would be a **server** change with three enforced consequences, and it is n
 
 **The quad budget is the thing to watch when any shape changes.** Cover is per voxel and
 unmerged, so every quad a plant gains is paid once per plant in the world: a flower is 11 quads, a
-bush is 46, and a winter bramble is 36. On a generated meadow chunk with 12 flowers and 9 bushes
-the cover half is 546 quads where the two shapes before #634 cost 96, while the opaque half fell by
+bush is 66, and a winter bramble is 36. On a generated meadow chunk with 12 flowers and 9 bushes
+the cover half is 726 quads where the two shapes before #634 cost 96, while the opaque half fell by
 24 — the bush's cube left the sweep and the ground under it gained the faces that cube was culling.
-**The bush was 42 until #835 put three shoots where four canes were and forked each of them**; the
-taper costs nothing, because a trapezoid has the rectangle's four corners. #835's last half spends
-the rest against a ceiling of 96.
+**The bush was 42 before #835 and 66 after it**, in three steps: three shoots for four canes took it
+to 34, their forks to 46, and leaves that are pointed surfaces rather than one quad each to 66. The
+taper cost nothing, because a trapezoid has the rectangle's four corners. #835 caps the shape at 96
+and says to lower the leaf count before raising that.
 The one-in-256 tundra fixture carries four winter brambles and therefore 144 cover quads.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
 The desert bramble is 46 quads. The dense desert fixture grows exactly 25 per chunk, so its cover
@@ -558,8 +559,8 @@ mesh takes**, which is why they do not move: the same finding #642 made about
 `MAX_APPLIED_PER_FRAME`, one stage earlier. `measure_what_a_planted_chunk_costs_to_mesh` put the
 then-new 510-quad cover buffer in context: the planted terrain chunk measured 4.218..5.197 ms (median
 4.354 ms), overlapping the bare terrain's 4.030..4.914 ms (median 4.314 ms). Those readings are #788's
-and describe the 42-quad bush; #835 re-ran the two streaming harnesses and reports them on its own
-pull requests.
+and describe the 42-quad bush; #835 re-ran the two streaming harnesses over the 66-quad one and
+reports them on its pull requests.
 
 **#789 repeated the same controls for dense desert scrub.** In the optimized 343-chunk join,
 `DesertBare` / `CubeScrub` / `DesertPlanted` recorded peak `queued` ranges of 155..169 / 161..171 /
