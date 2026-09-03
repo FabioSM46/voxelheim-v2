@@ -6265,10 +6265,6 @@ pub fn encode_mount_request(request: &MountRequest) -> Vec<u8> {
 }
 
 /// Builds the deliberately empty immediate dismount intent.
-#[allow(
-    dead_code,
-    reason = "the V27 encoder is reserved before its mount-input consumer"
-)]
 pub fn encode_dismount_request() -> Vec<u8> {
     let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
     let payload = fb::DismountRequest::create(&mut builder, &fb::DismountRequestArgs::default());
