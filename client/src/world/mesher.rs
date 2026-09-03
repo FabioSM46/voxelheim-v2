@@ -422,14 +422,14 @@ const COVER_LEAF_RISE: f32 = 0.09;
 /// about it, not a claim that the shape reaches every wall.
 const BUSH_INSET: f32 = 0.02;
 
-/// The umbrella frame the two undressed brambles still stand on: four canes at equal
-/// angles from one hub, each bent through three woody segments of one constant width.
+/// The umbrella frame the desert scrub still stands on: four canes at equal angles from one
+/// hub, each bent through three woody segments of one constant width.
 ///
-/// **It is being retired one biome at a time, and this is the middle of that.** The meadow
-/// bush left it in #835 for [`push_shoot`]; the desert scrub (#836) and the winter bramble
-/// (#837) dress it until they follow, and retiring it here would have redrawn both, which
-/// #835 puts out of scope by name. `BRAMBLE_` rather than `BUSH_` because the meadow bush
-/// is exactly what no longer reads them.
+/// **It is being retired one biome at a time, and only one biome is left.** The meadow bush
+/// left it in #835 for [`push_shoot`] and the winter bramble followed in #837; the desert
+/// scrub (#836) is the last caller, and retiring it here would have redrawn that species
+/// too, which both of those issues put out of scope by name. `BRAMBLE_` rather than `BUSH_`
+/// because the meadow bush is exactly what no longer reads them.
 const BRAMBLE_CANES: usize = 4;
 const BRAMBLE_CANE_SEGMENTS: usize = 3;
 const BRAMBLE_CANE_REACH: f32 = 0.38;
@@ -499,6 +499,100 @@ const BUSH_FORK_HALF_SCALES: [f32; BUSH_FORK_SEGMENTS + 1] = [0.60, 0.42, 0.25];
 const BUSH_FORK_REACH: f32 = 0.09;
 const BUSH_FORK_RISE: f32 = 0.10;
 const BUSH_FORK_YAW_SPREAD: f32 = 1.2;
+
+/// Where a shoot's shoulder and crest sit along its stroke, as fractions of its reach and
+/// its arch. Named rather than written into [`push_shoot`] as literals, because the winter
+/// bramble's snow line and the height its clusters hang from are both derived from the
+/// shoulder, and a literal buried in the primitive cannot be read from a `const` assertion.
+const SHOOT_SHOULDER_ALONG: f32 = 0.32;
+const SHOOT_SHOULDER_RISE: f32 = 0.72;
+const SHOOT_CREST_ALONG: f32 = 0.68;
+
+/// The dimensions one species draws [`push_shoot`] at.
+///
+/// **The branching is shared and the proportions are not.** A meadow bush stands up; a
+/// winter bramble is flattened by the snow lying on it. That difference is a table of
+/// numbers rather than a second copy of the branching code — which is exactly what
+/// [`push_cane`] became for three biomes, and what this exists so as not to repeat.
+struct ShootProfile {
+    /// How far every foot is displaced from the voxel's axis along its own yaw, so the
+    /// shoots leave separate feet rather than one hub.
+    root_spread: f32,
+    /// The horizontal stroke at no vigour, and how much full vigour adds to it.
+    reach: f32,
+    reach_span: f32,
+    /// The crest height, likewise.
+    arch: f32,
+    arch_span: f32,
+    /// Where the tip falls back to as a fraction of the arch, and how much that varies.
+    tip_fall: f32,
+    tip_fall_jitter: f32,
+    /// The sideways wander, so a shoot is not a plane curve.
+    bend: f32,
+    /// The half-width the wood is drawn at, at each of the shoot's joints. Monotonically
+    /// non-increasing from foot to tip: visible here rather than emergent.
+    half_widths: [f32; BUSH_SHOOT_SEGMENTS + 1],
+    /// The child twig that leaves the shoulder.
+    fork_reach: f32,
+    fork_rise: f32,
+}
+
+/// The meadow bush's proportions, gathered from the constants above so #835's numbers stay
+/// where their reasoning is written down.
+const BUSH_SHOOT_PROFILE: ShootProfile = ShootProfile {
+    root_spread: BUSH_ROOT_SPREAD,
+    reach: BUSH_SHOOT_REACH,
+    reach_span: BUSH_SHOOT_REACH_SPAN,
+    arch: BUSH_SHOOT_ARCH,
+    arch_span: BUSH_SHOOT_ARCH_SPAN,
+    tip_fall: BUSH_SHOOT_TIP_FALL,
+    tip_fall_jitter: BUSH_SHOOT_TIP_FALL_JITTER,
+    bend: BUSH_SHOOT_BEND,
+    half_widths: BUSH_SHOOT_HALF_WIDTHS,
+    fork_reach: BUSH_FORK_REACH,
+    fork_rise: BUSH_FORK_RISE,
+};
+
+/// The winter bramble's proportions: **lower and wider than the meadow bush's**.
+///
+/// A shrub under snow load is crushed, and that is the silhouette. The arch is roughly half
+/// the bush's while the stroke is longer and the feet start further out, so the plant
+/// spreads instead of standing — `a_winter_bramble_is_crushed_lower_and_reaches_wider`
+/// measures both against a meadow bush rather than trusting these numbers.
+///
+/// **Being smaller than its voxel is allowed here, and it is not an oversight.**
+/// `world.WinterBramble` has been `Cover` on the server since #790: no body is stopped by
+/// this cube, so this species has no collision span to make visible and therefore nothing
+/// it has to span. It may be crushed, lopsided and short of every wall. Do not copy the
+/// meadow bush's low cardinal fill leaves in here — a test pinning a six-wall span for this
+/// species would be pinning a guarantee the server does not make, and since #874 that is
+/// true of the other two brambles as well. [`BUSH_INSET`] still applies for the reason #874
+/// leaves it: every vertex stays inside its own voxel, so two neighbouring plants never put
+/// coincident quads on the plane they share.
+///
+/// The tip falls only a little way back from the crest, which is what keeps the descending
+/// segment shallow: a crushed shrub sprawls rather than arching, and #837's second half
+/// needs that shallowness again to lay a ribbon of snow along it.
+const WINTER_SHOOT_PROFILE: ShootProfile = ShootProfile {
+    root_spread: 0.15,
+    reach: 0.26,
+    reach_span: 0.06,
+    arch: 0.20,
+    arch_span: 0.14,
+    tip_fall: 0.70,
+    tip_fall_jitter: 0.06,
+    bend: 0.05,
+    half_widths: [0.026, 0.018, 0.011, 0.006],
+    fork_reach: 0.11,
+    fork_rise: 0.06,
+};
+
+/// The tallest the winter bramble may draw, in blocks above its voxel floor.
+///
+/// Strictly below the meadow bush's, which grows a leaf to `1.0 - BUSH_INSET` because it
+/// has a cube to fill. This is a ceiling the shape stays under, not a station anything
+/// reaches for.
+const WINTER_BRAMBLE_HEIGHT: f32 = 0.42;
 
 /// The meadow bush's leaves, in blocks.
 ///
@@ -577,8 +671,20 @@ const BUSH_SPECKS: usize = 3;
 const BUSH_SPECK_HALF_WIDTH: f32 = 0.018;
 const BUSH_SPECK_HEIGHT: f32 = 0.04;
 
-/// One crossed-blade berry per tip, plus two at crests.
-const WINTER_BRAMBLE_BERRIES: usize = BRAMBLE_CANES + 2;
+/// One crossed-blade berry at each shoot's crest and tip.
+///
+/// **A placeholder, and named as one.** #837's second half replaces every one of these with
+/// a bunch of three to five berries hanging from a short pedicel: a bead centred on a joint
+/// is the wrong botany, and against a white field one bead is punctuation where three
+/// hanging together are a shape. The tone is not what changes — `WINTER_BRAMBLE`'s dark
+/// crimson was chosen in #790 to stay readable against near-white snow and stays the only
+/// saturated tone on the plant.
+///
+/// Test-only for the reason [`QUADS_PER_WINTER_BRAMBLE`] is: production walks the shoots and
+/// emits a berry per joint rather than counting them, and a constant nothing reads is a
+/// claim nothing checks.
+#[cfg(test)]
+const WINTER_BRAMBLE_BERRIES: usize = BUSH_SHOOTS * 2;
 const WINTER_BERRY_HALF_WIDTH: f32 = 0.025;
 const WINTER_BERRY_HEIGHT: f32 = 0.05;
 
@@ -621,10 +727,16 @@ pub(super) const QUADS_PER_DESERT_BRAMBLE: usize = BRAMBLE_CANES * BRAMBLE_CANE_
     + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
     + DESERT_CROWN_BLADES;
 
-/// Four bare canes plus two crossed blades per berry.
+/// How many quads one winter bramble contributes: two ribbons for each segment of a shoot
+/// and of its fork, and two crossed blades per berry.
+///
+/// **42**, where the four-cane umbrella with a bead on each joint cost 36, against #837's
+/// ceiling of 72. Thirty of those are wood where four constant-width canes cost 24. #837's
+/// second half spends the thirty that are left on the snow load and on turning six beads
+/// into hanging clusters.
 #[cfg(test)]
 pub(super) const QUADS_PER_WINTER_BRAMBLE: usize =
-    BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2 + WINTER_BRAMBLE_BERRIES * 2;
+    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + WINTER_BRAMBLE_BERRIES * 2;
 
 /// The chunks across a chunk's six faces, in the order the sweep reads them.
 ///
@@ -1346,7 +1458,6 @@ fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 
 struct Cane {
     shoulder: [f32; 3],
     crest: [f32; 3],
-    tip: [f32; 3],
     yaw: f32,
 }
 
@@ -1401,7 +1512,6 @@ fn push_cane(
     Cane {
         shoulder,
         crest,
-        tip,
         yaw,
     }
 }
@@ -1459,6 +1569,15 @@ fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
 /// Each segment is drawn narrower than the last, and one child twig leaves the shoulder at
 /// a dial-driven deviation — shorter than its parent and thinner than the parent is at that
 /// joint. Two levels is the whole of it: this is a knee-high plant inside one voxel.
+///
+/// `profile` is what makes the primitive shared rather than the meadow bush's: the winter
+/// bramble draws the same branching at crushed proportions, and there is no second copy of
+/// this function to drift from it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the plant's frame, its dials and the species proportions; bundling the \
+              first three would name a struct nothing else has a use for"
+)]
 fn push_shoot(
     mesh: &mut SurfaceMesh,
     floor: [f32; 3],
@@ -1466,6 +1585,7 @@ fn push_shoot(
     index: usize,
     yaw: f32,
     leader: bool,
+    profile: &ShootProfile,
     color: [f32; 4],
 ) -> Shoot {
     let dials = BUSH_DIAL_SHOOT + index as u32 * BUSH_DIALS_PER_SHOOT;
@@ -1475,10 +1595,10 @@ fn push_shoot(
     } else {
         BUSH_FOLLOWER_VIGOUR * dial(seed, dials)
     };
-    let reach = BUSH_SHOOT_REACH + vigour * BUSH_SHOOT_REACH_SPAN;
-    let arch = BUSH_SHOOT_ARCH + vigour * BUSH_SHOOT_ARCH_SPAN;
-    let fall = BUSH_SHOOT_TIP_FALL + dial(seed, dials + 1) * BUSH_SHOOT_TIP_FALL_JITTER;
-    let bend = (dial(seed, dials + 2) - 0.5) * BUSH_SHOOT_BEND;
+    let reach = profile.reach + vigour * profile.reach_span;
+    let arch = profile.arch + vigour * profile.arch_span;
+    let fall = profile.tip_fall + dial(seed, dials + 1) * profile.tip_fall_jitter;
+    let bend = (dial(seed, dials + 2) - 0.5) * profile.bend;
 
     let (sin, cos) = yaw.sin_cos();
     let along = [cos, 0.0, sin];
@@ -1496,21 +1616,25 @@ fn push_shoot(
     // The foot sits its own half-width above the floor inset, so the ribbon around the
     // first segment cannot dip below the extent the low leaves are what carries.
     let foot = at(
-        BUSH_ROOT_SPREAD,
+        profile.root_spread,
         0.0,
-        BUSH_INSET + BUSH_SHOOT_HALF_WIDTHS[0],
+        BUSH_INSET + profile.half_widths[0],
     );
-    let shoulder = at(BUSH_ROOT_SPREAD + reach * 0.32, bend * 0.5, arch * 0.72);
-    let crest = at(BUSH_ROOT_SPREAD + reach * 0.68, bend, arch);
-    let tip = at(BUSH_ROOT_SPREAD + reach, bend * 0.5, arch * fall);
+    let shoulder = at(
+        profile.root_spread + reach * SHOOT_SHOULDER_ALONG,
+        bend * 0.5,
+        arch * SHOOT_SHOULDER_RISE,
+    );
+    let crest = at(profile.root_spread + reach * SHOOT_CREST_ALONG, bend, arch);
+    let tip = at(profile.root_spread + reach, bend * 0.5, arch * fall);
     let joints = [foot, shoulder, crest, tip];
     for segment in 0..BUSH_SHOOT_SEGMENTS {
         push_tapered_twig(
             mesh,
             joints[segment],
             joints[segment + 1],
-            BUSH_SHOOT_HALF_WIDTHS[segment],
-            BUSH_SHOOT_HALF_WIDTHS[segment + 1],
+            profile.half_widths[segment],
+            profile.half_widths[segment + 1],
             color,
         );
     }
@@ -1521,12 +1645,12 @@ fn push_shoot(
     let (fork_sin, fork_cos) = fork_yaw.sin_cos();
     let fork_at = |step: f32| {
         [
-            shoulder[0] + fork_cos * BUSH_FORK_REACH * step,
-            shoulder[1] + BUSH_FORK_RISE * step,
-            shoulder[2] + fork_sin * BUSH_FORK_REACH * step,
+            shoulder[0] + fork_cos * profile.fork_reach * step,
+            shoulder[1] + profile.fork_rise * step,
+            shoulder[2] + fork_sin * profile.fork_reach * step,
         ]
     };
-    let shoulder_half = BUSH_SHOOT_HALF_WIDTHS[1];
+    let shoulder_half = profile.half_widths[1];
     let fork_joints = [shoulder, fork_at(0.55), fork_at(1.0)];
     for segment in 0..BUSH_FORK_SEGMENTS {
         push_tapered_twig(
@@ -1570,7 +1694,16 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let yaws = bush_shoot_yaws(seed);
     let leader = bush_leader(seed);
     let shoots: [Shoot; BUSH_SHOOTS] = std::array::from_fn(|shoot| {
-        push_shoot(mesh, floor, seed, shoot, yaws[shoot], shoot == leader, wood)
+        push_shoot(
+            mesh,
+            floor,
+            seed,
+            shoot,
+            yaws[shoot],
+            shoot == leader,
+            &BUSH_SHOOT_PROFILE,
+            wood,
+        )
     });
 
     // The low tangle. Cardinal yaws exactly, because these four are the fill guarantee on
@@ -1718,18 +1851,61 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     }
 }
 
-/// Bare shared canes with dark berries; `world.Cover`, so it has no fill guarantee.
+/// One winter bramble, standing in the voxel whose minimum corner is `floor`.
+///
+/// Three forked woody shoots at [`WINTER_SHOOT_PROFILE`]'s crushed proportions carry a dark
+/// berry at each crest and each tip. It shares [`push_shoot`] with the meadow bush and no
+/// longer touches [`push_cane`]: nothing here is `n` of anything at `TAU / n`.
+///
+/// **This species has no fill guarantee and must not grow one.** `world.WinterBramble` is
+/// `Cover` on the server, so no body is stopped by the cube and there is no collision span
+/// to make visible — the plant is deliberately smaller than its voxel and lopsided. The
+/// only span rule left is that every vertex stays inside the voxel, which is
+/// [`BUSH_INSET`]'s second reason and applies to every plant here.
+///
+/// The snow this plant is crushed by is drawn by #837's second half, along the upper side of
+/// these same segments. What is here is the silhouette it will lie on.
 fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
+    const {
+        // Why the crushed ceiling holds: the highest joint is a crest at full vigour, and
+        // the ribbon around it reaches a wood half-width past that.
+        assert!(
+            WINTER_SHOOT_PROFILE.arch
+                + WINTER_SHOOT_PROFILE.arch_span
+                + WINTER_SHOOT_PROFILE.half_widths[1]
+                < WINTER_BRAMBLE_HEIGHT
+        );
+        assert!(WINTER_BRAMBLE_HEIGHT < 1.0 - BUSH_INSET);
+        // And why a berry on the lowest joint still clears the floor inset.
+        assert!(
+            WINTER_SHOOT_PROFILE.arch * WINTER_SHOOT_PROFILE.tip_fall - WINTER_BERRY_HEIGHT * 0.5
+                > BUSH_INSET
+        );
+    }
+
     let wood = palette::linear_rgba(palette::LOG);
     let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
-    let canes: [Cane; BRAMBLE_CANES] =
-        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
 
-    for cane in &canes {
-        push_berry(mesh, cane.tip, berry);
-    }
-    for cane in canes.iter().take(WINTER_BRAMBLE_BERRIES - BRAMBLE_CANES) {
-        push_berry(mesh, cane.crest, berry);
+    let yaws = bush_shoot_yaws(seed);
+    let leader = bush_leader(seed);
+    let shoots: [Shoot; BUSH_SHOOTS] = std::array::from_fn(|shoot| {
+        push_shoot(
+            mesh,
+            floor,
+            seed,
+            shoot,
+            yaws[shoot],
+            shoot == leader,
+            &WINTER_SHOOT_PROFILE,
+            wood,
+        )
+    });
+
+    // The fruit. Still a bead on a joint, which is what #837's second half replaces with a
+    // bunch on a pedicel; the wood and the snow above are what this half is.
+    for shoot in &shoots {
+        push_berry(mesh, shoot.crest, berry);
+        push_berry(mesh, shoot.tip, berry);
     }
 }
 
@@ -4974,10 +5150,76 @@ mod tests {
         }
     }
 
+    const WINTER_FIXTURE: [usize; 3] = [4, 5, 6];
+    const WINTER_FIXTURE_FLOOR: [f32; 3] = [4.0, 5.0, 6.0];
+
+    /// One winter bramble's cover half, in the voxel every winter test below reads.
+    fn one_winter_bramble() -> SurfaceMesh {
+        let mut chunk = air(SIZE);
+        chunk.set(
+            WINTER_FIXTURE[0],
+            WINTER_FIXTURE[1],
+            WINTER_FIXTURE[2],
+            palette::WINTER_BRAMBLE,
+        );
+        super::mesh_chunk(&chunk, &alone()).cover
+    }
+
+    /// The wood of one winter shoot, in the order `push_shoot` pushes it.
+    fn winter_shoot_wood(mesh: &SurfaceMesh, shoot: usize) -> Vec<usize> {
+        let quads_per_shoot = (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
+        quads_coloured(mesh, palette::linear_rgba(palette::LOG))[shoot * quads_per_shoot..]
+            [..quads_per_shoot]
+            .to_vec()
+    }
+
+    /// The centre line of one winter shoot, foot to tip.
+    fn winter_shoot_joints(mesh: &SurfaceMesh, shoot: usize) -> Vec<[f32; 3]> {
+        let wood = winter_shoot_wood(mesh, shoot);
+        let mut joints = vec![centre_line(mesh, wood[0], false)];
+        for segment in 0..BUSH_SHOOT_SEGMENTS {
+            joints.push(centre_line(mesh, wood[segment * 2], true));
+        }
+        joints
+    }
+
+    /// The furthest any vertex of one colour stands from the voxel's vertical axis.
+    fn horizontal_reach(mesh: &SurfaceMesh, colour: [f32; 4], floor: [f32; 3]) -> f32 {
+        quads_coloured(mesh, colour)
+            .into_iter()
+            .flat_map(|quad| {
+                mesh.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD].to_vec()
+            })
+            .map(|point| (point[0] - floor[0] - 0.5).hypot(point[2] - floor[2] - 0.5))
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// The highest vertex of a mesh, above `floor`.
+    fn drawn_height(mesh: &SurfaceMesh, floor: [f32; 3]) -> f32 {
+        (0..mesh.quad_count())
+            .map(|quad| quad_extent(mesh, quad, 1).1 - floor[1])
+            .fold(f32::NEG_INFINITY, f32::max)
+    }
+
+    /// How much colour a tone carries: the spread between its brightest and dimmest
+    /// linear channel. A near-white and a dark brown both come out low; a crimson does
+    /// not, which is the only comparison `the_berry_is_the_only_saturated_tone` needs.
+    fn chroma(colour: [f32; 4]) -> f32 {
+        let (mut low, mut high) = (f32::INFINITY, f32::NEG_INFINITY);
+        for channel in &colour[..3] {
+            low = low.min(*channel);
+            high = high.max(*channel);
+        }
+        high - low
+    }
+
     #[test]
-    fn a_winter_bramble_has_bare_canes_and_small_berries() {
-        // Unlike the solid meadow bush, `world.WinterBramble` is Cover on the server:
-        // the snow beneath it stays visible and a body walks through the sparse canes.
+    fn a_winter_bramble_is_three_crushed_forked_shoots_with_berries() {
+        // `world.WinterBramble` is `Cover` on the server, so the snow beneath it stays
+        // visible and a body walks through it. **No fill guarantee is asserted here and
+        // none should be**: this species has no cube a body is stopped by, which is what
+        // makes a crushed, lopsided, smaller-than-its-voxel plant correct rather than a
+        // regression. A test pinning a six-wall span for it would be wrong.
         let mut chunk = air(SIZE);
         chunk.set(4, 4, 6, palette::SNOW);
         let bare = super::mesh_chunk(&chunk, &alone());
@@ -4990,27 +5232,235 @@ mod tests {
         );
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_WINTER_BRAMBLE);
+        // What `client/AGENTS.md`'s quad budget is written down as, and #837's ceiling.
+        assert_eq!(QUADS_PER_WINTER_BRAMBLE, 42);
+        const { assert!(QUADS_PER_WINTER_BRAMBLE <= 72) };
+
         assert_eq!(
             quads_by_colour(&mesh.cover),
             BTreeMap::from([
                 (
                     palette::linear_rgba(palette::LOG).map(f32::to_bits),
-                    BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2,
+                    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2,
                 ),
                 (
                     palette::linear_rgba(palette::WINTER_BRAMBLE).map(f32::to_bits),
                     WINTER_BRAMBLE_BERRIES * 2,
                 ),
             ]),
-            "bare wood and berries are the whole winter shape"
+            "forked tapering shoots and a berry at each crest and tip"
         );
 
         const {
             assert!(WINTER_BERRY_HEIGHT <= 0.05 && WINTER_BERRY_HALF_WIDTH * 2.0 <= 0.05);
         }
 
+        let repeated = super::mesh_chunk(&chunk, &alone());
+        assert_eq!(
+            mesh.cover, repeated.cover,
+            "a remesh reshuffled the winter bramble"
+        );
+
         winding_agrees_with_every_normal(&mesh.cover);
-        stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+        stays_inside_the_voxel(&mesh.cover, WINTER_FIXTURE_FLOOR);
+        assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
+    }
+
+    #[test]
+    fn the_berry_is_the_only_saturated_tone_a_winter_bramble_emits() {
+        // #790 chose `#761A3B` to stay readable against near-white snow and #837 does not
+        // reopen it. What is asserted is that nothing else on the plant competes with it:
+        // the wood is a dark brown, so the berry is the one place colour goes.
+        let mesh = one_winter_bramble();
+        let berry = palette::linear_rgba(palette::WINTER_BRAMBLE);
+        let others = [palette::linear_rgba(palette::LOG)];
+        for colour in others {
+            assert!(
+                chroma(berry) > chroma(colour) * 1.5,
+                "{colour:?} carries {} of the berry's {} colour: the plant has a second \
+                 saturated tone",
+                chroma(colour),
+                chroma(berry)
+            );
+        }
+        assert_eq!(
+            quads_by_colour(&mesh).len(),
+            1 + others.len(),
+            "the winter bramble emits a tone that is neither wood nor berry"
+        );
+    }
+
+    #[test]
+    fn a_winter_bramble_is_crushed_lower_and_reaches_wider_than_the_meadow_bush() {
+        // Snow flattens a shrub, and this is the silhouette that says so. **The width is
+        // compared wood to wood on purpose.** The meadow bush's widest vertices are its
+        // four low cardinal leaves, which exist only to make a `Solid` voxel's collision
+        // span visible; `world.WinterBramble` is `Cover` and deliberately grows no such
+        // part, so comparing against them would be comparing against a guarantee this
+        // species does not have. The skeletons are what both plants draw for shape.
+        let wood = palette::linear_rgba(palette::LOG);
+        for y in 0..4 {
+            for z in 0..4 {
+                for x in 0..4 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let seed = plant_seed(x, y, z);
+                    let mut bush = SurfaceMesh::default();
+                    push_bush(&mut bush, floor, seed);
+                    let mut bramble = SurfaceMesh::default();
+                    push_winter_bramble(&mut bramble, floor, seed);
+
+                    let (low, tall) = (drawn_height(&bramble, floor), drawn_height(&bush, floor));
+                    assert!(
+                        low <= WINTER_BRAMBLE_HEIGHT,
+                        "({x},{y},{z}) the bramble reaches {low}, over its crushed \
+                         ceiling of {WINTER_BRAMBLE_HEIGHT}"
+                    );
+                    assert!(
+                        low < tall,
+                        "({x},{y},{z}) the bramble is {low} tall against the bush's \
+                         {tall}: it is not crushed"
+                    );
+
+                    let spread = horizontal_reach(&bramble, wood, floor);
+                    let upright = horizontal_reach(&bush, wood, floor);
+                    assert!(
+                        spread > upright,
+                        "({x},{y},{z}) the bramble's wood reaches {spread} against the \
+                         bush's {upright}: it is not more spread"
+                    );
+                }
+            }
+        }
+
+        // The ceiling is a real constraint on the shape and not merely a number above it.
+        const { assert!(WINTER_BRAMBLE_HEIGHT < 1.0 - BUSH_INSET) };
+    }
+
+    #[test]
+    fn every_winter_shoot_tapers_and_no_two_leave_at_the_same_angle() {
+        // What the four-cane umbrella could not do. The yaws, the feet and the lengths are
+        // read back out of the drawn geometry, so a frame that went back to `i * TAU / n`
+        // with a wobble would fail here rather than merely look wrong.
+        let third = std::f32::consts::TAU / BUSH_SHOOTS as f32;
+        let (mut narrowest, mut widest) = (f32::INFINITY, f32::NEG_INFINITY);
+        for y in 0..8 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let seed = plant_seed(x, y, z);
+                    let mut mesh = SurfaceMesh::default();
+                    push_winter_bramble(&mut mesh, floor, seed);
+
+                    let yaws = bush_shoot_yaws(seed);
+                    let joints: Vec<Vec<[f32; 3]>> = (0..BUSH_SHOOTS)
+                        .map(|shoot| winter_shoot_joints(&mesh, shoot))
+                        .collect();
+                    for first in 0..BUSH_SHOOTS {
+                        for second in first + 1..BUSH_SHOOTS {
+                            let separation = angle_between(yaws[first], yaws[second]);
+                            assert!(
+                                separation >= 2.0 * BUSH_SHOOT_GUARD - 1e-4,
+                                "({x},{y},{z}) shoots {first} and {second} are \
+                                 {separation} apart, closer than the guard allows"
+                            );
+                            narrowest = narrowest.min(separation);
+                            widest = widest.max(separation);
+                            let feet = distance(joints[first][0], joints[second][0]);
+                            assert!(
+                                feet >= WINTER_SHOOT_PROFILE.root_spread,
+                                "({x},{y},{z}) feet {first} and {second} are {feet} apart, \
+                                 inside the root spread"
+                            );
+                        }
+                    }
+
+                    let lengths: Vec<f32> =
+                        joints.iter().map(|shoot| polyline_length(shoot)).collect();
+                    let longest = lengths.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let shortest = lengths.iter().copied().fold(f32::INFINITY, f32::min);
+                    // **Apical dominance is asserted as the leader winning, not as a
+                    // ratio.** The bush's 1.3x is arithmetic from *its* vigour bands
+                    // against *its* spans; a crushed plant varies its arch and reach over
+                    // narrower ranges, so the same number copied across would be a claim
+                    // about a shape this one does not have. What the two bands do
+                    // guarantee is which shoot is longest, and by how much is measured.
+                    let leader = bush_leader(seed);
+                    assert!(
+                        (lengths[leader] - longest).abs() < 1e-5,
+                        "({x},{y},{z}) the shoot drawn from the leader's vigour band is \
+                         not the longest: {lengths:?}, leader {leader}"
+                    );
+                    assert!(
+                        longest >= shortest * 1.15,
+                        "({x},{y},{z}) has no leading shoot: {lengths:?}"
+                    );
+
+                    // Wood, not wire: the drawn half-width falls from foot to tip.
+                    for shoot in 0..BUSH_SHOOTS {
+                        let stroke = winter_shoot_wood(&mesh, shoot);
+                        let mut widths = vec![drawn_half_width(&mesh, stroke[0], false)];
+                        for segment in 0..BUSH_SHOOT_SEGMENTS {
+                            widths.push(drawn_half_width(&mesh, stroke[segment * 2], true));
+                        }
+                        for pair in widths.windows(2) {
+                            assert!(
+                                pair[1] <= pair[0] + 1e-6,
+                                "({x},{y},{z}) shoot {shoot} widens: {widths:?}"
+                            );
+                        }
+                        assert!(
+                            *widths.last().expect("a shoot has stations") < widths[0] - 1e-6,
+                            "({x},{y},{z}) shoot {shoot} is one width throughout: {widths:?}"
+                        );
+                    }
+                }
+            }
+        }
+        // **The even partition is a property of the population and that is the level it is
+        // asserted at**, for the reason the meadow's twin says: one plant whose two shoots
+        // happen to sit a third of the turn apart is a coincidence, and the umbrella frame
+        // this replaces could not vary at all.
+        assert!(
+            narrowest < third - 0.3 && widest > third + 0.3,
+            "shoot separations only ran {narrowest}..{widest} around {third}: the turn is \
+             still being partitioned evenly with a wobble on top"
+        );
+
+        // And on the one bramble every other winter test reads, no two shoots are a third
+        // of the turn apart at all.
+        let fixture = bush_shoot_yaws(plant_seed(
+            WINTER_FIXTURE[0],
+            WINTER_FIXTURE[1],
+            WINTER_FIXTURE[2],
+        ));
+        for first in 0..BUSH_SHOOTS {
+            for second in first + 1..BUSH_SHOOTS {
+                assert!(
+                    (angle_between(fixture[first], fixture[second]) - third).abs() > 1e-3,
+                    "the fixture's shoots {first} and {second} are exactly a third of the \
+                     turn apart"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_winter_bramble_vertex_stays_inside_its_own_voxel() {
+        // `dial` is chunk-local, so sweep enough coordinates to exercise the yaw, vigour,
+        // bend, cluster-site and bunch-size combinations rather than one lucky seed. This
+        // is the one span rule this species has: `BUSH_INSET` keeps two neighbouring
+        // plants off the plane they share, and nothing here has a wall to reach.
+        for y in 0..8 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    let floor = [x as f32, y as f32, z as f32];
+                    let mut mesh = SurfaceMesh::default();
+                    push_winter_bramble(&mut mesh, floor, plant_seed(x, y, z));
+                    stays_inside_the_voxel(&mesh, floor);
+                    winding_agrees_with_every_normal(&mesh);
+                }
+            }
+        }
     }
 
     #[test]
@@ -5167,7 +5617,7 @@ mod tests {
 
         assert_eq!(brambles, 4);
         assert_eq!(mesh.cover.quad_count(), brambles * QUADS_PER_WINTER_BRAMBLE);
-        assert_eq!(mesh.cover.quad_count(), 144);
+        assert_eq!(mesh.cover.quad_count(), 168);
     }
 
     #[test]
