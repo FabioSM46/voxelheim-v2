@@ -448,15 +448,22 @@ const BRAMBLE_CANE_TIP_JITTER: f32 = 0.12;
 /// - [`BUSH_SHOOT_GUARD`] is what each sector keeps clear at both edges, and it makes the
 ///   feet's spacing a property rather than a hope: two feet at radius `r` and angle `t`
 ///   apart are `2 r sin(t / 2)` apart, so guarding both edges of two adjacent sectors puts
-///   any two over [`BUSH_ROOT_SPREAD`] apart on the floor. The narrowest sector the
-///   normalisation can produce is wider than twice the guard, which leaves the jitter
-///   somewhere to move.
+///   any two over [`BUSH_ROOT_SPREAD`] apart on the floor.
+///
+/// **`_MAX` is bounded by the guard and not chosen freely**, and getting that wrong is how
+/// the guarantee fails silently. The narrowest sector the normalisation can produce is one
+/// shoot at `_MIN` with *both* others at `_MAX` — `TAU * MIN / (MIN + 2 * MAX)` — not two
+/// at `_MIN`, which is the larger number and the one that is easy to write down instead.
+/// At `_MAX = 1.45` that narrowest sector is 1.00 rad against a guard pair of 1.16, so
+/// `free` went negative and the shoot was placed inside the clearance the doc claimed for
+/// it. `a_sector_is_always_wider_than_the_guard_pair_it_has_to_hold` is the assertion that
+/// now holds this, because the 512-bush sweep did not: those seeds never drew the extreme.
 const BUSH_SHOOTS: usize = 3;
 const BUSH_SHOOT_SEGMENTS: usize = 3;
 const BUSH_ROOT_SPREAD: f32 = 0.12;
 const BUSH_SHOOT_GUARD: f32 = 0.58;
 const BUSH_SHOOT_SECTOR_MIN: f32 = 0.55;
-const BUSH_SHOOT_SECTOR_MAX: f32 = 1.45;
+const BUSH_SHOOT_SECTOR_MAX: f32 = 1.20;
 
 /// Apical dominance, as two ranges driven by one dial per shoot.
 ///
@@ -4448,6 +4455,32 @@ mod tests {
         assert!(
             wood_high < crest_high - 1e-5,
             "the wood reached the ceiling instead of the crest leaves: {wood_high}"
+        );
+    }
+
+    #[test]
+    fn a_sector_is_always_wider_than_the_guard_pair_it_has_to_hold() {
+        // **The claim the sweep below cannot make.** A sweep answers for the seeds it
+        // draws; this answers for every seed there is, because the narrowest sector the
+        // normalisation can produce is a closed form: one shoot at the minimum with every
+        // other at the maximum. Written as it is rather than as a number, so tuning either
+        // bound is what re-evaluates it.
+        let narrowest = std::f32::consts::TAU * BUSH_SHOOT_SECTOR_MIN
+            / (BUSH_SHOOT_SECTOR_MIN + (BUSH_SHOOTS - 1) as f32 * BUSH_SHOOT_SECTOR_MAX);
+        assert!(
+            narrowest >= 2.0 * BUSH_SHOOT_GUARD,
+            "the narrowest sector is {narrowest} rad and has to hold two guards of \
+             {BUSH_SHOOT_GUARD}: `free` goes negative and a shoot is placed inside the \
+             clearance its feet spacing is derived from"
+        );
+
+        // And the guard is what it is because of this: two feet at BUSH_ROOT_SPREAD from
+        // the axis, that angle apart, are this far apart on the floor.
+        let closest = 2.0 * BUSH_ROOT_SPREAD * BUSH_SHOOT_GUARD.sin();
+        assert!(
+            closest >= BUSH_ROOT_SPREAD,
+            "two feet a guard pair apart are only {closest} apart, inside \
+             BUSH_ROOT_SPREAD"
         );
     }
 
