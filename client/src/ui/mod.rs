@@ -65,16 +65,8 @@ use settings::SettingsScreen;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlayerMessageKind {
     Server,
-    #[allow(
-        dead_code,
-        reason = "the second reviewable half of issue 840 migrates info producers"
-    )]
     Info,
     Warn,
-    #[allow(
-        dead_code,
-        reason = "the second reviewable half of issue 840 migrates error producers"
-    )]
     Error,
 }
 
