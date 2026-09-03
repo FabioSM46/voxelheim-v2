@@ -260,11 +260,13 @@ fn message_colour(kind: LogKind, alpha: f32) -> Color {
 }
 
 fn capture_chat(
+    time: Res<Time<Real>>,
     mut typed: MessageReader<KeyboardInput>,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
     mut history: ResMut<ChatHistory>,
     mut outbound: Option<ResMut<Outbound>>,
+    mut log: ResMut<ChatLog>,
 ) {
     if *mode != InputMode::Chat || mode.is_changed() {
         // Always drain: the T that opened chat and keys typed elsewhere must never leak
@@ -295,7 +297,7 @@ fn capture_chat(
                 if !line.trim().is_empty() {
                     history.0 = Some(line.clone());
                 }
-                send_line(line, outbound.as_deref_mut());
+                send_line(line, outbound.as_deref_mut(), &mut log, time.elapsed());
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
@@ -304,7 +306,14 @@ fn capture_chat(
     }
 }
 
-fn send_line(line: String, outbound: Option<&mut Outbound>) {
+/// Sends one chat or party frame, and reports directly to the log when it does not leave.
+///
+/// **Written straight to [`ChatLog`] rather than through the [`PlayerMessage`] bus.** This
+/// module already owns the log it would end up in, and going by way of a `MessageWriter`
+/// here would ask the reader — [`ingest_player_messages`], later in the same chained
+/// schedule — to notice a message this very frame wrote, for no benefit: chat is the
+/// producer and the consumer at once for its own delivery failure.
+fn send_line(line: String, outbound: Option<&mut Outbound>, log: &mut ChatLog, now: Duration) {
     let Some(frame) = outgoing_frame(&line) else {
         return;
     };
@@ -313,6 +322,14 @@ fn send_line(line: String, outbound: Option<&mut Outbound>) {
     };
     if outbound.send(frame) == Sent::Dropped {
         warn!("the outbound queue was full; one chat or party request was dropped");
+        push_player_message(
+            log,
+            &PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your message did not reach the server; try again.",
+            ),
+            now,
+        );
     }
 }
 
@@ -817,6 +834,26 @@ mod tests {
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
         assert_eq!(app.world().resource::<ChatLine>().0, "");
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_dropped_send_reaches_the_log_as_one_error_line() {
+        // A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+        // receiver is parked in a blocking `recv`, which nothing here ever is, so the send
+        // reads as `Sent::Dropped`. The receiver has to outlive this test — dropping it
+        // would disconnect the channel and turn the send into the silent `Sent::Closed`.
+        let (outbound, _never_received) = Outbound::to_a_test(0);
+        let mut app = capture_app(Some(outbound));
+        type_key(&mut app, Key::Character("hello".into()));
+        type_key(&mut app, Key::Enter);
+        app.update();
+
+        let line = app.world().resource::<ChatLog>().0.back().unwrap();
+        assert_eq!(
+            line.text,
+            "[ERROR] Your message did not reach the server; try again."
+        );
+        assert_eq!(line.kind, LogKind::System(PlayerMessageKind::Error));
     }
 
     fn reopen_chat(app: &mut App) {

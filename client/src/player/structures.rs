@@ -51,6 +51,7 @@ use crate::net::{
     BlockCoord, Facing, Outbound, PlaceStructureRequest, RemoveStructureRequest, Sent, Session,
     StructureKind, StructureState, encode_place_structure_request, encode_remove_structure_request,
 };
+use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// The control that plants a structure — the same press that places a block, because a
 /// tent and a stone block are the same gesture to a player.
@@ -459,6 +460,7 @@ impl Plugin for StructuresPlugin {
             // `PlayerCameraPlugin` owns it in the game; here too, so `InputGate` resolves
             // when this module is built on its own.
             .init_resource::<ViewMode>()
+            .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_footprint_ghost)
             .add_systems(
                 Update,
@@ -488,6 +490,7 @@ impl Plugin for StructuresPlugin {
                         .before(ApplyTargetInput)
                         .after(AimCamera),
                     (send_placement, send_removal)
+                        .in_set(PublishPlayerMessages)
                         .after(AimStructures)
                         // After the snapshots for the reason every other input system is: the
                         // gate they read is published there, and a frame stale is a click
@@ -694,6 +697,10 @@ fn move_the_footprint_ghost(
 /// is clear, whether the player is close enough by the server's own reckoning and whether
 /// they already have a tent are every one of them the server's answer. Intent goes out and
 /// the camp appears if a snapshot says so.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one intent-sending system; the chat report needs an eighth parameter"
+)]
 fn send_placement(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     gate: InputGate<'_>,
@@ -702,6 +709,7 @@ fn send_placement(
     look: Res<LookState>,
     cadence: Res<InputCadence>,
     outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     if !gate.may_act() {
         return;
@@ -742,10 +750,16 @@ fn send_placement(
 
     match outbound.send(encode_place_structure_request(&request)) {
         Sent::Queued => {}
-        Sent::Dropped => warn!(
-            "the outbound queue was full; a placement at {:?} never reached the server",
-            hit.block
-        ),
+        Sent::Dropped => {
+            warn!(
+                "the outbound queue was full; a placement at {:?} never reached the server",
+                hit.block
+            );
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your structure placement did not reach the server; try again.",
+            ));
+        }
         Sent::Closed => {}
     }
 }
@@ -761,6 +775,7 @@ fn send_removal(
     target: Res<StructureTarget>,
     cadence: Res<InputCadence>,
     outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     if !gate.may_act() {
         return;
@@ -784,10 +799,16 @@ fn send_removal(
     };
     match outbound.send(encode_remove_structure_request(&request)) {
         Sent::Queued => {}
-        Sent::Dropped => warn!(
-            "the outbound queue was full; a removal of structure {} never reached the server",
-            picked.structure_id
-        ),
+        Sent::Dropped => {
+            warn!(
+                "the outbound queue was full; a removal of structure {} never reached the server",
+                picked.structure_id
+            );
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Removing that structure did not reach the server; try again.",
+            ));
+        }
         Sent::Closed => {}
     }
 }
@@ -2030,6 +2051,77 @@ mod tests {
             .resource_mut::<InventoryInbox>()
             .push(InventoryState { stacks, silver: 0 });
         (app, sent)
+    }
+
+    /// [`clicking_app`], with an outbound queue that has no room for anything.
+    ///
+    /// A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+    /// receiver is parked in a blocking `recv`, which nothing here ever is, so every send
+    /// reads as `Sent::Dropped`. The receiver is returned rather than discarded — dropping
+    /// it would disconnect the channel and turn every later send into the silent
+    /// `Sent::Closed` instead.
+    fn clicking_app_that_drops(
+        store: ChunkStore,
+        slot_zero: InventoryStack,
+    ) -> (App, Receiver<Vec<u8>>) {
+        let mut app = aiming_app(store);
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.add_plugins(InputPlugin).insert_resource(outbound);
+
+        let mut stacks = vec![InventoryStack::default(); 36];
+        stacks[0] = slot_zero;
+        app.world_mut()
+            .resource_mut::<InventoryInbox>()
+            .push(InventoryState { stacks, silver: 0 });
+        (app, never_received)
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn a_dropped_placement_reaches_chat_as_one_error() {
+        let wall = IVec3::new(3, 81, 0);
+        let (mut app, _never_received) =
+            clicking_app_that_drops(store_with(&[wall]), one(ITEM_TENT));
+        app.update();
+
+        click(&mut app, PLACE_BUTTON);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your structure placement did not reach the server; try again."
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dropped_removal_reaches_chat_as_one_error() {
+        let (mut app, _never_received) =
+            clicking_app_that_drops(store_with(&[IVec3::new(4, 81, 0)]), one(palette::STONE));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+        deliver(&mut app, 1, vec![tent_at(900, [3, 80, 0], LOCAL_ID)]);
+        app.update();
+
+        click(&mut app, REMOVE_BUTTON);
+        app.update();
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Removing that structure did not reach the server; try again."
+            )]
+        );
     }
 
     /// One of an item, which is every stack these tests need except the blade.

@@ -75,6 +75,7 @@ use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
 use super::text_input::{TextEdit, apply_key};
+use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn, MapEvent, MapInbox,
     MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerPlaceRequest,
@@ -1073,6 +1074,7 @@ impl Plugin for MapUiPlugin {
             .init_resource::<MapPointer>()
             .init_resource::<MapDrag>()
             .init_resource::<LookState>()
+            .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_map_screen)
             .add_systems(
                 Update,
@@ -1090,7 +1092,7 @@ impl Plugin for MapUiPlugin {
                     // otherwise have begun a drag, and because a form that opened this frame
                     // is what suspends the two below it.
                     click_the_map,
-                    press_the_form,
+                    press_the_form.in_set(PublishPlayerMessages),
                     // After the mode for a second reason, written here rather than left to
                     // be inherited from the head of this chain: `ui/mod.rs` decides whether
                     // `Escape` belongs to the note field by asking whether the field is
@@ -1099,8 +1101,10 @@ impl Plugin for MapUiPlugin {
                     // close the map behind it too. The edge is already there by way of
                     // `follow_input_mode` above -- what this line adds is that the
                     // requirement stops being invisible if the chain is ever reordered.
-                    type_the_note.after(crate::player::ApplyInputMode),
-                    remove_a_mark,
+                    type_the_note
+                        .after(crate::player::ApplyInputMode)
+                        .in_set(PublishPlayerMessages),
+                    remove_a_mark.in_set(PublishPlayerMessages),
                     drag_the_map,
                     zoom_the_map,
                     request_map_tiles,
@@ -2145,6 +2149,7 @@ fn type_the_note(
     mut form: ResMut<MarkerForm>,
     mut ticks: ResMut<MarkerTick>,
     mut outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     if form.0.is_none() || !screen.is_open() {
         // Always drain, for the reason chat does: a key pressed while no field was open must
@@ -2162,7 +2167,7 @@ fn type_the_note(
                 return;
             }
             Some(TextEdit::Submitted) => {
-                ask_to_place(draft, &mut ticks, outbound.as_deref_mut());
+                ask_to_place(draft, &mut ticks, outbound.as_deref_mut(), &mut messages);
                 form.0 = None;
                 return;
             }
@@ -2178,6 +2183,7 @@ fn press_the_form(
     actions: Query<(&Interaction, &MarkerFormAction), Changed<Interaction>>,
     mut ticks: ResMut<MarkerTick>,
     mut outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     if form.0.is_none() {
         return;
@@ -2195,7 +2201,7 @@ fn press_the_form(
             continue;
         }
         if let (MarkerFormAction::Place, Some(draft)) = (action, form.0.as_ref()) {
-            ask_to_place(draft, &mut ticks, outbound.as_deref_mut());
+            ask_to_place(draft, &mut ticks, outbound.as_deref_mut(), &mut messages);
         }
         form.0 = None;
         return;
@@ -2206,7 +2212,12 @@ fn press_the_form(
 ///
 /// **A request and nothing else.** Nothing is added to [`Markers`] here; the mark exists when
 /// the next `MarkerList` says so, which is also how a refusal needs no undo.
-fn ask_to_place(draft: &MarkerDraft, ticks: &mut MarkerTick, outbound: Option<&mut Outbound>) {
+fn ask_to_place(
+    draft: &MarkerDraft,
+    ticks: &mut MarkerTick,
+    outbound: Option<&mut Outbound>,
+    messages: &mut MessageWriter<'_, PlayerMessage>,
+) {
     let Some(outbound) = outbound else {
         return;
     };
@@ -2223,6 +2234,10 @@ fn ask_to_place(draft: &MarkerDraft, ticks: &mut MarkerTick, outbound: Option<&m
     }));
     if sent == Sent::Dropped {
         warn!("the outbound queue was full; one mark placement was dropped");
+        messages.write(PlayerMessage::new(
+            PlayerMessageKind::Error,
+            "Placing that mark did not reach the server; try again.",
+        ));
     }
 }
 
@@ -2240,6 +2255,7 @@ fn remove_a_mark(
     pins: Query<(&Interaction, &MarkerPin)>,
     mut ticks: ResMut<MarkerTick>,
     mut outbound: Option<ResMut<Outbound>>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     // Suspended while the form is up, so the two gestures cannot be in flight at once -- and
     // because the form is what the pointer is over.
@@ -2272,6 +2288,10 @@ fn remove_a_mark(
     }));
     if sent == Sent::Dropped {
         warn!("the outbound queue was full; one mark removal was dropped");
+        messages.write(PlayerMessage::new(
+            PlayerMessageKind::Error,
+            "Removing that mark did not reach the server; try again.",
+        ));
     }
 }
 
@@ -4183,6 +4203,82 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
         app.update();
         (app, frames)
+    }
+
+    /// [`app_with_a_window`], with an outbound queue that has no room for anything.
+    ///
+    /// A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+    /// receiver is parked in a blocking `recv`, which nothing here ever is, so every send
+    /// reads as `Sent::Dropped`. The receiver is returned rather than discarded — dropping
+    /// it would disconnect the channel and turn every later send into the silent
+    /// `Sent::Closed` instead.
+    fn app_with_a_window_that_drops() -> (App, Receiver<Vec<u8>>) {
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .add_plugins(MapUiPlugin)
+            .insert_resource(outbound)
+            .insert_resource(session());
+        app.world_mut().spawn((
+            Window {
+                resolution: bevy::window::WindowResolution::new(800, 600),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        (app, never_received)
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        let messages = app.world().resource::<Messages<PlayerMessage>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).cloned().collect()
+    }
+
+    #[test]
+    fn a_dropped_placement_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = app_with_a_window_that_drops();
+        click_pointer(&mut app, Vec2::new(300.0, 200.0));
+
+        typing(&mut app, Key::Enter);
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Placing that mark did not reach the server; try again."
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dropped_removal_reaches_chat_as_one_error() {
+        let (mut app, _never_received) = app_with_a_window_that_drops();
+        list(&mut app, vec![mark(7, 0, 0, MarkerKind::Cave, "")]);
+        let pin = app
+            .world_mut()
+            .query_filtered::<Entity, With<MarkerPin>>()
+            .iter(app.world())
+            .next()
+            .expect("the mark is drawn");
+        *app.world_mut()
+            .get_mut::<Interaction>(pin)
+            .expect("a mark takes the pointer") = Interaction::Hovered;
+
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Right);
+        app.insert_resource(buttons);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Removing that mark did not reach the server; try again."
+            )]
+        );
     }
 
     #[test]
