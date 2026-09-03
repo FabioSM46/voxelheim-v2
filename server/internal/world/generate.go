@@ -503,7 +503,17 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // The river bed, settlement plateau and blend, and the bank on every other side remain
 // byte-identical; source water at the meeting edge becomes air or flowing fall water, so
 // a stored delta there still needs the new generated base.
-const WorldgenVersion uint32 = 27
+// 27 → 28: #874 makes Bush and DesertShrub [Cover]. setTreeBlock's `Cover(current)` arm
+// now lets a later-visited plant or tree canopy reclaim a voxel a bush or a desert
+// shrub used to hold onto as solid ground — the same rule two flowers already resolved
+// by, extended to two ids that used to be exceptions to it. Measured across a
+// 1,536-chunk sweep over five seeds: terrain heights and the overwhelming majority of
+// plant voxels stay byte-identical, but 65 of 1,536 sampled chunks for the golden seed
+// moved, each at the rare column where a bush's or a shrub's voxel physically overlaps
+// a tree's canopy or another plant's own root. Stored deltas there resolve against a
+// different base, so the precondition advances even though most of the world does not
+// move at all.
+const WorldgenVersion uint32 = 28
 
 // Generate builds the chunk at coord for seed.
 //
@@ -1501,10 +1511,22 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 }
 
 // setTreeBlock writes one plant voxel; its condition is the whole of what a plant may
-// overwrite, and **ground cover counts as air here, which makes the result
-// independent of the order two roots are visited in.** A bush's second block and a
-// flower can want one voxel: flower-first the bush overwrites it because [Cover] is
-// true, bush-first the flower is refused because Bush is neither air nor cover.
+// overwrite, and **ground cover counts as air here.**
+//
+// That makes solid ground independent of the order two roots are visited in: a voxel
+// that is neither air nor [Cover] resists every later write except the two named
+// canopy overwrites below, so a trunk or a canopy always keeps or reclaims a voxel
+// from a cover plant regardless of which root the loop reaches first — see
+// [TestATrunkOrCanopyAlwaysWinsOverCoverInEitherOrder].
+//
+// **It does not make cover independent of that order, and a bush's second block and
+// a flower are the pair that used to say otherwise.** Before #874, flower-first the
+// bush overwrote the flower because [Cover] was true of the flower, and bush-first
+// the flower was refused because `Bush` was neither air nor cover — both orders
+// landed on Bush, which read as order independence but was really "the solid one
+// always wins". Now that `Bush` is [Cover] too, that asymmetry is gone: whichever of
+// the two is visited second overwrites the other, exactly as two flowers already
+// resolved — see [TestTwoCoverPlantsResolveToWhicheverWasWrittenSecond].
 func setTreeBlock(chunk *Chunk, worldX, worldY, worldZ int64, block Block) {
 	originX, originY, originZ := chunk.Coord.Origin()
 	localX, localY, localZ := worldX-originX, worldY-originY, worldZ-originZ

@@ -396,20 +396,22 @@ func Solid(b Block) bool {
 // Cover reports whether a block is ground cover: a thing that stands in a voxel
 // without filling it.
 //
-// **The three flowers and the winter bramble today, and three consequences, each
-// enforced elsewhere:**
+// **The three flowers, the winter bramble, the meadow bush and the desert shrub
+// today, and three consequences, each enforced elsewhere:**
 //
 //   - A body passes through it — [Solid] is false, so the collision sweep, the
 //     standable-floor test and a creature's step-up probe all refuse it.
 //   - A placement displaces it — game.allowPlacement accepts a voxel holding cover
 //     exactly as one holding a fluid: one delta, one item spent.
-//   - A plant may overwrite it — setTreeBlock treats a cover voxel as air, so a bush
-//     or a canopy wins whichever the generator visits first.
+//   - A plant may overwrite it — setTreeBlock treats a cover voxel as air, so a
+//     canopy or a trunk wins regardless of which root the generator visits first,
+//     and two cover ids contesting one voxel resolve to whichever visits it last.
 //
 // Not folded into [Fluid]: a swim rule reading it would have players treading water
 // in a meadow. NextWater has a fourth arm for the same reason.
 func Cover(b Block) bool {
-	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue || b == WinterBramble
+	return b == FlowerRed || b == FlowerYellow || b == FlowerBlue || b == WinterBramble ||
+		b == Bush || b == DesertShrub
 }
 
 // Fluid reports whether a block is one a body wades and swims in rather than walks

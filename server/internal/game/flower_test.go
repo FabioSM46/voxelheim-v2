@@ -91,5 +91,51 @@ func TestAFlowerStopsNoBodyAndHoldsNoneUp(t *testing.T) {
 	}
 }
 
+// TestABushADesertShrubAndAWinterBrambleStopNoBodyAndHoldNoneUp restates
+// TestAFlowerStopsNoBodyAndHoldsNoneUp for the two ids #874 makes [world.Cover] and
+// the one that already was: a body passes through and rests in the voxel, and no
+// creature stands on or steps up onto any of the three, exactly as with a flower.
+func TestABushADesertShrubAndAWinterBrambleStopNoBodyAndHoldNoneUp(t *testing.T) {
+	t.Parallel()
+
+	for _, block := range []world.Block{world.Bush, world.DesertShrub, world.WinterBramble} {
+		w := meadowWorld{groundTop: 63, flower: block}
+		if !w.Solid(0, w.groundTop, 0) || w.Solid(0, w.groundTop+1, 0) || w.Fluid(0, w.groundTop+1, 0) {
+			t.Fatalf("block %d: the fixture is not a passable cover over solid grass", block)
+		}
+
+		// A fractional start height, so the descent arrives between two sub-steps the
+		// way a tick's accelerating fall does.
+		pos, blocked := moveAndCollide(w, playerBody, [3]float64{0.5, float64(w.groundTop) + 3.7, 0.5}, [3]float64{0, -3, 0})
+		if !blocked[1] {
+			t.Fatalf("block %d: the fall was not stopped by the ground", block)
+		}
+		if want := float64(w.groundTop + 1); pos[1] < want-tolerance || pos[1] > want+tolerance {
+			t.Errorf("block %d: feet come to rest at %.4f, want %.1f — in the voxel, not on top of it", block, pos[1], want)
+		}
+
+		// And a sweep straight through the voxel is unobstructed.
+		walked, hit := moveAndCollide(w, playerBody, [3]float64{0.5, float64(w.groundTop + 1), 0.5}, [3]float64{3, 0, 0})
+		if hit[0] {
+			t.Errorf("block %d: a walk through it was obstructed", block)
+		}
+		if want := 3.5; walked[0] < want-tolerance {
+			t.Errorf("block %d: the walk reached x=%.4f, want %.1f", block, walked[0], want)
+		}
+
+		// No creature is put on one either.
+		if standableFloor(block) {
+			t.Errorf("standableFloor(%d) = true, want false: a creature would spawn on it", block)
+		}
+
+		// Not a step either: a creature walks through it rather than hopping over.
+		def := mobRegistry[vnet.MobKindDraugr]
+		m := &mob{kind: vnet.MobKindDraugr, pos: [3]float64{3.5, float64(w.groundTop + 1), 0.5}}
+		if m.stepsUp(w, [2]float64{def.speed, 0}, 1.0/float64(DefaultTickRate)) {
+			t.Errorf("block %d: a draugr treats it as a step to hop over", block)
+		}
+	}
+}
+
 // tolerance is a millimetre: collision stops a hair short of the face it hit.
 const tolerance = 1e-3

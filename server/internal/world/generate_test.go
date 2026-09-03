@@ -74,6 +74,26 @@ const (
 	// stable physical width: 271 channel columns standing on two terraces four blocks
 	// apart — 48 and 52 — with 557 source-water voxels carrying all four current ids.
 	goldenRiverPath = "testdata/chunk_golden_river.bin"
+
+	// The sixth fixture, added for the reason the second through fifth were.
+	//
+	// **#874 moves generation only where a bush's or a desert shrub's voxel physically
+	// overlaps a tree's canopy or another plant's own root.** Bush and DesertShrub
+	// joining [Cover] lets setTreeBlock's `Cover(current)` arm reclaim a voxel either
+	// used to hold onto as solid ground, exactly as two flowers already resolved —
+	// see TestTwoCoverPlantsResolveToWhicheverWasWrittenSecond. None of the five
+	// fixtures above happens to hold such a voxel, so the golden test would once
+	// again have said nothing about a change that moved real terrain.
+	//
+	// It was found by generating a 1,536-chunk sweep across five seeds — the mixed
+	// plains/taiga square TestATaigaConiferOutranksTheLowCoverThatWantsItsColumn
+	// already uses, the plains square findFlower/findBush/plainsLowCoverDigest use,
+	// and a desert square found by sampling for the densest window — before and
+	// after the change, and diffing per-chunk digests: 65 of 1,536 sampled chunks
+	// moved for this seed alone. This coordinate holds the smallest change found:
+	// one voxel, at world (280, 84, 30), where a conifer's canopy reclaims a voxel a
+	// bush used to hold, Bush becoming Leaves.
+	goldenBushPath = "testdata/chunk_golden_bush.bin"
 )
 
 var (
@@ -82,6 +102,7 @@ var (
 	goldenSettlementCoord = Coord{X: -280, Y: 1, Z: -272}
 	goldenPlainsCoord     = Coord{X: 3, Y: 2, Z: 64}
 	goldenRiverCoord      = Coord{X: 195, Y: 1, Z: -65}
+	goldenBushCoord       = Coord{X: 8, Y: 2, Z: 0}
 
 	// bodyCaveMouthCoord holds a cave mouth in the bed of a lake — a carved voxel above
 	// [caveWaterLevel] that the run from its own column's ground reaches, and so the one
@@ -118,6 +139,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		{"settlement", goldenSettlementCoord, goldenSettlementPath},
 		{"plains-conifer", goldenPlainsCoord, goldenPlainsPath},
 		{"river", goldenRiverCoord, goldenRiverPath},
+		{"bush", goldenBushCoord, goldenBushPath},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
@@ -287,8 +309,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 27 {
-		t.Fatalf("WorldgenVersion = %d, want 27 after settlement ground began clamping a channel's source water", WorldgenVersion)
+	if WorldgenVersion != 28 {
+		t.Fatalf("WorldgenVersion = %d, want 28 after Bush and DesertShrub joined Cover", WorldgenVersion)
 	}
 }
 
