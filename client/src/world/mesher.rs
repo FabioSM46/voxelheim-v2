@@ -422,24 +422,6 @@ const COVER_LEAF_RISE: f32 = 0.09;
 /// about it, not a claim that the shape reaches every wall.
 const BUSH_INSET: f32 = 0.02;
 
-/// The umbrella frame the desert scrub still stands on: four canes at equal angles from one
-/// hub, each bent through three woody segments of one constant width.
-///
-/// **It is being retired one biome at a time, and only one biome is left.** The meadow bush
-/// left it in #835 for [`push_shoot`] and the winter bramble followed in #837; the desert
-/// scrub (#836) is the last caller, and retiring it here would have redrawn that species
-/// too, which both of those issues put out of scope by name. `BRAMBLE_` rather than `BUSH_`
-/// because the meadow bush is exactly what no longer reads them.
-const BRAMBLE_CANES: usize = 4;
-const BRAMBLE_CANE_SEGMENTS: usize = 3;
-const BRAMBLE_CANE_REACH: f32 = 0.38;
-const BRAMBLE_CANE_REACH_JITTER: f32 = 0.06;
-const BRAMBLE_CANE_HALF_WIDTH: f32 = 0.014;
-const BRAMBLE_CANE_ARCH: f32 = 0.78;
-const BRAMBLE_CANE_ARCH_JITTER: f32 = 0.1;
-const BRAMBLE_CANE_TIP: f32 = 0.46;
-const BRAMBLE_CANE_TIP_JITTER: f32 = 0.12;
-
 /// The meadow bush's shoot skeleton, in blocks. Three numbers answer the three ways the
 /// old frame gave itself away:
 ///
@@ -512,8 +494,9 @@ const SHOOT_CREST_ALONG: f32 = 0.68;
 ///
 /// **The branching is shared and the proportions are not.** A meadow bush stands up; a
 /// winter bramble is flattened by the snow lying on it. That difference is a table of
-/// numbers rather than a second copy of the branching code — which is exactly what
-/// [`push_cane`] became for three biomes, and what this exists so as not to repeat.
+/// numbers rather than a second copy of the branching code — which is exactly what the
+/// four-cane umbrella frame became for three biomes, and what this exists so as not to
+/// repeat. #836 retired the last of it.
 struct ShootProfile {
     /// How far every foot is displaced from the voxel's axis along its own yaw, so the
     /// shoots leave separate feet rather than one hub.
@@ -671,15 +654,41 @@ const BUSH_DIAL_SHOOT_YAW: u32 = 8;
 const BUSH_DIAL_SHOOT: u32 = 16;
 const BUSH_DIALS_PER_SHOOT: u32 = 4;
 
-/// The desert bramble's dressing on the shared cane skeleton. Two short thorns leave
-/// every arch, while two low crossed canes reach the four horizontal walls. A crossed
-/// thorn at the highest crest reaches the ceiling; together with the low canes it makes
-/// the full-voxel collision visible without putting foliage or a filler box in the sand.
-const DESERT_THORNS_PER_CANE: usize = 2;
-const DESERT_THORN_REACH: f32 = 0.09;
-const DESERT_THORN_RISE: f32 = 0.035;
-const DESERT_BASE_CANES: usize = 2;
-const DESERT_CROWN_BLADES: usize = 2;
+/// The desert scrub's dressing on the shared [`push_shoot`] skeleton: what makes a drought
+/// twig out of an arch. The kink is [`desert_kinks`], the comb is [`desert_shoot_yaws`],
+/// and both are drawn from the plant's own word.
+///
+/// **The lean is that comb and deliberately not a shear.** Displacing every joint downwind
+/// per block of height is the obvious way to bend a plant over, and it is incompatible with
+/// a readable kink: on a segment that *descends* it reverses and is subtracted from that
+/// joint's deviation, and where the last segment falls further than it reaches the term is
+/// larger than the segment's own horizontal step. Over the 512-plant population the smallest
+/// drawn deviation was **0.0002 rad** where the construction had asked for 0.45. Vertical
+/// profile is free, since a bearing is read from the horizontal step alone; horizontal
+/// displacement is not.
+const DESERT_KINK_MIN: f32 = 0.45;
+const DESERT_KINK_SPAN: f32 = 0.35;
+const DESERT_COMB: f32 = 0.55;
+
+/// The two floors the shape is held to, and nothing production reads either: how far the
+/// mean of a scrub's tips sits from the axis it grew out of, and how far apart two of its
+/// feet land. Floors rather than descriptions — over the 512-plant population the narrowest
+/// lean measured 0.141 against this 0.10 and the narrowest feet 0.0632 against this 0.06 —
+/// so tuning [`DESERT_COMB`] or [`BUSH_ROOT_SPREAD`] has margin before it has a verdict.
+#[cfg(test)]
+const DESERT_LEAN_MIN: f32 = 0.10;
+#[cfg(test)]
+const DESERT_FOOT_GAP: f32 = 0.06;
+
+/// Every dial index a desert scrub draws beyond the ones [`push_shoot`] reads.
+///
+/// A separate range for the reason [`BUSH_DIAL_TURN`] and its neighbours are named: two
+/// features sharing an index move together. These start above
+/// `BUSH_DIAL_SHOOT + BUSH_SHOOTS * BUSH_DIALS_PER_SHOOT`, so the dials the other two
+/// species read stay where they were.
+const DESERT_DIAL_LEAN_YAW: u32 = 32;
+const DESERT_DIAL_KINK: u32 = 36;
+const DESERT_DIALS_PER_SHOOT: u32 = 4;
 
 /// Three flower specks sit at three cane tips. Their crossed blades are less than half
 /// the flower eye's width and height, so they remain punctuation rather than miniature
@@ -761,13 +770,16 @@ pub(super) const QUADS_PER_BUSH: usize = BUSH_BASE_LEAVES * LEAF_SEGMENTS
         * ((BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2 + BUSH_LEAVES_PER_SHOOT * LEAF_SEGMENTS)
     + BUSH_SPECKS * 2;
 
-/// How many quads one desert bramble contributes: the shared four arches, two crossed
-/// low canes, two short thorns per arch and the crossed crown thorn.
+/// How many quads one desert scrub contributes: two ribbons for each of a shoot's segments
+/// and each of its fork's.
+///
+/// **30**, where the four-cane umbrella with two thorns per arch cost 46, against #836's
+/// ceiling of 72; the thorn dressing spends the rest of the budget in #836's second half.
+/// The dense desert fixture grows 25 scrubs in one chunk, so every quad here is paid 25
+/// times there, which is why this ceiling is tighter than the meadow's.
 #[cfg(test)]
-pub(super) const QUADS_PER_DESERT_BRAMBLE: usize = BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2
-    + DESERT_BASE_CANES * 2
-    + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
-    + DESERT_CROWN_BLADES;
+pub(super) const QUADS_PER_DESERT_BRAMBLE: usize =
+    BUSH_SHOOTS * (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
 
 /// How many quads one winter bramble contributes: two ribbons for each segment of a
 /// shoot and of its fork, one snow cap on every segment but the foot's, one pedicel per
@@ -1501,69 +1513,9 @@ fn push_flower(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32, petal: [f32; 
     push_blade(mesh, corolla, eye, top + COVER_EYE_HEIGHT, 2, eye_color);
 }
 
-#[derive(Clone, Copy)]
-struct Cane {
-    shoulder: [f32; 3],
-    crest: [f32; 3],
-    yaw: f32,
-}
-
-/// One arching cane in the shared bramble skeleton.
-///
-/// Three [`push_twig`] segments leave the base, climb through a shoulder to a crest,
-/// then descend to the tip. Yaw, reach, arch height, sideways bend and tip height all
-/// come from separate [`dial`]s on the plant's word. The meadow bush dresses the
-/// returned joints with leaves and flowers; the desert and tundra bushes in #789 and
-/// #790 reuse this skeleton and dress it for their own biomes.
-fn push_cane(
-    mesh: &mut SurfaceMesh,
-    floor: [f32; 3],
-    seed: u32,
-    index: usize,
-    color: [f32; 4],
-) -> Cane {
-    let spacing = std::f32::consts::TAU / BRAMBLE_CANES as f32;
-    let dial_index = 1 + index as u32 * 5;
-    let yaw =
-        dial(seed, 0) * spacing + index as f32 * spacing + (dial(seed, dial_index) - 0.5) * 0.36;
-    let reach = BRAMBLE_CANE_REACH + dial(seed, dial_index + 1) * BRAMBLE_CANE_REACH_JITTER;
-    let arch = BRAMBLE_CANE_ARCH + dial(seed, dial_index + 2) * BRAMBLE_CANE_ARCH_JITTER;
-    let tip_height = BRAMBLE_CANE_TIP + dial(seed, dial_index + 3) * BRAMBLE_CANE_TIP_JITTER;
-    let bend = (dial(seed, dial_index + 4) - 0.5) * 0.1;
-    let (sin, cos) = yaw.sin_cos();
-    let along = [cos, 0.0, sin];
-    let across = [-sin, 0.0, cos];
-    let at = |distance: f32, sideways: f32, height: f32| {
-        [
-            floor[0] + 0.5 + along[0] * distance + across[0] * sideways,
-            floor[1] + height,
-            floor[2] + 0.5 + along[2] * distance + across[2] * sideways,
-        ]
-    };
-
-    let base = at(-0.06, 0.0, BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH);
-    let shoulder = at(reach * 0.32, bend * 0.5, arch * 0.72);
-    let crest = at(reach * 0.68, bend, arch);
-    let tip = at(reach, bend * 0.5, tip_height);
-    let joints = [base, shoulder, crest, tip];
-    for segment in 0..BRAMBLE_CANE_SEGMENTS {
-        push_twig(
-            mesh,
-            joints[segment],
-            joints[segment + 1],
-            BRAMBLE_CANE_HALF_WIDTH,
-            color,
-        );
-    }
-
-    Cane {
-        shoulder,
-        crest,
-        yaw,
-    }
-}
-
-/// The joints one shoot's dressing needs, the way [`Cane`] answers for the old frame.
+/// The joints one shoot's dressing needs, the way the retired cane frame answered for it,
+/// and as they were **drawn** — after the kink — rather than as the arch they started out
+/// as: anything hung on a shoot has to arrive at the wood the eye can see.
 ///
 /// The whole polyline rather than three named joints, because the winter bramble dresses
 /// the *segments* — one snow cap each — where the meadow bush dresses the joints. The three
@@ -1628,7 +1580,7 @@ fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
 ///
 /// [`BUSH_SHOOT_SEGMENTS`] segments climb from a foot displaced along `yaw` through a
 /// shoulder to a crest and back down to a tip. The returned joints are what [`push_bush`]
-/// dresses, exactly as [`Cane`] is for the frame the other two brambles still stand on.
+/// and its two siblings dress.
 ///
 /// Each segment is drawn narrower than the last, and one child twig leaves the shoulder at
 /// a dial-driven deviation — shorter than its parent and thinner than the parent is at that
@@ -1637,6 +1589,14 @@ fn bush_shoot_yaws(seed: u32) -> [f32; BUSH_SHOOTS] {
 /// `profile` is what makes the primitive shared rather than the meadow bush's: the winter
 /// bramble draws the same branching at crushed proportions, and there is no second copy of
 /// this function to drift from it.
+///
+/// `turns` shapes that stroke rather than sizing it. The arch is computed first and then
+/// **walked**: each segment's step is turned about the vertical by the running total of
+/// `turns`, so a deviation at one joint carries the rest of the stroke with it instead of
+/// tilting one segment. All zero is the smooth arch the meadow bush and the winter bramble
+/// draw. A species that turns its stroke should set `profile.bend` to zero — the sideways
+/// wander is an unsigned wobble of the same size, and "this joint's deviation alternates in
+/// sign" cannot be read off a stroke carrying both.
 #[expect(
     clippy::too_many_arguments,
     reason = "the plant's frame, its dials and the species proportions; bundling the \
@@ -1650,6 +1610,7 @@ fn push_shoot(
     yaw: f32,
     leader: bool,
     profile: &ShootProfile,
+    turns: [f32; BUSH_SHOOT_SEGMENTS],
     color: [f32; 4],
 ) -> Shoot {
     let dials = BUSH_DIAL_SHOOT + index as u32 * BUSH_DIALS_PER_SHOOT;
@@ -1684,14 +1645,35 @@ fn push_shoot(
         0.0,
         BUSH_INSET + profile.half_widths[0],
     );
-    let shoulder = at(
-        profile.root_spread + reach * SHOOT_SHOULDER_ALONG,
-        bend * 0.5,
-        arch * SHOOT_SHOULDER_RISE,
-    );
-    let crest = at(profile.root_spread + reach * SHOOT_CREST_ALONG, bend, arch);
-    let tip = at(profile.root_spread + reach, bend * 0.5, arch * fall);
-    let joints = [foot, shoulder, crest, tip];
+    let arched = [
+        foot,
+        at(
+            profile.root_spread + reach * SHOOT_SHOULDER_ALONG,
+            bend * 0.5,
+            arch * SHOOT_SHOULDER_RISE,
+        ),
+        at(profile.root_spread + reach * SHOOT_CREST_ALONG, bend, arch),
+        at(profile.root_spread + reach, bend * 0.5, arch * fall),
+    ];
+
+    // Walk it. The foot stays where its sector put it — that is what keeps the feet's
+    // spacing a property of the yaws alone — and every step above it is turned.
+    let mut joints = [foot; BUSH_SHOOT_SEGMENTS + 1];
+    let mut turn = 0.0;
+    for segment in 0..BUSH_SHOOT_SEGMENTS {
+        turn += turns[segment];
+        let (turn_sin, turn_cos) = turn.sin_cos();
+        let step = [
+            arched[segment + 1][0] - arched[segment][0],
+            arched[segment + 1][1] - arched[segment][1],
+            arched[segment + 1][2] - arched[segment][2],
+        ];
+        joints[segment + 1] = [
+            joints[segment][0] + step[0] * turn_cos - step[2] * turn_sin,
+            joints[segment][1] + step[1],
+            joints[segment][2] + step[0] * turn_sin + step[2] * turn_cos,
+        ];
+    }
     for segment in 0..BUSH_SHOOT_SEGMENTS {
         push_tapered_twig(
             mesh,
@@ -1705,6 +1687,7 @@ fn push_shoot(
 
     // The fork leaves the shoulder, which is the joint that keeps a child inside the
     // voxel whatever the leader's reach turned out to be.
+    let shoulder = joints[1];
     let fork_yaw = yaw + (dial(seed, dials + 3) - 0.5) * BUSH_FORK_YAW_SPREAD;
     let (fork_sin, fork_cos) = fork_yaw.sin_cos();
     let fork_at = |step: f32| {
@@ -1765,6 +1748,7 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
             yaws[shoot],
             shoot == leader,
             &BUSH_SHOOT_PROFILE,
+            [0.0; BUSH_SHOOT_SEGMENTS],
             wood,
         )
     });
@@ -1847,71 +1831,110 @@ fn push_bush(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     }
 }
 
-/// One desert bramble, filling the voxel whose minimum corner is `floor`.
+/// The desert scrub's proportions: **shorter in the stroke than the meadow bush's, and with
+/// no sideways bend at all**.
 ///
-/// Four [`push_cane`] arches carry the silhouette and two short thorns grow from each.
-/// Two crossed canes at the foot make the dry tangle broad without leaves; their ends
-/// reach the four horizontal walls, and the crossed thorn rising from the highest crest
-/// reaches the ceiling. Every part is the scrub's existing sun-bleached khaki — there
-/// are no flowers, berries, leaves or saturated accents in this biome.
+/// The reach is cut back because the kink spends room a straight stroke would not — a twig
+/// that folds twice needs the clearance the folds swing it toward, and the meadow's longest
+/// shoot already reaches 0.43 from the axis against an inset wall at 0.48. The bend is zero
+/// for the reason [`push_shoot`]'s `turns` names. **This species has no fill guarantee
+/// either**: `world.DesertShrub` has been `Cover` since #874, so there is nothing it has to
+/// span and [`BUSH_INSET`] survives only to keep two neighbours off a shared plane.
+const DESERT_SHOOT_PROFILE: ShootProfile = ShootProfile {
+    root_spread: BUSH_ROOT_SPREAD,
+    reach: 0.112,
+    reach_span: 0.136,
+    arch: BUSH_SHOOT_ARCH,
+    arch_span: BUSH_SHOOT_ARCH_SPAN,
+    tip_fall: BUSH_SHOOT_TIP_FALL,
+    tip_fall_jitter: BUSH_SHOOT_TIP_FALL_JITTER,
+    bend: 0.0,
+    half_widths: BUSH_SHOOT_HALF_WIDTHS,
+    fork_reach: BUSH_FORK_REACH,
+    fork_rise: BUSH_FORK_RISE,
+};
+
+/// The direction one desert scrub was bent in.
 ///
-/// **Reaching every wall used to be a requirement and is now a leftover.** Before #874
-/// `world.DesertShrub` was `Solid`, so the sparse geometry had to show the whole cube a
-/// body was stopped by. `DesertShrub` is `Cover` now, nothing is stopped by this voxel,
-/// and the shape is unchanged because this issue draws nothing new. The six extrema
-/// still land at [`BUSH_INSET`] rather than on the voxel planes — that keeps
-/// neighbouring scrubs from sharing a plane, which is the reason `BUSH_INSET` survives.
+/// **Drawn from the plant's own word and nothing else.** [`build_cover`] is handed no chunk
+/// coordinate, precisely so the same voxels produce byte-identical buffers on every remesh.
+/// Each plant leans its own way; what the eye reads crossing the desert is the family
+/// resemblance, not the correlation.
+fn desert_lean_yaw(seed: u32) -> f32 {
+    dial(seed, DESERT_DIAL_LEAN_YAW) * std::f32::consts::TAU
+}
+
+/// Where each of a desert scrub's shoots leaves the floor: the meadow's unequal sectors,
+/// combed [`DESERT_COMB`] of the way toward the plant's lean.
+///
+/// **The comb is what makes the bush lean.** The mean direction of a plant's tips is set by
+/// which sectors its three shoots landed in, and drawing every yaw a fixed fraction of the
+/// way toward one direction is what moves it. A fraction of an unequal partition is still
+/// unequal, so the feet stay distinct and the plant stays anything but radially symmetric.
+fn desert_shoot_yaws(seed: u32, lean_yaw: f32) -> [f32; BUSH_SHOOTS] {
+    let mut yaws = bush_shoot_yaws(seed);
+    for yaw in &mut yaws {
+        // The signed turn from the lean to this shoot, in (-PI, PI], so combing moves the
+        // shoot the short way round rather than through the far side of the circle.
+        let mut offset = (*yaw - lean_yaw) % std::f32::consts::TAU;
+        if offset > std::f32::consts::PI {
+            offset -= std::f32::consts::TAU;
+        } else if offset < -std::f32::consts::PI {
+            offset += std::f32::consts::TAU;
+        }
+        *yaw = lean_yaw + offset * (1.0 - DESERT_COMB);
+    }
+    yaws
+}
+
+/// The yaw deviations one desert shoot's joints turn through, in the order they are walked:
+/// zero first, so the stroke leaves its foot along the yaw its sector gave it, then
+/// **alternating signs** out of a band starting at [`DESERT_KINK_MIN`]. Single-signed
+/// deviations of the same size would be a wider arch rather than a zigzag.
+fn desert_kinks(seed: u32, index: usize) -> [f32; BUSH_SHOOT_SEGMENTS] {
+    let dials = DESERT_DIAL_KINK + index as u32 * DESERT_DIALS_PER_SHOOT;
+    // Which way the first fold goes. The second answers it, and so on.
+    let first = if dial(seed, dials) < 0.5 { 1.0 } else { -1.0 };
+    std::array::from_fn(|joint| {
+        if joint == 0 {
+            return 0.0;
+        }
+        let size = DESERT_KINK_MIN + dial(seed, dials + joint as u32) * DESERT_KINK_SPAN;
+        let sign = if joint % 2 == 1 { first } else { -first };
+        size * sign
+    })
+}
+
+/// One desert scrub, standing in the voxel whose minimum corner is `floor`.
+///
+/// Three kinked, combed shoots of the shared [`push_shoot`] skeleton, each forking once.
+/// Bare dry wood and nothing else: no leaf, no bloom, no fruit, no saturated accent, because
+/// the desert's statement is that nothing blooms in it. **The thorns are #836's second
+/// half** — this is the skeleton they hang on.
+///
+/// **It used to be an umbrella and a comb**: four cane ribs a quarter turn apart from one
+/// hub at one constant thickness, two axis-aligned canes crossed through the roots and a
+/// crossed blade rising from the highest crest. The last three made a collision box visible
+/// — `world.DesertShrub` was `Solid` until #874 — so they stopped standing for anything and
+/// are gone rather than replaced. This was the frame's last caller, so #836 takes it out of
+/// the file.
 fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
     let wood = palette::linear_rgba(palette::DESERT_SHRUB);
-    let canes: [Cane; BRAMBLE_CANES] =
-        std::array::from_fn(|cane| push_cane(mesh, floor, seed, cane, wood));
-
-    // Two low canes cross through the roots. Their ribbons touch the floor inset and
-    // their centre lines touch the four horizontal insets: the full drawn span is
-    // carried by wood, not by a leaf or a hidden box.
-    let base_axes: [usize; DESERT_BASE_CANES] = [0, 2];
-    for axis in base_axes {
-        let mut start = [
-            floor[0] + 0.5,
-            floor[1] + BUSH_INSET + BRAMBLE_CANE_HALF_WIDTH,
-            floor[2] + 0.5,
-        ];
-        let mut end = start;
-        start[axis] = floor[axis] + BUSH_INSET;
-        end[axis] = floor[axis] + 1.0 - BUSH_INSET;
-        push_twig(mesh, start, end, BRAMBLE_CANE_HALF_WIDTH, wood);
-    }
-
-    // Alternating sides make the thorns read as a tangle rather than a comb. Every
-    // endpoint is derived from the cane's deterministic yaw and joints, so no world or
-    // chunk coordinate has entered the shape.
-    for (index, cane) in canes.iter().enumerate() {
-        let thorn_joints: [[f32; 3]; DESERT_THORNS_PER_CANE] = [cane.shoulder, cane.crest];
-        for (thorn, joint) in thorn_joints.into_iter().enumerate() {
-            let side = if (index + thorn) % 2 == 0 { 1.0 } else { -1.0 };
-            let angle = cane.yaw + side * std::f32::consts::FRAC_PI_2;
-            let (sin, cos) = angle.sin_cos();
-            let end = [
-                joint[0] + cos * DESERT_THORN_REACH,
-                joint[1] + DESERT_THORN_RISE,
-                joint[2] + sin * DESERT_THORN_REACH,
-            ];
-            push_twig(mesh, joint, end, BRAMBLE_CANE_HALF_WIDTH, wood);
-        }
-    }
-
-    // The highest arch owns the one vertical thorn that reaches the voxel's ceiling.
-    // Crossed blades are the established tiny-detail primitive; here they use the same
-    // dry wood and meet the crest instead of pretending to be a flower.
-    let crown = canes
-        .iter()
-        .max_by(|left, right| left.crest[1].total_cmp(&right.crest[1]))
-        .expect("a bramble has canes")
-        .crest;
-    let top = floor[1] + 1.0 - BUSH_INSET;
-    let crown_axes: [usize; DESERT_CROWN_BLADES] = [0, 2];
-    for axis in crown_axes {
-        push_blade(mesh, crown, BRAMBLE_CANE_HALF_WIDTH, top, axis, wood);
+    let lean_yaw = desert_lean_yaw(seed);
+    let yaws = desert_shoot_yaws(seed, lean_yaw);
+    let leader = bush_leader(seed);
+    for (shoot, yaw) in yaws.into_iter().enumerate() {
+        push_shoot(
+            mesh,
+            floor,
+            seed,
+            shoot,
+            yaw,
+            shoot == leader,
+            &DESERT_SHOOT_PROFILE,
+            desert_kinks(seed, shoot),
+            wood,
+        );
     }
 }
 
@@ -1920,8 +1943,7 @@ fn push_desert_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
 /// Three forked woody shoots at [`WINTER_SHOOT_PROFILE`]'s crushed proportions carry a thin
 /// snow cap along the upper side of every segment above the drift, and three bunches of
 /// dark berries hang from three dial-chosen twig joints. It shares [`push_shoot`] with the
-/// meadow bush and no longer touches [`push_cane`]: nothing here is `n` of anything at
-/// `TAU / n`.
+/// meadow bush and the desert scrub: nothing here is `n` of anything at `TAU / n`.
 ///
 /// **This species has no fill guarantee and must not grow one.** `world.WinterBramble` is
 /// `Cover` on the server, so no body is stopped by the cube and there is no collision span
@@ -1974,6 +1996,7 @@ fn push_winter_bramble(mesh: &mut SurfaceMesh, floor: [f32; 3], seed: u32) {
             yaws[shoot],
             shoot == leader,
             &WINTER_SHOOT_PROFILE,
+            [0.0; BUSH_SHOOT_SEGMENTS],
             wood,
         )
     });
@@ -2266,8 +2289,8 @@ fn push_blade(
 /// is one quad and the pair reads as a twig from every horizontal view.
 ///
 /// **The taper is what separates a branch from a wire, and it costs no quads**: a
-/// trapezoid has the rectangle's four corners. [`push_twig`] is this with equal ends, so
-/// there is one implementation of the crossed ribbon rather than two that can drift.
+/// trapezoid has the rectangle's four corners. The equal-ended `push_twig` that used to
+/// wrap this went with the umbrella frame in #836 — every caller left tapers.
 fn push_tapered_twig(
     mesh: &mut SurfaceMesh,
     start: [f32; 3],
@@ -2308,17 +2331,6 @@ fn push_tapered_twig(
         ];
         mesh.push_quad(corners, face_normal(corners), color, None);
     }
-}
-
-/// Two crossed ribbons of one constant width around one sloping segment.
-fn push_twig(
-    mesh: &mut SurfaceMesh,
-    start: [f32; 3],
-    end: [f32; 3],
-    half_width: f32,
-    color: [f32; 4],
-) {
-    push_tapered_twig(mesh, start, end, half_width, half_width, color);
 }
 
 /// The furthest a leaf of unit length reaches from its petiole, at `pitch`.
@@ -5308,11 +5320,59 @@ mod tests {
         }
     }
 
+    /// One desert scrub grown straight into a mesh, cheap enough to sweep a population with.
+    fn a_desert_scrub(cell: [usize; 3]) -> SurfaceMesh {
+        let mut mesh = SurfaceMesh::default();
+        push_desert_bramble(
+            &mut mesh,
+            [cell[0] as f32, cell[1] as f32, cell[2] as f32],
+            plant_seed(cell[0], cell[1], cell[2]),
+        );
+        mesh
+    }
+
+    /// Every plant in the first eight voxels of each axis: `plant_seed` is a pure function of
+    /// them, so this is a fixed set of 512 scrubs and not a sample.
+    fn every_desert_cell() -> impl Iterator<Item = [usize; 3]> {
+        (0..8).flat_map(|x| (0..8).flat_map(move |y| (0..8).map(move |z| [x, y, z])))
+    }
+
+    /// The quads of one desert shoot: its segments then its fork's, two ribbons each.
+    const DESERT_QUADS_PER_SHOOT: usize = (BUSH_SHOOT_SEGMENTS + BUSH_FORK_SEGMENTS) * 2;
+
+    /// The first ribbon of one segment of one shoot.
+    fn desert_segment_quad(shoot: usize, segment: usize) -> usize {
+        shoot * DESERT_QUADS_PER_SHOOT + segment * 2
+    }
+
+    /// The compass bearing from one point to another, ignoring height.
+    fn horizontal_yaw(from: [f32; 3], to: [f32; 3]) -> f32 {
+        (to[2] - from[2]).atan2(to[0] - from[0])
+    }
+
+    /// The signed turn from one yaw to another, in `(-PI, PI]`.
+    fn signed_turn(from: f32, to: f32) -> f32 {
+        let mut turn = (to - from) % std::f32::consts::TAU;
+        if turn > std::f32::consts::PI {
+            turn -= std::f32::consts::TAU;
+        } else if turn <= -std::f32::consts::PI {
+            turn += std::f32::consts::TAU;
+        }
+        turn
+    }
+
+    /// Which way one shoot left the voxel's axis, read back from its drawn foot — the one
+    /// joint the kink leaves alone.
+    fn desert_shoot_yaw(mesh: &SurfaceMesh, floor: [f32; 3], shoot: usize) -> f32 {
+        let foot = centre_line(mesh, desert_segment_quad(shoot, 0), false);
+        horizontal_yaw([floor[0] + 0.5, floor[1], floor[2] + 0.5], foot)
+    }
+
     #[test]
-    fn a_desert_bramble_has_arches_thorns_and_no_bloom() {
-        // `world.DesertShrub` has the bush's shape family and none of its meadow
-        // dressing: the old cube leaves the sweep, the sand regains its top face, and
-        // the drawn geometry is bare wood with no leaf, flower or saturated accent.
+    fn a_desert_scrub_is_kinked_combed_wood_and_nothing_else() {
+        // `world.DesertShrub` has the bush's shape family and none of its meadow dressing:
+        // the old cube leaves the sweep, the sand regains its top face, and what is drawn is
+        // bare wood with no leaf, flower or saturated accent.
         let mut chunk = solid(SIZE, palette::SAND);
         chunk.set(4, 5, 6, palette::AIR);
         let hole = super::mesh_chunk(&chunk, &alone());
@@ -5325,76 +5385,154 @@ mod tests {
         );
         assert!(mesh.water.is_empty());
         assert_eq!(mesh.cover.quad_count(), QUADS_PER_DESERT_BRAMBLE);
+        // What `client/AGENTS.md`'s quad budget is written down as, and #836's ceiling.
+        assert_eq!(QUADS_PER_DESERT_BRAMBLE, 30);
+        const { assert!(QUADS_PER_DESERT_BRAMBLE <= 72) };
+
+        // **The whole of "no leaves, no bloom, no fruit, no accent"**: the census is
+        // exhaustive, so any other colour fails here whatever part introduced it.
         assert_eq!(
             quads_by_colour(&mesh.cover),
             BTreeMap::from([(
                 palette::linear_rgba(palette::DESERT_SHRUB).map(f32::to_bits),
-                QUADS_PER_DESERT_BRAMBLE,
+                QUADS_PER_DESERT_BRAMBLE
             )]),
-            "bare sun-bleached wood, with no meadow leaf, flower or saturated accent"
+            "sun-bleached dry wood, with no meadow leaf, flower or saturated accent"
         );
 
         let repeated = super::mesh_chunk(&chunk, &alone());
         assert_eq!(
             mesh.cover, repeated.cover,
-            "a remesh reshuffled the desert bramble"
-        );
-
-        // The shared primitive emits two ribbons for each of three segments, and the
-        // first four groups are the bramble's arches. Reading their centre lines back
-        // proves each one climbs through a shoulder and crest before descending.
-        let endpoint = |quad: usize, end: bool| {
-            let vertices = &mesh.cover.positions[quad * VERTICES_PER_QUAD..][..VERTICES_PER_QUAD];
-            let pair = if end {
-                [vertices[2], vertices[3]]
-            } else {
-                [vertices[0], vertices[1]]
-            };
-            [
-                (pair[0][0] + pair[1][0]) * 0.5,
-                (pair[0][1] + pair[1][1]) * 0.5,
-                (pair[0][2] + pair[1][2]) * 0.5,
-            ]
-        };
-        for cane in 0..BRAMBLE_CANES {
-            let first = cane * BRAMBLE_CANE_SEGMENTS * 2;
-            let base = endpoint(first, false);
-            let shoulder = endpoint(first, true);
-            let crest = endpoint(first + 2, true);
-            let tip = endpoint(first + 4, true);
-            assert!(
-                base[1] < shoulder[1] && shoulder[1] < crest[1] && tip[1] < crest[1],
-                "cane {cane} is not an arch: {base:?} -> {shoulder:?} -> {crest:?} -> {tip:?}"
-            );
-        }
-
-        // Beyond those arches, every short branch is still woody geometry: two basal
-        // canes, two thorns per arch and the crossed crown thorn.
-        let dressing = QUADS_PER_DESERT_BRAMBLE - BRAMBLE_CANES * BRAMBLE_CANE_SEGMENTS * 2;
-        assert_eq!(
-            dressing,
-            DESERT_BASE_CANES * 2
-                + BRAMBLE_CANES * DESERT_THORNS_PER_CANE * 2
-                + DESERT_CROWN_BLADES
+            "a remesh reshuffled the desert scrub"
         );
 
         winding_agrees_with_every_normal(&mesh.cover);
         stays_inside_the_voxel(&mesh.cover, [4.0, 5.0, 6.0]);
+        assert!(mesh.cover.flow.is_empty() && mesh.cover.falling.is_empty());
+    }
+
+    #[test]
+    fn a_combed_desert_scrub_cannot_be_radially_symmetric() {
+        // **The claim a sweep cannot make.** Combing every shoot `DESERT_COMB` of the way
+        // toward the plant's lean puts all three inside one arc of this width, whatever
+        // sectors they started in — and three evenly spaced shoots need the whole circle but
+        // a third of it. The frame this replaces was exactly that third.
+        let fan = 2.0 * (1.0 - DESERT_COMB) * std::f32::consts::PI;
+        let evenly_spaced = std::f32::consts::TAU * 2.0 / 3.0;
+        assert!(
+            fan < evenly_spaced,
+            "the comb leaves a {fan} rad arc, wide enough to hold three shoots \
+             {evenly_spaced} apart"
+        );
+
+        // The same fraction scales every separation, so the meadow's guard survives it:
+        // two feet this far apart on the floor are still two points.
+        let closest = 2.0 * BUSH_ROOT_SPREAD * ((1.0 - DESERT_COMB) * BUSH_SHOOT_GUARD).sin();
+        assert!(
+            closest >= DESERT_FOOT_GAP,
+            "two combed feet are only {closest} apart"
+        );
+
+        // The kink is the only thing that turns this stroke; see `push_shoot`'s `turns`.
+        const { assert!(DESERT_SHOOT_PROFILE.bend == 0.0) };
+    }
+
+    #[test]
+    fn every_desert_shoot_kinks_at_every_joint_and_folds_back() {
+        // The property that stops the silhouette reading as a wire arc, read out of the
+        // drawn ribbons: a smooth arch shows up here as a deviation near zero, and a wider
+        // arch as two deviations of one sign.
+        for cell in every_desert_cell() {
+            let mesh = a_desert_scrub(cell);
+            for shoot in 0..BUSH_SHOOTS {
+                let yaws: Vec<f32> = (0..BUSH_SHOOT_SEGMENTS)
+                    .map(|segment| {
+                        let quad = desert_segment_quad(shoot, segment);
+                        horizontal_yaw(
+                            centre_line(&mesh, quad, false),
+                            centre_line(&mesh, quad, true),
+                        )
+                    })
+                    .collect();
+                let deviations: Vec<f32> = yaws
+                    .windows(2)
+                    .map(|pair| signed_turn(pair[0], pair[1]))
+                    .collect();
+                for (joint, deviation) in deviations.iter().enumerate() {
+                    assert!(
+                        deviation.abs() >= DESERT_KINK_MIN - 1e-4,
+                        "{cell:?} shoot {shoot} joint {joint} turns {deviation}, under the \
+                         kink floor: the twig curves instead of kinking"
+                    );
+                }
+                assert!(
+                    deviations
+                        .windows(2)
+                        .any(|pair| pair[0].is_sign_positive() != pair[1].is_sign_positive()),
+                    "{cell:?} shoot {shoot} turns one way at every joint: {deviations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_desert_scrub_combs_one_way_from_three_separate_feet() {
+        // What "the plant leans" means to a test with no screen: the mean of where its tips
+        // ended up, against the axis they grew from, on every plant of a fixed population.
+        for cell in every_desert_cell() {
+            let floor = [cell[0] as f32, cell[1] as f32, cell[2] as f32];
+            let mesh = a_desert_scrub(cell);
+            let axis = [floor[0] + 0.5, floor[2] + 0.5];
+
+            let mut mean = [0.0, 0.0];
+            let mut feet = Vec::new();
+            for shoot in 0..BUSH_SHOOTS {
+                let tip = centre_line(
+                    &mesh,
+                    desert_segment_quad(shoot, BUSH_SHOOT_SEGMENTS - 1),
+                    true,
+                );
+                mean[0] += (tip[0] - axis[0]) / BUSH_SHOOTS as f32;
+                mean[1] += (tip[2] - axis[1]) / BUSH_SHOOTS as f32;
+                feet.push(centre_line(&mesh, desert_segment_quad(shoot, 0), false));
+            }
+            let lean = mean[0].hypot(mean[1]);
+            assert!(
+                lean >= DESERT_LEAN_MIN,
+                "{cell:?} combs {lean} from its axis, under DESERT_LEAN_MIN: its tips \
+                 spread instead of leaning"
+            );
+
+            for first in 0..BUSH_SHOOTS {
+                for second in first + 1..BUSH_SHOOTS {
+                    let gap = distance(feet[first], feet[second]);
+                    assert!(
+                        gap >= DESERT_FOOT_GAP,
+                        "{cell:?} feet {first} and {second} are {gap} apart, inside \
+                         DESERT_FOOT_GAP"
+                    );
+                }
+            }
+
+            // And the fan is the mechanism: every shoot within the arc the comb allows.
+            let lean_yaw = desert_lean_yaw(plant_seed(cell[0], cell[1], cell[2]));
+            for shoot in 0..BUSH_SHOOTS {
+                let turn = signed_turn(lean_yaw, desert_shoot_yaw(&mesh, floor, shoot));
+                assert!(
+                    turn.abs() <= (1.0 - DESERT_COMB) * std::f32::consts::PI + 1e-4,
+                    "{cell:?} shoot {shoot} sits {turn} from the lean, outside the fan"
+                );
+            }
+        }
     }
 
     #[test]
     fn every_desert_bramble_vertex_stays_inside_its_own_voxel() {
-        // `dial` is chunk-local, so sweep enough coordinates to exercise its several
-        // yaw, bend, height and thorn combinations instead of checking one lucky seed.
-        for y in 0..4 {
-            for z in 0..4 {
-                for x in 0..4 {
-                    let floor = [x as f32, y as f32, z as f32];
-                    let mut mesh = SurfaceMesh::default();
-                    push_desert_bramble(&mut mesh, floor, plant_seed(x, y, z));
-                    stays_inside_the_voxel(&mesh, floor);
-                }
-            }
+        // `dial` is chunk-local, so sweep the whole fixed population rather than one lucky
+        // seed. It is the one guarantee `BUSH_INSET` still buys after #874.
+        for cell in every_desert_cell() {
+            let floor = [cell[0] as f32, cell[1] as f32, cell[2] as f32];
+            stays_inside_the_voxel(&a_desert_scrub(cell), floor);
         }
     }
 
@@ -6005,7 +6143,7 @@ mod tests {
             planted_mesh.cover.quad_count(),
             shrubs * QUADS_PER_DESERT_BRAMBLE
         );
-        assert_eq!(planted_mesh.cover.quad_count(), 1150);
+        assert_eq!(planted_mesh.cover.quad_count(), 750);
         assert_eq!(
             planted_mesh.opaque, bare_mesh.opaque,
             "the shaped scrub must return every sand face and leave no cube in the sweep"
