@@ -642,10 +642,9 @@ pub struct MonitorChoices {
 
 impl MonitorChoices {
     /// Every option the settings screen's monitor dropdown offers, in the order
-    /// [`Self::moved`] already steps through: `Primary`, then every live display that is
-    /// not the primary one. An unavailable saved preference is deliberately absent — it
-    /// stays selected until the player replaces it, but it is not something they can
-    /// select again from this list.
+    /// [`Self::moved`] steps through: `Primary`, then every live display that is not the
+    /// primary one. An unavailable saved preference is deliberately absent — it stays
+    /// selected until the player replaces it, but is not reselectable from this list.
     pub(crate) fn preferences(&self) -> Vec<MonitorPreference> {
         let mut preferences = vec![MonitorPreference::Primary];
         preferences.extend(
@@ -704,9 +703,9 @@ impl MonitorChoices {
     }
 
     /// What one dropdown option reads. Unlike [`Self::label`], every preference
-    /// [`Self::preferences`] offers is live, so there is no `(unavailable)` case here —
-    /// that suffix belongs to the closed control, which may still be showing a saved
-    /// choice this list no longer contains.
+    /// [`Self::preferences`] offers is live, so there is no `(unavailable)` case — that
+    /// suffix belongs to the closed control, which may still show a saved choice this
+    /// list no longer contains.
     pub(crate) fn option_label(&self, preference: &MonitorPreference) -> String {
         match preference {
             MonitorPreference::Primary => "Primary".to_owned(),
@@ -1122,11 +1121,10 @@ impl Settings {
 
     /// Applies one of `monitors.preferences()` directly, replacing whatever was selected.
     ///
-    /// The settings screen's Monitor row is a select, not a stepper: a player picks a
-    /// display from a list rather than moving relative to whichever one is current, so
-    /// this assigns rather than stepping through [`Self::adjust_with_monitors`]. It
-    /// replaces an unavailable saved preference exactly as it replaces a live one — there
-    /// is no other way to leave one behind.
+    /// The Monitor row is a select, not a stepper: a player picks a display rather than
+    /// moving relative to whichever one is current, so this assigns instead of stepping
+    /// through [`Self::adjust_with_monitors`]. It replaces an unavailable saved preference
+    /// exactly as it replaces a live one — there is no other way to leave one behind.
     pub fn set_monitor(&mut self, preference: MonitorPreference) {
         self.monitor = preference;
     }
@@ -1857,10 +1855,9 @@ mod tests {
         );
     }
 
-    /// The dropdown's own two questions: what it offers, and what each entry reads. Both
-    /// are answered from live monitors only — an unavailable saved preference is neither
-    /// offered nor named here, which is what keeps the closed control the only place it is
-    /// still visible.
+    /// What the dropdown offers, and what each entry reads — both answered from live
+    /// monitors only, which is what keeps the closed control the only place an unavailable
+    /// saved preference is still visible.
     #[test]
     fn the_dropdown_offers_primary_and_every_live_display_by_its_own_label() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
@@ -1878,10 +1875,8 @@ mod tests {
             "Side display (1920x1080 at 1920,0)"
         );
 
-        // A saved preference the dropdown does not offer still has an option label of its
-        // own asked for nowhere in production: `option_label` answers the empty string
-        // rather than inventing a name, which is what keeps `(unavailable)` — the closed
-        // control's own suffix — the only place this state is spelled out.
+        // A preference the dropdown does not offer answers the empty string here rather
+        // than inventing a name — `(unavailable)` is the closed control's own suffix.
         let vanished = MonitorPreference::Specific("name:6e6f7065".to_owned());
         assert_eq!(monitors.option_label(&vanished), "");
     }
