@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use super::items::{item_label, mount_item_id};
 use super::{ApplyInputMode, ApplySnapshots, InputGate};
 use crate::net::{
     LearnedMountsInbox, MountKind, MountRequest, Outbound, Session, encode_mount_request,
@@ -17,6 +18,11 @@ impl LearnedMounts {
 
     pub fn contains(&self, mount: MountKind) -> bool {
         self.0.contains(&mount)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(mounts: Vec<MountKind>) -> Self {
+        Self(mounts)
     }
 }
 
@@ -125,12 +131,8 @@ pub const fn preference_from_mount(mount: MountKind) -> DefaultMount {
     }
 }
 
-pub const fn mount_label(mount: MountKind) -> &'static str {
-    match mount {
-        MountKind::BlackHorse => "Black horse",
-        MountKind::BrownHorse => "Brown horse",
-        MountKind::GreyHorse => "Grey horse",
-    }
+pub fn mount_label(mount: MountKind) -> &'static str {
+    item_label(mount_item_id(mount))
 }
 
 #[cfg(test)]
@@ -154,5 +156,19 @@ mod tests {
             ),
             Err("Your default mount is not learned on this character.")
         );
+    }
+
+    #[test]
+    fn learned_and_default_mount_rows_share_the_item_registry_names() {
+        for mount in [
+            MountKind::BlackHorse,
+            MountKind::BrownHorse,
+            MountKind::GreyHorse,
+        ] {
+            assert_eq!(mount_label(mount), item_label(mount_item_id(mount)));
+        }
+        assert_eq!(mount_label(MountKind::BlackHorse), "Raven Friesian");
+        assert_eq!(mount_label(MountKind::BrownHorse), "Chestnut Icelandic");
+        assert_eq!(mount_label(MountKind::GreyHorse), "Silver Fjord");
     }
 }

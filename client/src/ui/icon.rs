@@ -193,6 +193,77 @@ const COIN: [IconPart; 2] = [
     },
 ];
 
+/// A horse head at a slight three-quarter angle: neck connection, poll, long face, muzzle
+/// and two ears.
+///
+/// Six overlapping rounded rectangles keep the silhouette readable in the vendor's 34-pixel
+/// host as well as the larger inventory cell. The item's exact world-coat colour comes through
+/// the registry; the shades here only separate the planes of that one colour.
+const HORSE_HEAD: [IconPart; 6] = [
+    // The neck leaves the poll down and to the right, behind the face.
+    IconPart {
+        left: 43.0,
+        top: 53.0,
+        width: 30.0,
+        height: 34.0,
+        radius: 22.0,
+        shade: -0.34,
+        rotation: -0.20,
+        ..IconPart::PLAIN
+    },
+    // Poll and cheek, broad enough to hold both ears.
+    IconPart {
+        left: 28.0,
+        top: 24.0,
+        width: 46.0,
+        height: 38.0,
+        radius: 30.0,
+        shade: 0.16,
+        rotation: 0.12,
+        ..IconPart::PLAIN
+    },
+    // The long face narrows the picture towards the muzzle.
+    IconPart {
+        left: 29.0,
+        top: 40.0,
+        width: 35.0,
+        height: 38.0,
+        radius: 28.0,
+        rotation: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 24.0,
+        top: 65.0,
+        width: 30.0,
+        height: 19.0,
+        radius: 36.0,
+        shade: -0.20,
+        rotation: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 32.0,
+        top: 10.0,
+        width: 13.0,
+        height: 26.0,
+        radius: 45.0,
+        shade: -0.12,
+        rotation: -0.14,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 55.0,
+        top: 8.0,
+        width: 12.0,
+        height: 28.0,
+        radius: 45.0,
+        shade: 0.30,
+        rotation: 0.19,
+        ..IconPart::PLAIN
+    },
+];
+
 /// A sword: a bright bar on the cell's diagonal, a cross guard across it, a grip below.
 ///
 /// The guard is perpendicular *by construction* rather than by a second angle — it is a
@@ -472,6 +543,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Bow => &BOW,
         ItemShape::Sceptre => &SCEPTRE,
         ItemShape::Coin => &COIN,
+        ItemShape::HorseHead => &HORSE_HEAD,
     }
 }
 
@@ -946,6 +1018,33 @@ mod tests {
                     parts(*shape),
                     parts(*other),
                     "{shape:?} and {other:?} draw the same picture"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_horse_head_keeps_its_profile_at_vendor_and_inventory_sizes() {
+        let [neck, poll, face, muzzle, left_ear, right_ear] =
+            <[IconPart; 6]>::try_from(parts(ItemShape::HorseHead))
+                .expect("the horse head has a neck, poll, face, muzzle and two ears");
+
+        assert!(left_ear.top < poll.top && right_ear.top < poll.top);
+        assert!(face.height > muzzle.height && poll.width > muzzle.width);
+        assert!(neck.top < muzzle.top + muzzle.height && neck.top + neck.height > face.top);
+        assert!(
+            parts(ItemShape::HorseHead)
+                .iter()
+                .all(|part| !part.iron && !part.green && !part.livery),
+            "every horse-head plane must keep the registry's exact coat colour"
+        );
+
+        for pixels in [34.0_f32, 50.0] {
+            for (name, part) in [("left ear", left_ear), ("right ear", right_ear)] {
+                let narrowest = part.width.min(part.height) * pixels / 100.0;
+                assert!(
+                    narrowest >= 4.0,
+                    "the {name} is only {narrowest}px across in a {pixels}px icon"
                 );
             }
         }

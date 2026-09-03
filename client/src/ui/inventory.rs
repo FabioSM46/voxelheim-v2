@@ -1795,8 +1795,9 @@ mod tests {
 
     use super::super::{COUNT_PLATE, DrawnCell, FILLED_CELL, drawn_cell, icon};
     use super::*;
-    use crate::net::{InventoryStack, RecipeId, SessionParams};
+    use crate::net::{InventoryStack, MountKind, RecipeId, SessionParams};
     use crate::player::{ITEM_SILVER, ItemShape, SelectedSlot};
+    use crate::settings::DefaultMount;
 
     fn session() -> Session {
         Session(SessionParams {
@@ -1865,6 +1866,34 @@ mod tests {
             .insert_resource(InputMode::Inventory)
             .add_plugins(InventoryUiPlugin);
         app
+    }
+
+    #[test]
+    fn learned_and_default_mount_rows_use_the_canonical_breed_names() {
+        let mut app = app();
+        app.insert_resource(LearnedMounts::for_test(vec![
+            MountKind::BlackHorse,
+            MountKind::BrownHorse,
+            MountKind::GreyHorse,
+        ]));
+        let mut settings = Settings::default();
+        settings.set_default_mount(DefaultMount::Brown);
+        app.insert_resource(settings);
+        app.update();
+
+        let world = app.world_mut();
+        let mut texts = world.query::<&Text>();
+        let lines: Vec<_> = texts.iter(world).map(|text| text.0.clone()).collect();
+        assert!(lines.contains(&"Raven Friesian".to_owned()), "{lines:?}");
+        assert!(
+            lines.contains(&"Chestnut Icelandic  -  DEFAULT".to_owned()),
+            "{lines:?}"
+        );
+        assert!(lines.contains(&"Silver Fjord".to_owned()), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.contains("unknown item")),
+            "a learned mount still fell through the registry: {lines:?}"
+        );
     }
 
     /// Which tabs have a `Display`, read the way `bevy_ui` decides whether a half occupies

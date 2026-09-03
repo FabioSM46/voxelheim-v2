@@ -222,6 +222,18 @@ impl HorseVisuals {
     }
 }
 
+/// The exact coat colour shared by the world rig and every presentation of its token.
+///
+/// Keeping the match beside the named rig constants makes a coat retune one edit. Item icons,
+/// held tokens and drops resolve this same value through the item display registry.
+pub(super) const fn coat_colour(kind: MountKind) -> Color {
+    match kind {
+        MountKind::BlackHorse => BLACK_COAT,
+        MountKind::BrownHorse => BROWN_COAT,
+        MountKind::GreyHorse => GREY_COAT,
+    }
+}
+
 /// The root of one horse. Ridden roots are parented to a body; paddock roots stand in
 /// world space, but both own the exact same mesh children and gait transforms.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,9 +518,18 @@ pub(super) fn create_visuals(
         tail: meshes.add(horse_tail_mesh()),
         tack: meshes.add(horse_tack_mesh()),
         eyes: meshes.add(horse_eye_mesh()),
-        black: materials.add(coat_material(BLACK_COAT, &coats.image)),
-        brown: materials.add(coat_material(BROWN_COAT, &coats.image)),
-        grey: materials.add(coat_material(GREY_COAT, &coats.image)),
+        black: materials.add(coat_material(
+            coat_colour(MountKind::BlackHorse),
+            &coats.image,
+        )),
+        brown: materials.add(coat_material(
+            coat_colour(MountKind::BrownHorse),
+            &coats.image,
+        )),
+        grey: materials.add(coat_material(
+            coat_colour(MountKind::GreyHorse),
+            &coats.image,
+        )),
         hair: materials.add(StandardMaterial::from_color(HAIR_COLOUR)),
         leather: materials.add(StandardMaterial::from_color(LEATHER_COLOUR)),
         eye: materials.add(StandardMaterial {
@@ -573,6 +594,22 @@ fn horse_head_mesh() -> Mesh {
     });
     merge_all(&mut head, ears, "horse head");
     head
+}
+
+/// The world horse's own head, ears, poll and neck connection, normalised for item renderers.
+///
+/// A slight three-quarter turn exposes both the long face and its narrow brow when the held-item
+/// camera or a world drop looks along Z. `edge` is the longest final extent; both item renderers
+/// choose their own existing scale without re-authoring the silhouette.
+pub(super) fn horse_head_item_mesh(edge: f32) -> Mesh {
+    const CENTRE: Vec3 = Vec3::new(0.0, 1.82, -0.96);
+    const LONGEST_EXTENT: f32 = 1.12;
+
+    let mut head = horse_neck_mesh();
+    merge_all(&mut head, [horse_head_mesh()], "horse-head item silhouette");
+    head.translated_by(-CENTRE)
+        .scaled_by(Vec3::splat(edge / LONGEST_EXTENT))
+        .rotated_by(Quat::from_rotation_y(-0.55))
 }
 
 /// Shoulder or hip to the knee, authored downwards from the pivot; shared by all four.
@@ -1875,7 +1912,11 @@ mod tests {
         }
         assert_eq!(
             coat_materials.map(|material| material.base_color),
-            [BLACK_COAT, BROWN_COAT, GREY_COAT]
+            [
+                coat_colour(MountKind::BlackHorse),
+                coat_colour(MountKind::BrownHorse),
+                coat_colour(MountKind::GreyHorse),
+            ]
         );
         assert_eq!(
             materials.get(&visuals.hair).unwrap().base_color,
