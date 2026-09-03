@@ -641,7 +641,12 @@ pub struct MonitorChoices {
 }
 
 impl MonitorChoices {
-    fn preferences(&self) -> Vec<MonitorPreference> {
+    /// Every option the settings screen's monitor dropdown offers, in the order
+    /// [`Self::moved`] already steps through: `Primary`, then every live display that is
+    /// not the primary one. An unavailable saved preference is deliberately absent — it
+    /// stays selected until the player replaces it, but it is not something they can
+    /// select again from this list.
+    pub(crate) fn preferences(&self) -> Vec<MonitorPreference> {
         let mut preferences = vec![MonitorPreference::Primary];
         preferences.extend(
             self.attached
@@ -695,6 +700,22 @@ impl MonitorChoices {
                             .unwrap_or_else(|| "display".to_owned())
                     )
                 }),
+        }
+    }
+
+    /// What one dropdown option reads. Unlike [`Self::label`], every preference
+    /// [`Self::preferences`] offers is live, so there is no `(unavailable)` case here —
+    /// that suffix belongs to the closed control, which may still be showing a saved
+    /// choice this list no longer contains.
+    pub(crate) fn option_label(&self, preference: &MonitorPreference) -> String {
+        match preference {
+            MonitorPreference::Primary => "Primary".to_owned(),
+            MonitorPreference::Specific(identity) => self
+                .attached
+                .iter()
+                .find(|choice| choice.identity == *identity)
+                .map(|choice| choice.label.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1097,6 +1118,17 @@ impl Settings {
             }
             Knob::FrameCap => self.frame_cap = step_frame_cap(self.frame_cap, steps),
         }
+    }
+
+    /// Applies one of `monitors.preferences()` directly, replacing whatever was selected.
+    ///
+    /// The settings screen's Monitor row is a select, not a stepper: a player picks a
+    /// display from a list rather than moving relative to whichever one is current, so
+    /// this assigns rather than stepping through [`Self::adjust_with_monitors`]. It
+    /// replaces an unavailable saved preference exactly as it replaces a live one — there
+    /// is no other way to leave one behind.
+    pub fn set_monitor(&mut self, preference: MonitorPreference) {
+        self.monitor = preference;
     }
 
     /// What the settings screen prints beside `knob`.
@@ -1823,6 +1855,55 @@ mod tests {
             &saved,
             "falling back rewrote the saved preference"
         );
+    }
+
+    /// The dropdown's own two questions: what it offers, and what each entry reads. Both
+    /// are answered from live monitors only — an unavailable saved preference is neither
+    /// offered nor named here, which is what keeps the closed control the only place it is
+    /// still visible.
+    #[test]
+    fn the_dropdown_offers_primary_and_every_live_display_by_its_own_label() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let preferences = monitors.preferences();
+        assert_eq!(preferences.len(), 2, "{preferences:?}");
+        assert_eq!(preferences[0], MonitorPreference::Primary);
+        assert!(matches!(preferences[1], MonitorPreference::Specific(_)));
+
+        assert_eq!(
+            monitors.option_label(&MonitorPreference::Primary),
+            "Primary"
+        );
+        assert_eq!(
+            monitors.option_label(&preferences[1]),
+            "Side display (1920x1080 at 1920,0)"
+        );
+
+        // A saved preference the dropdown does not offer still has an option label of its
+        // own asked for nowhere in production: `option_label` answers the empty string
+        // rather than inventing a name, which is what keeps `(unavailable)` — the closed
+        // control's own suffix — the only place this state is spelled out.
+        let vanished = MonitorPreference::Specific("name:6e6f7065".to_owned());
+        assert_eq!(monitors.option_label(&vanished), "");
+    }
+
+    /// The select assigns directly; it does not step. And it is the only way to leave an
+    /// unavailable saved preference behind — the model has no other setter for this field.
+    #[test]
+    fn set_monitor_replaces_the_preference_directly_including_an_unavailable_one() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let mut settings = Settings::default();
+        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
+
+        let side = monitors.preferences()[1].clone();
+        settings.set_monitor(side.clone());
+        assert_eq!(settings.monitor(), &side);
+
+        let unavailable = MonitorPreference::Specific("name:6c6f7374".to_owned());
+        settings.set_monitor(unavailable.clone());
+        assert_eq!(settings.monitor(), &unavailable);
+
+        settings.set_monitor(MonitorPreference::Primary);
+        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
     }
 
     #[test]
