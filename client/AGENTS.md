@@ -517,7 +517,10 @@ deviation it is handed, and the desert hands it alternating deviations of at lea
 `DESERT_COMB` of the way toward one per-plant lean, so the fan closes and the tangle combs one way as
 scrub in wind does. A shear was tried for that lean and rejected: on a descending segment it
 subtracts from the joint's deviation, and it cancelled the kink outright on the population's worst
-seed. The retrorse thorns and a second bleached tone are #836's second half.
+seed. A thorn then hooks *backward* off every joint above the foot — out of length bands that cannot
+meet, so three different lengths are arithmetic rather than luck — and the forks and thorns carry a
+second bleached tone, `DESERT_SHRUB_TIP_LINEAR`, so the outer twigs separate from the mass without
+drifting toward the sand behind them.
 Every vertex stays inside its own voxel, which lets
 `ChunkStore::apply_block` need no remesh rule for a plant on a chunk border — a neighbour's sweep can
 no more see one than it can see the air that replaces it. There is nothing for a mask to merge here,
@@ -571,16 +574,17 @@ beads — and the dressing took it to 70, 12 of snow and 28 of fruit where the s
 last: it is what ties the plant to the white it stands on, which is the whole of why it reads at
 distance. The one-in-256 tundra fixture carries four winter brambles and therefore 280 cover quads.
 `a_flowered_chunk_costs_the_quads_it_is_recorded_as_costing` is where the number is written down.
-**The desert scrub was 46 quads before #836 and its skeleton alone is 30**, against a ceiling of 72;
-the thorn dressing spends the rest in #836's second half. It gained the shared fork on every shoot
-and lost the two axis-aligned low canes and the crossed crown blade, which made a collision box
+**The desert scrub was 46 quads before #836 and is 48 after it**, against a ceiling of 72: 30 of
+forked kinked wood and 18 of thorns, where four constant-width canes with two thorns each cost 46.
+It gained the shared fork on every shoot and a third thorn per shoot, and lost the two axis-aligned
+low canes and the crossed crown blade, which made a collision box
 visible and stopped meaning anything once #874 made `DesertShrub` `Cover`. The dense desert fixture
 grows exactly 25 per chunk, so its cover
-half is 750 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
-7,645 quads while bare and shaped scrub were both 7,637. The new shape therefore adds 750 cover
-quads, removes a net 8 opaque quads after returning the sand tops the cubes hid, and adds 742
+half is 1,200 quads; in the same generated-terrain fixture the old cube proxy's opaque half was
+7,645 quads while bare and shaped scrub were both 7,637. The new shape therefore adds 1,200 cover
+quads, removes a net 8 opaque quads after returning the sand tops the cubes hid, and adds 1,192
 quads in all. **This ceiling is tighter than the meadow's for that density alone** — every quad here
-is paid 25 times in one chunk where a bush's is paid 9.
+is paid 25 times in one chunk where a bush's is paid 9, so lower a thorn count before raising it.
 `a_desert_chunk_costs_the_scrub_quads_and_returns_the_sand_faces` pins the cover cost
 and exact restoration of the bare opaque buffer.
 
