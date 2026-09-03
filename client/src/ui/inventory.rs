@@ -1685,8 +1685,8 @@ fn hover_tooltip(
 /// **Nothing is decided here.** A reported press becomes an `InventoryMoveRequest`, a
 /// `RepairRequest`, a `DropItemRequest` or a `ConsumeRequest` in `player::inventory`, which
 /// is the only module that pairs cells, checks its routing lists and builds a frame. That
-/// is what keeps the keyboard route below from being a second opinion about food: whether
-/// the hovered cell holds something edible is `consume_request`'s question, and this system
+/// is what keeps the keyboard route below from being a second opinion about consumables: whether
+/// the hovered cell holds something consumable is `consume_request`'s question, and this system
 /// does not ask it for either gesture.
 ///
 /// **Shift is read against the full-stack button and not the split one**, because what the
@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     /// The slot the consume gestures below are aimed at. Any cell will do — whether what
-    /// is in it may be eaten is `player::inventory`'s question and not this system's.
+    /// is in it may be consumed is `player::inventory`'s question and not this system's.
     const HOVERED_SLOT: u8 = 0;
 
     /// Runs one frame of the inventory screen and reports the clicks it wrote.
@@ -2853,7 +2853,7 @@ mod tests {
     ///
     /// The mode guard and the hover are this system's own; the key that was rebound away is
     /// the one a stale reader of the bindings would get wrong. What is deliberately *not*
-    /// here is an inedible cell — that is `player::inventory`'s judgement, and asking it
+    /// here is a non-consumable cell — that is `player::inventory`'s judgement, and asking it
     /// twice is what this module's "nothing is decided here" contract forbids.
     #[test]
     fn the_consume_key_is_silent_in_every_state_that_is_not_a_press_over_a_cell() {
@@ -2981,7 +2981,7 @@ mod tests {
     /// notice nothing.
     ///
     /// The cell under the pointer is [`HOVERED_SLOT`], which is occupied and nothing more:
-    /// whether what is in it may be eaten is `player::inventory`'s question, and asking it
+    /// whether what is in it may be consumed is `player::inventory`'s question, and asking it
     /// here is what this module's "nothing is decided here" contract forbids. What a
     /// repeat would have drained is a stack, and this is the press that would have drained
     /// it.
@@ -3016,7 +3016,7 @@ mod tests {
         assert_eq!(
             reported,
             vec![consume_press()],
-            "a held key is one press, so one stack is not eaten frame by frame"
+            "a held key is one press, so one stack is not consumed frame by frame"
         );
 
         // Releasing and pressing again has to report a second time. A test that only proved
