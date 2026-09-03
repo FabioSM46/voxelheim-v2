@@ -4723,10 +4723,13 @@ mod tests {
 
     #[test]
     fn a_meadow_bush_is_three_forked_shoots_ten_leaves_and_three_specks() {
-        // The constraint the bush has and the flower does not: `world.Bush` is `Solid` on
-        // the server, so what is drawn has to span the cube collision uses. It is drawn
-        // per voxel, which means the opaque sweep must stop drawing its cube — and the
-        // grass under it must start drawing the top face that cube used to cull.
+        // A bush is drawn per voxel rather than swept, which means the opaque sweep must
+        // stop drawing its cube — and the grass under it must start drawing the top face
+        // that cube used to cull. **This comment used to open by saying `world.Bush` is
+        // `Solid` and that the drawing therefore had to span the cube collision uses.**
+        // #874 made it `Cover`, so a body passes through it and that constraint is gone
+        // along with the assertion that enforced it; what is left is the rendering half,
+        // which never depended on solidity.
         let mut chunk = solid(SIZE, palette::GRASS);
         chunk.set(4, 5, 6, palette::AIR);
         let hole = super::mesh_chunk(&chunk, &alone());
