@@ -47,6 +47,7 @@ use crate::net::{
     BlockCoord, BlockEditRequest, EditAction, MineProgress, MineProgressInbox, MineRequest,
     Outbound, Sent, Session, encode_block_edit_request, encode_mine_request,
 };
+use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::world::{ChunkStore, palette};
 
 /// The control that breaks the targeted block.
@@ -131,6 +132,7 @@ impl Plugin for BlockTargetPlugin {
             .init_resource::<ViewMode>()
             .init_resource::<MiningFeedback>()
             .init_resource::<MineProgressInbox>()
+            .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_highlight)
             .add_systems(
                 Update,
@@ -145,7 +147,9 @@ impl Plugin for BlockTargetPlugin {
                     update_mining_feedback.in_set(ApplyMiningFeedback),
                     (
                         move_the_highlight.in_set(DrawTargetHighlight),
-                        send_block_edits.in_set(ApplyTargetInput),
+                        send_block_edits
+                            .in_set(ApplyTargetInput)
+                            .in_set(PublishPlayerMessages),
                     ),
                 )
                     .chain()
@@ -275,6 +279,16 @@ impl Aim<'_> {
 struct MiningInput {
     target: Option<IVec3>,
     observed_tick: u32,
+    /// Whether a dropped `active=true` frame has already been told to the player for the
+    /// voxel [`Self::target`] currently names.
+    ///
+    /// **One chat line per continuous mining attempt, not one per dropped tick.** An
+    /// `active=true` frame goes out on every tick the button stays held, so an outbound
+    /// queue that stays saturated would otherwise warn once in tracing and repeat the
+    /// same `[ERROR]` line to chat dozens of times a second. Reset to `false` exactly
+    /// where `target` changes, so a *new* mining attempt is reported again if it, too,
+    /// cannot reach the server.
+    drop_reported: bool,
 }
 
 /// Marks the outline entity, so a query finds it without also matching the bodies.
@@ -927,6 +941,10 @@ fn edge_bars(bleed: f32) -> [(Vec3, Vec3); 12] {
 /// those is the server's answer, and a client that pre-judged them would be doing the
 /// server's job while still having to accept being overruled. Intent goes out and the
 /// world changes if the server says so.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one intent-sending system; the chat report needs a ninth parameter"
+)]
 fn send_block_edits(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     gate: InputGate<'_>,
@@ -935,6 +953,7 @@ fn send_block_edits(
     held: combat::HeldItem<'_>,
     outbound: Option<ResMut<Outbound>>,
     mut mining: ResMut<MiningInput>,
+    mut messages: MessageWriter<PlayerMessage>,
 ) {
     let mut outbound = outbound;
     let tick_advanced = mining.observed_tick != cadence.client_tick;
@@ -965,12 +984,29 @@ fn send_block_edits(
 
     if mining.target != desired {
         if let Some(old) = mining.target {
-            send_mining(&mut outbound, old, false, held.slot(), cadence.client_tick);
+            send_mining(
+                &mut outbound,
+                old,
+                false,
+                held.slot(),
+                cadence.client_tick,
+                &mut messages,
+                &mut mining.drop_reported,
+            );
         }
         mining.target = desired;
+        mining.drop_reported = false;
     }
     if tick_advanced && let Some(pos) = mining.target {
-        send_mining(&mut outbound, pos, true, held.slot(), cadence.client_tick);
+        send_mining(
+            &mut outbound,
+            pos,
+            true,
+            held.slot(),
+            cadence.client_tick,
+            &mut messages,
+            &mut mining.drop_reported,
+        );
     }
 
     // Right stays a one-shot block edit. It remains a request only: neither the
@@ -1015,7 +1051,11 @@ fn send_block_edits(
     match outbound.send(frame) {
         Sent::Queued => {}
         Sent::Dropped => {
-            warn!("the outbound queue was full; a {action:?} at {pos:?} never reached the server")
+            warn!("the outbound queue was full; a {action:?} at {pos:?} never reached the server");
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your placement did not reach the server; try again.",
+            ));
         }
         Sent::Closed => {}
     }
@@ -1027,12 +1067,21 @@ fn send_block_edits(
 /// its own table for what that item is worth against the block — a client that named a tool
 /// would be naming its own mining speed. It is the same `held.slot()` the block edit beside
 /// it sends, and mining was the one action on this wire that named no slot until #185.
+///
+/// **A dropped `active=true` frame reaches chat at most once per continuous attempt.**
+/// `active=true` goes out on every tick the button stays held, so reporting every drop
+/// would spam the log a dozen times a second; `drop_reported` is `mining.drop_reported`,
+/// reset by the caller whenever the target changes. `active=false` — the one-shot stop
+/// sent when a target is released — never reaches chat: dropping it costs nothing the
+/// player can act on, since the mining attempt is already over.
 fn send_mining(
     outbound: &mut Option<ResMut<'_, Outbound>>,
     pos: IVec3,
     active: bool,
     slot: u8,
     client_tick: u32,
+    messages: &mut MessageWriter<'_, PlayerMessage>,
+    drop_reported: &mut bool,
 ) {
     let Some(outbound) = outbound.as_deref_mut() else {
         return;
@@ -1049,9 +1098,18 @@ fn send_mining(
     };
     match outbound.send(encode_mine_request(&request)) {
         Sent::Queued => {}
-        Sent::Dropped => warn!(
-            "the outbound queue was full; mining intent active={active} at {pos:?} never reached the server"
-        ),
+        Sent::Dropped => {
+            warn!(
+                "the outbound queue was full; mining intent active={active} at {pos:?} never reached the server"
+            );
+            if active && !*drop_reported {
+                messages.write(PlayerMessage::new(
+                    PlayerMessageKind::Error,
+                    "Your mining request did not reach the server; try again.",
+                ));
+                *drop_reported = true;
+            }
+        }
         Sent::Closed => {}
     }
 }
@@ -1749,6 +1807,30 @@ mod tests {
     /// the body the camera follows — without it `follow_the_player` has nothing to attach to
     /// and the camera keeps the identity rotation, so every ray would go down -z whatever the
     /// look state said.
+    // Every `PlayerMessage` published so far, read by a persistent `MessageReader` rather
+    // than a fresh cursor.
+    //
+    // A fresh `Messages::get_cursor()` is the wrong tool across several `update()` calls:
+    // Bevy retains a message for at most two frame boundaries, so a cursor made after the
+    // third `update()` in a held-key test would already have lost what the first one
+    // wrote, and reading after every single `update()` would double-count whatever
+    // survived into the next frame's window. A reader that persists its own position —
+    // the same shape `ui/chat.rs`'s real consumer uses — drains each message exactly
+    // once, whichever frame it arrived on.
+    #[derive(Resource, Debug, Default)]
+    struct CollectedMessages(Vec<PlayerMessage>);
+
+    fn drain_into_collected(
+        mut reader: MessageReader<PlayerMessage>,
+        mut collected: ResMut<CollectedMessages>,
+    ) {
+        collected.0.extend(reader.read().cloned());
+    }
+
+    fn player_messages(app: &App) -> Vec<PlayerMessage> {
+        app.world().resource::<CollectedMessages>().0.clone()
+    }
+
     fn aiming_app(store: ChunkStore) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
@@ -1756,7 +1838,9 @@ mod tests {
             .init_asset::<StandardMaterial>()
             .insert_resource(session())
             .insert_resource(store)
-            .add_plugins(PlayerPlugin);
+            .add_plugins(PlayerPlugin)
+            .init_resource::<CollectedMessages>()
+            .add_systems(Update, drain_into_collected.after(PublishPlayerMessages));
 
         *app.world_mut().resource_mut::<LookState>() = LookState {
             // A quarter turn to the right of -z is +x, which is also the server's `right`.
@@ -2145,6 +2229,92 @@ mod tests {
             .resource_mut::<InventoryInbox>()
             .push(InventoryState { stacks, silver: 0 });
         (app, sent)
+    }
+
+    /// An aiming app whose outbound queue never has room, so every send in these tests is
+    /// `Sent::Dropped` rather than `Sent::Queued`.
+    ///
+    /// A zero-capacity `sync_channel` is a rendezvous: `try_send` succeeds only while a
+    /// receiver is parked in a blocking `recv`, which nothing here ever is. Every attempt
+    /// therefore drops, deterministically — no bounded queue to fill up first. **The
+    /// receiver has to outlive this function**, and is handed back rather than discarded:
+    /// dropping it here would disconnect the channel, and every later send would then read
+    /// as `Sent::Closed` — silent by design — rather than `Sent::Dropped`.
+    fn dropping_app(store: ChunkStore) -> (App, Receiver<Vec<u8>>) {
+        let mut app = aiming_app(store);
+        let (outbound, never_received) = Outbound::to_a_test(0);
+        app.add_plugins(InputPlugin).insert_resource(outbound);
+        let mut stacks = vec![InventoryStack::default(); 36];
+        stacks[0] = InventoryStack {
+            item_id: palette::STONE,
+            count: 1,
+            ..Default::default()
+        };
+        app.world_mut()
+            .resource_mut::<InventoryInbox>()
+            .push(InventoryState { stacks, silver: 0 });
+        (app, never_received)
+    }
+
+    #[test]
+    fn a_dropped_placement_reaches_chat_as_one_error() {
+        let wall = IVec3::new(3, 81, 0);
+        let (mut app, _never_received) = dropping_app(store_with(&[wall]));
+        tick_each_update(&mut app);
+        app.update();
+        assert_eq!(target(&app).0.map(|hit| hit.block), Some(wall));
+
+        click(&mut app, PLACE_BUTTON);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your placement did not reach the server; try again."
+            )]
+        );
+    }
+
+    /// A held mining attempt reports a dropped send once, not once per tick.
+    ///
+    /// `active=true` goes out on every tick the button stays held, so a naive report would
+    /// spam the same `[ERROR]` line every fifty milliseconds while the queue stays
+    /// saturated. Three ticks, one chat line, is the property that matters.
+    #[test]
+    fn a_dropped_mining_attempt_reaches_chat_once_per_attempt() {
+        let wall = IVec3::new(3, 81, 0);
+        let (mut app, _never_received) = dropping_app(store_with(&[wall]));
+        tick_each_update(&mut app);
+        app.update();
+        assert_eq!(target(&app).0.map(|hit| hit.block), Some(wall));
+
+        click(&mut app, BREAK_BUTTON);
+        for _ in 0..3 {
+            app.update();
+        }
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Your mining request did not reach the server; try again."
+            )],
+            "three ticks of a saturated queue must still read as one failure"
+        );
+
+        // Releasing and pressing again starts a new attempt, and a fresh drop is reported
+        // again: the dedup is per attempt, not permanent for the whole session.
+        release(&mut app, BREAK_BUTTON);
+        app.update();
+        click(&mut app, BREAK_BUTTON);
+        app.update();
+
+        assert_eq!(
+            player_messages(&app).len(),
+            2,
+            "a new mining attempt must be reported again if it also cannot reach the server"
+        );
     }
 
     /// One edit request as the fields the server will read: position, action, slot, tick.

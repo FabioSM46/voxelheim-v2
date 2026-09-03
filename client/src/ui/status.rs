@@ -21,7 +21,7 @@ use bevy::prelude::*;
 
 use crate::net::{
     ActionRefused, ConnectionState, Identity, MAX_MARKERS, PlayerTradeCloseReason, RefusalInbox,
-    RefusalReason, RefusedAction, Reject, ServerAddress, Session,
+    RefusalReason, RefusedAction, Reject, ServerAddress, Session, SessionEndingInbox,
 };
 use crate::player::{PlayerStats, PlayerTradeEnded};
 use crate::settings::{Corner, Settings};
@@ -427,9 +427,22 @@ fn refresh_player_text(
 /// exactly where it matters.
 fn publish_gameplay_messages(
     inbox: Option<ResMut<RefusalInbox>>,
+    endings: Option<ResMut<SessionEndingInbox>>,
     mut trade_ended: MessageReader<PlayerTradeEnded>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
+    // One sanitized sentence per ending that interrupted a game, however many the net
+    // thread queued — see `SessionEndingInbox` for why the detail itself never reaches
+    // here. `saturating_add` in the inbox already collapses nothing: a burst is real and
+    // each one is a separate line, the same way a burst of refusals below is.
+    if let Some(mut endings) = endings {
+        for _ in 0..endings.take() {
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "The connection to the server was lost.",
+            ));
+        }
+    }
     if let Some(mut inbox) = inbox {
         for refused in inbox.take() {
             match describe_refusal(&refused) {
@@ -2056,6 +2069,24 @@ mod tests {
             app.world().resource::<RefusalInbox>().pending(),
             0,
             "the inbox was drained rather than left to grow"
+        );
+    }
+
+    #[test]
+    fn a_queued_session_ending_reaches_chat_as_an_error() {
+        let mut app = headless_messages_ui();
+        app.world_mut().init_resource::<SessionEndingInbox>();
+        app.world_mut()
+            .resource_mut::<SessionEndingInbox>()
+            .push_for_test();
+        app.update();
+
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "The connection to the server was lost."
+            )]
         );
     }
 
