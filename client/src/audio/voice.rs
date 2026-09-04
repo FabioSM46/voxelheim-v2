@@ -240,7 +240,7 @@ fn speak(
         // turning voice back on starts from a closed microphone and an unpressed key.
         pipeline.asked_to_speak = false;
         pipeline.start_over();
-        capture.shared().listen(false);
+        capture.listen(false);
         set_transmitting(&mut transmitting, false);
         return;
     }
@@ -251,7 +251,7 @@ fn speak(
     // Voice activation needs the device open to have a level to compare; push to talk waits
     // for the first press. See `VoicePipeline::asked_to_speak`.
     let open = controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak;
-    capture.shared().listen(open);
+    capture.listen(open);
     if !open {
         set_transmitting(&mut transmitting, false);
         return;
