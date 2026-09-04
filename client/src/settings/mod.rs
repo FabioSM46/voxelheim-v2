@@ -92,6 +92,11 @@ impl Plugin for SettingsPlugin {
         })
         .insert_resource(self.settings.clone())
         .init_resource::<MonitorChoices>()
+        // The audio module's supervisor thread fills this; the settings module owns it
+        // because it is the output-device knob's bound, and a bound belongs beside the knob
+        // it stops. An app built without `AudioPlugin` offers the system default and
+        // nothing else, which is the truth on a machine with no audio at all.
+        .init_resource::<OutputDevices>()
         .add_systems(
             Update,
             (
@@ -533,10 +538,11 @@ pub enum Knob {
     FogStart,
     FrameCap,
     MasterVolume,
+    OutputDevice,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 9] = [
+pub const KNOBS: [Knob; 10] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -546,6 +552,7 @@ pub const KNOBS: [Knob; 9] = [
     Knob::FogStart,
     Knob::FrameCap,
     Knob::MasterVolume,
+    Knob::OutputDevice,
 ];
 
 impl Knob {
@@ -561,12 +568,13 @@ impl Knob {
             Self::FogStart => "Fog starts at",
             Self::FrameCap => "Frame cap",
             Self::MasterVolume => "Master volume",
+            Self::OutputDevice => "Output device",
         }
     }
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so a tenth knob has to say where it belongs before it builds —
+    /// No wildcard arm, so an eleventh knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
@@ -578,7 +586,7 @@ impl Knob {
             | Self::Brightness
             | Self::FogStart
             | Self::FrameCap => Tab::Graphics,
-            Self::MasterVolume => Tab::Audio,
+            Self::MasterVolume | Self::OutputDevice => Tab::Audio,
         }
     }
 }
@@ -772,12 +780,7 @@ fn monitor_identity(
     y: i32,
     duplicate_name: bool,
 ) -> String {
-    let encoded_name: String = name
-        .unwrap_or_default()
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let encoded_name = hex_encode(name.unwrap_or_default());
     if !encoded_name.is_empty() && !duplicate_name {
         format!("name:{encoded_name}")
     } else {
@@ -837,8 +840,18 @@ fn monitor_name_from_identity(identity: &str) -> Option<String> {
 }
 
 fn ascii_monitor_name(name: Option<&str>) -> String {
+    ascii_shown(name.unwrap_or_default(), "unnamed display")
+}
+
+/// `name` as this client's only font can draw it, or `empty` when nothing is left.
+///
+/// **A hardware name is not this client's string**, and `ui/mod.rs`'s `ascii_guard` cannot
+/// see one: it reads the literals this crate compiles, and a monitor or card name arrives at
+/// runtime in whatever encoding the platform likes. The embedded font draws 95 codepoints
+/// and lays every other one out with zero advance, so anything else becomes a visible `?`
+/// rather than an invisible gap in a row a player is choosing from.
+fn ascii_shown(name: &str, empty: &str) -> String {
     let shown: String = name
-        .unwrap_or_default()
         .trim()
         .chars()
         .map(|character| {
@@ -850,9 +863,157 @@ fn ascii_monitor_name(name: Option<&str>) -> String {
         })
         .collect();
     if shown.is_empty() {
-        "unnamed display".to_owned()
+        empty.to_owned()
     } else {
         shown
+    }
+}
+
+/// `name`'s bytes as lowercase hex — what turns a platform-given name into one settings-file
+/// field. A sound card called `HDA Intel PCH: ALC295 Analog` is four whitespace-separated
+/// fields written plainly, and the parser would read the first. [`monitor_identity`] already
+/// chose this encoding for the same problem, so the device reuses it rather than inventing a
+/// second escape.
+fn hex_encode(name: &str) -> String {
+    name.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Which output device the player chose.
+///
+/// **`SystemDefault` is not "whichever device happens to be default now"** but a standing
+/// instruction to follow the system: `audio/device.rs` reopens when the host starts calling
+/// something else its default, which is what a player who never opened this tab expects when
+/// a headset goes in. [`Self::Named`] is the opposite instruction — this device and no other
+/// — so unplugging that headset leaves the client silent and retrying rather than quietly
+/// moving to the speakers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OutputDevice {
+    #[default]
+    SystemDefault,
+    /// One device, under the name its host gives it. Never shortened or normalised: it is
+    /// the key `audio/device.rs` matches an enumerated device against.
+    Named(String),
+}
+
+/// What the file calls "no device in particular".
+const SYSTEM_DEFAULT_OUTPUT: &str = "default";
+
+/// The `output-device` line's value for `device`.
+fn output_device_field(device: &OutputDevice) -> String {
+    match device {
+        OutputDevice::SystemDefault => SYSTEM_DEFAULT_OUTPUT.to_owned(),
+        OutputDevice::Named(name) => format!("name:{}", hex_encode(name)),
+    }
+}
+
+/// The output device `field` denotes, if it denotes one.
+///
+/// An unreadable field is `None` and costs this one setting its default, which is the whole
+/// of [`store`]'s rule for a line nothing can read.
+fn output_device_from_field(field: &str) -> Option<OutputDevice> {
+    if field == SYSTEM_DEFAULT_OUTPUT {
+        return Some(OutputDevice::SystemDefault);
+    }
+    let name = String::from_utf8(decode_hex(field.strip_prefix("name:")?)?).ok()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(OutputDevice::Named(name))
+}
+
+/// The dynamic bound of the output-device knob: what the host currently offers.
+///
+/// [`MonitorChoices`]' shape, for its reason — a knob whose values are the machine's still
+/// needs one place saying what stepping may reach. `audio/mod.rs` fills it from the
+/// supervisor's last enumeration, the only code here allowed to ask a host anything.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct OutputDevices {
+    present: Vec<String>,
+}
+
+impl OutputDevices {
+    /// What the knob steps through: the system default, then every device the host named.
+    ///
+    /// A saved device that is not present is deliberately absent, exactly as an unavailable
+    /// monitor is: it stays selected until the player replaces it, and stepping cannot land
+    /// back on it.
+    fn choices(&self) -> Vec<OutputDevice> {
+        let mut choices = vec![OutputDevice::SystemDefault];
+        choices.extend(self.present.iter().cloned().map(OutputDevice::Named));
+        choices
+    }
+
+    /// What the knob's reading says for `selected`.
+    fn label(&self, selected: &OutputDevice) -> String {
+        match selected {
+            OutputDevice::SystemDefault => "system default".to_owned(),
+            OutputDevice::Named(name) if self.present.iter().any(|found| found == name) => {
+                ascii_shown(name, "unnamed device")
+            }
+            // Chosen, saved, and not here now — a headset unplugged, or a file carried to
+            // another machine. Said out loud, because the alternative is a row naming a
+            // device while the client is silent for no reason a player can see.
+            OutputDevice::Named(name) => {
+                format!("{} (unavailable)", ascii_shown(name, "unnamed device"))
+            }
+        }
+    }
+
+    /// The device `steps` presses away from `current`.
+    fn moved(&self, current: &OutputDevice, steps: i32) -> OutputDevice {
+        let choices = self.choices();
+        let at = choices
+            .iter()
+            .position(|choice| choice == current)
+            .unwrap_or(0) as i64;
+        let moved = at
+            .saturating_add(i64::from(steps))
+            .clamp(0, choices.len().saturating_sub(1) as i64) as usize;
+        choices[moved].clone()
+    }
+
+    /// Replaces the list with what the audio module last enumerated.
+    pub fn offer(&mut self, present: Vec<String>) {
+        self.present = present;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn named(names: &[&str]) -> Self {
+        Self {
+            present: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+}
+
+/// The dynamic bounds of the two knobs whose values belong to the machine, not this module.
+///
+/// One borrow rather than two arguments every caller keeps in the right order, and named for
+/// what it is, so a third such knob widens this struct instead of every signature.
+#[derive(Clone, Copy, Debug)]
+pub struct Choices<'a> {
+    pub monitors: &'a MonitorChoices,
+    pub devices: &'a OutputDevices,
+}
+
+/// An empty device list, so [`Choices::with_monitors`] can hand out a borrow of one.
+#[cfg(test)]
+static NO_OUTPUT_DEVICES: OutputDevices = OutputDevices {
+    present: Vec::new(),
+};
+
+#[cfg(test)]
+impl<'a> Choices<'a> {
+    /// The bounds of a knob that has nothing to do with a sound card. Test-only: every
+    /// shipped caller reads both resources out of the world, and a production path quietly
+    /// offering no device would be a knob stuck on the system default with nothing saying why.
+    pub(crate) const fn with_monitors(monitors: &'a MonitorChoices) -> Self {
+        Self {
+            monitors,
+            devices: &NO_OUTPUT_DEVICES,
+        }
     }
 }
 
@@ -955,6 +1116,7 @@ pub struct Settings {
     brightness: f32,
     fog_start: f32,
     master_volume: u8,
+    output_device: OutputDevice,
 }
 
 impl Default for Settings {
@@ -974,6 +1136,7 @@ impl Default for Settings {
             brightness: 1.0,
             fog_start: DEFAULT_FOG_START,
             master_volume: DEFAULT_MASTER_VOLUME,
+            output_device: OutputDevice::SystemDefault,
         }
     }
 }
@@ -1068,14 +1231,23 @@ impl Settings {
         f32::from(self.master_volume()) / f32::from(MAX_MASTER_VOLUME)
     }
 
+    /// Which output device the audio module should open.
+    pub const fn output_device(&self) -> &OutputDevice {
+        &self.output_device
+    }
+
     /// Moves a fixed-bound `knob` by `steps` of its own size.
     #[cfg(test)]
     pub fn adjust(&mut self, knob: Knob, steps: i32) {
-        self.adjust_with_monitors(knob, steps, &MonitorChoices::default());
+        self.adjust_with_choices(
+            knob,
+            steps,
+            Choices::with_monitors(&MonitorChoices::default()),
+        );
     }
 
     /// Moves `knob` by `steps` of its own size, stopping at its current bounds.
-    pub fn adjust_with_monitors(&mut self, knob: Knob, steps: i32, monitors: &MonitorChoices) {
+    pub fn adjust_with_choices(&mut self, knob: Knob, steps: i32, choices: Choices<'_>) {
         // A step at a time rather than a multiplication, so no integer has to become a
         // float, then snapped to the grid `places` describes. **The snap is what makes a
         // step reversible**: `0.003 + 0.0005 - 0.0005` is not `0.003` in `f32`, so without
@@ -1114,7 +1286,7 @@ impl Settings {
                     as usize;
                 self.window_mode = WINDOW_MODES[moved];
             }
-            Knob::Monitor => self.monitor = monitors.moved(&self.monitor, steps),
+            Knob::Monitor => self.monitor = choices.monitors.moved(&self.monitor, steps),
             Knob::RenderDistance => {
                 self.render_distance = step_u8(
                     self.render_distance,
@@ -1159,6 +1331,9 @@ impl Settings {
                     MAX_MASTER_VOLUME,
                 );
             }
+            Knob::OutputDevice => {
+                self.output_device = choices.devices.moved(&self.output_device, steps);
+            }
         }
     }
 
@@ -1166,7 +1341,7 @@ impl Settings {
     ///
     /// The Monitor row is a select, not a stepper: a player picks a display rather than
     /// moving relative to whichever one is current, so this assigns instead of stepping
-    /// through [`Self::adjust_with_monitors`]. It replaces an unavailable saved preference
+    /// through [`Self::adjust_with_choices`]. It replaces an unavailable saved preference
     /// exactly as it replaces a live one — there is no other way to leave one behind.
     pub fn set_monitor(&mut self, preference: MonitorPreference) {
         self.monitor = preference;
@@ -1175,15 +1350,15 @@ impl Settings {
     /// What the settings screen prints beside `knob`.
     #[cfg(test)]
     pub fn reading(&self, knob: Knob) -> String {
-        self.reading_with_monitors(knob, &MonitorChoices::default())
+        self.reading_with_choices(knob, Choices::with_monitors(&MonitorChoices::default()))
     }
 
     /// What the settings screen prints beside `knob`, with the attached monitor names.
-    pub fn reading_with_monitors(&self, knob: Knob, monitors: &MonitorChoices) -> String {
+    pub fn reading_with_choices(&self, knob: Knob, choices: Choices<'_>) -> String {
         match knob {
             Knob::LookSensitivity => format!("{:.4}", self.look_sensitivity),
             Knob::WindowMode => self.window_mode.name().to_owned(),
-            Knob::Monitor => monitors.label(&self.monitor),
+            Knob::Monitor => choices.monitors.label(&self.monitor),
             Knob::RenderDistance => format!("{} chunks", self.render_distance),
             Knob::FieldOfView => format!("{:.0} deg", self.field_of_view),
             Knob::Brightness => format!("{:.2}x", self.brightness),
@@ -1191,6 +1366,7 @@ impl Settings {
             Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),
             Knob::FrameCap => format!("{} fps", self.frame_cap),
             Knob::MasterVolume => format!("{}%", self.master_volume),
+            Knob::OutputDevice => choices.devices.label(&self.output_device),
         }
     }
 
@@ -1250,7 +1426,10 @@ impl Settings {
                 self.brightness = defaults.brightness;
                 self.fog_start = defaults.fog_start;
             }
-            Tab::Audio => self.master_volume = defaults.master_volume,
+            Tab::Audio => {
+                self.master_volume = defaults.master_volume;
+                self.output_device = defaults.output_device.clone();
+            }
         }
     }
 
@@ -1442,6 +1621,16 @@ mod tests {
     use super::*;
     use crate::player::MAX_PITCH;
 
+    /// Both machine-given bounds, with something on each: a knob whose values are the
+    /// platform's has one choice when the platform offered nothing, and a bounds test over
+    /// one choice cannot fail.
+    fn attached() -> (MonitorChoices, OutputDevices) {
+        (
+            MonitorChoices::named(&["Main display", "Side display"]),
+            OutputDevices::named(&["Built-in speakers", "USB headset"]),
+        )
+    }
+
     /// A client whose player never opens this screen renders and steers exactly as it did
     /// before the screen existed.
     #[test]
@@ -1457,6 +1646,7 @@ mod tests {
         assert!(settings.vsync());
         assert!(!settings.readout_shown());
         assert_eq!(settings.master_volume(), DEFAULT_MASTER_VOLUME);
+        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
         for (control, key) in [
             (Control::Forward, KeyCode::KeyW),
             (Control::Back, KeyCode::KeyS),
@@ -1497,16 +1687,20 @@ mod tests {
 
     #[test]
     fn every_knob_stops_at_both_of_its_bounds() {
-        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let (monitors, devices) = attached();
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
         for knob in KNOBS {
             let mut low = Settings::default();
-            low.adjust_with_monitors(knob, -10_000, &monitors);
+            low.adjust_with_choices(knob, -10_000, bounds);
             let mut high = Settings::default();
-            high.adjust_with_monitors(knob, 10_000, &monitors);
+            high.adjust_with_choices(knob, 10_000, bounds);
             let mut lower = low.clone();
-            lower.adjust_with_monitors(knob, -1, &monitors);
+            lower.adjust_with_choices(knob, -1, bounds);
             let mut higher = high.clone();
-            higher.adjust_with_monitors(knob, 1, &monitors);
+            higher.adjust_with_choices(knob, 1, bounds);
             assert_eq!(low, lower, "{knob:?} kept falling past its floor");
             assert_eq!(high, higher, "{knob:?} kept climbing past its ceiling");
         }
@@ -1574,23 +1768,113 @@ mod tests {
         assert_eq!(settings.reading(Knob::MasterVolume), "100%");
     }
 
+    /// The device knob steps through what the machine has, stops at both ends of it, and
+    /// keeps a device the machine no longer has rather than quietly replacing it.
+    #[test]
+    fn the_output_device_knob_steps_through_what_the_host_offers() {
+        let (monitors, devices) = attached();
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        let mut settings = Settings::default();
+        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(
+            settings.reading_with_choices(Knob::OutputDevice, bounds),
+            "system default"
+        );
+
+        settings.adjust_with_choices(Knob::OutputDevice, 1, bounds);
+        assert_eq!(
+            settings.output_device(),
+            &OutputDevice::Named("Built-in speakers".to_owned())
+        );
+        assert_eq!(
+            settings.reading_with_choices(Knob::OutputDevice, bounds),
+            "Built-in speakers"
+        );
+
+        settings.adjust_with_choices(Knob::OutputDevice, 5, bounds);
+        assert_eq!(
+            settings.output_device(),
+            &OutputDevice::Named("USB headset".to_owned()),
+            "stepping past the last device kept climbing"
+        );
+        settings.adjust_with_choices(Knob::OutputDevice, -5, bounds);
+        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+
+        // **A device that is not here now is still the player's choice.** It stays
+        // selected — so a headset plugged back in is used again without anybody reopening
+        // this tab — and the row says out loud that it is not there.
+        let one = OutputDevices::named(&["Built-in speakers"]);
+        let unplugged = OutputDevice::Named("USB headset".to_owned());
+        assert_eq!(one.label(&unplugged), "USB headset (unavailable)");
+        assert!(
+            !one.choices().contains(&unplugged),
+            "an absent device is not something stepping can land back on"
+        );
+
+        // A name the embedded font cannot draw is shown as ASCII rather than as a row of
+        // invisible zero-advance glyphs. Built rather than written down, because
+        // `ui/mod.rs`'s `ascii_guard` reads what a literal *produces* and would fail this
+        // file for spelling it — which is the same reason the guard cannot see the real
+        // case: a device name is the platform's and arrives at runtime.
+        let awkward = format!("Hoerer {}ber USB", umlaut());
+        assert_eq!(
+            OutputDevices::named(&[awkward.as_str()]).label(&OutputDevice::Named(awkward)),
+            "Hoerer ?ber USB"
+        );
+    }
+
+    /// One character this client's only font has no glyph for.
+    fn umlaut() -> char {
+        char::from_u32(0xfc).expect("u+00fc is a scalar value")
+    }
+
+    /// A device name is a platform string with spaces and punctuation in it, and the
+    /// settings file is one whitespace-separated value per setting. The encoding is what
+    /// keeps the second true of the first.
+    #[test]
+    fn a_device_name_survives_the_one_field_the_file_gives_it() {
+        for device in [
+            OutputDevice::SystemDefault,
+            OutputDevice::Named("HDA Intel PCH: ALC295 Analog".to_owned()),
+            OutputDevice::Named(format!("Hoerer {}ber USB", umlaut())),
+        ] {
+            let field = output_device_field(&device);
+            assert!(
+                !field.contains(char::is_whitespace),
+                "{field} is more than one field"
+            );
+            assert_eq!(output_device_from_field(&field), Some(device));
+        }
+
+        for nonsense in ["", "name:", "name:zz", "name:6", "speakers", "name"] {
+            assert_eq!(output_device_from_field(nonsense), None, "{nonsense}");
+        }
+    }
+
     /// Every knob is on exactly one tab, so exactly one reset owns it. Without this a knob
     /// added to the model but forgotten in [`Knob::tab`] would simply never be resettable —
     /// which no other assertion here would notice.
     #[test]
     fn every_knob_belongs_to_a_tab_and_every_tab_has_a_reset_of_its_own() {
-        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let (monitors, devices) = attached();
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
         for tab in Tab::ALL {
             let mut moved = Settings::default();
             for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
-                moved.adjust_with_monitors(knob, 3, &monitors);
+                moved.adjust_with_choices(knob, 3, bounds);
             }
             assert_ne!(moved, Settings::default(), "{tab:?} moved no knob at all");
             moved.reset(tab);
             for knob in KNOBS.into_iter().filter(|knob| knob.tab() == tab) {
                 assert_eq!(
-                    moved.reading_with_monitors(knob, &monitors),
-                    Settings::default().reading_with_monitors(knob, &monitors),
+                    moved.reading_with_choices(knob, bounds),
+                    Settings::default().reading_with_choices(knob, bounds),
                     "{knob:?} survived its own tab's reset"
                 );
             }
@@ -1605,7 +1889,11 @@ mod tests {
     fn a_reset_puts_back_its_own_tab_and_touches_no_other() {
         let moved = || {
             let mut settings = Settings::default();
-            let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+            let (monitors, devices) = attached();
+            let bounds = Choices {
+                monitors: &monitors,
+                devices: &devices,
+            };
             settings.adjust(Knob::LookSensitivity, 4);
             settings
                 .rebind(Control::Forward, KeyCode::F6)
@@ -1615,9 +1903,10 @@ mod tests {
             settings.adjust(Knob::Brightness, -2);
             settings.adjust(Knob::FogStart, 2);
             settings.adjust(Knob::FrameCap, 3);
-            settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
-            settings.adjust_with_monitors(Knob::Monitor, 1, &monitors);
+            settings.adjust_with_choices(Knob::WindowMode, 1, bounds);
+            settings.adjust_with_choices(Knob::Monitor, 1, bounds);
             settings.adjust(Knob::MasterVolume, -3);
+            settings.adjust_with_choices(Knob::OutputDevice, 2, bounds);
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
@@ -1653,6 +1942,11 @@ mod tests {
             before.master_volume(),
             "resetting graphics moved the master volume"
         );
+        assert_eq!(
+            after.output_device(),
+            before.output_device(),
+            "resetting graphics moved the output device"
+        );
 
         // And the mirror: controls back, graphics untouched.
         let mut after = moved();
@@ -1673,11 +1967,13 @@ mod tests {
         assert_eq!(after.monitor(), before.monitor());
         assert_eq!(after.default_mount(), before.default_mount());
         assert_eq!(after.master_volume(), before.master_volume());
+        assert_eq!(after.output_device(), before.output_device());
 
         // And the third tab: audio back, the other two untouched.
         let mut after = moved();
         after.reset(Tab::Audio);
         assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
+        assert_eq!(after.output_device(), &OutputDevice::SystemDefault);
         assert_eq!(
             after.bindings(),
             before.bindings(),
@@ -1918,7 +2214,7 @@ mod tests {
         let choices = app.world().resource::<MonitorChoices>().clone();
         app.world_mut()
             .resource_mut::<Settings>()
-            .adjust_with_monitors(Knob::Monitor, 1, &choices);
+            .adjust_with_choices(Knob::Monitor, 1, Choices::with_monitors(&choices));
         let saved = app.world().resource::<Settings>().monitor().clone();
         assert!(matches!(saved, MonitorPreference::Specific(_)));
         app.update();
@@ -2000,7 +2296,7 @@ mod tests {
         let path = scratch.join("settings");
         let monitors = MonitorChoices::default();
         let mut settings = Settings::default();
-        settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
+        settings.adjust_with_choices(Knob::WindowMode, 1, Choices::with_monitors(&monitors));
         store::save(&path, &settings).expect("save a window mode");
 
         assert_eq!(

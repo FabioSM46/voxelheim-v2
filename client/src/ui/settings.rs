@@ -21,7 +21,9 @@ use bevy::prelude::*;
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
 use crate::audio::AudioControls;
 use crate::player::InputMode;
-use crate::settings::{CONTROLS, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name};
+use crate::settings::{
+    CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, OutputDevices, Settings, Tab, key_name,
+};
 
 /// Whether the screen is up, and what it is waiting for.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -71,6 +73,7 @@ impl Plugin for SettingsScreenPlugin {
         app.init_resource::<SettingsScreen>()
             .init_resource::<Settings>()
             .init_resource::<MonitorChoices>()
+            .init_resource::<OutputDevices>()
             // Inserted by `AudioPlugin`, which `main.rs` adds first; this is what lets the
             // screen and its tests stand up with no audio device anywhere near them.
             .init_resource::<AudioControls>()
@@ -916,6 +919,7 @@ type SettingsButton<'a> = (&'a Interaction, &'a SettingsAction, &'a mut Backgrou
 fn settings_actions(
     mut buttons: Query<SettingsButton<'_>, (Changed<Interaction>, With<Button>)>,
     monitors: Res<MonitorChoices>,
+    devices: Res<OutputDevices>,
     mut audio: ResMut<AudioControls>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
@@ -927,7 +931,14 @@ fn settings_actions(
         }
         match *action {
             SettingsAction::Nudge(knob, steps) => {
-                settings.adjust_with_monitors(knob, steps, &monitors);
+                settings.adjust_with_choices(
+                    knob,
+                    steps,
+                    Choices {
+                        monitors: &monitors,
+                        devices: &devices,
+                    },
+                );
             }
             SettingsAction::ToggleVsync => settings.toggle_vsync(),
             SettingsAction::ToggleReadout => settings.toggle_readout(),
@@ -1155,14 +1166,23 @@ fn colour_monitor_controls(
 fn refresh_readings(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
+    devices: Res<OutputDevices>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
-    if !settings.is_changed() && !monitors.is_changed() && !screen.is_changed() {
+    if !settings.is_changed()
+        && !monitors.is_changed()
+        && !devices.is_changed()
+        && !screen.is_changed()
+    {
         return;
     }
+    let choices = Choices {
+        monitors: &monitors,
+        devices: &devices,
+    };
     for (reading, mut text) in &mut readings {
-        let next = describe(&settings, &monitors, &screen, *reading);
+        let next = describe(&settings, choices, &screen, *reading);
         if text.0 != next {
             text.0 = next;
         }
@@ -1173,12 +1193,12 @@ fn refresh_readings(
 /// panel's content is testable with no window.
 fn describe(
     settings: &Settings,
-    monitors: &MonitorChoices,
+    choices: Choices<'_>,
     screen: &SettingsScreen,
     reading: Reading,
 ) -> String {
     match reading {
-        Reading::Knob(knob) => settings.reading_with_monitors(knob, monitors),
+        Reading::Knob(knob) => settings.reading_with_choices(knob, choices),
         Reading::Vsync => on_or_off(settings.vsync()),
         Reading::Readout => on_or_off(settings.readout_shown()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
@@ -1187,7 +1207,7 @@ fn describe(
         Reading::MonitorControl => {
             format!(
                 "{} v",
-                settings.reading_with_monitors(Knob::Monitor, monitors)
+                settings.reading_with_choices(Knob::Monitor, choices)
             )
         }
         Reading::Binding(control) if screen.capturing == Some(control) => "...".to_owned(),
@@ -1206,7 +1226,7 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Corner, Knob, MonitorPreference};
+    use crate::settings::{Corner, Knob, MonitorPreference, OutputDevice};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
@@ -1215,6 +1235,10 @@ mod tests {
             .init_resource::<InputMode>()
             .insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(MonitorChoices::named(&["Main display", "Side display"]))
+            // Two of each, so a knob whose bound is the machine's has somewhere to step.
+            // No `AudioPlugin` and therefore no device anywhere: this is the list
+            // `offer_the_output_devices` would have written, inserted by hand.
+            .insert_resource(OutputDevices::named(&["Built-in speakers", "USB headset"]))
             .add_plugins(SettingsScreenPlugin);
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
         app.world_mut().resource_mut::<SettingsScreen>().open();
@@ -1427,8 +1451,13 @@ mod tests {
             press(&mut app, SettingsAction::Nudge(knob, 1));
             let after = app.world().resource::<Settings>().clone();
             assert_ne!(before, after, "{knob:?} did not move");
-            let expected =
-                after.reading_with_monitors(knob, app.world().resource::<MonitorChoices>());
+            let expected = after.reading_with_choices(
+                knob,
+                Choices {
+                    monitors: app.world().resource::<MonitorChoices>(),
+                    devices: app.world().resource::<OutputDevices>(),
+                },
+            );
             assert_eq!(reading_of(&mut app, Reading::Knob(knob)), expected);
 
             press(&mut app, SettingsAction::Nudge(knob, -1));
@@ -1737,20 +1766,24 @@ mod tests {
     }
 
     /// Every value with a model-owned bound fits in the reading area at both ends of that
-    /// bound. The monitor is deliberately excluded: hardware owns its name, so it follows
-    /// the clipped overflow policy asserted separately below.
+    /// bound. The monitor and the output device are deliberately excluded: hardware owns
+    /// both names, so they follow the clipped overflow policy asserted separately below.
     #[test]
     fn every_bounded_reading_fits_complete_on_one_line() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let devices = OutputDevices::default();
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
         let mut values = Vec::new();
-        for knob in KNOBS
-            .into_iter()
-            .filter(|knob| knob.tab() != Tab::Controls && *knob != Knob::Monitor)
-        {
+        for knob in KNOBS.into_iter().filter(|knob| {
+            knob.tab() != Tab::Controls && *knob != Knob::Monitor && *knob != Knob::OutputDevice
+        }) {
             for steps in [-10_000, 10_000] {
                 let mut settings = Settings::default();
-                settings.adjust_with_monitors(knob, steps, &monitors);
-                values.push(settings.reading_with_monitors(knob, &monitors));
+                settings.adjust_with_choices(knob, steps, bounds);
+                values.push(settings.reading_with_choices(knob, bounds));
             }
         }
         values.extend(["on", "off"].into_iter().map(str::to_owned));
@@ -2205,7 +2238,10 @@ mod tests {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
 
         let labels: Vec<&str> = rows_of(Tab::Audio).iter().map(|row| row.label()).collect();
-        assert_eq!(labels, vec!["Master volume", "Test speakers"]);
+        assert_eq!(
+            labels,
+            vec!["Master volume", "Output device", "Test speakers"]
+        );
         for other in [Tab::Controls, Tab::Graphics] {
             assert!(
                 !rows_of(other)
@@ -2222,6 +2258,10 @@ mod tests {
             reading_of(&mut app, Reading::Knob(Knob::MasterVolume)),
             "80%"
         );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
+            "system default"
+        );
 
         // The knob moves, the reading follows, and the reset that owns it puts it back
         // without reaching the tab beside it.
@@ -2237,6 +2277,55 @@ mod tests {
         press(&mut app, SettingsAction::Reset(Tab::Audio));
         let settings = app.world().resource::<Settings>();
         assert_eq!(settings.master_volume(), 80);
+        assert_eq!(
+            settings.render_distance(),
+            distance,
+            "RESET AUDIO reached the graphics tab"
+        );
+    }
+
+    /// The device row steps through what the machine offers, the reading follows, the
+    /// audio-scoped reset puts it back — and a device that goes away keeps its place in the
+    /// row rather than being silently replaced by one that is present.
+    #[test]
+    fn the_output_device_row_offers_the_machines_devices_and_marks_an_absent_one() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+
+        // One press per button, because that is what the row spawns: the steppers are
+        // `Nudge(knob, -1)` and `Nudge(knob, 1)` and nothing else.
+        press(&mut app, SettingsAction::Nudge(Knob::OutputDevice, 1));
+        press(&mut app, SettingsAction::Nudge(Knob::OutputDevice, 1));
+        assert_eq!(
+            app.world().resource::<Settings>().output_device(),
+            &OutputDevice::Named("USB headset".to_owned()),
+            "the row stepped somewhere the machine does not offer"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
+            "USB headset"
+        );
+
+        // The headset is unplugged. The choice stands, and the row says why it is silent.
+        *app.world_mut().resource_mut::<OutputDevices>() =
+            OutputDevices::named(&["Built-in speakers"]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<Settings>().output_device(),
+            &OutputDevice::Named("USB headset".to_owned()),
+            "the choice was rewritten by the device going away"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
+            "USB headset (unavailable)"
+        );
+
+        // And the reset that owns the row puts it back without reaching the tab beside it.
+        press(&mut app, SettingsAction::Nudge(Knob::RenderDistance, -1));
+        let distance = app.world().resource::<Settings>().render_distance();
+        press(&mut app, SettingsAction::Reset(Tab::Audio));
+        let settings = app.world().resource::<Settings>();
+        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
         assert_eq!(
             settings.render_distance(),
             distance,
