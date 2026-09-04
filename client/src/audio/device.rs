@@ -64,7 +64,7 @@
 //! configuration is reported and retried like any other failure. [`float_config`] carries
 //! the rest, including which rate it asks for and why it is not the highest one.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -102,6 +102,8 @@ const DEVICE_GONE: u8 = 1;
 const BACKEND_ERROR: u8 = 2;
 /// [`Watch::loss`] when the supervisor itself noticed the system's default device move.
 const DEFAULT_MOVED: u8 = 3;
+/// [`Watch::loss`] when the player picked a different output device in the settings.
+const CHOICE_CHANGED: u8 = 4;
 
 /// What a device is called when the host will not say.
 const UNNAMED: &str = "an unnamed output device";
@@ -114,8 +116,62 @@ const fn why(loss: u8) -> &'static str {
     match loss {
         DEVICE_GONE => "the device is no longer available",
         DEFAULT_MOVED => "the system's default output device changed",
+        CHOICE_CHANGED => "a different output device was chosen in the settings",
         _ => "the audio backend reported an error",
     }
+}
+
+/// Which device the player asked for, and which ones the host named.
+///
+/// **The settings tab's whole view of the device**, and the only state crossing between a
+/// Bevy thread and the supervisor once a stream is open. No audio callback ever touches it —
+/// the supervisor reads it between waits, Bevy on its own schedule — so the mutexes cost the
+/// real-time rule nothing. [`Watch`] is still all the callbacks share. [`Self::listings`] is
+/// a counter rather than a flag because Bevy asks "is this list new" every frame, and
+/// cloning a `Vec<String>` under a lock to hear "no" is the wrong shape for that question.
+#[derive(Debug, Default)]
+struct Choice {
+    /// The device the player picked, under the name its host gives it, or `None` for
+    /// "follow whatever the system calls its default".
+    wanted: Mutex<Option<String>>,
+    /// Every output device the host named, as of the last enumeration.
+    seen: Mutex<Vec<String>>,
+    /// Bumped whenever [`Self::seen`] is replaced.
+    listings: AtomicU64,
+}
+
+impl Choice {
+    fn wanted(&self) -> Option<String> {
+        held(&self.wanted).clone()
+    }
+
+    /// Asks for `name`, or for the system default when `None`. The supervisor notices within
+    /// one [`Pace::playing`] rather than being woken: half a second is under the time it
+    /// takes a player to look up from the mouse they just decided with.
+    fn want(&self, name: Option<String>) {
+        *held(&self.wanted) = name;
+    }
+
+    /// Records what the host answered, for the knob to offer.
+    fn publish(&self, names: Vec<String>) {
+        *held(&self.seen) = names;
+        self.listings.fetch_add(1, Ordering::Release);
+    }
+
+    fn seen(&self) -> Vec<String> {
+        held(&self.seen).clone()
+    }
+
+    fn listings(&self) -> u64 {
+        self.listings.load(Ordering::Acquire)
+    }
+}
+
+/// A lock taken even when it is poisoned — [`Watch::rest`]'s judgement, for the same reason:
+/// neither field behind these holds an invariant a panicking thread could have broken, and
+/// refusing would leave the settings tab with no device list for the session.
+fn held<T>(what: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    what.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// How long the supervisor waits in each of its two states.
@@ -229,9 +285,16 @@ trait OutputHost {
     /// What the host currently calls its default output device, if it has one.
     fn default_name(&self) -> Option<String>;
 
-    /// Builds a stream on the default output device, without running it.
+    /// Builds a stream on `wanted` — or on the host's default output device when it is
+    /// `None` — without running it.
+    ///
+    /// **A named device that is not present is an error, never a fallback to the default.**
+    /// A player who picked a headset and hears the speakers has been told something untrue
+    /// about where the sound is going; the failure path retries, so the headset is picked up
+    /// again the moment it is plugged back in.
     fn open(
         &self,
+        wanted: Option<&str>,
         mixer: &Arc<Mixer>,
         watch: &Arc<Watch>,
     ) -> Result<(Self::Stream, Format), String>;
@@ -246,10 +309,11 @@ trait OutputHost {
 /// Opens a stream, tells the mixer what it negotiated, and only then runs it.
 fn opened<H: OutputHost>(
     host: &H,
+    wanted: Option<&str>,
     mixer: &Arc<Mixer>,
     watch: &Arc<Watch>,
 ) -> Result<(H::Stream, Format), String> {
-    let (stream, format) = host.open(mixer, watch)?;
+    let (stream, format) = host.open(wanted, mixer, watch)?;
     // The one caller of `set_format`, and before the start rather than after the open, so
     // that no buffer is ever rendered in the previous stream's shape.
     mixer.set_format(format.sample_rate, format.channels);
@@ -261,9 +325,16 @@ fn opened<H: OutputHost>(
 ///
 /// Runs until [`Watch::stop`]. It never returns early on a failure, because a failure here
 /// is a device that might come back.
-fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pace: Pace) {
+fn supervise<H: OutputHost>(
+    host: &H,
+    mixer: &Arc<Mixer>,
+    watch: &Arc<Watch>,
+    choice: &Arc<Choice>,
+    pace: Pace,
+) {
     // Once, at startup: what this machine has. Enumeration is not free on every backend,
-    // so it happens here and on a logged failure, never on a reopen.
+    // so it happens here, on a stream that opened, and on a logged failure, never on a
+    // reopen.
     //
     // **Bound before the macro rather than inside it, here and below**: `debug!` and
     // `warn!` evaluate their fields only when the callsite is enabled, so an enumeration
@@ -274,11 +345,12 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
 
     let mut failures: u32 = 0;
     while !watch.stopping() {
+        let wanted = choice.wanted();
         // Cleared **before** the attempt and never after it: a device that fails the moment
         // `opened` starts it reports its loss while that call is still on the stack, and
         // `cpal` reports a stream error once. See the module doc.
         watch.playing();
-        match opened(host, mixer, watch) {
+        match opened(host, wanted.as_deref(), mixer, watch) {
             Ok((stream, format)) => {
                 failures = 0;
                 info!(
@@ -287,14 +359,23 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
                     format.sample_rate,
                     format.channels
                 );
+                // Refreshed on an open rather than on a poll: an open is where this
+                // machine's devices most recently changed, and is rare enough to enumerate.
+                choice.publish(host.device_names());
 
                 while !watch.stopping() && watch.loss() == PLAYING {
                     watch.rest(pace.playing);
-                    // What the error callback cannot see: a host that moved its default
-                    // without failing the stream we hold. Skipped for a device the host
-                    // would not name, because `default_name` fails the same way — comparing
-                    // two unknowns would reopen a working stream on every poll.
-                    if let Some(name) = format.name.as_deref()
+                    // Two things the error callback cannot see. The first is the player
+                    // choosing a different device.
+                    if choice.wanted() != wanted {
+                        watch.lose(CHOICE_CHANGED);
+                    // The second is a host that moved its default without failing the
+                    // stream we hold — only a reason to reopen while the player follows that
+                    // default. Skipped for a device the host would not name, because
+                    // `default_name` fails the same way and comparing two unknowns would
+                    // reopen a working stream on every poll.
+                    } else if wanted.is_none()
+                        && let Some(name) = format.name.as_deref()
                         && host.default_name().as_deref() != Some(name)
                     {
                         watch.lose(DEFAULT_MOVED);
@@ -313,6 +394,10 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
                 if failures.is_multiple_of(FAILURE_LOG_EVERY) {
                     let seen = host.device_names();
                     warn!("no audio output ({err}); the client is silent. Devices seen: {seen:?}");
+                    // The one place the list is refreshed while nothing opens, so a device
+                    // chosen and then unplugged still leaves the knob offering what is
+                    // actually attached.
+                    choice.publish(seen);
                 }
                 failures = failures.saturating_add(1);
                 watch.rest(pace.after_failure);
@@ -329,6 +414,7 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
 #[derive(Resource, Debug)]
 pub struct AudioDevice {
     watch: Arc<Watch>,
+    choice: Arc<Choice>,
     supervisor: Option<JoinHandle<()>>,
 }
 
@@ -336,17 +422,69 @@ impl AudioDevice {
     /// Starts the supervisor on `mixer`.
     pub fn start(mixer: Arc<Mixer>) -> Self {
         let watch = Arc::new(Watch::default());
+        let choice = Arc::new(Choice::default());
         let supervisor = thread::Builder::new()
             .name("voxelheim-audio".to_owned())
             .spawn({
                 let watch = Arc::clone(&watch);
+                let choice = Arc::clone(&choice);
                 // The host is built here rather than passed in, so nothing outside this
                 // thread has to be able to hold one.
-                move || supervise(&CpalHost::new(), &mixer, &watch, Pace::REAL)
+                move || supervise(&CpalHost::new(), &mixer, &watch, &choice, Pace::REAL)
             })
             .map_err(|err| warn!("the audio thread would not start ({err}); the client is silent"))
             .ok();
-        Self { watch, supervisor }
+        Self {
+            watch,
+            choice,
+            supervisor,
+        }
+    }
+
+    /// Asks for the device called `name`, or for the system default when `None`.
+    ///
+    /// Recorded rather than acted on: the supervisor owns the stream and reopens within one
+    /// poll. Asking for what is already wanted changes nothing, which is what lets the Bevy
+    /// side write it on every settings change without thinking about it.
+    pub fn use_output(&self, name: Option<String>) {
+        self.choice.want(name);
+    }
+
+    /// Every output device the host named, as of the supervisor's last enumeration.
+    pub fn output_devices(&self) -> Vec<String> {
+        self.choice.seen()
+    }
+
+    /// How many times that list has been replaced, so a Bevy system can tell "nothing new"
+    /// from "the same list again" without a lock or a clone every frame.
+    pub fn listings(&self) -> u64 {
+        self.choice.listings()
+    }
+
+    /// An `AudioDevice` with no supervisor, and therefore no device anywhere.
+    ///
+    /// **Test-only, and what keeps `audio/mod.rs`'s systems testable**: everything they say
+    /// to this resource goes through [`Choice`], and [`Self::start`] is the one function
+    /// that spawns the thread which would open a stream.
+    #[cfg(test)]
+    pub(super) fn idle() -> Self {
+        Self {
+            watch: Arc::new(Watch::default()),
+            choice: Arc::new(Choice::default()),
+            supervisor: None,
+        }
+    }
+
+    /// Publishes `names` as though the supervisor had just enumerated them.
+    #[cfg(test)]
+    pub(super) fn enumerated(&self, names: Vec<String>) {
+        self.choice.publish(names);
+    }
+
+    /// What [`Self::use_output`] last recorded.
+    #[cfg(test)]
+    pub(super) fn wanted(&self) -> Option<String> {
+        self.choice.wanted()
     }
 }
 
@@ -371,6 +509,16 @@ impl CpalHost {
     fn new() -> Self {
         Self(cpal::default_host())
     }
+
+    /// The device this host calls `wanted`, if it has one. Matched on the exact name the
+    /// host gave, because that is what the file holds and what [`named`] offered the player.
+    /// No fuzzy match: two cards whose names differ by a space are two cards.
+    fn named_device(&self, wanted: &str) -> Option<cpal::Device> {
+        self.0
+            .output_devices()
+            .ok()?
+            .find(|device| device.name().is_ok_and(|name| name == wanted))
+    }
 }
 
 impl OutputHost for CpalHost {
@@ -391,13 +539,19 @@ impl OutputHost for CpalHost {
 
     fn open(
         &self,
+        wanted: Option<&str>,
         mixer: &Arc<Mixer>,
         watch: &Arc<Watch>,
     ) -> Result<(cpal::Stream, Format), String> {
-        let device = self
-            .0
-            .default_output_device()
-            .ok_or_else(|| "this host has no default output device".to_owned())?;
+        let device = match wanted {
+            Some(name) => self
+                .named_device(name)
+                .ok_or_else(|| format!("{name} is not one of this host's output devices"))?,
+            None => self
+                .0
+                .default_output_device()
+                .ok_or_else(|| "this host has no default output device".to_owned())?,
+        };
         let name = device.name().ok();
         let config = float_config(&device).ok_or_else(|| {
             let shown = name.as_deref().unwrap_or(UNNAMED);
@@ -548,7 +702,8 @@ mod tests {
     struct FakeHost {
         /// What each successive `open` answers; the last one repeats forever.
         answers: Mutex<VecDeque<Result<Format, String>>>,
-        names: Vec<String>,
+        /// Mutable, so a test can plug a device in between two opens.
+        names: Mutex<Vec<String>>,
         default: Mutex<Option<String>>,
         opens: AtomicUsize,
         listings: AtomicUsize,
@@ -563,11 +718,18 @@ mod tests {
         /// Makes the next `open` report a loss the way an error callback would, while
         /// `open` is still on the stack.
         lose_while_opening: AtomicBool,
+        /// Which device each successive `open` was asked for.
+        asked_for: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeHost {
         /// A host answering `answers` in turn, its default named after the first Ok one.
         fn new(answers: Vec<Result<Format, String>>) -> Arc<Self> {
+            Self::naming(&["a card"], answers)
+        }
+
+        /// The same, naming `names` when it is asked what it has.
+        fn naming(names: &[&str], answers: Vec<Result<Format, String>>) -> Arc<Self> {
             let default = answers
                 .iter()
                 .flatten()
@@ -575,7 +737,7 @@ mod tests {
                 .and_then(|format| format.name.clone());
             Arc::new(Self {
                 answers: Mutex::new(answers.into()),
-                names: vec!["a card".to_owned()],
+                names: Mutex::new(names.iter().map(|name| (*name).to_owned()).collect()),
                 default: Mutex::new(default),
                 ..Self::default()
             })
@@ -595,7 +757,7 @@ mod tests {
 
         fn device_names(&self) -> Vec<String> {
             self.listings.fetch_add(1, Ordering::Relaxed);
-            self.names.clone()
+            lock(&self.names).clone()
         }
 
         fn default_name(&self) -> Option<String> {
@@ -604,9 +766,11 @@ mod tests {
 
         fn open(
             &self,
+            wanted: Option<&str>,
             mixer: &Arc<Mixer>,
             watch: &Arc<Watch>,
         ) -> Result<(FakeStream, Format), String> {
+            lock(&self.asked_for).push(wanted.map(str::to_owned));
             *lock(&self.mixer) = Some(Arc::clone(mixer));
             lock(&self.found_live).push(self.live.load(Ordering::Relaxed));
             self.opens.fetch_add(1, Ordering::Relaxed);
@@ -645,6 +809,7 @@ mod tests {
     struct Running {
         mixer: Arc<Mixer>,
         watch: Arc<Watch>,
+        choice: Arc<Choice>,
         thread: Option<JoinHandle<()>>,
     }
 
@@ -652,15 +817,18 @@ mod tests {
         fn start(host: &Arc<FakeHost>, pace: Pace) -> Self {
             let mixer = Arc::new(Mixer::new());
             let watch = Arc::new(Watch::default());
+            let choice = Arc::new(Choice::default());
             let thread = thread::spawn({
                 let host = Arc::clone(host);
                 let mixer = Arc::clone(&mixer);
                 let watch = Arc::clone(&watch);
-                move || supervise(&*host, &mixer, &watch, pace)
+                let choice = Arc::clone(&choice);
+                move || supervise(&*host, &mixer, &watch, &choice, pace)
             });
             Self {
                 mixer,
                 watch,
+                choice,
                 thread: Some(thread),
             }
         }
@@ -854,6 +1022,109 @@ mod tests {
         let opens = host.opens();
         assert!(running.stop());
         assert_eq!(opens, 1, "a working stream was reopened {opens} times");
+    }
+
+    /// **The knob's whole job, end to end.** The list the host names reaches the settings
+    /// side; a name is asked for; the supervisor closes the stream it holds and opens that
+    /// one instead, without being woken.
+    #[test]
+    fn choosing_a_device_reopens_the_stream_on_it() {
+        let host = FakeHost::naming(
+            &["Built-in speakers", "USB headset"],
+            // Neither rate is `DEFAULT_SAMPLE_RATE`, so "the mixer reached this format" is
+            // never satisfied by a mixer no stream has spoken to yet.
+            vec![
+                Ok(format("Built-in speakers", 44_100, 2)),
+                Ok(format("USB headset", 32_000, 2)),
+            ],
+        );
+        let mut running = Running::start(&host, BRISK);
+        assert!(until(|| running.mixer.sample_rate() == 44_100));
+        assert_eq!(
+            running.choice.seen(),
+            vec!["Built-in speakers".to_owned(), "USB headset".to_owned()],
+            "the knob is offered what the host named"
+        );
+        assert_eq!(
+            lock(&host.asked_for).first().cloned(),
+            Some(None),
+            "an untouched setting asks for no device in particular"
+        );
+
+        // Plugged in between the two opens, so the reopen is what has to notice it: the
+        // list is refreshed on a stream that opened, not on a poll.
+        lock(&host.names).push("Studio monitors".to_owned());
+        running.choice.want(Some("USB headset".to_owned()));
+
+        assert!(
+            until(|| running.mixer.sample_rate() == 32_000),
+            "the chosen device's format never reached the mixer"
+        );
+        assert!(
+            until(|| running.choice.seen().len() == 3),
+            "a device that appeared between two opens never reached the knob"
+        );
+        assert!(running.stop());
+        assert_eq!(
+            lock(&host.asked_for).last().cloned(),
+            Some(Some("USB headset".to_owned())),
+            "the reopen asked for the device the player picked"
+        );
+        assert!(
+            lock(&host.found_live).iter().all(|live| *live == 0),
+            "the old stream was still open when the new one was asked for"
+        );
+    }
+
+    /// **A chosen device neither follows the system default nor is replaced when it is
+    /// absent.** Both halves of "this device and no other" — the second is what makes the
+    /// first worth having, so they are asserted together.
+    #[test]
+    fn a_chosen_device_neither_follows_the_default_nor_is_replaced() {
+        let host = FakeHost::naming(
+            &["Built-in speakers", "USB headset"],
+            vec![Ok(format("USB headset", 44_100, 2))],
+        );
+        let mut running = Running::start(&host, BRISK);
+        running.choice.want(Some("USB headset".to_owned()));
+        assert!(until(|| running.mixer.sample_rate() == 44_100));
+
+        let opened = host.opens();
+        *lock(&host.default) = Some("Built-in speakers".to_owned());
+        // Several polls at `BRISK`, which is what would have reopened the stream had
+        // `DEFAULT_MOVED` still applied to a device the player named.
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(host.opens(), opened, "the client left the chosen device");
+        assert!(running.stop());
+
+        // Absent, now: a name nothing answers to is a failure like any other — retried,
+        // never a silent move to some other card.
+        let absent = FakeHost::naming(
+            &["Built-in speakers"],
+            vec![Err(
+                "USB headset is not one of this host's output devices".to_owned()
+            )],
+        );
+        let mut running = Running::start(&absent, BRISK);
+        running.choice.want(Some("USB headset".to_owned()));
+        assert!(until(|| absent.opens() >= 3), "it keeps trying");
+        assert_eq!(
+            running.choice.seen(),
+            vec!["Built-in speakers".to_owned()],
+            "a machine where nothing opens still tells the knob what it has"
+        );
+        assert!(
+            lock(&absent.asked_for)
+                .iter()
+                .all(|asked| asked.is_none() || asked.as_deref() == Some("USB headset")),
+            "an attempt fell back to some other device"
+        );
+        assert_eq!(
+            running.mixer.sample_rate(),
+            DEFAULT_SAMPLE_RATE,
+            "a device that never opened told the mixer nothing"
+        );
+        assert!(running.stop());
     }
 
     #[test]
