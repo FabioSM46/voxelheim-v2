@@ -846,35 +846,44 @@ impl Capture {
     // captured sample. See `audio/dsp.rs` for why the seam is here.
     #[allow(dead_code)]
     pub fn take(&self, out: &mut Vec<f32>) -> Option<Captured> {
-        let packed = self.stream.load(Ordering::Acquire);
-        if packed == 0 {
+        let before = self.stream.load(Ordering::Acquire);
+        if before == 0 {
             return None;
         }
-        let generation = (packed >> 48) as u32;
-        let answer = |fresh| Captured {
-            sample_rate: packed as u32,
-            channels: (packed >> 32) as u16,
-            fresh,
-        };
-
-        if self.read_from.swap(generation, Ordering::AcqRel) != generation {
-            self.samples.skip();
-            return Some(answer(true));
-        }
-
         let at = out.len();
-        self.samples.drain_into(out);
+
+        // **One check for both paths, at one exit, and the review on #921 is why.** The first
+        // version put the re-read on the draining path only — the protection was understood
+        // and applied to one of two siblings, which is the shape that survives a review most
+        // easily. A rule of the form "remember to re-read the generation" would have the same
+        // fate at the third path, so there is no third place to put it: whichever branch runs,
+        // control reaches the comparison below before anything is returned.
+        let fresh =
+            self.read_from.swap((before >> 48) as u32, Ordering::AcqRel) != (before >> 48) as u32;
+        if fresh {
+            self.samples.skip();
+        } else {
+            self.samples.drain_into(out);
+        }
         #[cfg(test)]
         if self.reopen_mid_read.swap(false, Ordering::Relaxed) {
-            self.opened_at(packed as u32, (packed >> 32) as u16);
+            self.opened_at(before as u32, (before >> 32) as u16);
         }
-        if (self.stream.load(Ordering::Acquire) >> 48) as u32 != generation {
+
+        // The whole word, not the generation: a stream that moved changed its rate too, and
+        // an answer built from `before` would describe the one that ended.
+        if self.stream.load(Ordering::Acquire) != before {
             out.truncate(at);
-            // Zero is never a live generation, so the next call answers `fresh`.
+            // Zero is never a live generation, so the next call answers `fresh` — and it
+            // answers it from the word that is live then.
             self.read_from.store(0, Ordering::Release);
             return None;
         }
-        Some(answer(false))
+        Some(Captured {
+            sample_rate: before as u32,
+            channels: (before >> 32) as u16,
+            fresh,
+        })
     }
 
     /// How many samples a full ring has cost. A diagnostic; nothing decides from it.
@@ -2221,5 +2230,28 @@ mod tests {
             "the read after a discarded batch did not report a fresh stream"
         );
         assert_eq!(heard.len(), 22, "a fresh stream appended something");
+
+        // **And the same on the skipping path**, which is the half the review on #921 found
+        // unprotected: a reopen that lands while a *fresh* read is skipping would otherwise
+        // answer with the ended stream's rate and leave the reader's position on the old
+        // generation, so the call after it would report `fresh` a second time.
+        capture.opened_at(16_000, 2);
+        capture.captured(&[0.5; 30]);
+        capture.reopen_mid_read.store(true, Ordering::Relaxed);
+        assert_eq!(
+            capture.take(&mut heard),
+            None,
+            "a skip that a reopen ran through answered anyway"
+        );
+        let after = capture.take(&mut heard).expect("a stream is open");
+        assert!(after.fresh);
+        assert_eq!(
+            after.sample_rate, 16_000,
+            "the answer described the stream that ended"
+        );
+        assert!(
+            !capture.take(&mut heard).expect("a stream is open").fresh,
+            "the same stream was reported fresh twice"
+        );
     }
 }
