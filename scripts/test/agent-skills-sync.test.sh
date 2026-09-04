@@ -42,4 +42,75 @@ if [ -n "$offenders" ]; then
   exit 1
 fi
 
+process_skill=.claude/skills/process-pr/SKILL.md
+iteration_skill=.claude/skills/develop-iteration/SKILL.md
+dev_skill=.claude/skills/dev-issue/SKILL.md
+
+# The iteration loop must actively route a conflicting PR into remediation. Merely making the
+# frozen rule fail closed leaves the orchestrator waiting forever because a conflicting PR has no
+# merge ref and therefore no CI run that could wake it up.
+grep -qF 'or `mergeable == CONFLICTING`' "$iteration_skill" || {
+  echo "FAIL: develop-iteration no longer routes merge conflicts through process-pr" >&2
+  exit 1
+}
+grep -qF 'A conflict is actionable remediation, not a wait' "$process_skill" || {
+  echo "FAIL: process-pr no longer owns base-conflict remediation" >&2
+  exit 1
+}
+grep -qF 'Do this on every remediation run.' "$process_skill" || {
+  echo "FAIL: process-pr only reconciles a moved base after it becomes conflicting" >&2
+  exit 1
+}
+
+# Reusing a worktree must never erase unfinished work. The safe paths are a clean no-op, a
+# fast-forward, or a loud stop that preserves the checkout.
+if grep -qF 'git reset --hard' "$process_skill"; then
+  echo "FAIL: process-pr destructively resets a reused worktree" >&2
+  exit 1
+fi
+grep -qF 'Existing worktree is dirty; preserving it' "$process_skill" || {
+  echo "FAIL: process-pr does not preserve a dirty reused worktree" >&2
+  exit 1
+}
+
+# A review disposition may make READY TO MERGE reachable. The skill must stop at both kinds of
+# finding, push and verify the remote head, and only then resume the deferred API writes.
+grep -qF 'do not execute it until Step 4e verifies the pushed remote head' "$process_skill" \
+  && grep -qF 'Stop here until Step 4e has pushed the fixes and verified the remote head' "$process_skill" \
+  && grep -qF 'Only then execute the prepared' "$process_skill" || {
+  echo "FAIL: process-pr can dispose of review findings before pushing their fixes" >&2
+  exit 1
+}
+grep -qF 'if git diff --cached --quiet; then' "$process_skill" || {
+  echo "FAIL: process-pr still requires a source commit for a no-code disposition" >&2
+  exit 1
+}
+
+# A feature base moving invalidates its children's evidence even when their own head SHA did not
+# move. Both the orchestration instruction and the merge helper binding must remain visible.
+grep -qF 'whose **head or base** is that branch' "$iteration_skill" || {
+  echo "FAIL: develop-iteration does not refresh PRs whose feature base moved" >&2
+  exit 1
+}
+grep -qF -- '--base-head "$OBSERVED_BASE_HEAD"' "$iteration_skill" || {
+  echo "FAIL: develop-iteration does not bind the observed base head at merge time" >&2
+  exit 1
+}
+if grep -qF -- '--json baseRefOid' "$iteration_skill"; then
+  echo "FAIL: develop-iteration requests a gh JSON field unavailable in the pinned CLI" >&2
+  exit 1
+fi
+grep -qF -- "--jq '.base.sha'" "$iteration_skill" || {
+  echo "FAIL: develop-iteration does not read the observed base SHA from REST" >&2
+  exit 1
+}
+
+# AI acknowledgement is evidence-gated, not human-only. NO_DEEPSEEK_REVIEW is the exemption that
+# remains human-only.
+if grep -qF 'blocks the pull request until a human' "$dev_skill"; then
+  echo "FAIL: dev-issue still describes DeepSeek body acknowledgement as human-only" >&2
+  exit 1
+fi
+
 echo "no skill refuses model invocation"
+echo "iteration remediation ordering and worktree safety are pinned"
