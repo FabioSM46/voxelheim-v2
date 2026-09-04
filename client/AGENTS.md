@@ -83,11 +83,11 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout and the master volume; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume and the output device; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
-| `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
+| `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
-| `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, reopens it when the device errors, disappears or stops being the system default, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
+| `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
@@ -1470,11 +1470,20 @@ setting and writes `AudioControls`, and nothing under `audio/` ever writes a set
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
 
-**What is deliberately not here yet.** No output-device knob: `OutputDevice` and
-`AudioControls::output_device` are #851's last part, so today the device opened is always the
-system default. `device_names()` is what that knob will read, and the supervisor is already
-its one caller.
-Nothing encodes either: `audiopus` is a dependency from #851 part 1 so that the lockfile and
+**The output device is a choice, and `SystemDefault` is one of its values rather than the
+absence of one.** Following the system means reopening when the host moves its own default,
+which is what a player who never opens this tab expects when a headset goes in. Naming a
+device means *that device and no other*: a name nothing answers to is a retry and a throttled
+log line, never a quiet move to another card, because a player told the sound is going to
+their headset must not be hearing the speakers. So `DEFAULT_MOVED` is checked only while the
+choice is `None`. The knob's bound is `OutputDevices`, filled from the supervisor's last
+enumeration — at startup, on a stream that opened, and on a logged failure; never on a poll,
+because enumeration is not free on every backend. A device name is a platform string, so
+`hex_encode` makes it one whitespace-free field in the settings file and `ascii_shown` makes
+it something the embedded font can draw.
+
+**What is deliberately not here yet.**
+Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
 the CI package list move once rather than twice, and the codec arrives with proximity voice.
 No capture device, no spatialisation, no `bevy_audio` and no Bevy `audio` feature — the
 reasoning for that last one is in `docs/adr/0001-voice-transport.md` and in `Cargo.toml`
@@ -2316,11 +2325,10 @@ Recorded here so the next reader does not mistake them for oversights:
   own default does.
 - **The settings screen is not every setting, and what it leaves out each has a reason.**
   #179's second half landed in #247 — the original six graphics values, the four-corner frame-rate
-  readout, the two tabs and one reset per tab — and #851 added the third tab, the master volume
-  and the speaker test, so what remains outside is deliberate: *cursor capture*, which belongs to
-  the camera-control issue this file has named for a while and that still does not exist; the
-  *output device*, which is #851's last part; *voice*, whose knobs are #853's and not this
-  issue's; and *shadows, ambient occlusion and texture quality*, which have no shadow map, no AO
+  readout, the two tabs and one reset per tab — and #851 added the third tab, the master volume,
+  the output device and the speaker test, so what remains outside is deliberate: *cursor
+  capture*, which belongs to the camera-control issue this file has named for a while and that
+  still does not exist; *voice*, whose knobs are #853's and not this issue's; and *shadows, ambient occlusion and texture quality*, which have no shadow map, no AO
   pass and no texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
   invariant rather than a preference.
 - **A reset is scoped by a tab, and the obvious implementation is the bug.** `Settings::reset`
