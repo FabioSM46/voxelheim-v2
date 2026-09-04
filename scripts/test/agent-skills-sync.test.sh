@@ -42,4 +42,11 @@ if [ -n "$offenders" ]; then
   exit 1
 fi
 
+process_skill=.claude/skills/process-pr/SKILL.md
+grep -qF '[ "$(echo "$CURRENT_PR" | jq -r '\''.state'\'')" = "OPEN" ] || exit 1' "$process_skill" \
+  && grep -qF '[ "$(echo "$CURRENT_PR" | jq -r '\''.headRefOid'\'')" = "$REMOTE_HEAD" ] || exit 1' "$process_skill" || {
+  echo "FAIL: process-pr publication guard does not fail closed without ambient set -e" >&2
+  exit 1
+}
+
 echo "no skill refuses model invocation"

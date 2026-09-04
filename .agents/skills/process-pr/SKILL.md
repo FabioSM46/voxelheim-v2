@@ -446,8 +446,8 @@ fi
 # Confirm the PR is still open at REMOTE_HEAD. Only then execute the prepared
 # replies/resolutions and body acknowledgement sequence from steps 3–5.
 CURRENT_PR=$(gh pr view <pr-number> --json state,headRefOid)
-[ "$(echo "$CURRENT_PR" | jq -r '.state')" = "OPEN" ]
-[ "$(echo "$CURRENT_PR" | jq -r '.headRefOid')" = "$REMOTE_HEAD" ]
+[ "$(echo "$CURRENT_PR" | jq -r '.state')" = "OPEN" ] || exit 1
+[ "$(echo "$CURRENT_PR" | jq -r '.headRefOid')" = "$REMOTE_HEAD" ] || exit 1
 ```
 
 **NEVER run `git add` / `git commit` / `git push` from the main repo directory.** Always from `$WORKTREE_DIR`.
