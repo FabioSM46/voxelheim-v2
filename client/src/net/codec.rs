@@ -4497,6 +4497,39 @@ fn storm_warning(warning: &fb::StormWarning<'_>) -> Result<StormWarning, DecodeE
 /// The length is checked before anything is allocated from it, and column addresses are
 /// checked for uniqueness because the set is complete: two rows for one column are two
 /// answers about the same ground, and nothing downstream could tell which was meant.
+fn wards_nearby(wards: &fb::WardsNearby<'_>) -> Result<WardsNearby, DecodeError> {
+    let columns = wards.columns().unwrap_or_default();
+    if columns.len() > MAX_WARDED_COLUMNS {
+        return Err(DecodeError::TooManyWardedColumns(columns.len()));
+    }
+
+    let mut decoded = Vec::with_capacity(columns.len());
+    let mut addresses = HashSet::new();
+    for column in &columns {
+        let (cx, cz) = (column.cx(), column.cz());
+        let kind = WardKind::from_wire(column.kind()).ok_or(DecodeError::UnknownWardKind {
+            cx,
+            cz,
+            value: column.kind().0,
+        })?;
+        if !addresses.insert((cx, cz)) {
+            return Err(DecodeError::DuplicateWardedColumn { cx, cz });
+        }
+        // `mine` is copied verbatim and never checked against anything. It is
+        // presentation: the server refuses a warded edit whatever this byte says, and a
+        // client that read a permission out of it would be deciding a gameplay outcome.
+        // A `Settlement` column claiming to be this player's is therefore a shading bug
+        // on the server, not a frame this side may reinterpret.
+        decoded.push(WardedColumn {
+            cx,
+            cz,
+            kind,
+            mine: column.mine(),
+        });
+    }
+    Ok(WardsNearby { columns: decoded })
+}
+
 /// Copies and validates one relayed voice frame.
 ///
 /// The speaker is read first because every other refusal names it, and the length is
@@ -4532,39 +4565,6 @@ fn voice_heard(heard: &fb::VoiceHeard<'_>) -> Result<VoiceHeard, DecodeError> {
         // the frame is gone by the time anything reads this.
         opus: opus.bytes().to_vec(),
     })
-}
-
-fn wards_nearby(wards: &fb::WardsNearby<'_>) -> Result<WardsNearby, DecodeError> {
-    let columns = wards.columns().unwrap_or_default();
-    if columns.len() > MAX_WARDED_COLUMNS {
-        return Err(DecodeError::TooManyWardedColumns(columns.len()));
-    }
-
-    let mut decoded = Vec::with_capacity(columns.len());
-    let mut addresses = HashSet::new();
-    for column in &columns {
-        let (cx, cz) = (column.cx(), column.cz());
-        let kind = WardKind::from_wire(column.kind()).ok_or(DecodeError::UnknownWardKind {
-            cx,
-            cz,
-            value: column.kind().0,
-        })?;
-        if !addresses.insert((cx, cz)) {
-            return Err(DecodeError::DuplicateWardedColumn { cx, cz });
-        }
-        // `mine` is copied verbatim and never checked against anything. It is
-        // presentation: the server refuses a warded edit whatever this byte says, and a
-        // client that read a permission out of it would be deciding a gameplay outcome.
-        // A `Settlement` column claiming to be this player's is therefore a shading bug
-        // on the server, not a frame this side may reinterpret.
-        decoded.push(WardedColumn {
-            cx,
-            cz,
-            kind,
-            mine: column.mine(),
-        });
-    }
-    Ok(WardsNearby { columns: decoded })
 }
 
 /// Copies and validates the weather at the recipient's own position.
