@@ -7,13 +7,14 @@ metadata:
 ---
 
 
-# process-pr — Manual PR Force-Cycle Skill
+# process-pr — PR Remediation Skill
 
 Triggers: `/process-pr <pr-number>` or `/process-pr` (uses current branch PR)
 
 ## Purpose
 
-A manual force-cycle for PR monitoring. Use this when you want immediate feedback processing without waiting for the `pr-labeler.yml` sweep. This skill reads DeepSeek review comments, resolves them, fixes CI failures, and pushes updates.
+A remediation cycle for conflicts, CI failures, and review feedback. It may be invoked by a user
+or by an iteration orchestrator.
 
 The passive monitoring path (`pr-labeler.yml`) handles the normal case. This skill is the escape hatch for when you want results now.
 
@@ -56,7 +57,12 @@ Exit with an error if no PR is found.
 All file edits and git operations happen **inside a worktree**. Never modify the main working directory.
 
 ```bash
-BRANCH=$(gh pr view <pr-number> --json headRefName --jq '.headRefName')
+PR_META=$(gh pr view <pr-number> --json headRefName,baseRefName,state)
+BRANCH=$(echo "$PR_META" | jq -er '.headRefName | select(length > 0)')
+BASE_BRANCH=$(echo "$PR_META" | jq -er '.baseRefName | select(length > 0)')
+[ "$(echo "$PR_META" | jq -r '.state')" = "OPEN" ] || exit 1
+git fetch origin "$BRANCH" "$BASE_BRANCH"
+REMOTE_HEAD=$(git rev-parse "origin/$BRANCH")
 
 # Reuse an existing worktree for this branch if one is checked out.
 # substr() rather than $2 — worktree paths can contain spaces.
@@ -67,14 +73,31 @@ WORKTREE_DIR=$(git worktree list --porcelain | awk -v b="refs/heads/$BRANCH" '
 if [ -n "$WORKTREE_DIR" ]; then
   echo "Reusing existing worktree: $WORKTREE_DIR"
   cd "$WORKTREE_DIR"
-  git fetch origin "$BRANCH"
-  git reset --hard "origin/$BRANCH"
+  [ -z "$(git status --porcelain)" ] || {
+    echo "Existing worktree is dirty; preserving it and stopping"
+    exit 1
+  }
+  LOCAL_HEAD=$(git rev-parse HEAD)
+  if [ "$LOCAL_HEAD" = "$REMOTE_HEAD" ]; then
+    :
+  elif git merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
+    git merge --ff-only "origin/$BRANCH"
+  else
+    echo "Existing worktree has local commits or diverged history; preserving it and stopping"
+    exit 1
+  fi
 else
   WORKTREE_DIR="$(dirname "$REPO_ROOT")/voxelheim-pr-<pr-number>"
-  git fetch origin "$BRANCH"
-  git worktree add "$WORKTREE_DIR" "origin/$BRANCH"
+  if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    [ "$(git rev-parse "refs/heads/$BRANCH")" = "$REMOTE_HEAD" ] || {
+      echo "Local branch differs from origin; preserving it and stopping"
+      exit 1
+    }
+    git worktree add "$WORKTREE_DIR" "$BRANCH"
+  else
+    git worktree add -b "$BRANCH" "$WORKTREE_DIR" "origin/$BRANCH"
+  fi
   cd "$WORKTREE_DIR"
-  git checkout -B "$BRANCH" "origin/$BRANCH"
   [ -f server/go.mod ] && (cd server && go mod download)
   [ -f client/Cargo.toml ] && (cd client && cargo fetch)
 fi
@@ -119,6 +142,33 @@ other place the mistake is available.
 
 Formatting is the gate most often skipped and the one that most often reddens CI. It is not optional.
 
+#### Step 2b: Reconcile the current base
+
+Do this on every remediation run. If the current base tip is not an ancestor of the PR head, merge
+it into the head without rebasing or force-pushing, resolve any conflicts, run all affected Step 2
+gates, and push. This also invalidates stale CI on a technically mergeable child after its feature
+base advances.
+
+```bash
+BASE_HEAD=$(git rev-parse "origin/$BASE_BRANCH")
+if ! git merge-base --is-ancestor "$BASE_HEAD" HEAD; then
+  [ "$(git rev-parse "origin/$BRANCH")" = "$REMOTE_HEAD" ] || exit 1
+  git merge --no-ff --no-commit "origin/$BASE_BRANCH"
+  # Resolve conflicts; if their intent is ambiguous, abort and stop without publishing.
+  # Run every affected gate, then:
+  git add -A
+  git commit -m "fix: reconcile ${BASE_BRANCH} on PR #<pr-number>"
+  bash scripts/check-publication-privacy.sh
+  bash scripts/check-commit-privacy.sh "origin/$BASE_BRANCH" HEAD
+  git push origin HEAD
+  REMOTE_HEAD=$(git rev-parse HEAD)
+fi
+```
+
+After this push, require fresh CI. The base commits were reviewed on their own PRs, so do not wait
+for an automatic review that cannot start after the findings-round cap is spent; an aggregate
+parent still needs the explicit assembled-head review required by `/develop-iteration`.
+
 ### Step 3: Check PR Status
 
 ```bash
@@ -135,7 +185,9 @@ This evaluates the full frozen READY TO MERGE rule and prints a `[FAIL]` line fo
 6. `mergeable == MERGEABLE`
 7. DeepSeek definitively finished (approved, rounds exhausted, or `NO_DEEPSEEK_REVIEW` exempt), with no unread findings left in a review body (cleared with the `DEEPSEEK_REVIEW_READ` label)
 
-Conditions 5 and 6 exist because a **conflicting PR runs zero Actions checks** — with nothing red, a naive "is CI failing?" read calls that green. If `pr-status` reports a conflict, stop and rebase before anything else; no amount of pushing will produce a check run until the conflict is gone.
+Conditions 5 and 6 exist because a **conflicting PR runs zero Actions checks** — with nothing red,
+a naive "is CI failing?" read calls that green. A conflict is actionable remediation, not a wait;
+Step 2b merges the current base into the PR head so CI can run again.
 
 The helper fails closed: an unreadable value counts as failure, never as pass.
 
@@ -236,14 +288,20 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
    - Nitpick under ~5 minutes → just fix it
    - Out of scope → reply explaining why; do not silently ignore
 
-3. **Reply to every thread**, including ones you did not act on:
+   **Publication order:** prepare the dispositions in steps 3–5, but do not send replies, resolve
+   threads, post the body audit, or write `DEEPSEEK_REVIEW_READ` until Step 4e has pushed every
+   source fix and verified the remote head. A fix that exists only in the worktree has not landed.
+
+3. **Prepare a reply for every thread**, including ones you did not act on. Record the command,
+   but do not execute it until Step 4e verifies the pushed remote head:
 
    ```bash
    gh api "repos/$REPO/pulls/<pr-number>/comments/<comment-databaseId>/replies" \
      --field body="<response text>"
    ```
 
-4. **Resolve** only threads where the fix landed or the point is genuinely addressed:
+4. **Prepare to resolve** only threads where the fix will have landed or the point is genuinely
+   addressed. Do not execute this command until after its reply has been published in Step 4e:
 
    ```bash
    gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' -f id="<THREAD_ID>"
@@ -279,7 +337,9 @@ A timeout here is a real signal, not noise. A job cancelled by the 100-minute ca
    finding is unclear or unsupported by evidence either way, leave it unacknowledged and report
    the block.
 
-   Before applying `DEEPSEEK_REVIEW_READ`, post a public PR comment that identifies every body
+   **Stop here until Step 4e has pushed the fixes and verified the remote head; then resume with
+   the publication sequence below.** Before applying `DEEPSEEK_REVIEW_READ`, post a public PR
+   comment that identifies every body
    finding and records its disposition: fixed (with the file/test), or rejected (with the
    evidence). Scan the exact comment for publication privacy before posting it:
 
@@ -371,9 +431,26 @@ helper writes through REST and verifies every requested field by reading the pul
 ```bash
 cd "$WORKTREE_DIR"
 git add -A
-git commit -m "fix: address DeepSeek review round $(( ${BOT_REVIEW_COUNT:-0} + 1 )) on PR #<pr-number>"
-git pull --rebase origin "$BRANCH"
-git push origin HEAD
+if git diff --cached --quiet; then
+  echo "No source changes to commit"
+else
+  git commit -m "fix: address feedback on PR #<pr-number>"
+  bash scripts/check-publication-privacy.sh
+  bash scripts/check-commit-privacy.sh "origin/$BASE_BRANCH" HEAD
+  git fetch origin "$BRANCH"
+  [ "$(git rev-parse "origin/$BRANCH")" = "$REMOTE_HEAD" ] || {
+    echo "PR head moved; preserve local commits and reconstruct state"
+    exit 1
+  }
+  git push origin HEAD
+  REMOTE_HEAD=$(git rev-parse HEAD)
+fi
+
+# Confirm the PR is still open at REMOTE_HEAD. Only then execute the prepared
+# replies/resolutions and body acknowledgement sequence from steps 3–5.
+CURRENT_PR=$(gh pr view <pr-number> --json state,headRefOid)
+[ "$(echo "$CURRENT_PR" | jq -r '.state')" = "OPEN" ]
+[ "$(echo "$CURRENT_PR" | jq -r '.headRefOid')" = "$REMOTE_HEAD" ]
 ```
 
 **NEVER run `git add` / `git commit` / `git push` from the main repo directory.** Always from `$WORKTREE_DIR`.
@@ -450,13 +527,15 @@ finished result and the PR's ordering constraints.
 - **GraphQL rate limits**: one wait is at most 190 polls (5700s ÷ 30s) at ~3–5 points each — under 950 points. GitHub allows 5000 points/hour. Avoid concurrent force-cycles across multiple PRs.
 - NEVER push directly to `main` (`git push origin main`), and never merge a pull request into
   `main` — human-only. Merging into any non-main base is authorized through
-  **`bash scripts/gh-automation.sh pr-merge <pr> --head <observed-sha>`**: it refuses a `main` base
-  by name, fails closed on one it cannot read (#218), and rejects a head that moved after the
-  readiness read. Read the pull-request body before you merge — an ordering
+  **`bash scripts/gh-automation.sh pr-merge <pr> --head <observed-sha> --base-head
+  <observed-base-sha>`**: it refuses a `main` base by name, fails closed on one it cannot read
+  (#218), and rejects a head or base that moved after the readiness read. Read the pull-request
+  body before you merge — an ordering
   stated against another PR binds whoever merges, and the frozen rule cannot see it (#214 and #215
   were each `ready_to_merge: true`, and merging one alone broke `develop` at runtime with nothing
   turning red).
-- Never force-push or rebase without explicit user instruction (the `git pull --rebase` of your own feature branch in 4e is the sanctioned exception).
+- Never force-push or rebase without explicit user instruction. Conflict remediation merges the
+  current base into the PR head and preserves history.
 - Always run quality gates locally before pushing fixes.
 - Apply `DEEPSEEK_REVIEW_READ` only through Step 4c's read/dispose/public-audit/fresh-write
   sequence. Never apply `NO_DEEPSEEK_REVIEW`; that exemption remains human-only.
