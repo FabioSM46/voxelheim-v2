@@ -8,9 +8,10 @@ here.
 
 | Role | Who | What |
 |------|-----|------|
-| Product Owner | **You** | Ideas, priorities, approve specs, merge PRs |
+| Product Owner | **You** | Ideas, priorities, approve specs, and perform `main` promotions |
 | Scrum Master | Claude/OpenCode (`/scrum-master`) or Codex (`$scrum-master`) | Runs ceremonies, drafts specs, creates issues |
 | Developer | Claude/OpenCode (`/dev-issue`) or Codex (`$dev-issue`) | Implements issues, opens PRs, resolves feedback |
+| Iteration Orchestrator | Claude/OpenCode (`/develop-iteration`) or Codex (`$develop-iteration`) | Parallelizes committed issues, remediates PRs, merges non-main bases |
 | Reviewer | DeepSeek `deepseek-v4-flash` with high reasoning (auto) + You | Automated code review on every PR |
 
 ## The Completion-Driven Cycle
@@ -42,10 +43,12 @@ six-hour sweep and manual dispatch), evaluates the frozen rule, and labels the P
 **Force-cycle**: `/process-pr <number>` reads review feedback, implements fixes, re-runs
 quality gates, pushes.
 
-**You**: Review PRs, merge any with `READY TO MERGE`, and run `/process-pr` on
-`needs-work` PRs. You may acknowledge body-level findings with `DEEPSEEK_REVIEW_READ`
-after reading them. `/process-pr` may do so too, but only after it has addressed or
-evidence-backed rejected every finding and posted that disposition publicly on the PR.
+**Autonomous path**: `/develop-iteration` (or `$develop-iteration` in Codex) assigns one agent per
+independent issue, runs safe waves in parallel, routes actionable PRs through `/process-pr`, and
+merges every freshly ready PR into its planned non-main base. You may still run the individual
+skills directly. You may acknowledge body-level findings with `DEEPSEEK_REVIEW_READ` after reading
+them; `/process-pr` may do so too, but only after it has addressed or evidence-backed rejected every
+finding and posted that disposition publicly on the PR.
 
 There is no calendar deadline. If you stop work for a month, the active iteration simply
 remains open. When its final committed issue closes, `iteration-lifecycle.yml` creates one
@@ -107,7 +110,7 @@ needs-triage → needs-refinement → ready-for-dev → in-progress → in-revie
 | `ready-for-dev` | Fully specified, iteration-ready | `backlog-refine` |
 | `in-progress` | Being implemented | `/dev-issue` (auto) |
 | `in-review` | PR open, under review | `/dev-issue` (auto) |
-| `done` | Merged to develop | You (manual close via PR merge) |
+| `done` | Merged to develop | PR merge (normally the iteration orchestrator) |
 
 ## Issue Labels
 
@@ -153,6 +156,7 @@ creates breakdown issues with suggested order and effort estimates.
 |---------|---------|
 | `/dev-issue <number>` | Implement end-to-end: worktree → code → gates → PR |
 | `/process-pr <number>` | Force-cycle: resolve bot feedback + fix CI |
+| `/develop-iteration [iteration]` | Parallelize committed issues → remediate → merge non-main PRs |
 | `/scrum-master feature-spec "..."` | Draft spec → create breakdown issues (after approval) |
 | `/scrum-master backlog-refine` | Scan, categorize, draft specs, re-prioritize |
 | `/scrum-master iteration-plan` | Close completed milestone, create next iteration, select issues |
@@ -163,7 +167,7 @@ creates breakdown issues with suggested order and effort estimates.
 
 | Workflow File | Trigger | Purpose |
 |---------------|---------|---------|
-| `.github/workflows/ci.yml` | PRs to develop/main | Change-gated develop validation; existence-complete main promotion; stable `ci-gate` verdict |
+| `.github/workflows/ci.yml` | Every PR | Change-gated non-main validation; existence-complete main promotion; stable `ci-gate` verdict |
 | `.github/workflows/pr-labeler.yml` | CI run completed + 6h sweep + manual | Read CI + reviews + threads, manage labels |
 | `.github/workflows/deepseek-pr-review.yml` | PR open/sync + review replies + manual dispatch | Post inline review comments via DeepSeek |
 | `.github/workflows/iteration-lifecycle.yml` | Issue closed + manual recovery | Sequence completion-driven ceremonies |

@@ -18,9 +18,9 @@ voxelheim-v2/
 ├── docs/                 # GDD, workflow, issue conventions
 ├── scripts/              # gh-automation.sh, CI classifiers, schema validation + tests
 ├── .github/              # CI, DeepSeek review bot, PR labeler, iteration lifecycle
-├── .claude/skills/       # Canonical skills for Claude Code (/dev-issue, /process-pr, /scrum-master)
-├── .agents/skills/       # Generated Codex adapters ($dev-issue, $process-pr, $scrum-master)
-└── .opencode/skills/     # Generated OpenCode adapters (/dev-issue, /process-pr, /scrum-master)
+├── .claude/skills/       # Canonical Claude skills (/dev-issue, /process-pr, /develop-iteration, /scrum-master)
+├── .agents/skills/       # Generated Codex adapters ($dev-issue, $process-pr, $develop-iteration, $scrum-master)
+└── .opencode/skills/     # Generated OpenCode adapters (/dev-issue, /process-pr, /develop-iteration, /scrum-master)
 ```
 
 **The workspaces are scaffolded through the pipeline itself.** `server/`, `client/` and
@@ -164,20 +164,23 @@ branch names, commit and PR messages, review comments, CI logs, artifacts and re
 - **NEVER push or merge to `main`** — `main` is the release branch and it stays human-only. The AI
   must never `git push origin main` and must never merge a pull request into `main`. PRs targeting
   `main` are allowed; the human performs the merge.
-- **Merging into `develop` is the AI's to do** — since #217 it merges on its own judgement, and
+- **Merging into any non-main base is the AI's to do** — #217 authorized `develop`; the repository
+  owner later extended that decision to stacked feature bases. The AI merges on its own judgement, and
   `READY TO MERGE` is a signal it should read rather than a precondition it must satisfy. Merge
   through **`bash scripts/gh-automation.sh pr-merge <pr>`**, which refuses a `main` base by name and
   fails closed on one it cannot read (#218). **This is an instruction, and it is worth knowing
-  exactly what backs it** — see "What actually stops a merge" below, because for `develop` the
-  answer is now "nothing, deliberately", and for `main` it is the instruction plus that one check on
-  the path an agent is told to use.
+  exactly what backs it** — see "What actually stops a merge" below. `develop` has ruleset
+  backstops; a feature base does not, so an orchestrator must run the frozen readiness check
+  immediately before merging. For `main`, the instruction plus the helper's base check remain the
+  line the agent must not cross.
 - **Git worktree isolation** — All file edits and git operations MUST happen inside an isolated `git worktree`, never on the main working directory. Use `<parent-directory>/voxelheim-v2-issue-<number>` when the work is tied to an issue; if no issue exists, do not invent a number — use `<parent-directory>/voxelheim-v2-issue-<short-descriptive-slug>` instead (for example, `voxelheim-v2-issue-graphify`). `/process-pr` worktrees remain `voxelheim-v2-pr-<number>`. Verify you are inside the worktree before making any changes (`git rev-parse --show-toplevel`). After the PR is opened, clean up with `git worktree remove` and `git worktree prune`. Reuse an existing worktree if one already exists for the branch.
 - **Never hand-edit generated code** — anything under a `gen/` directory or matching `*_generated.rs` is flatc output. Regenerate from `schemas/`; the review bot excludes those paths from the diff it reads for the same reason.
 
 ## Branch Strategy
 
 - `main` — production-ready branch (releases)
-- `develop` — shared integration branch and the default branch; **all branches start here**
+- `develop` — shared integration branch and default base; intentionally stacked sub-branches may
+  start from their planned feature branch
 - `feature/<issue>-<slug>` — features and enhancements
 - `fix/<issue>-<slug>` — bug fixes
 - `refactor/<issue>-<slug>` — restructuring without behavior change
@@ -198,7 +201,7 @@ merge-ready PRs. It uses three layers:
 
 ### Cross-Runtime Skill Synchronization
 
-`.claude/skills/` is the canonical source for the three pipeline workflows. Codex consumes
+`.claude/skills/` is the canonical source for the four pipeline workflows. Codex consumes
 the generated adapters in `.agents/skills/`; OpenCode consumes the generated adapters in
 `.opencode/skills/`. The adapters remove runtime-specific Claude frontmatter, preserve the
 same workflow, and map explicit invocations to each runtime's syntax.
@@ -244,11 +247,15 @@ pr-labeler.yml (on CI completion + 6h sweep): reads ci-gate + threads ─┘
     └───────────────┘
         │
         ▼
-User optionally runs: /process-pr (Claude/OpenCode) or $process-pr (Codex)
+An agent or orchestrator runs: /process-pr (Claude/OpenCode) or $process-pr (Codex)
         │
         ▼
-User reviews → merges (manual gate)
+AI reads the finished result and ordering constraints → merges any non-main base autonomously
 ```
+
+`/develop-iteration` (Claude/OpenCode) or `$develop-iteration` (Codex) owns this whole execution
+loop for a committed milestone: it evaluates safe parallel waves, assigns one agent per issue,
+routes failures through the issue's `/process-pr` owner, and merges ready PRs in dependency order.
 
 ### Skills Reference
 
@@ -256,11 +263,12 @@ User reviews → merges (manual gate)
 | -------------- | --------------------------- | --------------------------- | ------------------------------------------------ |
 | `dev-issue`    | `/dev-issue <number>`       | `$dev-issue <number>`       | Stateless: implements issue → opens PR → exits   |
 | `process-pr`   | `/process-pr <pr-number>`   | `$process-pr <pr-number>`   | Manual force-cycle: fix CI issues + re-run gates |
+| `develop-iteration` | `/develop-iteration [iteration]` | `$develop-iteration [iteration]` | Parallel issue agents → remediate → merge non-main PRs |
 | `scrum-master` | `/scrum-master <ceremony>`  | `$scrum-master <ceremony>`  | backlog-refine, iteration-plan, feature-spec     |
 
 #### Who may start a skill, and which gates are the real ones
 
-All three skills are invocable by an agent as well as by a human typist. They carried
+All four skills are invocable by an agent as well as by a human typist. The original three carried
 `disable-model-invocation: true` until legacy PR 48, and removing it changed less than it looks like:
 three agents had already hit that refusal and done the work by hand anyway, from the issue
 body and this file. The flag was not preventing the work — it was routing it through a path
@@ -272,7 +280,7 @@ a skill invocation over a hand-rolled agent.
 hand opened it, `READY TO MERGE` is still computed by the one frozen rule, and the rulesets still
 reject direct pushes at the remote. `NO_DEEPSEEK_REVIEW` remains human-only;
 `DEEPSEEK_REVIEW_READ` may also be applied by the AI, but only after it has read and disposed of
-every body finding with a public, evidence-backed audit trail. Into `develop` the merge is the AI's
+every body finding with a public, evidence-backed audit trail. Into any non-main base the merge is the AI's
 call, and a thread the AI has answered is the AI's to resolve. **The human gate was the merge, it was the gate that was
 ever load-bearing, and it is gone by decision rather than by oversight** — read the residual risk
 closing the next section before assuming otherwise.
@@ -283,7 +291,7 @@ user's call, not a mechanical step.
 
 #### What actually stops a merge
 
-Since #217 the answer depends on the target, and for `develop` the answer is "nothing".
+After #217 and the later feature-base authorization, the answer depends on the target.
 
 **Into `develop`: nothing, and that is the decision.** The AI merges on its own judgement. The
 frozen acceptance rule still computes `READY TO MERGE` and the AI should read it, but it is a
@@ -291,6 +299,12 @@ signal, not a gate — a merge that ignores it is a bad call rather than a block
 ruleset still applies to everyone: a pull request is required, review threads must be resolved,
 and `ci-gate` must be green, so nothing lands on a pull request that is not already in a mergeable
 state. That is the whole of what remains, and every condition in it is machine-checkable.
+
+**Into another feature branch: the orchestrator's fresh check.** The repository rulesets cover
+`develop` and `main`, not arbitrary feature bases. CI and DeepSeek run for every pull request, so
+the frozen rule can still be evaluated, but `/develop-iteration` must run
+`is-ready-to-merge` immediately before `pr-merge`; there is no branch-ruleset backstop if it skips
+that read.
 
 **Into `main`: the instruction, plus one check on the designated path.** This is worth stating
 precisely, because the shape is the one this file warns about everywhere else. A deny rule can match
@@ -301,8 +315,9 @@ the base is a property of the pull request — so no `Bash(...)` prefix can dist
 
 What replaces it is not a deny but a check. **`bash scripts/gh-automation.sh pr-merge <pr>` is the
 designated way for an agent to merge**: it reads `baseRefName` and refuses `main` by name. It fails
-closed — an unreadable base and an empty one are refused too, because neither is evidence of
-`develop` — and in every refusal it attempts no merge at all.
+closed — an unreadable base and an empty one are refused too, because neither is evidence of a
+permitted non-main target — and in every refusal it attempts no merge at all. Orchestrators pass
+`--head <observed-sha>` so GitHub also refuses a head that moved after the readiness read.
 `scripts/test/pr-merge-guard.test.sh` pins each of those, the negative included (#218).
 
 **It stops an accident, not a decision, and that difference is the whole of what may be claimed for
@@ -879,7 +894,7 @@ on `develop` after every merge — see "Nothing verified `develop` after a merge
 
 #### CI runs only the jobs the diff can affect (the `detect` job)
 
-Every `ci.yml` run starts with `detect`. On a PR targeting `develop`, it classifies changed
+Every `ci.yml` run starts with `detect`. On a PR targeting any non-main branch, it classifies changed
 files through `scripts/changed-areas.sh` and lets unaffected jobs skip via job-level `if:`.
 A server-only PR runs `server`; a schema PR runs `schemas` + `server` + `client` (the
 contract fan-out); a docs-only PR runs nothing but `detect`, possibly `automation`, and
@@ -920,8 +935,8 @@ Two traps to know before trying to trim CI further. Both are ways of making
 
 #### Nothing verified `develop` after a merge — `integration.yml` does
 
-`ci.yml` runs on a pull request's merge ref **and nowhere else**. Every pull request is therefore
-validated against the `develop` that existed when its run started, and two pull requests branched
+`ci.yml` runs on a pull request's merge ref **and nowhere else**. Every pull request targeting
+`develop` is therefore validated against the `develop` that existed when its run started, and two pull requests branched
 from the same base are each validated against a tree that does not contain the other. A
 combination that is broken only together turns nothing red. #214 and #215 were the first bill for
 that; in Iteration 25, #402 and #403 were verified together only because somebody made a worktree
