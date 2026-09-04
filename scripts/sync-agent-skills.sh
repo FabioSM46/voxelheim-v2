@@ -17,7 +17,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel)
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-SKILLS=(dev-issue process-pr scrum-master)
+SKILLS=(dev-issue process-pr scrum-master develop-iteration)
 status=0
 
 frontmatter_value() {
@@ -51,6 +51,11 @@ interface_metadata() {
       SHORT_DESCRIPTION="Run backlog, iteration, and feature ceremonies"
       DEFAULT_PROMPT='Use $scrum-master to run backlog refinement for this repository.'
       ;;
+    develop-iteration)
+      DISPLAY_NAME="Develop Iteration"
+      SHORT_DESCRIPTION="Deliver an iteration through parallel issue agents"
+      DEFAULT_PROMPT='Use $develop-iteration to deliver the active iteration autonomously.'
+      ;;
     *)
       echo "sync-agent-skills: add Codex interface metadata for '$1'" >&2
       exit 1
@@ -76,7 +81,8 @@ render_codex_skill() {
       -e 's|/dev-issue|$dev-issue|g' \
       -e 's|/process-pr|$process-pr|g' \
       -e 's|/scrum-master|$scrum-master|g' \
-      -e 's|/develop-iteration|$develop-iteration|g'
+      -e 's|/develop-iteration|$develop-iteration|g' \
+      -e 's|the \*\*Agent tool\*\*|the **Codex collaboration sub-agent tools**|g'
   } >"$output"
 }
 
@@ -110,7 +116,8 @@ render_opencode_skill() {
     printf '%s\n' 'metadata:'
     printf '%s\n' '  opencode/autoinvoke: "false"'
     printf '%s\n\n' '---'
-    skill_body "$source"
+    skill_body "$source" | sed \
+      -e 's|the \*\*Agent tool\*\*|the **Task tool**|g'
   } >"$output"
 }
 
