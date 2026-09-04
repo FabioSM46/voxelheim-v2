@@ -25,9 +25,9 @@ On restart, reconstruct the plan from GitHub and continue without duplicating br
 - Never push directly to `main` or `develop`.
 - A merge may target `develop` or any other non-`main` branch. Feature branches and their
   sub-branches are first-class topology, not exceptional cleanup.
-- Use `bash scripts/gh-automation.sh pr-merge <pr> --head <observed-sha>` for every merge. The
-  helper refuses `main` and rejects a concurrently changed head, but it does not decide readiness;
-  the fresh readiness check below is mandatory.
+- Use `bash scripts/gh-automation.sh pr-merge <pr> --head <observed-sha> --base-head
+  <observed-base-sha>` for every merge. The helper refuses `main` and rejects a changed head or
+  base, but it does not decide readiness; the fresh readiness check below is mandatory.
 - `NO_DEEPSEEK_REVIEW` remains human-only. Body findings may be acknowledged only through
   `$process-pr`'s read/dispose/public-audit/fresh-label sequence.
 - Iteration ceremonies remain human-in-the-loop. Stop after delivery; do not run backlog
@@ -124,8 +124,10 @@ After an implementation wave returns, monitor all of its open PRs as a set. Befo
 PR, confirm it is still open. Pending CI or an in-progress first DeepSeek review is a wait state,
 not a reason to invoke `$process-pr`.
 
-When a PR has actionable CI failures, unresolved DeepSeek threads, or unread DeepSeek body
-findings, send its owning agent a follow-up task to invoke `$process-pr <pr>`. Preserve one agent
+When a PR has actionable CI failures, unresolved DeepSeek threads, unread DeepSeek body findings,
+or `mergeable == CONFLICTING`, send its owning agent a follow-up task to invoke
+`$process-pr <pr>`. A missing `ci-gate` together with `CONFLICTING` is conflict remediation, not a
+pending-CI wait; no pull-request workflow can start until the merge ref exists. Preserve one agent
 per issue even when that issue owns multiple PRs. Do not run concurrent force-cycles for multiple
 PRs from the same issue, and avoid unnecessary concurrent DeepSeek polling because of GraphQL rate
 limits.
@@ -143,13 +145,15 @@ loop move.
 
 Only leaf PRs whose dependencies have landed are candidates. Immediately before every merge:
 
-1. Re-read the PR state, `headRefOid`, base branch and complete body; retain that SHA as
-   `OBSERVED_HEAD`.
+1. Re-read the PR state, `headRefOid`, base branch and complete body. Read the base SHA from the
+   pull-request REST shape (`gh api "repos/$REPO/pulls/<pr>" --jq '.base.sha'`), because the pinned
+   `gh` does not expose `baseRefOid` through `gh pr view --json`. Retain the two SHAs as
+   `OBSERVED_HEAD` and `OBSERVED_BASE_HEAD`.
 2. Confirm it is still open and the base is non-empty and not `main`.
 3. Enforce every ordering statement in its issue and PR body.
 4. Run `bash scripts/gh-automation.sh is-ready-to-merge <pr>` against the current head.
 5. If the command succeeds, run
-   `bash scripts/gh-automation.sh pr-merge <pr> --head "$OBSERVED_HEAD"`.
+   `bash scripts/gh-automation.sh pr-merge <pr> --head "$OBSERVED_HEAD" --base-head "$OBSERVED_BASE_HEAD"`.
 
 `READY TO MERGE` is useful evidence but may lag the current state; never substitute a stale label
 for step 4. Conversely, a fresh successful frozen-rule evaluation is sufficient even if the
@@ -159,8 +163,16 @@ Feature-base branches are not protected by the `develop`/`main` rulesets. For th
 frozen-rule check is the only required-check guard the orchestrator controls, so skipping it is
 never permitted.
 
-After a merge into a feature branch, refresh every open PR whose head is that branch. After a
-merge into `develop`, wait for that exact merge commit's `Integration` workflow and require its
+After a merge into a feature branch, refresh every open PR whose **head or base** is that branch.
+For every PR based on the branch that moved, send its owner through `$process-pr`: merge the new
+base into the PR head without rebasing or force-pushing, run the affected gates, push, and require
+fresh CI before it is a merge candidate again. Re-read DeepSeek state; if its findings-round cap is
+already spent, do not wait for an automatic review that will never start—the newly incorporated
+base commits were reviewed on their own PRs. A previously green head is not evidence about a newly
+changed base. For a parent PR whose head is the feature branch, apply the assembled-head review
+rule from step 2, including its explicit forced review.
+
+After a merge into `develop`, wait for that exact merge commit's `Integration` workflow and require its
 `integration-verdict` to succeed before merging another PR into `develop`. A red integration run
 is a stop condition: report the generated integration issue and do not compound the broken base.
 

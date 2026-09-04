@@ -47,6 +47,7 @@ for label, text in processes + (
 for label, process_text in processes:
     start = process_text.index("**Findings in the review body**")
     policy = process_text[start:]
+    assignment = policy.index("ACK_COMMENT=")
     privacy = policy.index("bash scripts/check-body-privacy.sh")
     comment = policy.index("gh pr comment")
     pre_write = policy.index("LATEST_BEFORE_ACK=")
@@ -56,7 +57,7 @@ for label, process_text in processes:
     verify_added = policy.index("Could not verify the fresh acknowledgement label")
     post_latest = policy.index("LATEST_AFTER_ACK=")
     post_unread = policy.index("UNREAD_AFTER_ACK=")
-    assert privacy < comment < pre_write < remove < verify_removed < add < verify_added < post_latest < post_unread, (
+    assert assignment < privacy < comment < pre_write < remove < verify_removed < add < verify_added < post_latest < post_unread, (
         f"{label} must publish, race-check, refresh, and verify every AI acknowledgement in order"
     )
 

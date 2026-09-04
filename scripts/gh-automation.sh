@@ -1277,9 +1277,9 @@ MERGE_FORBIDDEN_BASE="${MERGE_FORBIDDEN_BASE:-main}"
 
 cmd_pr_merge() {
   local pr="${1:-}"
-  [ -n "$pr" ] || die "usage: pr-merge <pr> [--head <sha>] [--squash|--merge|--rebase]"
+  [ -n "$pr" ] || die "usage: pr-merge <pr> [--head <sha>] [--base-head <sha>] [--squash|--merge|--rebase]"
   shift
-  local method="--squash" expected_head=""
+  local method="--squash" expected_head="" expected_base_head=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --head)
@@ -1287,15 +1287,23 @@ cmd_pr_merge() {
         expected_head="$2"
         shift 2
         ;;
+      --base-head)
+        [ "$#" -ge 2 ] || die "--base-head requires a commit SHA"
+        expected_base_head="$2"
+        shift 2
+        ;;
       --squash|--merge|--rebase)
         method="$1"
         shift
         ;;
-      *) die "unknown merge option '${1}' (expected --head <sha>, --squash, --merge or --rebase)" ;;
+      *) die "unknown merge option '${1}' (expected --head <sha>, --base-head <sha>, --squash, --merge or --rebase)" ;;
     esac
   done
   if [ -n "$expected_head" ] && [[ ! "$expected_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
     die "invalid expected head SHA '${expected_head}'"
+  fi
+  if [ -n "$expected_base_head" ] && [[ ! "$expected_base_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    die "invalid expected base head SHA '${expected_base_head}'"
   fi
   require_gh
 
@@ -1310,6 +1318,23 @@ cmd_pr_merge() {
 
   if [ "$base" = "$MERGE_FORBIDDEN_BASE" ]; then
     die "PR #${pr} targets '${base}'. Merging into '${MERGE_FORBIDDEN_BASE}' is human-only (#217) — refusing."
+  fi
+
+  # `--match-head-commit` atomically protects the PR head. GitHub exposes no matching
+  # merge option for the base, so do the strongest available check immediately before
+  # the merge call: reject a base that moved after the orchestrator's readiness read.
+  # This closes the ordinary stacked-PR race; it does not claim atomicity against a
+  # base update in the few milliseconds between this read and GitHub's merge endpoint.
+  if [ -n "$expected_base_head" ]; then
+    local actual_base_head
+    resolve_repo || die "could not resolve the repository for the base-head guard on PR #${pr}"
+    if ! actual_base_head=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.base.sha' 2>&1); then
+      die "could not read the base head of PR #${pr} — refusing to merge: ${actual_base_head}"
+    fi
+    [ -n "$actual_base_head" ] || die "empty base head for PR #${pr} — refusing to merge"
+    if [ "$actual_base_head" != "$expected_base_head" ]; then
+      die "base branch of PR #${pr} moved from ${expected_base_head} to ${actual_base_head} — repeat readiness checks"
+    fi
   fi
 
   local -a merge_args=(pr merge "$pr" "$method")
@@ -1845,8 +1870,9 @@ Commands:
                                        round cap (ref defaults to develop)
   pr-check-label <pr> <label>          Exit 0 present, 1 absent, 2 undetermined
   is-ready-to-merge <pr>              Exit 0 if frozen rule met
-  pr-merge <pr> [--head <sha>] [method]  Merge a PR; refuses base 'main', optionally
-                                       binds the head, and fails closed on unreadable base
+  pr-merge <pr> [--head <sha>] [--base-head <sha>] [method]
+                                       Merge a PR; refuses base 'main', optionally binds
+                                       the head/base, and fails closed on unreadable state
   iteration-advance                   Advance completion-driven iteration ceremonies
   integration-report                  File (or comment on) the alarm for a develop that
                                       failed post-merge verification. Reads

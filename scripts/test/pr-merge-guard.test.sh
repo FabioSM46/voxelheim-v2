@@ -106,6 +106,14 @@ case "$1 ${2:-}" in
     printf '%s\n' "${GH_BASE-develop}"
     exit 0
     ;;
+  "repo view")
+    printf '%s\n' 'owner/repo'
+    exit 0
+    ;;
+  "api repos/owner/repo/pulls/218")
+    printf '%s\n' "${GH_BASE_HEAD-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+    exit 0
+    ;;
   "pr merge")
     if [ "${GH_HEAD_MATCH_OK:-1}" != "1" ] && [[ " $* " == *" --match-head-commit "* ]]; then
       echo "head branch was modified" >&2
@@ -125,6 +133,11 @@ chmod +x "$STUB_DIR/gh"
 export CALL_LOG
 PATH="$STUB_DIR:$PATH"
 export PATH
+
+# Actions exports the real repository name. This fixture deliberately exercises the stubbed
+# `gh repo view` fallback, so isolate both higher-priority inputs instead of making the expected
+# REST path depend on whether the test runs locally or in CI.
+unset GITHUB_REPOSITORY REPO
 
 run_merge() {
   : > "$CALL_LOG"
@@ -187,6 +200,24 @@ assert_contains "the invalid SHA is explained" "$OUT" "invalid expected head SHA
 assert_not_contains "an invalid SHA attempts no merge" "$LOG" "gh pr merge"
 
 echo
+echo "pr-merge — an observed base head can be bound to the readiness read"
+BASE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+GH_BASE=feature/parent-branch GH_BASE_HEAD="$BASE_SHA" run_merge 218 --base-head "$BASE_SHA"
+assert_eq "a matching expected base head merges" "0" "$RC"
+assert_contains "the base SHA comes from the stable REST shape" "$LOG" "gh api repos/owner/repo/pulls/218 --jq .base.sha"
+assert_not_contains "the guard does not request an unsupported gh field" "$LOG" "baseRefOid"
+
+GH_BASE=feature/parent-branch GH_BASE_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb run_merge 218 --base-head "$BASE_SHA"
+assert_nonzero "a moved base refuses the merge" "$RC"
+assert_contains "the moved-base failure requests fresh readiness" "$OUT" "repeat readiness checks"
+assert_not_contains "a moved base attempts no merge" "$LOG" "gh pr merge"
+
+GH_BASE=feature/parent-branch run_merge 218 --base-head not-a-sha
+assert_nonzero "an invalid expected base SHA is refused" "$RC"
+assert_contains "the invalid base SHA is explained" "$OUT" "invalid expected base head SHA"
+assert_not_contains "an invalid base SHA attempts no merge" "$LOG" "gh pr merge"
+
+echo
 echo "pr-merge — the method is explicit and validated"
 GH_BASE=develop run_merge 218 --merge
 assert_eq "an explicit --merge is accepted" "0" "$RC"
@@ -194,7 +225,7 @@ assert_contains "and is what gh receives" "$LOG" "gh pr merge 218 --merge"
 
 GH_BASE=develop run_merge 218 --yolo
 assert_nonzero "an unknown method exits non-zero" "$RC"
-assert_contains "and says which methods exist" "$OUT" "expected --head <sha>, --squash, --merge or --rebase"
+assert_contains "and says which methods exist" "$OUT" "expected --head <sha>, --base-head <sha>, --squash, --merge or --rebase"
 assert_not_contains "an unknown method attempts no merge" "$LOG" "gh pr merge"
 
 echo
