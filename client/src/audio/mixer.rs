@@ -92,9 +92,10 @@ impl Bus {
 /// device's buffer, and a test hands it a `Vec<f32>`. Nothing in [`Mixer::render`] knows
 /// which it got, so every assertion below runs with no device open — which is the whole of
 /// how the acceptance criterion "no test opens a real device" is met.
-// #851 part 2 lands the mixer; the output callback that renders through this trait is the
-// device in the part after it. Until then the only implementations are the tests'.
-#[allow(dead_code)]
+///
+/// `device.rs` is the implementation that matters: it wraps the buffer `cpal` hands the
+/// output callback, so the device's own memory *is* the sink and the render path copies
+/// nothing on its way out.
 pub trait Sink {
     /// The interleaved block to fill, `channels` samples per frame.
     fn block(&mut self) -> &mut [f32];
@@ -249,9 +250,8 @@ impl Mixer {
         self.gains[bus.index()].store(gain.to_bits(), Ordering::Relaxed);
     }
 
-    /// Records the format the open stream negotiated. The device layer is the one caller.
-    // Which is why it is unreachable from `main` until that layer lands — see `Sink`.
-    #[allow(dead_code)]
+    /// Records the format the open stream negotiated. `device.rs` is the one caller, and
+    /// it calls this once per stream it opens.
     pub fn set_format(&self, sample_rate: u32, channels: u16) {
         self.sample_rate
             .store(sample_rate.max(1), Ordering::Relaxed);
@@ -269,9 +269,6 @@ impl Mixer {
     /// **This is the function that runs on the output thread.** It allocates nothing, takes
     /// no lock, logs nothing and mentions no Bevy type; every read below is an atomic load
     /// over memory that was allocated when the mixer was built.
-    // Unreachable from `main` until the device that runs it lands — see `Sink`. The tests
-    // below are what exercise it in the meantime, which is the point of the trait.
-    #[allow(dead_code)]
     pub fn render(&self, sink: &mut impl Sink) {
         let channels = self.channels.load(Ordering::Relaxed).max(1) as usize;
         let voice = f32::from_bits(self.gains[Bus::Voice.index()].load(Ordering::Relaxed));

@@ -87,6 +87,7 @@ keeps meaning "everything the client is".
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
+| `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, reopens it when the device errors, disappears or stops being the system default, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
@@ -1396,13 +1397,13 @@ answers do is disagree.
 `net/session.rs` may block, allocate and log, because nothing is waiting on it to the
 microsecond. The **output callback** is scheduled by the platform's audio stack and is not
 waited for at all: miss its deadline and the player hears a click, which is not a dropped
-frame that catches up next tick. The callback itself arrives with the device, in the part of
-#851 after this one; everything below is what it will be allowed to run when it does.
+frame that catches up next tick.
 
 ```text
   ECS (audio/mod.rs)                                   output callback
   ──────────────────                                   ───────────────
   SourceHandle::push ────── lock-free ring ───────────▶ Ring::pop ─▶ Mixer::render
+  AudioDevice::start ─▶ supervisor thread ─▶ cpal::Stream ─▶ that callback
 ```
 
 **What may run in the callback**: atomic loads and stores, and arithmetic over memory that
@@ -1428,20 +1429,54 @@ claimed onto it is scaled once and never squared. Two buses and deliberately onl
 or music bus arrives with the feature that feeds it, because a gain nobody can hear moving is
 a knob that cannot be tested.
 
-**The device will have exactly one owner and it will not be a resource.** A `cpal::Stream` is
-not `Send` on every platform, so when `audio/device.rs` lands it puts the stream on a
-supervisor thread of its own and nothing else ever holds one — the same shape `net/session.rs`
-uses for the socket. `Mixer::render` is the seam it plugs into, and it is the only part of
-this module a real-time thread ever touches.
+**The device has exactly one owner and it is not a resource.** A `cpal::Stream` is not
+`Send` on every platform, so `audio/device.rs` puts it on a supervisor thread of its own and
+nothing else ever holds one — the same shape `net/session.rs` uses for the socket. The Bevy
+side holds `AudioDevice`, which is a thread handle and a stop flag; dropping it closes the
+stream, the way dropping `net`'s `Channels` stops the net thread. `Mixer::render` is the seam
+the callback plugs into, and it is the only part of this module a real-time thread touches.
+
+**The stream's *error* callback is on that same real-time thread**, so it obeys the same
+rule: it stores a numbered reason in an atomic and notifies a condition variable **without
+taking the lock**, because taking one is the thing it may not do. The supervisor therefore
+waits with a timeout rather than forever, so a notification lost to that race costs a delayed
+reopen instead of a silent client; `Watch::stop` runs on a Bevy thread and does take the
+lock, which is why quitting is never delayed by it. The reason is a number because formatting
+a string allocates — `why()` turns it back into a sentence where that is allowed.
+
+**Every device failure is recoverable and none is fatal.** No device, no float format, a
+stream that will not open, one unplugged mid-session, a default that moved — each leaves the
+supervisor waiting and trying again, so a headset plugged in later is picked up without a
+restart. No `unwrap`, `expect` or `panic!` sits on any path a device can reach: a machine
+with no sound card plays a silent game. The retry is a condvar wait, not a spin, and the
+failure log is throttled so an absent device cannot fill a log file.
+
+**The stream is opened as `f32` or not at all**, so the device's own buffer *is* the `Sink`
+and the callback converts nothing; an integer format would need a scratch buffer sized before
+the stream opened, growing one inside the callback being the allocation forbidden above. It
+is also **not** opened with `with_max_sample_rate()`, the idiom `cpal`'s examples reach for:
+that takes a range's ceiling, so a device advertising 192 kHz would have the mixer generate
+four times the samples — for content that is voice — and the platform resample them back down
+to the rate it is already mixing at. `float_config` asks for the device's own default rate.
+
+**Enumeration is bound before the log macro, not inside it.** `warn!` and `debug!` evaluate
+their fields only when the callsite is enabled, so an enumeration written inline runs or not
+depending on the log level — and counting those calls is the only handle a unit test has on
+the throttle. Written lazily, the test that pins the throttle passed while measuring
+nothing; that is the #46 family again.
+
+**No test in `audio/` opens a device.** The seam is `OutputHost` — the three methods the
+supervisor uses, faked in twenty lines — and nothing under test constructs `CpalHost` or
+builds `AudioPlugin`, which is what starts the supervisor.
 
 **Audio is presentation, and the rule is `player/ambience.rs`'s.** Nothing under `audio/` is
 ever read by input, targeting, placement or anything else that decides an outcome. A gain is
 not a fact about the world and a silent client is not a disadvantaged one.
 
-**What is deliberately not here yet.** No device: `audio/device.rs` is the next part of #851,
-so `Sink`, `Mixer::render` and `Mixer::set_format` carry an `#[allow(dead_code)]` naming it —
-the same shape `net/codec.rs` uses for an encoder that ships before its caller. They are not
-untested, only unreachable from `main`, which is exactly what the `Sink` trait was for.
+**What is deliberately not here yet.** No settings: the Audio tab, its master-volume and
+output-device knobs and `AudioControls::output_device` are #851's last part, so today the
+device opened is always the system default and the master gain is the plugin's own 0.8.
+`device_names()` is what that knob will read, and the supervisor is already its one caller.
 Nothing encodes either: `audiopus` is a dependency from #851 part 1 so that the lockfile and
 the CI package list move once rather than twice, and the codec arrives with proximity voice.
 No capture device, no spatialisation, no `bevy_audio` and no Bevy `audio` feature — the
