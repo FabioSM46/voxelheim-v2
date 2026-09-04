@@ -135,9 +135,13 @@ pub struct AudioControls {
 impl Default for AudioControls {
     fn default() -> Self {
         Self {
-            // 80 of 100, which is what the Audio tab's master volume starts at: loud
-            // enough to be heard, with room above it for a quiet recording.
-            master_gain: 0.8,
+            // Read from the knob, not restated beside it. The plugin sets the gain
+            // before the first frame, so a default that disagreed with the settings
+            // file's would be a stream briefly audible at the wrong volume — and two
+            // copies of one number is how that disagreement arrives. `Settings` is
+            // already this module's dependency: `follow_the_settings` below reads the
+            // same accessor every frame.
+            master_gain: Settings::default().master_gain(),
             speaker_test: false,
         }
     }
@@ -347,12 +351,17 @@ mod tests {
 
     #[test]
     fn the_default_master_gain_matches_the_volume_the_audio_tab_starts_at() {
-        // 80 of 100, and now that the knob exists this reads it rather than restating it.
-        // The plugin sets the gain before the first frame, so a plugin default that
-        // disagreed with the file's would be a stream briefly audible at the wrong volume.
-        assert_eq!(
-            AudioControls::default().master_gain,
-            Settings::default().master_gain()
+        // The value, not the equality. `AudioControls::default()` now *is*
+        // `Settings::default().master_gain()`, so asserting those two against each other
+        // would compare a thing with itself and could never fail — a test that passes
+        // whatever anybody does to either side. What can still break is the number a
+        // player actually hears on first launch, so that is what is pinned: the Audio
+        // tab starts at 80 of 100 and the gain is linear, so this is 0.8. Move either
+        // the knob's default or the conversion and this fails.
+        assert!(
+            (AudioControls::default().master_gain - 0.8).abs() < f32::EPSILON,
+            "first launch plays at {} rather than 0.8",
+            AudioControls::default().master_gain
         );
         assert!(!AudioControls::default().speaker_test);
     }
