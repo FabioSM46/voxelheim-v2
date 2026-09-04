@@ -229,10 +229,10 @@ Issue opened via template
 skill: reads issue → validates workspace → reads AGENTS.md
         │
         ▼
-skill: creates worktree + branch from develop → implements → gates (fmt, lint, build, test)
+skill: creates worktree + branch from its planned non-main base → implements → gates (fmt, lint, build, test)
         │
         ▼
-skill: opens PR targeting develop with structured description → EXITS (stateless)
+skill: opens PR targeting that planned base (`develop` by default) → EXITS (stateless)
         │
         ▼
 deepseek-pr-review.yml: posts inline review comments on the PR diff ───┐
@@ -262,7 +262,7 @@ routes failures through the issue's `/process-pr` owner, and merges ready PRs in
 | Skill          | Claude / OpenCode           | Codex                       | Behavior                                         |
 | -------------- | --------------------------- | --------------------------- | ------------------------------------------------ |
 | `dev-issue`    | `/dev-issue <number>`       | `$dev-issue <number>`       | Stateless: implements issue → opens PR → exits   |
-| `process-pr`   | `/process-pr <pr-number>`   | `$process-pr <pr-number>`   | Manual force-cycle: fix CI issues + re-run gates |
+| `process-pr`   | `/process-pr <pr-number>`   | `$process-pr <pr-number>`   | Active remediation: conflicts, CI, review feedback |
 | `develop-iteration` | `/develop-iteration [iteration]` | `$develop-iteration [iteration]` | Parallel issue agents → remediate → merge non-main PRs |
 | `scrum-master` | `/scrum-master <ceremony>`  | `$scrum-master <ceremony>`  | backlog-refine, iteration-plan, feature-spec     |
 
@@ -304,7 +304,10 @@ state. That is the whole of what remains, and every condition in it is machine-c
 `develop` and `main`, not arbitrary feature bases. CI and DeepSeek run for every pull request, so
 the frozen rule can still be evaluated, but `/develop-iteration` must run
 `is-ready-to-merge` immediately before `pr-merge`; there is no branch-ruleset backstop if it skips
-that read.
+that read. It also binds both the observed PR head and observed base head to the merge attempt.
+When a feature base advances, every open PR targeting it must merge that new base into its own head
+and obtain fresh checks before another child lands; an unchanged child head is not evidence about
+a changed base.
 
 **Into `main`: the instruction, plus one check on the designated path.** This is worth stating
 precisely, because the shape is the one this file warns about everywhere else. A deny rule can match
@@ -317,7 +320,8 @@ What replaces it is not a deny but a check. **`bash scripts/gh-automation.sh pr-
 designated way for an agent to merge**: it reads `baseRefName` and refuses `main` by name. It fails
 closed — an unreadable base and an empty one are refused too, because neither is evidence of a
 permitted non-main target — and in every refusal it attempts no merge at all. Orchestrators pass
-`--head <observed-sha>` so GitHub also refuses a head that moved after the readiness read.
+`--head <observed-sha>` and `--base-head <observed-base-sha>` so a moved head or base invalidates
+the readiness read before the merge is attempted.
 `scripts/test/pr-merge-guard.test.sh` pins each of those, the negative included (#218).
 
 **It stops an accident, not a decision, and that difference is the whole of what may be claimed for

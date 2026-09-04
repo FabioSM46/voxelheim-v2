@@ -11,7 +11,9 @@ Triggers: `$dev-issue <issue-number>` or `$dev-issue <issue-url>`, optionally fo
 
 ## Purpose
 
-Takes a GitHub issue and drives it from requirements to PR — statelessly. Exits after opening the PR and cleaning up. Does NOT monitor the PR; monitoring is handled by `pr-labeler.yml` (event-driven: fires when a PR's CI run completes, plus a six-hour sweep) or `$process-pr` (manual force-cycle).
+Takes a GitHub issue and drives it from requirements to PR — statelessly. Exits after opening the
+PR and cleaning up. Does NOT monitor the PR; passive monitoring is handled by `pr-labeler.yml`
+(event-driven plus a six-hour sweep), while `$process-pr` owns active remediation.
 
 Uses `git worktree` for branch isolation, enabling parallel issue work without blocking the main working directory.
 
@@ -242,15 +244,19 @@ stable `ci-gate` run for a pull request targeting **any** base, and `$dev-issue`
 `--base`, so a later part is branched from the earlier one and opened against it. Its three-dot diff
 then measures that part alone, which is the number the cap is about, and nothing waits.
 
-What remains is an ordering, not a blockage: **say in every part's description which part it is, how
-many there are, and that it must merge after the one it is based on.** The merge helper does not
-infer that, and merging out of order lands a consumer without its producer.
+What remains is an ordering, not a blockage: **say in every part's description which part it is,
+how many there are, its exact base, and the direction in which the stack must collapse.** A PR
+targeting an earlier part normally merges *into that part before the earlier part merges upward*;
+the deepest ready leaf lands first. Saying merely "after part N" is ambiguous about whether it
+means implementation dependency or GitHub merge direction, and the frozen rule cannot infer either.
 
-The replay is still there for the one case that needs it: a part branched from a *merged* earlier
-part, or one you choose to base on `BASE_BRANCH` directly, needs
+The replay is still there only for a deliberately parent-first stack: a part branched from a
+*merged* earlier part, or one you choose to base on `BASE_BRANCH` directly, needs
 `git rebase --onto "origin/$BASE_BRANCH" <old-base>` after that squash merge before it will push a
-clean diff. Iteration 30 paid that cost twice, on #455 and #457; Iteration 50 paid it seven times —
-and that iteration is why the feature-base support exists.
+clean diff. That rewrites history and therefore requires explicit user authorization; the
+iteration orchestrator defaults to leaf-first non-main merges instead. Iteration 30 paid that cost
+twice, on #455 and #457; Iteration 50 paid it seven times — and that iteration is why the
+feature-base support exists.
 
 **Write the estimate down in the pull request body**, next to the measurement Step 7 produces. An
 estimate nobody records is an estimate nobody can be shown to have skipped — which is exactly how
@@ -409,8 +415,10 @@ the current `high` effort trades some reasoning depth for lower latency and a lo
 exhausting the shared reasoning/verdict budget, without changing its 384,000-token ceiling.
 `DEEPSEEK_MAX_DIFF_CHARS` is
 **45,000** characters, set from the worst ratio yet measured; over it the diff is truncated and
-every unread file is injected as a finding, which blocks the pull request until a human
-acknowledges the gap. Neither outcome is one to open a PR into deliberately.
+every unread file is injected as a finding, which blocks the pull request until every gap has been
+read and publicly disposed of. A human may acknowledge that audit; `$process-pr` may do so only
+through its evidence-backed, dated acknowledgement sequence. Neither outcome is one to open a PR
+into deliberately.
 
 **This step verifies the decision Step 5 already took; it is not where that decision belongs.** If
 the estimate there was that this issue is a single pull request, this is where the estimate meets
@@ -489,7 +497,9 @@ describes — a boundary the code already draws, never a character count — so 
 somebody can review as a whole and each stands on its own. **There is no limit of two**: take as
 many parts as the work needs, and say which part is which and how many there are in every
 description. Open each on the part before it rather than waiting for that one to merge — Step 5 says
-why that works now and what it still costs — and state the merge order in every body.
+why that works now and what it still costs — and state that leaf PRs merge inward before their base
+branch's PR merges upward. If the intended topology is parent-first instead, stop for the explicit
+history-rewrite authorization that topology requires.
 
 Also record what Step 5 estimated beside what this measured. Two numbers make the estimate
 falsifiable; one makes it decorative, and this table is calibrated from the pairs.
@@ -504,18 +514,23 @@ Verify each part before opening it — the same measurement, on the branch you a
 
 ```bash
 # From within the worktree, with Step 7's commit already made:
+bash scripts/check-publication-privacy.sh
+bash scripts/check-commit-privacy.sh "origin/$BASE_BRANCH" HEAD
 git push -u origin HEAD
 
-gh pr create \
-  --base "$BASE_BRANCH" \
-  --title "<issue-title>" \
-  --body "$(cat <<'EOF'
+PR_BODY=$(mktemp)
+trap 'rm -f "$PR_BODY"' EXIT
+cat >"$PR_BODY" <<'EOF'
 ## Summary
 
 Closes #<issue-number>
 
 ### Changes
 - <list key changes>
+
+### Review Size
+- Estimated before implementation: <estimate and reasoning>
+- Measured reviewable diff: <REVIEWABLE> characters
 
 ### Gates Run
 - [x] format check (gofmt / cargo fmt)
@@ -530,7 +545,12 @@ Closes #<issue-number>
 ### Out of Scope (Verified)
 <confirm nothing from the Out of Scope section was touched>
 EOF
-)"
+
+bash scripts/check-body-privacy.sh <"$PR_BODY"
+gh pr create \
+  --base "$BASE_BRANCH" \
+  --title "<issue-title>" \
+  --body-file "$PR_BODY"
 ```
 
 **If the pull request's title or body must be corrected, never use `gh pr edit`.** On `gh`

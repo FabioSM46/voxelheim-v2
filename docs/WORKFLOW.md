@@ -24,10 +24,10 @@ The daily dev cycle. Run `/dev-issue <number>` in Claude/OpenCode or
 ```
 1. Fetch issue from GitHub → parse workspace, AC, code pointers
 2. Read AGENTS.md conventions (root + workspace)
-3. Create isolated git worktree, branch from develop
+3. Create isolated git worktree, branch from the planned non-main base (`develop` by default)
 4. Implement (surgical edits, server-authoritative, no new deps)
 5. Run quality gates (fmt, lint, build, test, schemas) — loop until green
-6. Commit, push, open PR targeting develop
+6. Commit, push, open PR targeting that planned base
 7. Cleanup worktree, exit (stateless)
 ```
 
@@ -40,8 +40,9 @@ six-hour sweep and manual dispatch), evaluates the frozen rule, and labels the P
 - `needs-work` — CI failing or changes requested
 - `needs-review` — otherwise (pending, unresolved threads, unread body findings, conflicts)
 
-**Force-cycle**: `/process-pr <number>` reads review feedback, implements fixes, re-runs
-quality gates, pushes.
+**Force-cycle**: `/process-pr <number>` resolves base conflicts, reads review feedback, implements
+fixes, re-runs quality gates, pushes, then resolves or acknowledges findings against the published
+head.
 
 **Autonomous path**: `/develop-iteration` (or `$develop-iteration` in Codex) assigns one agent per
 independent issue, runs safe waves in parallel, routes actionable PRs through `/process-pr`, and
