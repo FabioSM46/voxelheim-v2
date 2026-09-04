@@ -275,8 +275,8 @@ Every change — feature, bugfix, refactor — flows through the same rigorous l
    DeepSeek (`deepseek-v4-flash`, high reasoning) reviews the diff (one automatic round)
 4. **Labeling** — `pr-labeler.yml` applies `READY TO MERGE` only when the frozen
    acceptance rule holds; `/process-pr <n>` force-cycles feedback when you want it now
-5. **Merge** — a human merges to `develop`. Always. `develop → main` promotions re-run the
-   complete matrix
+5. **Merge** — the AI merges ready PRs autonomously into non-main bases; `develop → main`
+   promotions remain human-only and re-run the complete matrix
 
 Read the details:
 
