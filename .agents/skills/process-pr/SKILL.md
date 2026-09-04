@@ -386,10 +386,10 @@ Only after Step 4e verifies the remote head, publish every prepared reply, then 
 
 ```bash
 gh api "repos/$REPO/pulls/<pr-number>/comments/<comment-databaseId>/replies" \
-  --field body="<response naming the pushed fix or rejection evidence>"
+  --field body="<response naming the pushed fix or rejection evidence>" || exit 1
 gh api graphql \
   -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}' \
-  -f id="<THREAD_ID>"
+  -f id="<THREAD_ID>" || exit 1
 ```
 
 For body findings, post one public disposition per finding (fixed with file/test, or rejected with
