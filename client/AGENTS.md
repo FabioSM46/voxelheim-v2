@@ -1448,10 +1448,21 @@ GDD-level architecture, and each gets the sentence that justifies it:
 - **`audiopus`** — libopus, for the proximity voice codec, linked against the system
   `libopus-dev` through `pkg-config` rather than compiled from vendored source with cmake.
 
-The last two are **approved and not yet present**: `Cargo.toml` still carries three, and the
-audio pair lands with the client's audio foundation (#851). They are listed here because the
-budget is spent when the decision is taken, not when the line is added — which is the whole
-point of asking for a discussion first.
+The last two are **declared and not yet consumed**: #851 lands them ahead of the audio module
+that uses them, so the lockfile and the CI package list move once rather than once per pull
+request. The budget is spent when the decision is taken and not when the line is added, which
+is the whole point of asking for a discussion first — and the decision is
+`docs/adr/0001-voice-transport.md`.
+
+**Measured on the pinned toolchain with
+`cargo tree -e normal --target x86_64-unknown-linux-gnu`**, and the number worth knowing is the
+one the lockfile does not give you: `Cargo.lock` gains twenty-seven entries, of which
+twenty-one are the Windows, CoreAudio and Android backends `cpal` carries for platforms this
+client is not built for. On this target the graph grows by **six** — `cpal`, `alsa`,
+`alsa-sys`, `dasp_sample`, `audiopus`, `audiopus_sys` — because `libc`, `bitflags` and
+`cfg-if`, which the ADR counted, were already in Bevy's graph. The filtered package count,
+build dependencies included, goes from 315 to 330; the extra nine are `audiopus_sys`'s build
+scripts, `cmake` among them as a *crate* even on the path that never invokes the binary.
 
 A sixth needs a discussion before a commit — in particular there is still no async runtime and
 no networking framework here, by design: `std::net` plus `std::sync::mpsc` on one thread is the
@@ -1501,9 +1512,10 @@ Two things about that feature choice are deliberate and easy to undo by accident
   at all. If that line is ever deleted, the client silently regresses to the error path.
 
 **A Bevy feature can still add a *system* dependency, and that budget is set by CI.** The
-`client` job installs `libasound2-dev`, `libudev-dev` and `pkg-config` and nothing else — read
-that list from `.github/workflows/ci.yml` before enabling a feature, and treat a successful local
-build as no evidence at all: a developer desktop carries development headers a runner does not,
+`client` job installs `libasound2-dev`, `libudev-dev`, `libopus-dev` and `pkg-config` and
+nothing else — read that list from `.github/workflows/ci.yml` before enabling a feature, and
+treat a successful local build as no evidence at all: a developer desktop carries development
+headers a runner does not,
 so the two hosts disagree exactly where it hurts. Two checks that do settle it:
 
 ```bash
@@ -1516,11 +1528,20 @@ env -u PKG_CONFIG_PATH PKG_CONFIG_LIBDIR=/nonexistent CARGO_TARGET_DIR=/tmp/blin
   cargo build --workspace --locked
 ```
 
-Both pass on the current feature set, `bevy_pbr` included: no package in the 315-package graph
-declares `links`, and the whole client builds from scratch with pkg-config blind — so it needs
-none of the three packages at build time. The only link directives any build script emits are
-`dl` (glibc) and blake3's own bundled assembly. Re-run both after every feature change; a green
-ordinary build proves nothing about the runner.
+**Both used to pass, and since #851 the second one fails. That is the change, not a
+regression.** `alsa-sys` declares `links = "alsa"` and `audiopus_sys` probes `pkg-config` for
+`opus`, so the graph now binds two native libraries where it bound none, and the blind build
+stops at `alsa-sys`'s build script with *"The system library `alsa` required by crate
+`alsa-sys` was not found"* — measured, not inferred. `libasound2-dev` and `libopus-dev` are
+therefore **build** requirements of this client now, not merely packages CI happens to
+install, and `pkg-config` is how both are found.
+
+What that costs is a rule this section could previously state for free: a Bevy *feature* still
+adds no system dependency, but the client as a whole has two, and "it built on my machine"
+proves even less than it did. Re-run both checks after every feature change and after every
+new crate; the second one is now the interesting one, because a crate that quietly falls back
+to a vendored cmake build when `pkg-config` finds nothing is the failure mode
+`docs/adr/0001-voice-transport.md` chose `audiopus` to avoid, and it *succeeds*.
 
 `flatbuffers` is version-matched (`=`) to the flatc release in `.flatc-version`. The generator and
 the runtime move together, and a mismatch is a decode bug that only shows up on the wire.
@@ -2021,9 +2042,10 @@ Five rules hold that down, and they are all in `net/session.rs`:
 thread boundary as a `SessionEvent::Warning` value and `net/mod.rs` logs it. That is what lets a
 test read one back instead of hoping a global logger was installed.
 
-CI's `client` job installs `libasound2-dev`, `libudev-dev` and `pkg-config`; the feature set needs
-none of them at build time (see "Toolchain and dependencies"). What it does need is a **runtime**
-X11 library, because the `x11` feature reaches libX11 through `x11-dl`, which dlopens it when a
+CI's `client` job installs `libasound2-dev`, `libudev-dev`, `libopus-dev` and `pkg-config`; the
+Bevy feature set needs none of them (the two audio crates do — see "Toolchain and
+dependencies"). What the window needs on top of those is a **runtime** X11 library, because
+the `x11` feature reaches libX11 through `x11-dl`, which dlopens it when a
 window is created. That is why CI is unaffected: the gates build and run headless tests, and no
 test opens a window.
 
@@ -2115,7 +2137,8 @@ Recorded here so the next reader does not mistake them for oversights:
   modules it is composed from — and none of them is compilation. Composition (`naga_oil`
   splicing those modules in, naga validating the result) happens in `ShaderCache`, which is only
   ever reached from a `RenderDevice`; the `client` job installs `libasound2-dev libudev-dev
-  pkg-config` and nothing else, so wgpu opens no adapter and there is no software one either.
+  libopus-dev pkg-config` and nothing else, so wgpu opens no adapter and there is no software
+  one either.
   **A shader that does not compile therefore turns nothing red**: Bevy logs the error and the
   water draws with the base material's fragment shader, which looks like water that has stopped
   moving rather than like a failure.

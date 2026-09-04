@@ -214,7 +214,7 @@ jobs:
             -o Acquire::Retries=2 \
             -o Acquire::http::Timeout=15 \
             -o Acquire::https::Timeout=15 \
-            install -y --no-install-recommends libasound2-dev libudev-dev pkg-config
+            install -y --no-install-recommends libasound2-dev libudev-dev libopus-dev pkg-config
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         if: ${{ steps.ws.outputs.present == 'true' }}
         with:

@@ -16,8 +16,9 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-# Three dependencies, all GDD-level architecture. A fourth needs a discussion,
-# not a commit — see client/AGENTS.md.
+# Five dependencies, all GDD-level architecture. A sixth needs a discussion,
+# not a commit — see client/AGENTS.md. The fourth and fifth were argued on the record
+# before either was added: docs/adr/0001-voice-transport.md.
 #
 # `default-features = false` plus an explicit list, because Bevy's `default`
 # feature is `2d + 3d + ui + audio`: it drags in glTF, PBR, animation, image
@@ -36,8 +37,9 @@ publish = false
 # The feature list is bounded by what CI's `client` job installs — read it from
 # .github/workflows/ci.yml, never from a local build succeeding, because a
 # developer desktop carries development headers a runner does not. Today that
-# budget is `libasound2-dev libudev-dev pkg-config`, and every feature here needs
-# *none* of them: nothing in this graph asks pkg-config for anything.
+# budget is `libasound2-dev libudev-dev libopus-dev pkg-config`, and every feature here
+# needs *none* of them: nothing in Bevy's graph asks pkg-config for anything. The three
+# development packages are there for the two audio crates below, not for a Bevy feature.
 #
 # `x11` and not `wayland`, deliberately. `x11` links nothing at build time —
 # winit reaches libX11 through `x11-dl`, which dlopens at runtime — whereas
@@ -94,7 +96,7 @@ flatbuffers = "=25.12.19"
 # releases, and a crypto backend that changes under a toolchain upgrade is one
 # nobody reviewed. Both build here: `cc`, `gcc`, `cmake` and `perl` are present on
 # the ubuntu-latest runner image and on the development box, so neither would
-# change the apt list CI installs (`libasound2-dev libudev-dev pkg-config`).
+# change the apt list CI installs (`libasound2-dev libudev-dev libopus-dev pkg-config`).
 # `ring` is the lighter of the two — it needs `cc` alone, where `aws-lc-rs` also
 # wants cmake and perl — and the feature budget this file keeps says take the
 # lighter one. **Verified against the built tree, not against this paragraph**:
@@ -108,6 +110,47 @@ flatbuffers = "=25.12.19"
 # `rustls::pki_types` re-exports what a custom verifier needs, so this stays one
 # crate rather than one plus `rustls-pki-types`.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+
+# The fourth and fifth crates. The discussion client/AGENTS.md asks for before a new
+# dependency is on the record as **docs/adr/0001-voice-transport.md** rather than waived,
+# and the evidence for both entries below lives there: read it before changing either.
+#
+# **Both are declared here ahead of the code that consumes them**, deliberately: the
+# lockfile and CI's apt list are what a new dependency actually costs everybody else, and
+# they are cheaper to move once than once per pull request. The audio module that opens a
+# device and runs a mixer is the next half of #851; nothing encodes at all until #852.
+#
+# `cpal` — the microphone and the speakers. The alternative was `bevy_audio`, and it is
+# not a near miss: Bevy's audio feature is playback-only, so it cannot open a capture
+# device at all and the client needs `cpal` whichever way voice goes. Having taken it for
+# capture, `bevy_audio` would then be a *second* owner of the output device beside it, and
+# the mixing, the bus gains and the spatialisation of #854 all have to happen in one place
+# or they cannot be reasoned about. It costs six transitive packages here — `alsa`,
+# `alsa-sys`, `libc`, `bitflags`, `cfg-if`, `dasp_sample` — and no async runtime.
+# `alsa-sys` links the system ALSA library through `pkg-config`, and `libasound2-dev` and
+# `pkg-config` were already installed by CI, so **`cpal` changes the CI system-dependency
+# list not at all.**
+cpal = "0.16"
+
+# `audiopus` — libopus, for the proximity voice codec of #852. Nothing encodes yet; the
+# crate is taken now so the lockfile and the CI package list move once rather than twice.
+#
+# **`audiopus` and not `opus` 0.4.0.** Both are safe wrappers over the same frozen C
+# library and they differ only in how they *get* it: `audiopus_sys` probes `pkg-config`
+# first on Unix/GNU targets, while `opus` depends on `opusic-sys`, which bundles libopus
+# and builds it with cmake by default. The ADR verified that by scratch build with a
+# `cmake` on `PATH` that fails on sight — `audiopus` built clean through `pkg-config`,
+# `opus` failed on the blocked cmake with a system libopus sitting right there. What
+# linking the system library buys is one apt package, `libopus-dev`, against cmake in
+# every clean build and a copy of libopus whose security updates would arrive through a
+# crate release instead of through the distribution.
+#
+# The cost of saying yes, stated rather than buried: 0.3.0-rc.0 is a release candidate
+# from 2021 and `audiopus_sys` has not moved in five years. The C API it binds has been
+# stable since Opus 1.0 in 2012, #852 uses four functions of it, and the exit is named in
+# the ADR — `libopus_sys` 0.4, which keeps the `pkg-config` property for the price of a
+# hand-written `unsafe` layer. Two lockfile entries and no runtime dependency beyond them.
+audiopus = "0.3.0-rc.0"
 
 # No `[lints] unsafe_code = "forbid"`, deliberately: flatc's output is full of
 # `unsafe` accessor bodies, and a crate-level `forbid` cannot be relaxed by an

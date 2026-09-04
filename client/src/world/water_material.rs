@@ -613,9 +613,10 @@ mod tests {
     /// the render app's `PipelineCache` read back for an `Err`.
     ///
     /// **`#[ignore]`, because CI has no render device.** The `client` job installs
-    /// `libasound2-dev libudev-dev pkg-config` and nothing else, so there is no adapter
-    /// for wgpu to open and no software one either; the render sub-app is never created
-    /// and this test could only ever report the absence of a GPU. It is kept rather than
+    /// `libasound2-dev libudev-dev libopus-dev pkg-config` and nothing else, so there is
+    /// no adapter for wgpu to open and no software one either; the render sub-app is
+    /// never created and this test could only ever report the absence of a GPU. It is
+    /// kept rather than
     /// deleted because it is the only thing in this repository that can answer the
     /// question, it runs in ten seconds on a workstation, and it was verified to
     /// **fail** on a deliberately broken shader before it was trusted to pass on a
