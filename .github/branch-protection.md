@@ -45,7 +45,7 @@ sits in a ruleset that lists the admin role. The API reports this back per rules
 - **`required_approving_review_count` is 0 on purpose.** GitHub does not let an author approve
   their own pull request, so on a solo repository requiring one approval would make every PR
   unmergeable except by bypass — turning the review requirement into a rubber stamp on the bypass
-  checkbox. The human merge action *is* the review here.
+  checkbox. The frozen-rule evaluation and evidence-backed AI disposition are the review gate here.
 - **`strict_required_status_checks_policy` is false** (branches need not be up to date with the
   base). With several PRs open in parallel, requiring it would mean re-pushing every branch after
   each merge for a check that a red `ci-gate` would catch anyway. Turn it on if the parallel waves
@@ -54,7 +54,7 @@ sits in a ruleset that lists the admin role. The API reports this back per rules
   legitimately skips runs once its round cap is spent, so requiring `review` would deadlock any PR
   whose second push produced no review. `ci-gate` is the one stable check, and it owns the
   branch-aware workload rule:
-  - `develop`: changed-area-selected workspace jobs and the automation job must succeed;
+  - non-`main`: changed-area-selected workspace jobs and the automation job must succeed;
     explicitly unselected jobs may report `SKIPPED`.
   - `main`: every workspace that exists at the ref, plus the automation job, must run and succeed.
     A selector may be false only because the workspace is not scaffolded yet; `SKIPPED` is

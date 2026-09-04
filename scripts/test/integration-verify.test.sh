@@ -288,11 +288,12 @@ assert set(reported.split()) == workload, (
     f"{sorted(workload)} — the alarm would not name the job that failed"
 )
 
-# ── ci.yml's pull-request contract is untouched ──────────────────────────────
+# ── ci.yml's pull-request contract remains PR-only ───────────────────────────
 ci_on = exactly_one(r"^on:\s*$\n([\s\S]*?)(?=^\S)", ci, "ci.yml on: block")
-assert ci_on.strip() == "pull_request:\n    branches: [main, develop]".strip(), (
-    "ci.yml's trigger changed. Post-merge verification lives in its own workflow "
-    f"precisely so this stays as it was; got:\n{ci_on}"
+assert ci_on.strip() == "pull_request:", (
+    "ci.yml must run on every PR base so feature-branch sub-PRs receive ci-gate; "
+    "post-merge develop verification still belongs to Integration; "
+    f"got:\n{ci_on}"
 )
 assert "integration" not in job_block(ci, "ci_gate"), (
     "ci-gate must know nothing about post-merge verification"

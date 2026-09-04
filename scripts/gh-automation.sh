@@ -1259,8 +1259,9 @@ cmd_pr_check_label() {
 
 # ── is-ready-to-merge — Exit 0 if frozen rule met ───────────────────────────
 
-# The base branch a merge may never target. Merging into `develop` is the AI's call
-# (#217); merging into `main` is not, and a deny rule cannot express that difference —
+# The base branch a merge may never target. #217 made merging into `develop` the AI's call;
+# the repository owner later extended that authorization to stacked non-main feature bases.
+# Merging into `main` is not authorized, and a deny rule cannot express that difference —
 # `gh pr merge <n>` names no branch, because the base is a property of the pull request
 # rather than of the command line. So the check has to read the base and refuse.
 #
@@ -1276,16 +1277,30 @@ MERGE_FORBIDDEN_BASE="${MERGE_FORBIDDEN_BASE:-main}"
 
 cmd_pr_merge() {
   local pr="${1:-}"
-  [ -n "$pr" ] || die "usage: pr-merge <pr> [--squash|--merge|--rebase]"
-  local method="${2:---squash}"
-  case "$method" in
-    --squash|--merge|--rebase) ;;
-    *) die "unknown merge method '${method}' (expected --squash, --merge or --rebase)" ;;
-  esac
+  [ -n "$pr" ] || die "usage: pr-merge <pr> [--head <sha>] [--squash|--merge|--rebase]"
+  shift
+  local method="--squash" expected_head=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --head)
+        [ "$#" -ge 2 ] || die "--head requires a commit SHA"
+        expected_head="$2"
+        shift 2
+        ;;
+      --squash|--merge|--rebase)
+        method="$1"
+        shift
+        ;;
+      *) die "unknown merge option '${1}' (expected --head <sha>, --squash, --merge or --rebase)" ;;
+    esac
+  done
+  if [ -n "$expected_head" ] && [[ ! "$expected_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    die "invalid expected head SHA '${expected_head}'"
+  fi
   require_gh
 
   # Fails closed, for the same reason every count in cmd_pr_status_json does: a base
-  # that could not be read is not evidence that the base is `develop`. Refuse and say
+  # that could not be read is not evidence that the base is a permitted non-main target. Refuse and say
   # which read failed, rather than merging on an assumption.
   local base
   if ! base=$(gh pr view "$pr" --json baseRefName --jq '.baseRefName' 2>&1); then
@@ -1297,8 +1312,13 @@ cmd_pr_merge() {
     die "PR #${pr} targets '${base}'. Merging into '${MERGE_FORBIDDEN_BASE}' is human-only (#217) — refusing."
   fi
 
+  local -a merge_args=(pr merge "$pr" "$method")
+  if [ -n "$expected_head" ]; then
+    merge_args+=(--match-head-commit "$expected_head")
+  fi
+
   local out
-  if ! out=$(gh pr merge "$pr" "$method" 2>&1); then
+  if ! out=$(gh "${merge_args[@]}" 2>&1); then
     die "merge of PR #${pr} into '${base}' failed: ${out}"
   fi
   echo "PR #${pr} merged into ${base} (${method#--})"
@@ -1825,8 +1845,8 @@ Commands:
                                        round cap (ref defaults to develop)
   pr-check-label <pr> <label>          Exit 0 present, 1 absent, 2 undetermined
   is-ready-to-merge <pr>              Exit 0 if frozen rule met
-  pr-merge <pr> [--squash|--merge|--rebase]  Merge a PR; refuses base 'main' and
-                                       fails closed on an unreadable base
+  pr-merge <pr> [--head <sha>] [method]  Merge a PR; refuses base 'main', optionally
+                                       binds the head, and fails closed on unreadable base
   iteration-advance                   Advance completion-driven iteration ceremonies
   integration-report                  File (or comment on) the alarm for a develop that
                                       failed post-merge verification. Reads
