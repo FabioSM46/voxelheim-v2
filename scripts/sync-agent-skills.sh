@@ -75,7 +75,8 @@ render_codex_skill() {
     skill_body "$source" | sed \
       -e 's|/dev-issue|$dev-issue|g' \
       -e 's|/process-pr|$process-pr|g' \
-      -e 's|/scrum-master|$scrum-master|g'
+      -e 's|/scrum-master|$scrum-master|g' \
+      -e 's|/develop-iteration|$develop-iteration|g'
   } >"$output"
 }
 

@@ -1328,8 +1328,8 @@ class ReviewsNeverClaimAnActionTests(unittest.TestCase):
         # cautious. Resolving a review thread is the GraphQL `resolveReviewThread` mutation,
         # and this module makes no GraphQL call of any kind. If it ever gains one, this test
         # failing is the right way to be told: the prompt clause would need revisiting the
-        # same day, and the frozen acceptance rule has a strong opinion about a bot that can
-        # clear its own findings — `unresolved_threads == 0` must keep meaning a human looked.
+        # same day. The reviewer must not clear its own findings: a separate agent may resolve
+        # them only after replying with an evidence-backed disposition, preserving the audit trail.
         source = Path(deepseek_review.__file__).read_text().lower()
 
         self.assertNotIn("graphql", source)

@@ -9,7 +9,8 @@ metadata:
 
 # dev-issue — Issue to Implementation Skill
 
-Triggers: `/dev-issue <issue-number>` or `/dev-issue <issue-url>`
+Triggers: `/dev-issue <issue-number>` or `/dev-issue <issue-url>`, optionally followed by
+`--base <branch>` when an orchestrator is assembling work on a non-main feature branch.
 
 ## Purpose
 
@@ -66,9 +67,20 @@ Before writing any code:
 5. If the change touches `schemas/*.fbs`, remember the contract rule: a schema change rebuilds BOTH sides. Generated bindings live under `gen/` directories (plus flatc's `*_generated.rs` naming on the Rust side) and are committed — regenerate them, never hand-edit them, and expect the review bot to exclude them from the diff it reads.
 6. Use `rg --files` and `rg` to find existing patterns relevant to the change
 
+### Step 3a: Resolve the PR Base
+
+Set `BASE_BRANCH=develop` unless the invocation explicitly supplies `--base <branch>`. A base
+override is used by `/develop-iteration` for feature branches and their sub-branches; it changes
+both the branch point and the pull request target.
+
+Verify that the selected remote branch exists before creating the worktree. Refuse an empty base
+and refuse `main`: this skill never opens or retargets a pull request to `main`. When reusing an
+existing branch or PR, verify its actual base matches the requested base rather than silently
+retargeting it.
+
 ### Step 4: Create Worktree and Branch
 
-All branches are created from `develop`.
+Branches are created from the selected `BASE_BRANCH` (`develop` by default).
 
 **Branch naming:**
 
@@ -104,6 +116,9 @@ cd "$REPO_ROOT"
 SLUG=$(echo "<issue-title>" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-//;s/-$//' | tr '-' '\n' | head -5 | paste -sd '-')
 BRANCH="<type-prefix><issue-number>-${SLUG}"
 WORKTREE_DIR="$(dirname "$REPO_ROOT")/voxelheim-v2-issue-<issue-number>"
+BASE_BRANCH="<develop-or-explicit-base>"
+[ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" != "main" ] || { echo "Refusing PR base: $BASE_BRANCH"; exit 1; }
+git fetch origin "$BASE_BRANCH"
 
 # Reuse an existing worktree for this branch if one is already checked out.
 EXISTING=$(git worktree list --porcelain | awk -v b="refs/heads/$BRANCH" '
@@ -115,7 +130,6 @@ if [ -n "$EXISTING" ]; then
   WORKTREE_DIR="$EXISTING"
   cd "$WORKTREE_DIR"
 else
-  git fetch origin develop
   # Three states, not two: the branch can exist with no worktree. Step 10's
   # `git worktree remove` deletes the worktree and keeps the branch (it holds the
   # PR's commits), so any re-run or retry lands here. `worktree add -b` would die
@@ -125,7 +139,7 @@ else
     echo "Branch $BRANCH exists with no worktree — checking it out"
     git worktree add "$WORKTREE_DIR" "$BRANCH"
   else
-    git worktree add -b "$BRANCH" "$WORKTREE_DIR" origin/develop
+    git worktree add -b "$BRANCH" "$WORKTREE_DIR" "origin/$BASE_BRANCH"
   fi
   cd "$WORKTREE_DIR"
 fi
@@ -172,7 +186,7 @@ pull requests went over it anyway.
 **And know what the ordering costs, because it is the part nobody anticipates.** The second half
 cannot be opened until the first has merged — opened earlier it carries the first half's commits and
 its diff is straight back over the cap — and since `pr-merge` squashes, the second branch then needs
-a `git rebase --onto origin/develop <old-base>` replay before it will push a clean diff. Deciding up
+a `git rebase --onto "origin/$BASE_BRANCH" <old-base>` replay before it will push a clean diff. Deciding up
 front does not remove that cost. It lets you spend it deliberately, on a seam chosen for how the two
 halves read rather than for damage control, instead of discovering it at the end of an issue that
 was planned as one pull request and had been scheduled as parallel work. Iteration 30 paid it that
@@ -214,7 +228,8 @@ the verdict true, never to quieten it, and not to paste a `cache clean` into the
 either, since the cache is what keeps the gate cheap enough to run every time. CI never sees
 this: every run starts on a clean runner holding no other checkout's cache.
 
-Run from within the worktree, for **every** workspace the diff touches (determine them from `git diff --name-only origin/develop...HEAD`):
+Run from within the worktree, for **every** workspace the diff touches (determine them from
+`git diff --name-only "origin/$BASE_BRANCH"...HEAD`):
 
 | Workspace | Gate command |
 | --------- | ------------ |
@@ -337,7 +352,7 @@ acknowledges the gap. Neither outcome is one to open a PR into deliberately.
 the estimate there was that this issue is a single pull request, this is where the estimate meets
 the actual bytes.
 
-**Commit first, then measure.** `git diff origin/develop...HEAD` compares *commits*: run it on an
+**Commit first, then measure.** `git diff "origin/$BASE_BRANCH"...HEAD` compares *commits*: run it on an
 uncommitted tree and it answers for a branch that has not changed, which is `0` however much work
 is sitting in the working directory. A guard that reports `0` is not a guard, and it is silent —
 exactly the shape of failure this step exists to remove. Committing costs nothing here, because
@@ -363,7 +378,7 @@ Implements #<issue-number>
 # matches on the *basename* at any depth (`is_generated_path` in
 # .github/scripts/deepseek_review.py), so the pair is what mirrors it.
 # `scripts/test/diff-measure-parity.test.sh` pins this list against that function.
-REVIEWABLE=$(git diff origin/develop...HEAD -- . \
+REVIEWABLE=$(git diff "origin/$BASE_BRANCH"...HEAD -- . \
   ':(exclude)gen/*' ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
   ':(exclude)Cargo.lock' ':(exclude)*/Cargo.lock' \
   ':(exclude)go.sum' ':(exclude)*/go.sum' | wc -m)
@@ -386,8 +401,8 @@ decision from is an output, and outputs are pinned by tests here.** This one cou
 look wrong, because a diff size has no expected value to compare against.
 
 **When Step 5 split the issue, mind what the three-dot diff measures against.** The first half is
-measured against `origin/develop` like any other branch. The second half is branched from the
-first, so `origin/develop...HEAD` there still resolves to the first half's base as its merge base
+measured against `origin/$BASE_BRANCH` like any other branch. The second half is branched from the
+first, so `origin/$BASE_BRANCH...HEAD` there still resolves to the first half's base as its merge base
 and the diff carries the first half's commits with it: measured before the first half has merged
 and the rebase replay below has been done, it reads as over the cap however correctly sized the
 half is. Measure the second half after that replay — until then the number is not the one the cap
@@ -415,7 +430,7 @@ Verify each half before opening it — the same measurement, on the branch you a
 git push -u origin HEAD
 
 gh pr create \
-  --base develop \
+  --base "$BASE_BRANCH" \
   --title "<issue-title>" \
   --body "$(cat <<'EOF'
 ## Summary
@@ -448,7 +463,11 @@ helper writes through REST and reads both requested fields back before reporting
 
 Only tick a box you actually ran. An unticked box with a one-line reason is useful; a ticked box that is not true poisons every later review.
 
-**PR target**: Default is `develop`. PRs targeting `main` are allowed for hotfixes. NEVER push directly to `main`, and NEVER merge a pull request into `main` — that one stays human-only. Merging into `develop` is authorized (#217), but **not from this skill**: `/dev-issue` is stateless and exits at PR creation, before CI has reported anything. Merging is a decision for a context that has read the result.
+**PR target**: Default is `develop`; an explicit `--base` may target another feature branch.
+Never open or retarget a PR to `main`, never push directly to `main`, and never merge a pull request
+into `main`. Merging into any non-main base is authorized, but **not from this skill**:
+`/dev-issue` is stateless and exits at PR creation, before CI has reported anything. Merging is a
+decision for a context that has read the result.
 
 ### Step 9: Exit
 

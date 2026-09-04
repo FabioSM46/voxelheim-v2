@@ -25,7 +25,9 @@ DeepSeek's review job is budgeted at `DEEPSEEK_REQUEST_TIMEOUT_SECONDS` (2700) �
 
 The review round budget is `MAX_ROUNDS: "1"` (set in `.github/workflows/deepseek-pr-review.yml`). Exactly one Mode A full review is automatic; thread replies (Mode B) do not spend the budget and continue indefinitely. So the normal execution of this skill is **a single pass**, not a loop. Step 4 is written that way.
 
-Because `pull_request` runs check out the merge ref, the workflow that actually executes is the **base branch's** copy. Read `develop`'s `deepseek-pr-review.yml` when diagnosing review behaviour, never the feature branch's.
+Because `pull_request` runs check out the merge ref, the workflow that actually executes is the
+**base branch's** copy. Read the PR's actual base branch version of
+`deepseek-pr-review.yml` when diagnosing review behaviour; do not assume the base is `develop`.
 
 ## Workflow
 
@@ -417,12 +419,16 @@ PR #<number>: <title>
 ├── Threads:     ✅ 0 unresolved
 ├── Body finds:  ✅ none unread (or: N left unacknowledged with the blocking reason)
 ├── Label:       READY TO MERGE
-└── Status:      Ready for manual review and merge
+└── Status:      Ready for an autonomous non-main merge
 ```
 
-Report each line from what `pr-status` actually printed. Remind the user: "PR is ready for your review. Merge when satisfied."
+Report each line from what `pr-status` actually printed. A standalone `/process-pr` invocation
+returns after remediation; an orchestrator such as `/develop-iteration` may now perform the fresh
+readiness check and merge.
 
-**DO NOT auto-merge.** The pipeline only labels; the human is the merge gate.
+**Do not merge from this remediation skill.** This is a separation of responsibilities, not a
+human gate: autonomous merge decisions for non-main bases belong to the caller that reads the
+finished result and the PR's ordering constraints.
 
 ## Guardrails
 
@@ -443,9 +449,10 @@ Report each line from what `pr-status` actually printed. Remind the user: "PR is
 - If DeepSeek does not arrive within `DEEPSEEK_WAIT_SECONDS` (5700), report it as a probable job-cap timeout and exit the loop — do not treat it as "no findings".
 - **GraphQL rate limits**: one wait is at most 190 polls (5700s ÷ 30s) at ~3–5 points each — under 950 points. GitHub allows 5000 points/hour. Avoid concurrent force-cycles across multiple PRs.
 - NEVER push directly to `main` (`git push origin main`), and never merge a pull request into
-  `main` — human-only. Merging into `develop` is authorized (#217), through
-  **`bash scripts/gh-automation.sh pr-merge <pr>`**: it refuses a `main` base by name and fails
-  closed on one it cannot read (#218). Read the pull-request body before you merge — an ordering
+  `main` — human-only. Merging into any non-main base is authorized through
+  **`bash scripts/gh-automation.sh pr-merge <pr> --head <observed-sha>`**: it refuses a `main` base
+  by name, fails closed on one it cannot read (#218), and rejects a head that moved after the
+  readiness read. Read the pull-request body before you merge — an ordering
   stated against another PR binds whoever merges, and the frozen rule cannot see it (#214 and #215
   were each `ready_to_merge: true`, and merging one alone broke `develop` at runtime with nothing
   turning red).
