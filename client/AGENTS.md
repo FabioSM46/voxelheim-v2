@@ -1520,6 +1520,11 @@ is wrong. (`docs/adr/0001-voice-transport.md` is **not** the authority for that 
 cited for it here in error — it decides how voice is transported and mentions a microphone once,
 about `bevy_audio` being playback-only.)
 
+**A stream that dies before it ever runs is paced like any other failure.** It is the one path
+where the hold loop's body never executes, so nothing waits and nothing is throttled unless
+something says so — measured at 456 654 output reopens and 588 591 capture reopens in 200 ms
+before `stopped` existed, under a module doc claiming the opposite. `failures` is therefore
+cleared by a stream that *held*, never by one that merely opened.
 
 `Capture` is `Mixer`'s mirror: a lock-free ring the callback pushes into and the same rule about
 what may run in a callback. The samples in it are the *device's own*, interleaved at whatever it

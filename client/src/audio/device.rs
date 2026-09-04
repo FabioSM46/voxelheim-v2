@@ -121,6 +121,29 @@ const fn why(loss: u8) -> &'static str {
     }
 }
 
+/// What a supervisor does with a stream that stopped: name it, and pace what comes next.
+///
+/// **`held` is the whole of the distinction, and without it both loops spin.** A stream that
+/// ran and then failed is reopened at once, because a device that was working a moment ago
+/// probably still exists. A stream that never ran — the error callback fired while `open` was
+/// still on the stack, which is exactly the case the loss code is cleared early for — leaves
+/// the hold loop's body unexecuted, so nothing has waited and nothing has been throttled.
+/// Measured at [`Pace::REAL`] before this existed: 456 654 output reopens and 588 591 capture
+/// reopens in 200 ms, under a module doc claiming that the retry is a wait and that the log is
+/// throttled. Found by review on #919.
+fn stopped(what: &str, loss: u8, held: bool, failures: &mut u32, watch: &Watch, pace: Pace) {
+    if held {
+        *failures = 0;
+        warn!("{what} stopped: {}. Reopening.", why(loss));
+        return;
+    }
+    if failures.is_multiple_of(FAILURE_LOG_EVERY) {
+        warn!("{what} will not stay open: {}. Retrying.", why(loss));
+    }
+    *failures = failures.saturating_add(1);
+    watch.rest(pace.after_failure);
+}
+
 /// Which device the player asked for, and which ones the host named.
 ///
 /// **The settings tab's whole view of the device**, and the only state crossing between a
@@ -362,19 +385,24 @@ fn supervise<H: OutputHost>(
         watch.playing();
         match opened(host, wanted.as_deref(), mixer, watch) {
             Ok((stream, format)) => {
-                failures = 0;
-                info!(
-                    "audio output: {} at {} Hz, {} channel(s)",
-                    format.shown(),
-                    format.sample_rate,
-                    format.channels
-                );
+                // Not reset here any more: a stream that never runs must keep counting, or the
+                // throttle in `stopped` never engages. It is cleared by a stream that held.
+                if failures == 0 {
+                    info!(
+                        "audio output: {} at {} Hz, {} channel(s)",
+                        format.shown(),
+                        format.sample_rate,
+                        format.channels
+                    );
+                }
                 // Refreshed on an open rather than on a poll: an open is where this
                 // machine's devices most recently changed, and is rare enough to enumerate.
                 choice.publish(host.device_names());
 
+                let mut held = false;
                 while !watch.stopping() && watch.loss() == PLAYING {
                     watch.rest(pace.playing);
+                    held = true;
                     // Two things the error callback cannot see. The first is the player
                     // choosing a different device.
                     if choice.wanted() != wanted {
@@ -397,7 +425,7 @@ fn supervise<H: OutputHost>(
                 // with two streams open on one device.
                 drop(stream);
                 if !watch.stopping() {
-                    warn!("the audio stream stopped: {}. Reopening.", why(loss));
+                    stopped("the audio stream", loss, held, &mut failures, watch, pace);
                 }
             }
             Err(err) => {
@@ -869,15 +897,20 @@ fn supervise_capture<H: InputHost>(
         watch.playing();
         match opened_capture(host, capture, watch) {
             Ok((stream, format)) => {
-                failures = 0;
-                info!(
-                    "voice capture: {} at {} Hz, {} channel(s)",
-                    format.shown(),
-                    format.sample_rate,
-                    format.channels
-                );
+                // See the output supervisor: cleared by a stream that held, not by one that
+                // opened, so a stream that dies on every attempt is still throttled.
+                if failures == 0 {
+                    info!(
+                        "voice capture: {} at {} Hz, {} channel(s)",
+                        format.shown(),
+                        format.sample_rate,
+                        format.channels
+                    );
+                }
+                let mut held = false;
                 while !watch.stopping() && watch.loss() == PLAYING && capture.wanted() {
                     watch.rest(pace.playing);
+                    held = true;
                 }
                 let loss = watch.loss();
                 let closed_on_request = !capture.wanted() && loss == PLAYING;
@@ -888,8 +921,9 @@ fn supervise_capture<H: InputHost>(
                     // Nothing to say: the app is going away.
                 } else if closed_on_request {
                     info!("voice capture closed");
+                    failures = 0;
                 } else {
-                    warn!("voice capture stopped: {}. Reopening.", why(loss));
+                    stopped("voice capture", loss, held, &mut failures, watch, pace);
                 }
             }
             Err(err) => {
@@ -1582,6 +1616,8 @@ mod tests {
         captured: Mutex<Vec<f32>>,
         /// Makes the next `open` report a loss while `open` is still on the stack.
         lose_while_opening: AtomicBool,
+        /// The same, for every `open` rather than the next one.
+        always_lose_while_opening: AtomicBool,
         /// The capture's sample rate when each `start` was called — how a test sees whether
         /// the format was recorded before the callback could run.
         rate_at_start: Mutex<Vec<u32>>,
@@ -1620,7 +1656,9 @@ mod tests {
                     _ => answers.pop_front().expect("a queued answer"),
                 }
             };
-            if self.lose_while_opening.swap(false, Ordering::Relaxed) {
+            if self.lose_while_opening.swap(false, Ordering::Relaxed)
+                || self.always_lose_while_opening.load(Ordering::Relaxed)
+            {
                 watch.lose(DEVICE_GONE);
             }
             let format = answer?;
@@ -1775,6 +1813,95 @@ mod tests {
             Some((48_000, 1, 1)),
             "the third attempt's format was never recorded"
         );
+    }
+
+    /// **A microphone that will not open is a wait, not a spin** — and the module doc says so,
+    /// which until #919 it had no right to on either supervisor. Mutation-checked: deleting
+    /// `watch.rest(pace.after_failure)` from the `Err` arm left the whole suite green before
+    /// this test existed.
+    #[test]
+    fn a_failing_capture_open_waits_rather_than_spinning() {
+        let host = FakeInput::answering(vec![Err("no default input device".to_owned())]);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || {
+                supervise_capture(
+                    &host,
+                    &capture,
+                    &watch,
+                    Pace {
+                        playing: Duration::from_millis(1),
+                        after_failure: Duration::from_secs(2),
+                    },
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            host.opens(),
+            1,
+            "one attempt, then a wait — a retry loop that spun would have made hundreds"
+        );
+
+        // And the wait is interruptible: stopping does not have to outlast it.
+        let stopped = Instant::now();
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+        assert!(stopped.elapsed() < Duration::from_secs(2));
+    }
+
+    /// **A stream that dies before it ever runs is paced and throttled like any other
+    /// failure.** It is the one path where the hold loop's body never executes, so nothing
+    /// waits unless something says so — measured at 588 591 reopens in 200 ms before #919.
+    #[test]
+    fn a_capture_stream_that_never_runs_is_not_reopened_in_a_spin() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        // Every attempt loses the stream while `open` is still on the stack.
+        host.always_lose_while_opening
+            .store(true, Ordering::Relaxed);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || {
+                supervise_capture(
+                    &host,
+                    &capture,
+                    &watch,
+                    Pace {
+                        playing: Duration::from_millis(1),
+                        after_failure: Duration::from_secs(2),
+                    },
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(60));
+        let opens = host.opens();
+        assert!(
+            opens <= 2,
+            "a stream that never ran was reopened {opens} times in 60 ms"
+        );
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
     }
 
     /// **The first press must not wait out a poll.** `AudioCapture::listen` wakes the
