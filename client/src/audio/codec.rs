@@ -84,18 +84,33 @@ pub enum Missing {
     FromTheNext,
 }
 
+/// How much room the packet buffer has beyond the contract's ceiling.
+///
+/// **The buffer is deliberately larger than the limit, so that exceeding the limit is
+/// observable.** libopus takes the output buffer's length as a hard cap on *this frame* and
+/// re-encodes to fit it — it does not error, and it does not merely truncate. Measured on the
+/// linked library, encoding one 20 ms frame that wants 98 bytes: a 97-byte buffer answers
+/// `Ok(52)`, a 10-byte buffer answers `Ok(9)`, and a **one-byte** buffer answers `Ok(1)`. So a
+/// buffer of exactly [`MAX_OPUS_BYTES`] cannot detect anything: it would quietly hand back a
+/// degraded frame and every name in this file would say the ceiling had been enforced.
+///
+/// Four times the ceiling is past what any legal configuration of this encoder produces — a
+/// 20 ms frame first reaches 400 bytes at 160 kbit/s, and this one runs at 24 — so libopus
+/// writes what it actually wanted to write, and [`VoiceEncoder::encode`] compares it.
+const PACKET_HEADROOM: usize = 4;
+
 /// One speaker's encoder: 20 ms of mono in, an Opus packet out.
 ///
-/// **The packet buffer is [`MAX_OPUS_BYTES`] and that is the ceiling check.** `net/codec.rs`
-/// deliberately does not enforce the contract's limit — a refusal there could only drop a
-/// frame — so it is enforced here, where the thing that decides a frame's length lives.
-/// libopus refuses to write past the buffer it is given, so an encoder configured to produce
-/// more than the contract allows fails loudly at the first frame rather than sending packets
-/// a relay silently drops.
+/// **The contract's ceiling is checked here, and `net/codec.rs` says why it is not checked
+/// there**: a refusal at the wire could only drop a frame, where this is beside the bitrate —
+/// the thing that decides a frame's length. See [`PACKET_HEADROOM`] for why the check is a
+/// comparison rather than the buffer's own size, which is what the review on #918 found this
+/// file claiming and not doing.
 #[derive(Debug)]
 pub struct VoiceEncoder {
     encoder: Encoder,
-    /// Reused across frames, so encoding fifty times a second allocates nothing.
+    /// Reused across frames, so encoding fifty times a second allocates nothing. Larger than
+    /// the ceiling on purpose — see [`PACKET_HEADROOM`].
     packet: Vec<u8>,
 }
 
@@ -122,7 +137,7 @@ impl VoiceEncoder {
             .map_err(|err| format!("cannot set the expected packet loss: {err}"))?;
         Ok(Self {
             encoder,
-            packet: vec![0; MAX_OPUS_BYTES],
+            packet: vec![0; MAX_OPUS_BYTES * PACKET_HEADROOM],
         })
     }
 
@@ -143,7 +158,30 @@ impl VoiceEncoder {
             .encoder
             .encode_float(frame, &mut self.packet)
             .map_err(|err| format!("cannot encode a voice frame: {err}"))?;
+        // **The ceiling check, and it has to be this rather than the buffer's size.** See
+        // `PACKET_HEADROOM`: a buffer of exactly `MAX_OPUS_BYTES` would make libopus produce
+        // a degraded frame that fits instead of the frame it wanted, and nothing here could
+        // tell the two apart.
+        if written == 0 || written > MAX_OPUS_BYTES {
+            return Err(format!(
+                "the voice encoder produced {written} bytes, and a relayed frame is 1 to \
+                 {MAX_OPUS_BYTES}"
+            ));
+        }
         Ok(&self.packet[..written])
+    }
+
+    /// An encoder at `bitrate` rather than [`VOICE_BITRATE`]. Test-only, and the only way to
+    /// reach the ceiling check: at 24 kbit/s a 20 ms frame is about sixty bytes, and a guard
+    /// no test can make fire is a guard nobody knows the shape of.
+    #[cfg(test)]
+    fn at_bitrate(bitrate: Bitrate) -> Result<Self, String> {
+        let mut encoder = Self::new()?;
+        encoder
+            .encoder
+            .set_bitrate(bitrate)
+            .map_err(|err| format!("cannot set the voice bitrate: {err}"))?;
+        Ok(encoder)
     }
 
     /// What the encoder is actually running at, read back from libopus rather than from the
@@ -331,6 +369,56 @@ mod tests {
         );
     }
 
+    /// **The ceiling check, made to fire.** At 24 kbit/s a frame is nowhere near 400 bytes, so
+    /// the guard is only reachable through an encoder configured past what this client uses —
+    /// and a guard no test can make fire is a guard nobody knows the shape of.
+    #[test]
+    fn a_frame_over_the_contracts_ceiling_is_refused_rather_than_sent() {
+        let mut encoder = VoiceEncoder::at_bitrate(Bitrate::Max).expect("libopus is linked");
+        let refusal = encoder
+            .encode(&frame(300.0, 0.7, 0))
+            // **Mapped to a length before the failure message can exist.** `expect_err`
+            // formats the `Ok` value, and the `Ok` value here is an Opus packet — which
+            // running this test against a deliberately broken guard duly printed in full.
+            // Nothing writes a voice frame down, and a test's failure output is a published
+            // surface like any other.
+            .map(<[u8]>::len)
+            .expect_err("a frame past the contract's ceiling was handed back");
+        assert!(refusal.contains(&MAX_OPUS_BYTES.to_string()), "{refusal}");
+    }
+
+    /// **Why the packet buffer is bigger than the ceiling**, measured rather than asserted
+    /// from the documentation.
+    ///
+    /// libopus takes the output buffer's length as a hard cap on *this* frame and re-encodes
+    /// to fit it. It does not error and it does not truncate. So a buffer of exactly
+    /// [`MAX_OPUS_BYTES`] could never observe a frame that wanted more — it would receive a
+    /// degraded one that fitted, and the check above would be a comment rather than a check.
+    /// That is what the review on #918 found this file claiming, and this is the measurement
+    /// that settles it.
+    #[test]
+    fn a_small_buffer_makes_libopus_shrink_the_frame_rather_than_fail() {
+        let mut raw = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)
+            .expect("libopus is linked");
+        raw.set_bitrate(Bitrate::BitsPerSecond(VOICE_BITRATE))
+            .expect("the bitrate applies");
+        let block = frame(300.0, 0.6, 3);
+
+        let mut roomy = vec![0u8; MAX_OPUS_BYTES * PACKET_HEADROOM];
+        let wanted = raw.encode_float(&block, &mut roomy).expect("it encodes");
+        assert!(wanted > 2, "the fixture frame is too small to be shrunk");
+
+        // One byte. Not an error, not a truncation — a whole, legal, tiny packet.
+        let mut tiny = vec![0u8; 1];
+        let squeezed = raw
+            .encode_float(&block, &mut tiny)
+            .expect("a one-byte buffer is not an error");
+        assert_eq!(
+            squeezed, 1,
+            "libopus refused a buffer it is documented to encode into"
+        );
+    }
+
     /// **Concealment is not silence, and it is not a click either.** A decoder handed nothing
     /// extrapolates from what it played last, so what comes out has energy and joins onto the
     /// previous frame without a step.
@@ -395,7 +483,14 @@ mod tests {
         let mut packets = Vec::new();
         let mut sent = Vec::new();
         for at in 0..12 {
-            let block = frame(300.0, if at >= 10 { loud } else { quiet }, at);
+            // **Frame 10 alone is loud, and that is the whole design of the fixture.** The
+            // first version made everything from 10 onwards loud, and the review on #918
+            // found what that hid: at 300 Hz a 20 ms frame is exactly six cycles, so frames
+            // 10 and 11 were sample-identical and a decoder that ignored the request for the
+            // redundant copy and simply decoded packet 11 normally would have passed every
+            // assertion below. With only frame 10 loud, a mistaken normal decode yields the
+            // quiet frame 11 and fails.
+            let block = frame(300.0, if at == 10 { loud } else { quiet }, at);
             packets.push(encoder.encode(&block).expect("the frame encodes").to_vec());
             sent.push(block);
         }
@@ -424,6 +519,11 @@ mod tests {
         let lost = level_db(&sent[10]);
         let repaired = level_db(&recovered);
         let guessed = level_db(&concealed);
+        assert!(
+            level_db(&sent[11]) < lost - 6.0,
+            "the fixture's next frame is not quieter than the lost one, so a normal decode \
+             of it would pass this test"
+        );
         assert!(
             repaired > guessed + 6.0,
             "the recovered frame ({repaired} dB) is no louder than the concealed one \
@@ -473,6 +573,9 @@ mod tests {
         for length in [0, FRAME_SAMPLES - 1, FRAME_SAMPLES + 1] {
             let refusal = encoder
                 .encode(&vec![0.1; length])
+                // See the ceiling test above: the `Ok` side is a packet, so it never
+                // reaches a message.
+                .map(<[u8]>::len)
                 .expect_err("a frame of the wrong length was encoded");
             assert!(refusal.contains(&FRAME_SAMPLES.to_string()), "{refusal}");
             assert!(
