@@ -201,12 +201,16 @@ func (p *Player) Voice(frame protocol.VoiceFrame) (delivered, dropped int) {
 			// nobody, which is the honest reading of the request.
 			continue
 		}
-		if listener.deliver(heard) {
+		// The latency lane rather than the ordinary one, and the drop that follows is
+		// what makes it safe: a voice frame is superseded by the next one 20 ms later,
+		// so a listener whose lane is full loses this frame instead of delaying every
+		// other listener's. See Player.deliverVoice.
+		if listener.deliverVoice(heard) {
 			delivered++
 			continue
 		}
 		dropped++
-		p.sim.log.Debug("voice frame dropped: the session's outbound queue is full",
+		p.sim.log.Debug("voice frame dropped: the session's latency lane is full",
 			"speaker_entity_id", p.entityID, "entity_id", listener.entityID)
 	}
 	return delivered, dropped

@@ -48,6 +48,12 @@ type Config struct {
 	ChunkSize    uint16
 	ViewDistance uint8
 	Spawn        [3]float32
+
+	// VoiceRange is how far a voice carries here, in blocks, and zero is a server that
+	// relays no voice at all. Announced so a client can draw an indicator and for
+	// nothing else: which frames a client receives is decided by the simulation, which
+	// holds this same number as [game.WithVoiceRange] and never asks the client about it.
+	VoiceRange float64
 }
 
 // Validate enforces, on the producing side, the decoder invariants that
@@ -64,6 +70,30 @@ func (c Config) Validate() error {
 		return fmt.Errorf("chunk size must be in 1..%d, got %d", protocol.MaxChunkSize, c.ChunkSize)
 	case c.ViewDistance > protocol.MaxViewDistance:
 		return fmt.Errorf("view distance must be at most %d, got %d", protocol.MaxViewDistance, c.ViewDistance)
+	case math.IsNaN(c.VoiceRange) || math.IsInf(c.VoiceRange, 0) || c.VoiceRange < 0:
+		// schemas/handshake.fbs requires a finite, non-negative radius, and refuses
+		// rather than clamps for the reason spawn does: NaN compares false against every
+		// bound it is given, so a welcome carrying one is a client deciding for itself
+		// what a voice range is.
+		return fmt.Errorf("voice range must be a finite number of blocks and not negative, got %v", c.VoiceRange)
+	case math.IsInf(float64(float32(c.VoiceRange)), 0) || (float32(c.VoiceRange) == 0 && c.VoiceRange != 0):
+		// The check above is not the same check as this one, and the gap between them
+		// is reachable. `voice_range_blocks` is a FlatBuffers `float`, so the number
+		// this simulation runs on is a float64 and the number it announces is the
+		// float32 it narrows to — and narrowing is not total. Any finite float64 above
+		// math.MaxFloat32 becomes +Inf on the wire, and the client refuses a non-finite
+		// welcome by contract: `-voice-range 1e300` is accepted by every check above,
+		// starts a server that appears healthy, and is one no client can join, with
+		// nothing in the log saying why. Below the other end, a positive value under
+		// math.SmallestNonzeroFloat32 announces 0, which is this contract's word for
+		// "this server has no voice at all" — so the welcome would deny a feature the
+		// relay is running.
+		//
+		// Refused rather than clamped, like every case above it. A clamp would pick a
+		// range the operator did not ask for and never mention it; the comment on
+		// VoiceRange promises one number read twice, and a silent clamp is the second
+		// number.
+		return fmt.Errorf("voice range must survive the float32 the welcome announces, got %v", c.VoiceRange)
 	}
 
 	for axis, value := range c.Spawn {
@@ -283,6 +313,11 @@ func Welcome(cfg Config, entityID uint64, self Resolved) []byte {
 		DayLengthTicks:  game.DayLengthTicks,
 		NightStartTicks: game.NightStartTicks,
 		NightEndTicks:   game.NightEndTicks,
+		// Narrowed here rather than held as a float32 in Config, because the
+		// authoritative number is the float64 the simulation compares distances against
+		// and this is the announcement of it. Zero survives the conversion exactly, which
+		// is the value the whole field turns on: a server that relays no voice.
+		VoiceRangeBlocks: float32(cfg.VoiceRange),
 	})
 }
 
@@ -491,15 +526,18 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			}
 		}
 
-		// Order matters, and there are now four producers to stop before the channel
-		// they produce into can be closed. Closing it first would make a send on a
+		// Order matters, and there are now five producers to stop before the channels
+		// they produce into can be closed. Closing one first would make a send on a
 		// closed channel — a panic, in a goroutine, taking the process with it.
 		//
-		// The two that send from *another* goroutine go first, because they are the ones
+		// The three that send from *another* goroutine go first, because they are the ones
 		// this function does not wait on. Each stops through the same shape of guarantee:
-		// Sim.Leave takes the lock Sim.Step holds for a whole tick, and
-		// Registry.Unsubscribe takes the lock BroadcastChunk holds while it sends, so once
-		// both have returned nothing outside this function can still reach the queue.
+		// Sim.Leave takes the lock Sim.Step holds for a whole tick, the same lock
+		// Player.Voice holds while it relays one frame to the sessions that can hear it —
+		// and Leave also forgets this entity in every speaker's audible set, so no later
+		// frame can choose it again — and Registry.Unsubscribe takes the lock
+		// BroadcastChunk holds while it sends. Once both have returned nothing outside
+		// this function can still reach either lane.
 		//
 		// Then stop the session-scoped workers (streaming and mining), wait for both to
 		// stop producing, and only then close the channel.
@@ -627,6 +665,34 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// are each worth the same whenever they land, and reordering them against each other
 	// would change what the client is told rather than when.
 	offerSnapshot := func(frame []byte) bool {
+		select {
+		case priority <- frame:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// offerVoice is the second thing on the fast lane, and it belongs to the same set as
+	// the snapshot rather than widening it: what may overtake a chunk payload is exactly
+	// what a later frame makes worthless. A voice frame is twenty milliseconds of speech
+	// that the next frame replaces, so one queued behind a view's worth of chunks arrives
+	// as a gap in a sentence — the same defect #668 measured for a position, one lane
+	// down, and audible instead of visible.
+	//
+	// **Non-blocking for a reason this seam does not share with the snapshot's.** The
+	// producer here is somebody *else's* read goroutine, inside game.Player.Voice and
+	// under Sim.mu: a blocking send would let one client that has stopped reading hold
+	// the simulation's lock and stall the speaker and every other listener. A full lane
+	// therefore drops the frame and returns false, which Voice counts and logs as a
+	// number.
+	//
+	// What keeps that safe against `close(priority)` is the teardown order above, and
+	// only that — the same guarantee trySend relies on, reached the same way: Sim.Leave
+	// takes the lock Voice holds for the whole of a relay, and it also forgets this
+	// entity in every speaker's audible set, so once it has returned no later frame can
+	// choose this session again.
+	offerVoice := func(frame []byte) bool {
 		select {
 		case priority <- frame:
 			return true
@@ -885,7 +951,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// stored character. Nothing the client said at any point in this handshake
 			// reaches it, and a creation's appearance reaches it only by having been
 			// written down first.
-			admitted, jErr := sim.JoinCharacterWithSnapshotDelivery(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot)
+			admitted, jErr := sim.JoinCharacterWithDelivery(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot, offerVoice)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}
@@ -1049,6 +1115,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadConsumeRequest,
 		vnet.PayloadDropItemRequest,
 		vnet.PayloadChatRequest,
+		vnet.PayloadVoiceFrame,
 		vnet.PayloadPartyRequest,
 		vnet.PayloadLootOpenRequest,
 		vnet.PayloadLootTakeRequest,
@@ -1718,6 +1785,34 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			if sErr := send(protocol.EncodeInventoryState(*outcome.Inventory)); sErr != nil {
 				return fmt.Errorf("session: send inventory after command: %w", sErr)
 			}
+		}
+		return nil
+
+	case vnet.PayloadVoiceFrame:
+		if player == nil || msg.Voice == nil {
+			// Decode either supplies the frame or fails it. Kept for the reason the chat
+			// guard is: a Message built inside this process must not dereference nil.
+			log.Debug("voice frame arrived with no player or payload; discarding")
+			return nil
+		}
+
+		// **Nothing is answered on the wire, and nothing here can fail the session.**
+		// Chat's cadence limit gets a refusal because a person can wait and press the key
+		// again; a voice frame has no such answer, because the next one is already being
+		// spoken. So every refusal inside the relay is silent by design — see
+		// game.Player.Voice, which states the order it applies them in — and this arm's
+		// whole job is to hand the frame over and account for what came back.
+		//
+		// The frame is not read here either: which listeners it reaches is the
+		// simulation's decision, made from positions this session never sees, and there
+		// is no position in a VoiceFrame for it to have offered.
+		delivered, dropped := player.Voice(*msg.Voice)
+		if dropped > 0 {
+			// Counts and identities, never bytes. The Opus is forwarded and never
+			// written down, and game/voice_test.go captures the logger at Debug during an
+			// exchange to keep every line on this path honest about that.
+			log.Debug("voice frame did not reach every listener",
+				"entity_id", player.EntityID(), "delivered", delivered, "dropped", dropped)
 		}
 		return nil
 

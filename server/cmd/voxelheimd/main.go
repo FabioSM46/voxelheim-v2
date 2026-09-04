@@ -92,6 +92,10 @@ type options struct {
 	stormPeriod         time.Duration
 	nextStorm           string
 	devCommands         bool
+	// voiceRange is how far a voice carries, in blocks, and zero is a server that relays
+	// no voice at all. A float rather than a uint because it is a distance in a
+	// continuous world, and the simulation compares it against one.
+	voiceRange float64
 
 	logLevel  string
 	logFormat string
@@ -155,6 +159,7 @@ func parseFlags() options {
 	flag.StringVar(&opts.nextStorm, "next-storm", "",
 		"one-time RFC3339 override for the next Fimbulvetr deadline; persisted at startup")
 	registerDevCommandsFlag(flag.CommandLine, &opts)
+	registerVoiceRangeFlag(flag.CommandLine, &opts)
 	flag.StringVar(&opts.logLevel, "log-level", "info", "log level: debug, info, warn or error")
 	flag.StringVar(&opts.logFormat, "log-format", "text", "log format: text or json")
 	flag.Parse()
@@ -165,6 +170,15 @@ func parseFlags() options {
 func registerDevCommandsFlag(flags *flag.FlagSet, opts *options) {
 	flags.BoolVar(&opts.devCommands, "dev-commands", false,
 		"enable development-only chat commands; disabled by default because they bypass normal progression")
+}
+
+func registerVoiceRangeFlag(flags *flag.FlagSet, opts *options) {
+	flags.Float64Var(&opts.voiceRange, "voice-range", game.VoiceRangeDefault,
+		"how far a player's voice carries, in blocks; 0 disables voice on this server. It is the "+
+			"authoritative number and the only one that decides anything: the server chooses each frame's "+
+			"listeners from the positions it simulates, and a client is told this only so it can say so on "+
+			"screen. A listener stops hearing a speaker slightly past it, so the audible set does not "+
+			"flicker on the boundary")
 }
 
 func registerWorldDirFlag(flags *flag.FlagSet, opts *options) {
@@ -192,6 +206,12 @@ func (o options) validate() error {
 		return errors.New("terrain memory must be greater than zero MiB")
 	case o.stormPeriod < 0:
 		return fmt.Errorf("storm period must not be negative, got %s", o.stormPeriod)
+	case math.IsNaN(o.voiceRange) || math.IsInf(o.voiceRange, 0) || o.voiceRange < 0:
+		// Refused rather than clamped, for the reason every other range here is: there is
+		// no distance "less than nothing" could have meant, and a NaN compares false
+		// against every bound the simulation would give it — a server relaying to nobody
+		// while reporting a radius. The refusal lands where the operator is looking.
+		return fmt.Errorf("voice range must be a finite number of blocks and not negative, got %v", o.voiceRange)
 	}
 	if o.nextStorm != "" {
 		if _, err := time.Parse(time.RFC3339, o.nextStorm); err != nil {
@@ -279,6 +299,11 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		// Derived from the world, never hardcoded: since #519 this is the square
 		// outside the capital's castle gate, and the capital is a function of the seed.
 		Spawn: world.SpawnAt(opts.seed),
+		// The same number the simulation is given below, announced. One value read
+		// twice rather than two knobs: a welcome that advertised a range the relay
+		// did not use would be a client drawing an indicator for a distance nobody
+		// is measured against.
+		VoiceRange: opts.voiceRange,
 	}
 	// options.validate covers what the operator can type; this covers the contract
 	// invariants from schemas/handshake.fbs for the fields that are not flag-derived.
@@ -376,7 +401,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// one generator, so where the dark puts creatures is a property of this world rather
 	// than of this process. See game.NewSim.
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log,
-		game.WithDevCommands(opts.devCommands))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange))
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
@@ -452,6 +477,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		"idle_timeout", opts.idleTimeout.String(),
 		"storm_period", opts.stormPeriod.String(),
 		"next_storm_unix", sim.NextStorm(),
+		"voice_range_blocks", cfg.VoiceRange,
 	)
 
 	srv.run(ctx)
