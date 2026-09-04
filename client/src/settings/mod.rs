@@ -976,12 +976,6 @@ impl OutputDevices {
     }
 
     /// Replaces the list with what the audio module last enumerated.
-    ///
-    /// The other half of the same seam, and the same marker: `offer_the_output_devices`
-    /// calls this in #851's device half, and takes the `allow` off with it. Until then the
-    /// knob offers the system default and nothing else, which is also exactly what it
-    /// offers on a machine that has no sound card.
-    #[allow(dead_code)]
     pub fn offer(&mut self, present: Vec<String>) {
         self.present = present;
     }
@@ -1238,12 +1232,6 @@ impl Settings {
     }
 
     /// Which output device the audio module should open.
-    ///
-    /// **No production caller yet, and that is this part's shape rather than an oversight.**
-    /// The knob, its bound and the file line land here; `follow_the_settings` in
-    /// `audio/mod.rs` reads this in #851's device half, which is also where this marker
-    /// comes off — the way #851 part 3 removed the three part 2 left behind.
-    #[allow(dead_code)]
     pub const fn output_device(&self) -> &OutputDevice {
         &self.output_device
     }

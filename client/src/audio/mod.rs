@@ -53,7 +53,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
-use crate::settings::Settings;
+use crate::settings::{OutputDevice, OutputDevices, Settings};
 use device::AudioDevice;
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
 
@@ -97,10 +97,12 @@ impl Plugin for AudioPlugin {
             .insert_resource(device)
             .insert_resource(controls)
             .insert_resource(speaker_test)
+            .insert_resource(LastListing(0))
             .add_systems(
                 Update,
                 (
                     follow_the_settings,
+                    offer_the_output_devices,
                     apply_the_controls,
                     play_the_speaker_test,
                 )
@@ -127,6 +129,14 @@ pub struct AudioMixer(Arc<Mixer>);
 pub struct AudioControls {
     /// The master bus gain, `0.0` silent to `1.0` unity. Clamped by the mixer.
     pub master_gain: f32,
+    /// Which output device to open, under the name its host gives it, or `None` for "follow
+    /// whatever the system calls its default".
+    ///
+    /// **A name and not a `settings::OutputDevice`**: that enum is a *choice*, with a variant
+    /// meaning "follow the system", and this is the instruction it resolves to.
+    /// `audio/device.rs` matches it against the names the host answered with and nothing
+    /// else.
+    pub output_device: Option<String>,
     /// Set to play the speaker test once. **Taken back by this module**, so a caller sets
     /// it and never has to clear it.
     pub speaker_test: bool,
@@ -142,6 +152,7 @@ impl Default for AudioControls {
             // already this module's dependency: `follow_the_settings` below reads the
             // same accessor every frame.
             master_gain: Settings::default().master_gain(),
+            output_device: None,
             speaker_test: false,
         }
     }
@@ -226,6 +237,10 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
         return;
     }
     let gain = settings.master_gain();
+    let device = match settings.output_device() {
+        OutputDevice::SystemDefault => None,
+        OutputDevice::Named(name) => Some(name.clone()),
+    };
     // Written only on a real change, so a settings change that moved nothing this module
     // reads does not mark the resource and wake `apply_the_controls` for a gain that is
     // already set. The speaker test is deliberately untouched: it is a press, not a
@@ -233,16 +248,45 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
     if controls.master_gain != gain {
         controls.master_gain = gain;
     }
+    if controls.output_device != device {
+        controls.output_device = device;
+    }
 }
 
-/// Puts the master gain where [`AudioControls`] says.
+/// The device list's version number as this module last saw it — compared rather than the
+/// list, which [`AudioDevice::output_devices`] would clone under a lock every frame.
+#[derive(Resource, Debug)]
+struct LastListing(u64);
+
+/// Hands the settings knob the device names the supervisor last enumerated — the other
+/// direction across the same seam, and the only one: [`OutputDevices`] is a bound the machine
+/// owns, so the module that talks to the machine fills it.
+fn offer_the_output_devices(
+    device: Res<AudioDevice>,
+    mut last: ResMut<LastListing>,
+    mut offered: ResMut<OutputDevices>,
+) {
+    let listing = device.listings();
+    if listing == last.0 {
+        return;
+    }
+    last.0 = listing;
+    offered.offer(device.output_devices());
+}
+
+/// Puts the master gain and the chosen device where [`AudioControls`] says.
 ///
 /// Only on a change, so the ordinary frame does nothing at all.
-fn apply_the_controls(controls: Res<AudioControls>, audio: Res<AudioMixer>) {
+fn apply_the_controls(
+    controls: Res<AudioControls>,
+    audio: Res<AudioMixer>,
+    device: Res<AudioDevice>,
+) {
     if !controls.is_changed() {
         return;
     }
     audio.0.set_gain(Bus::Master, controls.master_gain);
+    device.use_output(controls.output_device.clone());
 }
 
 /// Starts the speaker test when one is asked for, and keeps its ring fed while it plays.
@@ -264,7 +308,7 @@ fn play_the_speaker_test(mut controls: ResMut<AudioControls>, mut test: ResMut<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Knob;
+    use crate::settings::{Choices, Knob, MonitorChoices, Tab};
 
     /// A mixer and a speaker test with no device anywhere near them.
     ///
@@ -395,5 +439,82 @@ mod tests {
             quieter,
             "the audio module wrote a setting back"
         );
+        assert_eq!(
+            controls.output_device, None,
+            "an untouched setting asks for no device in particular"
+        );
+    }
+
+    /// **The device seam, both ways, with no device anywhere.** The supervisor's list
+    /// reaches the knob's bound; the knob's choice reaches the supervisor. `AudioDevice`
+    /// is built through `idle()`, which is the constructor that spawns no thread — the one
+    /// that does is what would open a stream.
+    #[test]
+    fn the_chosen_device_reaches_the_supervisor_and_its_list_reaches_the_knob() {
+        let mixer = Arc::new(Mixer::new());
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .insert_resource(AudioControls::default())
+            .insert_resource(AudioMixer(mixer))
+            .insert_resource(AudioDevice::idle())
+            .insert_resource(OutputDevices::default())
+            .insert_resource(LastListing(0))
+            .add_systems(
+                Update,
+                (
+                    follow_the_settings,
+                    offer_the_output_devices,
+                    apply_the_controls,
+                )
+                    .chain(),
+            );
+        app.update();
+        assert_eq!(
+            app.world().resource::<OutputDevices>(),
+            &OutputDevices::default(),
+            "a supervisor that has enumerated nothing offers nothing"
+        );
+
+        // What the supervisor does once it has looked at the machine.
+        app.world().resource::<AudioDevice>().enumerated(vec![
+            "Built-in speakers".to_owned(),
+            "USB headset".to_owned(),
+        ]);
+        app.update();
+        let offered = app.world().resource::<OutputDevices>().clone();
+        assert_eq!(
+            offered,
+            OutputDevices::named(&["Built-in speakers", "USB headset"]),
+            "the knob's bound never heard about the devices"
+        );
+
+        // And back the other way: the knob picks one, and the supervisor is asked for it.
+        let monitors = MonitorChoices::default();
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust_with_choices(
+                Knob::OutputDevice,
+                2,
+                Choices {
+                    monitors: &monitors,
+                    devices: &offered,
+                },
+            );
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioControls>().output_device,
+            Some("USB headset".to_owned())
+        );
+        assert_eq!(
+            app.world().resource::<AudioDevice>().wanted(),
+            Some("USB headset".to_owned()),
+            "the supervisor was never told which device to open"
+        );
+
+        // Back to the system default, which is an instruction too and not an absence of
+        // one: the supervisor has to hear it or it keeps holding the headset.
+        app.world_mut().resource_mut::<Settings>().reset(Tab::Audio);
+        app.update();
+        assert_eq!(app.world().resource::<AudioDevice>().wanted(), None);
     }
 }
