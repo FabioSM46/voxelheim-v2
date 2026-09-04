@@ -9,7 +9,7 @@
 # *_EXISTS flags, computed by the ci-gate job from its own checkout of the same
 # merge ref the workload jobs ran on:
 #
-#   * develop: selectors come from the diff classifier; existence is not
+#   * non-main bases: selectors come from the diff classifier; existence is not
 #     consulted. A selected job must succeed, an unselected one must be skipped.
 #   * main: a release promotion validates everything that exists. The selector
 #     must EQUAL existence — a false selector for an existing workspace is a
@@ -70,12 +70,6 @@ automation_result="${AUTOMATION_RESULT:-}"
 expect_exact "detect" "$detect_result" success
 
 case "$base_ref" in
-  develop)
-    expect_selected "server" "${SERVER_SELECTED:-}" "$server_result"
-    expect_selected "client" "${CLIENT_SELECTED:-}" "$client_result"
-    expect_selected "schemas" "${SCHEMAS_SELECTED:-}" "$schemas_result"
-    expect_selected "automation" "${HELPERS_SELECTED:-}" "$automation_result"
-    ;;
   main)
     # Checking both the selectors and the results catches a future workflow
     # edit that silently narrows production validation while all executed jobs
@@ -86,7 +80,13 @@ case "$base_ref" in
     expect_exact "helper-scope selector" "${HELPERS_SELECTED:-}" true
     expect_exact "automation" "$automation_result" success
     ;;
-  *) reject "BASE_REF must be develop or main, got ${base_ref:-<empty>}" ;;
+  "") reject "BASE_REF must be a non-empty branch name" ;;
+  *)
+    expect_selected "server" "${SERVER_SELECTED:-}" "$server_result"
+    expect_selected "client" "${CLIENT_SELECTED:-}" "$client_result"
+    expect_selected "schemas" "${SCHEMAS_SELECTED:-}" "$schemas_result"
+    expect_selected "automation" "${HELPERS_SELECTED:-}" "$automation_result"
+    ;;
 esac
 
 if [ "$fail" -ne 0 ]; then

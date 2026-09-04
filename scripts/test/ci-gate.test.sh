@@ -29,7 +29,7 @@ run_case() {
   fi
 }
 
-develop_common=(
+non_main_common=(
   BASE_REF=develop DETECT_RESULT=success
   SERVER_SELECTED=true SERVER_RESULT=success
   CLIENT_SELECTED=false CLIENT_RESULT=skipped
@@ -45,20 +45,23 @@ main_common=(
   HELPERS_SELECTED=true AUTOMATION_RESULT=success
 )
 
-echo "ci-gate — develop policy"
-run_case "selected workspace succeeds while unrelated jobs skip" 0 "${develop_common[@]}"
+echo "ci-gate — non-main policy"
+run_case "develop accepts selected work while unrelated jobs skip" 0 "${non_main_common[@]}"
+run_case "a feature base uses the same selected-work policy" 0 \
+  "${non_main_common[@]/BASE_REF=develop/BASE_REF=feature/parent-branch}"
 run_case "docs-only PR accepts an entirely skipped workload" 0 \
   BASE_REF=develop DETECT_RESULT=success \
   SERVER_SELECTED=false SERVER_RESULT=skipped \
   CLIENT_SELECTED=false CLIENT_RESULT=skipped \
   SCHEMAS_SELECTED=false SCHEMAS_RESULT=skipped \
   HELPERS_SELECTED=false AUTOMATION_RESULT=skipped
-run_case "selected job may not skip" 1 "${develop_common[@]/SERVER_RESULT=success/SERVER_RESULT=skipped}"
-run_case "unselected job may not disappear" 1 "${develop_common[@]/CLIENT_RESULT=skipped/CLIENT_RESULT=missing}"
-run_case "cancelled selected job fails closed" 1 "${develop_common[@]/SERVER_RESULT=success/SERVER_RESULT=cancelled}"
-run_case "failed detect cannot be hidden" 1 "${develop_common[@]/DETECT_RESULT=success/DETECT_RESULT=failure}"
-run_case "missing selector fails closed" 1 "${develop_common[@]/SCHEMAS_SELECTED=false/SCHEMAS_SELECTED=}"
-run_case "malformed selector is not read as false" 1 "${develop_common[@]/SCHEMAS_SELECTED=false/SCHEMAS_SELECTED=maybe}"
+run_case "selected job may not skip" 1 "${non_main_common[@]/SERVER_RESULT=success/SERVER_RESULT=skipped}"
+run_case "unselected job may not disappear" 1 "${non_main_common[@]/CLIENT_RESULT=skipped/CLIENT_RESULT=missing}"
+run_case "cancelled selected job fails closed" 1 "${non_main_common[@]/SERVER_RESULT=success/SERVER_RESULT=cancelled}"
+run_case "failed detect cannot be hidden" 1 "${non_main_common[@]/DETECT_RESULT=success/DETECT_RESULT=failure}"
+run_case "missing selector fails closed" 1 "${non_main_common[@]/SCHEMAS_SELECTED=false/SCHEMAS_SELECTED=}"
+run_case "malformed selector is not read as false" 1 "${non_main_common[@]/SCHEMAS_SELECTED=false/SCHEMAS_SELECTED=maybe}"
+run_case "an empty base still fails closed" 1 "${non_main_common[@]/BASE_REF=develop/BASE_REF=}"
 
 echo
 echo "ci-gate — the helper-scope selector the classifier cannot compute for itself"
@@ -66,15 +69,15 @@ echo "ci-gate — the helper-scope selector the classifier cannot compute for it
 # scripts/** while changed-areas.sh — the very thing that diff may have broken —
 # says nothing about it. The automation job hosts the classifier's own tests, so
 # a SKIPPED automation here would be precisely the silent self-exemption.
-helpers_only=("${develop_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=true}")
+helpers_only=("${non_main_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=true}")
 run_case "helper-scope diffs cannot skip the job hosting the helper tests" 1 \
   "${helpers_only[@]}"
 run_case "helper scope alone is enough for automation to have run" 0 \
   "${helpers_only[@]/AUTOMATION_RESULT=skipped/AUTOMATION_RESULT=success}"
 run_case "missing helper-scope selector fails closed" 1 \
-  "${develop_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=}"
+  "${non_main_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=}"
 run_case "a malformed helper-scope selector is not read as false" 1 \
-  "${develop_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=maybe}"
+  "${non_main_common[@]/HELPERS_SELECTED=false/HELPERS_SELECTED=maybe}"
 
 echo
 echo "ci-gate — main release policy validates everything that exists"
@@ -106,7 +109,6 @@ run_case "malformed existence flag fails closed" 1 \
   "${main_common[@]/SERVER_EXISTS=true/SERVER_EXISTS=maybe}"
 run_case "missing existence flag fails closed" 1 \
   "${main_common[@]/SERVER_EXISTS=true/SERVER_EXISTS=}"
-run_case "unknown base branch fails closed" 1 "${main_common[@]/BASE_REF=main/BASE_REF=staging}"
 
 echo
 echo "${pass} passed, ${fail} failed"
