@@ -198,6 +198,17 @@ impl Ring {
         }
         taken
     }
+
+    /// Throws away everything waiting.
+    ///
+    /// The consumer's, like [`Self::pop`] and [`Self::drain_into`] — it advances the read
+    /// index and nothing else, so it keeps the single-consumer assumption this ring's memory
+    /// ordering rests on. `audio/device.rs` uses it for the samples either side of a capture
+    /// stream reopening, which are two devices' audio as far as anything can tell.
+    pub(super) fn skip(&self) {
+        let written = self.written.load(Ordering::Acquire);
+        self.read.store(written, Ordering::Release);
+    }
 }
 
 /// One slot in the mixer: a ring and the bus it is mixed on.

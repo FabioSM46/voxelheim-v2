@@ -676,14 +676,17 @@ const CAPTURE_CAPACITY: usize = 12_000;
 #[derive(Debug)]
 pub struct Capture {
     samples: Ring,
-    /// What the open stream negotiated. Zero until a stream has.
-    sample_rate: AtomicU32,
-    channels: AtomicU32,
-    /// Bumped whenever a stream opens. A consumer whose resampler was built for a previous
-    /// format compares this rather than the format itself — two streams can negotiate the
-    /// same rate and still need the resampler's carried tail thrown away, because the samples
-    /// between them are a gap rather than a continuation.
-    generation: AtomicU64,
+    /// The open stream's rate, channel count and identity, in **one** word.
+    ///
+    /// **Three atomics would not be one answer, and the review on #919 is where that was
+    /// found.** Written separately, a consumer can read the new rate beside the old
+    /// generation — precisely the observation the generation exists to make impossible. The
+    /// three are one fact about one stream, so they are one atomic: 32 bits of rate, 16 of
+    /// channels, 16 of generation. See [`Self::pack`].
+    stream: AtomicU64,
+    /// Which stream the consumer has read from. **Written only by the consumer**, which is
+    /// what keeps [`Ring`]'s single-consumer assumption true — see [`Self::take`].
+    read_from: AtomicU32,
     /// How many samples the callback has had to drop for a full ring. A diagnostic, never a
     /// decision.
     overruns: AtomicU64,
@@ -693,6 +696,30 @@ pub struct Capture {
     /// `VoiceMode::Off` means and the whole of what a server relaying no voice means. The
     /// supervisor holds no device while this is false.
     wanted: AtomicBool,
+    /// Makes the next [`Self::take`] observe a stream opening at the one moment no fixture
+    /// can otherwise put one: **between its two generation reads**.
+    ///
+    /// **A `cfg(test)` seam, on `Transport::Plaintext`'s precedent**, and it is here because
+    /// the alternatives were both worse. The branch it reaches is unreachable from any
+    /// sequential test — every reopen a reader can see *before* it starts is caught by the
+    /// skip above — and a concurrent fixture reaches it only sometimes: measured, a stress
+    /// loop caught a deliberately removed guard in one run of three, and tuning it either way
+    /// took the detection rate to zero. A guard nobody has watched fire is a guard nobody
+    /// knows the shape of, so the fixture places the reopen exactly.
+    #[cfg(test)]
+    reopen_mid_read: AtomicBool,
+}
+
+/// What one read of the capture ring produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Captured {
+    /// The rate and channel count the samples are in.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// **A stream this reader had not read from before**, so nothing was appended and
+    /// whatever the caller was carrying — a resampler's tail, a part-built frame — belongs to
+    /// a stream that has ended. See [`Capture::take`].
+    pub fresh: bool,
 }
 
 impl Default for Capture {
@@ -705,52 +732,111 @@ impl Capture {
     pub fn new() -> Self {
         Self {
             samples: Ring::new(CAPTURE_CAPACITY),
-            sample_rate: AtomicU32::new(0),
-            channels: AtomicU32::new(0),
-            generation: AtomicU64::new(0),
+            stream: AtomicU64::new(0),
+            read_from: AtomicU32::new(0),
             overruns: AtomicU64::new(0),
             wanted: AtomicBool::new(false),
+            #[cfg(test)]
+            reopen_mid_read: AtomicBool::new(false),
         }
+    }
+
+    /// The three fields as one word: rate, then channels, then generation.
+    ///
+    /// The generation wraps every 65 536 streams and skips zero, so a packed word is zero if
+    /// and only if no stream has ever opened. Nothing compares two generations for order —
+    /// only for equality — so wrapping costs nothing.
+    const fn pack(sample_rate: u32, channels: u16, generation: u16) -> u64 {
+        (sample_rate as u64) | ((channels as u64) << 32) | ((generation as u64) << 48)
     }
 
     /// Records what a stream negotiated and marks it a new one.
     ///
-    /// The format is stored **before** the generation, so a consumer that sees a new
-    /// generation is guaranteed to read the format that goes with it rather than the previous
-    /// one — the same ordering rule, and for the same reason, as [`opened`] setting the
-    /// mixer's format between building a stream and starting it.
+    /// One store, so there is no window in which half of it is visible. Called between
+    /// building a stream and starting it, which is [`opened`]'s ordering and its reason: a
+    /// callback that ran first would fill the ring with samples described by the previous
+    /// stream's rate.
     fn opened_at(&self, sample_rate: u32, channels: u16) {
-        self.sample_rate
-            .store(sample_rate.max(1), Ordering::Relaxed);
-        self.channels
-            .store(u32::from(channels).max(1), Ordering::Relaxed);
-        self.generation.fetch_add(1, Ordering::Release);
+        let previous = (self.stream.load(Ordering::Relaxed) >> 48) as u16;
+        let generation = match previous.wrapping_add(1) {
+            0 => 1,
+            next => next,
+        };
+        self.stream.store(
+            Self::pack(sample_rate.max(1), channels.max(1), generation),
+            Ordering::Release,
+        );
     }
 
-    /// The rate and channel count of the open stream, and which stream it is.
+    /// The rate, channel count and identity of the open stream, or `None` before one has
+    /// opened. One atomic load, so the three are never a mixture of two streams.
     ///
-    /// `None` before any stream has opened. The generation is part of the answer rather than
-    /// a separate question, because reading them apart is how a consumer ends up with one
-    /// stream's rate and another's identity.
-    // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
-    // a captured sample. See `audio/dsp.rs` for why the seam is here.
-    #[allow(dead_code)]
-    pub fn format(&self) -> Option<(u32, u16, u64)> {
-        let generation = self.generation.load(Ordering::Acquire);
-        if generation == 0 {
+    /// Test-only: what a consumer uses is [`Self::take`], which answers the same format
+    /// beside the samples it belongs to rather than as a separate question.
+    #[cfg(test)]
+    fn format(&self) -> Option<(u32, u16, u16)> {
+        let packed = self.stream.load(Ordering::Acquire);
+        if packed == 0 {
             return None;
         }
-        let rate = self.sample_rate.load(Ordering::Relaxed);
-        let channels = self.channels.load(Ordering::Relaxed);
-        Some((rate, channels as u16, generation))
+        Some((packed as u32, (packed >> 32) as u16, (packed >> 48) as u16))
     }
 
-    /// Moves every captured sample waiting onto the end of `out`.
-    // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
-    // a captured sample. See `audio/dsp.rs` for why the seam is here.
+    /// Appends everything the **current** stream has captured to `out`.
+    ///
+    /// **This is the whole consumer-side contract, and it is a method rather than a rule
+    /// because the review on #919 found what the rule costs.** A ring drained naively across
+    /// a reopen hands back the tail of one stream stitched onto the head of the next, at two
+    /// different sample rates, with nothing saying where the seam is — which is the
+    /// continuation the generation exists to preclude, arriving by the other door.
+    ///
+    /// Two things make that unreachable:
+    ///
+    /// - **A stream this reader has not read from before is skipped, not appended.** What is
+    ///   waiting then is the previous stream's tail plus however much of the new one has
+    ///   arrived since, and nothing can tell them apart — so both go, and the answer says
+    ///   [`Captured::fresh`] so the caller throws its own carried state away too. A reopen is
+    ///   a gap; the skip costs a few milliseconds inside one.
+    /// - **A stream that opens *while* this is reading invalidates the batch.** The
+    ///   generation is read again afterwards and `out` is put back exactly as it was;
+    ///   `None` is the answer, and the next call reports a fresh stream.
+    ///
+    /// **One consumer, which is why its position lives here.** [`Ring`] is single-consumer
+    /// and `read_from` is written by nobody else — the supervisor never touches the ring, so
+    /// no third party races the read index.
+    // The caller is the capture pipeline in #852 part 6, the first thing with a use for a
+    // captured sample. See `audio/dsp.rs` for why the seam is here.
     #[allow(dead_code)]
-    pub fn drain(&self, out: &mut Vec<f32>) -> usize {
-        self.samples.drain_into(out)
+    pub fn take(&self, out: &mut Vec<f32>) -> Option<Captured> {
+        let packed = self.stream.load(Ordering::Acquire);
+        if packed == 0 {
+            return None;
+        }
+        let generation = (packed >> 48) as u32;
+        let answer = |fresh| Captured {
+            sample_rate: packed as u32,
+            channels: (packed >> 32) as u16,
+            fresh,
+        };
+
+        if self.read_from.swap(generation, Ordering::AcqRel) != generation {
+            self.samples.skip();
+            return Some(answer(true));
+        }
+
+        let at = out.len();
+        self.samples.drain_into(out);
+        #[cfg(test)]
+        if self.reopen_mid_read.swap(false, Ordering::Relaxed) {
+            self.opened_at(packed as u32, (packed >> 32) as u16);
+        }
+        if (self.stream.load(Ordering::Acquire) >> 48) as u32 != generation {
+            out.truncate(at);
+            // Zero is never a live generation, so the next call answers `fresh`.
+            self.read_from.store(0, Ordering::Release);
+            return None;
+        }
+        Some(answer(false))
     }
 
     /// How many samples a full ring has cost. A diagnostic; nothing decides from it.
@@ -1777,28 +1863,41 @@ mod tests {
     /// **The ring, and what the callback does when it is full.** The newest samples are
     /// dropped and counted; nothing is overwritten, because the consumer is mid-frame.
     #[test]
-    fn the_capture_ring_drains_in_order_and_counts_what_it_could_not_hold() {
+    fn the_capture_ring_is_read_in_order_and_counts_what_it_could_not_hold() {
         let capture = Capture::new();
-        capture.captured(&[0.25, -0.5, 0.75]);
+        capture.opened_at(48_000, 1);
         let mut heard = Vec::new();
-        assert_eq!(capture.drain(&mut heard), 3);
+        // The first read of a stream is the skip: see `Capture::take`.
+        assert_eq!(
+            capture.take(&mut heard),
+            Some(Captured {
+                sample_rate: 48_000,
+                channels: 1,
+                fresh: true
+            })
+        );
+
+        capture.captured(&[0.25, -0.5, 0.75]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
         assert_eq!(heard, vec![0.25, -0.5, 0.75]);
-        assert_eq!(capture.drain(&mut heard), 0, "an empty ring gave something");
-        assert_eq!(heard.len(), 3, "draining nothing changed the buffer");
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 3, "reading nothing changed the buffer");
         assert_eq!(capture.overruns(), 0);
 
         capture.captured(&vec![0.1; CAPTURE_CAPACITY + 40]);
         assert_eq!(capture.overruns(), 40);
         heard.clear();
-        assert_eq!(capture.drain(&mut heard), CAPTURE_CAPACITY);
+        capture.take(&mut heard).expect("a stream is open");
+        assert_eq!(heard.len(), CAPTURE_CAPACITY);
         assert!(
             heard.iter().all(|sample| (sample - 0.1).abs() < 1e-9),
             "the oldest samples were overwritten"
         );
     }
 
-    /// Two streams can negotiate the same rate and still be two streams, which is why a
-    /// consumer compares the generation rather than the format.
+    /// Two streams can negotiate the same rate and still be two streams, and the three fields
+    /// are read as one word so a consumer can never see one stream's rate beside another's
+    /// identity.
     #[test]
     fn a_second_stream_at_the_same_rate_is_still_a_new_stream() {
         let capture = Capture::new();
@@ -1811,5 +1910,103 @@ mod tests {
             Some((48_000, 1, 2)),
             "the samples across a reopen are a gap, not a continuation"
         );
+
+        // The packing is what makes the tuple atomic, so it is worth pinning that the three
+        // fields survive it — including a generation that has wrapped past its ceiling.
+        assert_eq!(
+            Capture::pack(44_100, 2, 7),
+            u64::from(44_100u32) | (2u64 << 32) | (7u64 << 48)
+        );
+        let wrapped = Capture::new();
+        wrapped
+            .stream
+            .store(Capture::pack(1, 1, u16::MAX), Ordering::Relaxed);
+        wrapped.opened_at(96_000, 2);
+        assert_eq!(
+            wrapped.format(),
+            Some((96_000, 2, 1)),
+            "the generation wrapped onto zero, which means no stream at all"
+        );
+    }
+
+    /// **The seam a reopen leaves, and the whole reason `take` is a method.**
+    ///
+    /// The ring can hold the tail of one stream and the head of the next at two different
+    /// sample rates, with nothing marking where one ends. A naive drain hands both back as
+    /// one batch — the review on #919 found exactly that — so the first read of a stream this
+    /// reader has not seen throws the ring away and says so.
+    #[test]
+    fn samples_are_never_spliced_across_a_reopen() {
+        let capture = Capture::new();
+        capture.opened_at(48_000, 1);
+        let mut heard = Vec::new();
+        capture
+            .take(&mut heard)
+            .expect("the first read is the skip");
+
+        // Half a second of the first stream, read normally.
+        capture.captured(&[0.5; 100]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 100);
+
+        // Its tail is still in the ring when the device is reopened at another rate, and more
+        // arrives from the new stream before anything reads again.
+        capture.captured(&[0.5; 40]);
+        capture.opened_at(16_000, 2);
+        capture.captured(&[-0.25; 60]);
+
+        let read = capture.take(&mut heard).expect("a stream is open");
+        assert!(read.fresh, "a reopen was reported as a continuation");
+        assert_eq!(read.sample_rate, 16_000, "the old stream's rate came back");
+        assert_eq!(
+            heard.len(),
+            100,
+            "the tail of one stream was spliced onto the head of another"
+        );
+
+        // And from there the new stream reads normally.
+        capture.captured(&[-0.75; 10]);
+        let read = capture.take(&mut heard).expect("a stream is open");
+        assert!(!read.fresh);
+        assert_eq!(heard.len(), 110);
+        assert!(heard[100..].iter().all(|sample| *sample == -0.75));
+    }
+
+    /// A stream that opens *while* a read is running makes the batch two streams spliced,
+    /// and there is no way to say where the seam is — so the batch is discarded and the
+    /// caller's buffer is put back exactly as it was.
+    ///
+    /// The reopen is placed by [`Capture::reopen_mid_read`]; that field's doc says why a
+    /// fixture has to place it rather than race for it.
+    #[test]
+    fn a_reopen_during_a_read_discards_the_batch_rather_than_handing_it_over() {
+        let capture = Capture::new();
+        capture.opened_at(48_000, 1);
+        let mut heard = vec![9.0, 9.0];
+        capture
+            .take(&mut heard)
+            .expect("the first read is the skip");
+
+        capture.captured(&[0.5; 20]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 22, "an ordinary read appends");
+
+        // Now the reopen lands between the two generation reads inside `take`.
+        capture.captured(&[0.5; 30]);
+        capture.reopen_mid_read.store(true, Ordering::Relaxed);
+        assert_eq!(
+            capture.take(&mut heard),
+            None,
+            "a batch spanning a reopen was handed over"
+        );
+        assert_eq!(heard.len(), 22, "the caller's buffer was left changed");
+
+        // And the next read reports a fresh stream, so the caller throws its own carried
+        // state away.
+        assert!(
+            capture.take(&mut heard).is_some_and(|read| read.fresh),
+            "the read after a discarded batch did not report a fresh stream"
+        );
+        assert_eq!(heard.len(), 22, "a fresh stream appended something");
     }
 }
