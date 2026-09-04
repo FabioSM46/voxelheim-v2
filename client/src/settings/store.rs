@@ -199,6 +199,7 @@ fn render(settings: &Settings) -> String {
     out.push_str(&format!("brightness {}\n", settings.brightness));
     out.push_str(&format!("fog-start {}\n", settings.fog_start));
     out.push_str(&format!("frame-cap {}\n", settings.frame_cap));
+    out.push_str(&format!("master-volume {}\n", settings.master_volume));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
@@ -292,6 +293,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "frame-cap" => match value.parse::<u16>() {
                 Ok(parsed) => settings.frame_cap = parsed,
                 Err(_) => refuse("a frame cap"),
+            },
+            "master-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.master_volume = parsed,
+                Err(_) => refuse("a master volume"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -438,6 +443,7 @@ mod tests {
         settings.adjust(Knob::Brightness, -2);
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
+        settings.adjust(Knob::MasterVolume, -2);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
@@ -572,6 +578,34 @@ mod tests {
         assert!(settings.brightness() <= super::super::MAX_BRIGHTNESS);
         assert!(settings.fog_start() <= super::super::MAX_FOG_START);
         assert!(settings.frame_cap() <= super::super::MAX_FRAME_CAP);
+
+        fs::write(&path, "master-volume 250\n").expect("a scratch file");
+        let (settings, _) = load(&path);
+        assert_eq!(settings.master_volume(), super::super::MAX_MASTER_VOLUME);
+    }
+
+    /// The audio line follows the one rule this file has: a line nothing can read costs
+    /// that setting its default, and no other setting notices.
+    #[test]
+    fn an_unreadable_volume_line_costs_that_setting_and_no_other() {
+        let scratch = Scratch::new("settings-bad-volume");
+        let path = scratch.join("settings");
+        fs::write(&path, "render-distance 5\nmaster-volume loud\nvsync off\n")
+            .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(
+            settings.master_volume(),
+            Settings::default().master_volume()
+        );
+        assert_eq!(settings.render_distance(), 5);
+        assert!(!settings.vsync(), "a bad volume line took the rest with it");
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 2"), "{complaints:?}");
+        assert!(
+            !complaints[0].contains("loud"),
+            "a complaint carried the file's contents: {complaints:?}"
+        );
     }
 
     /// Zero is "uncapped" rather than the bottom of the range, so the clamp has to leave it
