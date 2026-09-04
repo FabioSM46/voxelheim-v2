@@ -46,6 +46,7 @@
 //! can hear moving. See `docs/adr/0001-voice-transport.md`.
 
 mod device;
+mod dsp;
 mod mixer;
 
 use std::f32::consts::TAU;

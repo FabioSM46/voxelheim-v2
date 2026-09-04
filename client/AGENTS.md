@@ -87,6 +87,7 @@ keeps meaning "everything the client is".
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
+| `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
 | `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
@@ -1481,6 +1482,14 @@ enumeration — at startup, on a stream that opened, and on a logged failure; ne
 because enumeration is not free on every backend. A device name is a platform string, so
 `hex_encode` makes it one whitespace-free field in the settings file and `ascii_shown` makes
 it something the embedded font can draw.
+
+**The signal processing is hand-written, and the dependency budget is why.** `audio/dsp.rs`
+holds a resampler, a noise gate, a slow automatic gain control and a level meter — two
+hundred lines of arithmetic that would otherwise be a sixth crate, which
+`docs/adr/0001-voice-transport.md` declines. Two rules bind it. It runs on the Bevy schedule
+and never in a callback, so it may allocate, and it is still written to reuse its buffers
+rather than allocate sixty times a second. And a level is presentation like everything else
+under `audio/`: no gameplay branch reads a decibel.
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
