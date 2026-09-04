@@ -291,12 +291,82 @@ Trigger: `$scrum-master feature-spec <feature-description>`
    - Total estimated effort
    - Link to the spec for future reference
 
+## Sizing: an issue is written against the review cap, or it is written wrong
+
+**This is the one place a seam can be chosen with no code sunk at all, and until Iteration 50 this
+skill had never heard of the cap.**
+
+`DEEPSEEK_MAX_DIFF_CHARS` is **45,000** characters. A pull request above it is truncated, every
+unread file is injected as a finding, and the pull request blocks until somebody acknowledges the
+gap. `$dev-issue` Step 5 therefore splits an oversized issue into parts — but splitting is damage
+control. By the time `$dev-issue` reads an issue, its shape is already fixed: the acceptance
+criteria are one list, and an agent cutting them apart is guessing at a seam somebody else should
+have drawn.
+
+The bill for that is measurable. **Iteration 50's first three issues became ten pull requests** —
+#849 one, #850 four, #851 five. Each of those parts had then to be reviewed, merged and replayed in
+order, seven times, because at the time only a pull request targeting `main` or `develop` got a CI
+run at all. #903 removed that constraint and a later part can now be opened directly on the one
+before it, so the *serialisation* is gone — but the review rounds, the ordering to keep straight and
+the seams somebody had to invent under time pressure are not. Those are what sizing the issue up
+front avoids, and they are the reason this section exists rather than a note that splitting is now
+cheaper.
+
+### Size every issue you draft or refine
+
+Estimate from the same table `$dev-issue` Step 5 uses, calibrated on this repository's own
+measurements:
+
+| What the issue looks like | Measured | Pull requests |
+| --- | --- | --- |
+| One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
+| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+
+Two multipliers the file count hides: changes here run about two-thirds tests, so a module with
+real coverage is roughly three times its production code; and a field added to a type constructed
+by literal costs every construction site — `SessionParams` has 45, which was 14,000 characters
+before any behaviour existed.
+
+**The Parts column is not the estimate divided by the cap.** 74,073 over 45,000 is 1.6 and #851
+took five. Seams are discrete — you cut where the code already draws a boundary, and #851's parts
+came out around 16k, 44k, 49k, 36k and 42k because that is where its module edges are — and an
+estimate made before any code exists is systematically low: #851 was estimated whole at 74,073 and
+its fifth part *alone* measured 80,534 once written. Treat the arithmetic as a floor on the count
+and let the seams decide the number. `$dev-issue` Step 5 carries the same warning, for the agent
+that reads the estimate you wrote.
+
+### What to do when an issue is over
+
+**Prefer splitting the issue.** Two issues, each one pull request, each with its own acceptance
+criteria and its own `Dependencies` line, is strictly better than one issue and a note: the
+milestone then counts the real work, `$dev-issue` runs each without a judgement call, and the seam
+was chosen by whoever understood the feature.
+
+**When the work genuinely is one issue** — a contract and both its consumers, say — keep it whole
+and write the seam into the body under a heading `Suggested split`, naming each part, what it
+contains, and the order they must merge in. `$dev-issue` will follow a stated seam rather than
+invent one. Say how many parts: there is no limit of two, and #851 needed five.
+
+**Never split on a character count.** The seam is a boundary the code already draws — the wire and
+its consumer, the mechanism and its callers, a decision and the wiring that carries it. A split
+made to hit a number leaves parts that each read as an excerpt of something else.
+
+### Say the estimate out loud
+
+Put the estimate and its reasoning in the issue body, or in the refinement comment for an issue you
+did not author. **An estimate nobody records is one nobody can be shown to have skipped** — which
+is exactly how `$dev-issue`'s identical instruction went unfollowed three times in Iteration 50
+while being the first sentence of its Step 5.
+
 ## Guardrails
 
 - Never create issues without user confirmation on the spec
 - Never modify closed issues or closed milestones
 - Respect workspace boundaries: don't create server issues for a client-only feature
 - A feature that moves data between client and server ALWAYS has a schemas component — surface it explicitly rather than burying contract changes in a server issue
+- **Size every issue against the 45,000-character review cap before it is committed to a milestone** — see "Sizing" above. A cross-workspace feature is never one pull request, and an issue that needs five parts should say five.
 - When in doubt about scope, ask — don't assume
 - Ceremony issues (labeled `ceremony`) are excluded from all iteration/backlog reports
 
@@ -306,4 +376,5 @@ Trigger: `$scrum-master feature-spec <feature-description>`
 - Issue templates: `.github/ISSUE_TEMPLATE/`
 - Issue conventions: `docs/ISSUE_CONVENTIONS.md`
 - Pipeline: `AGENTS.md` (root)
+- The review cap and what it costs: `AGENTS.md`, "Automated PR Review (DeepSeek)"; `$dev-issue` Step 5
 - Shared helpers: `scripts/gh-automation.sh`
