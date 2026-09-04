@@ -56,7 +56,7 @@ use std::sync::Arc;
 use bevy::prelude::*;
 
 use crate::settings::{OutputDevice, OutputDevices, Settings};
-use device::AudioDevice;
+use device::{AudioCapture, AudioDevice};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
@@ -94,9 +94,15 @@ impl Plugin for AudioPlugin {
         // its own thread the moment this returns, and a stream that starts at the wrong
         // volume is a stream that is briefly audible at the wrong volume.
         let device = AudioDevice::start(Arc::clone(&mixer));
+        // **Started, and holding no microphone.** The capture supervisor opens a device only
+        // once something calls `Capture::listen(true)`, which nothing does until #852 part 6
+        // — so a client built today runs this thread and never touches an input device, which
+        // is exactly what a player who has not asked for voice expects.
+        let capture = AudioCapture::start();
 
         app.insert_resource(AudioMixer(mixer))
             .insert_resource(device)
+            .insert_resource(capture)
             .insert_resource(controls)
             .insert_resource(speaker_test)
             .insert_resource(LastListing(0))

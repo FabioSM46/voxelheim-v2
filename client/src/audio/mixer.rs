@@ -103,12 +103,18 @@ pub trait Sink {
 
 /// A fixed-capacity single-producer single-consumer ring of mono samples.
 ///
-/// One producer (a Bevy system, through [`SourceHandle`]) and one consumer (the output
-/// callback, through [`Mixer::render`]). The indices only ever increase; the modulo is
-/// taken at access, so "empty" and "full" are told apart by the difference rather than by
-/// a spare slot.
+/// One producer and one consumer, and which thread is which depends on the direction. On the
+/// way out a Bevy system produces through [`SourceHandle`] and the output callback consumes
+/// through [`Mixer::render`]; on the way in `audio/device.rs`'s capture callback produces and
+/// a Bevy system consumes. The indices only ever increase; the modulo is taken at access, so
+/// "empty" and "full" are told apart by the difference rather than by a spare slot.
+///
+/// **`pub(super)` because there is one ring in this module and not two.** The capture side
+/// needs the same lock-free, allocation-free structure for the same reason — a callback the
+/// operating system will not wait for — and a second copy of it would be a second place for
+/// the memory ordering to be subtly different.
 #[derive(Debug)]
-struct Ring {
+pub(super) struct Ring {
     /// `f32` bits. See the module doc for why this is a slice of atomics.
     data: Box<[AtomicU32]>,
     /// What the consumer has taken. Written by the consumer only.
@@ -118,7 +124,7 @@ struct Ring {
 }
 
 impl Ring {
-    fn new(capacity: usize) -> Self {
+    pub(super) fn new(capacity: usize) -> Self {
         Self {
             data: (0..capacity.max(1)).map(|_| AtomicU32::new(0)).collect(),
             read: AtomicUsize::new(0),
@@ -127,14 +133,14 @@ impl Ring {
     }
 
     /// How many samples are waiting.
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.written
             .load(Ordering::Acquire)
             .wrapping_sub(self.read.load(Ordering::Acquire))
     }
 
     /// How many more samples [`Self::push`] would accept.
-    fn free(&self) -> usize {
+    pub(super) fn free(&self) -> usize {
         self.data.len() - self.len().min(self.data.len())
     }
 
@@ -143,7 +149,7 @@ impl Ring {
     /// **Refuses rather than overwrites.** A full ring means the consumer is behind; the
     /// producer dropping the newest samples costs the tail of a sound, where overwriting
     /// the oldest would tear the middle of one that is already being played.
-    fn push(&self, samples: &[f32]) -> usize {
+    pub(super) fn push(&self, samples: &[f32]) -> usize {
         let mut written = self.written.load(Ordering::Relaxed);
         let taken = samples.len().min(self.free());
         for sample in &samples[..taken] {
@@ -157,7 +163,7 @@ impl Ring {
     }
 
     /// Takes the next sample, or `None` when there is none.
-    fn pop(&self) -> Option<f32> {
+    pub(super) fn pop(&self) -> Option<f32> {
         let read = self.read.load(Ordering::Relaxed);
         if read == self.written.load(Ordering::Acquire) {
             return None;
@@ -165,6 +171,32 @@ impl Ring {
         let bits = self.data[read % self.data.len()].load(Ordering::Relaxed);
         self.read.store(read.wrapping_add(1), Ordering::Release);
         Some(f32::from_bits(bits))
+    }
+
+    /// Moves everything waiting onto the end of `out`, and answers how much that was.
+    ///
+    /// The consumer's counterpart to [`Self::push`], and the shape the capture side wants: a
+    /// Bevy system draining a callback's output every frame asks "everything you have" rather
+    /// than one sample at a time. `out` is the caller's buffer and is never cleared here, for
+    /// [`Resampler::resample`]'s reason — the caller is accumulating towards a frame.
+    ///
+    /// [`Resampler::resample`]: super::dsp::Resampler::resample
+    pub(super) fn drain_into(&self, out: &mut Vec<f32>) -> usize {
+        // Read once: the producer may add more while this runs, and taking those too would
+        // make the amount drained unbounded by anything the caller can see.
+        let waiting = self.len().min(self.data.len());
+        out.reserve(waiting);
+        let mut taken = 0;
+        while taken < waiting {
+            match self.pop() {
+                Some(sample) => {
+                    out.push(sample);
+                    taken += 1;
+                }
+                None => break,
+            }
+        }
+        taken
     }
 }
 

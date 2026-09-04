@@ -89,7 +89,7 @@ keeps meaning "everything the client is".
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, or let a diagnostic quote a payload |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
-| `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
+| `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
@@ -1508,6 +1508,22 @@ hundred lines of arithmetic that would otherwise be a sixth crate, which
 and never in a callback, so it may allocate, and it is still written to reuse its buffers
 rather than allocate sixty times a second. And a level is presentation like everything else
 under `audio/`: no gameplay branch reads a decibel.
+
+**The microphone is the same shape pointed the other way, with one state more.** The output
+stream is open whenever a device will have it, because a client with sound is always
+potentially making some. The capture stream is open only while something above has called
+`Capture::listen(true)` — so `supervise_capture` starts and ends in a wait, and a client whose
+player never asks for voice runs the thread and never touches an input device. That is not a
+convenience: an open microphone nobody asked for is the thing `docs/adr/0001-voice-transport.md`
+and every player expectation say must not exist, and making it a property of the loop rather
+than of its callers is what keeps it true when a caller is wrong.
+
+`Capture` is `Mixer`'s mirror: a lock-free ring the callback pushes into, four atomics, and the
+same rule about what may run in a callback. The samples in it are the *device's own*,
+interleaved at whatever it negotiated, because a resampler carries state and buffers a callback
+may not allocate — `audio/dsp.rs` converts them on the Bevy side. Two streams can negotiate the
+same rate and still be two streams, so a consumer compares `Capture::format`'s **generation**
+rather than its rate: the samples across a reopen are a gap, not a continuation.
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
