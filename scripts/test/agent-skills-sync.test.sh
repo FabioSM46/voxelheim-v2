@@ -42,4 +42,22 @@ if [ -n "$offenders" ]; then
   exit 1
 fi
 
+# Review dispositions can unlock a merge, so their mutating commands must live after the source
+# push and remote-head verification, not behind a prose instruction to jump around the workflow.
+python3 - <<'PY'
+from pathlib import Path
+
+text = Path('.claude/skills/process-pr/SKILL.md').read_text()
+round_flow = text[text.index('#### 4c — Address the round') :]
+push = round_flow.index('git push origin HEAD')
+verify = round_flow.index('Confirm the PR is still open at REMOTE_HEAD')
+publish = round_flow.index('#### 4f — Publish dispositions after the push')
+reply = round_flow.index('comments/<comment-databaseId>/replies')
+resolve = round_flow.index('resolveReviewThread')
+ack = round_flow.index('add DEEPSEEK_REVIEW_READ')
+assert push < verify < publish < reply < resolve < ack, (
+    'process-pr can mutate review disposition state before source fixes are published and verified'
+)
+PY
+
 echo "no skill refuses model invocation"
