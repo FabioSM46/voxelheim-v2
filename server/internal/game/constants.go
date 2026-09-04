@@ -674,4 +674,51 @@ const (
 	// compose — 2.41 at zero hunger in deep snow — because being starved in a blizzard
 	// is worse than either, and nothing here needs a special case to say so.
 	SnowSpeedScale = 0.7
+
+	// --- Voice ---------------------------------------------------------------
+	//
+	// Proximity voice is a relay, not a channel: the server decides who hears a frame
+	// by deciding whether to send it at all, and a client is never told who else is
+	// listening. These four numbers are the whole of that decision.
+
+	// VoiceRangeDefault is how far a voice carries, in blocks, on a server whose
+	// operator did not say otherwise. Twenty-four blocks is a little under the width of
+	// a settlement square: close enough that walking up to somebody is what starts a
+	// conversation, and far enough that a party working one building can stay in one.
+	//
+	// [WithVoiceRange] is how an operator's choice reaches the simulation, and zero
+	// there is a server that relays no voice at all.
+	VoiceRangeDefault = 24.0
+
+	// VoiceExitFactor is the hysteresis: a listener enters the audible set at the range
+	// and only leaves it at the range multiplied by this.
+	//
+	// **Without it the set is a coin toss on the boundary.** A player standing exactly at
+	// the edge crosses it several times a second as the physics step nudges them, and each
+	// crossing starts or stops a stream mid-syllable. Ten percent is 2.4 blocks at the
+	// default — about one step — which is wide enough that ordinary standing-still jitter
+	// cannot span it and narrow enough that walking away still ends the conversation.
+	VoiceExitFactor = 1.1
+
+	// VoiceSetInterval is how many ticks apart the audible sets are recomputed. It is the
+	// cost bound this feature commits to: the recompute is O(players) per speaker, so the
+	// simulation pays O(players²) once every four ticks rather than on every frame, and a
+	// relayed frame costs only its own audible set.
+	//
+	// Four ticks is 200 ms at the default rate. A voice frame is 20 ms of audio, so the
+	// worst a stale set can do is carry ten frames past a boundary that has already been
+	// widened by VoiceExitFactor — inaudible as a fault, and far cheaper than a spatial
+	// index nobody else here needs.
+	VoiceSetInterval = 4
+
+	// VoiceBurst is how many frames one speaker may relay immediately and
+	// VoiceRefillPerSecond is the sustained rate the bucket restores.
+	//
+	// Sixty a second is three times what a 20 ms Opus frame needs, so an honest client is
+	// never near it; the burst of twenty is a third of a second of audio, which absorbs a
+	// client whose frames arrive in clumps without letting anyone buy a second of fan-out
+	// in one write. Keyed by the identity that survives a connection, exactly as the chat
+	// bucket is, so reconnecting cannot mint a fresh burst.
+	VoiceBurst           = 20
+	VoiceRefillPerSecond = 60.0
 )

@@ -31,24 +31,32 @@ type ChatOutcome struct {
 	arguments   []string
 }
 
-// chatLimiter is one token bucket retained by Sim under the player's stable
+// tokenBucket is one cadence allowance retained by Sim under the player's stable
 // identity. It has no mutex of its own: every access happens under Sim.mu.
-type chatLimiter struct {
-	tokens float64
-	last   time.Time
+//
+// **The burst and the refill are fields rather than constants**, because there are two
+// of these and their numbers differ by two orders of magnitude: chat is five lines with
+// one restored a second, voice is twenty frames with sixty restored a second. What must
+// not differ is the arithmetic — the backwards-clock guard below is the part that is
+// easy to get subtly wrong, and one copy of it is one thing to be right about.
+type tokenBucket struct {
+	tokens          float64
+	burst           float64
+	refillPerSecond float64
+	last            time.Time
 }
 
-func newChatLimiter(now time.Time) *chatLimiter {
-	return &chatLimiter{tokens: ChatBurst, last: now}
+func newChatLimiter(now time.Time) *tokenBucket {
+	return &tokenBucket{tokens: ChatBurst, burst: ChatBurst, refillPerSecond: ChatRefillPerSecond, last: now}
 }
 
 // allow refills from elapsed wall time and spends one token when possible.
-func (l *chatLimiter) allow(now time.Time) bool {
+func (l *tokenBucket) allow(now time.Time) bool {
 	// A clock that stands still or moves backwards grants no credit and does not
 	// move the refill origin backwards. SystemClock carries a monotonic reading;
 	// the guard also makes deliberately frozen test clocks exact.
 	if elapsed := now.Sub(l.last); elapsed > 0 {
-		l.tokens = min(float64(ChatBurst), l.tokens+elapsed.Seconds()*ChatRefillPerSecond)
+		l.tokens = min(l.burst, l.tokens+elapsed.Seconds()*l.refillPerSecond)
 		l.last = now
 	}
 	if l.tokens < 1 {
@@ -60,13 +68,13 @@ func (l *chatLimiter) allow(now time.Time) bool {
 
 // fullAt reports whether elapsed refill time has restored the whole burst. A
 // fully restored limiter carries no information: deleting it is equivalent to
-// retaining it and bounds the identity-keyed map to recent chat activity.
-func (l *chatLimiter) fullAt(now time.Time) bool {
-	if l.tokens >= ChatBurst {
+// retaining it and bounds the identity-keyed map to recent activity.
+func (l *tokenBucket) fullAt(now time.Time) bool {
+	if l.tokens >= l.burst {
 		return true
 	}
 	elapsed := now.Sub(l.last)
-	return elapsed > 0 && l.tokens+elapsed.Seconds()*ChatRefillPerSecond >= ChatBurst
+	return elapsed > 0 && l.tokens+elapsed.Seconds()*l.refillPerSecond >= l.burst
 }
 
 func (s *Sim) pruneChatLimitersLocked(now time.Time) {
