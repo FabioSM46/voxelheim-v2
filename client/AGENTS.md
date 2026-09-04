@@ -1430,44 +1430,32 @@ or music bus arrives with the feature that feeds it, because a gain nobody can h
 a knob that cannot be tested.
 
 **The device has exactly one owner and it is not a resource.** A `cpal::Stream` is not
-`Send` on every platform, so `audio/device.rs` puts it on a supervisor thread of its own and
-nothing else ever holds one — the same shape `net/session.rs` uses for the socket. The Bevy
-side holds `AudioDevice`, which is a thread handle and a stop flag; dropping it closes the
-stream, the way dropping `net`'s `Channels` stops the net thread. `Mixer::render` is the seam
-the callback plugs into, and it is the only part of this module a real-time thread touches.
+`Send` on every platform, so `audio/device.rs` puts it on a supervisor thread of its own —
+the shape `net/session.rs` uses for the socket. Bevy holds `AudioDevice`, a thread handle and
+a stop flag; dropping it closes the stream, the way dropping `net`'s `Channels` stops the net
+thread. **That module's doc carries the arguments. These are the rules it must not lose:**
 
-**The stream's *error* callback is on that same real-time thread**, so it obeys the same
-rule: it stores a numbered reason in an atomic and notifies a condition variable **without
-taking the lock**, because taking one is the thing it may not do. The supervisor therefore
-waits with a timeout rather than forever, so a notification lost to that race costs a delayed
-reopen instead of a silent client; `Watch::stop` runs on a Bevy thread and does take the
-lock, which is why quitting is never delayed by it. The reason is a number because formatting
-a string allocates — `why()` turns it back into a sentence where that is allowed.
-
-**Every device failure is recoverable and none is fatal.** No device, no float format, a
-stream that will not open, one unplugged mid-session, a default that moved — each leaves the
-supervisor waiting and trying again, so a headset plugged in later is picked up without a
-restart. No `unwrap`, `expect` or `panic!` sits on any path a device can reach: a machine
-with no sound card plays a silent game. The retry is a condvar wait, not a spin, and the
-failure log is throttled so an absent device cannot fill a log file.
-
-**The stream is opened as `f32` or not at all**, so the device's own buffer *is* the `Sink`
-and the callback converts nothing; an integer format would need a scratch buffer sized before
-the stream opened, growing one inside the callback being the allocation forbidden above. It
-is also **not** opened with `with_max_sample_rate()`, the idiom `cpal`'s examples reach for:
-that takes a range's ceiling, so a device advertising 192 kHz would have the mixer generate
-four times the samples — for content that is voice — and the platform resample them back down
-to the rate it is already mixing at. `float_config` asks for the device's own default rate.
-
-**Enumeration is bound before the log macro, not inside it.** `warn!` and `debug!` evaluate
-their fields only when the callsite is enabled, so an enumeration written inline runs or not
-depending on the log level — and counting those calls is the only handle a unit test has on
-the throttle. Written lazily, the test that pins the throttle passed while measuring
-nothing; that is the #46 family again.
-
-**No test in `audio/` opens a device.** The seam is `OutputHost` — the three methods the
-supervisor uses, faked in twenty lines — and nothing under test constructs `CpalHost` or
-builds `AudioPlugin`, which is what starts the supervisor.
+- The **error callback runs on the real-time thread too**: an atomic store and a notify, with
+  no lock taken. So the supervisor waits with a *timeout* — a notification lost to that race
+  must cost a delayed reopen, never a silent client.
+- **Two orderings, each a bug first (the #901 review).** `set_format` happens between
+  building the stream and starting it, because starting is what lets the callback run. And
+  the loss code is cleared *before* an open attempt, never after: cpal reports a stream error
+  once, so a stream that dies while opening stores the only notification there will be. Both
+  live in `supervise`/`opened`, where one copy serves every `OutputHost` — never in an
+  implementation's memory, which no test can hold to a rule.
+- **A name the host will not give is `None`, not a placeholder**: `default_name()` fails the
+  same way `name()` did, so comparing two unknowns reopens a working stream on every poll.
+- **Nothing panics on a path a device can reach**, every failure is retried on a condvar wait
+  rather than a spin, and the failure log is throttled.
+- **`f32` or nothing**, and `float_config` asks for the device's *default* rate rather than
+  `with_max_sample_rate()`.
+- **Enumeration is bound before the log macro**, because `warn!` evaluates its fields only
+  when the callsite is enabled — and counting those calls is the only handle a test has on
+  the throttle. Written lazily it passed while measuring nothing; the #46 family again.
+- **No test in `audio/` opens a device.** The seam is `OutputHost`, faked in twenty lines;
+  nothing under test constructs `CpalHost` or builds `AudioPlugin`, which starts the
+  supervisor.
 
 **Audio is presentation, and the rule is `player/ambience.rs`'s.** Nothing under `audio/` is
 ever read by input, targeting, placement or anything else that decides an outcome. A gain is

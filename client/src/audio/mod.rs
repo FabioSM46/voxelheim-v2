@@ -30,13 +30,12 @@
 //!
 //! `audio/device.rs`, and nothing else. It puts one `cpal::Stream` on a supervisor thread
 //! of its own, reopens it when the device errors or disappears, and treats a machine with
-//! no output at all as a log line and a silent client rather than a reason not to run. The
-//! stream's output callback is where [`Mixer::render`] is called from, and it is the only
-//! real-time caller there is.
+//! no output at all as a log line and a silent client rather than a reason not to run. Its
+//! output callback is the only real-time caller [`Mixer::render`] has.
 //!
 //! `Mixer` is still testable with no device anywhere, through [`mixer::Sink`] — which is
-//! how every assertion in this module and in `mixer.rs` runs, and how the device's own
-//! supervisor loop is tested without a sound card.
+//! how every assertion here and in `mixer.rs` runs, and how the supervisor loop itself is
+//! tested without a sound card.
 //!
 //! ## What this module does not do yet
 //!

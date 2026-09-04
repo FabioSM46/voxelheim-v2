@@ -22,37 +22,47 @@
 //!
 //! ## The error callback is a real-time thread too
 //!
-//! `cpal` calls the error callback from the same thread it calls the data callback from, so
-//! the rule in `audio/mod.rs` covers it: no allocation, no lock, no `warn!`. All it does is
-//! store a code in an atomic and notify a condition variable — and it notifies **without
-//! taking the lock**, because taking one is the thing it may not do. The cost of that is a
-//! wakeup the supervisor can miss, which is why the supervisor waits with a timeout rather
-//! than forever: a missed notification delays a reopen by [`POLL_WHILE_PLAYING`] instead of
-//! losing it. [`Watch::stop`] runs on a Bevy thread and therefore *does* take the lock, so
-//! quitting is never delayed by that race.
+//! `cpal` calls it from the thread it calls the data callback from, so the rule in
+//! `audio/mod.rs` covers it: no allocation, no lock, no `warn!`. It stores a code in an
+//! atomic and notifies a condition variable **without taking the lock**, because taking one
+//! is the thing it may not do. The cost is a wakeup the supervisor can miss, which is why
+//! the supervisor waits with a timeout rather than forever: a missed notification delays a
+//! reopen by [`POLL_WHILE_PLAYING`] instead of losing it. [`Watch::stop`] runs on a Bevy
+//! thread and *does* take the lock, so quitting is never delayed by that race.
+//!
+//! ## Two orderings, and why they live in the supervisor
+//!
+//! Both were bugs first, found in review on this file, and both are the same shape: a rule
+//! that is easy to state and easy for one implementation to forget.
+//!
+//! - **The mixer learns the format between building the stream and starting it.** Starting
+//!   is what lets the output callback run, so a callback that runs first renders buffers in
+//!   the previous stream's shape — mono fanned into a stereo frame, on a reopen.
+//! - **The loss code is cleared before an open attempt, never after one.** A stream can die
+//!   while it is starting, and `cpal` reports a stream error *once*: clearing afterwards
+//!   discards the only notification there will ever be, leaving this loop holding a dead
+//!   stream and the client silent.
+//!
+//! [`opened`] owns both, so one copy serves every [`OutputHost`] — which is also the only
+//! way a test can hold them, since the only implementation a test drives is a fake.
 //!
 //! ## A missing device is a log line and a silent client
 //!
-//! Every failure here is recoverable and none of them is fatal: no device, a device that
-//! offers no format this mixer can render into, a stream that will not open, a device
-//! unplugged mid-session. Each one leaves the supervisor waiting [`RETRY_AFTER_LOSS`] and
-//! trying again, so a device that appears later is picked up without a restart. There is no
-//! `unwrap`, no `expect` and no `panic!` on any path a device can reach — a player with no
-//! sound card plays a silent game, and the game is what has to keep running.
-//!
-//! **The retry is a wait, not a spin**, and the log is throttled to one line every
-//! [`FAILURE_LOG_EVERY`] attempts: a permanently absent device would otherwise fill a log
-//! file with the same sentence for as long as the client runs.
+//! Every failure here is recoverable: no device, no format this mixer can render into, a
+//! stream that will not open, a device unplugged mid-session. Each leaves the supervisor
+//! waiting [`RETRY_AFTER_LOSS`] and trying again, so a device that appears later is picked
+//! up without a restart. There is no `unwrap`, `expect` or `panic!` on any path a device can
+//! reach — a player with no sound card plays a silent game, and the game has to keep
+//! running. **The retry is a wait, not a spin**, and the log is throttled to one line every
+//! [`FAILURE_LOG_EVERY`] attempts.
 //!
 //! ## Float only, deliberately
 //!
-//! The mixer renders `f32` and the stream is opened as `f32`, so the device's own buffer
-//! *is* the [`Sink`] and the callback converts nothing. An integer format would need a
-//! scratch buffer sized before the stream opened, growing one inside the callback being the
-//! allocation the rule above forbids — so a device offering no float configuration is
-//! reported and retried like any other failure. Every backend this client targets offers
-//! one. [`float_config`] carries the rest of that decision, including which rate it asks
-//! for and why it is not the highest one.
+//! The stream is opened as `f32`, so the device's own buffer *is* the [`Sink`] and the
+//! callback converts nothing; an integer format would need a scratch buffer sized before the
+//! stream opened, which is the allocation the rule above forbids. A device offering no float
+//! configuration is reported and retried like any other failure. [`float_config`] carries
+//! the rest, including which rate it asks for and why it is not the highest one.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
@@ -67,25 +77,21 @@ use super::mixer::{Mixer, Sink};
 
 /// How long the supervisor sleeps between looks at a stream that is playing.
 ///
-/// It bounds two things and neither is a poll of the audio itself: how long a notification
-/// the error callback could not deliver takes to be noticed anyway, and how long the client
-/// keeps playing to a device the system has stopped calling default. Half a second is below
-/// the threshold at which a player would call it a hang and far above the cost of asking a
-/// host for a device name.
+/// It bounds two things, neither a poll of the audio itself: how long a notification the
+/// error callback could not deliver takes to be noticed anyway, and how long the client
+/// keeps playing to a device the system has stopped calling default.
 const POLL_WHILE_PLAYING: Duration = Duration::from_millis(500);
 
 /// How long the supervisor waits after a failure before opening again.
 ///
-/// Long enough that a machine with no sound card is not spending a measurable slice of a
-/// core on it, short enough that plugging a headset in is noticed while the player is still
-/// holding it.
+/// Long enough that a machine with no sound card spends no measurable slice of a core on
+/// it, short enough that plugging a headset in is noticed while the player still holds it.
 const RETRY_AFTER_LOSS: Duration = Duration::from_secs(2);
 
 /// One failure in this many is written to the log; the rest are silent.
 ///
 /// At [`RETRY_AFTER_LOSS`] that is one line a minute for a device that is never coming
-/// back, which is enough to diagnose a silent client and little enough to leave in a log
-/// nobody is reading.
+/// back: enough to diagnose a silent client, little enough to leave in an unread log.
 const FAILURE_LOG_EVERY: u32 = 30;
 
 /// [`Watch::loss`] while the stream is healthy.
@@ -102,8 +108,8 @@ const UNNAMED: &str = "an unnamed output device";
 
 /// Which of the codes above happened, as a sentence for the log.
 ///
-/// The error callback may not format a string, so the reason travels as a number and is
-/// turned back into words here, on a thread that is allowed to spend the time.
+/// The error callback may not format a string, so the reason travels as a number and
+/// becomes words here, on a thread allowed to spend the time.
 const fn why(loss: u8) -> &'static str {
     match loss {
         DEVICE_GONE => "the device is no longer available",
@@ -115,7 +121,7 @@ const fn why(loss: u8) -> &'static str {
 /// How long the supervisor waits in each of its two states.
 ///
 /// A parameter rather than two constants read directly, so a test can drive the loop at a
-/// pace a test suite can afford while [`Pace::REAL`] stays the one thing the client runs.
+/// pace a suite can afford while [`Pace::REAL`] stays the one thing the client runs.
 #[derive(Clone, Copy, Debug)]
 struct Pace {
     playing: Duration,
@@ -133,15 +139,25 @@ impl Pace {
 /// The format an open stream negotiated, and what the device is called.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Format {
-    name: String,
+    /// `None` when the host would not name the device, which is a different thing from
+    /// [`UNNAMED`]: a name nobody can read cannot be compared with anything, and treating
+    /// the placeholder as one is how a working stream gets reopened forever.
+    name: Option<String>,
     sample_rate: u32,
     channels: u16,
 }
 
+impl Format {
+    /// The device's name for a log line.
+    fn shown(&self) -> &str {
+        self.name.as_deref().unwrap_or(UNNAMED)
+    }
+}
+
 /// The two flags the supervisor sleeps on.
 ///
-/// Shared with the stream's error callback, which is why every field is an atomic and why
-/// the notify path takes no lock. See the module doc.
+/// Shared with the stream's error callback, which is why every field is an atomic and the
+/// notify path takes no lock. See the module doc.
 #[derive(Debug, Default)]
 struct Watch {
     /// [`PLAYING`], or one of the loss codes above. Written by the error callback and by
@@ -158,8 +174,7 @@ struct Watch {
 impl Watch {
     /// Records why the stream stopped and wakes the supervisor.
     ///
-    /// **This runs on the audio thread.** One atomic store and one notify, no lock and no
-    /// allocation; see the module doc for what a lost wakeup costs.
+    /// **This runs on the audio thread**: one store, one notify, no lock, no allocation.
     fn lose(&self, loss: u8) {
         self.loss.store(loss, Ordering::Release);
         self.wake.notify_all();
@@ -177,8 +192,8 @@ impl Watch {
 
     /// Asks the supervisor to close the stream and end.
     ///
-    /// Unlike [`Self::lose`] this takes the lock before notifying, because it runs on a
-    /// Bevy thread where a lock costs nothing and a missed wakeup would delay quitting.
+    /// Unlike [`Self::lose`] this locks before notifying: it runs on a Bevy thread, where a
+    /// lock costs nothing and a missed wakeup would delay quitting.
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
         drop(self.quiet.lock().unwrap_or_else(PoisonError::into_inner));
@@ -192,7 +207,7 @@ impl Watch {
     /// Waits for a notification, or `at_most`, whichever comes first.
     ///
     /// A poisoned lock is taken anyway: nothing is stored behind it, so no invariant can
-    /// have been broken — and refusing to wait would turn a lock nobody reads into a spin.
+    /// have been broken, and refusing to wait would turn a lock nobody reads into a spin.
     fn rest(&self, at_most: Duration) {
         let quiet = self.quiet.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = self.wake.wait_timeout(quiet, at_most);
@@ -202,11 +217,10 @@ impl Watch {
 /// What the supervisor needs from an audio host.
 ///
 /// **The seam that keeps every test in this file away from a sound card.** `cpal`'s own
-/// traits cannot be implemented by a test without writing a whole backend; these three
-/// methods are all the loop below uses, so the fake in the tests is twenty lines and no
-/// test ever calls [`cpal::default_host`].
+/// traits cannot be implemented without writing a whole backend; these four methods are all
+/// the loop below uses, so the fake in the tests is twenty lines.
 trait OutputHost {
-    /// An open stream. Dropping it closes the device; nothing is ever called on it.
+    /// A built stream that is not yet running. Dropping it closes the device.
     type Stream;
 
     /// Every output device this host can name, in the host's own order.
@@ -215,12 +229,32 @@ trait OutputHost {
     /// What the host currently calls its default output device, if it has one.
     fn default_name(&self) -> Option<String>;
 
-    /// Opens the default output device and starts it playing.
+    /// Builds a stream on the default output device, without running it.
     fn open(
         &self,
         mixer: &Arc<Mixer>,
         watch: &Arc<Watch>,
     ) -> Result<(Self::Stream, Format), String>;
+
+    /// Runs a stream [`Self::open`] built, so its callback begins.
+    ///
+    /// **Separate from `open` on purpose**, so the ordering lives in [`opened`]. See the
+    /// module doc.
+    fn start(&self, stream: &Self::Stream) -> Result<(), String>;
+}
+
+/// Opens a stream, tells the mixer what it negotiated, and only then runs it.
+fn opened<H: OutputHost>(
+    host: &H,
+    mixer: &Arc<Mixer>,
+    watch: &Arc<Watch>,
+) -> Result<(H::Stream, Format), String> {
+    let (stream, format) = host.open(mixer, watch)?;
+    // The one caller of `set_format`, and before the start rather than after the open, so
+    // that no buffer is ever rendered in the previous stream's shape.
+    mixer.set_format(format.sample_rate, format.channels);
+    host.start(&stream)?;
+    Ok((stream, format))
 }
 
 /// The supervisor loop: open, hold, reopen.
@@ -240,23 +274,29 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
 
     let mut failures: u32 = 0;
     while !watch.stopping() {
-        match host.open(mixer, watch) {
+        // Cleared **before** the attempt and never after it: a device that fails the moment
+        // `opened` starts it reports its loss while that call is still on the stack, and
+        // `cpal` reports a stream error once. See the module doc.
+        watch.playing();
+        match opened(host, mixer, watch) {
             Ok((stream, format)) => {
                 failures = 0;
                 info!(
                     "audio output: {} at {} Hz, {} channel(s)",
-                    format.name, format.sample_rate, format.channels
+                    format.shown(),
+                    format.sample_rate,
+                    format.channels
                 );
-                // The one caller of `set_format`: every generator downstream asks the mixer
-                // what rate it is producing for, and this is where that answer comes from.
-                mixer.set_format(format.sample_rate, format.channels);
-                watch.playing();
 
                 while !watch.stopping() && watch.loss() == PLAYING {
                     watch.rest(pace.playing);
                     // What the error callback cannot see: a host that moved its default
-                    // device without failing the stream we are already holding.
-                    if host.default_name().as_deref() != Some(format.name.as_str()) {
+                    // without failing the stream we hold. Skipped for a device the host
+                    // would not name, because `default_name` fails the same way — comparing
+                    // two unknowns would reopen a working stream on every poll.
+                    if let Some(name) = format.name.as_deref()
+                        && host.default_name().as_deref() != Some(name)
+                    {
                         watch.lose(DEFAULT_MOVED);
                     }
                 }
@@ -283,9 +323,9 @@ fn supervise<H: OutputHost>(host: &H, mixer: &Arc<Mixer>, watch: &Arc<Watch>, pa
 
 /// The supervisor thread, as the ECS holds it.
 ///
-/// A handle and a flag. Everything that could fail happens on the other side of it, which
-/// is why building one is infallible: a client that cannot start an audio thread is a
-/// silent client, not a client that will not start.
+/// A handle and a flag. Everything that can fail happens on the other side of it, which is
+/// why building one is infallible: a client that cannot start an audio thread is a silent
+/// client, not one that will not start.
 #[derive(Resource, Debug)]
 pub struct AudioDevice {
     watch: Arc<Watch>,
@@ -313,9 +353,9 @@ impl AudioDevice {
 impl Drop for AudioDevice {
     /// Dropping the resource is how the app says "close the device".
     ///
-    /// Joined rather than detached, because an abandoned stream outlives the window by a
-    /// noticeable moment on some backends. The wait is bounded by one open attempt:
-    /// [`Watch::stop`] takes the lock, so a resting supervisor cannot miss it.
+    /// Joined rather than detached, because an abandoned stream outlives the window on some
+    /// backends. The wait is bounded by one open attempt: [`Watch::stop`] takes the lock,
+    /// so a resting supervisor cannot miss it.
     fn drop(&mut self) {
         self.watch.stop();
         if let Some(supervisor) = self.supervisor.take() {
@@ -358,9 +398,11 @@ impl OutputHost for CpalHost {
             .0
             .default_output_device()
             .ok_or_else(|| "this host has no default output device".to_owned())?;
-        let name = device.name().unwrap_or_else(|_| UNNAMED.to_owned());
-        let config = float_config(&device)
-            .ok_or_else(|| format!("{name} offers no 32-bit float output configuration"))?;
+        let name = device.name().ok();
+        let config = float_config(&device).ok_or_else(|| {
+            let shown = name.as_deref().unwrap_or(UNNAMED);
+            format!("{shown} offers no 32-bit float output configuration")
+        })?;
         let format = Format {
             name,
             sample_rate: config.sample_rate().0,
@@ -386,11 +428,14 @@ impl OutputHost for CpalHost {
                 },
                 None,
             )
-            .map_err(|err| format!("cannot open {}: {err}", format.name))?;
+            .map_err(|err| format!("cannot open {}: {err}", format.shown()))?;
+        Ok((stream, format))
+    }
+
+    fn start(&self, stream: &cpal::Stream) -> Result<(), String> {
         stream
             .play()
-            .map_err(|err| format!("cannot start {}: {err}", format.name))?;
-        Ok((stream, format))
+            .map_err(|err| format!("cannot start the output stream: {err}"))
     }
 }
 
@@ -405,16 +450,16 @@ impl Sink for Block<'_> {
 
 /// The float configuration this device should be opened with, if it has one.
 ///
-/// **Not `with_max_sample_rate()`, which is the idiom `cpal`'s own examples reach for.**
-/// That takes the ceiling of whichever range it is handed: a device advertising 192 kHz
-/// would have the mixer generate four times the samples — for content that is voice — and
-/// the platform resample all of them back down, because the mixer the operating system runs
-/// is still at its own default rate. That rate is the device's *default* configuration, so
-/// it is what is asked for, with the fewest conversions between here and a speaker.
+/// **Not `with_max_sample_rate()`, the idiom `cpal`'s own examples reach for.** That takes
+/// the ceiling of whichever range it is handed: a device advertising 192 kHz would have the
+/// mixer generate four times the samples — for content that is voice — and the platform
+/// resample all of them back down, because the mixer the operating system runs is still at
+/// its own default rate. That rate is the device's *default* configuration, so it is what is
+/// asked for, with the fewest conversions between here and a speaker.
 ///
-/// The default is used outright when it is already float, which is the common case; when it
-/// is not, the device's float ranges are searched for the window sitting closest to that
-/// same rate, ties going to the configuration with fewer channels.
+/// The default is used outright when it is already float, the common case; when it is not,
+/// the float ranges are searched for the window closest to that same rate, ties going to
+/// the configuration with fewer channels.
 fn float_config(device: &cpal::Device) -> Option<SupportedStreamConfig> {
     let default = device.default_output_config().ok()?;
     if default.sample_format() == SampleFormat::F32 {
@@ -450,9 +495,8 @@ fn named<E>(devices: impl Iterator<Item = Result<String, E>>) -> Vec<String> {
 }
 
 /// **No test below opens an audio device.** Every one drives [`supervise`] through
-/// [`FakeHost`]; nothing here names [`cpal::default_host`] or constructs [`CpalHost`], which
-/// is the only code in this file that reaches the platform — and which is the whole reason
-/// [`OutputHost`] exists.
+/// [`FakeHost`]; nothing here constructs [`CpalHost`], the only code in this file that
+/// reaches the platform — which is the whole reason [`OutputHost`] exists.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,14 +519,23 @@ mod tests {
     /// A format with a name, so a test can say which device answered.
     fn format(name: &str, sample_rate: u32, channels: u16) -> Format {
         Format {
-            name: name.to_owned(),
+            name: Some(name.to_owned()),
             sample_rate,
             channels,
         }
     }
 
-    /// One open stream. Counting itself out on drop is what lets a test assert that the
-    /// old stream is closed before a new one is opened.
+    /// A format from a host that would not say what the device is called.
+    fn nameless(sample_rate: u32, channels: u16) -> Format {
+        Format {
+            name: None,
+            sample_rate,
+            channels,
+        }
+    }
+
+    /// One open stream. Counting itself out on drop is how a test asserts that the old
+    /// stream is closed before a new one opens.
     struct FakeStream(Arc<AtomicUsize>);
 
     impl Drop for FakeStream {
@@ -502,17 +555,24 @@ mod tests {
         live: Arc<AtomicUsize>,
         /// How many streams were open when each `open` was called.
         found_live: Mutex<Vec<usize>>,
+        /// The mixer the supervisor drives, kept so `start` can look at it.
+        mixer: Mutex<Option<Arc<Mixer>>>,
+        /// The mixer's sample rate when each `start` was called — how a test sees whether
+        /// the format reached the mixer before the callback could run.
+        rate_at_start: Mutex<Vec<u32>>,
+        /// Makes the next `open` report a loss the way an error callback would, while
+        /// `open` is still on the stack.
+        lose_while_opening: AtomicBool,
     }
 
     impl FakeHost {
-        /// A host answering `answers` in turn, calling its default whatever the first
-        /// successful answer is named.
+        /// A host answering `answers` in turn, its default named after the first Ok one.
         fn new(answers: Vec<Result<Format, String>>) -> Arc<Self> {
             let default = answers
                 .iter()
                 .flatten()
                 .next()
-                .map(|format| format.name.clone());
+                .and_then(|format| format.name.clone());
             Arc::new(Self {
                 answers: Mutex::new(answers.into()),
                 names: vec!["a card".to_owned()],
@@ -544,11 +604,17 @@ mod tests {
 
         fn open(
             &self,
-            _mixer: &Arc<Mixer>,
-            _watch: &Arc<Watch>,
+            mixer: &Arc<Mixer>,
+            watch: &Arc<Watch>,
         ) -> Result<(FakeStream, Format), String> {
+            *lock(&self.mixer) = Some(Arc::clone(mixer));
             lock(&self.found_live).push(self.live.load(Ordering::Relaxed));
             self.opens.fetch_add(1, Ordering::Relaxed);
+            if self.lose_while_opening.swap(false, Ordering::Relaxed) {
+                // What a device that dies the instant it runs does: the error callback
+                // fires before this call has even returned.
+                watch.lose(DEVICE_GONE);
+            }
             let mut answers = lock(&self.answers);
             let answer = if answers.len() > 1 {
                 answers.pop_front()
@@ -565,9 +631,17 @@ mod tests {
                 None => Err("this host was given no answer".to_owned()),
             }
         }
+
+        fn start(&self, _stream: &FakeStream) -> Result<(), String> {
+            let rate = lock(&self.mixer)
+                .as_ref()
+                .map_or(0, |mixer| mixer.sample_rate());
+            lock(&self.rate_at_start).push(rate);
+            Ok(())
+        }
     }
 
-    /// A supervisor running on its own thread, and the mixer and watch it is driving.
+    /// A supervisor on its own thread, with the mixer and watch it drives.
     struct Running {
         mixer: Arc<Mixer>,
         watch: Arc<Watch>,
@@ -622,14 +696,15 @@ mod tests {
     }
 
     #[test]
-    fn an_open_stream_hands_the_mixer_the_format_it_negotiated() {
+    fn the_mixer_has_the_format_before_the_callback_can_run() {
+        // 44_100 rather than the mixer's own default, so "was told" and "was never told"
+        // are different numbers rather than the same one.
         let host = FakeHost::new(vec![Ok(format("a card", 44_100, 2))]);
         let mut running = Running::start(&host, BRISK);
+        assert!(until(|| !lock(&host.rate_at_start).is_empty()));
 
-        assert!(until(|| running.mixer.sample_rate() == 44_100));
-
-        // And the channel count reached it too, which has no getter: two samples out per
-        // one sample in is what a stereo stream means.
+        // The channel count reached it too, which has no getter: two samples out per one
+        // sample in is what a stereo stream means.
         let source = running.mixer.claim(Bus::Master).expect("a free slot");
         running.mixer.set_gain(Bus::Master, 1.0);
         source.push(&[0.5]);
@@ -638,6 +713,11 @@ mod tests {
         assert_eq!(block, [0.5, 0.5]);
 
         assert!(running.stop(), "the supervisor ended cleanly");
+        assert_eq!(
+            *lock(&host.rate_at_start),
+            vec![44_100],
+            "the mixer knew the buffer shape before the callback could run"
+        );
         assert_eq!(
             host.live.load(Ordering::Relaxed),
             0,
@@ -657,10 +737,7 @@ mod tests {
         // What the error callback does, and the whole of what it does.
         running.watch.lose(DEVICE_GONE);
 
-        assert!(
-            until(|| running.mixer.sample_rate() == 48_000),
-            "the reopened stream's format replaced the lost one's"
-        );
+        assert!(until(|| running.mixer.sample_rate() == 48_000), "reopened");
         assert!(running.stop());
         assert!(host.opens() >= 2);
         assert!(
@@ -682,10 +759,7 @@ mod tests {
             DEFAULT_SAMPLE_RATE,
             "a device that never opened told the mixer nothing"
         );
-        assert!(
-            running.stop(),
-            "no attempt panicked, and stopping still works"
-        );
+        assert!(running.stop(), "nothing panicked, and stopping still works");
     }
 
     #[test]
@@ -739,8 +813,8 @@ mod tests {
         let mut running = Running::start(&host, BRISK);
         assert!(until(|| running.mixer.sample_rate() == 48_000));
 
-        // Nothing failed: the host simply started calling something else its default,
-        // which is the case no error callback ever reports.
+        // Nothing failed: the host simply started calling something else its default —
+        // the case no error callback reports.
         *lock(&host.default) = Some("the headset".to_owned());
 
         assert!(
@@ -748,6 +822,38 @@ mod tests {
             "the client followed the system's default"
         );
         assert!(running.stop());
+    }
+
+    #[test]
+    fn a_stream_that_dies_while_it_is_opening_is_reopened_rather_than_held() {
+        // Both answers name the same device, so nothing here can be reopened by the
+        // default-moved poll: a reopen can only come from the loss surviving.
+        let host = FakeHost::new(vec![
+            Ok(format("a card", 44_100, 2)),
+            Ok(format("a card", 22_050, 2)),
+        ]);
+        host.lose_while_opening.store(true, Ordering::Relaxed);
+        let mut running = Running::start(&host, BRISK);
+
+        assert!(
+            until(|| running.mixer.sample_rate() == 22_050),
+            "the loss stored during the open survived into the inner loop"
+        );
+        assert!(running.stop());
+    }
+
+    #[test]
+    fn a_device_the_host_will_not_name_is_left_alone_rather_than_reopened() {
+        let host = FakeHost::new(vec![Ok(nameless(44_100, 2))]);
+        let mut running = Running::start(&host, BRISK);
+        assert!(until(|| running.mixer.sample_rate() == 44_100));
+
+        // `default_name` fails the way `name` did, so an unguarded comparison would find
+        // them unequal on every poll — fifty of them at this pace.
+        thread::sleep(Duration::from_millis(50));
+        let opens = host.opens();
+        assert!(running.stop());
+        assert_eq!(opens, 1, "a working stream was reopened {opens} times");
     }
 
     #[test]
