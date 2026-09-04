@@ -1087,7 +1087,24 @@ mod tests {
         );
         let mut running = Running::start(&host, BRISK);
         running.choice.want(Some("USB headset".to_owned()));
-        assert!(until(|| running.mixer.sample_rate() == 44_100));
+
+        // Wait for an open that *asked for the chosen name*, not merely for one that
+        // produced 44,100 Hz. `start` spawns the supervisor before the line above runs, so
+        // it may already have read `Choice::wanted()` as `None` and opened the default —
+        // and this host answers every open with the same 44,100 Hz format, so a rate check
+        // is satisfied by that pre-choice open while a `None -> Some` reopen is still
+        // pending. Snapshotting `opens()` there would count the reopen against the sleep
+        // below and fail a client that behaved correctly. Waiting on `asked_for` resolves
+        // the transition first: it is immediately true when the choice beat the supervisor,
+        // and becomes true at the reopen when it did not — after which nothing further is
+        // pending, because the live `Choice` now matches what the current open captured.
+        assert!(
+            until(|| {
+                lock(&host.asked_for).last().cloned() == Some(Some("USB headset".to_owned()))
+            }),
+            "the supervisor never opened the device the player chose"
+        );
+        assert_eq!(running.mixer.sample_rate(), 44_100);
 
         let opened = host.opens();
         *lock(&host.default) = Some("Built-in speakers".to_owned());
