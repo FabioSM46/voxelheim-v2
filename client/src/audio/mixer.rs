@@ -172,43 +172,6 @@ impl Ring {
         self.read.store(read.wrapping_add(1), Ordering::Release);
         Some(f32::from_bits(bits))
     }
-
-    /// Moves everything waiting onto the end of `out`, and answers how much that was.
-    ///
-    /// The consumer's counterpart to [`Self::push`], and the shape the capture side wants: a
-    /// Bevy system draining a callback's output every frame asks "everything you have" rather
-    /// than one sample at a time. `out` is the caller's buffer and is never cleared here, for
-    /// [`Resampler::resample`]'s reason — the caller is accumulating towards a frame.
-    ///
-    /// [`Resampler::resample`]: super::dsp::Resampler::resample
-    pub(super) fn drain_into(&self, out: &mut Vec<f32>) -> usize {
-        // Read once: the producer may add more while this runs, and taking those too would
-        // make the amount drained unbounded by anything the caller can see.
-        let waiting = self.len().min(self.data.len());
-        out.reserve(waiting);
-        let mut taken = 0;
-        while taken < waiting {
-            match self.pop() {
-                Some(sample) => {
-                    out.push(sample);
-                    taken += 1;
-                }
-                None => break,
-            }
-        }
-        taken
-    }
-
-    /// Throws away everything waiting.
-    ///
-    /// The consumer's, like [`Self::pop`] and [`Self::drain_into`] — it advances the read
-    /// index and nothing else, so it keeps the single-consumer assumption this ring's memory
-    /// ordering rests on. `audio/device.rs` uses it for the samples either side of a capture
-    /// stream reopening, which are two devices' audio as far as anything can tell.
-    pub(super) fn skip(&self) {
-        let written = self.written.load(Ordering::Acquire);
-        self.read.store(written, Ordering::Release);
-    }
 }
 
 /// One slot in the mixer: a ring and the bus it is mixed on.

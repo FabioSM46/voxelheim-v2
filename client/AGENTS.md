@@ -1523,17 +1523,15 @@ what may run in a callback. The samples in it are the *device's own*, interleave
 negotiated, because a resampler carries state and buffers a callback may not allocate —
 `audio/dsp.rs` converts them on the Bevy side.
 
-**A stream's rate, its channel count and its identity are one word, and reading it is the only
-way to read the ring.** Both halves of that were review findings on #919 and both are the same
-mistake wearing different clothes. Three atomics are not one answer: a consumer can observe the
-new rate beside the old generation, which is exactly the reading the generation exists to
-prevent, so the three are packed into one `AtomicU64`. And a ring drained across a reopen hands
-back one stream's tail stitched onto the next stream's head at two different rates — so
-`Capture::take` is the whole consumer-side contract rather than a rule somebody has to follow:
-a stream the reader has not read from is *skipped* and reported `fresh`, and a stream that opens
-mid-read invalidates the batch and leaves the caller's buffer untouched. The samples across a
-reopen are a gap, not a continuation, and there is now no API through which they can be
-anything else.
+**A stream's rate, its channel count and its identity are one word.** Three atomics are not one
+answer — a consumer can observe the new rate beside the old generation, which is exactly the
+reading the generation exists to prevent — so the three are packed into one `AtomicU64`. That
+was a review finding on #919, and so was its sibling: a ring drained naively across a reopen
+hands back one stream's tail stitched onto the next stream's head at two different rates. The
+answer to the second is that **there is no naive drain**: the only way to read the ring is
+`Capture::take`, which lands with its one consumer, skips a stream the reader has not seen and
+says `fresh`, and discards a batch that a reopen ran through. The samples across a reopen are a
+gap, not a continuation, and no API offers them as anything else.
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
