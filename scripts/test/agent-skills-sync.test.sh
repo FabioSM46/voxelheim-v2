@@ -73,14 +73,23 @@ grep -qF 'Existing worktree is dirty; preserving it' "$process_skill" || {
   exit 1
 }
 
-# A review disposition may make READY TO MERGE reachable. The skill must stop at both kinds of
-# finding, push and verify the remote head, and only then resume the deferred API writes.
-grep -qF 'do not execute it until Step 4e verifies the pushed remote head' "$process_skill" \
-  && grep -qF 'Stop here until Step 4e has pushed the fixes and verified the remote head' "$process_skill" \
-  && grep -qF 'Only then execute the prepared' "$process_skill" || {
-  echo "FAIL: process-pr can dispose of review findings before pushing their fixes" >&2
-  exit 1
-}
+# Review dispositions can unlock a merge, so their mutating commands must live after the source
+# push and remote-head verification, not behind a prose instruction to jump around the workflow.
+python3 - <<'PY'
+from pathlib import Path
+
+text = Path('.claude/skills/process-pr/SKILL.md').read_text()
+round_flow = text[text.index('#### 4c — Address the round') :]
+push = round_flow.index('git push origin HEAD')
+verify = round_flow.index('Confirm the PR is still open at REMOTE_HEAD')
+publish = round_flow.index('#### 4f — Publish dispositions after the push')
+reply = round_flow.index('comments/<comment-databaseId>/replies')
+resolve = round_flow.index('resolveReviewThread')
+ack = round_flow.index('add DEEPSEEK_REVIEW_READ')
+assert push < verify < publish < reply < resolve < ack, (
+    'process-pr can mutate review disposition state before source fixes are published and verified'
+)
+PY
 grep -qF 'if git diff --cached --quiet; then' "$process_skill" || {
   echo "FAIL: process-pr still requires a source commit for a no-code disposition" >&2
   exit 1
