@@ -23,7 +23,7 @@ use bevy::prelude::KeyCode;
 
 use super::{
     Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
-    key_from_name, key_name, valid_monitor_identity,
+    key_from_name, key_name, output_device_field, output_device_from_field, valid_monitor_identity,
 };
 
 /// The environment variable naming the XDG data directory.
@@ -200,6 +200,11 @@ fn render(settings: &Settings) -> String {
     out.push_str(&format!("fog-start {}\n", settings.fog_start));
     out.push_str(&format!("frame-cap {}\n", settings.frame_cap));
     out.push_str(&format!("master-volume {}\n", settings.master_volume));
+    // One field, whatever the sound card is called — see `output_device_field`.
+    out.push_str(&format!(
+        "output-device {}\n",
+        output_device_field(&settings.output_device)
+    ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
@@ -297,6 +302,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "master-volume" => match value.parse::<u8>() {
                 Ok(parsed) => settings.master_volume = parsed,
                 Err(_) => refuse("a master volume"),
+            },
+            "output-device" => match output_device_from_field(value) {
+                Some(parsed) => settings.output_device = parsed,
+                None => refuse("the system default output or a saved device"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -427,7 +436,7 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Knob, RebindRefusal};
+    use crate::settings::{Choices, Knob, OutputDevice, RebindRefusal};
     use bevy::prelude::KeyCode;
 
     /// Settings that differ from the defaults in every field, so a round trip that lost
@@ -435,9 +444,18 @@ mod tests {
     fn every_field_moved() -> Settings {
         let mut settings = Settings::default();
         let monitors = super::super::MonitorChoices::named(&["Main display", "Side display"]);
+        // A name with spaces and a colon in it: the shape `output_device_field` exists for,
+        // so the round trip runs over the case that would otherwise be read back as its
+        // first word.
+        let devices = super::super::OutputDevices::named(&["HDA Intel PCH: ALC295 Analog"]);
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
         settings.adjust(Knob::LookSensitivity, 4);
-        settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
-        settings.adjust_with_monitors(Knob::Monitor, 1, &monitors);
+        settings.adjust_with_choices(Knob::WindowMode, 1, bounds);
+        settings.adjust_with_choices(Knob::Monitor, 1, bounds);
+        settings.adjust_with_choices(Knob::OutputDevice, 1, bounds);
         settings.adjust(Knob::RenderDistance, -3);
         settings.adjust(Knob::FieldOfView, 3);
         settings.adjust(Knob::Brightness, -2);
@@ -590,8 +608,11 @@ mod tests {
     fn an_unreadable_volume_line_costs_that_setting_and_no_other() {
         let scratch = Scratch::new("settings-bad-volume");
         let path = scratch.join("settings");
-        fs::write(&path, "render-distance 5\nmaster-volume loud\nvsync off\n")
-            .expect("a scratch file");
+        fs::write(
+            &path,
+            "render-distance 5\nmaster-volume loud\nvsync off\noutput-device name:6f6b\n",
+        )
+        .expect("a scratch file");
 
         let (settings, complaints) = load(&path);
         assert_eq!(
@@ -600,10 +621,28 @@ mod tests {
         );
         assert_eq!(settings.render_distance(), 5);
         assert!(!settings.vsync(), "a bad volume line took the rest with it");
+        assert_eq!(
+            settings.output_device(),
+            &OutputDevice::Named("ok".to_owned()),
+            "a bad volume line took the device with it"
+        );
         assert_eq!(complaints.len(), 1, "{complaints:?}");
         assert!(complaints[0].contains("line 2"), "{complaints:?}");
         assert!(
             !complaints[0].contains("loud"),
+            "a complaint carried the file's contents: {complaints:?}"
+        );
+
+        // And the mirror: an unreadable device line is the system default, not a device
+        // called `speakers`, and it costs the volume beside it nothing.
+        fs::write(&path, "master-volume 25\noutput-device speakers\n").expect("a scratch file");
+        let (settings, complaints) = load(&path);
+        assert_eq!(settings.master_volume(), 25);
+        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 2"), "{complaints:?}");
+        assert!(
+            !complaints[0].contains("speakers"),
             "a complaint carried the file's contents: {complaints:?}"
         );
     }
