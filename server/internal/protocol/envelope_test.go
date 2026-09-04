@@ -1593,8 +1593,11 @@ func TestTheVoiceContractCarriesIntentOneWayAndTheServersAnswerTheOther(t *testi
 		if err != nil {
 			t.Fatalf("Decode %s opus: %v", name, err)
 		}
-		if got.Voice == nil || len(got.Voice.Opus) != 0 {
-			t.Errorf("%s opus decoded to %v", name, got.Voice)
+		switch {
+		case got.Voice == nil:
+			t.Errorf("%s opus decoded to no voice frame at all", name)
+		case len(got.Voice.Opus) != 0:
+			t.Errorf("%s opus decoded to %d bytes, want 0", name, len(got.Voice.Opus))
 		}
 	}
 
