@@ -379,6 +379,23 @@ impl SnapshotBuffer {
     }
 
     /// The newest server tick held, if any. Diagnostics only.
+    /// Whether the newest accepted snapshot still names this entity.
+    ///
+    /// **A question about presence and nothing else.** `audio/heard.rs` asks it to release a
+    /// speaker who has left — the server stops relaying their voice at the same moment, so
+    /// what this prevents is a jitter buffer waiting out its release timer for somebody who
+    /// is demonstrably gone. Absence of a snapshot is `false`: a session with no answer yet
+    /// holds nobody.
+    pub fn holds_entity(&self, entity_id: u64) -> bool {
+        self.latest.as_ref().is_some_and(|latest| {
+            latest
+                .snapshot
+                .entities
+                .iter()
+                .any(|entity| entity.entity_id == entity_id)
+        })
+    }
+
     pub fn latest_tick(&self) -> Option<u32> {
         self.latest.as_ref().map(|held| held.snapshot.server_tick)
     }

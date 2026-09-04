@@ -48,6 +48,7 @@
 mod codec;
 mod device;
 mod dsp;
+mod heard;
 mod mixer;
 mod voice;
 
@@ -107,7 +108,7 @@ impl Plugin for AudioPlugin {
             .insert_resource(controls)
             .insert_resource(speaker_test)
             .insert_resource(LastListing(0))
-            .add_plugins(voice::VoicePlugin)
+            .add_plugins((voice::VoicePlugin, heard::HeardPlugin))
             .add_systems(
                 Update,
                 (
@@ -128,6 +129,16 @@ impl Plugin for AudioPlugin {
 /// than a `Mixer`, before there is a second holder to justify it.
 #[derive(Resource, Debug)]
 pub struct AudioMixer(Arc<Mixer>);
+
+impl AudioMixer {
+    /// Takes one of the mixer's source slots for `bus`, or `None` when they are all taken.
+    ///
+    /// The one way anything outside this file reaches the mixer, so "how many sources are
+    /// there" stays a question with one answer.
+    fn claim(&self, bus: Bus) -> Option<SourceHandle> {
+        self.0.claim(bus)
+    }
+}
 
 /// Everything a screen may ask of the audio module.
 ///
