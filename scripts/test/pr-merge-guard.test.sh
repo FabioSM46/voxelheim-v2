@@ -134,6 +134,11 @@ export CALL_LOG
 PATH="$STUB_DIR:$PATH"
 export PATH
 
+# Actions exports the real repository name. This fixture deliberately exercises the stubbed
+# `gh repo view` fallback, so isolate both higher-priority inputs instead of making the expected
+# REST path depend on whether the test runs locally or in CI.
+unset GITHUB_REPOSITORY REPO
+
 run_merge() {
   : > "$CALL_LOG"
   OUT=$(bash "$SCRIPT" pr-merge "$@" 2>&1)
