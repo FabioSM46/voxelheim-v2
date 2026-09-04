@@ -293,6 +293,15 @@ impl Control {
     }
 
     /// The key this control answers to before anybody changes it.
+    ///
+    /// **A default is what an *unnamed* control gets, never what overrides a named one.**
+    /// `Talk` starts on `KeyV`, which was free before it existed — so a settings file
+    /// written by an older client may legally hold `bind consume v` and no `talk` line at
+    /// all. [`Bindings::from_pairs`] resolves that by applying the file's bindings as a set
+    /// and giving each control the file left out the first key nothing else holds: the
+    /// player keeps `consume v`, `Talk` arrives somewhere free, and no control is left
+    /// unreachable. `a_settings_file_older_than_the_talk_control_keeps_every_binding_it_saved`
+    /// in `store` is what holds that, over exactly such a file.
     const fn default_key(self) -> KeyCode {
         match self {
             Self::Forward => KeyCode::KeyW,
