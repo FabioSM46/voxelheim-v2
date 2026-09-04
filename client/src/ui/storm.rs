@@ -178,6 +178,7 @@ mod tests {
             hotbar_slots: 4,
             equipment_slots: 1,
             player_token: ANY_TOKEN,
+            voice_range_blocks: 0.0,
         })
     }
 

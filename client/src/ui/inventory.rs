@@ -1812,6 +1812,7 @@ mod tests {
             hotbar_slots: 2,
             equipment_slots: 4,
             player_token: crate::net::ANY_TOKEN,
+            voice_range_blocks: 0.0,
         })
     }
 

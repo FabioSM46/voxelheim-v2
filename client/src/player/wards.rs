@@ -558,6 +558,7 @@ mod tests {
             } else {
                 WorldClock::default()
             },
+            voice_range_blocks: 0.0,
         })
     }
 

@@ -277,6 +277,16 @@ pub(super) enum SessionEvent {
     /// Every warded chunk column in view, **replacing** the client's previous set
     /// wholesale. Validated at the decode boundary; nothing draws it yet.
     WardsNearby(codec::WardsNearby),
+    /// One Opus frame the server decided this session may hear, in wire order.
+    ///
+    /// Validated at the decode boundary and consumed by nothing: the audio path is #851
+    /// and the settings that gate it are #852, exactly as `MapTile` crossed this channel
+    /// before the map window existed. Carried rather than dropped in `codec` so that the
+    /// arm which grows a decoder is the only thing left to write.
+    ///
+    /// **No log line may ever carry these bytes**, which is why this variant is delivered
+    /// and never printed: `Warning` is the one variant on this channel that becomes text.
+    VoiceHeard(codec::VoiceHeard),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1524,6 +1534,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::WardsNearby(wards)) => {
                     events.send(SessionEvent::WardsNearby(wards)).ok()?;
+                }
+                Ok(Transition::VoiceHeard(heard)) => {
+                    events.send(SessionEvent::VoiceHeard(heard)).ok()?;
                 }
                 // Deliberately silent. A server→client payload this issue does
                 // not consume yet is not a problem worth a log line every tick;
