@@ -253,8 +253,8 @@ const MONITOR_DROPDOWN_LAYER: i32 = 46;
 /// panel jumping, and #399 is what made it fail: adding `Control::Consume` grew Controls to
 /// eleven rows, so this number moved with it rather than the area silently overflowing.
 /// #452 moved it again, to twelve, for `Control::Map`; #711 moves it to thirteen for the
-/// rebindable default-mount call.
-const CONTENT_ROWS: usize = 13;
+/// rebindable default-mount call; #852 moves it to fourteen for `Control::Talk`.
+const CONTENT_ROWS: usize = 14;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
@@ -2130,17 +2130,19 @@ mod tests {
             "...",
             "the row did not arm a capture"
         );
-        press_key(&mut app, KeyCode::KeyV);
+        // `KeyB` and not `KeyV`: the latter is `Control::Talk`'s own key since #852, and
+        // a capture that landed on it would be refused rather than bound.
+        press_key(&mut app, KeyCode::KeyB);
         assert_eq!(
             app.world()
                 .resource::<Settings>()
                 .bindings()
                 .key(Control::Consume),
-            KeyCode::KeyV
+            KeyCode::KeyB
         );
         assert_eq!(
             reading_of(&mut app, Reading::Binding(Control::Consume)),
-            "v"
+            "b"
         );
         assert_eq!(reading_of(&mut app, Reading::Notice), "");
 
@@ -2240,7 +2242,13 @@ mod tests {
         let labels: Vec<&str> = rows_of(Tab::Audio).iter().map(|row| row.label()).collect();
         assert_eq!(
             labels,
-            vec!["Master volume", "Output device", "Test speakers"]
+            vec![
+                "Master volume",
+                "Output device",
+                "Voice",
+                "Voice threshold",
+                "Test speakers"
+            ]
         );
         for other in [Tab::Controls, Tab::Graphics] {
             assert!(

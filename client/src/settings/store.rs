@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings, VoiceMode,
     key_from_name, key_name, output_device_field, output_device_from_field, valid_monitor_identity,
 };
 
@@ -205,6 +205,11 @@ fn render(settings: &Settings) -> String {
         "output-device {}\n",
         output_device_field(&settings.output_device)
     ));
+    out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
+    out.push_str(&format!(
+        "voice-activation-threshold {}\n",
+        settings.voice_activation_threshold
+    ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
@@ -306,6 +311,14 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "output-device" => match output_device_from_field(value) {
                 Some(parsed) => settings.output_device = parsed,
                 None => refuse("the system default output or a saved device"),
+            },
+            "voice-mode" => match VoiceMode::from_name(value) {
+                Some(parsed) => settings.voice_mode = parsed,
+                None => refuse("a voice mode"),
+            },
+            "voice-activation-threshold" => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => settings.voice_activation_threshold = parsed,
+                _ => refuse("a voice activation threshold"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -462,6 +475,8 @@ mod tests {
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
         settings.adjust(Knob::MasterVolume, -2);
+        settings.adjust(Knob::VoiceMode, -1);
+        settings.adjust(Knob::VoiceActivationThreshold, 3);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
@@ -470,7 +485,9 @@ mod tests {
             (Control::Forward, KeyCode::F6),
             (Control::Menu, KeyCode::KeyG),
             (Control::Jump, KeyCode::Escape),
-            (Control::Consume, KeyCode::KeyV),
+            // Not `KeyV`: that is `Control::Talk`'s default since #852, and a rebinding
+            // onto a key another control answers to is refused by design.
+            (Control::Consume, KeyCode::F7),
         ] {
             settings.rebind(control, key).expect("a free key");
         }
@@ -600,6 +617,72 @@ mod tests {
         fs::write(&path, "master-volume 250\n").expect("a scratch file");
         let (settings, _) = load(&path);
         assert_eq!(settings.master_volume(), super::super::MAX_MASTER_VOLUME);
+    }
+
+    /// The two voice lines, both directions, plus the one thing a hand-edited threshold
+    /// must not be able to do: reach a reader outside the bound the model promises.
+    #[test]
+    fn the_voice_lines_survive_a_restart_and_a_hand_edited_one_costs_only_itself() {
+        let scratch = Scratch::new("settings-voice");
+        let path = scratch.join("settings");
+
+        for mode in [
+            VoiceMode::Off,
+            VoiceMode::PushToTalk,
+            VoiceMode::VoiceActivation,
+        ] {
+            let settings = Settings {
+                voice_mode: mode,
+                voice_activation_threshold: -33.0,
+                ..Settings::default()
+            };
+            assert_eq!(save(&path, &settings), Ok(()));
+            let (reloaded, complaints) = load(&path);
+            assert_eq!(complaints, Vec::<String>::new(), "{mode:?}");
+            assert_eq!(reloaded.voice_mode(), mode);
+            assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+        }
+
+        // A line nothing can read costs that one setting and leaves the other alone —
+        // this file's whole rule, applied to the pair that arrived together.
+        fs::write(
+            &path,
+            "voice-mode shouting
+voice-activation-threshold -30
+master-volume 25
+",
+        )
+        .expect("a scratch file");
+        let (settings, complaints) = load(&path);
+        assert_eq!(settings.voice_mode(), Settings::default().voice_mode());
+        assert!((settings.voice_activation_threshold_db() + 30.0).abs() < f32::EPSILON);
+        assert_eq!(settings.master_volume(), 25);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 1"), "{complaints:?}");
+        assert!(
+            !complaints[0].contains("shouting"),
+            "a complaint carried the file's contents: {complaints:?}"
+        );
+
+        // And a threshold outside the bound, or not a number at all, is not what a reader
+        // gets handed: `Settings::clamp` runs over whatever this parsed.
+        for line in [
+            "voice-activation-threshold -400\n",
+            "voice-activation-threshold 12\n",
+            "voice-activation-threshold NaN\n",
+            "voice-activation-threshold inf\n",
+        ] {
+            fs::write(&path, line).expect("a scratch file");
+            let (settings, _) = load(&path);
+            let held = settings.voice_activation_threshold_db();
+            assert!(
+                held.is_finite()
+                    && (super::super::MIN_VOICE_ACTIVATION_THRESHOLD
+                        ..=super::super::MAX_VOICE_ACTIVATION_THRESHOLD)
+                        .contains(&held),
+                "{line} read back as {held}"
+            );
+        }
     }
 
     /// The audio line follows the one rule this file has: a line nothing can read costs
