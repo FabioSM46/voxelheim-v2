@@ -53,6 +53,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
+use crate::settings::Settings;
 use device::AudioDevice;
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
 
@@ -96,7 +97,15 @@ impl Plugin for AudioPlugin {
             .insert_resource(device)
             .insert_resource(controls)
             .insert_resource(speaker_test)
-            .add_systems(Update, (apply_the_controls, play_the_speaker_test));
+            .add_systems(
+                Update,
+                (
+                    follow_the_settings,
+                    apply_the_controls,
+                    play_the_speaker_test,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -126,9 +135,13 @@ pub struct AudioControls {
 impl Default for AudioControls {
     fn default() -> Self {
         Self {
-            // 80 of 100, which is what the Audio tab's master volume starts at: loud
-            // enough to be heard, with room above it for a quiet recording.
-            master_gain: 0.8,
+            // Read from the knob, not restated beside it. The plugin sets the gain
+            // before the first frame, so a default that disagreed with the settings
+            // file's would be a stream briefly audible at the wrong volume — and two
+            // copies of one number is how that disagreement arrives. `Settings` is
+            // already this module's dependency: `follow_the_settings` below reads the
+            // same accessor every frame.
+            master_gain: Settings::default().master_gain(),
             speaker_test: false,
         }
     }
@@ -199,6 +212,29 @@ impl SpeakerTest {
     }
 }
 
+/// Turns the Audio tab's settings into what this module acts on.
+///
+/// **One direction, and only ever this one.** [`Settings`] is what a player chose and what
+/// the file holds; [`AudioControls`] is what the mixer is told. Nothing here writes a
+/// setting back, so no failure inside this module can quietly rewrite a choice a player
+/// made — the rule `settings/mod.rs` states about values that reach it from elsewhere.
+///
+/// `SettingsPlugin` is added before `AudioPlugin` in `main.rs`, which is what makes
+/// [`Settings`] present here.
+fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioControls>) {
+    if !settings.is_changed() {
+        return;
+    }
+    let gain = settings.master_gain();
+    // Written only on a real change, so a settings change that moved nothing this module
+    // reads does not mark the resource and wake `apply_the_controls` for a gain that is
+    // already set. The speaker test is deliberately untouched: it is a press, not a
+    // setting, and the screen that asks for one writes it straight onto this resource.
+    if controls.master_gain != gain {
+        controls.master_gain = gain;
+    }
+}
+
 /// Puts the master gain where [`AudioControls`] says.
 ///
 /// Only on a change, so the ordinary frame does nothing at all.
@@ -228,6 +264,7 @@ fn play_the_speaker_test(mut controls: ResMut<AudioControls>, mut test: ResMut<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Knob;
 
     /// A mixer and a speaker test with no device anywhere near them.
     ///
@@ -314,9 +351,49 @@ mod tests {
 
     #[test]
     fn the_default_master_gain_matches_the_volume_the_audio_tab_starts_at() {
-        // 80 of 100. The two numbers are one decision, and this is what says so until the
-        // knob exists to read it from.
-        assert_eq!(AudioControls::default().master_gain, 0.8);
+        // The value, not the equality. `AudioControls::default()` now *is*
+        // `Settings::default().master_gain()`, so asserting those two against each other
+        // would compare a thing with itself and could never fail — a test that passes
+        // whatever anybody does to either side. What can still break is the number a
+        // player actually hears on first launch, so that is what is pinned: the Audio
+        // tab starts at 80 of 100 and the gain is linear, so this is 0.8. Move either
+        // the knob's default or the conversion and this fails.
+        assert!(
+            (AudioControls::default().master_gain - 0.8).abs() < f32::EPSILON,
+            "first launch plays at {} rather than 0.8",
+            AudioControls::default().master_gain
+        );
         assert!(!AudioControls::default().speaker_test);
+    }
+
+    /// **The seam, in one direction only.** The tab writes a setting, this module reads it,
+    /// and nothing travels back — and a tone somebody asked for is not swallowed by a
+    /// settings change that lands on the same frame.
+    #[test]
+    fn the_volume_setting_reaches_the_controls_and_nothing_is_written_back() {
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .insert_resource(AudioControls::default())
+            .add_systems(Update, follow_the_settings);
+        app.update();
+
+        let mut quieter = Settings::default();
+        quieter.adjust(Knob::MasterVolume, -4);
+        *app.world_mut().resource_mut::<Settings>() = quieter.clone();
+        app.world_mut().resource_mut::<AudioControls>().speaker_test = true;
+        app.update();
+
+        let controls = app.world().resource::<AudioControls>();
+        assert_eq!(controls.master_gain, quieter.master_gain());
+        assert!(
+            (controls.master_gain - 0.6).abs() < f32::EPSILON,
+            "four presses off 80 is 60 of 100"
+        );
+        assert!(controls.speaker_test, "the tone request was cleared");
+        assert_eq!(
+            *app.world().resource::<Settings>(),
+            quieter,
+            "the audio module wrote a setting back"
+        );
     }
 }

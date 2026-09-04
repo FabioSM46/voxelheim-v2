@@ -19,6 +19,7 @@
 use bevy::prelude::*;
 
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
+use crate::audio::AudioControls;
 use crate::player::InputMode;
 use crate::settings::{CONTROLS, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name};
 
@@ -70,6 +71,9 @@ impl Plugin for SettingsScreenPlugin {
         app.init_resource::<SettingsScreen>()
             .init_resource::<Settings>()
             .init_resource::<MonitorChoices>()
+            // Inserted by `AudioPlugin`, which `main.rs` adds first; this is what lets the
+            // screen and its tests stand up with no audio device anywhere near them.
+            .init_resource::<AudioControls>()
             .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
             // Chained, and the order is what makes a press readable on the frame it
@@ -158,6 +162,8 @@ enum SettingsAction {
     Capture(Control),
     /// Put one tab's settings back to their defaults — **and only that tab's**.
     Reset(Tab),
+    /// Play a second of tone through the master bus at whatever the volume is now.
+    TestSpeakers,
     /// Back to the pause menu.
     Back,
 }
@@ -263,6 +269,7 @@ const fn reset_label(tab: Tab) -> &'static str {
     match tab {
         Tab::Controls => "RESET CONTROLS",
         Tab::Graphics => "RESET GRAPHICS",
+        Tab::Audio => "RESET AUDIO",
     }
 }
 
@@ -434,6 +441,10 @@ enum Row {
     /// Not `Knob(Knob::Monitor)` — [`rows_of`] gives Monitor this variant instead, which is
     /// what keeps the generic stepper out of its row while every other knob still gets one.
     MonitorSelect,
+    /// A row whose control *does* something rather than showing something: one button with
+    /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
+    /// this is the shape for a press with no state behind it at all.
+    Action(&'static str, SettingsAction, &'static str),
 }
 
 impl Row {
@@ -444,6 +455,7 @@ impl Row {
             Self::Toggle(label, _, _) => label,
             Self::Binding(control) => control.label(),
             Self::MonitorSelect => Knob::Monitor.label(),
+            Self::Action(label, _, _) => label,
         }
     }
 }
@@ -484,6 +496,13 @@ fn rows_of(tab: Tab) -> Vec<Row> {
                 Reading::ReadoutCorner,
             ),
         ]),
+        // Under the knob it proves, because that is the order a player uses them in: set
+        // the volume, then find out whether anything comes out.
+        Tab::Audio => rows.push(Row::Action(
+            "Test speakers",
+            SettingsAction::TestSpeakers,
+            "PLAY A TONE",
+        )),
     }
     rows
 }
@@ -524,6 +543,14 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                 );
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
+            Row::Action(_, action, face) => {
+                spawn_button(
+                    controls,
+                    action,
+                    Val::Px(STEP_BUTTON * 4.0),
+                    Face::Fixed(face),
+                );
+            }
         });
     }
 
@@ -889,6 +916,7 @@ type SettingsButton<'a> = (&'a Interaction, &'a SettingsAction, &'a mut Backgrou
 fn settings_actions(
     mut buttons: Query<SettingsButton<'_>, (Changed<Interaction>, With<Button>)>,
     monitors: Res<MonitorChoices>,
+    mut audio: ResMut<AudioControls>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
@@ -925,6 +953,14 @@ fn settings_actions(
                     screen.capturing = Some(control);
                     screen.notice = format!("press a key for {}", control.label().to_lowercase());
                 }
+                continue;
+            }
+            SettingsAction::TestSpeakers => {
+                // The whole of the row: a request, taken back by `audio/mod.rs` on the
+                // frame it starts the tone. This screen owns no sample, no bus and no
+                // device, and it sets no volume either — the tone plays at the gain
+                // `follow_the_settings` has already applied from the row above.
+                audio.speaker_test = true;
                 continue;
             }
             SettingsAction::Back => {
@@ -1704,12 +1740,12 @@ mod tests {
     /// bound. The monitor is deliberately excluded: hardware owns its name, so it follows
     /// the clipped overflow policy asserted separately below.
     #[test]
-    fn every_bounded_graphics_reading_fits_complete_on_one_line() {
+    fn every_bounded_reading_fits_complete_on_one_line() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
         let mut values = Vec::new();
         for knob in KNOBS
             .into_iter()
-            .filter(|knob| knob.tab() == Tab::Graphics && *knob != Knob::Monitor)
+            .filter(|knob| knob.tab() != Tab::Controls && *knob != Knob::Monitor)
         {
             for steps in [-10_000, 10_000] {
                 let mut settings = Settings::default();
@@ -2144,6 +2180,90 @@ mod tests {
             toggles, 3,
             "the screen draws {toggles} toggles; name the new one above rather than widening \
              this number"
+        );
+
+        // The same for the action rows, which are the other half `rows_of` writes by hand.
+        let actions: Vec<&Row> = all
+            .iter()
+            .filter(|row| matches!(row, Row::Action(..)))
+            .collect();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert!(matches!(
+            actions[0],
+            Row::Action(_, SettingsAction::TestSpeakers, _)
+        ));
+    }
+
+    // -------------------------------------------------------------------------
+    // The Audio tab
+    // -------------------------------------------------------------------------
+
+    /// Third in the strip, holding its own knob and the speaker test and nothing the other
+    /// two tabs claim.
+    #[test]
+    fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
+        assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
+
+        let labels: Vec<&str> = rows_of(Tab::Audio).iter().map(|row| row.label()).collect();
+        assert_eq!(labels, vec!["Master volume", "Test speakers"]);
+        for other in [Tab::Controls, Tab::Graphics] {
+            assert!(
+                !rows_of(other)
+                    .iter()
+                    .any(|row| row.label() == "Test speakers"),
+                "an audio row landed on {other:?}"
+            );
+        }
+
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Audio]);
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::MasterVolume)),
+            "80%"
+        );
+
+        // The knob moves, the reading follows, and the reset that owns it puts it back
+        // without reaching the tab beside it.
+        press(&mut app, SettingsAction::Nudge(Knob::MasterVolume, -1));
+        press(&mut app, SettingsAction::Nudge(Knob::MasterVolume, -1));
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::MasterVolume)),
+            "70%"
+        );
+        press(&mut app, SettingsAction::Nudge(Knob::RenderDistance, -1));
+        let distance = app.world().resource::<Settings>().render_distance();
+
+        press(&mut app, SettingsAction::Reset(Tab::Audio));
+        let settings = app.world().resource::<Settings>();
+        assert_eq!(settings.master_volume(), 80);
+        assert_eq!(
+            settings.render_distance(),
+            distance,
+            "RESET AUDIO reached the graphics tab"
+        );
+    }
+
+    /// **The row is a request and nothing else.** It sets the flag `audio/mod.rs` takes
+    /// back when it starts the tone; this screen owns no sample, no bus and no device, and
+    /// pressing it changes not one setting.
+    #[test]
+    fn the_test_speakers_row_asks_the_audio_module_for_a_tone() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+        assert!(
+            !app.world().resource::<AudioControls>().speaker_test,
+            "something asked for a tone before the row was pressed"
+        );
+        let before = app.world().resource::<Settings>().clone();
+
+        press(&mut app, SettingsAction::TestSpeakers);
+
+        assert!(app.world().resource::<AudioControls>().speaker_test);
+        assert_eq!(
+            *app.world().resource::<Settings>(),
+            before,
+            "the speaker test moved a setting"
         );
     }
 

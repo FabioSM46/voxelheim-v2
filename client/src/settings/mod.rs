@@ -127,6 +127,8 @@ pub enum Tab {
     Controls,
     /// The eight graphics values and the frame-rate readout.
     Graphics,
+    /// How loud the game is, and the speaker test that proves it.
+    Audio,
 }
 
 impl Tab {
@@ -136,13 +138,14 @@ impl Tab {
     /// no stable Rust enumerates an enum's variants. What keeps it honest is that
     /// [`Self::label`] and [`Settings::reset`] both match with no wildcard arm, so a third
     /// tab is a build failure until it has a name and a set of defaults of its own.
-    pub const ALL: [Self; 2] = [Self::Controls, Self::Graphics];
+    pub const ALL: [Self; 3] = [Self::Controls, Self::Graphics, Self::Audio];
 
     /// What a player reads on the tab.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Controls => "CONTROLS",
             Self::Graphics => "GRAPHICS",
+            Self::Audio => "AUDIO",
         }
     }
 }
@@ -529,10 +532,11 @@ pub enum Knob {
     Brightness,
     FogStart,
     FrameCap,
+    MasterVolume,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 8] = [
+pub const KNOBS: [Knob; 9] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -541,6 +545,7 @@ pub const KNOBS: [Knob; 8] = [
     Knob::Brightness,
     Knob::FogStart,
     Knob::FrameCap,
+    Knob::MasterVolume,
 ];
 
 impl Knob {
@@ -555,12 +560,13 @@ impl Knob {
             Self::Brightness => "Brightness",
             Self::FogStart => "Fog starts at",
             Self::FrameCap => "Frame cap",
+            Self::MasterVolume => "Master volume",
         }
     }
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so a ninth knob has to say where it belongs before it builds —
+    /// No wildcard arm, so a tenth knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
@@ -572,6 +578,7 @@ impl Knob {
             | Self::Brightness
             | Self::FogStart
             | Self::FrameCap => Tab::Graphics,
+            Self::MasterVolume => Tab::Audio,
         }
     }
 }
@@ -915,6 +922,17 @@ const FRAME_CAP_STEP: u16 = 10;
 /// continuously until somebody asks it not to.
 const NO_FRAME_CAP: u16 = 0;
 
+/// Silence, and a real value rather than a floor to stop short of: a player who wants the
+/// game muted has to be able to say so with this knob.
+const MIN_MASTER_VOLUME: u8 = 0;
+/// Unity gain, and the top. Nothing amplifies past what the mixer was handed —
+/// `audio/mixer.rs` clamps its own gains, and a knob asking for more asks for clipping.
+const MAX_MASTER_VOLUME: u8 = 100;
+/// One press of the master volume control.
+const MASTER_VOLUME_STEP: u8 = 5;
+/// What the game starts at: audible, with room above it for a quiet recording.
+const DEFAULT_MASTER_VOLUME: u8 = 80;
+
 /// Everything a player may change, as one resource.
 ///
 /// The fields are private and every one of them is inside its stated bound, always: the
@@ -936,6 +954,7 @@ pub struct Settings {
     frame_cap: u16,
     brightness: f32,
     fog_start: f32,
+    master_volume: u8,
 }
 
 impl Default for Settings {
@@ -954,6 +973,7 @@ impl Default for Settings {
             frame_cap: NO_FRAME_CAP,
             brightness: 1.0,
             fog_start: DEFAULT_FOG_START,
+            master_volume: DEFAULT_MASTER_VOLUME,
         }
     }
 }
@@ -1031,6 +1051,21 @@ impl Settings {
     /// Where the fog begins, as a fraction of the distance at which it is total.
     pub const fn fog_start(&self) -> f32 {
         self.fog_start
+    }
+
+    /// How loud the master bus is, from 0 to 100.
+    pub const fn master_volume(&self) -> u8 {
+        self.master_volume
+    }
+
+    /// The gain the master bus is set to, `0.0` silent to `1.0` unity.
+    ///
+    /// The one conversion between the number a player reads and the number a sample is
+    /// multiplied by, so `audio/` never divides by a hundred and this module never holds a
+    /// gain. Linear, deliberately: a perceptual curve changes how a volume *sounds* and
+    /// belongs with the feature that needs it, not with the knob that arrives first.
+    pub fn master_gain(&self) -> f32 {
+        f32::from(self.master_volume()) / f32::from(MAX_MASTER_VOLUME)
     }
 
     /// Moves a fixed-bound `knob` by `steps` of its own size.
@@ -1116,6 +1151,14 @@ impl Settings {
                 );
             }
             Knob::FrameCap => self.frame_cap = step_frame_cap(self.frame_cap, steps),
+            Knob::MasterVolume => {
+                self.master_volume = step_u8(
+                    self.master_volume,
+                    steps.saturating_mul(i32::from(MASTER_VOLUME_STEP)),
+                    MIN_MASTER_VOLUME,
+                    MAX_MASTER_VOLUME,
+                );
+            }
         }
     }
 
@@ -1147,6 +1190,7 @@ impl Settings {
             Knob::FogStart => format!("{:.0}%", self.fog_start * 100.0),
             Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),
             Knob::FrameCap => format!("{} fps", self.frame_cap),
+            Knob::MasterVolume => format!("{}%", self.master_volume),
         }
     }
 
@@ -1206,6 +1250,7 @@ impl Settings {
                 self.brightness = defaults.brightness;
                 self.fog_start = defaults.fog_start;
             }
+            Tab::Audio => self.master_volume = defaults.master_volume,
         }
     }
 
@@ -1228,6 +1273,9 @@ impl Settings {
         if self.frame_cap != NO_FRAME_CAP {
             self.frame_cap = self.frame_cap.clamp(MIN_FRAME_CAP, MAX_FRAME_CAP);
         }
+        self.master_volume = self
+            .master_volume
+            .clamp(MIN_MASTER_VOLUME, MAX_MASTER_VOLUME);
     }
 }
 
@@ -1408,6 +1456,7 @@ mod tests {
         assert_eq!(settings.frame_cap(), NO_FRAME_CAP);
         assert!(settings.vsync());
         assert!(!settings.readout_shown());
+        assert_eq!(settings.master_volume(), DEFAULT_MASTER_VOLUME);
         for (control, key) in [
             (Control::Forward, KeyCode::KeyW),
             (Control::Back, KeyCode::KeyS),
@@ -1507,6 +1556,24 @@ mod tests {
         assert_eq!(settings.render_distance(), MAX_VIEW_DISTANCE);
     }
 
+    /// The volume reaches silence and unity, and [`Settings::master_gain`] is the one
+    /// conversion between the number a player reads and the one a sample is multiplied by.
+    #[test]
+    fn the_master_volume_reaches_silence_and_unity() {
+        let mut settings = Settings::default();
+        assert!((settings.master_gain() - 0.8).abs() < f32::EPSILON);
+
+        settings.adjust(Knob::MasterVolume, -100);
+        assert_eq!(settings.master_volume(), MIN_MASTER_VOLUME);
+        assert!((settings.master_gain() - 0.0).abs() < f32::EPSILON);
+        assert_eq!(settings.reading(Knob::MasterVolume), "0%");
+
+        settings.adjust(Knob::MasterVolume, 100);
+        assert_eq!(settings.master_volume(), MAX_MASTER_VOLUME);
+        assert!((settings.master_gain() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(settings.reading(Knob::MasterVolume), "100%");
+    }
+
     /// Every knob is on exactly one tab, so exactly one reset owns it. Without this a knob
     /// added to the model but forgotten in [`Knob::tab`] would simply never be resettable —
     /// which no other assertion here would notice.
@@ -1550,6 +1617,7 @@ mod tests {
             settings.adjust(Knob::FrameCap, 3);
             settings.adjust_with_monitors(Knob::WindowMode, 1, &monitors);
             settings.adjust_with_monitors(Knob::Monitor, 1, &monitors);
+            settings.adjust(Knob::MasterVolume, -3);
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
@@ -1580,6 +1648,11 @@ mod tests {
             (after.look_sensitivity() - before.look_sensitivity()).abs() < f32::EPSILON,
             "resetting graphics moved the mouse sensitivity"
         );
+        assert_eq!(
+            after.master_volume(),
+            before.master_volume(),
+            "resetting graphics moved the master volume"
+        );
 
         // And the mirror: controls back, graphics untouched.
         let mut after = moved();
@@ -1599,6 +1672,26 @@ mod tests {
         assert_eq!(after.window_mode(), before.window_mode());
         assert_eq!(after.monitor(), before.monitor());
         assert_eq!(after.default_mount(), before.default_mount());
+        assert_eq!(after.master_volume(), before.master_volume());
+
+        // And the third tab: audio back, the other two untouched.
+        let mut after = moved();
+        after.reset(Tab::Audio);
+        assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
+        assert_eq!(
+            after.bindings(),
+            before.bindings(),
+            "resetting audio cleared a key binding"
+        );
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() == Tab::Graphics) {
+            assert_eq!(
+                after.reading(knob),
+                before.reading(knob),
+                "resetting audio moved {knob:?}"
+            );
+        }
+        assert_eq!(after.vsync(), before.vsync());
+        assert_eq!(after.readout_corner(), before.readout_corner());
     }
 
     /// **A reset is a whole assignment or nothing**, which is why it goes through

@@ -83,9 +83,9 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — and the frame-rate readout; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout and the master volume; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
-| `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
+| `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/device.rs` | the supervisor thread that owns the one `cpal::Stream`, reopens it when the device errors, disappears or stops being the system default, and names the output devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
@@ -98,7 +98,7 @@ keeps meaning "everything the client is".
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the two tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1461,10 +1461,19 @@ thread. **That module's doc carries the arguments. These are the rules it must n
 ever read by input, targeting, placement or anything else that decides an outcome. A gain is
 not a fact about the world and a silent client is not a disadvantaged one.
 
-**What is deliberately not here yet.** No settings: the Audio tab, its master-volume and
-output-device knobs and `AudioControls::output_device` are #851's last part, so today the
-device opened is always the system default and the master gain is the plugin's own 0.8.
-`device_names()` is what that knob will read, and the supervisor is already its one caller.
+**The Audio tab is the settings module's, and the gain is this one's.** `settings/mod.rs`
+owns `Tab::Audio`, `Knob::MasterVolume` and the `master-volume` line in the file — a bound, a
+step and a default, like every other knob. What crosses the seam is
+`Settings::master_gain()`, the single conversion from the 0-100 a player reads to the 0.0-1.0
+a sample is multiplied by, and it crosses **one way**: `follow_the_settings` reads the
+setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
+"Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
+the frame it starts the tone, so the screen never has to remember to clear it.
+
+**What is deliberately not here yet.** No output-device knob: `OutputDevice` and
+`AudioControls::output_device` are #851's last part, so today the device opened is always the
+system default. `device_names()` is what that knob will read, and the supervisor is already
+its one caller.
 Nothing encodes either: `audiopus` is a dependency from #851 part 1 so that the lockfile and
 the CI package list move once rather than twice, and the codec arrives with proximity voice.
 No capture device, no spatialisation, no `bevy_audio` and no Bevy `audio` feature — the
@@ -2307,11 +2316,12 @@ Recorded here so the next reader does not mistake them for oversights:
   own default does.
 - **The settings screen is not every setting, and what it leaves out each has a reason.**
   #179's second half landed in #247 — the original six graphics values, the four-corner frame-rate
-  readout, the two tabs and one reset per tab — so what remains outside is deliberate:
-  *cursor capture*, which belongs to the camera-control issue this file has named for a
-  while and that still does not exist; *audio*, of which there is none; and *shadows,
-  ambient occlusion and texture quality*, which have no shadow map, no AO pass and no
-  texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
+  readout, the two tabs and one reset per tab — and #851 added the third tab, the master volume
+  and the speaker test, so what remains outside is deliberate: *cursor capture*, which belongs to
+  the camera-control issue this file has named for a while and that still does not exist; the
+  *output device*, which is #851's last part; *voice*, whose knobs are #853's and not this
+  issue's; and *shadows, ambient occlusion and texture quality*, which have no shadow map, no AO
+  pass and no texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
   invariant rather than a preference.
 - **A reset is scoped by a tab, and the obvious implementation is the bug.** `Settings::reset`
   names one tab's fields; writing `Settings::default()` back would look right on the tab
