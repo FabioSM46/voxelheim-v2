@@ -59,7 +59,12 @@ use bevy::prelude::*;
 
 use crate::settings::{OutputDevice, OutputDevices, Settings};
 use device::{AudioCapture, AudioDevice};
+// `SPEAKING_FOR` is the window `ui/voice.rs` reads through `Speaking::recent`, named here so
+// that module's test can pin it rather than restating the number.
+#[allow(unused_imports)]
+pub use heard::{SPEAKING_FOR, Speaking};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
+pub use voice::{Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.

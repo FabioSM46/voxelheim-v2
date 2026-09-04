@@ -76,6 +76,13 @@ const MAX_HELD_FRAMES: usize = MAX_TARGET_FRAMES * 2;
 /// conceals: what this releases is somebody who has stopped, not somebody mid-sentence.
 const RELEASE_AFTER: Duration = Duration::from_millis(500);
 
+/// How long a speaker counts as speaking for, once a frame of theirs has been played.
+///
+/// **Presentation, and the HUD in #852 part 8 is its only reader.** A second is long enough
+/// that a name does not flicker between words and short enough that it is gone before the
+/// listener wonders why it is still there.
+pub const SPEAKING_FOR: Duration = Duration::from_millis(1_000);
+
 /// How much audio is kept queued for the output callback, in frames.
 ///
 /// The source ring is a quarter of a second; this is the depth the pipeline tops it back up
@@ -217,6 +224,44 @@ struct Speaker {
     decoder: Option<VoiceDecoder>,
 }
 
+/// Who has been heard, and when they were last played.
+///
+/// **Presentation only.** The HUD in #852 part 8 reads it to name the speakers heard in the
+/// last second; nothing decides anything from it, which is the rule `client/AGENTS.md` states
+/// for everything under `audio/`.
+#[derive(Resource, Debug, Default)]
+pub struct Speaking(Vec<(u64, Instant)>);
+
+impl Speaking {
+    /// Every entity heard within [`SPEAKING_FOR`] of `now`, in the order they were first
+    /// heard, so a name does not move in a list while somebody is reading it.
+    pub fn recent(&self, now: Instant) -> Vec<u64> {
+        self.0
+            .iter()
+            .filter(|(_, at)| now.duration_since(*at) < SPEAKING_FOR)
+            .map(|(entity_id, _)| *entity_id)
+            .collect()
+    }
+
+    fn heard(&mut self, entity_id: u64, at: Instant) {
+        match self.0.iter_mut().find(|(held, _)| *held == entity_id) {
+            Some((_, when)) => *when = at,
+            None => self.0.push((entity_id, at)),
+        }
+    }
+
+    /// Records a speaker as heard, as `play` does. Test-only, so `ui/voice.rs` can be driven
+    /// without a decoder or a mixer.
+    #[cfg(test)]
+    pub fn heard_for_test(&mut self, entity_id: u64, at: Instant) {
+        self.heard(entity_id, at);
+    }
+
+    fn forget(&mut self, entity_id: u64) {
+        self.0.retain(|(held, _)| *held != entity_id);
+    }
+}
+
 /// Everything the playback half carries between ticks.
 #[derive(Resource)]
 struct Listening {
@@ -260,6 +305,7 @@ impl Plugin for HeardPlugin {
             warn!("no mixer source is free for voice; nobody will be heard");
         }
         app.insert_resource(Listening::new(source))
+            .init_resource::<Speaking>()
             .add_systems(Update, (hear, play, release_speakers).chain());
     }
 }
@@ -296,7 +342,7 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
 }
 
 /// Decodes what is due and mixes it into the voice source.
-fn play(mut listening: ResMut<Listening>) {
+fn play(mut listening: ResMut<Listening>, mut speaking: ResMut<Speaking>) {
     let listening = &mut *listening;
     let Some(source) = listening.source.as_ref() else {
         return;
@@ -309,6 +355,7 @@ fn play(mut listening: ResMut<Listening>) {
         return;
     }
 
+    let now = Instant::now();
     // Topped up to a depth rather than drained: a buffer that played everything it had would
     // have no slack a moment later. `SOURCE_CAPACITY - free` is what is still queued.
     let queued = SOURCE_CAPACITY.saturating_sub(source.free());
@@ -316,7 +363,7 @@ fn play(mut listening: ResMut<Listening>) {
     for _ in 0..wanted {
         listening.mixed.fill(0.0);
         let mut anybody = false;
-        for speaker in speakers.values_mut() {
+        for (entity_id, speaker) in speakers.iter_mut() {
             let slot = speaker.jitter.slot();
             let Some(decoder) = speaker.decoder.as_mut() else {
                 continue;
@@ -335,6 +382,7 @@ fn play(mut listening: ResMut<Listening>) {
                 continue;
             }
             anybody = true;
+            speaking.heard(*entity_id, now);
             for (out, sample) in listening.mixed.iter_mut().zip(listening.decoded.iter()) {
                 *out += *sample;
             }
@@ -357,13 +405,18 @@ fn play(mut listening: ResMut<Listening>) {
 /// talking; a speaker whose entity has left the snapshot has gone, and the server has stopped
 /// relaying them at the same moment — so waiting out the silence timer for somebody
 /// demonstrably absent would hold a decoder and a name for half a second of nothing.
-fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<SnapshotBuffer>>) {
+fn release_speakers(
+    mut listening: ResMut<Listening>,
+    mut speaking: ResMut<Speaking>,
+    snapshots: Option<Res<SnapshotBuffer>>,
+) {
     let now = Instant::now();
     let listening = &mut *listening;
     let speakers = match listening.speakers.get_mut() {
         Ok(speakers) => speakers,
         Err(poisoned) => poisoned.into_inner(),
     };
+    let mut released = Vec::new();
     speakers.retain(|entity_id, speaker| {
         // Absence of a snapshot releases nobody: a session that has not answered yet holds
         // everybody, and reading "not present" from "nothing to read" would silence a
@@ -375,8 +428,15 @@ fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<Snap
         let gone = snapshots.as_deref().is_some_and(|snapshots| {
             snapshots.latest_tick().is_some() && !snapshots.holds_entity(*entity_id)
         });
-        !gone && !speaker.jitter.silent_since(now)
+        let keep = !gone && !speaker.jitter.silent_since(now);
+        if !keep {
+            released.push(*entity_id);
+        }
+        keep
     });
+    for entity_id in released {
+        speaking.forget(entity_id);
+    }
 }
 
 /// **No test here opens a device or a socket.** The wire side is `VoiceInbox::push_for_test`,
@@ -576,6 +636,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
+            .init_resource::<Speaking>()
             .init_resource::<VoiceInbox>()
             .add_systems(Update, (hear, play, release_speakers).chain());
         app
@@ -666,6 +727,7 @@ mod tests {
     fn a_listener_with_no_source_is_silent_rather_than_broken() {
         let mut app = App::new();
         app.insert_resource(Listening::new(None))
+            .init_resource::<Speaking>()
             .init_resource::<VoiceInbox>()
             .add_systems(Update, (hear, play, release_speakers).chain());
         let opus = frames();
@@ -673,5 +735,24 @@ mod tests {
             say(&mut app, 7, sequence as u32, frame.clone());
         }
         app.update();
+    }
+    /// A name stops being current a second after it was last heard, so the HUD in part 8 has
+    /// something that goes away on its own.
+    #[test]
+    fn a_speaker_stops_being_recent_after_a_second() {
+        let mut speaking = Speaking::default();
+        let now = Instant::now();
+        speaking.heard(7, now);
+        assert_eq!(speaking.recent(now), vec![7]);
+        assert_eq!(speaking.recent(now + Duration::from_millis(999)), vec![7]);
+        assert!(speaking.recent(now + SPEAKING_FOR).is_empty());
+
+        // And the order is the order they were first heard, so a name does not move in a
+        // list while somebody is reading it.
+        speaking.heard(9, now);
+        speaking.heard(7, now + Duration::from_millis(10));
+        assert_eq!(speaking.recent(now + Duration::from_millis(20)), vec![7, 9]);
+        speaking.forget(7);
+        assert_eq!(speaking.recent(now + Duration::from_millis(20)), vec![9]);
     }
 }
