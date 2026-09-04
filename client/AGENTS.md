@@ -1529,9 +1529,9 @@ reading the generation exists to prevent — so the three are packed into one `A
 was a review finding on #919, and so was its sibling: a ring drained naively across a reopen
 hands back one stream's tail stitched onto the next stream's head at two different rates. The
 answer to the second is that **there is no naive drain**: the only way to read the ring is
-`Capture::take`, which lands with its one consumer, skips a stream the reader has not seen and
-says `fresh`, and discards a batch that a reopen ran through. The samples across a reopen are a
-gap, not a continuation, and no API offers them as anything else.
+`Capture::take`, which skips a stream the reader has not seen and says `fresh`, and discards a
+batch that a reopen ran through. The samples across a reopen are a gap, not a continuation, and
+no API offers them as anything else.
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
