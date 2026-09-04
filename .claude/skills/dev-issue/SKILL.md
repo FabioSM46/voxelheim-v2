@@ -2,7 +2,7 @@
 name: dev-issue
 description: Implements GitHub issues end-to-end. Use to turn an issue into a merge-ready PR.
 argument-hint: <issue-number> [--base <branch>]
-allowed-tools: Bash(gh *) Bash(git *) Bash(go *) Bash(gofmt *) Bash(cargo *) Bash(flatc *) Bash(bash *) Bash(cd *) Bash(mkdir *) Bash(mktemp *) Bash(ls *) Bash(rm *) Bash(cp *) Bash(mv *) Bash(cat *) Bash(xargs *) Bash(sed *) Bash(awk *) Bash(tr *) Bash(head *) Bash(tail *) Bash(paste *) Bash(find *) Bash(rg *) Bash(date *) Bash(dirname *) Bash(echo *) Bash(set *) Bash(source *) Bash(export *) Bash(jq *)
+allowed-tools: Bash(gh *) Bash(git *) Bash(go *) Bash(gofmt *) Bash(cargo *) Bash(flatc *) Bash(bash *) Bash(cd *) Bash(mkdir *) Bash(mktemp *) Bash(trap *) Bash(ls *) Bash(rm *) Bash(cp *) Bash(mv *) Bash(cat *) Bash(xargs *) Bash(sed *) Bash(awk *) Bash(tr *) Bash(head *) Bash(tail *) Bash(paste *) Bash(find *) Bash(rg *) Bash(date *) Bash(dirname *) Bash(echo *) Bash(set *) Bash(source *) Bash(export *) Bash(jq *)
 ---
 
 # dev-issue — Issue to Implementation Skill

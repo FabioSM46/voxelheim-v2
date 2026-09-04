@@ -46,6 +46,11 @@ process_skill=.claude/skills/process-pr/SKILL.md
 iteration_skill=.claude/skills/develop-iteration/SKILL.md
 dev_skill=.claude/skills/dev-issue/SKILL.md
 
+grep -qF 'Bash(mktemp *) Bash(trap *)' "$dev_skill" || {
+  echo "FAIL: dev-issue creates and traps a temporary PR body without authorizing both commands" >&2
+  exit 1
+}
+
 # The iteration loop must actively route a conflicting PR into remediation. Merely making the
 # frozen rule fail closed leaves the orchestrator waiting forever because a conflicting PR has no
 # merge ref and therefore no CI run that could wake it up.
