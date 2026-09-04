@@ -331,6 +331,10 @@ func testConfig() session.Config {
 		ChunkSize:    32,
 		ViewDistance: 3,
 		Spawn:        [3]float32{0.5, 64, -0.5},
+		// Non-zero on purpose: zero is the announcement that means "no voice here", so a
+		// welcome that dropped the field entirely would still satisfy a test written
+		// against a zero config.
+		VoiceRange: game.VoiceRangeDefault,
 	}
 }
 
@@ -349,6 +353,11 @@ type fakeConn struct {
 	deadline chan struct{}
 	timer    *time.Timer
 	expired  bool
+
+	// writeGate holds the session's writer inside WriteFrame, so a test can let both
+	// outbound lanes accumulate behind one frame and then watch the order they drain in.
+	// Nil is an open gate, which is every test but the one about lane precedence.
+	writeGate chan struct{}
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -504,7 +513,39 @@ func (f *fakeConn) expireReadDeadline() {
 // Reads keep io.EOF, a peer hanging up; writes get net.ErrClosed, a write on a connection
 // that has been closed. Each is what a real net.Conn produces for the side that notices the
 // end, and errors.Is sees through the *net.OpError a socket wraps it in.
+// holdWrites blocks the next write and every write after it until releaseWrites.
+func (f *fakeConn) holdWrites() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.writeGate = make(chan struct{})
+}
+
+// releaseWrites reopens the gate. Safe to call on an open one, and called exactly once
+// per hold: closing a closed channel is a panic no test can recover.
+func (f *fakeConn) releaseWrites() {
+	f.mu.Lock()
+	gate := f.writeGate
+	f.writeGate = nil
+	f.mu.Unlock()
+	if gate != nil {
+		close(gate)
+	}
+}
+
 func (f *fakeConn) WriteFrame(payload []byte) error {
+	f.mu.Lock()
+	gate := f.writeGate
+	f.mu.Unlock()
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-f.done:
+			// A connection closed while the gate is still held ends the write the way a
+			// real one does, rather than hanging the session's writer past the test.
+			return net.ErrClosed
+		}
+	}
+
 	select {
 	case f.out <- bytes.Clone(payload):
 		return nil
@@ -620,6 +661,12 @@ func TestWelcome(t *testing.T) {
 		if got := welcome.NightEndTicks(); got != game.NightEndTicks {
 			t.Errorf("NightEndTicks = %d, want %d", got, uint32(game.NightEndTicks))
 		}
+		// Presentation only: the client is told how far a voice carries so it can say so
+		// on screen, and never so it can decide what it may play. What it receives was
+		// already decided by the server that sent it.
+		if got := welcome.VoiceRangeBlocks(); got != float32(cfg.VoiceRange) {
+			t.Errorf("VoiceRangeBlocks = %v, want %v", got, float32(cfg.VoiceRange))
+		}
 	})
 
 	// The ordering schemas/handshake.fbs requires of a welcome that declares a clock,
@@ -677,6 +724,12 @@ func TestConfigValidate(t *testing.T) {
 		},
 		"NaN spawn":      func(c *session.Config) { c.Spawn[1] = float32(math.NaN()) },
 		"infinite spawn": func(c *session.Config) { c.Spawn[2] = float32(math.Inf(1)) },
+		// The contract's rule for the announced radius, and the same reading as the
+		// spawn above: refused rather than clamped, because a NaN compares false against
+		// every bound a client would give it.
+		"negative voice range": func(c *session.Config) { c.VoiceRange = -1 },
+		"NaN voice range":      func(c *session.Config) { c.VoiceRange = math.NaN() },
+		"infinite voice range": func(c *session.Config) { c.VoiceRange = math.Inf(1) },
 	}
 
 	for name, mutate := range invalid {

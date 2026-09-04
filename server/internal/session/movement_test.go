@@ -64,6 +64,16 @@ type collector struct {
 	// a snapshot is the complete set of drops this session can see, which is exactly
 	// how the client reads it.
 	drops []protocol.ItemDropState
+
+	// voices is every relayed voice frame this session was sent, in order. Receiving one
+	// is the audibility decision: the server chose this session, and a test that asserts
+	// on this list is asserting about that choice.
+	voices []protocol.VoiceHeard
+
+	// kinds is every payload this session received, in arrival order, by type alone.
+	// Types rather than frames because the question it exists to answer is an ordering
+	// one — which outbound lane a frame took is visible only in what it overtook.
+	kinds []vnet.Payload
 }
 
 // collect starts draining conn until the test ends.
@@ -109,6 +119,8 @@ func (c *collector) absorb(frame []byte) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	c.kinds = append(c.kinds, env.PayloadType())
 
 	switch env.PayloadType() {
 	case vnet.PayloadEntitySnapshot:
@@ -272,6 +284,17 @@ func (c *collector) absorb(frame []byte) {
 			Text:           string(chat.Text()),
 		})
 
+	case vnet.PayloadVoiceHeard:
+		heard := new(vnet.VoiceHeard)
+		heard.Init(table.Bytes, table.Pos)
+		c.voices = append(c.voices, protocol.VoiceHeard{
+			SpeakerEntityID: heard.SpeakerEntityId(),
+			Sequence:        heard.Sequence(),
+			// Cloned like every other borrowed vector here: the accessor points into a
+			// frame this collector does not own.
+			Opus: slices.Clone(heard.OpusBytes()),
+		})
+
 	case vnet.PayloadPartyInvite:
 		invite := new(vnet.PartyInvite)
 		invite.Init(table.Bytes, table.Pos)
@@ -408,6 +431,20 @@ func (c *collector) chatMessages() []protocol.ChatMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return slices.Clone(c.chats)
+}
+
+// voicesHeard is every voice frame the server decided this session may hear, in order.
+func (c *collector) voicesHeard() []protocol.VoiceHeard {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.voices)
+}
+
+// kindsReceived is the arrival order of everything this session was sent, by payload type.
+func (c *collector) kindsReceived() []vnet.Payload {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.kinds)
 }
 
 func (c *collector) partyInvites() []protocol.PartyInvite {

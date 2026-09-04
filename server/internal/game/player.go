@@ -592,6 +592,12 @@ type Player struct {
 
 	deliver         func(frame []byte) bool
 	deliverSnapshot func(frame []byte, center world.Column) bool
+	// deliverVoice is the third seam, and it exists because a relayed voice frame is
+	// worth what a snapshot is worth and nothing like what a chunk is worth: twenty
+	// milliseconds of speech that the next frame replaces. The session puts it on the
+	// lane snapshots use, so it can never be queued behind a chunk payload — see
+	// Serve's `priority`. Game-only callers hand in their one delivery for all three.
+	deliverVoice func(frame []byte) bool
 
 	// audible is who this speaker can currently be heard by, as live entity ids,
 	// recomputed every [VoiceSetInterval] ticks by advanceVoiceSetsLocked and read by
@@ -893,14 +899,20 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 // Join remains a compact helper for game tests whose entity ids stand in for it.
 func (s *Sim) JoinCharacter(entityID uint64, playerID identity.PlayerID, characterID uint64, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
 	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver,
-		func(frame []byte, _ world.Column) bool { return deliver(frame) })
+		func(frame []byte, _ world.Column) bool { return deliver(frame) }, deliver)
 }
 
-// JoinCharacterWithSnapshotDelivery admits one stored character while preserving the
-// authoritative column beside each snapshot. Session uses that column to hold a snapshot
-// until its stream has reached the same centre; game-only callers use JoinCharacter and
-// keep the single delivery seam.
-func (s *Sim) JoinCharacterWithSnapshotDelivery(
+// JoinCharacterWithDelivery admits one stored character across all three of a session's
+// outbound seams.
+//
+// deliverSnapshot preserves the authoritative column beside each snapshot, which the
+// session uses to hold a snapshot until its stream has reached the same centre.
+// deliverVoice is where a relayed voice frame goes, kept apart from deliver for the
+// reason stated at the field: the session sends it on the lane a snapshot uses, and a
+// voice frame behind a chunk payload has already been superseded when it arrives.
+//
+// Game-only callers use JoinCharacter and keep the single delivery seam.
+func (s *Sim) JoinCharacterWithDelivery(
 	entityID uint64,
 	playerID identity.PlayerID,
 	characterID uint64,
@@ -910,11 +922,15 @@ func (s *Sim) JoinCharacterWithSnapshotDelivery(
 	resume *Life,
 	deliver func(frame []byte) bool,
 	deliverSnapshot func(frame []byte, center world.Column) bool,
+	deliverVoice func(frame []byte) bool,
 ) (*Player, error) {
 	if deliverSnapshot == nil {
 		return nil, errors.New("game: snapshot delivery must not be nil")
 	}
-	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver, deliverSnapshot)
+	if deliverVoice == nil {
+		return nil, errors.New("game: voice delivery must not be nil")
+	}
+	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver, deliverSnapshot, deliverVoice)
 }
 
 func (s *Sim) joinCharacter(
@@ -927,6 +943,7 @@ func (s *Sim) joinCharacter(
 	resume *Life,
 	deliver func(frame []byte) bool,
 	deliverSnapshot func(frame []byte, center world.Column) bool,
+	deliverVoice func(frame []byte) bool,
 ) (*Player, error) {
 	if characterID == 0 {
 		return nil, errors.New("game: character id 0 is reserved")
@@ -980,6 +997,7 @@ func (s *Sim) joinCharacter(
 		described:       make(map[uint64]uint64),
 		deliver:         deliver,
 		deliverSnapshot: deliverSnapshot,
+		deliverVoice:    deliverVoice,
 		audible:         make(map[uint64]struct{}),
 		chunks:          newChunkFeed(),
 		mineReady:       make(chan MiningCompletion, 1),

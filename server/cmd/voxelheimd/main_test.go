@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -208,6 +209,7 @@ func validOptions() options {
 		characterTimeout: session.DefaultCharacterTimeout,
 		idleTimeout:      session.DefaultIdleTimeout,
 		stormPeriod:      game.DefaultStormPeriod,
+		voiceRange:       game.VoiceRangeDefault,
 	}
 }
 
@@ -261,6 +263,36 @@ func TestDevelopmentCommandsHaveToBeExplicitlyEnabled(t *testing.T) {
 			}
 			if opts.devCommands != test.want {
 				t.Errorf("dev commands enabled = %t, want %t", opts.devCommands, test.want)
+			}
+		})
+	}
+}
+
+// The default is the simulation's own constant rather than a number typed here: an
+// operator who passes no flag gets the range game.VoiceRangeDefault documents, and
+// -voice-range 0 is how voice is turned off.
+func TestTheVoiceRangeFlagDefaultsToTheSimulationsRange(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want float64
+	}{
+		{name: "omitted", want: game.VoiceRangeDefault},
+		{name: "disabled", args: []string{"-voice-range", "0"}, want: 0},
+		{name: "chosen", args: []string{"-voice-range", "12.5"}, want: 12.5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var opts options
+			flags := flag.NewFlagSet("voxelheimd", flag.ContinueOnError)
+			registerVoiceRangeFlag(flags, &opts)
+			if err := flags.Parse(test.args); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if opts.voiceRange != test.want {
+				t.Errorf("voice range = %v, want %v", opts.voiceRange, test.want)
 			}
 		})
 	}
@@ -334,7 +366,13 @@ func TestOptionsValidate(t *testing.T) {
 		"character timeout 0":   func(o *options) { o.characterTimeout = 0 },
 		"negative idle timeout": func(o *options) { o.idleTimeout = -time.Second },
 		"negative storm period": func(o *options) { o.stormPeriod = -time.Second },
-		"non-RFC3339 storm":     func(o *options) { o.nextStorm = "next Thursday" },
+		// A distance is what an operator typed, and there is no distance that "less than
+		// nothing" or "not a number" could have meant. Refused at startup, where they are
+		// looking, rather than as a server that relays to nobody while announcing a range.
+		"negative voice range":     func(o *options) { o.voiceRange = -1 },
+		"voice range not a number": func(o *options) { o.voiceRange = math.NaN() },
+		"voice range unbounded":    func(o *options) { o.voiceRange = math.Inf(1) },
+		"non-RFC3339 storm":        func(o *options) { o.nextStorm = "next Thursday" },
 		// A first read allowed to outlive the budget every later read is held to.
 		"handshake beyond idle": func(o *options) {
 			o.handshakeTimeout = 21 * time.Second
@@ -380,6 +418,11 @@ func TestOptionsValidate(t *testing.T) {
 		},
 		func(o *options) { o.handshakeTimeout = o.idleTimeout },
 		func(o *options) { o.stormPeriod = 0 },
+		// Zero is a server that relays no voice at all, which is a choice rather than a
+		// degenerate range — the same reading schemas/handshake.fbs gives the announced
+		// field. Fractions of a block are a distance too.
+		func(o *options) { o.voiceRange = 0 },
+		func(o *options) { o.voiceRange = 0.5 },
 		func(o *options) { o.nextStorm = "2030-01-02T03:04:05Z" },
 		func(o *options) {
 			o.handshakeTimeout = time.Nanosecond
