@@ -369,8 +369,8 @@ fi
 # Confirm the PR is still open at REMOTE_HEAD. Only then execute the prepared
 # replies/resolutions and body acknowledgement sequence from steps 3–5.
 CURRENT_PR=$(gh pr view <pr-number> --json state,headRefOid)
-[ "$(echo "$CURRENT_PR" | jq -r '.state')" = "OPEN" ]
-[ "$(echo "$CURRENT_PR" | jq -r '.headRefOid')" = "$REMOTE_HEAD" ]
+[ "$(echo "$CURRENT_PR" | jq -r '.state')" = "OPEN" ] || exit 1
+[ "$(echo "$CURRENT_PR" | jq -r '.headRefOid')" = "$REMOTE_HEAD" ] || exit 1
 ```
 
 **NEVER run `git add` / `git commit` / `git push` from the main repo directory.** Always from `$WORKTREE_DIR`.
@@ -402,6 +402,7 @@ Refresh `DEEPSEEK_REVIEW_READ` only after the audit exists, treating label looku
 (present/absent/unreadable), and verify both the fresh label and postconditions:
 
 ```bash
+ACK_COMMENT='<one bullet per DeepSeek body finding, including review ID and evidence>'
 printf '%s\n' "$ACK_COMMENT" | bash scripts/check-body-privacy.sh || exit 1
 gh pr comment <pr-number> --body "$ACK_COMMENT" || exit 1
 LATEST_BEFORE_ACK=$(bash scripts/gh-automation.sh pr-deepseek-rounds <pr-number> \
