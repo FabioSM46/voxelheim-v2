@@ -45,6 +45,7 @@
 //! and `Master` — each of those is its own issue, and a bus nothing feeds is a gain nobody
 //! can hear moving. See `docs/adr/0001-voice-transport.md`.
 
+mod codec;
 mod device;
 mod dsp;
 mod mixer;

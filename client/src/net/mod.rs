@@ -118,6 +118,11 @@ pub use codec::{
     encode_remove_structure_request, encode_repair_request,
 };
 pub use codec::{encode_dismount_request, encode_mount_request};
+// V30's voice surface, named here for the reason the blocks above are: `audio/` should not
+// have to reopen `codec.rs` to find out what it is allowed to spell. The frame's ceiling is a
+// contract enum both peers read, and `audio/codec.rs` sizes its packet buffer from it.
+#[allow(unused_imports)] // The encoder's caller is #852 part 6.
+pub use codec::{MAX_OPUS_BYTES, VoiceAudience, VoiceFrame, encode_voice_frame};
 #[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
 pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
