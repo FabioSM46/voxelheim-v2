@@ -1512,11 +1512,19 @@ under `audio/`: no gameplay branch reads a decibel.
 **The microphone is the same shape pointed the other way, with one state more.** The output
 stream is open whenever a device will have it, because a client with sound is always
 potentially making some. The capture stream is open only while something above has called
-`Capture::listen(true)` — so `supervise_capture` starts and ends in a wait, and a client whose
-player never asks for voice runs the thread and never touches an input device. That is not a
-convenience: an open microphone nobody asked for is the thing `docs/adr/0001-voice-transport.md`
-and every player expectation say must not exist, and making it a property of the loop rather
-than of its callers is what keeps it true when a caller is wrong.
+`AudioCapture::listen(true)` — so `supervise_capture` starts and ends in a wait, and a client
+whose player never asks for voice runs the thread and never touches an input device. That is not
+a convenience: an open microphone nobody asked for is not a thing this client may have, and
+making it a property of the loop rather than of its callers is what keeps it true when a caller
+is wrong. (`docs/adr/0001-voice-transport.md` is **not** the authority for that rule and was
+cited for it here in error — it decides how voice is transported and mentions a microphone once,
+about `bevy_audio` being playback-only.)
+
+**A stream that dies before it ever runs is paced like any other failure.** It is the one path
+where the hold loop's body never executes, so nothing waits and nothing is throttled unless
+something says so — measured at 456 654 output reopens and 588 591 capture reopens in 200 ms
+before `stopped` existed, under a module doc claiming the opposite. `failures` is therefore
+cleared by a stream that *held*, never by one that merely opened.
 
 `Capture` is `Mixer`'s mirror: a lock-free ring the callback pushes into and the same rule about
 what may run in a callback. The samples in it are the *device's own*, interleaved at whatever it
