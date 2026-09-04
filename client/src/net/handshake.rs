@@ -33,7 +33,7 @@ use super::codec::{
     LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message,
     MineProgress, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed, PlayerTradeState,
     Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning, VendorClosed, VendorState,
-    WardsNearby, WorldClock, WorldUpdate,
+    VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -154,6 +154,14 @@ pub enum Transition {
     /// it against; the bound, the ward kinds and the uniqueness of a column address are
     /// all held at the decode boundary.
     WardsNearby(WardsNearby),
+    /// One relayed voice frame, admitted because a session exists.
+    ///
+    /// Nothing is checked here that the codec has not, and nothing here is checked
+    /// against the welcome either: `voice_range_blocks` bounds nothing about a frame
+    /// that arrived, because the server measured the distance before it sent it. The
+    /// speaker's id is a live entity's, but so is a `MobHit`'s attacker, and this layer
+    /// has never held a roster to test one against.
+    VoiceHeard(VoiceHeard),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -587,6 +595,7 @@ impl Handshake {
                 Ok(Transition::StormWarning(warning))
             }
             (Phase::Established, Message::WardsNearby(wards)) => Ok(Transition::WardsNearby(wards)),
+            (Phase::Established, Message::VoiceHeard(heard)) => Ok(Transition::VoiceHeard(heard)),
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -628,6 +637,7 @@ impl Handshake {
             }
             (_, Message::StormWarning(_)) => Err(HandshakeError::Premature("StormWarning")),
             (_, Message::WardsNearby(_)) => Err(HandshakeError::Premature("WardsNearby")),
+            (_, Message::VoiceHeard(_)) => Err(HandshakeError::Premature("VoiceHeard")),
         }
     }
 }
@@ -666,6 +676,7 @@ mod tests {
             hotbar_slots: 1,
             equipment_slots: 1,
             player_token: crate::net::ANY_TOKEN,
+            voice_range_blocks: 0.0,
         }
     }
 
@@ -1845,6 +1856,32 @@ mod tests {
         assert_eq!(
             live.apply(Message::PartyInvite(invite.clone())),
             Ok(Transition::PartyInvite(invite))
+        );
+    }
+
+    /// A relayed voice frame belongs to a session, like every other admitted payload.
+    ///
+    /// It needs nothing the welcome carries — `voice_range_blocks` bounds nothing about
+    /// a frame the server already decided to send — so the refusal before a session is
+    /// about phase alone, and the admission afterwards checks nothing further.
+    #[test]
+    fn a_relayed_voice_frame_only_belongs_to_an_established_session() {
+        let heard = VoiceHeard {
+            speaker_entity_id: 8,
+            sequence: 3,
+            opus: vec![1, 2, 3],
+        };
+
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::VoiceHeard(heard.clone())),
+            Err(HandshakeError::Premature("VoiceHeard"))
+        );
+
+        let mut live = established();
+        assert_eq!(
+            live.apply(Message::VoiceHeard(heard.clone())),
+            Ok(Transition::VoiceHeard(heard))
         );
     }
 

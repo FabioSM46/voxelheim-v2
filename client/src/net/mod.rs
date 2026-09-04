@@ -2086,6 +2086,12 @@ fn drain_session_events(
             }
             Ok(SessionEvent::WardsNearby(wards)) => inboxes.wards.0.push(wards),
 
+            // Dropped on purpose, and dropped *here* rather than earlier: the decode
+            // boundary is where a relayed frame is checked, and #851 grows the decoder
+            // that consumes it behind this line. Nothing is logged — a voice frame is
+            // personal data, and a count would still be a diagnostic about who spoke.
+            Ok(SessionEvent::VoiceHeard(_)) => {}
+
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
 
@@ -5132,6 +5138,7 @@ mod tests {
             equipment_slots: 4,
             player_token: ANY_TOKEN,
             clock: Default::default(),
+            voice_range_blocks: 0.0,
         }
     }
 

@@ -204,6 +204,19 @@ pub struct SessionParams {
     /// The world's day/night boundaries, or [`WorldClock::default`] — three zeros —
     /// from a server that keeps no clock.
     pub clock: WorldClock,
+    /// How far a voice carries on this server, in blocks, or zero from a server that
+    /// relays no voice at all. Guaranteed finite and not negative.
+    ///
+    /// Presentation, and the contract says so in as many words: the server recomputes
+    /// the audible set from the positions it owns and sends a frame only to it, so
+    /// receiving a [`VoiceHeard`] *is* the audibility answer. A client that filtered one
+    /// by this radius would be re-deciding an outcome the only authority already
+    /// settled, which is `view_distance`'s rule one message later.
+    ///
+    /// **Zero is a legal announcement rather than a missing value** — an operator who
+    /// turned voice off — and it is the second number here allowed to be zero after
+    /// validation, for [`WorldClock::day_length_ticks`]'s reason.
+    pub voice_range_blocks: f32,
 }
 
 /// The world's day, as `ServerWelcome` announces it.
@@ -2435,6 +2448,15 @@ pub struct StormWarning {
 /// from a length the peer chose.
 pub const MAX_WARDED_COLUMNS: usize = fb::WardBound::MaxWardedColumns.0 as usize;
 
+/// The most Opus bytes one [`VoiceHeard`] may carry.
+///
+/// Read off the contract for [`MAX_WARDED_COLUMNS`]'s reason: `schemas/player.fbs`
+/// states it as a `VoiceBound` enum so the server that refuses an oversized frame and
+/// the client that sizes a buffer from a relayed one read one constant rather than two
+/// copies of a paragraph. 400 bytes is a 20 ms frame at 160 kbit/s, comfortably above
+/// what a wideband stream needs and below anything a single frame has a reason to be.
+pub const MAX_OPUS_BYTES: usize = fb::VoiceBound::MaxOpusBytes.0 as usize;
+
 /// What put a ward on a chunk column.
 ///
 /// No `Unknown` variant, and refused rather than drawn as a generic claim: shading a
@@ -2487,6 +2509,34 @@ pub struct WardedColumn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WardsNearby {
     pub columns: Vec<WardedColumn>,
+}
+
+/// One Opus frame the authoritative server decided this session may hear.
+///
+/// **Receiving one is the audibility decision**, already made. Nothing here asks whether
+/// the speaker is close enough or in the right party: the server owns both positions and
+/// both party rosters, and a client that filtered on its own idea of either would be
+/// second-guessing the authority that answered by sending the frame.
+///
+/// The bytes are copied out and never read here. Whether they are a legal Opus frame is
+/// the decoder's question in #851, and this module owns the envelope — the same split
+/// `ChunkData`'s runs are decoded under. **They are also never logged, never persisted
+/// and never quoted in a diagnostic**, on either side of the wire: a voice frame is
+/// personal data, which is why [`DecodeError`] names lengths and speakers and no
+/// refusal here can print a payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceHeard {
+    /// The speaker's live entity, the same id an `EntitySnapshot` addresses them by.
+    /// Guaranteed non-zero.
+    pub speaker_entity_id: u64,
+    /// The speaker's own monotonic counter, copied through unchanged so a listener can
+    /// order frames and hear a gap as a gap. Per speaker: two speakers' sequences say
+    /// nothing about each other. Presentation, never a clock — no gameplay branch reads
+    /// it, and nothing here rejects a frame for arriving out of order.
+    pub sequence: u32,
+    /// The encoded frame, verbatim. Guaranteed non-empty and at most
+    /// [`MAX_OPUS_BYTES`].
+    pub opus: Vec<u8>,
 }
 
 /// One authoritative monster blow that reduced this player's health.
@@ -2646,6 +2696,10 @@ pub enum Message {
     /// Every warded chunk column in view, replacing the client's copy wholesale. Decoded
     /// and validated here; the boundary that draws it is its own issue.
     WardsNearby(WardsNearby),
+    /// One Opus frame the server decided this session may hear. Decoded and validated
+    /// here; nothing plays it until the client's audio path (#851), exactly as
+    /// `MapTile` was carried this far before the map window existed.
+    VoiceHeard(VoiceHeard),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -3176,6 +3230,25 @@ pub enum DecodeError {
     /// One `(cx, cz)` appears twice in the same `WardsNearby`. Two rows for one column
     /// are two answers about the same ground with no way to tell which is meant.
     DuplicateWardedColumn { cx: i32, cz: i32 },
+    /// `ServerWelcome.voice_range_blocks` is negative or non-finite.
+    ///
+    /// **Zero is deliberately not in this refusal**: it is the legal announcement of a
+    /// server that relays no voice, not a degenerate radius. Refused rather than
+    /// clamped, for the reason a spawn axis is — NaN compares false against every
+    /// bound, so a clamp would pass it through untouched.
+    VoiceRange(f32),
+    /// A `VoiceHeard` carries the reserved entity id 0, so nothing names the speaker
+    /// and no snapshot can place the voice.
+    VoiceWithoutSpeaker,
+    /// A `VoiceHeard` carries no audio: an absent or empty `opus` vector. A frame with
+    /// nothing in it is one the server should not have relayed.
+    VoiceWithoutAudio { speaker_entity_id: u64 },
+    /// A `VoiceHeard` carries more Opus bytes than `VoiceBound.MaxOpusBytes`.
+    ///
+    /// Refused rather than truncated: half a frame is not a frame, and this side
+    /// allocates from a length the peer chose. The length is named and the bytes are
+    /// not, which is the rule for every diagnostic that touches this payload.
+    OversizedVoiceFrame { speaker_entity_id: u64, len: usize },
 }
 
 impl fmt::Display for DecodeError {
@@ -3757,6 +3830,24 @@ impl fmt::Display for DecodeError {
             Self::DuplicateWardedColumn { cx, cz } => {
                 write!(f, "a WardsNearby names column ({cx}, {cz}) twice")
             }
+            Self::VoiceRange(got) => {
+                write!(f, "voice range must be finite and not negative, got {got}")
+            }
+            Self::VoiceWithoutSpeaker => {
+                write!(f, "a VoiceHeard carries reserved entity id 0")
+            }
+            Self::VoiceWithoutAudio { speaker_entity_id } => write!(
+                f,
+                "a VoiceHeard from entity {speaker_entity_id} carries no audio"
+            ),
+            Self::OversizedVoiceFrame {
+                speaker_entity_id,
+                len,
+            } => write!(
+                f,
+                "a VoiceHeard from entity {speaker_entity_id} carries {len} Opus bytes, \
+                 at most {MAX_OPUS_BYTES}"
+            ),
         }
     }
 }
@@ -4223,11 +4314,16 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
         }
-        // V30's relayed voice, carried by name until the arm that reads it lands with the
-        // client half of #850. Named rather than left to the fallback for the reason the
-        // arm below it is: the fallback must stay reachable for nothing this build can
-        // put a name to, and this build can name this tag.
-        fb::Payload::VoiceHeard => Ok(Message::Deferred(name)),
+        // V30's relayed voice. Read and validated here and played nowhere yet — the
+        // audio path is #851 — which is the point of carrying it this far: a frame that
+        // names no speaker, or one longer than the contract's ceiling, ends the session
+        // now rather than when somebody writes the decoder that would allocate from it.
+        fb::Payload::VoiceHeard => {
+            let payload = envelope
+                .payload_as_voice_heard()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::VoiceHeard(voice_heard(&payload)?))
+        }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -4401,6 +4497,43 @@ fn storm_warning(warning: &fb::StormWarning<'_>) -> Result<StormWarning, DecodeE
 /// The length is checked before anything is allocated from it, and column addresses are
 /// checked for uniqueness because the set is complete: two rows for one column are two
 /// answers about the same ground, and nothing downstream could tell which was meant.
+/// Copies and validates one relayed voice frame.
+///
+/// The speaker is read first because every other refusal names it, and the length is
+/// checked before the bytes are copied — the ordering is the security property, the same
+/// rule `frame::MAX_FRAME_SIZE` enforces on the length prefix one layer down.
+///
+/// **No refusal here may carry the payload**, and none does: a voice frame is personal
+/// data that this side relays into a decoder and writes down nowhere.
+fn voice_heard(heard: &fb::VoiceHeard<'_>) -> Result<VoiceHeard, DecodeError> {
+    let speaker_entity_id = heard.speaker_entity_id();
+    if speaker_entity_id == 0 {
+        return Err(DecodeError::VoiceWithoutSpeaker);
+    }
+
+    // Absent and empty are the same nothing, and both are refused: the server drops a
+    // frame with no audio in it rather than relaying one, so either shape is a peer
+    // this client cannot take at its word.
+    let opus = heard.opus().unwrap_or_default();
+    if opus.is_empty() {
+        return Err(DecodeError::VoiceWithoutAudio { speaker_entity_id });
+    }
+    if opus.len() > MAX_OPUS_BYTES {
+        return Err(DecodeError::OversizedVoiceFrame {
+            speaker_entity_id,
+            len: opus.len(),
+        });
+    }
+
+    Ok(VoiceHeard {
+        speaker_entity_id,
+        sequence: heard.sequence(),
+        // Copied out like every other field here: the accessor borrows the frame, and
+        // the frame is gone by the time anything reads this.
+        opus: opus.bytes().to_vec(),
+    })
+}
+
 fn wards_nearby(wards: &fb::WardsNearby<'_>) -> Result<WardsNearby, DecodeError> {
     let columns = wards.columns().unwrap_or_default();
     if columns.len() > MAX_WARDED_COLUMNS {
@@ -5675,6 +5808,16 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
         });
     }
 
+    // Finite and not negative, checked the way a spawn axis is and for the same reason:
+    // NaN compares false against every bound, so a clamp would pass it through untouched
+    // and it would then propagate into whatever attenuation reads it. Zero is not a
+    // degenerate radius — it is a server that relays no voice — so it is accepted here
+    // and asked about at the point of use, exactly as `WorldClock::declared` is.
+    let voice_range_blocks = welcome.voice_range_blocks();
+    if !voice_range_blocks.is_finite() || voice_range_blocks < 0.0 {
+        return Err(DecodeError::VoiceRange(voice_range_blocks));
+    }
+
     Ok(SessionParams {
         entity_id,
         spawn,
@@ -5687,6 +5830,7 @@ fn session_params(welcome: &fb::ServerWelcome) -> Result<SessionParams, DecodeEr
         equipment_slots,
         player_token: PlayerToken::from_bytes(player_token),
         clock,
+        voice_range_blocks,
     })
 }
 
@@ -6474,6 +6618,8 @@ pub(super) mod server_side {
         /// helper is how a *peer* emits a welcome, including one whose clock is
         /// nonsense, which is the case the decoder exists for.
         pub clock: WorldClock,
+        /// Written verbatim for the same reason, negative and non-finite included.
+        pub voice_range_blocks: f32,
     }
 
     impl Default for WelcomeWire {
@@ -6494,6 +6640,9 @@ pub(super) mod server_side {
                 // No clock by default, which is what every server in this repository
                 // announces today and therefore the shape most fixtures should carry.
                 clock: WorldClock::default(),
+                // No voice by default, which is the pre-V30 shape an absent scalar
+                // decodes to and what a fixture that says nothing about voice means.
+                voice_range_blocks: 0.0,
             }
         }
     }
@@ -6540,6 +6689,7 @@ pub(super) mod server_side {
         table.add_night_start_ticks(welcome.clock.night_start_ticks);
         table.add_night_end_ticks(welcome.clock.night_end_ticks);
         table.add_equipment_slots(welcome.equipment_slots);
+        table.add_voice_range_blocks(welcome.voice_range_blocks);
         let payload = table.finish();
 
         finish_envelope(
@@ -8184,6 +8334,28 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::WardsNearby, payload.as_union_value())
     }
 
+    /// Encodes a `VoiceHeard` envelope. `None` omits the vector entirely, which is how
+    /// an absent field reaches the decoder; an empty slice is the other shape of no
+    /// audio, and the decoder owes both the same answer.
+    pub fn encode_voice_heard(
+        speaker_entity_id: u64,
+        sequence: u32,
+        opus: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut builder =
+            FlatBufferBuilder::with_capacity(opus.map_or(0, <[u8]>::len) + super::BUILDER_CAPACITY);
+        let opus = opus.map(|opus| builder.create_vector(opus));
+        let payload = fb::VoiceHeard::create(
+            &mut builder,
+            &fb::VoiceHeardArgs {
+                speaker_entity_id,
+                sequence,
+                opus,
+            },
+        );
+        finish_envelope(builder, fb::Payload::VoiceHeard, payload.as_union_value())
+    }
+
     pub fn encode_loot_closed(corpse_id: u64) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let payload = fb::LootClosed::create(&mut builder, &fb::LootClosedArgs { corpse_id });
@@ -8672,13 +8844,13 @@ mod tests {
         (fb::Payload::PlayerTradeState, Handling::Consumed),
         (fb::Payload::PlayerTradeClosed, Handling::Consumed),
         // V30's two. The speaker's intent is client-only and always will be. The frame
-        // the server chose to relay is `Deferred` here and nowhere else in this contract
-        // is that a permanent answer: it is the staged shape V24's map payloads and V25's
-        // stall each had, and it says "this build has no arm yet" rather than "this
-        // contract has no member". The arm that reads it, and the decode invariants that
-        // go with it, are the client half of #850.
+        // the server chose to relay is read by an arm of its own since the client half
+        // of #850; it was `Deferred` through the contract part before that, the staged
+        // shape V24's map payloads and V25's stall each had. Nothing plays it yet — the
+        // audio path is #851 — and `Consumed` is about the decode boundary rather than
+        // about a consumer, which is what `MapTile` meant before the map window existed.
         (fb::Payload::VoiceFrame, Handling::ClientOnly),
-        (fb::Payload::VoiceHeard, Handling::Deferred),
+        (fb::Payload::VoiceHeard, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -10937,6 +11109,148 @@ mod tests {
         assert!(!params.clock.declared());
     }
 
+    /// A welcome that says nothing about voice announces no voice at all.
+    ///
+    /// An absent scalar decodes as zero, which is the pre-V30 shape *and* the legal
+    /// answer of a V30 operator who turned voice off — so this is the same test as the
+    /// clock's above and it is here for the same reason: the older peer stays readable
+    /// and the zero is a value rather than a gap.
+    #[test]
+    fn a_welcome_that_says_nothing_about_voice_relays_none() {
+        let Ok(Message::Welcome(params)) = decode_welcome(&WelcomeWire::default()) else {
+            panic!("a default welcome is accepted");
+        };
+
+        assert_eq!(params.voice_range_blocks, 0.0);
+    }
+
+    /// A declared voice range arrives unchanged, and a nonsensical one is refused.
+    ///
+    /// Zero is in the accepted column deliberately: it is an announcement, not a
+    /// degenerate radius. The two non-finite cases are the ones a clamp would pass
+    /// through — `NaN` compares false against every bound it is given — which is why
+    /// this decoder refuses rather than repairs, exactly as it does for a spawn axis.
+    #[test]
+    fn a_voice_range_is_finite_and_not_negative_or_the_welcome_is_refused() {
+        for blocks in [0.0, 0.5, 24.0, f32::MAX] {
+            let Ok(Message::Welcome(params)) = decode_welcome(&WelcomeWire {
+                voice_range_blocks: blocks,
+                ..WelcomeWire::default()
+            }) else {
+                panic!("{blocks} blocks is a range a server may announce");
+            };
+            assert_eq!(params.voice_range_blocks, blocks);
+        }
+
+        for blocks in [-1.0, f32::NEG_INFINITY, f32::INFINITY] {
+            assert_eq!(
+                decode_welcome(&WelcomeWire {
+                    voice_range_blocks: blocks,
+                    ..WelcomeWire::default()
+                }),
+                Err(DecodeError::VoiceRange(blocks)),
+                "{blocks} blocks is not a range"
+            );
+        }
+
+        // `NaN` is its own case, because it is not equal to itself and so cannot be
+        // compared with the value the error carries.
+        let refused = decode_welcome(&WelcomeWire {
+            voice_range_blocks: f32::NAN,
+            ..WelcomeWire::default()
+        });
+        assert!(
+            matches!(refused, Err(DecodeError::VoiceRange(got)) if got.is_nan()),
+            "NaN blocks is not a range, got {refused:?}"
+        );
+    }
+
+    /// A relayed frame arrives with its speaker, its counter and its bytes unchanged.
+    ///
+    /// The bytes are compared and never interpreted: whether they are a legal Opus frame
+    /// is the decoder's question in #851, and this layer's job is to hand over exactly
+    /// what the server relayed.
+    #[test]
+    fn a_relayed_voice_frame_carries_its_speaker_and_its_bytes() {
+        let opus = [0x78_u8, 0x00, 0xff, 0x11];
+        assert_eq!(
+            decode(&server_side::encode_voice_heard(41, 7, Some(&opus))),
+            Ok(Message::VoiceHeard(VoiceHeard {
+                speaker_entity_id: 41,
+                sequence: 7,
+                opus: opus.to_vec(),
+            }))
+        );
+    }
+
+    /// The three shapes a relayed frame may not have.
+    ///
+    /// Absent and empty `opus` are one nothing with two spellings and owe the same
+    /// answer; the ceiling is the contract's own `VoiceBound`, and the frame one byte
+    /// past it is refused rather than truncated, because this side allocates from a
+    /// length the peer chose. The frame exactly at the bound is accepted in the same
+    /// breath, since a bound tested only from the refusing side is a bound that may be
+    /// off by one.
+    #[test]
+    fn a_voice_frame_with_no_speaker_no_audio_or_too_much_of_it_is_refused() {
+        assert_eq!(
+            decode(&server_side::encode_voice_heard(0, 1, Some(&[9]))),
+            Err(DecodeError::VoiceWithoutSpeaker)
+        );
+
+        for opus in [None, Some(&[][..])] {
+            assert_eq!(
+                decode(&server_side::encode_voice_heard(41, 1, opus)),
+                Err(DecodeError::VoiceWithoutAudio {
+                    speaker_entity_id: 41
+                }),
+                "{opus:?} is a frame with no audio in it"
+            );
+        }
+
+        assert_eq!(MAX_OPUS_BYTES, 400);
+        let at_the_bound = vec![7_u8; MAX_OPUS_BYTES];
+        let Ok(Message::VoiceHeard(heard)) =
+            decode(&server_side::encode_voice_heard(41, 1, Some(&at_the_bound)))
+        else {
+            panic!("a frame of exactly MAX_OPUS_BYTES is one the server may relay");
+        };
+        assert_eq!(heard.opus.len(), MAX_OPUS_BYTES);
+
+        let over = vec![7_u8; MAX_OPUS_BYTES + 1];
+        assert_eq!(
+            decode(&server_side::encode_voice_heard(41, 1, Some(&over))),
+            Err(DecodeError::OversizedVoiceFrame {
+                speaker_entity_id: 41,
+                len: MAX_OPUS_BYTES + 1,
+            })
+        );
+    }
+
+    /// No refusal this payload can produce carries the audio it refused.
+    ///
+    /// The contract says a voice frame is never logged, never persisted and never quoted
+    /// in a diagnostic, and a `DecodeError` is a diagnostic: `session.rs` turns every one
+    /// of them into a status line and a log line. The bytes here are chosen so that a
+    /// decoder which printed them would be caught — each is a decimal run no id or length
+    /// in the message could produce on its own.
+    #[test]
+    fn a_voice_refusal_never_prints_the_bytes_it_refused() {
+        let over = vec![0xAB_u8; MAX_OPUS_BYTES + 1];
+        for frame in [
+            server_side::encode_voice_heard(0, 1, Some(&over)),
+            server_side::encode_voice_heard(41, 1, Some(&over)),
+        ] {
+            let rendered = decode(&frame)
+                .expect_err("both frames are refused")
+                .to_string();
+            assert!(
+                !rendered.contains("171") && !rendered.contains("0xAB"),
+                "a voice refusal quoted its payload: {rendered}"
+            );
+        }
+    }
+
     /// The two world-clock projections ride in the snapshot and arrive unchanged, the
     /// last tick of a day included.
     ///
@@ -11625,6 +11939,7 @@ mod tests {
                 night_start_ticks: 14_400,
                 night_end_ticks: 21_600,
             },
+            voice_range_blocks: 24.0,
         };
 
         assert_eq!(
@@ -11645,6 +11960,7 @@ mod tests {
                     night_start_ticks: 14_400,
                     night_end_ticks: 21_600,
                 },
+                voice_range_blocks: 24.0,
             }))
         );
     }

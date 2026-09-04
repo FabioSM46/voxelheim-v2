@@ -362,6 +362,7 @@ mod tests {
             equipment_slots: 4,
             player_token: ANY_TOKEN,
             clock: WorldClock::default(),
+            voice_range_blocks: 0.0,
         })
     }
 

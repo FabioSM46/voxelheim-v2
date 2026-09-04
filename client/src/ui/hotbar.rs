@@ -179,6 +179,7 @@ mod tests {
             hotbar_slots: 3,
             equipment_slots: 1,
             player_token: crate::net::ANY_TOKEN,
+            voice_range_blocks: 0.0,
         })
     }
 
