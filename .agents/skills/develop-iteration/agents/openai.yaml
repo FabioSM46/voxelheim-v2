@@ -1,0 +1,6 @@
+interface:
+  display_name: "Develop Iteration"
+  short_description: "Deliver an iteration through parallel issue agents"
+  default_prompt: "Use $develop-iteration to deliver the active iteration autonomously."
+policy:
+  allow_implicit_invocation: false
