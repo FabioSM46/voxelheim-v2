@@ -1840,11 +1840,16 @@ mod tests {
         );
     }
 
-    /// **What the callback does when the ring is full.** The newest samples are dropped and
-    /// counted; nothing is overwritten, because the consumer is mid-frame and tearing the
-    /// audio it is about to encode is worse than losing the tail of a block it has not seen.
+    /// **How many samples would not fit, and nothing about which ones.**
+    ///
+    /// The name and the message say only what this can see, deliberately. *Which* samples a
+    /// full ring keeps is a property of what comes out of it, and nothing in this part can
+    /// read the ring at all — `Capture::take` arrives with its consumer, and the ramp that
+    /// pins the ordering is in that part. A test whose message names a property it cannot
+    /// observe is what the review on #919 reported, and moving the message rather than the
+    /// measurement would only move the problem.
     #[test]
-    fn a_full_capture_ring_drops_the_newest_and_counts_them() {
+    fn a_full_capture_ring_counts_the_samples_it_could_not_hold() {
         let capture = Capture::new();
         assert_eq!(capture.overruns(), 0);
         capture.captured(&[0.25, -0.5, 0.75]);
