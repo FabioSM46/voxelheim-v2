@@ -713,6 +713,23 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatalf("a valid config was rejected: %v", err)
 	}
 
+	// The boundary of the narrowing check is accepted, not merely near-missed: a range
+	// that is exactly representable as float32 announces itself unchanged, and a check
+	// that refused it would be refusing legal configurations. Zero stays legal too — it
+	// is the contract's word for a server with no voice, and the underflow rule must not
+	// swallow it.
+	for name, blocks := range map[string]float64{
+		"the largest representable range":  math.MaxFloat32,
+		"the smallest representable range": math.SmallestNonzeroFloat32,
+		"no voice at all":                  0,
+	} {
+		cfg := testConfig()
+		cfg.VoiceRange = blocks
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate rejected %s (%v): %v", name, blocks, err)
+		}
+	}
+
 	invalid := map[string]func(c *session.Config){
 		"tick rate 0":  func(c *session.Config) { c.TickRate = 0 },
 		"chunk size 0": func(c *session.Config) { c.ChunkSize = 0 },
@@ -730,6 +747,18 @@ func TestConfigValidate(t *testing.T) {
 		"negative voice range": func(c *session.Config) { c.VoiceRange = -1 },
 		"NaN voice range":      func(c *session.Config) { c.VoiceRange = math.NaN() },
 		"infinite voice range": func(c *session.Config) { c.VoiceRange = math.Inf(1) },
+		// The three above are all finite-float64 checks, and they do not cover the
+		// narrowing. `voice_range_blocks` is a FlatBuffers `float`, so these two are
+		// perfectly good float64 ranges that stop being ranges on the wire: the first
+		// announces +Inf, which the client refuses by contract, and the second announces
+		// 0, which the contract reads as "this server has no voice". Both would have
+		// passed every check above.
+		"voice range that overflows the announced float32": func(c *session.Config) {
+			c.VoiceRange = math.MaxFloat32 * 2
+		},
+		"voice range that underflows the announced float32": func(c *session.Config) {
+			c.VoiceRange = math.SmallestNonzeroFloat32 / 2
+		},
 	}
 
 	for name, mutate := range invalid {

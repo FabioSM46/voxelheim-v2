@@ -76,6 +76,24 @@ func (c Config) Validate() error {
 		// bound it is given, so a welcome carrying one is a client deciding for itself
 		// what a voice range is.
 		return fmt.Errorf("voice range must be a finite number of blocks and not negative, got %v", c.VoiceRange)
+	case math.IsInf(float64(float32(c.VoiceRange)), 0) || (float32(c.VoiceRange) == 0 && c.VoiceRange != 0):
+		// The check above is not the same check as this one, and the gap between them
+		// is reachable. `voice_range_blocks` is a FlatBuffers `float`, so the number
+		// this simulation runs on is a float64 and the number it announces is the
+		// float32 it narrows to — and narrowing is not total. Any finite float64 above
+		// math.MaxFloat32 becomes +Inf on the wire, and the client refuses a non-finite
+		// welcome by contract: `-voice-range 1e300` is accepted by every check above,
+		// starts a server that appears healthy, and is one no client can join, with
+		// nothing in the log saying why. Below the other end, a positive value under
+		// math.SmallestNonzeroFloat32 announces 0, which is this contract's word for
+		// "this server has no voice at all" — so the welcome would deny a feature the
+		// relay is running.
+		//
+		// Refused rather than clamped, like every case above it. A clamp would pick a
+		// range the operator did not ask for and never mention it; the comment on
+		// VoiceRange promises one number read twice, and a silent clamp is the second
+		// number.
+		return fmt.Errorf("voice range must survive the float32 the welcome announces, got %v", c.VoiceRange)
 	}
 
 	for axis, value := range c.Spawn {
