@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, develop]
 
 # Every job starts read-only. Jobs that need more (the diff classifier) widen
 # their own token explicitly instead of inheriting a repository-level default.
@@ -25,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Develop PRs are classified from the changed-file list. Main promotion PRs
+  # Non-main PRs are classified from the changed-file list. Main promotion PRs
   # validate everything that EXISTS at the merge ref: the workspaces are scaffolded
   # through this very pipeline, so pre-scaffold a workspace legitimately has nothing
   # to verify. Jobs skip via job-level `if:` — NEVER via workflow- or job-level
@@ -34,7 +33,7 @@ jobs:
   # Every failure direction is open, and there are three of them:
   #   * the classifier treats unrecognised paths and empty input as "run
   #     everything" (scripts/changed-areas.sh, pinned by its tests);
-  #   * this step falls back to all-true when it cannot enumerate a develop PR diff
+  #   * this step falls back to all-true when it cannot enumerate a non-main PR diff
   #     (API error or the pulls/files API's 3000-file truncation cap);
   #   * the consumers test `!= 'false'`, so a missing or misspelled output —
   #     including every output of this job after a crash — runs the job rather
@@ -140,7 +139,7 @@ jobs:
             fi
             printf 'helpers=%s\n' "$helpers" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::detect: could not enumerate changed files for develop PR; failing open — all jobs run"
+            echo "::warning::detect: could not enumerate changed files for non-main PR; failing open — all jobs run"
             printf 'server=true\nclient=true\nschemas=true\nhelpers=true\n' >> "$GITHUB_OUTPUT"
           fi
 
@@ -441,7 +440,7 @@ jobs:
 
   # The one stable check consumed by READY TO MERGE and branch protection. It is
   # always created after the whole matrix reaches a terminal state. The helper
-  # accepts develop's explicitly skipped work and requires everything that exists
+  # accepts non-main bases' explicitly skipped work and requires everything that exists
   # to succeed on main; any missing or unexpected result fails closed.
   ci_gate:
     name: ci-gate

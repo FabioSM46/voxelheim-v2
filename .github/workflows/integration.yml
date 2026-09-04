@@ -2,8 +2,8 @@ name: Integration
 
 # Verify `develop` itself, after the merge has landed.
 #
-# ci.yml runs on `pull_request` and nowhere else, so every pull request is validated
-# against the `develop` that existed when its run started. Two pull requests branched
+# ci.yml runs on `pull_request` and nowhere else, so every pull request targeting `develop` is
+# validated against the `develop` that existed when its run started. Two pull requests branched
 # from the same base are therefore each validated against a tree that does not contain
 # the other, and a combination that is broken only together turns nothing red. That is
 # not hypothetical: #214 and #215 were each `ready_to_merge: true` on their own and

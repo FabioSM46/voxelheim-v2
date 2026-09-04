@@ -2,7 +2,8 @@
 #
 # pr-merge — the base guard, and what it does NOT claim.
 #
-# #217 authorized the AI to merge into `develop` and left `main` human-only. A deny rule
+# #217 authorized develop merges; the owner later authorized stacked non-main feature-base
+# merges too, while leaving `main` human-only. A deny rule
 # in `.claude/settings.json` cannot express that split: `gh pr merge <n>` names no branch,
 # because the base is a property of the pull request. Removing the merge deny for one
 # target therefore removed it for both, and the DeepSeek review on #218 asked for the
@@ -13,10 +14,10 @@
 #   * a PR based on `main` is refused, and the refusal names the base;
 #   * a base that cannot be read is refused too — fail closed, the same rule every count
 #     in `cmd_pr_status_json` follows, because an unreadable base is not evidence of
-#     `develop`;
+#     a permitted non-main base;
 #   * in both refusals **no merge is attempted**, which is the only claim the guard
 #     actually makes and the one a call log can prove;
-#   * a `develop` PR merges, with `--squash` as the default this repository uses.
+#   * PRs targeting `develop` or a feature branch merge, with `--squash` as the default.
 #
 # What is NOT pinned, because it is not true: that an agent cannot merge `main`. `gh pr
 # merge` and `gh api -X PUT …/merge` bypass this function entirely. The guard stops an
@@ -106,6 +107,10 @@ case "$1 ${2:-}" in
     exit 0
     ;;
   "pr merge")
+    if [ "${GH_HEAD_MATCH_OK:-1}" != "1" ] && [[ " $* " == *" --match-head-commit "* ]]; then
+      echo "head branch was modified" >&2
+      exit 1
+    fi
     if [ "${GH_MERGE_OK:-1}" != "1" ]; then
       echo "Pull request is not mergeable" >&2
       exit 1
@@ -159,6 +164,29 @@ assert_contains "it reports the base it merged into" "$OUT" "merged into develop
 assert_contains "the default method is squash" "$LOG" "gh pr merge 218 --squash"
 
 echo
+echo "pr-merge — a feature-base PR also merges"
+GH_BASE=feature/parent-branch run_merge 218
+assert_eq "merging into a feature branch exits 0" "0" "$RC"
+assert_contains "it reports the feature base" "$OUT" "merged into feature/parent-branch"
+assert_contains "the feature merge is squash by default" "$LOG" "gh pr merge 218 --squash"
+
+echo
+echo "pr-merge — an observed head can be bound to the merge"
+HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+GH_BASE=feature/parent-branch run_merge 218 --head "$HEAD_SHA"
+assert_eq "a matching expected head merges" "0" "$RC"
+assert_contains "gh receives the expected head" "$LOG" "--match-head-commit $HEAD_SHA"
+
+GH_BASE=feature/parent-branch GH_HEAD_MATCH_OK=0 run_merge 218 --head "$HEAD_SHA"
+assert_nonzero "a moved head refuses the merge" "$RC"
+assert_contains "the moved-head failure is visible" "$OUT" "head branch was modified"
+
+GH_BASE=feature/parent-branch run_merge 218 --head not-a-sha
+assert_nonzero "an invalid expected head is refused" "$RC"
+assert_contains "the invalid SHA is explained" "$OUT" "invalid expected head SHA"
+assert_not_contains "an invalid SHA attempts no merge" "$LOG" "gh pr merge"
+
+echo
 echo "pr-merge — the method is explicit and validated"
 GH_BASE=develop run_merge 218 --merge
 assert_eq "an explicit --merge is accepted" "0" "$RC"
@@ -166,7 +194,7 @@ assert_contains "and is what gh receives" "$LOG" "gh pr merge 218 --merge"
 
 GH_BASE=develop run_merge 218 --yolo
 assert_nonzero "an unknown method exits non-zero" "$RC"
-assert_contains "and says which methods exist" "$OUT" "expected --squash, --merge or --rebase"
+assert_contains "and says which methods exist" "$OUT" "expected --head <sha>, --squash, --merge or --rebase"
 assert_not_contains "an unknown method attempts no merge" "$LOG" "gh pr merge"
 
 echo
