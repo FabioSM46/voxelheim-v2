@@ -128,6 +128,15 @@ struct VoicePipeline {
     /// This speaker's own monotonic counter. Wraps rather than clamps: a listener orders
     /// frames by it and hears a gap as a gap, and nothing branches on its value.
     sequence: u32,
+    /// Makes the next frame that passes the transmit decision fail to reach the encoder.
+    ///
+    /// **A `cfg(test)` seam, on `Transport::Plaintext`'s precedent.** At 24 kbit/s with a
+    /// frame that is always [`FRAME_SAMPLES`] long, `VoiceEncoder::encode` has no reachable
+    /// failure — so the branch that drops a frame cannot be exercised from outside, and the
+    /// property under test is what the *sequence* does when it is taken. A guard nobody has
+    /// watched fire is a guard nobody knows the shape of.
+    #[cfg(test)]
+    fail_next_encode: Option<()>,
     /// Whether push to talk has been pressed since voice became live.
     ///
     /// **What "the stream opens on the first `Talk` press and stays open" means.** A player
@@ -152,6 +161,8 @@ impl Default for VoicePipeline {
             pending: Vec::new(),
             frame: vec![0.0; FRAME_SAMPLES],
             sequence: 0,
+            #[cfg(test)]
+            fail_next_encode: None,
             asked_to_speak: false,
         }
     }
@@ -314,26 +325,43 @@ fn speak(
         }
         sending = true;
 
-        let Some(encoder) = encoder.as_mut() else {
+        // **The counter advances for every frame that passed the transmit decision, whether
+        // or not one goes out.** It is the speaker's count of 20 ms *of speech*, which is what
+        // `schemas/player.fbs` says it is and what a listener orders and finds gaps by — not a
+        // count of successful encodes, which is a different quantity and one no receiver can
+        // use. A frame that is dropped here is 20 ms the speaker said and the listener will
+        // not hear, and the listener's decoder has exactly one repair for that; not moving the
+        // counter would hide it instead, splicing the two sides of the hole together and
+        // playing everything after it 20 ms early. Found by review on #922, where the comment
+        // below promised the concealment that this line is what makes possible.
+        let sequence = pipeline.sequence;
+        pipeline.sequence = pipeline.sequence.wrapping_add(1);
+
+        #[cfg(test)]
+        let failing = pipeline.fail_next_encode.take().is_some();
+        #[cfg(not(test))]
+        let failing = false;
+
+        let Some(encoder) = encoder.as_mut().filter(|_| !failing) else {
             continue;
         };
         let packet = match encoder.encode(&pipeline.frame) {
             Ok(packet) => packet,
-            // Logged and dropped, never fatal: one frame that would not encode is a gap the
-            // listener's concealment fills. The message names lengths and never samples.
+            // Logged and dropped, never fatal: one frame that would not encode is a gap, and
+            // the sequence above is what makes the listener hear it as one. The message names
+            // lengths and never samples.
             Err(err) => {
                 warn!("{err}");
                 continue;
             }
         };
         let wire = encode_voice_frame(&VoiceFrame {
-            sequence: pipeline.sequence,
+            sequence,
             // `Everyone` asks for the audible set the server already computed. The knob that
             // narrows it to a party is #853; the wire has carried both since #850.
             audience: VoiceAudience::Everyone,
             opus: packet,
         });
-        pipeline.sequence = pipeline.sequence.wrapping_add(1);
         if let Some(outbound) = outbound.as_mut() {
             outbound.send_voice(wire);
         }
@@ -656,6 +684,65 @@ mod tests {
             assert_eq!(pair[1], pair[0] + 1, "the sequence skipped: {sequences:?}");
         }
         assert_eq!(sequences[0], 0, "the first frame of a session is not zero");
+    }
+
+    /// **A frame that is not sent is a gap, and the sequence is what makes the listener hear
+    /// it as one.**
+    ///
+    /// The counter is the speaker's count of 20 ms *of speech*, not of successful encodes. A
+    /// frame dropped here is 20 ms the speaker said and the listener will not hear, and the
+    /// listener's decoder has exactly one repair for that. Leaving the counter still would
+    /// hide the hole instead: the receiver would see a continuous run, conceal nothing, splice
+    /// the two sides together, and play everything after it 20 ms early. Found by review on
+    /// #922, where the code promised the concealment and the counter denied it.
+    #[test]
+    fn a_frame_that_does_not_encode_leaves_a_gap_in_the_sequence() {
+        let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        app.world().resource::<AudioCapture>().opened(48_000, 1);
+
+        let mut sequences = Vec::new();
+        for at in 0..14 {
+            if at == 6 {
+                app.world_mut()
+                    .resource_mut::<VoicePipeline>()
+                    .fail_next_encode = Some(());
+            }
+            app.world().resource::<AudioCapture>().fed(&speech(0.3, at));
+            tick(&mut app);
+            for frame in app.world_mut().resource_mut::<Outbound>().taken_voice() {
+                sequences.push(
+                    fb::root_as_envelope(&frame)
+                        .expect("a frame this client built")
+                        .payload_as_voice_frame()
+                        .expect("the tag names the payload")
+                        .sequence(),
+                );
+            }
+        }
+
+        assert!(sequences.len() >= 4, "{sequences:?}");
+        let skipped: Vec<u32> = sequences
+            .windows(2)
+            .filter(|pair| pair[1] != pair[0] + 1)
+            .map(|pair| pair[0])
+            .collect();
+        assert_eq!(
+            skipped.len(),
+            1,
+            "one frame was dropped and the sequence shows {} gaps: {sequences:?}",
+            skipped.len()
+        );
+        let at = sequences
+            .iter()
+            .position(|sequence| *sequence == skipped[0])
+            .expect("the gap is in the run");
+        assert_eq!(
+            sequences[at + 1],
+            skipped[0] + 2,
+            "the gap is not one frame wide: {sequences:?}"
+        );
     }
 
     /// **Voice takes its own queue and never the one input waits on**, which is the
