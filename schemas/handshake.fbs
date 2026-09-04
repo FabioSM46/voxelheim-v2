@@ -250,6 +250,10 @@ enum RejectReason : ubyte {
 ///     read at all; any other value requires
 ///     `0 < night_start_ticks < night_end_ticks <= day_length_ticks`, and a
 ///     welcome that breaks that ordering is refused rather than repaired
+///   - `voice_range_blocks` is finite and not negative. Zero is a legal announcement
+///     rather than a degenerate range — it is a server that relays no voice at all —
+///     and a negative or non-finite radius is refused rather than clamped, for the
+///     reason `spawn` is: NaN compares false against every bound it is given
 table ServerWelcome {
   /// Server-assigned identity for this player's entity. Appears in
   /// `EntitySnapshot` so the client can tell itself apart from everyone else.
@@ -359,6 +363,22 @@ table ServerWelcome {
   /// slot is staged separately. The client uses this count to find where the pack ends;
   /// it never decides which item is legal in a worn slot.
   equipment_slots: ubyte;
+
+  /// How far a voice carries on this server, in blocks, or **zero for a server that
+  /// relays no voice at all**.
+  ///
+  /// Zero is the pre-V30 world and a legal answer a V30 server may give: an operator
+  /// who turned voice off, and a client that then shows nothing about it. Every other
+  /// value is a statement about presentation and about nothing else — the audible set
+  /// is recomputed by the server from the positions it owns, and a client that decided
+  /// from this number whether it should be hearing somebody would be second-guessing
+  /// the authority that already answered by sending the frame. It is here so a client
+  /// can attenuate what it was given and say how far voice reaches, not so it can
+  /// decide who is speaking to it.
+  ///
+  /// Blocks rather than metres, for the reason every other distance on this wire is in
+  /// blocks: the simulation measures in them.
+  voice_range_blocks: float = 0;
 }
 
 /// The session is refused. The connection closes immediately after this.

@@ -54,6 +54,10 @@ pub mod voxelheim {
         pub use self::player_trade_action_generated::*;
         mod player_trade_close_reason_generated;
         pub use self::player_trade_close_reason_generated::*;
+        mod voice_audience_generated;
+        pub use self::voice_audience_generated::*;
+        mod voice_bound_generated;
+        pub use self::voice_bound_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -222,6 +226,10 @@ pub mod voxelheim {
         pub use self::mount_request_generated::*;
         mod dismount_request_generated;
         pub use self::dismount_request_generated::*;
+        mod voice_frame_generated;
+        pub use self::voice_frame_generated::*;
+        mod voice_heard_generated;
+        pub use self::voice_heard_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

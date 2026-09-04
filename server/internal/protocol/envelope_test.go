@@ -285,11 +285,19 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // messages travel back and would be safely droppable alone; the request is the bump owed.
 // V29 then appends the persisted absolute world tick; absence would look like a fresh
 // world rather than an unreadable one, so that append owes a clean handshake refusal.
-func TestProtocolV29AddsTheAbsoluteWorldClock(t *testing.T) {
+//
+// **V30 appends the voice relay, and VoiceFrame is what owes the bump.** It travels
+// client -> server, so a V29 server cannot name the tag and closes the session rather
+// than dropping the frame — the mid-session failure this version exists to turn into a
+// clean handshake refusal. VoiceHeard travels back and would have been safely dropped by
+// an older client; ServerWelcome.voice_range_blocks would have read as zero on one, which
+// is the honest statement that the server relays no voice. Both ride the same bump
+// because a relay with one half of its pair is not a relay.
+func TestProtocolV30AddsTheAuthoritativeVoiceRelay(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 29 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 29", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 30 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 30", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -358,6 +366,10 @@ func TestProtocolV29AddsTheAbsoluteWorldClock(t *testing.T) {
 		vnet.PayloadPlayerTradeRequest,
 		vnet.PayloadPlayerTradeState,
 		vnet.PayloadPlayerTradeClosed,
+		// V30's speaker intent, followed by the frame the server decided somebody may
+		// hear. The intent is what carries the bump; the answer would have been dropped.
+		vnet.PayloadVoiceFrame,
+		vnet.PayloadVoiceHeard,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -1464,6 +1476,10 @@ func TestServerWelcomeEncodesEveryField(t *testing.T) {
 		DayLengthTicks:  24000,
 		NightStartTicks: 14400,
 		NightEndTicks:   21600,
+		// A voice range this encoder has no opinion about either. Whether it is a range
+		// an operator may set is cmd/voxelheimd's question; what is checked here is that
+		// the number survives the wire.
+		VoiceRangeBlocks: 24,
 	}
 
 	frame := EncodeServerWelcome(want)
@@ -1525,6 +1541,105 @@ func TestServerWelcomeEncodesEveryField(t *testing.T) {
 	}
 	if got := table.NightEndTicks(); got != want.NightEndTicks {
 		t.Errorf("NightEndTicks = %d, want %d", got, want.NightEndTicks)
+	}
+	if got := table.VoiceRangeBlocks(); got != want.VoiceRangeBlocks {
+		t.Errorf("VoiceRangeBlocks = %v, want %v", got, want.VoiceRangeBlocks)
+	}
+}
+
+// The two halves of V30's voice contract, checked the way every other pair here is: the
+// client's intent through Decode, and the server's answer through the generated
+// accessors.
+//
+// **No test in this file quotes a payload's bytes into a message.** The opus vectors
+// below are deliberately short and arbitrary, and every failure names a length or a
+// speaker rather than what was said — the same rule schemas/player.fbs states beside both
+// tables, applied to the diagnostics as well as to the logs.
+func TestTheVoiceContractCarriesIntentOneWayAndTheServersAnswerTheOther(t *testing.T) {
+	t.Parallel()
+
+	for _, want := range []VoiceFrame{
+		{Sequence: 0, Audience: vnet.VoiceAudienceEveryone, Opus: []byte{0x9c, 0x01}},
+		{Sequence: 4_294_967_295, Audience: vnet.VoiceAudienceParty, Opus: []byte{0xff}},
+		// Copied verbatim rather than refused: an audience this server cannot name is a
+		// filter it cannot apply, and the relay drops such a frame. Widening it to
+		// Everyone would deliver to people the speaker asked to exclude, and failing the
+		// frame would close a connection whose bytes are perfectly readable.
+		{Sequence: 7, Audience: vnet.VoiceAudience(99), Opus: []byte{1, 2, 3}},
+	} {
+		got, err := Decode(EncodeVoiceFrame(want))
+		if err != nil {
+			t.Fatalf("Decode voice frame with audience %d: %v", want.Audience, err)
+		}
+		if got.Kind != vnet.PayloadVoiceFrame || got.Voice == nil {
+			t.Fatalf("decoded kind = %s, voice = %v", got.Kind, got.Voice != nil)
+		}
+		if got.Voice.Sequence != want.Sequence || got.Voice.Audience != want.Audience {
+			t.Errorf("sequence/audience = %d/%d, want %d/%d",
+				got.Voice.Sequence, got.Voice.Audience, want.Sequence, want.Audience)
+		}
+		if !bytes.Equal(got.Voice.Opus, want.Opus) {
+			t.Errorf("opus survived as %d bytes, want %d", len(got.Voice.Opus), len(want.Opus))
+		}
+	}
+
+	// Absent and empty are both framing-valid and both decode to no audio. Whether a
+	// frame with nothing in it is worth relaying is the relay's decision.
+	for name, frame := range map[string][]byte{
+		"absent": EncodeVoiceFrame(VoiceFrame{Sequence: 1}),
+		"empty":  EncodeVoiceFrame(VoiceFrame{Sequence: 1, Opus: []byte{}}),
+	} {
+		got, err := Decode(frame)
+		if err != nil {
+			t.Fatalf("Decode %s opus: %v", name, err)
+		}
+		if got.Voice == nil || len(got.Voice.Opus) != 0 {
+			t.Errorf("%s opus decoded to %v", name, got.Voice)
+		}
+	}
+
+	heard := VoiceHeard{SpeakerEntityID: 41, Sequence: 12_345, Opus: []byte{0x9c, 0x01, 0x42}}
+	env := vnet.GetRootAsEnvelope(EncodeVoiceHeard(heard), 0)
+	if env.PayloadType() != vnet.PayloadVoiceHeard {
+		t.Fatalf("heard payload = %s, want %s", env.PayloadType(), vnet.PayloadVoiceHeard)
+	}
+	table := payloadTable(t, env)
+	relayed := new(vnet.VoiceHeard)
+	relayed.Init(table.Bytes, table.Pos)
+	if got := relayed.SpeakerEntityId(); got != heard.SpeakerEntityID {
+		t.Errorf("SpeakerEntityId = %d, want %d", got, heard.SpeakerEntityID)
+	}
+	// The speaker's own counter, copied through rather than reassigned: a listener orders
+	// by it and hears a gap as a gap.
+	if got := relayed.Sequence(); got != heard.Sequence {
+		t.Errorf("Sequence = %d, want %d", got, heard.Sequence)
+	}
+	if got := relayed.OpusBytes(); !bytes.Equal(got, heard.Opus) {
+		t.Errorf("relayed opus is %d bytes, want %d", len(got), len(heard.Opus))
+	}
+}
+
+// The ceiling on a relayed frame belongs to the contract, so it is read from the contract
+// and never restated. Both consumers size a buffer from this number.
+func TestTheVoiceCeilingIsTheOneTheContractDeclares(t *testing.T) {
+	t.Parallel()
+
+	if MaxVoiceOpusBytes != 400 {
+		t.Errorf("MaxVoiceOpusBytes = %d, want 400", MaxVoiceOpusBytes)
+	}
+	if MaxVoiceOpusBytes != int(vnet.VoiceBoundMaxOpusBytes) {
+		t.Errorf("MaxVoiceOpusBytes = %d, want the contract's %d",
+			MaxVoiceOpusBytes, vnet.VoiceBoundMaxOpusBytes)
+	}
+
+	// Not enforced here, and the test says so rather than leaving it to be discovered:
+	// an oversized frame decodes cleanly and the relay is what drops it.
+	oversized, err := Decode(EncodeVoiceFrame(VoiceFrame{Opus: make([]byte, MaxVoiceOpusBytes+1)}))
+	if err != nil {
+		t.Fatalf("Decode an oversized voice frame: %v", err)
+	}
+	if oversized.Voice == nil || len(oversized.Voice.Opus) != MaxVoiceOpusBytes+1 {
+		t.Error("Decode must copy an oversized payload verbatim and leave the refusal to the relay")
 	}
 }
 

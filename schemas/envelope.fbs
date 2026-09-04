@@ -230,7 +230,25 @@ union Payload {
   //    builds against one settled contract.
   PlayerTradeRequest,      // 58  client -> server
   PlayerTradeState,        // 59  server -> client
-  PlayerTradeClosed        // 60  server -> client
+  PlayerTradeClosed,       // 60  server -> client
+
+  // -- V30. Appended, so the tags of 1..60 are untouched.
+  //
+  //    `VoiceFrame` carries the bump, on the rule this file has stated since V8: it
+  //    travels client -> server, a V29 server cannot name the tag, and direction being
+  //    a protocol rule means that server closes the session rather than dropping the
+  //    frame. A V30 client would otherwise handshake cleanly and lose the connection
+  //    the first time somebody spoke, which is exactly the mid-session decode failure
+  //    `ProtocolVersion` exists to turn into a clean refusal.
+  //
+  //    `VoiceHeard` travels back and would have owed nothing alone — an older client
+  //    drops a tag it cannot name and simply hears nobody. It is appended in the same
+  //    bump because a relay with only one half of its pair is not a relay, and because
+  //    `ServerWelcome.voice_range_blocks` rides the same version for the same reason.
+  //    See `player.fbs` for both tables and `docs/adr/0001-voice-transport.md` for why
+  //    voice rides this connection rather than a second one.
+  VoiceFrame,              // 61  client -> server
+  VoiceHeard               // 62  server -> client
 }
 
 table Envelope {

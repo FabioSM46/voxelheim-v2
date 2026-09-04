@@ -4203,6 +4203,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::MountRequest
         | fb::Payload::DismountRequest
         | fb::Payload::PlayerTradeRequest
+        | fb::Payload::VoiceFrame
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -4222,6 +4223,11 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::WardsNearby(wards_nearby(&payload)?))
         }
+        // V30's relayed voice, carried by name until the arm that reads it lands with the
+        // client half of #850. Named rather than left to the fallback for the reason the
+        // arm below it is: the fallback must stay reachable for nothing this build can
+        // put a name to, and this build can name this tag.
+        fb::Payload::VoiceHeard => Ok(Message::Deferred(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -8486,9 +8492,9 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v29_adds_the_absolute_world_clock() {
+    fn protocol_v30_adds_the_authoritative_voice_relay() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 29);
+        assert_eq!(fb::ProtocolVersion::Current.0, 30);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -8550,6 +8556,8 @@ mod tests {
             (fb::Payload::PlayerTradeRequest, 58),
             (fb::Payload::PlayerTradeState, 59),
             (fb::Payload::PlayerTradeClosed, 60),
+            (fb::Payload::VoiceFrame, 61),
+            (fb::Payload::VoiceHeard, 62),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -8565,7 +8573,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            61,
+            63,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -8595,7 +8603,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 61] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 63] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -8663,6 +8671,14 @@ mod tests {
         (fb::Payload::PlayerTradeRequest, Handling::ClientOnly),
         (fb::Payload::PlayerTradeState, Handling::Consumed),
         (fb::Payload::PlayerTradeClosed, Handling::Consumed),
+        // V30's two. The speaker's intent is client-only and always will be. The frame
+        // the server chose to relay is `Deferred` here and nowhere else in this contract
+        // is that a permanent answer: it is the staged shape V24's map payloads and V25's
+        // stall each had, and it says "this build has no arm yet" rather than "this
+        // contract has no member". The arm that reads it, and the decode invariants that
+        // go with it, are the client half of #850.
+        (fb::Payload::VoiceFrame, Handling::ClientOnly),
+        (fb::Payload::VoiceHeard, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
