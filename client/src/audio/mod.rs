@@ -26,14 +26,18 @@
 //! and atomics; the callback reads them. `mixer.rs` is where that is enforced rather than
 //! requested, and `the_render_path_allocates_nothing` is what holds it.
 //!
-//! ## What this module does not do yet
+//! ## Who owns the device
 //!
-//! **Nothing opens a device.** `audio/device.rs` — one supervisor thread owning a
-//! `cpal::Stream`, reopening it when the device errors or disappears, and enumerating output
-//! devices by name — is the next part of #851, and [`Mixer::render`] is the seam it plugs
-//! into. Until it lands the mixer is fed and rendered only by its own tests, which is
-//! deliberate: the render path is the half that must be right before anything real-time
-//! runs it, and it is testable through [`mixer::Sink`] with no device anywhere.
+//! `audio/device.rs`, and nothing else. It puts one `cpal::Stream` on a supervisor thread
+//! of its own, reopens it when the device errors or disappears, and treats a machine with
+//! no output at all as a log line and a silent client rather than a reason not to run. Its
+//! output callback is the only real-time caller [`Mixer::render`] has.
+//!
+//! `Mixer` is still testable with no device anywhere, through [`mixer::Sink`] — which is
+//! how every assertion here and in `mixer.rs` runs, and how the supervisor loop itself is
+//! tested without a sound card.
+//!
+//! ## What this module does not do yet
 //!
 //! Nothing encodes either. `audiopus` is a dependency of this client from #851 part 1 so the
 //! lockfile and the CI package list move once rather than twice, and the codec arrives with
@@ -41,6 +45,7 @@
 //! and `Master` — each of those is its own issue, and a bus nothing feeds is a gain nobody
 //! can hear moving. See `docs/adr/0001-voice-transport.md`.
 
+mod device;
 mod mixer;
 
 use std::f32::consts::TAU;
@@ -48,6 +53,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
+use device::AudioDevice;
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
@@ -81,7 +87,13 @@ impl Plugin for AudioPlugin {
             .map(SpeakerTest::new)
             .expect("a mixer starts with every source free");
 
+        // Last of the three, and after the gain is set: the supervisor opens a device on
+        // its own thread the moment this returns, and a stream that starts at the wrong
+        // volume is a stream that is briefly audible at the wrong volume.
+        let device = AudioDevice::start(Arc::clone(&mixer));
+
         app.insert_resource(AudioMixer(mixer))
+            .insert_resource(device)
             .insert_resource(controls)
             .insert_resource(speaker_test)
             .add_systems(Update, (apply_the_controls, play_the_speaker_test));
@@ -219,9 +231,10 @@ mod tests {
 
     /// A mixer and a speaker test with no device anywhere near them.
     ///
-    /// **No test in this module builds [`AudioPlugin`]**, and none will once the device
-    /// lands: what is under test is the sample generation and the control surface, and both
-    /// are reachable without one.
+    /// **No test in this module builds [`AudioPlugin`]**, and that is what keeps the
+    /// suite off a sound card: building the plugin is what starts the supervisor thread
+    /// that opens one. What is under test is the sample generation and the control
+    /// surface, and both are reachable without either.
     fn silent_test(rate: u32) -> (Arc<Mixer>, SpeakerTest) {
         let mixer = Arc::new(Mixer::new());
         mixer.set_format(rate, 1);
