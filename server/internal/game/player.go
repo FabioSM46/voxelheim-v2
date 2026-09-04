@@ -142,8 +142,26 @@ type Sim struct {
 	// reconnect resume the same allowance instead of manufacturing a fresh burst. A
 	// bucket is removed once elapsed time has completely refilled it, because at that
 	// point retaining it and creating a new full bucket are equivalent. See chat.go.
-	chatLimiters map[identity.PlayerID]*chatLimiter
+	chatLimiters map[identity.PlayerID]*tokenBucket
 	chatNow      func() time.Time
+
+	// voiceRange is how far a voice carries here, in blocks, and zero is a server that
+	// relays no voice at all. Startup-only, like devCommands: it is an operator's
+	// decision about this world, and nothing a client says can move it.
+	//
+	// It is the *authoritative* number, and the only one that decides anything: a client
+	// may be told what it is so it can draw an indicator, but audibility is settled here,
+	// by sending the frame or not sending it. See voice.go.
+	voiceRange float64
+
+	// voiceLimiters are the per-speaker frame allowances, keyed by the identity that
+	// survives a connection for the reason chatLimiters are: a reconnect must resume the
+	// same allowance rather than mint a fresh burst. Pruned once elapsed time has
+	// completely refilled one, again for the reason above.
+	voiceLimiters map[identity.PlayerID]*tokenBucket
+	// voiceNow is the voice bucket's clock, its own field so a test may freeze the frame
+	// cadence without also freezing chat's.
+	voiceNow func() time.Time
 
 	// pendingExperience is every mob award earned after its tap owner left the
 	// simulation and not yet confirmed on that character's stored record. The key is
@@ -374,6 +392,7 @@ type Sim struct {
 
 type simOptions struct {
 	devCommands bool
+	voiceRange  float64
 }
 
 // SimOption is one startup-only simulation choice.
@@ -382,6 +401,17 @@ type SimOption func(*simOptions)
 // WithDevCommands controls the startup-only command surface; the default is false.
 func WithDevCommands(enabled bool) SimOption {
 	return func(options *simOptions) { options.devCommands = enabled }
+}
+
+// WithVoiceRange sets how far a voice carries, in blocks; the default is
+// [VoiceRangeDefault] and zero is a simulation that relays no voice at all.
+//
+// Refused rather than clamped for a negative or non-finite value: a range is a distance
+// an operator typed, and there is no distance that "less than nothing" could have meant.
+// The refusal lands at startup, where the operator is looking, rather than as a server
+// that quietly relays to nobody.
+func WithVoiceRange(blocks float64) SimOption {
+	return func(options *simOptions) { options.voiceRange = blocks }
 }
 
 // NewSim returns a simulation whose timestep matches tickRate hertz.
@@ -426,12 +456,15 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	if log == nil {
 		return nil, errors.New("game: logger must not be nil")
 	}
-	var configured simOptions
+	configured := simOptions{voiceRange: VoiceRangeDefault}
 	for _, option := range options {
 		if option == nil {
 			return nil, errors.New("game: simulation option must not be nil")
 		}
 		option(&configured)
+	}
+	if math.IsNaN(configured.voiceRange) || math.IsInf(configured.voiceRange, 0) || configured.voiceRange < 0 {
+		return nil, fmt.Errorf("game: voice range must be a finite number of blocks and not negative, got %v", configured.voiceRange)
 	}
 
 	return &Sim{
@@ -468,8 +501,11 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		sceptreCooldownTicks: ticksFor(SceptreCooldown, tickRate),
 		log:                  log,
 		players:              make(map[uint64]*Player),
-		chatLimiters:         make(map[identity.PlayerID]*chatLimiter),
+		chatLimiters:         make(map[identity.PlayerID]*tokenBucket),
+		voiceLimiters:        make(map[identity.PlayerID]*tokenBucket),
+		voiceRange:           configured.voiceRange,
 		chatNow:              SystemClock{}.Now,
+		voiceNow:             SystemClock{}.Now,
 		pendingExperience:    make(map[characterKey]ExperienceAward),
 		parties:              make(map[uint64]*party),
 		partyMemberships:     make(map[partyMemberKey]uint64),
@@ -556,9 +592,20 @@ type Player struct {
 
 	deliver         func(frame []byte) bool
 	deliverSnapshot func(frame []byte, center world.Column) bool
-	chunks          *chunkFeed
-	mineReady       chan MiningCompletion
-	inventory       inventory
+
+	// audible is who this speaker can currently be heard by, as live entity ids,
+	// recomputed every [VoiceSetInterval] ticks by advanceVoiceSetsLocked and read by
+	// Voice. Membership is the audibility decision: a relayed frame goes to this set and
+	// nowhere else, so a frame costs the set rather than the population.
+	//
+	// State on the *speaker* rather than a symmetric graph, because the question a relay
+	// asks is one-directional — "who hears me" — and hysteresis makes the relation
+	// deliberately asymmetric while two players drift apart at slightly different times.
+	// Pruned when a listener leaves, the way chatLimiters are pruned.
+	audible   map[uint64]struct{}
+	chunks    *chunkFeed
+	mineReady chan MiningCompletion
+	inventory inventory
 
 	// appearance is what this player looks like: the character's own, handed in at Join
 	// and never changed afterwards. **It is read from the stored character and from
@@ -933,6 +980,7 @@ func (s *Sim) joinCharacter(
 		described:       make(map[uint64]uint64),
 		deliver:         deliver,
 		deliverSnapshot: deliverSnapshot,
+		audible:         make(map[uint64]struct{}),
 		chunks:          newChunkFeed(),
 		mineReady:       make(chan MiningCompletion, 1),
 
@@ -1028,6 +1076,11 @@ func (s *Sim) Leave(p *Player) {
 		p.mineReset = nil
 		p.blocking = false
 		delete(s.players, p.entityID)
+		// Every speaker forgets this listener, the way a refilled chat bucket is
+		// forgotten: the set is keyed by live entity id, and an id nobody holds any more
+		// would be looked up on every frame for as long as the speaker kept talking. The
+		// leaver's own set goes with the player object.
+		s.forgetVoiceListenerLocked(p.entityID)
 		// The same "only the player that was handed in" guard, applied to the second
 		// index: a rejoin that already claimed this identity must keep it. The two maps
 		// are written together here and in Join, which is what makes "an identity is in
@@ -1292,6 +1345,12 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		// because this loop is the whole of what weather costs.
 		p.weather = s.weatherAtLocked(worldTick, p.pos)
 	}
+
+	// Who can hear whom, at the positions this tick produced rather than the last one's
+	// — the same rule the chunk crossing and the weather sample above follow. Every
+	// fourth tick, and the whole of what proximity voice costs the simulation: see
+	// voice.go, where the cadence is the cost bound the feature commits to.
+	s.advanceVoiceSetsLocked(tick, players)
 
 	// The drops, in the order the world changed them: fall and age first, then combine
 	// what ended up together, then hand over what somebody is standing on. Merging
