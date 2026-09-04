@@ -354,11 +354,34 @@ Implements #<issue-number>
 # so exclude them here too or the number is not the one that matters. `wc -m` and not
 # `wc -c`, because the cap is characters and the reviewer measures `len(diff)` in code
 # points — bytes overcount every em-dash in this repository's prose.
+#
+# Two pathspecs per lockfile, and that is not redundancy. A git pathspec without
+# `:(glob)` matches the path from the root, so a bare `Cargo.lock` matches ONLY a
+# top-level one — and neither lockfile in this repository is top-level. The reviewer
+# matches on the *basename* at any depth (`is_generated_path` in
+# .github/scripts/deepseek_review.py), so the pair is what mirrors it.
+# `scripts/test/diff-measure-parity.test.sh` pins this list against that function.
 REVIEWABLE=$(git diff origin/develop...HEAD -- . \
-  ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
-  ':(exclude)Cargo.lock' ':(exclude)go.sum' | wc -m)
+  ':(exclude)gen/*' ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
+  ':(exclude)Cargo.lock' ':(exclude)*/Cargo.lock' \
+  ':(exclude)go.sum' ':(exclude)*/go.sum' | wc -m)
 echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
 ```
+
+**That list was wrong for as long as it existed, and the way it was wrong is the reason
+it is now pinned by a test.** It excluded `Cargo.lock` and `go.sum` as bare pathspecs,
+which match a top-level file and nothing else — while this repository keeps them at
+`client/Cargo.lock` and `server/go.sum`. So the recipe excluded **neither**, and every
+measurement of a pull request that touched a lockfile was too large: `client/Cargo.lock`
+alone was 5264 lines on legacy PR 15. A number that is too large is the quiet direction
+to be wrong in — it never opens an oversized pull request, it splits a change that did
+not need splitting, and the split costs the serialisation Step 5 describes. It was found
+on #851, where a 16,140-character part measured 30,000 and a reviewer had to check the
+pathspec by hand to find out why.
+
+The lesson is the one this repository keeps relearning: **a number somebody makes a
+decision from is an output, and outputs are pinned by tests here.** This one could not
+look wrong, because a diff size has no expected value to compare against.
 
 **When Step 5 split the issue, mind what the three-dot diff measures against.** The first half is
 measured against `origin/develop` like any other branch. The second half is branched from the
