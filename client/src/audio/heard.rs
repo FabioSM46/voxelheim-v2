@@ -145,6 +145,14 @@ impl Jitter {
             self.target = (self.target + 1).min(MAX_TARGET_FRAMES);
             return;
         }
+        // **A frame that is already held costs nothing to accept, so it evicts nothing.** The
+        // review on #923 found the eviction below running for a duplicate: with the buffer
+        // full, a second copy of frame 5 dropped frame 19 and then replaced itself, so
+        // *receiving* a frame manufactured a gap — the opposite of what a jitter buffer is
+        // for. A duplicate is the ordinary shape of a retransmission, not an admission.
+        if self.frames.contains_key(&sequence) {
+            return;
+        }
         // Bounded before the insert, and the *highest* goes: the map is ordered, so the
         // entries furthest from the slot being played are the ones a listener will reach
         // last, and dropping the lowest would throw away the frame about to be needed.
@@ -191,7 +199,14 @@ impl Jitter {
         if let Some(frame) = self.frames.remove(&next) {
             return Slot::Frame(frame);
         }
-        match self.frames.values().next() {
+        // **Only the frame immediately after this slot can repair it, and the review on #923
+        // is where that was got wrong.** Opus's in-band forward error correction puts a
+        // lower-bitrate copy of frame *N* inside packet *N + 1* and nowhere else. Offering the
+        // lowest frame held — which the first version did — hands the decoder packet 5 to
+        // recover slot 3 from, and what comes out is frame 4, played in slot 3 and then again
+        // in slot 4: the stream duplicated and a frame out of step, for a gap concealment
+        // would have covered honestly.
+        match self.frames.get(&next.wrapping_add(1)) {
             Some(after) => Slot::Recover(after.clone()),
             None => Slot::Conceal,
         }
@@ -211,6 +226,14 @@ impl Jitter {
 #[derive(Debug)]
 struct Speaker {
     jitter: Jitter,
+    /// Whether a snapshot has ever named this speaker.
+    ///
+    /// **A speaker the world has not confirmed is released by the silence timer and not by
+    /// absence.** Voice and snapshots arrive on their own schedules, so somebody who starts
+    /// talking after the newest snapshot and before the next one is genuinely missing from it
+    /// — and releasing them there would drop the first part of every voice that comes into
+    /// range, in the same frame the buffer was created. Found by review on #923.
+    seen: bool,
     /// `None` when libopus would not open one. That costs this speaker their voice and
     /// nothing else — never a panic, and never a retry per frame, which is why the entry is
     /// made either way.
@@ -286,6 +309,7 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
         let speaker = speakers.entry(frame.speaker_entity_id).or_insert_with(|| {
             Speaker {
                 jitter: Jitter::new(now),
+                seen: false,
                 // A decoder that will not open costs this speaker their voice and nothing
                 // else: the entry is still made, so nothing retries per frame.
                 decoder: VoiceDecoder::new().map_err(|err| warn!("{err}")).ok(),
@@ -365,16 +389,19 @@ fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<Snap
         Err(poisoned) => poisoned.into_inner(),
     };
     speakers.retain(|entity_id, speaker| {
-        // Absence of a snapshot releases nobody: a session that has not answered yet holds
-        // everybody, and reading "not present" from "nothing to read" would silence a
-        // conversation every time a snapshot was late.
-        // `holds_entity` answers `false` for a buffer with no snapshot in it, so "gone"
-        // has to mean *a snapshot arrived and did not name them* — which is why the
-        // presence of a tick is read alongside it. Reading "not present" from "nothing to
-        // read" would silence a conversation every time a snapshot was late.
-        let gone = snapshots.as_deref().is_some_and(|snapshots| {
-            snapshots.latest_tick().is_some() && !snapshots.holds_entity(*entity_id)
-        });
+        // **Two things have to be true before absence means anything**, and the review on
+        // #923 found only the first of them. A snapshot has to exist at all — "nothing to
+        // read" is never "not present", or a late snapshot would silence a conversation. And
+        // this speaker has to have *been* in one: voice and snapshots arrive on their own
+        // schedules, so somebody who starts talking after the newest snapshot and before the
+        // next one is genuinely missing from it, and releasing them there drops the first part
+        // of every voice that comes into range in the same frame its buffer was created. Until
+        // the world has confirmed them once, the silence timer is what lets them go.
+        let present = snapshots
+            .as_deref()
+            .is_some_and(|snapshots| snapshots.holds_entity(*entity_id));
+        speaker.seen |= present;
+        let gone = speaker.seen && !present;
         !gone && !speaker.jitter.silent_since(now)
     });
 }
@@ -387,7 +414,7 @@ mod tests {
     use super::*;
     use crate::audio::codec::VoiceEncoder;
     use crate::audio::mixer::Mixer;
-    use crate::net::VoiceHeard;
+    use crate::net::{EntityState, Snapshot, VoiceHeard};
     use std::sync::Arc;
 
     /// Twelve real Opus frames of a tone, so the decoder is fed something it can decode.
@@ -500,10 +527,43 @@ mod tests {
         for frame in opus.iter().take(3) {
             assert_eq!(jitter.slot(), Slot::Frame(frame.clone()));
         }
-        // Slot 3 is missing and 5 has arrived: 5 is what carries a copy of 4, not of 3, so
-        // this is the honest case for concealment.
+        // **Slot 3 is missing and only 5 has arrived.** Packet 5 carries a copy of frame 4 and
+        // of nothing else, so it cannot repair slot 3 — this is the honest case for
+        // concealment, and the first version of this test asserted `Recover(opus[5])` under a
+        // comment stating the very fact that makes it wrong. Found by review on #923.
         jitter.push(5, opus[5].clone(), now);
+        assert_eq!(
+            jitter.slot(),
+            Slot::Conceal,
+            "a gap was repaired from a packet that does not carry it"
+        );
+        // Slot 4 is the one packet 5 *can* repair, so the next slot does recover.
         assert_eq!(jitter.slot(), Slot::Recover(opus[5].clone()));
+        assert_eq!(jitter.slot(), Slot::Frame(opus[5].clone()));
+    }
+
+    /// **A duplicate costs nothing to accept, so it evicts nothing.** With the buffer full, a
+    /// second copy of a frame already held used to drop the highest unique one and then
+    /// replace itself — so *receiving* a frame manufactured a gap, which is the opposite of
+    /// what a jitter buffer is for. Found by review on #923.
+    #[test]
+    fn a_duplicate_never_pushes_a_unique_frame_out() {
+        let now = Instant::now();
+        let opus = frames();
+        let mut jitter = Jitter::new(now);
+        for sequence in 0..MAX_HELD_FRAMES as u32 {
+            jitter.push(sequence, opus[sequence as usize % opus.len()].clone(), now);
+        }
+        assert_eq!(jitter.frames.len(), MAX_HELD_FRAMES);
+        let highest = MAX_HELD_FRAMES as u32 - 1;
+        assert!(jitter.frames.contains_key(&highest));
+
+        jitter.push(5, opus[5 % opus.len()].clone(), now);
+        assert!(
+            jitter.frames.contains_key(&highest),
+            "a duplicate pushed the highest unique frame out"
+        );
+        assert_eq!(jitter.frames.len(), MAX_HELD_FRAMES);
     }
 
     /// **The buffer grows when the network makes it, and only then.** A frame that arrives
@@ -658,6 +718,76 @@ mod tests {
         assert!(
             heard_level(&app) <= crate::audio::dsp::SILENCE_DB + 1.0,
             "a refused frame was played"
+        );
+    }
+
+    /// **A voice that arrives before the world does is not released.** Voice and snapshots
+    /// arrive on their own schedules, so somebody who starts talking after the newest snapshot
+    /// and before the next one is genuinely missing from it — and releasing them there drops
+    /// the first part of every voice that comes into range, in the same frame its buffer was
+    /// created. Absence only means anything once a snapshot has named them at least once.
+    /// Found by review on #923.
+    #[test]
+    fn a_speaker_the_world_has_not_confirmed_yet_is_not_released() {
+        let mut app = listening_app();
+        app.init_resource::<SnapshotBuffer>();
+        let opus = frames();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.update();
+        assert!(
+            heard_level(&app) > -30.0,
+            "the first thing said by a newly nearby speaker was thrown away"
+        );
+
+        // A snapshot arrives naming somebody else. **This is the state the finding is about**
+        // — a snapshot exists and this speaker is not in it — and it must not release them,
+        // because the world has never confirmed them and may simply be behind the voice.
+        let named = |entity_id: u64, tick: u32| Snapshot {
+            server_tick: tick,
+            entities: vec![EntityState {
+                entity_id,
+                pos: [0.0; 3],
+                vel: [0.0; 3],
+                yaw: 0.0,
+            }],
+            ..Snapshot::default()
+        };
+        app.world_mut()
+            .resource_mut::<SnapshotBuffer>()
+            .accept(named(9, 1), Instant::now());
+        for _ in 0..5 {
+            app.update();
+        }
+        {
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            assert!(
+                speakers.contains_key(&7),
+                "a speaker no snapshot had ever named was released for being absent"
+            );
+            assert!(
+                !speakers[&7].seen,
+                "the world confirmed a speaker it never named"
+            );
+        }
+
+        // And once the world *has* confirmed them, absence does release them: the rule is
+        // "not confirmed yet", not "never released".
+        app.world_mut()
+            .resource_mut::<SnapshotBuffer>()
+            .accept(named(7, 2), Instant::now());
+        app.update();
+        app.world_mut()
+            .resource_mut::<SnapshotBuffer>()
+            .accept(named(9, 3), Instant::now());
+        app.update();
+        let listening = app.world().resource::<Listening>();
+        let speakers = listening.speakers.lock().expect("no test poisons it");
+        assert!(
+            !speakers.contains_key(&7),
+            "a speaker the world confirmed and then dropped was kept"
         );
     }
 
