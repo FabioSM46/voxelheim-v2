@@ -104,7 +104,7 @@ expected_commands = [
     f"sudo apt-get {expected_options} update",
     (
         f"sudo apt-get {expected_options} install -y --no-install-recommends "
-        "libasound2-dev libudev-dev pkg-config"
+        "libasound2-dev libudev-dev libopus-dev pkg-config"
     ),
 ]
 assert commands == expected_commands, (
