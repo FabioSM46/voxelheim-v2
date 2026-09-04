@@ -35,6 +35,10 @@ pub enum ServerWelcomeOffset {}
 ///     read at all; any other value requires
 ///     `0 < night_start_ticks < night_end_ticks <= day_length_ticks`, and a
 ///     welcome that breaks that ordering is refused rather than repaired
+///   - `voice_range_blocks` is finite and not negative. Zero is a legal announcement
+///     rather than a degenerate range — it is a server that relays no voice at all —
+///     and a negative or non-finite radius is refused rather than clamped, for the
+///     reason `spawn` is: NaN compares false against every bound it is given
 pub struct ServerWelcome<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -63,6 +67,7 @@ impl<'a> ServerWelcome<'a> {
     pub const VT_NIGHT_START_TICKS: ::flatbuffers::VOffsetT = 24;
     pub const VT_NIGHT_END_TICKS: ::flatbuffers::VOffsetT = 26;
     pub const VT_EQUIPMENT_SLOTS: ::flatbuffers::VOffsetT = 28;
+    pub const VT_VOICE_RANGE_BLOCKS: ::flatbuffers::VOffsetT = 30;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -81,6 +86,7 @@ impl<'a> ServerWelcome<'a> {
         let mut builder = ServerWelcomeBuilder::new(_fbb);
         builder.add_world_seed(args.world_seed);
         builder.add_entity_id(args.entity_id);
+        builder.add_voice_range_blocks(args.voice_range_blocks);
         builder.add_night_end_ticks(args.night_end_ticks);
         builder.add_night_start_ticks(args.night_start_ticks);
         builder.add_day_length_ticks(args.day_length_ticks);
@@ -323,6 +329,31 @@ impl<'a> ServerWelcome<'a> {
                 .unwrap()
         }
     }
+    /// How far a voice carries on this server, in blocks, or **zero for a server that
+    /// relays no voice at all**.
+    ///
+    /// Zero is the pre-V30 world and a legal answer a V30 server may give: an operator
+    /// who turned voice off, and a client that then shows nothing about it. Every other
+    /// value is a statement about presentation and about nothing else — the audible set
+    /// is recomputed by the server from the positions it owns, and a client that decided
+    /// from this number whether it should be hearing somebody would be second-guessing
+    /// the authority that already answered by sending the frame. It is here so a client
+    /// can attenuate what it was given and say how far voice reaches, not so it can
+    /// decide who is speaking to it.
+    ///
+    /// Blocks rather than metres, for the reason every other distance on this wire is in
+    /// blocks: the simulation measures in them.
+    #[inline]
+    pub fn voice_range_blocks(&self) -> f32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<f32>(ServerWelcome::VT_VOICE_RANGE_BLOCKS, Some(0.0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for ServerWelcome<'_> {
@@ -349,6 +380,7 @@ impl ::flatbuffers::Verifiable for ServerWelcome<'_> {
             .visit_field::<u32>("night_start_ticks", Self::VT_NIGHT_START_TICKS, false)?
             .visit_field::<u32>("night_end_ticks", Self::VT_NIGHT_END_TICKS, false)?
             .visit_field::<u8>("equipment_slots", Self::VT_EQUIPMENT_SLOTS, false)?
+            .visit_field::<f32>("voice_range_blocks", Self::VT_VOICE_RANGE_BLOCKS, false)?
             .finish();
         Ok(())
     }
@@ -367,6 +399,7 @@ pub struct ServerWelcomeArgs<'a> {
     pub night_start_ticks: u32,
     pub night_end_ticks: u32,
     pub equipment_slots: u8,
+    pub voice_range_blocks: f32,
 }
 impl<'a> Default for ServerWelcomeArgs<'a> {
     #[inline]
@@ -385,6 +418,7 @@ impl<'a> Default for ServerWelcomeArgs<'a> {
             night_start_ticks: 0,
             night_end_ticks: 0,
             equipment_slots: 0,
+            voice_range_blocks: 0.0,
         }
     }
 }
@@ -465,6 +499,14 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> ServerWelcomeBuilder<'a, 'b, 
             .push_slot::<u8>(ServerWelcome::VT_EQUIPMENT_SLOTS, equipment_slots, 0);
     }
     #[inline]
+    pub fn add_voice_range_blocks(&mut self, voice_range_blocks: f32) {
+        self.fbb_.push_slot::<f32>(
+            ServerWelcome::VT_VOICE_RANGE_BLOCKS,
+            voice_range_blocks,
+            0.0,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> ServerWelcomeBuilder<'a, 'b, A> {
@@ -497,6 +539,7 @@ impl ::core::fmt::Debug for ServerWelcome<'_> {
         ds.field("night_start_ticks", &self.night_start_ticks());
         ds.field("night_end_ticks", &self.night_end_ticks());
         ds.field("equipment_slots", &self.equipment_slots());
+        ds.field("voice_range_blocks", &self.voice_range_blocks());
         ds.finish()
     }
 }

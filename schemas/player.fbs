@@ -2542,3 +2542,116 @@ table MountRequest {
 /// Decoder invariant: the empty table carries no value to validate.
 table DismountRequest {
 }
+
+// -----------------------------------------------------------------------------
+// Proximity voice: what a speaker sends, and what a listener the *server* chose is
+// given. `docs/adr/0001-voice-transport.md` is the decision these two implement —
+// Opus frames ride the connection the session is already authenticated on, and the
+// server alone decides who hears whom.
+// -----------------------------------------------------------------------------
+
+/// Who a speaker is asking to be heard by. Client -> server.
+///
+/// **It narrows the server's answer and never widens it.** `Everyone` asks for the
+/// audible set the server computed; `Party` asks for the members of that same set who
+/// share the speaker's party. Neither one names a recipient, and there is deliberately
+/// no member that reaches a party regardless of distance — a channel that ignored
+/// proximity would be a recipient list under another name.
+///
+/// Append-only, and zero is a real member rather than the fail-closed sentinel
+/// `PartyAction.Unknown` is. The departure is deliberate: a zero sentinel exists so an
+/// *absent* field cannot become an operation nobody asked for, and neither member here
+/// is an operation. Both are requests to be heard by people the server has already
+/// ruled audible — `Everyone` takes that set, `Party` takes a subset of it — so an
+/// absent audience reading as `Everyone` asks for what a speaker who said nothing is
+/// asking for, and reaches nobody the server had not already chosen anyway.
+///
+/// An unrecognised *non-zero* value is a different thing, and it does fail closed: it
+/// names a filter this server cannot apply, so the frame is dropped rather than relayed
+/// under a rule the two peers do not share.
+enum VoiceAudience : ubyte {
+  Everyone = 0,
+  Party = 1
+}
+
+/// The ceiling on one relayed Opus frame, stated where both consumers can read it.
+///
+/// An enum rather than a sentence, on the `WardBound` precedent: both generated APIs
+/// expose it, so the server that refuses an oversized frame and the client that sizes a
+/// buffer from a relayed one read one constant instead of two copies of a paragraph.
+///
+/// 400 bytes is a 20 ms frame at 160 kbit/s — comfortably above the 64 kbit/s a wideband
+/// voice stream needs, and below anything a single frame has a reason to be. It exists
+/// because the receiver allocates from this length, and every such length here gets an
+/// explicit bound even from an authoritative server.
+enum VoiceBound : ushort {
+  MaxOpusBytes = 400
+}
+
+/// One encoded Opus frame a client is asking the server to relay. Client -> server,
+/// and intent only.
+///
+/// **It carries no position and no recipient**, which is the whole of the authority
+/// boundary here: the server already knows where this speaker is standing, because it
+/// put them there, and it decides who is close enough to hear them. A field naming a
+/// listener would be a client choosing an audience, and a field naming a position would
+/// be a client choosing how far its voice carries.
+///
+/// `sequence` is the speaker's own monotonic frame counter, for a receiver's jitter
+/// buffer to order and to notice gaps with. It is presentation, never authority: the
+/// server does not read it as a clock, does not reject a frame for arriving out of
+/// order, and does not renumber it.
+///
+/// Decoder invariants:
+///   - `audience` is copied verbatim, unrecognised values included. It is deliberately
+///     not a framing question: an audience this server cannot name is a filter it
+///     cannot apply, so the *relay* drops the frame silently rather than the decoder
+///     closing the connection. Widening it to `Everyone` is the one wrong answer, since
+///     it would deliver to people the speaker asked to exclude
+///   - `opus` is copied verbatim and never parsed. Whether it is a legal Opus frame is
+///     the *listener's* decoder's question; this server forwards bytes it does not read
+///   - an absent or empty `opus` is framing-valid and carries no audio. Whether such a
+///     frame is worth relaying is a server decision, not a framing one
+///   - a frame carrying more than `VoiceBound.MaxOpusBytes` of `opus` is dropped by the
+///     relay. That ceiling is the contract's rather than one server's tuning, which is
+///     why it is an enum both peers read
+///
+/// **Nothing may write these bytes down.** A voice frame is personal data: the server
+/// relays it and never logs it, never persists it and never puts it in a diagnostic.
+/// That is stated in the GDD's section 10 and it is a constraint on every consumer of
+/// this table.
+table VoiceFrame {
+  sequence: uint;
+  audience: VoiceAudience;
+  opus: [ubyte];
+}
+
+/// One Opus frame the authoritative server decided this recipient may hear.
+/// Server -> client.
+///
+/// Receiving one *is* the audibility decision. A client never asks whether it should be
+/// hearing this speaker and never filters the frame by its own idea of distance or
+/// party: the server sent it, so it is audible, and a client that decided otherwise
+/// would be second-guessing the only authority there is.
+///
+/// `sequence` is the speaker's counter, copied through unchanged, so a recipient can
+/// order frames and hear a gap as a gap. It is per speaker: two speakers' sequences say
+/// nothing about each other.
+///
+/// Decoder invariants:
+///   - `speaker_entity_id` is non-zero and names the speaker's live entity, the same id
+///     an `EntitySnapshot` addresses them by
+///   - `opus` is present, non-empty and at most `VoiceBound.MaxOpusBytes` — the same
+///     ceiling `VoiceFrame` states, because this frame is the one that got past it. A
+///     frame with no audio in it is one the server should not have relayed, and one over
+///     the ceiling is one it should not have accepted
+///   - `opus` is copied verbatim and decoded by the client's Opus decoder, which is the
+///     only thing in this system that reads it
+///
+/// The same rule as its counterpart: **these bytes are never logged, never persisted
+/// and never quoted in a diagnostic**, on either side of the wire.
+table VoiceHeard {
+  speaker_entity_id: ulong;
+  sequence: uint;
+  opus: [ubyte];
+}

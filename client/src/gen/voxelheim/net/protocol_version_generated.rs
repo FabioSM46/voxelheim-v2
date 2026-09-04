@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 29;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 30;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -231,6 +231,15 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// eight-day lunar phase every time a V29 client connected. The version therefore moves
 /// even though FlatBuffers can decode the older table: the two peers would otherwise
 /// assign different celestial state to the same snapshot after a clean handshake.
+///
+/// **V30 belongs to `VoiceFrame`.** It is a client -> server union member a V29 server
+/// cannot name, and that server closes the session instead of dropping the frame — so a
+/// V30 client must not handshake cleanly and then lose the connection the first time
+/// somebody speaks. `VoiceHeard` rides in the same bump as its server -> client
+/// counterpart, and so does `ServerWelcome.voice_range_blocks`, which would have owed
+/// nothing alone: a V29 server leaves that scalar at zero, and zero is the honest
+/// statement that this server relays no voice. See `schemas/player.fbs` for both tables
+/// and `docs/adr/0001-voice-transport.md` for why the frames ride this connection at all.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -241,10 +250,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(29);
+    pub const Current: Self = Self(30);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 29;
+    pub const ENUM_MAX: u16 = 30;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

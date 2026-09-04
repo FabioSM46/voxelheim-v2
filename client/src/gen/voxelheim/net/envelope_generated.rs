@@ -968,6 +968,36 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_voice_frame(&self) -> Option<VoiceFrame<'a>> {
+        if self.payload_type() == Payload::VoiceFrame {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { VoiceFrame::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_voice_heard(&self) -> Option<VoiceHeard<'a>> {
+        if self.payload_type() == Payload::VoiceHeard {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { VoiceHeard::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1039,6 +1069,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::PlayerTradeRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeRequest>>("Payload::PlayerTradeRequest", pos),
           Payload::PlayerTradeState => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeState>>("Payload::PlayerTradeState", pos),
           Payload::PlayerTradeClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeClosed>>("Payload::PlayerTradeClosed", pos),
+          Payload::VoiceFrame => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceFrame>>("Payload::VoiceFrame", pos),
+          Payload::VoiceHeard => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceHeard>>("Payload::VoiceHeard", pos),
           _ => Ok(()),
         }
      })?
@@ -1692,6 +1724,26 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::PlayerTradeClosed => {
                 if let Some(x) = self.payload_as_player_trade_closed() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::VoiceFrame => {
+                if let Some(x) = self.payload_as_voice_frame() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::VoiceHeard => {
+                if let Some(x) = self.payload_as_voice_heard() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

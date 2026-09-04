@@ -95,6 +95,18 @@ const (
 	// truncate: dropping the tail would leave the client shading the wrong ground.
 	MaxWardedColumns = int(vnet.WardBoundMaxWardedColumns)
 
+	// MaxVoiceOpusBytes is the generated VoiceBound member both consumers share: the
+	// longest Opus payload one relayed frame may carry.
+	//
+	// **Read by the relay, deliberately not enforced by Decode.** A frame over it is
+	// perfectly readable bytes asking for something this server will not do, and the
+	// contract says so beside the table: the relay drops it and the session continues.
+	// Refusing it at the framing layer would close a connection over a request that has
+	// an answer, which is the division of labour every other bound in this file follows
+	// — the decoder bounds what it must allocate from, the simulation refuses what it
+	// will not do.
+	MaxVoiceOpusBytes = int(vnet.VoiceBoundMaxOpusBytes)
+
 	// MarkerNoteMaxBytes bounds Marker.note and MarkerPlaceRequest.note. Bytes
 	// rather than characters, because a byte is what the wire and both decoders
 	// actually count.
@@ -224,6 +236,7 @@ type Message struct {
 	ActionRefused      *ActionRefused
 	MountRequest       *MountRequest
 	DismountRequest    *DismountRequest
+	Voice              *VoiceFrame
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -248,6 +261,34 @@ type DismountRequest struct{}
 // server accepts, rate-limits or delivers it is a simulation decision.
 type ChatRequest struct {
 	Text string
+}
+
+// VoiceFrame is one encoded Opus frame a client has asked the server to relay.
+//
+// **Opus is never read here and never written down.** The bytes are copied out of the
+// frame and forwarded to the listeners the simulation chose; nothing in this server
+// parses them, logs them, persists them or quotes them in a diagnostic. See
+// schemas/player.fbs, which states that rule beside the table, and the GDD's section 10.
+//
+// Audience is copied verbatim, unrecognised values included: an audience this server
+// cannot name is a filter it cannot apply, and the relay drops such a frame rather than
+// widening it to Everyone. That is a simulation refusal, not a framing one, so it does
+// not close the connection.
+type VoiceFrame struct {
+	Sequence uint32
+	Audience vnet.VoiceAudience
+	Opus     []byte
+}
+
+// VoiceHeard is one Opus frame the authoritative server decided a recipient may hear.
+// Receiving one is the audibility decision; the client never re-filters it.
+//
+// The same rule as VoiceFrame applies to Opus, in the same words: forwarded, never read
+// and never written down.
+type VoiceHeard struct {
+	SpeakerEntityID uint64
+	Sequence        uint32
+	Opus            []byte
 }
 
 // PartyRequest is one intent to change party membership. TargetName is display text,
@@ -1403,6 +1444,11 @@ type Welcome struct {
 	HotbarSlots    uint8
 	EquipmentSlots uint8
 
+	// VoiceRangeBlocks is how far a voice carries on this server, and zero for a server
+	// that relays no voice. It is presentation for the client: audibility is decided
+	// here, by sending the frame at all.
+	VoiceRangeBlocks float32
+
 	// PlayerToken is the retired identity field, which a welcome must still carry:
 	// present and exactly [PlayerTokenLen] bytes on every accepted handshake, because
 	// a decoder treats any other length as a protocol error.
@@ -1803,6 +1849,27 @@ func Decode(frame []byte) (msg Message, err error) {
 		// Display text, copied exactly as sent. Empty, absent and arbitrarily long
 		// strings are framing-valid; the authoritative chat rule decides acceptance.
 		msg.Chat = &ChatRequest{Text: string(request.Text())}
+
+	case vnet.PayloadVoiceFrame:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.VoiceFrame
+		request.Init(table.Bytes, table.Pos)
+		// Copied rather than aliased, exactly as every other vector in this file is: the
+		// accessor borrows the frame's buffer, and this value outlives the read that
+		// produced it — it is handed to the simulation and from there to other sessions'
+		// queues. An absent vector is an ordinary empty frame here; whether an empty one
+		// is worth relaying is the relay's decision, not the decoder's.
+		//
+		// Nothing about these bytes reaches a log. The length does, in the relay's own
+		// counters; the contents never do.
+		msg.Voice = &VoiceFrame{
+			Sequence: request.Sequence(),
+			Audience: request.Audience(),
+			Opus:     append([]byte(nil), request.OpusBytes()...),
+		}
 
 	case vnet.PayloadPartyRequest:
 		table, tErr := unionPayload(env, msg.Kind)
@@ -2386,6 +2453,10 @@ func EncodeServerWelcome(w Welcome) []byte {
 	vnet.ServerWelcomeAddNightStartTicks(b, w.NightStartTicks)
 	vnet.ServerWelcomeAddNightEndTicks(b, w.NightEndTicks)
 	vnet.ServerWelcomeAddEquipmentSlots(b, w.EquipmentSlots)
+	// Zero for a server with no voice, and written the same way the clock's three zeros
+	// are: FlatBuffers emits no bytes for a scalar equal to its default, so a server that
+	// relays no voice produces exactly the pre-V30 shape of this table.
+	vnet.ServerWelcomeAddVoiceRangeBlocks(b, w.VoiceRangeBlocks)
 	welcome := vnet.ServerWelcomeEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadServerWelcome, welcome)
@@ -3547,6 +3618,43 @@ func EncodePlayerTradeState(state PlayerTradeState) []byte {
 	vnet.PlayerTradeStateAddTheirConfirmed(b, state.TheirConfirmed)
 	payload := vnet.PlayerTradeStateEnd(b)
 	return finishEnvelope(b, vnet.PayloadPlayerTradeState, payload)
+}
+
+// EncodeVoiceFrame builds the client's voice intent, for protocol round-trip tests and
+// for the session tests that drive a speaker. The server never sends this payload.
+//
+// Nothing here inspects opus: it is a byte vector this package copies onto the wire, in
+// exactly the way the decoder copies one off it.
+func EncodeVoiceFrame(frame VoiceFrame) []byte {
+	b := flatbuffers.NewBuilder(256)
+
+	// The vector must be complete before the table that references it opens.
+	opus := b.CreateByteVector(frame.Opus)
+
+	vnet.VoiceFrameStart(b)
+	vnet.VoiceFrameAddSequence(b, frame.Sequence)
+	vnet.VoiceFrameAddAudience(b, frame.Audience)
+	vnet.VoiceFrameAddOpus(b, opus)
+	payload := vnet.VoiceFrameEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadVoiceFrame, payload)
+}
+
+// EncodeVoiceHeard builds one frame the authoritative server has decided a recipient may
+// hear. The sequence is the speaker's own counter, copied through rather than reassigned:
+// a listener orders by it and hears a gap as a gap.
+func EncodeVoiceHeard(heard VoiceHeard) []byte {
+	b := flatbuffers.NewBuilder(256)
+
+	opus := b.CreateByteVector(heard.Opus)
+
+	vnet.VoiceHeardStart(b)
+	vnet.VoiceHeardAddSpeakerEntityId(b, heard.SpeakerEntityID)
+	vnet.VoiceHeardAddSequence(b, heard.Sequence)
+	vnet.VoiceHeardAddOpus(b, opus)
+	payload := vnet.VoiceHeardEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadVoiceHeard, payload)
 }
 
 // EncodePlayerTradeClosed explicitly ends one open player trade for a recipient.

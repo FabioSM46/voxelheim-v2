@@ -36,6 +36,10 @@ import (
 // /     read at all; any other value requires
 // /     `0 < night_start_ticks < night_end_ticks <= day_length_ticks`, and a
 // /     welcome that breaks that ordering is refused rather than repaired
+// /   - `voice_range_blocks` is finite and not negative. Zero is a legal announcement
+// /     rather than a degenerate range — it is a server that relays no voice at all —
+// /     and a negative or non-finite radius is refused rather than clamped, for the
+// /     reason `spawn` is: NaN compares false against every bound it is given
 type ServerWelcome struct {
 	_tab flatbuffers.Table
 }
@@ -416,8 +420,48 @@ func (rcv *ServerWelcome) MutateEquipmentSlots(n byte) bool {
 	return rcv._tab.MutateByteSlot(28, n)
 }
 
+// / How far a voice carries on this server, in blocks, or **zero for a server that
+// / relays no voice at all**.
+// /
+// / Zero is the pre-V30 world and a legal answer a V30 server may give: an operator
+// / who turned voice off, and a client that then shows nothing about it. Every other
+// / value is a statement about presentation and about nothing else — the audible set
+// / is recomputed by the server from the positions it owns, and a client that decided
+// / from this number whether it should be hearing somebody would be second-guessing
+// / the authority that already answered by sending the frame. It is here so a client
+// / can attenuate what it was given and say how far voice reaches, not so it can
+// / decide who is speaking to it.
+// /
+// / Blocks rather than metres, for the reason every other distance on this wire is in
+// / blocks: the simulation measures in them.
+func (rcv *ServerWelcome) VoiceRangeBlocks() float32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.GetFloat32(o + rcv._tab.Pos)
+	}
+	return 0.0
+}
+
+// / How far a voice carries on this server, in blocks, or **zero for a server that
+// / relays no voice at all**.
+// /
+// / Zero is the pre-V30 world and a legal answer a V30 server may give: an operator
+// / who turned voice off, and a client that then shows nothing about it. Every other
+// / value is a statement about presentation and about nothing else — the audible set
+// / is recomputed by the server from the positions it owns, and a client that decided
+// / from this number whether it should be hearing somebody would be second-guessing
+// / the authority that already answered by sending the frame. It is here so a client
+// / can attenuate what it was given and say how far voice reaches, not so it can
+// / decide who is speaking to it.
+// /
+// / Blocks rather than metres, for the reason every other distance on this wire is in
+// / blocks: the simulation measures in them.
+func (rcv *ServerWelcome) MutateVoiceRangeBlocks(n float32) bool {
+	return rcv._tab.MutateFloat32Slot(30, n)
+}
+
 func ServerWelcomeStart(builder *flatbuffers.Builder) {
-	builder.StartObject(13)
+	builder.StartObject(14)
 }
 func ServerWelcomeAddEntityId(builder *flatbuffers.Builder, entityId uint64) {
 	builder.PrependUint64Slot(0, entityId, 0)
@@ -460,6 +504,9 @@ func ServerWelcomeAddNightEndTicks(builder *flatbuffers.Builder, nightEndTicks u
 }
 func ServerWelcomeAddEquipmentSlots(builder *flatbuffers.Builder, equipmentSlots byte) {
 	builder.PrependByteSlot(12, equipmentSlots, 0)
+}
+func ServerWelcomeAddVoiceRangeBlocks(builder *flatbuffers.Builder, voiceRangeBlocks float32) {
+	builder.PrependFloat32Slot(13, voiceRangeBlocks, 0.0)
 }
 func ServerWelcomeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

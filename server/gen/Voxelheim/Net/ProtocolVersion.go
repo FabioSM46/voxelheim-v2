@@ -215,6 +215,15 @@ import "strconv"
 // / eight-day lunar phase every time a V29 client connected. The version therefore moves
 // / even though FlatBuffers can decode the older table: the two peers would otherwise
 // / assign different celestial state to the same snapshot after a clean handshake.
+// /
+// / **V30 belongs to `VoiceFrame`.** It is a client -> server union member a V29 server
+// / cannot name, and that server closes the session instead of dropping the frame — so a
+// / V30 client must not handshake cleanly and then lose the connection the first time
+// / somebody speaks. `VoiceHeard` rides in the same bump as its server -> client
+// / counterpart, and so does `ServerWelcome.voice_range_blocks`, which would have owed
+// / nothing alone: a V29 server leaves that scalar at zero, and zero is the honest
+// / statement that this server relays no voice. See `schemas/player.fbs` for both tables
+// / and `docs/adr/0001-voice-transport.md` for why the frames ride this connection at all.
 type ProtocolVersion uint16
 
 const (
@@ -223,7 +232,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 29
+	ProtocolVersionCurrent ProtocolVersion = 30
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
