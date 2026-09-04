@@ -2054,8 +2054,13 @@ mod tests {
         );
     }
 
-    /// **The ring, and what the callback does when it is full.** The newest samples are
-    /// dropped and counted; nothing is overwritten, because the consumer is mid-frame.
+    /// **The ring, in the order it was written, and what would not fit.**
+    ///
+    /// The ramp is the point: with one value in every slot the ordering assertion below holds
+    /// for any subset in any order, which is what the review on #919 found — inverting
+    /// `captured` to keep the newest left the whole suite green. Part 5 counts the overruns
+    /// and says only that, because nothing there can read the ring at all; this is the part
+    /// where `Capture::take` exists, so this is where the ordering can be seen.
     #[test]
     fn the_capture_ring_is_read_in_order_and_counts_what_it_could_not_hold() {
         let capture = Capture::new();
