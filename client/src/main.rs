@@ -33,6 +33,7 @@
 )]
 mod wire;
 
+mod audio;
 mod net;
 mod player;
 mod settings;
@@ -44,6 +45,7 @@ use std::process::ExitCode;
 
 use bevy::prelude::*;
 
+use crate::audio::AudioPlugin;
 use crate::net::{AccountService, DEFAULT_PLAYER_NAME, NetPlugin, ServerListPlugin, SignInPlugin};
 use crate::player::PlayerPlugin;
 use crate::settings::SettingsPlugin;
@@ -265,6 +267,12 @@ fn run(start: Start) -> AppExit {
     // them. It is the whole of the file this client keeps for a player's preferences —
     // nothing here reaches the wire, and nothing here decides an outcome.
     .add_plugins(settings)
+    // After the settings and before anything that would ask it for a sound: the plugin
+    // stands up the mixer, and every later audio feature is a source claimed from it. It
+    // reads `AudioControls` and nothing else — see `audio/mod.rs` for the real-time rule
+    // the render path is written to, and for why the device that will run it has exactly
+    // one owner.
+    .add_plugins(AudioPlugin)
     // The player before the UI: the player plugin owns the world camera that `bevy_ui`
     // explicitly defaults to. See the module comment in player/camera.rs.
     .add_plugins(PlayerPlugin)

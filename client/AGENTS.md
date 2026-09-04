@@ -85,6 +85,8 @@ keeps meaning "everything the client is".
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
 | `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — and the frame-rate readout; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
+| `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
+| `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
@@ -1387,6 +1389,64 @@ says which part takes which field and where each of its boxes sits, in notches o
 rather than in metres. `ui/character.rs` and `player/mod.rs` consume those same pieces and shared
 meshes. Two tables would be two answers to "what does a shirt colour cover", and the first thing two
 answers do is disagree.
+
+## Audio: one device, one mixer, and a thread the ECS may not wait on
+
+`audio/` is the second real-time boundary in this client, and it is stricter than the first.
+`net/session.rs` may block, allocate and log, because nothing is waiting on it to the
+microsecond. The **output callback** is scheduled by the platform's audio stack and is not
+waited for at all: miss its deadline and the player hears a click, which is not a dropped
+frame that catches up next tick. The callback itself arrives with the device, in the part of
+#851 after this one; everything below is what it will be allowed to run when it does.
+
+```text
+  ECS (audio/mod.rs)                                   output callback
+  ──────────────────                                   ───────────────
+  SourceHandle::push ────── lock-free ring ───────────▶ Ring::pop ─▶ Mixer::render
+```
+
+**What may run in the callback**: atomic loads and stores, and arithmetic over memory that
+was allocated before the stream opened. Nothing else. No allocation, no `Mutex`, no
+`info!`/`warn!`, no Bevy type, no `Arc::clone`, no `String`, no `panic!` — a `malloc` that
+happens to take a lock somebody else holds is an underrun, and a lock a Bevy system holds for
+one frame is a hundred of them. `mixer.rs` is where that is enforced rather than requested,
+and `the_render_path_allocates_nothing` is what holds it: a per-thread counting allocator, with
+a negative control beside it, because an assertion of "zero allocations" is worthless from an
+instrument that answers zero to everything.
+
+**No `unsafe`, and that constrained the design rather than decorating it.** A single-producer
+single-consumer ring wants interior mutability shared across two threads, and there are three
+ways to have it: a lock (forbidden above), an `UnsafeCell` (this client contains no
+hand-written `unsafe`, see "Conventions"), or a slice of atomics. The third is the one that is
+both safe and lock-free, so the sample buffers are `Box<[AtomicU32]>` holding `f32::to_bits`
+and the indices are `AtomicUsize`. It costs one atomic load per sample and buys a real-time
+path a reviewer can read without checking an invariant by hand.
+
+**The bus arithmetic, in one line.** `out = master_gain * (voice_gain * voice_sources +
+master_sources)`. `Voice` has a gain of its own; `Master` *is* the output stage, so a source
+claimed onto it is scaled once and never squared. Two buses and deliberately only two — an SFX
+or music bus arrives with the feature that feeds it, because a gain nobody can hear moving is
+a knob that cannot be tested.
+
+**The device will have exactly one owner and it will not be a resource.** A `cpal::Stream` is
+not `Send` on every platform, so when `audio/device.rs` lands it puts the stream on a
+supervisor thread of its own and nothing else ever holds one — the same shape `net/session.rs`
+uses for the socket. `Mixer::render` is the seam it plugs into, and it is the only part of
+this module a real-time thread ever touches.
+
+**Audio is presentation, and the rule is `player/ambience.rs`'s.** Nothing under `audio/` is
+ever read by input, targeting, placement or anything else that decides an outcome. A gain is
+not a fact about the world and a silent client is not a disadvantaged one.
+
+**What is deliberately not here yet.** No device: `audio/device.rs` is the next part of #851,
+so `Sink`, `Mixer::render` and `Mixer::set_format` carry an `#[allow(dead_code)]` naming it —
+the same shape `net/codec.rs` uses for an encoder that ships before its caller. They are not
+untested, only unreachable from `main`, which is exactly what the `Sink` trait was for.
+Nothing encodes either: `audiopus` is a dependency from #851 part 1 so that the lockfile and
+the CI package list move once rather than twice, and the codec arrives with proximity voice.
+No capture device, no spatialisation, no `bevy_audio` and no Bevy `audio` feature — the
+reasoning for that last one is in `docs/adr/0001-voice-transport.md` and in `Cargo.toml`
+beside the `cpal` entry.
 
 ## Conventions that are not obvious from the code
 
