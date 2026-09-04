@@ -1886,25 +1886,38 @@ mod tests {
         );
     }
 
-    /// **What the callback does when the ring is full.** The newest samples are dropped and
-    /// counted; nothing is overwritten, because the consumer is mid-frame and tearing the
-    /// audio it is about to encode is worse than losing the tail of a block it has not seen.
+    /// **The ring, and what the callback does when it is full.** The newest samples are
+    /// dropped and counted; nothing is overwritten, because the consumer is mid-frame.
     #[test]
-    fn a_full_capture_ring_drops_the_newest_and_counts_them() {
+    fn the_capture_ring_is_read_in_order_and_counts_what_it_could_not_hold() {
         let capture = Capture::new();
-        assert_eq!(capture.overruns(), 0);
-        capture.captured(&[0.25, -0.5, 0.75]);
+        capture.opened_at(48_000, 1);
+        let mut heard = Vec::new();
+        // The first read of a stream is the skip: see `Capture::take`.
         assert_eq!(
-            capture.overruns(),
-            0,
-            "three samples overran a quarter-second"
+            capture.take(&mut heard),
+            Some(Captured {
+                sample_rate: 48_000,
+                channels: 1,
+                fresh: true
+            })
         );
 
+        capture.captured(&[0.25, -0.5, 0.75]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard, vec![0.25, -0.5, 0.75]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 3, "reading nothing changed the buffer");
+        assert_eq!(capture.overruns(), 0);
+
         capture.captured(&vec![0.1; CAPTURE_CAPACITY + 40]);
-        assert_eq!(
-            capture.overruns(),
-            40 + 3,
-            "the count is what would not fit, including what was already waiting"
+        assert_eq!(capture.overruns(), 40);
+        heard.clear();
+        capture.take(&mut heard).expect("a stream is open");
+        assert_eq!(heard.len(), CAPTURE_CAPACITY);
+        assert!(
+            heard.iter().all(|sample| (sample - 0.1).abs() < 1e-9),
+            "the oldest samples were overwritten"
         );
     }
 
@@ -1941,6 +1954,7 @@ mod tests {
             "the generation wrapped onto zero, which means no stream at all"
         );
     }
+
     /// **The seam a reopen leaves, and the whole reason `take` is a method.**
     ///
     /// The ring can hold the tail of one stream and the head of the next at two different
