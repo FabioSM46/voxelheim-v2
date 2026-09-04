@@ -88,6 +88,7 @@ keeps meaning "everything the client is".
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings, the contract's byte ceiling checked against what libopus wanted to write, and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, size its packet buffer at the ceiling, or let a diagnostic quote a payload |
+| `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
 | `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
@@ -1532,6 +1533,16 @@ answer to the second is that **there is no naive drain**: the only way to read t
 `Capture::take`, which lands with its one consumer, skips a stream the reader has not seen and
 says `fresh`, and discards a batch that a reopen ran through. The samples across a reopen are a
 gap, not a continuation, and no API offers them as anything else.
+
+**Whether to hold a microphone open and whether to transmit are two questions, and
+`audio/voice.rs` answers them separately.** A client that opened the device only while
+transmitting would lose the first syllable of every sentence to a stream starting; one that
+transmitted whenever the device was open would be an open microphone. So the stream is held
+while voice is *usable* — a mode that is not `Off`, on a server whose welcome announces a
+non-zero `voice_range_blocks`, and in push to talk only once the key has been pressed once —
+and nothing is sent unless the transmit rule says so, frame by frame. **A server announcing zero
+opens no microphone at all**: `schemas/handshake.fbs` calls that "a server that relays no voice",
+and recording a player for nobody is the one outcome this feature must not have.
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and

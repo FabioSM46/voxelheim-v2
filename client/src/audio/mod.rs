@@ -49,6 +49,7 @@ mod codec;
 mod device;
 mod dsp;
 mod mixer;
+mod voice;
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
@@ -106,6 +107,7 @@ impl Plugin for AudioPlugin {
             .insert_resource(controls)
             .insert_resource(speaker_test)
             .insert_resource(LastListing(0))
+            .add_plugins(voice::VoicePlugin)
             .add_systems(
                 Update,
                 (

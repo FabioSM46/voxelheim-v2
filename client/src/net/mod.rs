@@ -1073,6 +1073,13 @@ impl Outbound {
     pub(in crate::net) fn voice_depth(&mut self) -> usize {
         self.priority().voice_depth()
     }
+
+    /// Every voice frame queued for the writer, taken in order. Test-only, and `pub(crate)`
+    /// because `audio/voice.rs` is the producer whose output these are.
+    #[cfg(test)]
+    pub(crate) fn taken_voice(&mut self) -> Vec<Vec<u8>> {
+        self.priority().taken_voice()
+    }
 }
 
 /// Orders systems that read what the net thread said after the system that reads
