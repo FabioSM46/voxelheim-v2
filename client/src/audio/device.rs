@@ -260,6 +260,16 @@ impl Watch {
         self.stopping.load(Ordering::Acquire)
     }
 
+    /// Wakes the supervisor without asking it to stop.
+    ///
+    /// [`Self::stop`]'s shape rather than [`Self::lose`]'s: it runs on a Bevy thread, where
+    /// taking the lock costs nothing and a missed wakeup would cost a poll interval. Nothing
+    /// in an audio callback may call this.
+    fn nudge(&self) {
+        drop(self.quiet.lock().unwrap_or_else(PoisonError::into_inner));
+        self.wake.notify_all();
+    }
+
     /// Waits for a notification, or `at_most`, whichever comes first.
     ///
     /// A poisoned lock is taken anyway: nothing is stored behind it, so no invariant can
@@ -654,11 +664,11 @@ fn named<E>(devices: impl Iterator<Item = Result<String, E>>) -> Vec<String> {
 
 /// How many samples the capture ring holds.
 ///
-/// A quarter of a second at 48 kHz, and rather more than that at the rates a device is
-/// likely to run at — [`Ring`]'s capacity is samples, and a stereo device at 44.1 kHz fills
-/// it with about 136 ms. The consumer is a Bevy system at the frame rate, so what this has to
-/// survive is a stall rather than a steady rate mismatch: at 60 Hz the ring is emptied every
-/// 17 ms, and this is fifteen of those.
+/// **Samples, not milliseconds**, so how long it holds depends on the stream: a quarter of a
+/// second of mono at 48 kHz, 136 ms of stereo at 44.1 kHz, 62 ms of stereo at 96 kHz. The
+/// shortest is what the number has to be sized from, and the consumer is a Bevy system at the
+/// frame rate — so what this survives is a *stall*, not a steady rate mismatch. At 60 Hz the
+/// ring is emptied every 17 ms, and 62 ms is three of those.
 const CAPTURE_CAPACITY: usize = 12_000;
 
 /// The microphone, as everything above the platform sees it.
@@ -762,9 +772,11 @@ impl Capture {
 
     /// Asks for a stream to be open, or for the one that is open to be closed.
     ///
-    /// Recorded rather than acted on, exactly as [`Choice::want`] is: the supervisor owns the
-    /// stream and notices within one [`Pace::playing`]. Asking for what is already wanted
-    /// changes nothing, which is what lets a Bevy system write it every frame.
+    /// **Recorded here and woken by [`AudioCapture::listen`]**, which is the entry a caller
+    /// uses. The output side can afford to be noticed within one [`Pace::playing`] — half a
+    /// second is under the time it takes a player to look up from the mouse they just decided
+    /// with — but the first push-to-talk press is not that: waiting out a poll would lose half
+    /// a second of the first thing anybody says. Found by review on #919.
     // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
     // a captured sample. See `audio/dsp.rs` for why the seam is here.
     #[allow(dead_code)]
@@ -834,9 +846,8 @@ fn opened_capture<H: InputHost>(
 ///
 /// [`supervise`] with one state more. The output stream is open whenever a device will have
 /// it, because a client with sound is always potentially making some; a microphone is open
-/// only while something above has asked for one, because an open microphone that nobody asked
-/// for is the thing `docs/adr/0001-voice-transport.md` and every player expectation say must
-/// not exist. So this loop starts and ends in a wait.
+/// only while something above has asked for one, because an open microphone nobody asked for
+/// is not a thing this client may have. So this loop starts and ends in a wait.
 fn supervise_capture<H: InputHost>(
     host: &H,
     capture: &Arc<Capture>,
@@ -936,6 +947,20 @@ impl AudioCapture {
     #[allow(dead_code)]
     pub fn shared(&self) -> &Arc<Capture> {
         &self.capture
+    }
+
+    /// Asks for a stream to be open, or closed, and wakes the supervisor.
+    ///
+    /// **The wake is the point, and it is why this is here rather than on [`Capture`].** The
+    /// flag lives with the ring, where the supervisor reads it; the condvar the supervisor
+    /// sleeps on lives with [`Watch`], and only this resource holds both. Without the wake a
+    /// press waits out a whole [`POLL_WHILE_PLAYING`] before a device is even asked for — half
+    /// a second off the front of the first thing anybody says.
+    // Called by the capture pipeline in #852 part 6.
+    #[allow(dead_code)]
+    pub fn listen(&self, wanted: bool) {
+        self.capture.listen(wanted);
+        self.watch.nudge();
     }
 }
 
@@ -1750,6 +1775,48 @@ mod tests {
             Some((48_000, 1, 1)),
             "the third attempt's format was never recorded"
         );
+    }
+
+    /// **The first press must not wait out a poll.** `AudioCapture::listen` wakes the
+    /// supervisor, so a device is asked for at once rather than up to `POLL_WHILE_PLAYING`
+    /// later — half a second off the front of the first thing anybody says.
+    #[test]
+    fn asking_for_a_microphone_wakes_the_supervisor_rather_than_waiting_out_a_poll() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        let capture = Arc::new(Capture::new());
+        let watch = Arc::new(Watch::default());
+        // A pace whose idle poll is far longer than this test will wait for.
+        let pace = Pace {
+            playing: Duration::from_secs(30),
+            after_failure: Duration::from_secs(30),
+        };
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, pace))
+        };
+
+        // Let it reach the idle wait before anything asks.
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(host.opens(), 0, "a device was opened for nobody");
+
+        let asked = Instant::now();
+        capture.listen(true);
+        watch.nudge();
+        let deadline = asked + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let waited = asked.elapsed();
+        assert_eq!(host.opens(), 1, "the press opened nothing");
+        assert!(
+            waited < Duration::from_secs(1),
+            "the press waited {waited:?}, which is the poll rather than a wake"
+        );
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
     }
 
     /// A stream that dies while it is starting reports its loss with `open` still on the
