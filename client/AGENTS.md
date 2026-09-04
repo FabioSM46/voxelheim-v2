@@ -1435,10 +1435,32 @@ and the `go` directive in `server/go.mod`. CI pins the matching
 the channel and every workflow action pin together. `Cargo.lock` is committed and every gate
 runs `--locked`.
 
-**Three dependencies: `bevy`, `flatbuffers` and `rustls`.** All three are GDD-level
-architecture. A fourth needs a discussion before a commit — in particular there is still no
-async runtime and no networking framework here, by design: `std::net` plus `std::sync::mpsc` on
-one thread is the whole netcode substrate, and it is enough.
+**Five dependencies: `bevy`, `flatbuffers`, `rustls`, `cpal` and `audiopus`.** Each is
+GDD-level architecture, and each gets the sentence that justifies it:
+
+- **`bevy`** — the engine. ECS, windowing and the wgpu renderer the whole client is built on.
+- **`flatbuffers`** — the wire. `schemas/` is the contract and this is the runtime that reads
+  the bindings generated from it, version-matched to `.flatc-version`.
+- **`rustls`** — the encryption, in the binary rather than in a tunnel the operator has to
+  configure correctly. Decided on 2026-08-20; the reasoning is two paragraphs below.
+- **`cpal`** — the microphone and the speakers. Nothing else here can open a capture device,
+  and `bevy_audio` cannot open one at all.
+- **`audiopus`** — libopus, for the proximity voice codec, linked against the system
+  `libopus-dev` through `pkg-config` rather than compiled from vendored source with cmake.
+
+The last two are **approved and not yet present**: `Cargo.toml` still carries three, and the
+audio pair lands with the client's audio foundation (#851). They are listed here because the
+budget is spent when the decision is taken, not when the line is added — which is the whole
+point of asking for a discussion first.
+
+A sixth needs a discussion before a commit — in particular there is still no async runtime and
+no networking framework here, by design: `std::net` plus `std::sync::mpsc` on one thread is the
+whole netcode substrate, and it is enough. That rule is why the two audio crates were argued on
+the record before either was added: **`docs/adr/0001-voice-transport.md`** is that argument. It decides that voice rides the existing TLS stream instead of an SFU beside the
+server — which is what keeps the count at five rather than at five plus a WebRTC stack and the
+async runtime under it — names `cpal` and `audiopus` as the two this costs, says why
+`bevy_audio` is not one of them, and carries the measurement the decision rests on. Read it
+before proposing a sixth crate for audio; it probably already says no, and says why.
 
 That budget is also why signing in brought no crate with it: opening a browser is `xdg-open`
 through `std::process::Command`, the loopback listener is `std::net`, and the HTTP, JSON,
@@ -1446,7 +1468,7 @@ base64url and RFC 3339 readers are the narrow hand-rolled ones listed above. The
 genuinely costs is **`https` to the account service**, which is refused rather than downgraded —
 see "Known gaps".
 
-**`rustls` is the third, and the discussion the rule asks for is on the record.** Fabio decided
+**`rustls` was the third, and the discussion the rule asks for is on the record.** Fabio decided
 it on 2026-08-20 (legacy issue 157) over the alternative of leaving the wire in the clear and
 documenting a WireGuard or VPN deployment. The reasoning is the part worth keeping: a tunnel
 protects only when every operator configures one correctly and every player joins it, and it
