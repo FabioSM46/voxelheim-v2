@@ -51,7 +51,7 @@ keeps meaning "everything the client is".
 | `net/frame.rs` | the length-prefixed framing codec | know what a frame means |
 | `net/codec.rs` | FlatBuffers encode/decode, contract limits, `ServerWelcome` validation | know about connections |
 | `net/handshake.rs` | the handshake state machine and its admission rules | do I/O, or hold a clock |
-| `net/session.rs` | one connection's lifetime; the only code that blocks; the per-server identity file, opened only for a server the list named | mention a Bevy type, or open an identity file for an unlisted server |
+| `net/session.rs` | one connection's lifetime; the only code that blocks; the per-server identity file, opened only for a server the list named; the writer thread, its second queue for voice and the order it empties the two in | mention a Bevy type, or open an identity file for an unlisted server |
 | `net/signin.rs` | one sign-in attempt: the two POSTs, the browser, and the loopback listener that catches the redirect | mention a Bevy type, hold a PKCE verifier, or put `finish_secret` in a URL |
 | `net/servers.rs` | one read of the server list: the ticket it presents, the rows it validates, and the address and fingerprint it keeps out of the ECS | shorten a list it could not read whole, answer a failure with an empty list, or expose an address |
 | `net/tls.rs` | the encrypted transport, the certificate check and the two shapes of expectation | write a fingerprint anywhere, or offer a way past a refusal |
@@ -220,6 +220,18 @@ Rules that hold on this boundary:
   thread now waits in the middle of the handshake for a person to choose, and the choice reaches
   it as a `NetCommand`, so the writer thread is still started at `Established` and the frame that
   answers the list is still written by the one thread that wrote the hello.
+- **Voice waits in a second queue, and the order the writer empties them in is the rule.**
+  The writer drains the outbound channel completely and only then takes *one* voice frame, so
+  voice can never delay an input by more than the write already in progress and can never
+  occupy a slot an input needed — they are not the same slots. The two are lossy in opposite
+  directions, deliberately: the input channel drops its *newest* frame, because an input frame
+  describes the controls now and the next tick supersedes it; the voice queue drops its
+  *oldest*, because voice is a sequence in which nothing supersedes anything and a backlog
+  means the socket is behind. Dropping the oldest costs a gap the listener's concealment
+  fills; dropping the newest would play the conversation out further and further behind and
+  never recover. `session::VoiceQueue` carries the argument, and the writer waits on its
+  condvar — which is why `Outbound::send` wakes it too, and why the flag beside the frames is
+  load-bearing rather than a duplicate of the channel.
 - **The outbound channel is bounded and lossy, and the other two are not.** It is the only channel
   the ECS *produces* into, and a producer that cannot block has to be able to drop. What waits
   there is input, and an input frame describes the controls *now*: by the time a deep queue

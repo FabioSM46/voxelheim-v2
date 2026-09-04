@@ -47,8 +47,8 @@ mod tickets;
 mod tls;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -122,7 +122,7 @@ pub use codec::{encode_dismount_request, encode_mount_request};
 pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
 use servers::ServerListEvent;
-use session::{Choice, NetCommand, SessionEvent};
+use session::{Choice, NetCommand, SessionEvent, VoiceQueue};
 
 pub use signin::AccountService;
 use signin::{SignInCommand, SignInEvent};
@@ -949,7 +949,14 @@ impl SessionEndingInbox {
 /// [`NetLink`]: a Bevy resource must be `Sync`. The one accessor takes `ResMut` and reaches
 /// the contents with `get_mut`, so no lock is ever taken.
 #[derive(Resource)]
-pub struct Outbound(Mutex<SyncSender<Vec<u8>>>);
+pub struct Outbound {
+    /// Input and every request this client originates, bounded by [`OUTBOUND_QUEUE`].
+    frames: Mutex<SyncSender<Vec<u8>>>,
+    /// Voice, bounded by `session::VOICE_QUEUE` and emptied only after the channel above
+    /// is. See [`session::VoiceQueue`] for why the two are separate and why this one drops
+    /// its *oldest* frame where that one drops its newest.
+    voice: Arc<VoiceQueue>,
+}
 
 /// The writer set aside while a live leave makes gameplay inert.
 #[derive(Resource)]
@@ -966,17 +973,36 @@ pub enum Sent {
     Closed,
 }
 
+/// What became of a voice frame handed to [`Outbound::send_voice`].
+///
+/// Its own enum rather than [`Sent`], because the two answer different questions. `Sent`
+/// reports what became of *this* frame — queued, dropped, or nowhere to send. A voice frame
+/// is always queued; what varies is whether an older one had to give way for it, and reusing
+/// `Sent::Dropped` would say the opposite of what happened.
+// Read by the capture pipeline in #852 part 5, the first thing with a frame to send.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceSent {
+    /// Queued behind whatever was already waiting.
+    Queued,
+    /// Queued, and the oldest frame waiting was dropped to make room.
+    Displaced,
+}
+
 /// The pause menu asking the network thread to end this session.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisconnectRequest;
 
 impl Outbound {
     fn sibling(&mut self) -> Self {
-        let sender = match self.0.get_mut() {
+        let sender = match self.frames.get_mut() {
             Ok(sender) => sender,
             Err(poisoned) => poisoned.into_inner(),
         };
-        Self(Mutex::new(sender.clone()))
+        Self {
+            frames: Mutex::new(sender.clone()),
+            voice: Arc::clone(&self.voice),
+        }
     }
 
     /// Hands one encoded frame to the writer thread, without ever blocking.
@@ -985,7 +1011,7 @@ impl Outbound {
     /// block on a socket is a frame that can stall on a network. A full queue costs the
     /// frame, which for input is the right trade — the next tick's frame supersedes it.
     pub fn send(&mut self, frame: Vec<u8>) -> Sent {
-        let sender = match self.0.get_mut() {
+        let sender = match self.frames.get_mut() {
             Ok(sender) => sender,
             // Recovered rather than propagated, for the reason NetLink gives: nothing here
             // panics while holding it, and a client that stopped sending input because of
@@ -993,11 +1019,42 @@ impl Outbound {
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        match sender.try_send(frame) {
+        let sent = match sender.try_send(frame) {
             Ok(()) => Sent::Queued,
             Err(TrySendError::Full(_)) => Sent::Dropped,
             Err(TrySendError::Disconnected(_)) => Sent::Closed,
+        };
+        // The writer sleeps on the voice queue's condvar, so a frame reaching *this* channel
+        // has to say so there. Without it an input frame handed over between the writer's
+        // last drain and its next wait would sit out `WRITER_IDLE` — at sixty frames a
+        // second, that is input arriving late for no reason a player could see.
+        self.voice.wake();
+        sent
+    }
+
+    /// Queues one encoded voice frame behind everything already waiting on the channel above.
+    ///
+    /// **It never blocks and it never refuses.** A full queue drops its own oldest frame and
+    /// answers [`VoiceSent::Displaced`], which is a diagnostic rather than a failure: what
+    /// the listener gets is a gap their decoder conceals, and what they are spared is a
+    /// conversation that plays out further and further behind. Nothing an input frame needed
+    /// is spent either way — the two queues are separate, which is the whole reason there
+    /// are two.
+    // Called by #852 part 5; see `VoiceSent` above.
+    #[allow(dead_code)]
+    pub fn send_voice(&mut self, frame: Vec<u8>) -> VoiceSent {
+        if self.voice.push(frame) {
+            VoiceSent::Displaced
+        } else {
+            VoiceSent::Queued
         }
+    }
+
+    /// How many voice frames a full queue has cost this session. For a diagnostic; nothing
+    /// decides anything from it.
+    #[allow(dead_code)]
+    pub fn voice_dropped(&self) -> u64 {
+        self.voice.dropped()
     }
 
     /// The ECS end of a channel whose far side is a test rather than a writer thread.
@@ -1010,7 +1067,21 @@ impl Outbound {
     #[cfg(test)]
     pub fn to_a_test(capacity: usize) -> (Self, Receiver<Vec<u8>>) {
         let (sender, receiver) = mpsc::sync_channel(capacity);
-        (Self(Mutex::new(sender)), receiver)
+        (
+            Self {
+                frames: Mutex::new(sender),
+                voice: Arc::new(VoiceQueue::default()),
+            },
+            receiver,
+        )
+    }
+
+    /// The voice queue this sender feeds, so a test can read what was queued without a
+    /// writer thread to take it. Test-only for the reason [`Self::to_a_test`] is, and
+    /// `pub(in crate::net)` because `VoiceQueue` is the net thread's own type.
+    #[cfg(test)]
+    pub(in crate::net) fn voice_queue(&self) -> &Arc<VoiceQueue> {
+        &self.voice
     }
 }
 
@@ -1380,6 +1451,11 @@ fn start_session(
     // and a producer that cannot block has to be able to drop. See OUTBOUND_QUEUE.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(OUTBOUND_QUEUE);
     let session_outbound = outbound_tx.clone();
+    // The second queue, shared by value between the ECS end below and the writer thread the
+    // session starts. Bounded and lossy like the channel above, and for the same reason —
+    // but it drops its oldest rather than its newest. See `session::VoiceQueue`.
+    let voice = Arc::new(VoiceQueue::default());
+    let session_voice = Arc::clone(&voice);
 
     let addr = addr.to_owned();
     let player_name = settings.player_name.clone();
@@ -1404,6 +1480,7 @@ fn start_session(
                 command_rx,
                 session_outbound,
                 outbound_rx,
+                session_voice,
             )
         })
         .map_err(|err| format!("cannot start the network thread: {err}"))?;
@@ -1413,7 +1490,10 @@ fn start_session(
             events: event_rx,
             commands: command_tx,
         })),
-        Outbound(Mutex::new(outbound_tx)),
+        Outbound {
+            frames: Mutex::new(outbound_tx),
+            voice,
+        },
     ))
 }
 
@@ -3019,6 +3099,45 @@ mod tests {
     use super::session::Scratch;
     use super::*;
     use crate::wire::voxelheim::net as fb;
+
+    /// **The ECS side of the second queue.** Voice goes to its own queue, the ninth frame
+    /// displaces the oldest rather than failing, and none of it reaches the channel input
+    /// waits on — which is the acceptance criterion's "voice can never evict an input".
+    #[test]
+    fn voice_fills_its_own_queue_and_never_the_input_one() {
+        let (mut outbound, input) = Outbound::to_a_test(OUTBOUND_QUEUE);
+
+        for byte in 0..8u8 {
+            assert_eq!(
+                outbound.send_voice(vec![byte; 4]),
+                VoiceSent::Queued,
+                "frame {byte} displaced something"
+            );
+        }
+        assert_eq!(
+            outbound.send_voice(vec![8; 4]),
+            VoiceSent::Displaced,
+            "the ninth frame did not report the one it pushed out"
+        );
+        assert_eq!(outbound.voice_queue().depth(), 8);
+        assert_eq!(outbound.voice_dropped(), 1);
+
+        // The input channel never saw any of it, and every one of its slots is still free.
+        assert_eq!(input.try_recv(), Err(TryRecvError::Empty));
+        for byte in 0..OUTBOUND_QUEUE as u8 {
+            assert_eq!(
+                outbound.send(vec![byte; 2]),
+                Sent::Queued,
+                "voice had taken input slot {byte}"
+            );
+        }
+        assert_eq!(
+            outbound.send(vec![0xFF; 2]),
+            Sent::Dropped,
+            "the input channel is still the bounded one it was"
+        );
+        assert_eq!(outbound.voice_queue().depth(), 8, "an input reached voice");
+    }
 
     /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
     ///

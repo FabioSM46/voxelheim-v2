@@ -2539,6 +2539,63 @@ pub struct VoiceHeard {
     pub opus: Vec<u8>,
 }
 
+/// Who a speaker is asking to be heard by. Client -> server.
+///
+/// **It narrows the server's answer and never widens it.** Neither member names a recipient:
+/// `Everyone` asks for the set the server already computed as audible, and `Party` asks for
+/// the members of that same set who share the speaker's party. There is deliberately no
+/// member that reaches a party regardless of distance — that would be a recipient list under
+/// another name, and `schemas/player.fbs` says so where the enum is declared.
+///
+/// Only `Everyone` is sent today. The knob that offers the other one is #853, and the wire
+/// carries both from #850 so the client half is one match arm rather than a contract change.
+// The consumer is the capture pipeline in #852 part 5, which is the part that first has
+// an Opus frame to send. In a binary crate `pub` saves nothing from `dead_code`, and the
+// alternative is a seam that puts the wire, the capture device and the codec in one pull
+// request. House style is this file's own outbound encoders, which carry the same
+// allowance for the same reason.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceAudience {
+    #[default]
+    Everyone,
+    Party,
+}
+
+impl VoiceAudience {
+    /// The contract's spelling.
+    #[allow(dead_code)]
+    const fn wire(self) -> fb::VoiceAudience {
+        match self {
+            Self::Everyone => fb::VoiceAudience::Everyone,
+            Self::Party => fb::VoiceAudience::Party,
+        }
+    }
+}
+
+/// One encoded Opus frame this client is asking the server to relay.
+///
+/// **It carries no position and no recipient, and there are no fields to carry them in.** The
+/// server put this speaker where they are and decides who is close enough to hear them; a
+/// field naming a listener would be a client choosing an audience, and one naming a position
+/// would be a client choosing how far its voice carries.
+///
+/// The bytes are borrowed rather than owned because there is one of these every 20 ms: the
+/// envelope allocates, and a `Vec` per frame on top of it would be an allocation the encoder
+/// does not need.
+// See `VoiceAudience` above for why this carries the allowance.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoiceFrame<'a> {
+    /// This speaker's own monotonic counter. Presentation for a receiver's jitter buffer,
+    /// never a clock: the server does not read it, reject on it, or renumber it.
+    pub sequence: u32,
+    pub audience: VoiceAudience,
+    /// The encoded frame, verbatim. At most [`MAX_OPUS_BYTES`] — see
+    /// [`encode_voice_frame`] for who checks that and why it is not here.
+    pub opus: &'a [u8],
+}
+
 /// One authoritative monster blow that reduced this player's health.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobHit {
@@ -6125,6 +6182,43 @@ pub fn encode_trade_request(request: &TradeRequest) -> Vec<u8> {
         },
     );
     finish_envelope(builder, fb::Payload::TradeRequest, payload.as_union_value())
+}
+
+/// Builds one voice frame. Intent only, and the bytes are copied without being read.
+///
+/// **Whether they are a legal Opus frame is not this module's question**, which is the same
+/// split `ChunkData`'s runs are decoded under: `codec` owns the envelope, and the codec that
+/// produced these bytes owns what is inside them. The server does not read them either — it
+/// relays bytes it never parses.
+///
+/// **The [`MAX_OPUS_BYTES`] ceiling is deliberately not enforced here.** A refusal at this
+/// point could only drop the frame, where the encoder that produced it can prevent an
+/// oversized one — by its bitrate, which is the thing that decides a frame's length. So the
+/// check lives beside the Opus encoder in #852, and this stays total: an encoder that
+/// silently refused would be a microphone that goes quiet with nothing saying why. At the
+/// 24 kbit/s this client encodes at, a 20 ms frame is about sixty bytes, against a ceiling of
+/// four hundred.
+///
+/// **Nothing may write these bytes down.** A voice frame is personal data: it is never
+/// logged, never persisted and never quoted in a diagnostic, on either side of the wire.
+/// That is why no failure path here can print one — there is no failure path.
+// The one caller is #852 part 5. See `VoiceAudience` for why the allowance is here.
+#[allow(dead_code)]
+pub fn encode_voice_frame(frame: &VoiceFrame<'_>) -> Vec<u8> {
+    // Sized for the payload rather than the shared default: a voice frame is the one
+    // outbound message whose body is hundreds of bytes, and a builder that has to grow once
+    // per frame is a reallocation fifty times a second.
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY + MAX_OPUS_BYTES);
+    let opus = builder.create_vector(frame.opus);
+    let payload = fb::VoiceFrame::create(
+        &mut builder,
+        &fb::VoiceFrameArgs {
+            sequence: frame.sequence,
+            audience: frame.audience.wire(),
+            opus: Some(opus),
+        },
+    );
+    finish_envelope(builder, fb::Payload::VoiceFrame, payload.as_union_value())
 }
 
 /// Builds intent verbatim. The action decides which fields the server reads; an
@@ -12535,6 +12629,102 @@ mod tests {
                 fb::MountKind::BrownHorse,
             ]))),
             Err(DecodeError::DuplicateLearnedMount(MountKind::BrownHorse))
+        );
+    }
+
+    /// **The frame a speaker sends, and the two fields it deliberately has no room for.**
+    /// The union tag, the sequence, the audience and the bytes verbatim — and nothing
+    /// naming a position or a recipient, which is the authority boundary this table is
+    /// shaped by.
+    #[test]
+    fn a_voice_frame_carries_its_bytes_and_names_no_listener() {
+        let opus = [0x78u8, 0x00, 0xFF, 0x41, 0x00];
+        let frame = encode_voice_frame(&VoiceFrame {
+            sequence: 4_294_967_295,
+            audience: VoiceAudience::Everyone,
+            opus: &opus,
+        });
+        assert_eq!(decode(&frame), Ok(Message::ClientOnly("VoiceFrame")));
+
+        let envelope = fb::root_as_envelope(&frame).expect("a frame this client built");
+        let sent = envelope
+            .payload_as_voice_frame()
+            .expect("the tag names the payload");
+        assert_eq!(
+            sent.sequence(),
+            u32::MAX,
+            "the counter wraps rather than clamps"
+        );
+        assert_eq!(sent.audience(), fb::VoiceAudience::Everyone);
+        assert_eq!(
+            sent.opus().expect("the vector is written").bytes(),
+            &opus,
+            "the bytes were not copied through verbatim"
+        );
+
+        // The other audience is on the wire from #850 and is one match arm here, so the
+        // knob that offers it in #853 is a UI change rather than a contract one.
+        let party = encode_voice_frame(&VoiceFrame {
+            sequence: 1,
+            audience: VoiceAudience::Party,
+            opus: &opus,
+        });
+        assert_eq!(
+            fb::root_as_envelope(&party)
+                .expect("a frame this client built")
+                .payload_as_voice_frame()
+                .expect("the tag names the payload")
+                .audience(),
+            fb::VoiceAudience::Party
+        );
+    }
+
+    /// The full-size frame the contract allows, and the one it does not.
+    ///
+    /// The ceiling is not enforced by the encoder — see its doc for why the check belongs
+    /// beside the Opus encoder instead — so what is pinned here is that a frame *at* the
+    /// ceiling builds correctly, and that one over it is built rather than silently
+    /// truncated. A truncated frame would be a legal envelope carrying half an Opus packet,
+    /// which is the one outcome a listener cannot tell from a corrupt network.
+    #[test]
+    fn a_full_size_voice_frame_builds_and_an_oversized_one_is_not_truncated() {
+        let full = vec![0x5Au8; MAX_OPUS_BYTES];
+        let frame = encode_voice_frame(&VoiceFrame {
+            sequence: 9,
+            audience: VoiceAudience::Everyone,
+            opus: &full,
+        });
+        let envelope = fb::root_as_envelope(&frame).expect("a frame this client built");
+        assert_eq!(
+            envelope
+                .payload_as_voice_frame()
+                .expect("the tag names the payload")
+                .opus()
+                .expect("the vector is written")
+                .len(),
+            MAX_OPUS_BYTES
+        );
+        assert!(
+            frame.len() < super::super::frame::MAX_FRAME_SIZE,
+            "a full-size voice frame does not fit the transport"
+        );
+
+        let over = vec![0x5Au8; MAX_OPUS_BYTES + 1];
+        let built = encode_voice_frame(&VoiceFrame {
+            sequence: 10,
+            audience: VoiceAudience::Everyone,
+            opus: &over,
+        });
+        assert_eq!(
+            fb::root_as_envelope(&built)
+                .expect("a frame this client built")
+                .payload_as_voice_frame()
+                .expect("the tag names the payload")
+                .opus()
+                .expect("the vector is written")
+                .len(),
+            MAX_OPUS_BYTES + 1,
+            "the encoder quietly shortened a payload"
         );
     }
 
