@@ -231,8 +231,13 @@ Rules that hold on this boundary:
   means the socket is behind. Dropping the oldest costs a gap the listener's concealment
   fills; dropping the newest would play the conversation out further and further behind and
   never recover. `session::VoiceQueue` carries the argument, and the writer waits on its
-  condvar — which is why `Outbound::send` wakes it too, and why the flag beside the frames is
-  load-bearing rather than a duplicate of the channel.
+  condvar — which is why every send on the priority channel wakes it too, and why the flag
+  beside the frames is load-bearing rather than a duplicate of the channel. **That wake is a
+  type and not a rule**: `session::Priority` pairs the sender with the queue, so neither
+  producer on that channel — the ECS through `Outbound`, or the reader thread's own leave
+  requests — can reach it without waking the writer. A discipline of "remember to call `wake`
+  afterwards" was the first version, and it was already broken in half of its own two call
+  sites when the review on #917 found it.
 - **The outbound channel is bounded and lossy, and the other two are not.** It is the only channel
   the ECS *produces* into, and a producer that cannot block has to be able to drop. What waits
   there is input, and an input frame describes the controls *now*: by the time a deep queue

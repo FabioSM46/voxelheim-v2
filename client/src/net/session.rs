@@ -453,9 +453,8 @@ pub(super) fn run(
     target: Target,
     events: Sender<SessionEvent>,
     commands: Receiver<NetCommand>,
-    outbound_sender: SyncSender<Vec<u8>>,
+    outbound_sender: Priority,
     outbound: Receiver<Vec<u8>>,
-    voice: Arc<VoiceQueue>,
 ) {
     let Target {
         addr,
@@ -592,7 +591,6 @@ pub(super) fn run(
         commands: &commands,
         outbound,
         outbound_sender: &outbound_sender,
-        voice: &voice,
         identity: &identity,
         chosen: &chosen,
     }) {
@@ -1253,9 +1251,10 @@ impl VoiceQueue {
         displaced
     }
 
-    /// Wakes the writer without queueing anything. What the priority channel's producer calls
-    /// once it has handed a frame over.
-    pub(super) fn wake(&self) {
+    /// Wakes the writer without queueing anything. Reached only through [`Priority`], which
+    /// is what makes it unskippable — see that type for why it is not a method every producer
+    /// is asked to remember.
+    fn wake(&self) {
         held(&self.shared).poked = true;
         self.ready.notify_all();
     }
@@ -1289,6 +1288,81 @@ impl VoiceQueue {
     #[cfg(test)]
     pub(super) fn depth(&self) -> usize {
         held(&self.shared).frames.len()
+    }
+}
+
+/// The producing end of the priority channel, with the wake the writer needs attached to it.
+///
+/// **A type rather than a discipline, and the review on #917 is why.** [`write_loop`] no
+/// longer blocks in `Receiver::recv` — it waits on [`VoiceQueue`]'s condvar so that *both*
+/// queues can wake it — so a frame handed to a bare `SyncSender` sits until the next
+/// [`WRITER_IDLE`] expires. This channel has two producers: the ECS through
+/// [`super::Outbound`], and this thread's own leave and leave-cancel requests. The first
+/// version of this change woke the writer in one of them and not the other, which is what a
+/// rule of the form "remember to call `wake` afterwards" always eventually does.
+///
+/// Pairing the sender with the queue removes the rule. There is no way to put a frame on this
+/// channel without waking the writer, because there is no way to reach the channel except
+/// through here.
+#[derive(Clone, Debug)]
+pub(super) struct Priority {
+    frames: SyncSender<Vec<u8>>,
+    voice: Arc<VoiceQueue>,
+}
+
+impl Priority {
+    pub(super) fn new(frames: SyncSender<Vec<u8>>, voice: Arc<VoiceQueue>) -> Self {
+        Self { frames, voice }
+    }
+
+    /// Sends, blocking while the queue is full.
+    ///
+    /// **The net thread only.** A Bevy system that blocked here would be a frame stalled on a
+    /// network; what the ECS uses is [`Self::try_send`]. This exists for the one durable
+    /// request the reader thread originates, which has to go out behind every frame already
+    /// accepted rather than being dropped for a full queue.
+    pub(super) fn send(&self, frame: Vec<u8>) -> Result<(), std::sync::mpsc::SendError<Vec<u8>>> {
+        let sent = self.frames.send(frame);
+        if sent.is_ok() {
+            self.voice.wake();
+        }
+        sent
+    }
+
+    /// Sends without ever blocking, refusing when the queue is full.
+    pub(super) fn try_send(
+        &self,
+        frame: Vec<u8>,
+    ) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
+        let sent = self.frames.try_send(frame);
+        if sent.is_ok() {
+            self.voice.wake();
+        }
+        sent
+    }
+
+    /// Queues one voice frame. `true` when the oldest was dropped to make room.
+    ///
+    /// It reaches the *other* queue, and it wakes the writer by itself: [`VoiceQueue::push`]
+    /// notifies under the same lock the writer sleeps on, which the channel above cannot.
+    pub(super) fn queue_voice(&self, frame: Vec<u8>) -> bool {
+        self.voice.push(frame)
+    }
+
+    /// How many voice frames a full queue has cost this session.
+    pub(super) fn voice_dropped(&self) -> u64 {
+        self.voice.dropped()
+    }
+
+    /// The queue the writer thread waits on, so [`pump`] can hand it over.
+    pub(super) fn voice(&self) -> &Arc<VoiceQueue> {
+        &self.voice
+    }
+
+    /// How many voice frames are waiting. Test-only, for the reason [`VoiceQueue::depth`] is.
+    #[cfg(test)]
+    pub(super) fn voice_depth(&self) -> usize {
+        self.voice.depth()
     }
 }
 
@@ -1373,10 +1447,10 @@ struct Connection<'a> {
     /// A clone of the writer's bounded queue, kept so the reader thread can place
     /// the one durable LeaveRequest behind every frame already accepted. Blocking
     /// here is safe — this is the network thread, never a Bevy system.
-    outbound_sender: &'a SyncSender<Vec<u8>>,
-    /// Handed to the writer thread beside the channel above, and owned by the ECS at the
-    /// other end. Held here only to pass on: nothing in the read loop queues voice.
-    voice: &'a Arc<VoiceQueue>,
+    /// **A [`Priority`] and not a bare `SyncSender`**: the writer no longer blocks on this
+    /// channel, so every producer on it has to wake the writer, and that is a rule a type
+    /// keeps and a comment does not.
+    outbound_sender: &'a Priority,
     identity: &'a IdentityFile,
     chosen: &'a ChosenCharacter,
 }
@@ -1399,7 +1473,6 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
         commands,
         outbound,
         outbound_sender,
-        voice,
         identity,
         chosen,
     } = conn;
@@ -1574,7 +1647,7 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                                 )));
                             }
                         };
-                        let voice = Arc::clone(voice);
+                        let voice = Arc::clone(outbound_sender.voice());
                         if let Err(err) = thread::Builder::new()
                             .name("voxelheim-net-writer".to_owned())
                             .spawn(move || write_loop(writer, outbound, voice))
@@ -1868,7 +1941,16 @@ mod tests {
     /// arm exists under `cfg(test)` precisely so the thread boundary can be driven without a
     /// certificate. What is under test is the *order* frames leave in, and that is only
     /// observable at the far end of a socket.
-    fn writer_on_a_socket() -> (
+    ///
+    /// **`fill` runs before the thread is spawned, and that is what makes the order under
+    /// test deterministic** — the review on #917 found the version that did not. A writer
+    /// started first is woken by the first `push`, so it could drain every voice frame before
+    /// the caller had queued any input, and the assertion about which came out first would
+    /// pass or fail on how quickly a thread was scheduled. With both queues populated up
+    /// front, the writer's first pass is the whole of what is being asserted.
+    fn writer_on_a_socket(
+        fill: impl FnOnce(&SyncSender<Vec<u8>>, &Arc<VoiceQueue>),
+    ) -> (
         SyncSender<Vec<u8>>,
         Arc<VoiceQueue>,
         TcpStream,
@@ -1884,6 +1966,7 @@ mod tests {
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(super::super::OUTBOUND_QUEUE);
         let voice = Arc::new(VoiceQueue::default());
+        fill(&sender, &voice);
         let handle = {
             let voice = Arc::clone(&voice);
             thread::spawn(move || write_loop(Wire::Plain(writing), receiver, voice))
@@ -1966,48 +2049,80 @@ mod tests {
     /// **The writer empties the priority channel before it looks at voice**, whatever order
     /// the two were handed over in. Read at the far end of a real socket, because the order
     /// frames leave in is not observable anywhere else.
+    ///
+    /// Both queues are full before the writer exists, so the answer is exact rather than a
+    /// band: the first pass writes all three input frames and then one voice frame, and each
+    /// pass after it writes one more voice frame. Inverting the two blocks in [`write_loop`]
+    /// makes this fail with `[a0, a1, a2, a3, 10, 11, 12]`.
     #[test]
     fn the_writer_drains_input_before_voice_however_they_were_queued() {
-        let (sender, voice, mut reading, handle) = writer_on_a_socket();
-
-        // Voice first and plenty of it, then input — the order that would come out wrong if
-        // the writer treated the two queues as one.
-        for byte in 0..4u8 {
-            voice.push(marked(0xA0 + byte));
-        }
-        for byte in 0..3u8 {
-            sender.try_send(marked(0x10 + byte)).expect("a free slot");
-        }
-        voice.wake();
+        let (sender, _voice, mut reading, handle) = writer_on_a_socket(|sender, voice| {
+            // Voice first and plenty of it, then input — the order that would come out wrong
+            // if the writer treated the two queues as one.
+            for byte in 0..4u8 {
+                voice.push(marked(0xA0 + byte));
+            }
+            for byte in 0..3u8 {
+                sender.try_send(marked(0x10 + byte)).expect("a free slot");
+            }
+        });
 
         let bodies = read_bodies(&mut reading, 7);
         let heads: Vec<u8> = bodies.iter().map(|body| body[0]).collect();
-        // Every input frame is out before the *second* voice frame: the writer may already
-        // have been mid-pass on the first when the input arrived, which is the one write it
-        // is allowed to be behind by.
-        let first_input = heads
-            .iter()
-            .position(|byte| *byte < 0x80)
-            .expect("input arrived");
-        let last_input = heads
-            .iter()
-            .rposition(|byte| *byte < 0x80)
-            .expect("input arrived");
-        assert!(
-            first_input <= 1,
-            "voice got two frames out ahead of any input: {heads:x?}"
-        );
         assert_eq!(
-            last_input - first_input,
-            2,
-            "the input frames were not written together: {heads:x?}"
-        );
-        assert_eq!(
-            heads.iter().filter(|byte| **byte >= 0x80).count(),
-            4,
-            "a voice frame was lost: {heads:x?}"
+            heads,
+            vec![0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3],
+            "the writer did not empty the priority channel first"
         );
 
+        drop(sender);
+        handle.join().expect("the writer ended cleanly");
+    }
+
+    /// **Every producer on the priority channel wakes the writer, not only the ECS's.**
+    ///
+    /// The reader thread originates its own frames through [`Priority::send`] — the leave
+    /// request and its cancellation — and the review on #917 found that half of the change
+    /// woke the writer and half did not. What that cost was latency rather than a lost frame,
+    /// which is exactly the kind of defect a green suite keeps: the frame does go out, a
+    /// tenth of a second later. So this measures the delay.
+    ///
+    /// The bound is a tenth of [`WRITER_IDLE`]. A writer that was not woken cannot answer
+    /// inside it; one that was answers in microseconds.
+    #[test]
+    fn a_frame_from_either_producer_wakes_the_writer_rather_than_waiting_out_the_timeout() {
+        let (sender, voice, mut reading, handle) = writer_on_a_socket(|_, _| {});
+        let priority = Priority::new(sender.clone(), Arc::clone(&voice));
+
+        // Let the writer reach its wait before anything is sent, so what is measured is a
+        // wake rather than a pass that was already running.
+        thread::sleep(Duration::from_millis(20));
+
+        for (label, byte, blocking) in [
+            ("the ECS's non-blocking send", 0x21u8, false),
+            ("the net thread's blocking send", 0x22u8, true),
+        ] {
+            let sent = if blocking {
+                priority.send(marked(byte)).is_ok()
+            } else {
+                priority.try_send(marked(byte)).is_ok()
+            };
+            assert!(sent, "{label} was refused");
+
+            let started = Instant::now();
+            let body = read_bodies(&mut reading, 1);
+            let waited = started.elapsed();
+            assert_eq!(body[0][0], byte, "{label} produced the wrong frame");
+            assert!(
+                waited < WRITER_IDLE / 10,
+                "{label} waited {waited:?}, which is the timeout rather than a wake"
+            );
+            // Back to a resting writer before the next one, so each is measured from the
+            // same state.
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        drop(priority);
         drop(sender);
         handle.join().expect("the writer ended cleanly");
     }
@@ -2017,8 +2132,9 @@ mod tests {
     /// all — nothing wakes a writer to tell it a channel closed.
     #[test]
     fn the_writer_ends_when_the_ecs_drops_its_sender() {
-        let (sender, voice, mut reading, handle) = writer_on_a_socket();
-        voice.push(marked(0xA0));
+        let (sender, _voice, mut reading, handle) = writer_on_a_socket(|_, voice| {
+            voice.push(marked(0xA0));
+        });
         assert_eq!(read_bodies(&mut reading, 1)[0][0], 0xA0);
 
         drop(sender);
