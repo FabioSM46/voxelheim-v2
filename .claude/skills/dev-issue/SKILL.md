@@ -162,33 +162,100 @@ Every file edit and every git command from here on runs inside `$WORKTREE_DIR`. 
 
 ### Step 5: Implement
 
-**Decide first whether this issue is one pull request or two — before any code exists, not after.**
+**Decide first how many pull requests this issue is — before any code exists, not after.**
 Step 7 measures the finished diff against `DEEPSEEK_MAX_DIFF_CHARS`, and a measurement is a check
 rather than a decision: an issue implemented whole and split afterwards is split at its most
-expensive moment, when every seam has to be cut back out of finished work. Estimate now, from what
-you have already read — the acceptance criteria and the Code Pointers between them name most of the
-files the change will touch — and if the finished change plausibly exceeds the cap, choose the seam
-now and implement the halves as separate branches from the start.
+expensive moment, when every seam has to be cut back out of finished work.
+
+**The answer is a count, not a coin flip.** This step used to ask "one pull request or two", and
+that framing was itself a defect: Iteration 50 produced a four-part issue and a five-part one, and
+both agents wrote them up as deviations from the skill because the skill had given them two. An
+issue that needs five parts needs five. Say the number, say where each seam is, and open them in
+order.
+
+### Estimate before you write, with the table rather than with intuition
+
+The instruction above is not new and it did not work: in Iteration 50 all three issues were
+implemented whole and split after measuring — 95,000, 74,073 and 84,185 characters — by three
+agents who had each read this paragraph. **The reason is worth stating, because it is a property of
+instructions and not of those agents**: Step 5 asked for an estimate and gave no method, while Step
+7 gives an exact command. An instruction to guess loses to an instruction to measure, every time,
+and it loses *silently* — the guess is never written down, so nothing looks skipped.
+
+So estimate from the issue, using what this repository has actually measured:
+
+| What the issue looks like | Measured | Parts |
+| --- | --- | --- |
+| One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
+| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+
+Two calibration points behind the bottom rows, both from Iteration 50: **#851** named eight new
+files in one workspace and came to 74,073 — five parts; **#850** touched `schemas`, `server` and
+`client` and came to about 95,000 — four parts.
+
+**The Parts column is not the estimate divided by the cap, and reading it that way is the mistake
+this paragraph exists to stop.** 74,073 over 45,000 is 1.6, and #851 took five. Two reasons, both
+structural rather than accidental:
+
+- **Seams are discrete.** You cut where the code already draws a boundary, and those boundaries fall
+  where they fall — not at even fractions of a total. #851's parts came out at roughly 16k, 44k,
+  49k, 36k and 42k because that is where its module edges are. A part well under the cap is normal
+  and is not waste.
+- **An estimate made before writing is systematically low**, and by more than a rounding. #851 was
+  estimated whole at 74,073; its fifth part *alone* measured 80,534 once written. Implementation
+  finds work the acceptance criteria did not name, and review fixes then grow a branch again (#901
+  went 44,973 → 48,682 answering three findings).
+
+So the arithmetic is a floor on the count, never the count: **estimate ÷ 45,000, rounded up, then
+add one for what you have not thought of, then let the seams decide the final number.** Aim each
+part at roughly 40,000 rather than 45,000, because the cap is a truncation point and not a target.
+
+**Two multipliers the file count hides.** Test-heavy changes run about two-thirds tests in this
+repository, so a module with real coverage is roughly three times its production code. And a field
+added to a type that is constructed by literal costs every construction site: `SessionParams` has
+45 of them, which was 14,000 characters before any behaviour was written.
 
 **The seam is a boundary the code already draws**: the wire and its consumer, the mechanism and its
-callers, the description and its renderer. Never a character count — a split made to hit a number
-leaves two halves that each read as an excerpt of something else. Each half must build, pass its
-gates and stand as a reviewable change on its own; Step 7 says what to do when they cannot, and the
-answer there is to ask rather than to open pieces that do not compile.
+callers, the description and its renderer, a decision and the wiring that carries it. Never a
+character count — a split made to hit a number leaves parts that each read as an excerpt of
+something else. Each part must build, pass its gates and stand as a reviewable change on its own;
+Step 7 says what to do when they cannot, and the answer there is to ask rather than to open pieces
+that do not compile.
+
+**In a binary crate, "stands on its own" has a compiler meaning**: a `pub` item reachable only from
+`#[cfg(test)]` is `dead_code` under `-D warnings`, so a seam that leaves a producer without its
+consumer does not build. Either move the seam, or carry `#[allow(dead_code)]` with a comment naming
+the part that consumes it — house style here, as `net/codec.rs` does for encoders that ship before
+their callers. Say which you did and why.
 
 **The rule that actually catches people**: acceptance criteria that touch both a server workspace
-and a client one, or that name more than a handful of new files, are very likely two pull requests
-at this cap. Iteration 30 was the first iteration run entirely under 45,000 and four of its seven
-pull requests went over it anyway.
+and a client one, or that name more than a handful of new files, are not one pull request at this
+cap. Iteration 30 was the first iteration run entirely under 45,000 and four of its seven pull
+requests went over it anyway; Iteration 50 turned three issues into ten.
 
-**And know what the ordering costs, because it is the part nobody anticipates.** The second half
-cannot be opened until the first has merged — opened earlier it carries the first half's commits and
-its diff is straight back over the cap — and since `pr-merge` squashes, the second branch then needs
-a `git rebase --onto "origin/$BASE_BRANCH" <old-base>` replay before it will push a clean diff. Deciding up
-front does not remove that cost. It lets you spend it deliberately, on a seam chosen for how the two
-halves read rather than for damage control, instead of discovering it at the end of an issue that
-was planned as one pull request and had been scheduled as parallel work. Iteration 30 paid it that
-way twice, on #455 and #457.
+**Know what the ordering costs — and know that it is much smaller than it was.** A later part used
+to be unopenable until the one before it had merged, because `ci.yml` only ran for pull requests
+targeting `main` or `develop`: based on an earlier part's branch it got no CI at all, and based on
+`develop` it carried that part's commits and went straight back over the cap. Since #903 CI and the
+stable `ci-gate` run for a pull request targeting **any** base, and `/dev-issue` takes an explicit
+`--base`, so a later part is branched from the earlier one and opened against it. Its three-dot diff
+then measures that part alone, which is the number the cap is about, and nothing waits.
+
+What remains is an ordering, not a blockage: **say in every part's description which part it is, how
+many there are, and that it must merge after the one it is based on.** The merge helper does not
+infer that, and merging out of order lands a consumer without its producer.
+
+The replay is still there for the one case that needs it: a part branched from a *merged* earlier
+part, or one you choose to base on `BASE_BRANCH` directly, needs
+`git rebase --onto "origin/$BASE_BRANCH" <old-base>` after that squash merge before it will push a
+clean diff. Iteration 30 paid that cost twice, on #455 and #457; Iteration 50 paid it seven times —
+and that iteration is why the feature-base support exists.
+
+**Write the estimate down in the pull request body**, next to the measurement Step 7 produces. An
+estimate nobody records is an estimate nobody can be shown to have skipped — which is exactly how
+this instruction went unfollowed three times while being the first sentence of this step.
 
 Then implement:
 
@@ -398,28 +465,41 @@ The lesson is the one this repository keeps relearning: **a number somebody make
 decision from is an output, and outputs are pinned by tests here.** This one could not
 look wrong, because a diff size has no expected value to compare against.
 
-**When Step 5 split the issue, mind what the three-dot diff measures against.** The first half is
-measured against `origin/$BASE_BRANCH` like any other branch. The second half is branched from the
-first, so `origin/$BASE_BRANCH...HEAD` there still resolves to the first half's base as its merge base
-and the diff carries the first half's commits with it: measured before the first half has merged
-and the rebase replay below has been done, it reads as over the cap however correctly sized the
-half is. Measure the second half after that replay — until then the number is not the one the cap
-is about, and the paragraph that follows does not apply to it.
+**When Step 5 split the issue, mind what the three-dot diff measures against.** It measures against
+whatever base the branch was created from, so measure against the base this part is actually opened
+on: `git diff "origin/$BASE_BRANCH"...HEAD` where `BASE_BRANCH` is that base. A part branched from an
+earlier part and opened against it measures that part alone — which is the number the cap is about.
+The trap is measuring a later part against `develop` while the earlier part is unmerged: the merge
+base is then the earlier part's base, the diff carries its commits, and it reads as over the cap
+however correctly sized the part is. That number is not the one
+the cap is about, and the paragraph that follows does not apply to it.
+
+**And if you ever do need to change a pull request's base, change it before you push.** A base
+change fires `pull_request` with action `edited`, which is not among the default activity types, so
+retargeting on its own re-triggers nothing: the pull request sits with whatever checks the old base
+produced. Retarget **first**, then push, so the push is the event that runs CI. Recovering after the
+fact takes a close-and-reopen to emit `reopened` — which is what #902 cost, back when a feature base
+got no CI run at all and retargeting to `develop` was the only way to obtain `ci-gate`. #903 removed
+that reason; the ordering rule outlived it, because it is about GitHub's events rather than about
+which bases are allowed.
 
 **If it is over the cap, the estimate was wrong and the work still has to be split — before
 opening anything.** Not after: a PR that exists is a PR whose review has already been attempted,
-and unpicking one into two costs more than staging two in the first place. Split along the seam
-Step 5 describes — a boundary the code already draws, never a character count — so each half is a
-change somebody can review as a whole and each stands on its own. Say which half is which in both
-descriptions, and open the second only once the first has merged: opened earlier it carries the
-first's commits and the diff is back over the cap, and after that squash merge the second branch
-needs the rebase replay Step 5 names.
+and unpicking one costs more than staging the parts in the first place. Split along the seam Step 5
+describes — a boundary the code already draws, never a character count — so each part is a change
+somebody can review as a whole and each stands on its own. **There is no limit of two**: take as
+many parts as the work needs, and say which part is which and how many there are in every
+description. Open each on the part before it rather than waiting for that one to merge — Step 5 says
+why that works now and what it still costs — and state the merge order in every body.
 
-If the halves cannot each stand alone, say so and ask the user rather than splitting into pieces
+Also record what Step 5 estimated beside what this measured. Two numbers make the estimate
+falsifiable; one makes it decorative, and this table is calibrated from the pairs.
+
+If the parts cannot each stand alone, say so and ask the user rather than splitting into pieces
 that do not compile. A branch that does not build is worse than a review that has to be split
 across two rounds.
 
-Verify each half before opening it — the same measurement, on the branch you are about to push.
+Verify each part before opening it — the same measurement, on the branch you are about to push.
 
 ### Step 8: Push and Open PR
 
