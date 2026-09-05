@@ -299,7 +299,7 @@ Trigger: `/scrum-master feature-spec <feature-description>`
 **This is the one place a seam can be chosen with no code sunk at all, and until Iteration 50 this
 skill had never heard of the cap.**
 
-`DEEPSEEK_MAX_DIFF_CHARS` is **45,000** characters. A pull request above it is truncated, every
+`DEEPSEEK_MAX_DIFF_CHARS` is **90,000** characters. A pull request above it is truncated, every
 unread file is injected as a finding, and the pull request blocks until somebody acknowledges the
 gap. `/dev-issue` Step 5 therefore splits an oversized issue into parts — but splitting is damage
 control. By the time `/dev-issue` reads an issue, its shape is already fixed: the acceptance
@@ -369,7 +369,7 @@ while being the first sentence of its Step 5.
 - Never modify closed issues or closed milestones
 - Respect workspace boundaries: don't create server issues for a client-only feature
 - A feature that moves data between client and server ALWAYS has a schemas component — surface it explicitly rather than burying contract changes in a server issue
-- **Size every issue against the 45,000-character review cap before it is committed to a milestone** — see "Sizing" above. A cross-workspace feature is never one pull request, and an issue that needs five parts should say five.
+- **Size every issue against the 90,000-character review cap before it is committed to a milestone** — see "Sizing" above. A cross-workspace feature is never one pull request, and an issue that needs five parts should say five.
 - When in doubt about scope, ask — don't assume
 - Ceremony issues (labeled `ceremony`) are excluded from all iteration/backlog reports
 

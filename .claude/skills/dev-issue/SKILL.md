@@ -415,7 +415,8 @@ what binds is how hard the model reasons about *that* content. Those measurement
 the current `high` effort trades some reasoning depth for lower latency and a lower risk of
 exhausting the shared reasoning/verdict budget, without changing its 384,000-token ceiling.
 `DEEPSEEK_MAX_DIFF_CHARS` is
-**45,000** characters, set from the worst ratio yet measured; over it the diff is truncated and
+**90,000** characters, set on #925 from seventeen replays at `high` — the worst ratio observed,
+doubled for the tail, under the 72% margin every cap here has used; over it the diff is truncated and
 every unread file is injected as a finding, which blocks the pull request until every gap has been
 read and publicly disposed of. A human may acknowledge that audit; `/process-pr` may do so only
 through its evidence-backed, dated acknowledgement sequence. Neither outcome is one to open a PR
@@ -455,7 +456,7 @@ REVIEWABLE=$(git diff "origin/$BASE_BRANCH"...HEAD -- . \
   ':(exclude)gen/*' ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
   ':(exclude)Cargo.lock' ':(exclude)*/Cargo.lock' \
   ':(exclude)go.sum' ':(exclude)*/go.sum' | wc -m)
-echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
+echo "reviewable diff: ${REVIEWABLE} characters (cap 90,000)"
 ```
 
 **That list was wrong for as long as it existed, and the way it was wrong is the reason

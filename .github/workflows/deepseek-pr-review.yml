@@ -100,6 +100,9 @@ jobs:
           # High reasoning trades some review depth for lower latency and a lower risk
           # that reasoning exhausts the shared output budget before the verdict.
           DEEPSEEK_MODEL: "deepseek-v4-flash"
+          # DEEPSEEK_MAX_DIFF_CHARS was measured at this setting (#925, seventeen replays);
+          # the reviewer's tests pin the two together, so changing the effort fails the
+          # suite until the cap is measured again.
           DEEPSEEK_REASONING_EFFORT: "high"
           # Legacy PR 80 spent 65,536 tokens entirely on reasoning for a 50,963-character /
           # 13-file diff. A faithful measure-only replay then exhausted 131,072 too

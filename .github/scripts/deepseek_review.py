@@ -120,7 +120,36 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 #
 # The ratio is a property of DEEPSEEK_REASONING_EFFORT and of the model. Change either and
 # every number above has to be measured again.
-DEEPSEEK_MAX_DIFF_CHARS = 45_000
+#
+# **Everything above was measured at `max`, and the effort has been `high` since #796.** The
+# samples that paragraph kept asking for were taken on #925 — seventeen measure-only replays
+# at `high`, the full table in AGENTS.md under "Taken, on #925" — and they are why the
+# number below is 90,000 and not 45,000:
+#
+#   * ratio 1.6–6.0 chars of reasoning per char of diff, against 11.9–31.3 at `max`;
+#   * the heaviest run spent 72,201 of 384,000 completion tokens — under 19% of the ceiling;
+#   * run-to-run variance on identical input at most 1.6× (#509: 1.7 then 2.8), against
+#     the 4× or more #80 and #506 showed under `max`;
+#   * #506 — 31.3 and no verdict under `max` — reasoned at 2.2 and answered in 3m57s;
+#   * a 139,626-character assembled head reviewed twice in eight minutes with a real,
+#     anchored finding each time; nothing in any sample was within a factor of five of
+#     the ceiling.
+#
+# The derivation is the one 45,000 used, with the tail allowance stated instead of folded
+# into the margin: budget 1,481,000 chars (the #164 figure — `high` emits 4.16 chars per
+# token, which would make it larger, and the smaller number is the one to size under);
+# worst observed ratio 6.0, **doubled to 12.1** because seventeen samples bound the tail
+# loosely and the observed 1.6× swing needs room above it; fill point at 12.1 about
+# 122,800; 72% of that 88,400, and 90,000 is 73% of it. At the doubled ratio a diff at the
+# cap reasons for about 282,000 tokens, 73% of the ceiling — the "quarter left over" the
+# tests below have always checked. 100,000 spends 82% and fails it, which is why the
+# number is not rounder. The tests pin the workflow's effort to `high` beside this
+# constant: change the effort and the suite fails until the cap is measured again.
+#
+# Still a truncation threshold and not a promise: a run at `high` that exhausts the budget
+# under it is the next measurement, and `pr-deepseek-force-review --measure-only
+# --measure-cap` is how it gets replayed.
+DEEPSEEK_MAX_DIFF_CHARS = 90_000
 
 
 def is_measure_only():

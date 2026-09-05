@@ -581,7 +581,7 @@ reading develop's copy, never the branch's.
 
 **Safety**: DeepSeek never creates commits, pushes code, or modifies files — it is
 review-only. The bot ignores its own comments (anti-loop guard, enforced at job level
-before a runner boots). Diffs over 45,000 characters are truncated with every dropped file
+before a runner boots). Diffs over 90,000 characters are truncated with every dropped file
 named in the log **and in the review itself**: a truncated pass cannot come back clean, because
 the skipped files are injected as a finding, so the pull request blocks until a reviewer has
 acknowledged what nobody read (legacy PR 32 — on legacy PR 30 the budget ran out after the client files and the
