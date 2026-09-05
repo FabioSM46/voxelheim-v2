@@ -1,43 +1,34 @@
 //! Proximity voice, inbound: from the wire to the speakers.
 //!
 //! **Receiving a frame *is* the audibility decision, already made.** The server owns every
-//! position and every party roster and it sent this frame, so nothing here asks whether the
-//! speaker is close enough or in the right group. A client that filtered on its own idea of
-//! either would be second-guessing the only authority there is —
-//! `schemas/player.fbs` states that where `VoiceHeard` is declared, and this module is the
-//! consumer it is stated for.
+//! position and every roster and it sent this frame, so nothing here asks whether the speaker
+//! is close enough or in the right group; a client that filtered on its own idea of either
+//! would be second-guessing the only authority there is. `schemas/player.fbs` states that
+//! where `VoiceHeard` is declared, and this module is the consumer it is stated for.
 //!
 //! ```text
 //!   net::VoiceInbox ─▶ Jitter (one per speaker) ─▶ VoiceDecoder ─▶ mixed ─▶ Voice bus
-//!                            │                          │
-//!                     reorder, 60–200 ms         concealment, or the
-//!                     of slack, gaps kept        copy inside the next
+//!                       reorder, 60–200 ms        conceal, or the copy
+//!                       of slack, gaps kept       inside the next packet
 //! ```
 //!
 //! ## What a jitter buffer is for, and what it is not for
 //!
 //! Frames arrive early, late, out of order, twice, or not at all, and a decoder needs exactly
-//! one every 20 ms. So each speaker gets a small buffer that holds a target amount of slack
-//! before it starts playing and then hands out one frame per slot: the frame that belongs to
-//! that slot if it has arrived, a repair if it has not. The slack is latency the listener
-//! pays for continuity, which is why it starts at the smallest useful value and only grows
-//! when the network has demonstrably needed it.
+//! one every 20 ms. So each speaker gets a buffer that holds a target amount of slack before it
+//! starts and then hands out one frame per slot: the frame belonging to that slot if it has
+//! arrived, a repair if it has not. The slack is latency the listener pays for continuity,
+//! which is why it starts at the smallest useful value and grows only when the network has
+//! demonstrably needed it. **It is not a queue that drains** — one that played everything it
+//! had would have no slack a moment later.
 //!
-//! **It is not a queue that drains.** A buffer that played everything it had as fast as it
-//! could would be a buffer with no slack at all a moment later.
+//! `audio/mixer.rs` has four source slots for the whole client and a claimed one is kept for
+//! the mixer's life, so every speaker is summed here and pushed into **one** source on
+//! `Bus::Voice`. Per-speaker attenuation and panning is #854, and it belongs to a source per
+//! speaker — a change to the mixer rather than to this file.
 //!
-//! ## Everything is mixed into one source
-//!
-//! `audio/mixer.rs` has four source slots for the whole client, and a speaker who claimed one
-//! would keep it for the life of the mixer. So the speakers are summed here — mono, at bus
-//! gain — and pushed into one source on `Bus::Voice`. Per-speaker attenuation and panning is
-//! #854, and it belongs to a source per speaker, which is a change to the mixer rather than a
-//! change here.
-//!
-//! ## Nothing is written down
-//!
-//! A voice frame is personal data. Nothing in this module logs a payload, a speaker, or a
-//! count of either — a count of how often somebody spoke is a fact about a person.
+//! Nothing here is written down. A voice frame is personal data, so nothing logs a payload, a
+//! speaker, or a count of either: how often somebody spoke is a fact about a person.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -64,34 +55,31 @@ const MAX_TARGET_FRAMES: usize = 10;
 
 /// How many frames a speaker may hold at all.
 ///
-/// **A bound on a length the peer chooses**, like every other one at this boundary: the
-/// server relays what a speaker sends, and a speaker that sent faster than real time would
-/// otherwise grow this map without limit. Twice the largest target is slack for a burst and
-/// nothing like a backlog.
+/// **A bound on a length the peer chooses**, like every other at this boundary: a speaker
+/// sending faster than real time would otherwise grow this map without limit. Twice the
+/// largest target is slack for a burst and nothing like a backlog.
 const MAX_HELD_FRAMES: usize = MAX_TARGET_FRAMES * 2;
 
 /// How long a speaker may send nothing before they are released.
 ///
-/// The acceptance criterion's number. It is deliberately much longer than a gap the buffer
-/// conceals: what this releases is somebody who has stopped, not somebody mid-sentence.
+/// Much longer than a gap the buffer conceals: what this releases is somebody who has
+/// stopped, not somebody mid-sentence.
 const RELEASE_AFTER: Duration = Duration::from_millis(500);
 
 /// How much audio is kept queued for the output callback, in frames.
 ///
-/// The source ring is a quarter of a second; this is the depth the pipeline tops it back up
-/// to each tick. Four frames is 80 ms — more than two ordinary 60 Hz ticks, so a frame that
-/// runs long does not underrun, and far short of the ring, so nothing here is the thing that
-/// adds latency.
+/// The source ring is a quarter of a second; this is the depth each tick tops it back up to.
+/// Four frames is 80 ms — over two ordinary 60 Hz ticks, so a long frame does not underrun,
+/// and far short of the ring, so nothing here is what adds latency.
 const QUEUED_FRAMES: usize = 4;
 
 /// One speaker's frames, in order, with the slack a listener hears as continuity.
 ///
-/// Keyed by the speaker's own sequence, which is presentation and never a clock: it is what
-/// makes reordering fixable and a gap knowable, and nothing branches on its value.
+/// Keyed by the speaker's own sequence, which is presentation and never a clock: it makes
+/// reordering fixable and a gap knowable, and nothing branches on its value.
 #[derive(Debug)]
 struct Jitter {
-    /// Frames waiting, by sequence. A `BTreeMap` because what is asked for is "the lowest",
-    /// and because a duplicate arrival must replace rather than accumulate.
+    /// Frames waiting, by sequence. A `BTreeMap` because what is asked for is "the lowest".
     frames: BTreeMap<u32, Vec<u8>>,
     /// The sequence the next slot wants. `None` until the first frame arrives.
     next: Option<u32>,
@@ -99,7 +87,7 @@ struct Jitter {
     target: usize,
     /// Whether the buffer has filled once and started playing.
     playing: bool,
-    /// When a frame from this speaker last arrived.
+    /// When a frame last arrived.
     arrived: Instant,
 }
 
@@ -108,12 +96,12 @@ struct Jitter {
 enum Slot {
     /// The frame that belongs to this slot, which arrived.
     Frame(Vec<u8>),
-    /// It did not, and the one after it has — so the redundant copy inside that one is the
-    /// real frame at a lower bitrate.
+    /// It did not, and the one immediately after it has — so the redundant copy inside that
+    /// one is the real frame at a lower bitrate.
     Recover(Vec<u8>),
     /// Neither. The decoder extrapolates from what it played.
     Conceal,
-    /// The buffer has not filled yet, or has nothing at all. Silence, and not a repair:
+    /// The buffer has not filled, or has nothing at all. Silence and not a repair:
     /// concealing from a decoder that has decoded nothing is a guess about nothing.
     Nothing,
 }
@@ -131,11 +119,10 @@ impl Jitter {
 
     /// Accepts one relayed frame.
     ///
-    /// **A frame for a slot already played is dropped, and it grows the target.** That is the
-    /// whole of the adaptation: arriving late is the only evidence this buffer has that its
-    /// slack is too small, and it is direct evidence. Nothing shrinks the target inside one
-    /// speaker's turn — a buffer that shrank on every frame that arrived on time would spend
-    /// the conversation oscillating.
+    /// **A frame for a slot already played is dropped, and it grows the target.** Arriving
+    /// late is the only direct evidence this buffer has that its slack is too small, and it is
+    /// the whole of the adaptation. Nothing shrinks the target inside a turn: a buffer that
+    /// shrank on every on-time frame would spend the conversation oscillating.
     fn push(&mut self, sequence: u32, opus: Vec<u8>, now: Instant) {
         self.arrived = now;
         if self.playing
@@ -145,11 +132,10 @@ impl Jitter {
             self.target = (self.target + 1).min(MAX_TARGET_FRAMES);
             return;
         }
-        // **A frame that is already held costs nothing to accept, so it evicts nothing.** The
-        // review on #923 found the eviction below running for a duplicate: with the buffer
-        // full, a second copy of frame 5 dropped frame 19 and then replaced itself, so
-        // *receiving* a frame manufactured a gap — the opposite of what a jitter buffer is
-        // for. A duplicate is the ordinary shape of a retransmission, not an admission.
+        // **A frame already held costs nothing to accept, so it evicts nothing.** The
+        // eviction below used to run for a duplicate too: with the buffer full, a second copy
+        // of frame 5 dropped frame 19 and then replaced itself, so *receiving* a frame
+        // manufactured a gap — the opposite of what a jitter buffer is for (#923).
         if self.frames.contains_key(&sequence) {
             return;
         }
@@ -175,19 +161,17 @@ impl Jitter {
                 return Slot::Nothing;
             }
             self.playing = true;
-            // **The lowest held, not the first that arrived.** Which frame turned up first
-            // is a fact about the network; where the run starts is a fact about the speaker,
-            // and starting from the wrong one plays the whole conversation out of order
-            // while every individual frame is intact.
+            // **The lowest held, not the first that arrived.** Which turned up first is a
+            // fact about the network; where the run starts is a fact about the speaker, and
+            // the wrong one plays the conversation out of order with every frame intact.
             self.next = self.frames.keys().next().copied();
         }
         let Some(next) = self.next else {
             return Slot::Nothing;
         };
         if self.frames.is_empty() {
-            // Nothing at all rather than a gap in a stream: a speaker who has stopped is
-            // silence, and concealing it would be inventing audio nobody sent. The run ends
-            // here, so the next one starts from whatever is lowest then.
+            // Silence rather than a gap: a speaker who has stopped is silence, and
+            // concealing it would be inventing audio nobody sent. The run ends here.
             self.playing = false;
             self.next = None;
             return Slot::Nothing;
@@ -199,13 +183,11 @@ impl Jitter {
         if let Some(frame) = self.frames.remove(&next) {
             return Slot::Frame(frame);
         }
-        // **Only the frame immediately after this slot can repair it, and the review on #923
-        // is where that was got wrong.** Opus's in-band forward error correction puts a
-        // lower-bitrate copy of frame *N* inside packet *N + 1* and nowhere else. Offering the
-        // lowest frame held — which the first version did — hands the decoder packet 5 to
-        // recover slot 3 from, and what comes out is frame 4, played in slot 3 and then again
-        // in slot 4: the stream duplicated and a frame out of step, for a gap concealment
-        // would have covered honestly.
+        // **Only the frame immediately after this slot can repair it** (#923). Opus's in-band
+        // correction puts a copy of frame *N* inside packet *N + 1* and nowhere else, so
+        // offering the lowest frame held — as the first version did — hands the decoder packet
+        // 5 to recover slot 3 from: frame 4 comes out, played in slot 3 and again in slot 4,
+        // for a gap concealment would have covered honestly.
         match self.frames.get(&next.wrapping_add(1)) {
             Some(after) => Slot::Recover(after.clone()),
             None => Slot::Conceal,
@@ -220,19 +202,14 @@ impl Jitter {
 
 /// One speaker being listened to: their buffer, their decoder, and when they last spoke.
 ///
-/// **A decoder each, and that is not an optimisation.** An Opus decoder carries the state its
-/// concealment extrapolates from, so two speakers sharing one would each be concealed from
-/// the other's audio.
+/// **A decoder each, and not as an optimisation.** An Opus decoder carries the state its
+/// concealment extrapolates from, so two sharing one would each be concealed from the
+/// other's audio.
 #[derive(Debug)]
 struct Speaker {
     jitter: Jitter,
-    /// Whether a snapshot has ever named this speaker.
-    ///
-    /// **A speaker the world has not confirmed is released by the silence timer and not by
-    /// absence.** Voice and snapshots arrive on their own schedules, so somebody who starts
-    /// talking after the newest snapshot and before the next one is genuinely missing from it
-    /// — and releasing them there would drop the first part of every voice that comes into
-    /// range, in the same frame the buffer was created. Found by review on #923.
+    /// Whether a snapshot has ever named this speaker. Until one has, absence means nothing
+    /// and the silence timer is what releases them — see [`release_speakers`] (#923).
     seen: bool,
     /// `None` when libopus would not open one. That costs this speaker their voice and
     /// nothing else — never a panic, and never a retry per frame, which is why the entry is
@@ -245,10 +222,9 @@ struct Speaker {
 struct Listening {
     /// One per speaker being heard. Removed by [`release_speakers`] and nothing else.
     ///
-    /// **The `Mutex` is a type obligation and not synchronisation**, exactly as `NetLink`'s
-    /// is: libopus's decoder holds a raw pointer, so `audiopus` declares it `Send` and not
-    /// `Sync`, and a Bevy resource must be `Sync`. The one accessor takes `ResMut` and reaches
-    /// the contents with `get_mut`, so no lock is ever taken.
+    /// **The `Mutex` is a type obligation and not synchronisation**, as `NetLink`'s is:
+    /// libopus's decoder holds a raw pointer, so it is `Send` and not `Sync`, and a Bevy
+    /// resource must be `Sync`. The one accessor uses `get_mut`, so no lock is ever taken.
     speakers: Mutex<HashMap<u64, Speaker>>,
     /// The one source every speaker is summed into. `None` when the mixer had no slot free,
     /// which is a silent client and not a broken one.
@@ -300,9 +276,8 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
         Err(poisoned) => poisoned.into_inner(),
     };
     for frame in heard {
-        // Refused rather than trusted: the decoder allocates nothing from this, but the
-        // buffer does, and every length a peer chooses gets a bound here. The decode
-        // boundary already enforces it — this is the second reader of the same rule.
+        // Refused rather than trusted: the buffer allocates from this, and every length a
+        // peer chooses gets a bound. The decode boundary enforces the same rule.
         if frame.opus.is_empty() || frame.opus.len() > MAX_OPUS_BYTES {
             continue;
         }
@@ -333,8 +308,8 @@ fn play(mut listening: ResMut<Listening>) {
         return;
     }
 
-    // Topped up to a depth rather than drained: a buffer that played everything it had would
-    // have no slack a moment later. `SOURCE_CAPACITY - free` is what is still queued.
+    // Topped up rather than drained: a buffer that played everything it had would have no
+    // slack a moment later. `SOURCE_CAPACITY - free` is what is still queued.
     let queued = SOURCE_CAPACITY.saturating_sub(source.free());
     let wanted = (QUEUED_FRAMES * FRAME_SAMPLES).saturating_sub(queued) / FRAME_SAMPLES;
     for _ in 0..wanted {
@@ -353,8 +328,8 @@ fn play(mut listening: ResMut<Listening>) {
                 }
                 Slot::Conceal => decoder.repair(Missing::Conceal, None, &mut listening.decoded),
             };
-            // A frame that will not decode is a gap, never a log line: the message would name
-            // a speaker, and how often somebody spoke is a fact about a person.
+            // A frame that will not decode is a gap, never a log line: the message would
+            // name a speaker.
             if decoded.is_err() {
                 continue;
             }
@@ -366,8 +341,8 @@ fn play(mut listening: ResMut<Listening>) {
         if !anybody {
             break;
         }
-        // Clamped here rather than in the mixer's own sum, so a crowd is quiet distortion on
-        // this bus rather than a master stage that has to absorb it.
+        // Clamped here rather than in the mixer's sum, so a crowd is quiet distortion on this
+        // bus rather than a master stage that has to absorb it.
         for sample in listening.mixed.iter_mut() {
             *sample = sample.clamp(-1.0, 1.0);
         }
@@ -378,9 +353,9 @@ fn play(mut listening: ResMut<Listening>) {
 /// Lets go of speakers who have stopped, and of speakers who are no longer there.
 ///
 /// **Two releases, and they are different questions.** A speaker whose frames stop has stopped
-/// talking; a speaker whose entity has left the snapshot has gone, and the server has stopped
-/// relaying them at the same moment — so waiting out the silence timer for somebody
-/// demonstrably absent would hold a decoder and a name for half a second of nothing.
+/// talking; one whose entity has left the snapshot has gone, and the server stopped relaying
+/// them at the same moment — so waiting out the silence timer there would hold a decoder for
+/// half a second of nothing.
 fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<SnapshotBuffer>>) {
     let now = Instant::now();
     let listening = &mut *listening;
@@ -389,14 +364,12 @@ fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<Snap
         Err(poisoned) => poisoned.into_inner(),
     };
     speakers.retain(|entity_id, speaker| {
-        // **Two things have to be true before absence means anything**, and the review on
-        // #923 found only the first of them. A snapshot has to exist at all — "nothing to
-        // read" is never "not present", or a late snapshot would silence a conversation. And
-        // this speaker has to have *been* in one: voice and snapshots arrive on their own
-        // schedules, so somebody who starts talking after the newest snapshot and before the
-        // next one is genuinely missing from it, and releasing them there drops the first part
-        // of every voice that comes into range in the same frame its buffer was created. Until
-        // the world has confirmed them once, the silence timer is what lets them go.
+        // **Two things have to be true before absence means anything** (#923). A snapshot has
+        // to exist — "nothing to read" is never "not present". And this speaker has to have
+        // *been* in one: voice and snapshots arrive on their own schedules, so somebody who
+        // starts talking between two of them is genuinely missing from the newest, and
+        // releasing them there drops the first part of every voice that comes into range.
+        // Until the world confirms them once, the silence timer is what lets them go.
         let present = snapshots
             .as_deref()
             .is_some_and(|snapshots| snapshots.holds_entity(*entity_id));
@@ -407,8 +380,7 @@ fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<Snap
 }
 
 /// **No test here opens a device or a socket.** The wire side is `VoiceInbox::push_for_test`,
-/// the mixer side is a `Mixer` built in a `Vec`, and the codec is real libopus in this
-/// process. What is under test is the buffer's ordering and the two releases.
+/// the mixer side is a `Mixer` rendering into a `Vec`, and the codec is real libopus.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,9 +417,8 @@ mod tests {
         (jitter, now, opus)
     }
 
-    /// **The buffer holds its slack before it plays anything**, which is the whole of what it
-    /// is for: a buffer that played the first frame it received would have no slack a moment
-    /// later and would conceal every reordering after it.
+    /// **The buffer holds its slack before it plays anything.** One that played the first
+    /// frame it received would have no slack a moment later and conceal every reordering.
     #[test]
     fn a_buffer_waits_for_its_target_before_it_plays() {
         let now = Instant::now();
@@ -468,8 +439,7 @@ mod tests {
         assert_eq!(jitter.slot(), Slot::Frame(opus[1].clone()));
     }
 
-    /// Frames that arrive out of order are played in order, and one that arrives twice is
-    /// played once.
+    /// Out-of-order frames are played in order, and one that arrives twice is played once.
     #[test]
     fn reordering_is_fixed_and_a_duplicate_is_played_once() {
         let now = Instant::now();
@@ -488,9 +458,8 @@ mod tests {
         assert_eq!(jitter.slot(), Slot::Nothing, "the duplicate played twice");
     }
 
-    /// **A gap is a gap.** The frame after a missing one is what carries its redundant copy,
-    /// so a slot with the next frame present asks for the recovery and a slot with nothing
-    /// after it asks for concealment.
+    /// The frame after a missing one carries its redundant copy, so a slot with that frame
+    /// present asks for recovery and one without it asks for concealment.
     #[test]
     fn a_missing_frame_is_recovered_from_the_next_or_concealed() {
         let now = Instant::now();
@@ -542,10 +511,9 @@ mod tests {
         assert_eq!(jitter.slot(), Slot::Frame(opus[5].clone()));
     }
 
-    /// **A duplicate costs nothing to accept, so it evicts nothing.** With the buffer full, a
-    /// second copy of a frame already held used to drop the highest unique one and then
-    /// replace itself — so *receiving* a frame manufactured a gap, which is the opposite of
-    /// what a jitter buffer is for. Found by review on #923.
+    /// **A duplicate costs nothing to accept, so it evicts nothing** (#923). With the buffer
+    /// full, a second copy of a held frame used to drop the highest unique one and replace
+    /// itself — so *receiving* a frame manufactured a gap.
     #[test]
     fn a_duplicate_never_pushes_a_unique_frame_out() {
         let now = Instant::now();
@@ -566,9 +534,8 @@ mod tests {
         assert_eq!(jitter.frames.len(), MAX_HELD_FRAMES);
     }
 
-    /// **The buffer grows when the network makes it, and only then.** A frame that arrives
-    /// after its slot has been played is the one piece of direct evidence that the slack was
-    /// too small, and nothing else moves the target.
+    /// **The buffer grows when the network makes it, and only then.** A frame arriving after
+    /// its slot is the one direct evidence the slack was too small; nothing else moves it.
     #[test]
     fn a_late_frame_grows_the_target_and_an_early_one_does_not() {
         let (mut jitter, now, opus) = filled(TARGET_FRAMES);
@@ -593,8 +560,7 @@ mod tests {
         assert_eq!(jitter.target, MAX_TARGET_FRAMES);
     }
 
-    /// A speaker that sends faster than real time cannot grow the buffer without limit — the
-    /// bound every length a peer chooses gets at this boundary.
+    /// A speaker sending faster than real time cannot grow the buffer without limit.
     #[test]
     fn a_speaker_cannot_grow_the_buffer_without_limit() {
         let now = Instant::now();
@@ -625,8 +591,7 @@ mod tests {
         assert!(jitter.silent_since(now + RELEASE_AFTER));
     }
 
-    /// **The whole inbound path, through real libopus and a real mixer.** Frames in one end,
-    /// audio out of the other, on the `Voice` bus at its gain.
+    /// The whole inbound path, through real libopus and a real mixer.
     fn listening_app() -> App {
         let mixer = Arc::new(Mixer::new());
         mixer.set_format(48_000, 1);
@@ -707,8 +672,7 @@ mod tests {
     }
 
     /// **A frame no decoder should have been given is refused before it reaches one.** The
-    /// decode boundary enforces the same rule; this is its second reader, because the buffer
-    /// allocates from a length the peer chose.
+    /// decode boundary enforces the same rule; the buffer allocates from that length too.
     #[test]
     fn a_frame_outside_the_contracts_bounds_never_reaches_a_decoder() {
         let mut app = listening_app();
@@ -721,12 +685,10 @@ mod tests {
         );
     }
 
-    /// **A voice that arrives before the world does is not released.** Voice and snapshots
-    /// arrive on their own schedules, so somebody who starts talking after the newest snapshot
-    /// and before the next one is genuinely missing from it — and releasing them there drops
-    /// the first part of every voice that comes into range, in the same frame its buffer was
-    /// created. Absence only means anything once a snapshot has named them at least once.
-    /// Found by review on #923.
+    /// **A voice that arrives before the world does is not released** (#923). Somebody who
+    /// starts talking between two snapshots is genuinely missing from the newest, and
+    /// releasing them there drops the first part of every voice that comes into range —
+    /// in the same frame its buffer was created.
     #[test]
     fn a_speaker_the_world_has_not_confirmed_yet_is_not_released() {
         let mut app = listening_app();
@@ -791,7 +753,7 @@ mod tests {
         );
     }
 
-    /// What a listener with no mixer slot gets: silence, and a client that keeps running.
+    /// A listener with no mixer slot: silence, and a client that keeps running.
     #[test]
     fn a_listener_with_no_source_is_silent_rather_than_broken() {
         let mut app = App::new();
