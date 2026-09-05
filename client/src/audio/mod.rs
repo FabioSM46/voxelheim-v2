@@ -57,7 +57,7 @@ use std::sync::Arc;
 
 use bevy::prelude::*;
 
-use crate::settings::{OutputDevice, OutputDevices, Settings};
+use crate::settings::{AudioDevices, DeviceChoice, Settings};
 use device::{AudioCapture, AudioDevice};
 // `SPEAKING_FOR` is the window `ui/voice.rs` reads through `Speaking::recent`, named here so
 // that module's test can pin it rather than restating the number.
@@ -158,7 +158,7 @@ pub struct AudioControls {
     /// Which output device to open, under the name its host gives it, or `None` for "follow
     /// whatever the system calls its default".
     ///
-    /// **A name and not a `settings::OutputDevice`**: that enum is a *choice*, with a variant
+    /// **A name and not a `settings::DeviceChoice`**: that enum is a *choice*, with a variant
     /// meaning "follow the system", and this is the instruction it resolves to.
     /// `audio/device.rs` matches it against the names the host answered with and nothing
     /// else.
@@ -264,8 +264,8 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
     }
     let gain = settings.master_gain();
     let device = match settings.output_device() {
-        OutputDevice::SystemDefault => None,
-        OutputDevice::Named(name) => Some(name.clone()),
+        DeviceChoice::SystemDefault => None,
+        DeviceChoice::Named(name) => Some(name.clone()),
     };
     // Written only on a real change, so a settings change that moved nothing this module
     // reads does not mark the resource and wake `apply_the_controls` for a gain that is
@@ -285,19 +285,19 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
 struct LastListing(u64);
 
 /// Hands the settings knob the device names the supervisor last enumerated — the other
-/// direction across the same seam, and the only one: [`OutputDevices`] is a bound the machine
+/// direction across the same seam, and the only one: [`AudioDevices`] is a bound the machine
 /// owns, so the module that talks to the machine fills it.
 fn offer_the_output_devices(
     device: Res<AudioDevice>,
     mut last: ResMut<LastListing>,
-    mut offered: ResMut<OutputDevices>,
+    mut offered: ResMut<AudioDevices>,
 ) {
     let listing = device.listings();
     if listing == last.0 {
         return;
     }
     last.0 = listing;
-    offered.offer(device.output_devices());
+    offered.offer_outputs(device.output_devices());
 }
 
 /// Puts the master gain and the chosen device where [`AudioControls`] says.
@@ -483,7 +483,7 @@ mod tests {
             .insert_resource(AudioControls::default())
             .insert_resource(AudioMixer(mixer))
             .insert_resource(AudioDevice::idle())
-            .insert_resource(OutputDevices::default())
+            .insert_resource(AudioDevices::default())
             .insert_resource(LastListing(0))
             .add_systems(
                 Update,
@@ -496,8 +496,8 @@ mod tests {
             );
         app.update();
         assert_eq!(
-            app.world().resource::<OutputDevices>(),
-            &OutputDevices::default(),
+            app.world().resource::<AudioDevices>(),
+            &AudioDevices::default(),
             "a supervisor that has enumerated nothing offers nothing"
         );
 
@@ -507,10 +507,10 @@ mod tests {
             "USB headset".to_owned(),
         ]);
         app.update();
-        let offered = app.world().resource::<OutputDevices>().clone();
+        let offered = app.world().resource::<AudioDevices>().clone();
         assert_eq!(
             offered,
-            OutputDevices::named(&["Built-in speakers", "USB headset"]),
+            AudioDevices::named(&["Built-in speakers", "USB headset"]),
             "the knob's bound never heard about the devices"
         );
 

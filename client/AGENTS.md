@@ -1492,13 +1492,18 @@ setting and writes `AudioControls`, and nothing under `audio/` ever writes a set
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
 
+**`DeviceChoice` is named for what it is, and `AudioDevices` for the module that fills it.**
+The output and the input are the same question asked of two halves of one card, so they are
+one enum and one bound rather than two of each; what differs between the sides is what
+`audio/device.rs` does with the answer, never what a player may say.
+
 **The output device is a choice, and `SystemDefault` is one of its values rather than the
 absence of one.** Following the system means reopening when the host moves its own default,
 which is what a player who never opens this tab expects when a headset goes in. Naming a
 device means *that device and no other*: a name nothing answers to is a retry and a throttled
 log line, never a quiet move to another card, because a player told the sound is going to
 their headset must not be hearing the speakers. So `DEFAULT_MOVED` is checked only while the
-choice is `None`. The knob's bound is `OutputDevices`, filled from the supervisor's last
+choice is `None`. The knob's bound is `AudioDevices::outputs`, filled from the supervisor's last
 enumeration — at startup, on a stream that opened, and on a logged failure; never on a poll,
 because enumeration is not free on every backend. A device name is a platform string, so
 `hex_encode` makes it one whitespace-free field in the settings file and `ascii_shown` makes

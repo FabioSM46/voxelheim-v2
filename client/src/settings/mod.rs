@@ -92,11 +92,11 @@ impl Plugin for SettingsPlugin {
         })
         .insert_resource(self.settings.clone())
         .init_resource::<MonitorChoices>()
-        // The audio module's supervisor thread fills this; the settings module owns it
-        // because it is the output-device knob's bound, and a bound belongs beside the knob
-        // it stops. An app built without `AudioPlugin` offers the system default and
-        // nothing else, which is the truth on a machine with no audio at all.
-        .init_resource::<OutputDevices>()
+        // The audio module's supervisor threads fill this; the settings module owns it
+        // because it is the two device knobs' bound, and a bound belongs beside the knob it
+        // stops. An app built without `AudioPlugin` offers the system default and nothing
+        // else, which is the truth on a machine with no audio at all.
+        .init_resource::<AudioDevices>()
         .add_systems(
             Update,
             (
@@ -906,7 +906,7 @@ fn hex_encode(name: &str) -> String {
         .collect()
 }
 
-/// Which output device the player chose.
+/// Which device the player chose, on either side of the sound card.
 ///
 /// **`SystemDefault` is not "whichever device happens to be default now"** but a standing
 /// instruction to follow the system: `audio/device.rs` reopens when the host starts calling
@@ -914,8 +914,12 @@ fn hex_encode(name: &str) -> String {
 /// a headset goes in. [`Self::Named`] is the opposite instruction — this device and no other
 /// — so unplugging that headset leaves the client silent and retrying rather than quietly
 /// moving to the speakers.
+///
+/// **One type for both knobs, because it is one statement.** The output and the input are the
+/// same question asked of two halves of the same card, and the difference between them is
+/// entirely in what `audio/device.rs` does with the answer — not in what a player may say.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum OutputDevice {
+pub enum DeviceChoice {
     #[default]
     SystemDefault,
     /// One device, under the name its host gives it. Never shortened or normalised: it is
@@ -924,71 +928,70 @@ pub enum OutputDevice {
 }
 
 /// What the file calls "no device in particular".
-const SYSTEM_DEFAULT_OUTPUT: &str = "default";
+const SYSTEM_DEFAULT_DEVICE: &str = "default";
 
-/// The `output-device` line's value for `device`.
-fn output_device_field(device: &OutputDevice) -> String {
+/// The `output-device` or `input-device` line's value for `device`.
+fn device_field(device: &DeviceChoice) -> String {
     match device {
-        OutputDevice::SystemDefault => SYSTEM_DEFAULT_OUTPUT.to_owned(),
-        OutputDevice::Named(name) => format!("name:{}", hex_encode(name)),
+        DeviceChoice::SystemDefault => SYSTEM_DEFAULT_DEVICE.to_owned(),
+        DeviceChoice::Named(name) => format!("name:{}", hex_encode(name)),
     }
 }
 
-/// The output device `field` denotes, if it denotes one.
+/// The device `field` denotes, if it denotes one.
 ///
 /// An unreadable field is `None` and costs this one setting its default, which is the whole
 /// of [`store`]'s rule for a line nothing can read.
-fn output_device_from_field(field: &str) -> Option<OutputDevice> {
-    if field == SYSTEM_DEFAULT_OUTPUT {
-        return Some(OutputDevice::SystemDefault);
+fn device_from_field(field: &str) -> Option<DeviceChoice> {
+    if field == SYSTEM_DEFAULT_DEVICE {
+        return Some(DeviceChoice::SystemDefault);
     }
     let name = String::from_utf8(decode_hex(field.strip_prefix("name:")?)?).ok()?;
     if name.is_empty() {
         return None;
     }
-    Some(OutputDevice::Named(name))
+    Some(DeviceChoice::Named(name))
 }
 
-/// The dynamic bound of the output-device knob: what the host currently offers.
+/// One side of the card's dynamic bound: what the host currently offers there.
 ///
 /// [`MonitorChoices`]' shape, for its reason — a knob whose values are the machine's still
-/// needs one place saying what stepping may reach. `audio/mod.rs` fills it from the
-/// supervisor's last enumeration, the only code here allowed to ask a host anything.
-#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
-pub struct OutputDevices {
+/// needs one place saying what stepping may reach.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeviceList {
     present: Vec<String>,
 }
 
-impl OutputDevices {
+impl DeviceList {
     /// What the knob steps through: the system default, then every device the host named.
     ///
     /// A saved device that is not present is deliberately absent, exactly as an unavailable
     /// monitor is: it stays selected until the player replaces it, and stepping cannot land
     /// back on it.
-    fn choices(&self) -> Vec<OutputDevice> {
-        let mut choices = vec![OutputDevice::SystemDefault];
-        choices.extend(self.present.iter().cloned().map(OutputDevice::Named));
+    fn choices(&self) -> Vec<DeviceChoice> {
+        let mut choices = vec![DeviceChoice::SystemDefault];
+        choices.extend(self.present.iter().cloned().map(DeviceChoice::Named));
         choices
     }
 
     /// What the knob's reading says for `selected`.
-    fn label(&self, selected: &OutputDevice) -> String {
+    fn label(&self, selected: &DeviceChoice) -> String {
         match selected {
-            OutputDevice::SystemDefault => "system default".to_owned(),
-            OutputDevice::Named(name) if self.present.iter().any(|found| found == name) => {
+            DeviceChoice::SystemDefault => "system default".to_owned(),
+            DeviceChoice::Named(name) if self.present.iter().any(|found| found == name) => {
                 ascii_shown(name, "unnamed device")
             }
             // Chosen, saved, and not here now — a headset unplugged, or a file carried to
             // another machine. Said out loud, because the alternative is a row naming a
             // device while the client is silent for no reason a player can see.
-            OutputDevice::Named(name) => {
+            DeviceChoice::Named(name) => {
                 format!("{} (unavailable)", ascii_shown(name, "unnamed device"))
             }
         }
     }
 
     /// The device `steps` presses away from `current`.
-    fn moved(&self, current: &OutputDevice, steps: i32) -> OutputDevice {
+    fn moved(&self, current: &DeviceChoice, steps: i32) -> DeviceChoice {
         let choices = self.choices();
         let at = choices
             .iter()
@@ -1000,15 +1003,39 @@ impl OutputDevices {
         choices[moved].clone()
     }
 
-    /// Replaces the list with what the audio module last enumerated.
-    pub fn offer(&mut self, present: Vec<String>) {
-        self.present = present;
+    #[cfg(test)]
+    fn named(names: &[&str]) -> Self {
+        Self {
+            present: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+}
+
+/// The dynamic bound of the device knobs: what the host offers on each side of the card.
+///
+/// **One resource and not one per side**, because one module fills them: `audio/mod.rs`
+/// writes it from its supervisors' last enumerations, the only code here allowed to ask a
+/// host anything. The microphone's list joins the loudspeaker's here in part 2 of #853.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct AudioDevices {
+    outputs: DeviceList,
+}
+
+impl AudioDevices {
+    /// Every output device the host named, as of the last enumeration.
+    pub fn outputs(&self) -> &DeviceList {
+        &self.outputs
+    }
+
+    /// Replaces the output list with what the audio module last enumerated.
+    pub fn offer_outputs(&mut self, present: Vec<String>) {
+        self.outputs.present = present;
     }
 
     #[cfg(test)]
-    pub(crate) fn named(names: &[&str]) -> Self {
+    pub(crate) fn named(outputs: &[&str]) -> Self {
         Self {
-            present: names.iter().map(|name| (*name).to_owned()).collect(),
+            outputs: DeviceList::named(outputs),
         }
     }
 }
@@ -1091,20 +1118,23 @@ const VOICE_ACTIVATION_THRESHOLD_STEP: f32 = 2.0;
 /// Where it starts: above a quiet room, below a voice.
 const DEFAULT_VOICE_ACTIVATION_THRESHOLD: f32 = -40.0;
 
-/// The dynamic bounds of the two knobs whose values belong to the machine, not this module.
+/// The dynamic bounds of the knobs whose values belong to the machine, not this module.
 ///
-/// One borrow rather than two arguments every caller keeps in the right order, and named for
-/// what it is, so a third such knob widens this struct instead of every signature.
+/// One borrow rather than an argument per bound that every caller keeps in the right order,
+/// and named for what it is, so a further such knob widens this struct instead of every
+/// signature.
 #[derive(Clone, Copy, Debug)]
 pub struct Choices<'a> {
     pub monitors: &'a MonitorChoices,
-    pub devices: &'a OutputDevices,
+    pub devices: &'a AudioDevices,
 }
 
 /// An empty device list, so [`Choices::with_monitors`] can hand out a borrow of one.
 #[cfg(test)]
-static NO_OUTPUT_DEVICES: OutputDevices = OutputDevices {
-    present: Vec::new(),
+static NO_AUDIO_DEVICES: AudioDevices = AudioDevices {
+    outputs: DeviceList {
+        present: Vec::new(),
+    },
 };
 
 #[cfg(test)]
@@ -1115,7 +1145,7 @@ impl<'a> Choices<'a> {
     pub(crate) const fn with_monitors(monitors: &'a MonitorChoices) -> Self {
         Self {
             monitors,
-            devices: &NO_OUTPUT_DEVICES,
+            devices: &NO_AUDIO_DEVICES,
         }
     }
 }
@@ -1219,7 +1249,7 @@ pub struct Settings {
     brightness: f32,
     fog_start: f32,
     master_volume: u8,
-    output_device: OutputDevice,
+    output_device: DeviceChoice,
     voice_mode: VoiceMode,
     voice_activation_threshold: f32,
 }
@@ -1241,7 +1271,7 @@ impl Default for Settings {
             brightness: 1.0,
             fog_start: DEFAULT_FOG_START,
             master_volume: DEFAULT_MASTER_VOLUME,
-            output_device: OutputDevice::SystemDefault,
+            output_device: DeviceChoice::SystemDefault,
             voice_mode: DEFAULT_VOICE_MODE,
             voice_activation_threshold: DEFAULT_VOICE_ACTIVATION_THRESHOLD,
         }
@@ -1339,17 +1369,11 @@ impl Settings {
     }
 
     /// Which output device the audio module should open.
-    pub const fn output_device(&self) -> &OutputDevice {
+    pub const fn output_device(&self) -> &DeviceChoice {
         &self.output_device
     }
 
     /// What the microphone is for: nothing, a held key, or a level.
-    // The two readers this pair exists for are `audio/`'s capture supervisor and the
-    // transmit rule above it, which land in #852 part 3. Until then the settings screen
-    // reaches the fields directly through `reading_with_choices`, so the accessors are
-    // reachable only from the tests — `dead_code` in a binary crate, exactly as
-    // `net/codec.rs`'s outbound encoders are before their callers.
-    #[allow(dead_code)]
     pub const fn voice_mode(&self) -> VoiceMode {
         self.voice_mode
     }
@@ -1360,7 +1384,6 @@ impl Settings {
     /// against a meter reading rather than multiplied into a sample, and the meter that
     /// answers it works in decibels. The conversion that does not happen here is the point
     /// — there is no second place a threshold could be expressed.
-    #[allow(dead_code)]
     pub const fn voice_activation_threshold_db(&self) -> f32 {
         self.voice_activation_threshold
     }
@@ -1461,7 +1484,7 @@ impl Settings {
                 );
             }
             Knob::OutputDevice => {
-                self.output_device = choices.devices.moved(&self.output_device, steps);
+                self.output_device = choices.devices.outputs().moved(&self.output_device, steps);
             }
             Knob::VoiceMode => {
                 let current = VOICE_MODES
@@ -1515,7 +1538,7 @@ impl Settings {
             Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),
             Knob::FrameCap => format!("{} fps", self.frame_cap),
             Knob::MasterVolume => format!("{}%", self.master_volume),
-            Knob::OutputDevice => choices.devices.label(&self.output_device),
+            Knob::OutputDevice => choices.devices.outputs().label(&self.output_device),
             Knob::VoiceMode => self.voice_mode.label().to_owned(),
             Knob::VoiceActivationThreshold => {
                 format!("{:.0} dB", self.voice_activation_threshold)
@@ -1790,10 +1813,10 @@ mod tests {
     /// Both machine-given bounds, with something on each: a knob whose values are the
     /// platform's has one choice when the platform offered nothing, and a bounds test over
     /// one choice cannot fail.
-    fn attached() -> (MonitorChoices, OutputDevices) {
+    fn attached() -> (MonitorChoices, AudioDevices) {
         (
             MonitorChoices::named(&["Main display", "Side display"]),
-            OutputDevices::named(&["Built-in speakers", "USB headset"]),
+            AudioDevices::named(&["Built-in speakers", "USB headset"]),
         )
     }
 
@@ -1812,7 +1835,7 @@ mod tests {
         assert!(settings.vsync());
         assert!(!settings.readout_shown());
         assert_eq!(settings.master_volume(), DEFAULT_MASTER_VOLUME);
-        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(settings.output_device(), &DeviceChoice::SystemDefault);
         for (control, key) in [
             (Control::Forward, KeyCode::KeyW),
             (Control::Back, KeyCode::KeyS),
@@ -1944,7 +1967,7 @@ mod tests {
             devices: &devices,
         };
         let mut settings = Settings::default();
-        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(settings.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(
             settings.reading_with_choices(Knob::OutputDevice, bounds),
             "system default"
@@ -1953,7 +1976,7 @@ mod tests {
         settings.adjust_with_choices(Knob::OutputDevice, 1, bounds);
         assert_eq!(
             settings.output_device(),
-            &OutputDevice::Named("Built-in speakers".to_owned())
+            &DeviceChoice::Named("Built-in speakers".to_owned())
         );
         assert_eq!(
             settings.reading_with_choices(Knob::OutputDevice, bounds),
@@ -1963,20 +1986,20 @@ mod tests {
         settings.adjust_with_choices(Knob::OutputDevice, 5, bounds);
         assert_eq!(
             settings.output_device(),
-            &OutputDevice::Named("USB headset".to_owned()),
+            &DeviceChoice::Named("USB headset".to_owned()),
             "stepping past the last device kept climbing"
         );
         settings.adjust_with_choices(Knob::OutputDevice, -5, bounds);
-        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(settings.output_device(), &DeviceChoice::SystemDefault);
 
         // **A device that is not here now is still the player's choice.** It stays
         // selected — so a headset plugged back in is used again without anybody reopening
         // this tab — and the row says out loud that it is not there.
-        let one = OutputDevices::named(&["Built-in speakers"]);
-        let unplugged = OutputDevice::Named("USB headset".to_owned());
-        assert_eq!(one.label(&unplugged), "USB headset (unavailable)");
+        let one = AudioDevices::named(&["Built-in speakers"]);
+        let unplugged = DeviceChoice::Named("USB headset".to_owned());
+        assert_eq!(one.outputs().label(&unplugged), "USB headset (unavailable)");
         assert!(
-            !one.choices().contains(&unplugged),
+            !one.outputs().choices().contains(&unplugged),
             "an absent device is not something stepping can land back on"
         );
 
@@ -1987,7 +2010,9 @@ mod tests {
         // case: a device name is the platform's and arrives at runtime.
         let awkward = format!("Hoerer {}ber USB", umlaut());
         assert_eq!(
-            OutputDevices::named(&[awkward.as_str()]).label(&OutputDevice::Named(awkward)),
+            AudioDevices::named(&[awkward.as_str()])
+                .outputs()
+                .label(&DeviceChoice::Named(awkward)),
             "Hoerer ?ber USB"
         );
     }
@@ -2003,20 +2028,20 @@ mod tests {
     #[test]
     fn a_device_name_survives_the_one_field_the_file_gives_it() {
         for device in [
-            OutputDevice::SystemDefault,
-            OutputDevice::Named("HDA Intel PCH: ALC295 Analog".to_owned()),
-            OutputDevice::Named(format!("Hoerer {}ber USB", umlaut())),
+            DeviceChoice::SystemDefault,
+            DeviceChoice::Named("HDA Intel PCH: ALC295 Analog".to_owned()),
+            DeviceChoice::Named(format!("Hoerer {}ber USB", umlaut())),
         ] {
-            let field = output_device_field(&device);
+            let field = device_field(&device);
             assert!(
                 !field.contains(char::is_whitespace),
                 "{field} is more than one field"
             );
-            assert_eq!(output_device_from_field(&field), Some(device));
+            assert_eq!(device_from_field(&field), Some(device));
         }
 
         for nonsense in ["", "name:", "name:zz", "name:6", "speakers", "name"] {
-            assert_eq!(output_device_from_field(nonsense), None, "{nonsense}");
+            assert_eq!(device_from_field(nonsense), None, "{nonsense}");
         }
     }
 
@@ -2258,7 +2283,7 @@ mod tests {
         let mut after = moved();
         after.reset(Tab::Audio);
         assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
-        assert_eq!(after.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(after.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(after.voice_mode(), DEFAULT_VOICE_MODE);
         assert!(
             (after.voice_activation_threshold_db() - DEFAULT_VOICE_ACTIVATION_THRESHOLD).abs()

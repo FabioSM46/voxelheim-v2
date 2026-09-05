@@ -22,7 +22,7 @@ use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
 use crate::audio::AudioControls;
 use crate::player::InputMode;
 use crate::settings::{
-    CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, OutputDevices, Settings, Tab, key_name,
+    AudioDevices, CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name,
 };
 
 /// Whether the screen is up, and what it is waiting for.
@@ -73,7 +73,7 @@ impl Plugin for SettingsScreenPlugin {
         app.init_resource::<SettingsScreen>()
             .init_resource::<Settings>()
             .init_resource::<MonitorChoices>()
-            .init_resource::<OutputDevices>()
+            .init_resource::<AudioDevices>()
             // Inserted by `AudioPlugin`, which `main.rs` adds first; this is what lets the
             // screen and its tests stand up with no audio device anywhere near them.
             .init_resource::<AudioControls>()
@@ -919,7 +919,7 @@ type SettingsButton<'a> = (&'a Interaction, &'a SettingsAction, &'a mut Backgrou
 fn settings_actions(
     mut buttons: Query<SettingsButton<'_>, (Changed<Interaction>, With<Button>)>,
     monitors: Res<MonitorChoices>,
-    devices: Res<OutputDevices>,
+    devices: Res<AudioDevices>,
     mut audio: ResMut<AudioControls>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
@@ -1166,7 +1166,7 @@ fn colour_monitor_controls(
 fn refresh_readings(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
-    devices: Res<OutputDevices>,
+    devices: Res<AudioDevices>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
@@ -1226,7 +1226,7 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Corner, Knob, MonitorPreference, OutputDevice};
+    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
@@ -1238,7 +1238,7 @@ mod tests {
             // Two of each, so a knob whose bound is the machine's has somewhere to step.
             // No `AudioPlugin` and therefore no device anywhere: this is the list
             // `offer_the_output_devices` would have written, inserted by hand.
-            .insert_resource(OutputDevices::named(&["Built-in speakers", "USB headset"]))
+            .insert_resource(AudioDevices::named(&["Built-in speakers", "USB headset"]))
             .add_plugins(SettingsScreenPlugin);
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
         app.world_mut().resource_mut::<SettingsScreen>().open();
@@ -1455,7 +1455,7 @@ mod tests {
                 knob,
                 Choices {
                     monitors: app.world().resource::<MonitorChoices>(),
-                    devices: app.world().resource::<OutputDevices>(),
+                    devices: app.world().resource::<AudioDevices>(),
                 },
             );
             assert_eq!(reading_of(&mut app, Reading::Knob(knob)), expected);
@@ -1771,7 +1771,7 @@ mod tests {
     #[test]
     fn every_bounded_reading_fits_complete_on_one_line() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
-        let devices = OutputDevices::default();
+        let devices = AudioDevices::default();
         let bounds = Choices {
             monitors: &monitors,
             devices: &devices,
@@ -2306,7 +2306,7 @@ mod tests {
         press(&mut app, SettingsAction::Nudge(Knob::OutputDevice, 1));
         assert_eq!(
             app.world().resource::<Settings>().output_device(),
-            &OutputDevice::Named("USB headset".to_owned()),
+            &DeviceChoice::Named("USB headset".to_owned()),
             "the row stepped somewhere the machine does not offer"
         );
         assert_eq!(
@@ -2315,12 +2315,12 @@ mod tests {
         );
 
         // The headset is unplugged. The choice stands, and the row says why it is silent.
-        *app.world_mut().resource_mut::<OutputDevices>() =
-            OutputDevices::named(&["Built-in speakers"]);
+        *app.world_mut().resource_mut::<AudioDevices>() =
+            AudioDevices::named(&["Built-in speakers"]);
         app.update();
         assert_eq!(
             app.world().resource::<Settings>().output_device(),
-            &OutputDevice::Named("USB headset".to_owned()),
+            &DeviceChoice::Named("USB headset".to_owned()),
             "the choice was rewritten by the device going away"
         );
         assert_eq!(
@@ -2333,7 +2333,7 @@ mod tests {
         let distance = app.world().resource::<Settings>().render_distance();
         press(&mut app, SettingsAction::Reset(Tab::Audio));
         let settings = app.world().resource::<Settings>();
-        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(settings.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(
             settings.render_distance(),
             distance,

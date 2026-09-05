@@ -23,7 +23,7 @@ use bevy::prelude::KeyCode;
 
 use super::{
     Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings, VoiceMode,
-    key_from_name, key_name, output_device_field, output_device_from_field, valid_monitor_identity,
+    device_field, device_from_field, key_from_name, key_name, valid_monitor_identity,
 };
 
 /// The environment variable naming the XDG data directory.
@@ -200,10 +200,10 @@ fn render(settings: &Settings) -> String {
     out.push_str(&format!("fog-start {}\n", settings.fog_start));
     out.push_str(&format!("frame-cap {}\n", settings.frame_cap));
     out.push_str(&format!("master-volume {}\n", settings.master_volume));
-    // One field, whatever the sound card is called — see `output_device_field`.
+    // One field, whatever the sound card is called — see `device_field`.
     out.push_str(&format!(
         "output-device {}\n",
-        output_device_field(&settings.output_device)
+        device_field(&settings.output_device)
     ));
     out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
     out.push_str(&format!(
@@ -308,7 +308,7 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
                 Ok(parsed) => settings.master_volume = parsed,
                 Err(_) => refuse("a master volume"),
             },
-            "output-device" => match output_device_from_field(value) {
+            "output-device" => match device_from_field(value) {
                 Some(parsed) => settings.output_device = parsed,
                 None => refuse("the system default output or a saved device"),
             },
@@ -449,7 +449,7 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Choices, Knob, OutputDevice, RebindRefusal};
+    use crate::settings::{Choices, DeviceChoice, Knob, RebindRefusal};
     use bevy::prelude::KeyCode;
 
     /// Settings that differ from the defaults in every field, so a round trip that lost
@@ -457,10 +457,9 @@ mod tests {
     fn every_field_moved() -> Settings {
         let mut settings = Settings::default();
         let monitors = super::super::MonitorChoices::named(&["Main display", "Side display"]);
-        // A name with spaces and a colon in it: the shape `output_device_field` exists for,
-        // so the round trip runs over the case that would otherwise be read back as its
-        // first word.
-        let devices = super::super::OutputDevices::named(&["HDA Intel PCH: ALC295 Analog"]);
+        // A name with spaces and a colon in it: the shape `device_field` exists for, so the
+        // round trip runs over the case that would otherwise be read back as its first word.
+        let devices = super::super::AudioDevices::named(&["HDA Intel PCH: ALC295 Analog"]);
         let bounds = Choices {
             monitors: &monitors,
             devices: &devices,
@@ -820,7 +819,7 @@ master-volume 25
         assert!(!settings.vsync(), "a bad volume line took the rest with it");
         assert_eq!(
             settings.output_device(),
-            &OutputDevice::Named("ok".to_owned()),
+            &DeviceChoice::Named("ok".to_owned()),
             "a bad volume line took the device with it"
         );
         assert_eq!(complaints.len(), 1, "{complaints:?}");
@@ -835,7 +834,7 @@ master-volume 25
         fs::write(&path, "master-volume 25\noutput-device speakers\n").expect("a scratch file");
         let (settings, complaints) = load(&path);
         assert_eq!(settings.master_volume(), 25);
-        assert_eq!(settings.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(settings.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(complaints.len(), 1, "{complaints:?}");
         assert!(complaints[0].contains("line 2"), "{complaints:?}");
         assert!(
