@@ -159,14 +159,11 @@ impl Voices {
     }
 }
 
-/// The half the Voices panel drives, which lands in part 7 of #853.
+/// The half the Voices panel drives.
 ///
-/// **Separated so the allowance is narrow rather than module-wide.** Every method above has a
-/// caller today — `audio/heard.rs` multiplies the gain and records the hearing, `ui/voice.rs`
-/// asks whether a name is muted — and these three are reachable only from the tests until the
-/// panel exists. `dead_code` in a binary crate, exactly as `net/codec.rs`'s outbound encoders
-/// are before their callers.
-#[allow(dead_code)]
+/// Kept as its own block because the two halves have different callers: `audio/heard.rs` and
+/// `ui/voice.rs` read the block above every frame, and `ui/settings.rs` is the only thing that
+/// reaches these three.
 impl Voices {
     /// Every speaker heard within [`HEARD_FOR`] of `now`, oldest first.
     pub fn recent(&self, now: Instant) -> Vec<u64> {

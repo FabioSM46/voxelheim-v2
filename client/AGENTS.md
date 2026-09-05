@@ -88,23 +88,23 @@ keeps meaning "everything the client is".
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings, the contract's byte ceiling checked against what libopus wanted to write, and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, size its packet buffer at the ceiling, or let a diagnostic quote a payload |
-| `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
+| `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — the chain between them (resample, gate, gain, 20 ms, encode, send), and the third answer to the first question: the microphone test, which holds the device, plays it back and sends nothing | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
 | `audio/heard.rs` | the inbound half: one jitter buffer and one decoder per speaker, the slack a listener hears as continuity, the two repairs a lost frame has, and every speaker summed into one source on the `Voice` bus | ask whether a speaker should be audible, log a frame or a speaker or a count of either, or hold a source per speaker |
 | `audio/listener.rs` | the listener's own half of who they hear: one mute and one volume per speaker, kept for the session, and the roster of everybody heard in the last minute | be persisted, reach `settings/`, decide whether a speaker may be heard at all, or log a speaker or a count of one |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
-| `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one, opens the microphone the player named or the host's default in its place, and names the input devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
+| `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one, opens the microphone the player named and refuses rather than substituting one that is absent, and names the input devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that publishes each milestone sentence once through the tagged chat channel | infer a storm from weather, advance a phase locally, or grow a second notification surface |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
-| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent, with the bound key that would start it and who is going to hear it, and who has been heard in the last second and not muted | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
+| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent — or that the microphone they named is not there — with the bound key that would start it and who is going to hear it, and who has been heard in the last second and not muted | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — the frame-rate readout in whichever of the four corners the setting names, and routing server refusals and trade endings into tagged chat | reach into another module's internals, grow a health bar, call the snapshot age a round trip, or grow a second notification surface |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the two overlays with lifecycles of their own — the Monitor dropdown and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1506,19 +1506,39 @@ The output and the input are the same question asked of two halves of one card, 
 one enum and one bound rather than two of each; what differs between the sides is what
 `audio/device.rs` does with the answer, never what a player may say.
 
-**A named loudspeaker that is not there leaves the client silent; a named microphone that is
-not there is substituted, and said out loud.** This is the one place the two sides deliberately
-answer the same question differently, and the reasoning is not symmetric. A player told the
-sound is going to their headset must not be hearing the speakers, so a missing output device is
-a retry and a throttled log. A missing *input* device would leave the client recording nothing
-while the HUD says SPEAKING — a player told they are heard when nobody can hear them — so
-`resolved_input` opens the host's default instead and logs both names. **The cost is real and
-is stated rather than hidden**: that default may be a microphone in the room. What bounds it is
-that the substitution is only ever *to the host's default*, never from one named device to
-another; that the player's choice is never rewritten, so plugging the headset back in uses it
-again; and that the settings row reads the chosen device as unavailable while it is in force.
-The decision is re-made on every open attempt rather than remembered, so there is no state to
-go stale when a device appears.
+**A named device that is not there is not opened, on either side of the card, and nothing is
+opened in its place.** For the loudspeaker the reason is stated above: a player told the sound
+is going to their headset must not be hearing the speakers. For the microphone the reason is
+stronger and different in kind — **audio the player never consented to, relayed to people who
+cannot tell it happened**. `docs/adr/0001-voice-transport.md` calls a voice frame personal data
+and constrains the server accordingly; opening an unchosen input is the client-side form of the
+same concern. What refusing owes the player is being *told*, and that is `MicrophoneMissing`
+and the line `ui/voice.rs` draws from it. The choice itself survives, so plugging the headset
+back in uses it again with nobody reopening the tab, and the decision is re-made on every open
+attempt so there is no state to go stale.
+
+**This was decided the other way first, and the rejected argument is written down so nobody
+re-litigates it by accident.** #853 part 5 shipped a `resolved_input` that substituted the
+host's default for a named microphone that was absent, bounded four ways — only ever to the
+default, never between named devices, the choice never rewritten, the settings row reading
+`(unavailable, using system default)`. Its justification was that refusing *"would leave the
+client recording nothing while the HUD says SPEAKING — a player told they are heard when nobody
+can hear them"*. Two things were wrong with it.
+
+- **The symptom was never real.** `speak` never reaches its held-key branch with no stream:
+  `Capture::take` answers `None` and `set_transmitting(false)` runs first, so the indicator
+  said `hold [V] to speak` and never `SPEAKING`. The bound was built on a failure that does not
+  occur — checked only after the decision had already been written into this file.
+- **The objection was to the indicator, and the fix for an indicator that lies is to stop it
+  lying.** Substituting fixed the symptom by making the lie true, and paid for it in the one
+  currency the loudspeaker case never spends. The two sides are not symmetric: a wrong *output*
+  device costs the player something they notice immediately and can undo; a wrong *input*
+  device costs somebody else something they cannot detect and nobody can take back, because the
+  audio has already been relayed.
+
+The four bounds made the substitution tidy. They did not make it **chosen by the player**, and
+consent is what was at stake. Reversed in part 9, with #853's acceptance criterion amended from
+"falls back to the default with a log line" to a refusal the player is told about.
 
 **Both supervisors enumerate at startup, and only the loudspeaker's watches for a moved
 default.** A bound that stayed empty until its device had been opened would be a knob a player
@@ -1598,6 +1618,23 @@ answer to the second is that **there is no naive drain**: the only way to read t
 batch that a reopen ran through. The samples across a reopen are a gap, not a continuation, and
 no API offers them as anything else.
 
+**The microphone test is a third answer to the first question below, and it is the player's
+own.** A client opens no input device unasked — that is the whole of what `VoiceMode::Off`
+means and what a server relaying no voice means — but a player pressing "Test microphone" has
+asked, out loud, on this machine. So `MicTest::open` holds the device whatever the mode says and
+whatever the server says, and it is the one path that opens an input with `Off` chosen. Three
+things bound it. **Nothing is sent**: the transmit rule is not consulted at all while the row is
+open, which matters most in the configuration where it would otherwise say yes — a held talk
+key, or a level over the threshold. **Closing it restores what was there** with no state to put
+back, because the answer is recomputed every tick from the mode and a press the test never
+touches. And **it cannot outlive the screen**: `ui/settings.rs` closes it when the settings
+screen closes or the tab changes, because every other piece of screen state is forgotten by
+`SettingsScreen::close` and this one is a held microphone living on another resource.
+
+There is no echo canceller in this client — `docs/adr/0001-voice-transport.md` is why push to
+talk is the default — so a loudspeaker and an open microphone are a feedback path. A test the
+player opened and can close is where that is acceptable; transmitting from it would not be.
+
 **Whether to hold a microphone open and whether to transmit are two questions, and
 `audio/voice.rs` answers them separately.** A client that opened the device only while
 transmitting would lose the first syllable of every sentence to a stream starting; one that
@@ -1620,6 +1657,19 @@ after an un-mute an artefact; and a muted speaker is still on the panel's roster
 row somebody muted has to stay where they can un-mute it. The HUD is the one place they
 disappear from, and that is the same rule read the other way — that line says who the player
 is *hearing*.
+
+**The Voices panel is an overlay, and it is rebuilt on a *set* rather than on a change.** It
+takes the Monitor dropdown's shape for the Monitor dropdown's reasons — absolutely positioned,
+its own `GlobalZIndex`, its own open/close lifecycle, closed by a tab change and by Escape
+before Escape reaches the screen. What differs is the trap: `Voices` is marked changed on
+**every frame anybody is speaking**, so a rebuild driven by `Res::is_changed` would despawn and
+respawn a row under a pointer sixty times a second. `rebuild_voice_rows` therefore compares
+what is drawn against what should be — and it compares **two** things, the set of speakers and
+the number not drawn, because with the count folded into the row list the first crowd compares
+equal to the rows already there and the "+n more" line is never spawned at all. Its controls
+are `VoiceControl`, not `SettingsAction`: they carry a speaker's entity id and they write a
+resource `audio/` owns rather than a setting, which is also what keeps `settings_actions` from
+having to know that `Voices` exists.
 
 **Two lifetimes again, and again they are separate on purpose.** The roster is pruned at
 `HEARD_FOR` (a minute) because it describes the last minute; an *adjustment* is kept for the

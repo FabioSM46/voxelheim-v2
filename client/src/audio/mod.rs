@@ -64,10 +64,13 @@ use device::{AudioCapture, AudioDevice};
 // that module's test can pin it rather than restating the number.
 #[allow(unused_imports)]
 pub use heard::{SPEAKING_FOR, Speaking};
-// `HEARD_FOR` is the Voices panel's window and is exported with the panel, in part 7 of #853.
-pub use listener::Voices;
+// `HEARD_FOR` and `MAX_VOICE` are the Voices panel's window and its ceiling, named here so
+// `ui/settings.rs`'s tests can pin them rather than restating the numbers — the reason
+// `SPEAKING_FOR` above carries the same allowance.
+#[allow(unused_imports)]
+pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
-pub use voice::{Transmitting, VoiceControls};
+pub use voice::{MicTest, MicrophoneMissing, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.

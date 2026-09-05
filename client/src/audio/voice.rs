@@ -45,6 +45,7 @@ use bevy::prelude::*;
 use super::codec::VoiceEncoder;
 use super::device::AudioCapture;
 use super::dsp::{Agc, FRAME_SAMPLES, Hold, NoiseGate, Resampler, level_db};
+use super::mixer::{Bus, SourceHandle};
 use crate::net::VoiceAudience as WireAudience;
 use crate::net::{Outbound, Session, VoiceFrame, encode_voice_frame};
 use crate::player::InputMode;
@@ -98,6 +99,41 @@ impl VoiceControls {
     }
 }
 
+/// The microphone test: whether the settings screen is holding the input open, and what it
+/// last measured.
+///
+/// **A held state, not a request, and that is the difference from `AudioControls::speaker_test`
+/// one module over.** A tone is a press that this module takes back on the frame it starts;
+/// a microphone test is a row that is *open*, and the screen owns whether it still is. So this
+/// flag is written by `ui/settings.rs` and never cleared here.
+///
+/// **The level is presentation like every other number under `audio/`.** Nothing decides
+/// anything from it — the transmit rule reads its own meter, frame by frame, and would go on
+/// working with this resource deleted.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub struct MicTest {
+    /// Whether the row is open. While it is, the capture device is held whatever the voice
+    /// mode says, what it hears is played back through the `Voice` bus, and **nothing is
+    /// sent**.
+    pub open: bool,
+    /// The gated, gain-controlled level of the last frame captured, in dBFS, or `None` when
+    /// nothing has been captured since the row was opened.
+    pub level_db: Option<f32>,
+}
+
+/// Whether the microphone this player chose has been asked for and would not open.
+///
+/// **This is what makes refusing a named device that is not there safe to do.** The client
+/// opens nothing in its place — audio the player never consented to, relayed to people who
+/// cannot tell it happened, is the harm that decides it — so what is owed to the player is
+/// being *told*, in the place they are already looking when they wonder why nobody answered.
+/// `ui/voice.rs` is that place.
+///
+/// **Presentation, and the HUD is its only reader**, exactly as [`Transmitting`] is. Nothing
+/// decides anything from it.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MicrophoneMissing(pub bool);
+
 /// Whether this client is sending voice right now.
 ///
 /// **Presentation, and the HUD in #852 part 7 is its only reader.** Nothing decides anything
@@ -145,6 +181,12 @@ struct VoicePipeline {
     /// watched fire is a guard nobody knows the shape of.
     #[cfg(test)]
     fail_next_encode: Option<()>,
+    /// The mixer source the test plays back through, or `None` when the mixer had no slot
+    /// free — a test that cannot be heard rather than a client that will not run.
+    ///
+    /// Claimed once, at build, and kept for the life of the app, for `SpeakerTest`'s reason:
+    /// a slot is claimed for the mixer's life, so claiming one per press would exhaust them.
+    loopback: Option<SourceHandle>,
     /// Whether push to talk has been pressed since voice became live.
     ///
     /// **What "the stream opens on the first `Talk` press and stays open" means.** A player
@@ -165,6 +207,7 @@ impl Default for VoicePipeline {
                     .map_err(|err| warn!("{err}; nobody can hear this player"))
                     .ok(),
             ),
+            loopback: None,
             block: Vec::new(),
             pending: Vec::new(),
             frame: vec![0.0; FRAME_SAMPLES],
@@ -193,9 +236,21 @@ pub(super) struct VoicePlugin;
 
 impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
+        let loopback = app
+            .world()
+            .get_resource::<super::AudioMixer>()
+            .and_then(|mixer| mixer.claim(Bus::Voice));
+        if loopback.is_none() {
+            warn!("no mixer source is free for the microphone test");
+        }
         app.init_resource::<VoiceControls>()
             .init_resource::<Transmitting>()
-            .init_resource::<VoicePipeline>()
+            .init_resource::<MicrophoneMissing>()
+            .init_resource::<MicTest>()
+            .insert_resource(VoicePipeline {
+                loopback,
+                ..VoicePipeline::default()
+            })
             .add_systems(Update, (follow_the_voice_settings, speak).chain());
     }
 }
@@ -240,8 +295,23 @@ fn speak(
     mut pipeline: ResMut<VoicePipeline>,
     mut outbound: Option<ResMut<Outbound>>,
     mut transmitting: ResMut<Transmitting>,
+    mut missing: ResMut<MicrophoneMissing>,
+    mut test: ResMut<MicTest>,
 ) {
     let pipeline = &mut *pipeline;
+    // **The meter reads only while the row is open.** Cleared here rather than on the paths
+    // that shut the device, because those are not the same set: voice activation and a held
+    // key both keep a stream open, so a test stopped under either left its last reading on a
+    // meter nothing was feeding. Found by review on #943.
+    // **The test is a third answer to "hold a microphone open?", and it is the player's own.**
+    // A client opens no input device unasked — that is what `VoiceMode::Off` means and what a
+    // server relaying no voice means — but a player pressing "Test microphone" has asked, out
+    // loud, on this machine. So it holds the device whatever the mode and whatever the server
+    // says, and it is the one path that opens one with `Off` chosen.
+    let testing = test.open;
+    if !testing {
+        clear_level(&mut test);
+    }
 
     // **The key is not read while chat owns the keyboard**, which is the whole of the guard
     // and the reason it is here rather than in `player`: typing the letter the control is
@@ -255,25 +325,37 @@ fn speak(
         _ => false,
     };
 
-    if !controls.live() {
-        // Off, or a server that relays no voice. Nothing is held and nothing is remembered:
-        // turning voice back on starts from a closed microphone and an unpressed key.
+    if !controls.live() && !testing {
+        // Off, or a server that relays no voice, and no test asking otherwise. Nothing is held
+        // and nothing is remembered: turning voice back on starts from a closed microphone and
+        // an unpressed key.
         pipeline.asked_to_speak = false;
         pipeline.start_over();
         capture.listen(false);
         set_transmitting(&mut transmitting, false);
+        set_missing(&mut missing, false);
+        clear_level(&mut test);
         return;
     }
 
-    if talk && controls.mode == VoiceMode::PushToTalk {
+    if talk && controls.live() && controls.mode == VoiceMode::PushToTalk {
         pipeline.asked_to_speak = true;
     }
     // Voice activation needs the device open to have a level to compare; push to talk waits
-    // for the first press. See `VoicePipeline::asked_to_speak`.
-    let open = controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak;
+    // for the first press. See `VoicePipeline::asked_to_speak`. **Closing the test restores
+    // exactly this**, with no state to put back: the answer is recomputed every tick from the
+    // mode and a press the test never touched.
+    let open = testing
+        || (controls.live()
+            && (controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak));
     capture.listen(open);
+    // **Only while a device has been asked for.** A microphone nobody wanted is not missing,
+    // and the supervisor says "unavailable" only once an open attempt has actually failed —
+    // so this cannot flash in the moment between the request and a stream starting.
+    set_missing(&mut missing, open && capture.shared().unavailable());
     if !open {
         set_transmitting(&mut transmitting, false);
+        clear_level(&mut test);
         return;
     }
 
@@ -285,6 +367,7 @@ fn speak(
         // pipeline was carrying belong to a stream that has ended.
         pipeline.start_over();
         set_transmitting(&mut transmitting, false);
+        clear_level(&mut test);
         return;
     };
     if read.fresh {
@@ -323,6 +406,24 @@ fn speak(
         pipeline.gate.process(&mut pipeline.frame);
         pipeline.agc.apply(&mut pipeline.frame);
         let level = level_db(&pipeline.frame);
+
+        if testing {
+            // **The whole of the test: heard here, and nowhere else.** The player is listening
+            // to their own microphone through the same bus every other voice arrives on, so the
+            // voice volume they just set is the volume they hear it at.
+            //
+            // There is no echo canceller in this client — `docs/adr/0001-voice-transport.md`
+            // is why push to talk is the default — so a loudspeaker and an open microphone are
+            // a feedback path. A test the player opened and can close is where that is
+            // acceptable; transmitting from it would not be.
+            if let Some(loopback) = pipeline.loopback.as_ref() {
+                loopback.push(&pipeline.frame);
+            }
+            if test.level_db != Some(level) {
+                test.level_db = Some(level);
+            }
+            continue;
+        }
 
         let transmit = match controls.mode {
             VoiceMode::Off => false,
@@ -386,9 +487,25 @@ fn speak(
     }
 
     // Push to talk says it is transmitting while the key is held even on a tick that produced
-    // no whole frame, which is what keeps the indicator from flickering at the frame rate.
-    let held = controls.mode == VoiceMode::PushToTalk && talk;
-    set_transmitting(&mut transmitting, sending || held);
+    // no whole frame, which is what keeps the indicator from flickering at the frame rate. A
+    // test never transmits, whatever is held.
+    let held = !testing && controls.mode == VoiceMode::PushToTalk && talk;
+    set_transmitting(&mut transmitting, !testing && (sending || held));
+}
+
+/// Writes the flag only when it changes, so an ordinary frame does not mark the resource.
+fn set_missing(missing: &mut ResMut<MicrophoneMissing>, gone: bool) {
+    if missing.0 != gone {
+        missing.0 = gone;
+    }
+}
+
+/// Forgets the last level when nothing is being captured, so a meter cannot sit at whatever it
+/// last read while the device is shut.
+fn clear_level(test: &mut ResMut<MicTest>) {
+    if test.level_db.is_some() {
+        test.level_db = None;
+    }
 }
 
 /// The contract's word for what the player asked for.
@@ -417,10 +534,12 @@ fn set_transmitting(transmitting: &mut ResMut<Transmitting>, sending: bool) {
 /// is the two decisions this module makes — whether to hold a microphone, and whether to send.
 #[cfg(test)]
 mod tests {
+    use super::super::mixer::Mixer;
     use super::*;
     use crate::net::{Outbound, Sent};
     use crate::settings::Knob;
     use crate::wire::voxelheim::net as fb;
+    use std::sync::Arc;
     use std::sync::mpsc::Receiver;
 
     /// One 20 ms block of a sine at `amplitude`, at 48 kHz.
@@ -445,6 +564,37 @@ mod tests {
         app_on_a_server(settings, 0.0)
     }
 
+    /// The same, with a real mixer behind the loopback source so what the test plays back can
+    /// be measured rather than assumed.
+    fn voice_app_with_a_mixer(settings: Settings, range_blocks: f32) -> (App, Arc<Mixer>) {
+        let mixer = Arc::new(Mixer::new());
+        mixer.set_format(48_000, 1);
+        mixer.set_gain(Bus::Voice, 1.0);
+        mixer.set_gain(Bus::Master, 1.0);
+        let loopback = mixer.claim(Bus::Voice).expect("a free slot");
+        let (mut app, _sent) = app_on_a_server(settings, range_blocks);
+        app.world_mut().resource_mut::<VoicePipeline>().loopback = Some(loopback);
+        (app, mixer)
+    }
+
+    /// How loud what the loopback has queued for the output callback is.
+    fn loopback_level(mixer: &Arc<Mixer>) -> f32 {
+        struct VecSink(Vec<f32>);
+        impl super::super::mixer::Sink for VecSink {
+            fn block(&mut self) -> &mut [f32] {
+                &mut self.0
+            }
+        }
+        let mut sink = VecSink(vec![0.0; FRAME_SAMPLES * 4]);
+        mixer.render(&mut sink);
+        level_db(&sink.0)
+    }
+
+    /// Opens or closes the microphone test, as the settings row does.
+    fn set_mic_test(app: &mut App, open: bool) {
+        app.world_mut().resource_mut::<MicTest>().open = open;
+    }
+
     /// **`speak` alone, with the controls set as `follow_the_voice_settings` would.** That
     /// system is tested on its own below: the range comes from a `ServerWelcome`, and
     /// `SessionParams` can only be built by the codec from bytes a server sent, so running it
@@ -464,6 +614,8 @@ mod tests {
         .insert_resource(AudioCapture::idle())
         .insert_resource(outbound)
         .init_resource::<Transmitting>()
+        .init_resource::<MicrophoneMissing>()
+        .init_resource::<MicTest>()
         .init_resource::<VoicePipeline>()
         .add_systems(Update, speak);
         (app, sent)
@@ -522,6 +674,186 @@ mod tests {
             frames.extend(app.world_mut().resource_mut::<Outbound>().taken_voice());
         }
         frames
+    }
+
+    /// **A microphone that will not open is published to the HUD, and only once one has been
+    /// asked for.**
+    ///
+    /// The second half is what stops the indicator flashing on every first press: `speak` asks
+    /// the supervisor whether an attempt has *failed*, not whether a stream is open this
+    /// instant, so the moment between `listen(true)` and a stream starting reads normally.
+    #[test]
+    fn a_microphone_that_will_not_open_reaches_the_hud_and_an_unasked_one_does_not() {
+        let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
+        app.world().resource::<AudioCapture>().cannot_open();
+        tick(&mut app);
+        assert!(
+            !app.world().resource::<MicrophoneMissing>().0,
+            "a microphone nobody has asked for was reported missing"
+        );
+
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        assert!(microphone_is_open(&app), "the key did not ask for a device");
+        assert!(
+            app.world().resource::<MicrophoneMissing>().0,
+            "a device that was asked for and would not open was not reported"
+        );
+        assert!(
+            !app.world().resource::<Transmitting>().0,
+            "the HUD was told this player was speaking with no microphone"
+        );
+
+        // Voice off closes the device, and nothing is missing when nothing is wanted.
+        app.world_mut().resource_mut::<VoiceControls>().mode = VoiceMode::Off;
+        tick(&mut app);
+        assert!(
+            !app.world().resource::<MicrophoneMissing>().0,
+            "voice off still reported a missing microphone"
+        );
+    }
+
+    /// **The test holds the microphone with voice off, plays it back, and sends nothing.**
+    ///
+    /// Three claims, and each is the whole of a criterion. The device is held because the
+    /// player asked for it out loud — the one path that opens an input with `Off` chosen, and
+    /// the reason it is not "a microphone nobody asked for". What it hears reaches the `Voice`
+    /// bus, so it arrives at the volume the player just set. And **nothing goes out**: the
+    /// transmit rule is not consulted at all while the row is open.
+    #[test]
+    fn the_microphone_test_holds_the_device_plays_it_back_and_sends_nothing() {
+        let (mut app, mixer) = voice_app_with_a_mixer(tuned(VoiceMode::Off), 0.0);
+        tick(&mut app);
+        assert!(
+            !microphone_is_open(&app),
+            "voice off held a microphone before anybody asked"
+        );
+
+        set_mic_test(&mut app, true);
+        tick(&mut app);
+        assert!(
+            microphone_is_open(&app),
+            "the test did not open the microphone with voice off"
+        );
+
+        app.world().resource::<AudioCapture>().opened(48_000, 1);
+        let sent = speak_for(&mut app, 6, 0.3);
+        assert!(sent.is_empty(), "the microphone test transmitted");
+        assert!(
+            !app.world().resource::<Transmitting>().0,
+            "the HUD was told this player was speaking during a test"
+        );
+
+        let played = loopback_level(&mixer);
+        assert!(played > -40.0, "the test played nothing back ({played} dB)");
+        let level = app.world().resource::<MicTest>().level_db;
+        assert!(
+            level.is_some_and(|level| level > -40.0),
+            "the meter read {level:?} for speech"
+        );
+
+        // **And nothing goes out on the one configuration where the transmit rule would
+        // otherwise say yes.** With voice off it says no for its own reasons, so a test that
+        // stopped there would pass with the whole loopback branch deleted — measured: removing
+        // the `continue` failed nothing until this half existed. Push to talk with the key held
+        // on a server that relays voice is the case that distinguishes them.
+        let (mut talking, _mixer) = voice_app_with_a_mixer(tuned(VoiceMode::PushToTalk), 24.0);
+        set_mic_test(&mut talking, true);
+        press(&mut talking, KeyCode::KeyV);
+        tick(&mut talking);
+        talking.world().resource::<AudioCapture>().opened(48_000, 1);
+        assert!(
+            speak_for(&mut talking, 6, 0.3).is_empty(),
+            "holding the talk key during a microphone test transmitted"
+        );
+        assert!(
+            !talking.world().resource::<Transmitting>().0,
+            "the HUD said this player was speaking while they were testing"
+        );
+
+        // And the same for voice activation, whose rule answers to the level rather than a key
+        // — which the test is deliberately feeding.
+        let (mut gated, _mixer) = voice_app_with_a_mixer(tuned(VoiceMode::VoiceActivation), 24.0);
+        set_mic_test(&mut gated, true);
+        tick(&mut gated);
+        gated.world().resource::<AudioCapture>().opened(48_000, 1);
+        assert!(
+            speak_for(&mut gated, 12, 0.4).is_empty(),
+            "voice activation transmitted the microphone test"
+        );
+
+        // **Closing the row restores the previous capture state**, and there is no state to
+        // put back: with voice off, that state is a closed microphone.
+        set_mic_test(&mut app, false);
+        tick(&mut app);
+        assert!(
+            !microphone_is_open(&app),
+            "the microphone outlived the test that opened it"
+        );
+        assert_eq!(
+            app.world().resource::<MicTest>().level_db,
+            None,
+            "the meter kept its last reading with the device shut"
+        );
+
+        // **And with the device still open, which is the case the first clear missed.** The
+        // level used to be forgotten only on the paths that shut the capture stream — but a
+        // test stopped under push to talk with the key held, or under voice activation, leaves
+        // a stream open for voice, so the meter kept its last reading while nothing was
+        // feeding it. Found by review on #943.
+        let (mut holding, _mixer) = voice_app_with_a_mixer(tuned(VoiceMode::PushToTalk), 24.0);
+        press(&mut holding, KeyCode::KeyV);
+        set_mic_test(&mut holding, true);
+        tick(&mut holding);
+        holding.world().resource::<AudioCapture>().opened(48_000, 1);
+        speak_for(&mut holding, 6, 0.3);
+        assert!(
+            holding.world().resource::<MicTest>().level_db.is_some(),
+            "the meter read nothing during the test"
+        );
+
+        set_mic_test(&mut holding, false);
+        tick(&mut holding);
+        assert!(
+            microphone_is_open(&holding),
+            "the fixture shut the device, so this is not the case under test"
+        );
+        assert_eq!(
+            holding.world().resource::<MicTest>().level_db,
+            None,
+            "a stopped test left a stale level on a meter nothing is feeding"
+        );
+    }
+
+    /// **And closing it restores a microphone that was already open.** Push to talk that has
+    /// been pressed once holds the device; a test opened and closed over the top of that must
+    /// leave it exactly where it found it, and must not have consumed the press either.
+    #[test]
+    fn closing_the_test_leaves_push_to_talk_holding_the_device_it_had() {
+        let (mut app, _mixer) = voice_app_with_a_mixer(tuned(VoiceMode::PushToTalk), 24.0);
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        release(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        assert!(
+            microphone_is_open(&app),
+            "push to talk let go of the device between presses"
+        );
+
+        set_mic_test(&mut app, true);
+        tick(&mut app);
+        set_mic_test(&mut app, false);
+        tick(&mut app);
+        assert!(
+            microphone_is_open(&app),
+            "the test closing took push to talk's device with it"
+        );
+
+        // And the key still transmits, so nothing about the press was consumed.
+        app.world().resource::<AudioCapture>().opened(48_000, 1);
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        assert!(!speak_for(&mut app, 6, 0.3).is_empty());
     }
 
     /// **A server that relays no voice never has a microphone opened on it**, whatever the
