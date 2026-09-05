@@ -199,7 +199,7 @@ parts then, two now. The Parts column was recomputed for the 90,000 cap #925 mea
 were not, because the sizes are what was measured.
 
 **The Parts column is not the estimate divided by the cap, and reading it that way is the mistake
-this paragraph exists to stop.** 74,073 over 45,000 is 1.6, and #851 took five. Two reasons, both
+this paragraph exists to stop.** 74,073 over the 45,000 cap of the time is 1.6, and #851 took five. Two reasons, both
 structural rather than accidental:
 
 - **Seams are discrete.** You cut where the code already draws a boundary, and those boundaries fall
