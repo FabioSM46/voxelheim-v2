@@ -29,7 +29,7 @@
 //! once, by the master gain, and never twice.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use super::spatial::{self, BANDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, PanGains, Placement};
 
@@ -221,33 +221,56 @@ impl Ring {
     }
 }
 
+/// Where one slot is in its life, as **one** value.
+///
+/// **Two booleans were the bug, and one value is the fix** (found by review on #948). A slot
+/// that was free and cleared read as `taken == false, flushed == true`, and the callback
+/// tested those two flags with two separate loads: a claim landing between them left the
+/// callback clearing the ring and the filter state of a slot that had just been handed to
+/// somebody. Two loads are not one decision, and no ordering on either of them makes them one
+/// — the second load can always read a value from before the claim it is meant to notice.
+///
+/// So there is one location, and **each state has exactly one party permitted to leave it**:
+///
+/// | State | Who may move it | To |
+/// | --- | --- | --- |
+/// | [`Self::Free`] | [`Mixer::claim`], by compare-exchange | `Live` |
+/// | [`Self::Live`] | the one [`SourceHandle`]'s `Drop` | `Dirty` |
+/// | [`Self::Dirty`] | the output callback, after clearing the slot | `Free` |
+///
+/// A slot is claimable only while `Free`, and `Free` is written only by the thread that has
+/// just finished clearing it. There is no state a second reader can catch half-written,
+/// because there is nothing to read twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum SlotState {
+    /// Nobody owns it and there is nothing in it.
+    Free = 0,
+    /// A [`SourceHandle`] exists. The callback renders it.
+    Live = 1,
+    /// The handle is gone and the callback has not cleared it yet.
+    ///
+    /// **Why a released slot is not immediately re-claimable.** What needs resetting is the
+    /// consumer's memory — the read index and the filter states — and a producer resetting it
+    /// would be a second writer of what [`Ring`]'s ordering assumes has one. A client with no
+    /// working output device therefore never recycles a slot, which costs nothing: nothing is
+    /// audible there either way.
+    Dirty = 2,
+}
+
 /// One slot in the mixer: a ring, the bus it is mixed on, and where it is heard from.
 ///
 /// **Every field is an atomic, and which thread writes which is the whole contract.** A Bevy
-/// system writes [`Self::bus`], the two pan gains, [`Self::target_occlusion`] and
+/// system writes [`Self::bus`], the gain, the two pan gains, [`Self::target_occlusion`] and
 /// [`Self::high_cue`]; the callback writes [`Self::occlusion`] and the two filter states and
-/// reads everything else. [`Self::taken`] and [`Self::flushed`] are the handshake that lets a
-/// slot be given away twice — see [`Mixer::claim`].
+/// reads everything else. [`Self::state`] is what says which of them is entitled to.
 #[derive(Debug)]
 struct Source {
     ring: Ring,
     /// A [`Bus::index`]. Written by [`Mixer::claim`], read by the callback.
     bus: AtomicU8,
-    /// Whether a [`SourceHandle`] for this slot exists.
-    ///
-    /// The callback renders only a taken slot, so a released one is silent from the moment
-    /// its handle drops rather than from the moment its ring runs out.
-    taken: AtomicBool,
-    /// Whether the callback has cleared this slot since it was last released.
-    ///
-    /// **The reason a released slot is not immediately re-claimable.** Everything that has
-    /// to be reset lives on the consumer's side of the ring — the read index, and the two
-    /// filter states the callback owns — and a producer that reset them would be a second
-    /// writer of memory whose ordering assumes exactly one. So the releasing thread asks,
-    /// the callback does it, and [`Mixer::claim`] hands out only slots where it has happened.
-    /// A client with no working output device therefore never recycles a slot, which costs
-    /// nothing: nothing is audible there either way.
-    flushed: AtomicBool,
+    /// A [`SlotState`]. The one thing that decides who may touch the rest.
+    state: AtomicU8,
     /// Distance attenuation, as `f32` bits. Kept apart from the pan rather than folded into
     /// it, because a mono device applies this and skips the pan — and recovering one from
     /// the other would be arithmetic standing in for a field.
@@ -272,10 +295,9 @@ impl Source {
         Self {
             ring: Ring::new(SOURCE_CAPACITY),
             bus: AtomicU8::new(Bus::Master.index() as u8),
-            taken: AtomicBool::new(false),
             // A slot nobody has used needs no clearing, which is what makes the first
             // `MAX_SOURCES` claims of a fresh mixer succeed with no callback anywhere.
-            flushed: AtomicBool::new(true),
+            state: AtomicU8::new(SlotState::Free as u8),
             gain: AtomicU32::new(1.0f32.to_bits()),
             pan_left: AtomicU32::new(1.0f32.to_bits()),
             pan_right: AtomicU32::new(1.0f32.to_bits()),
@@ -285,14 +307,6 @@ impl Source {
             low_state: AtomicU32::new(0.0f32.to_bits()),
             mid_state: AtomicU32::new(0.0f32.to_bits()),
         }
-    }
-
-    /// Puts the spatial state back where [`Placement::UNPOSITIONED`] leaves it.
-    ///
-    /// The producer's half of recycling a slot: the fields a Bevy system writes. The
-    /// consumer's half is [`Self::flush`], and the two are deliberately not one function.
-    fn unposition(&self) {
-        self.place(Placement::UNPOSITIONED);
     }
 
     /// Sets everything one placement says. Called from a Bevy system; never from a callback.
@@ -320,15 +334,29 @@ impl Source {
         );
     }
 
-    /// Throws away whatever the previous owner left behind. The **callback** runs this.
-    fn flush(&self) {
+    /// Throws away everything the previous owner left behind and frees the slot.
+    ///
+    /// **The callback runs this, only on a slot it has just read as [`SlotState::Dirty`], and
+    /// nothing else may leave that state** — `claim` moves only `Free`, and `Drop` needs a
+    /// handle that no longer exists. So the whole reset happens here, consumer-side ring
+    /// index and producer-side placement alike, with nobody else entitled to the slot: one
+    /// place a slot is cleared rather than two halves that have to agree.
+    ///
+    /// The exchange rather than a store makes the *safety* independent of that argument —
+    /// were something ever able to leave `Dirty`, this fails and the slot stays dirty rather
+    /// than being handed out unflushed — and its release pairs with `claim`'s acquire.
+    fn recycle(&self) {
         self.ring.skip();
         self.low_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.mid_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.occlusion.store(0.0f32.to_bits(), Ordering::Relaxed);
-        // Last, and with a release: everything above has to be visible to the thread that
-        // claims this slot next, and this store is what admits the slot is clear.
-        self.flushed.store(true, Ordering::Release);
+        self.place(Placement::UNPOSITIONED);
+        let _ = self.state.compare_exchange(
+            SlotState::Dirty as u8,
+            SlotState::Free as u8,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -398,24 +426,29 @@ impl Mixer {
     /// which is what makes each ring's producer single, as its ordering assumes.
     pub fn claim(self: &Arc<Self>, bus: Bus) -> Option<SourceHandle> {
         for (index, source) in self.sources.iter().enumerate() {
-            // Only a slot the callback has finished clearing. A released one whose flush has
-            // not run yet still holds the previous owner's audio and filter state, and
-            // handing it out would play one speaker's tail as another speaker's opening word.
-            if !source.flushed.load(Ordering::Acquire) {
-                continue;
-            }
+            // **One compare-exchange, and it is the whole decision.** Only a `Free` slot can
+            // be won, and a slot is `Free` only after the callback has cleared it — a
+            // released one still holding the previous owner's audio is `Dirty` and this
+            // fails on it, as it does on one somebody else is using. The acquire pairs with
+            // `recycle`'s release, so the winner sees the cleared ring and the reset
+            // placement rather than whatever was there before.
             if source
-                .taken
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .state
+                .compare_exchange(
+                    SlotState::Free as u8,
+                    SlotState::Live as u8,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
                 .is_err()
             {
                 continue;
             }
+            // After the slot is won, and safely: the callback may render it for one block
+            // before this store lands, and renders `0.0` whichever bus it reads — `recycle`
+            // emptied the ring and pushing needs the handle this has not returned yet, which
+            // the type system enforces rather than a comment.
             source.bus.store(bus.index() as u8, Ordering::Relaxed);
-            source.unposition();
-            // Cleared here rather than by the callback, so the next release is what sets it
-            // again — a slot in use is never "already flushed".
-            source.flushed.store(false, Ordering::Release);
             return Some(SourceHandle {
                 mixer: Arc::clone(self),
                 index,
@@ -442,6 +475,17 @@ impl Mixer {
         self.channels
             .store(u32::from(channels).max(1), Ordering::Relaxed);
         self.set_crossovers(sample_rate);
+    }
+
+    /// What one slot is doing. Test-only: nothing at run time asks, because the answer is
+    /// only ever acted on by the compare-exchange that reads it.
+    #[cfg(test)]
+    fn slot_state(&self, index: usize) -> SlotState {
+        match self.sources[index].state.load(Ordering::Acquire) {
+            0 => SlotState::Free,
+            1 => SlotState::Live,
+            _ => SlotState::Dirty,
+        }
     }
 
     /// The sample rate the open stream is running at.
@@ -499,12 +543,15 @@ impl Mixer {
         let mut low_state = [0.0f32; MAX_SOURCES];
         let mut mid_state = [0.0f32; MAX_SOURCES];
         for (index, source) in self.sources.iter().enumerate() {
-            if !source.taken.load(Ordering::Acquire) {
-                // Released. Clearing it is this thread's job and this is the only place it
-                // can safely happen; until it does, `claim` will not hand the slot out.
-                if !source.flushed.load(Ordering::Relaxed) {
-                    source.flush();
-                }
+            // **One load, one decision.** Clearing a `Dirty` slot is this thread's job
+            // because nothing else may leave that state; live and free are not this thread's
+            // to touch.
+            let state = source.state.load(Ordering::Acquire);
+            if state == SlotState::Dirty as u8 {
+                source.recycle();
+                continue;
+            }
+            if state != SlotState::Live as u8 {
                 continue;
             }
             live[index] = true;
@@ -654,19 +701,19 @@ impl SourceHandle {
 impl Drop for SourceHandle {
     /// Hands the slot back, and asks the callback to clear it.
     ///
-    /// **Two stores, in this order, and neither of them touches the ring.** The read index
-    /// and the filter states are the consumer's memory, and a producer resetting them would
-    /// be a second writer of exactly what [`Ring`]'s ordering assumes has one. So this
-    /// records that clearing is owed and stops the slot being rendered; [`Mixer::render`]
-    /// does the clearing and [`Mixer::claim`] waits for it.
+    /// **One store, and it does not touch the ring.** The read index and the filter states
+    /// are the consumer's memory, and a producer resetting them would be a second writer of
+    /// exactly what [`Ring`]'s ordering assumes has one. So this moves the slot to
+    /// [`SlotState::Dirty`] — silent to the callback, refused by [`Mixer::claim`] — and the
+    /// callback does the clearing and the freeing together.
     ///
-    /// `flushed` is written **before** `taken`, so the callback cannot observe an untaken
-    /// slot that does not yet know it needs flushing — which it would then treat as already
-    /// clear and leave the previous owner's tail in.
+    /// A plain store rather than an exchange: `Live` is this handle's state to leave, there
+    /// is exactly one handle per slot, and nothing else writes `Dirty`. The release is what
+    /// makes the last samples this owner pushed visible to the callback that discards them.
     fn drop(&mut self) {
-        let source = &self.mixer.sources[self.index];
-        source.flushed.store(false, Ordering::Release);
-        source.taken.store(false, Ordering::Release);
+        self.mixer.sources[self.index]
+            .state
+            .store(SlotState::Dirty as u8, Ordering::Release);
     }
 }
 
@@ -870,6 +917,83 @@ mod tests {
         );
     }
 
+    /// **The transition table, walked.** Each state has exactly one party permitted to leave
+    /// it, and this is what that means in practice: a live slot refuses a claim and is not
+    /// cleared by the callback; a dirty one refuses a claim until the callback has cleared
+    /// it; a free one is claimable and comes back with nothing of its last owner in it.
+    ///
+    /// This is the property the two booleans could not have — not a faster version of the
+    /// same check. There is one location, so there is no pair of loads for a claim to land
+    /// between (#948).
+    #[test]
+    fn a_slot_moves_free_to_live_to_dirty_to_free_and_nowhere_else() {
+        let mixer = mono_mixer();
+        assert_eq!(mixer.slot_state(0), SlotState::Free);
+
+        let mut held: Vec<SourceHandle> = (0..MAX_SOURCES)
+            .map(|_| mixer.claim(Bus::Master).expect("a free slot"))
+            .collect();
+        for index in 0..MAX_SOURCES {
+            assert_eq!(mixer.slot_state(index), SlotState::Live, "slot {index}");
+        }
+        assert!(
+            mixer.claim(Bus::Master).is_none(),
+            "a live slot was claimed"
+        );
+
+        let last = MAX_SOURCES - 1;
+        let released = held.pop().expect("one of sixteen");
+        released.push(&[0.5; 64]);
+        drop(released);
+        assert_eq!(mixer.slot_state(last), SlotState::Dirty);
+        assert!(
+            mixer.claim(Bus::Master).is_none(),
+            "a dirty slot was claimed"
+        );
+
+        // Only the callback leaves `Dirty`, and it leaves it clear.
+        let mut sink = VecSink(vec![0.0; 4]);
+        mixer.render(&mut sink);
+        assert_eq!(sink.0, vec![0.0; 4], "a released slot was still audible");
+        assert_eq!(mixer.slot_state(last), SlotState::Free);
+
+        let again = mixer.claim(Bus::Master).expect("the slot back");
+        assert_eq!(mixer.slot_state(last), SlotState::Live);
+        let mut sink = VecSink(vec![0.0; 8]);
+        mixer.render(&mut sink);
+        assert_eq!(
+            sink.0,
+            vec![0.0; 8],
+            "a new owner inherited the last one's audio"
+        );
+        drop(again);
+        drop(held);
+    }
+
+    /// **The single-threaded shadow of the race #948's review found**, and the closest a test
+    /// can honestly get to it: the callback deciding, slot by slot, whose a slot is, while
+    /// fifteen of them are being recycled in the same pass. The race itself needed a claim to
+    /// land between two atomic loads and cannot be reproduced deterministically; what is
+    /// testable is that the decision is per slot and never reaches a live one.
+    #[test]
+    fn recycling_one_slot_does_not_touch_a_live_one() {
+        let mixer = mono_mixer();
+        let live = mixer.claim(Bus::Master).expect("a free slot");
+        let doomed: Vec<SourceHandle> = (0..MAX_SOURCES - 1)
+            .map(|_| mixer.claim(Bus::Master).expect("a free slot"))
+            .collect();
+        live.push(&[0.5; 64]);
+        drop(doomed);
+
+        let mut sink = VecSink(vec![0.0; 8]);
+        mixer.render(&mut sink);
+        assert_eq!(
+            sink.0,
+            vec![0.5; 8],
+            "a live slot lost its audio to a neighbour being recycled"
+        );
+    }
+
     #[test]
     fn a_slot_the_callback_has_not_cleared_is_not_handed_out() {
         let mixer = mono_mixer();
@@ -969,6 +1093,36 @@ mod tests {
         assert!(
             high_behind < high_ahead * 0.7,
             "the cue took nothing off the top: {high_ahead} to {high_behind}"
+        );
+    }
+
+    /// A slot comes back from `recycle` unpositioned as well as empty. The placement is the
+    /// producer's memory and the ring is the consumer's, and both are reset in the one place
+    /// where nobody else is entitled to the slot — so a new speaker never opens their mouth
+    /// panned to wherever the last one was standing.
+    #[test]
+    fn a_reused_slot_comes_back_unpositioned() {
+        let mixer = stereo_mixer();
+        let first = mixer.claim(Bus::Master).expect("a free slot");
+        first.place(placed(
+            1.0,
+            spatial::pan_gains(std::f32::consts::FRAC_PI_2),
+            0.0,
+            1.0,
+        ));
+        drop(first);
+
+        let mut sink = VecSink(vec![0.0; 4]);
+        mixer.render(&mut sink);
+
+        let second = mixer.claim(Bus::Master).expect("the slot back");
+        second.push(&[1.0; 4]);
+        let mut sink = VecSink(vec![0.0; 8]);
+        mixer.render(&mut sink);
+        assert_eq!(
+            sink.0,
+            vec![1.0; 8],
+            "a new owner inherited the last one's pan"
         );
     }
 
