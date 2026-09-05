@@ -349,7 +349,7 @@ pub(super) enum HorseHair {
 /// is a speed, and no gait is chosen from one. The server holds a ridden horse at
 /// `MountSpeed` and the paddock lap at a walk, so which gait a horse uses follows from
 /// which kind of horse it is, and the phase alone says where in the cycle it stands.
-struct Gait {
+pub(super) struct Gait {
     /// Blocks per cycle. A drawn stride length, documented the way
     /// `WALK_RADIANS_PER_BLOCK` is, and no more a speed than that one: the server still
     /// owns how quickly the blocks are covered.
@@ -369,7 +369,7 @@ struct Gait {
     /// The neck's pitch forward of rest while moving — negative lowers the poll — and
     /// how far it nods either way of that.
     lean: f32,
-    nod: f32,
+    pub(super) nod: f32,
 }
 
 /// The walk: a lateral four-beat sequence — left rear, left front, right rear, right
@@ -390,7 +390,7 @@ const WALK: Gait = Gait {
 /// lead the trailing hind — the left — lands first, the diagonal pair a quarter later,
 /// the leading fore — the right — a quarter after that, and in the fourth quarter
 /// nothing lands. The neck stretches forward and the barrel rocks once a stride.
-const CANTER: Gait = Gait {
+pub(super) const CANTER: Gait = Gait {
     stride: 3.4,
     beats: [FRAC_PI_2, PI, 0.0, FRAC_PI_2],
     swing: 0.45,
@@ -404,13 +404,13 @@ const CANTER: Gait = Gait {
 
 impl Gait {
     /// Where in this gait's cycle the horse is, or `None` standing.
-    fn cycle(&self, walk: WalkPose) -> Option<f32> {
+    pub(super) fn cycle(&self, walk: WalkPose) -> Option<f32> {
         walk.moving
             .then(|| walk.phase * (WALK_STRIDE_BLOCKS / self.stride))
     }
 
     /// Where in its sway the body is, `sways` times a cycle, or `None` standing.
-    fn sway(&self, walk: WalkPose) -> Option<f32> {
+    pub(super) fn sway(&self, walk: WalkPose) -> Option<f32> {
         self.cycle(walk).map(|cycle| (cycle * self.sways).sin())
     }
 

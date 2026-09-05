@@ -24,11 +24,11 @@ use bevy::prelude::*;
 use super::camera::{ViewMode, WorldCamera};
 use super::hands::{mounted_hand_transform, view_field_of_view};
 use super::horse::{
-    BROW, EYE_COLOUR, HAIR_COLOUR, HORSE_HEIGHT, HorseCoats, LEATHER_COLOUR, MANE_REST, MANE_ROOT,
-    MANE_STRIP, MUZZLE, NECK_BASE, NECK_POLL, REIN_BIT, REIN_WIDTH, coat_colour, horse_ear_mesh,
-    horse_eye_mesh, lofted_along_y, lofted_along_z,
+    BROW, CANTER, EYE_COLOUR, HAIR_COLOUR, HORSE_HEIGHT, HorseCoats, LEATHER_COLOUR, MANE_REST,
+    MANE_ROOT, MANE_STRIP, MUZZLE, NECK_BASE, NECK_POLL, REIN_BIT, REIN_WIDTH, coat_colour,
+    horse_ear_mesh, horse_eye_mesh, lofted_along_y, lofted_along_z,
 };
-use super::{ApplySnapshots, InputMode, LocalMount};
+use super::{ApplySnapshots, Body, InputMode, LocalMount, WalkPose};
 use crate::net::Session;
 
 #[cfg(test)]
@@ -37,6 +37,17 @@ use super::camera::SADDLE_EYE_HEIGHT;
 /// The point the composition hangs from, in the horse's own space (feet at y = 0, facing
 /// -Z): the mane's root on the crest at the poll, where the head is hung and the neck ends.
 const CREST: Vec3 = MANE_ROOT;
+
+/// Six independently rooted strips partition the world mane's original crest span.
+const MANE_STRIPS: usize = 6;
+
+/// Four times the world mane's 0.035 rad: a distant silhouette needs only a hint, but the
+/// camera-space crest needs a readable ripple. Still small enough to keep every tip clear
+/// of the near plane across the canter and the full field-of-view range.
+const SADDLE_MANE_SWING: f32 = 0.14;
+
+/// One wave along the original strip length, delayed farther back from the poll.
+const MANE_PHASE_PER_BLOCK: f32 = std::f32::consts::TAU / MANE_STRIP.y;
 
 /// One block of horse is this much of camera space, at every field of view.
 const VIEW_SCALE: f32 = 0.30;
@@ -86,7 +97,7 @@ enum SaddlePart {
     Eye,
     Neck,
     NeckExtension,
-    Mane,
+    Mane(usize),
     Rein,
 }
 
@@ -127,26 +138,46 @@ fn ear(side: f32, field_of_view: f32) -> Piece {
     horse_piece(SaddlePart::Ear, horse_ear_mesh(side), field_of_view)
 }
 
-/// The mane at rest, lying along the crest exactly as the world horse wears it standing.
-fn mane(field_of_view: f32) -> Piece {
-    horse_piece(
-        SaddlePart::Mane,
-        Mesh::from(Cuboid::from_size(MANE_STRIP))
-            .translated_by(Vec3::Y * -MANE_STRIP.y / 2.0)
-            .transformed_by(
-                Transform::from_translation(MANE_ROOT)
-                    .with_rotation(Quat::from_rotation_x(MANE_REST)),
-            ),
-        field_of_view,
-    )
+/// Nod the entire composition about its crest on the world neck's canter sway. The
+/// world neck's forward lean belongs to its world pose; the saddle keeps its framing.
+fn horse_frame(field_of_view: f32, walk: WalkPose) -> Transform {
+    framing(field_of_view).with_rotation(Quat::from_rotation_x(
+        CANTER.sway(walk).unwrap_or(0.0) * CANTER.nod,
+    ))
+}
+
+/// Each root stays on the resting crest. Its short strip swings about that root, with a
+/// lag proportional to distance from the poll, so the motion travels toward the withers.
+fn mane_transform(strip: usize, walk: WalkPose) -> Transform {
+    let distance = strip as f32 * MANE_STRIP.y / MANE_STRIPS as f32;
+    let root = MANE_ROOT + Quat::from_rotation_x(MANE_REST) * (Vec3::NEG_Y * distance);
+    let swing = CANTER.cycle(walk).map_or(0.0, |cycle| {
+        (cycle - distance * MANE_PHASE_PER_BLOCK).sin() * SADDLE_MANE_SWING
+    });
+    Transform::from_translation(root - CREST)
+        .with_rotation(Quat::from_rotation_x(MANE_REST + swing))
+}
+
+fn mane(strip: usize, field_of_view: f32) -> Piece {
+    let size = Vec3::new(
+        MANE_STRIP.x,
+        MANE_STRIP.y / MANE_STRIPS as f32,
+        MANE_STRIP.z,
+    );
+    Piece {
+        part: SaddlePart::Mane(strip),
+        mesh: Mesh::from(Cuboid::from_size(size)).translated_by(Vec3::NEG_Y * size.y / 2.0),
+        transform: horse_frame(field_of_view, WalkPose::default())
+            * mane_transform(strip, WalkPose::default()),
+    }
 }
 
 /// The rein begins inside the shared bare fist and ends at the horse's own bit.
 /// Its unit bar keeps one mesh while the projection changes its length and direction.
-fn rein_transform(side: f32, field_of_view: f32) -> Transform {
+fn rein_transform(side: f32, field_of_view: f32, walk: WalkPose) -> Transform {
     let mirror = Vec3::new(side, 1.0, 1.0);
     let start = mounted_hand_transform(side, field_of_view).translation;
-    let end = framing(field_of_view).transform_point((REIN_BIT - CREST) * mirror);
+    let end = horse_frame(field_of_view, walk).transform_point((REIN_BIT - CREST) * mirror);
     let direction = end - start;
     Transform::from_translation((start + end) / 2.0)
         .with_rotation(Quat::from_rotation_arc(Vec3::Y, direction.normalize()))
@@ -158,12 +189,12 @@ fn rein(side: f32, field_of_view: f32) -> Piece {
     Piece {
         part: SaddlePart::Rein,
         mesh: Mesh::from(Cuboid::new(width, 1.0, width)),
-        transform: rein_transform(side, field_of_view),
+        transform: rein_transform(side, field_of_view, WalkPose::default()),
     }
 }
 
-fn pieces(field_of_view: f32) -> [Piece; 9] {
-    [
+fn pieces(field_of_view: f32) -> Vec<Piece> {
+    let mut pieces = vec![
         horse_piece(
             SaddlePart::Head,
             lofted_along_z(BROW, MUZZLE),
@@ -184,10 +215,11 @@ fn pieces(field_of_view: f32) -> [Piece; 9] {
             lofted_along_y(NECK_BASE.lowered(MANE_STRIP.y), NECK_BASE),
             field_of_view,
         ),
-        mane(field_of_view),
         rein(-1.0, field_of_view),
         rein(1.0, field_of_view),
-    ]
+    ];
+    pieces.extend((0..MANE_STRIPS).map(|strip| mane(strip, field_of_view)));
+    pieces
 }
 
 fn view_material(colour: Color) -> StandardMaterial {
@@ -235,7 +267,7 @@ fn create_view(
                 | SaddlePart::Neck
                 | SaddlePart::NeckExtension => coat_material.clone(),
                 SaddlePart::Eye => eye_material.clone(),
-                SaddlePart::Mane => mane_material.clone(),
+                SaddlePart::Mane(_) => mane_material.clone(),
                 SaddlePart::Rein => rein_material.clone(),
             };
             let part = piece.part;
@@ -269,18 +301,19 @@ fn attach_to_camera(
 }
 
 #[derive(SystemParam)]
-struct SaddleSubject<'w> {
+struct SaddleSubject<'w, 's> {
     mount: Res<'w, LocalMount>,
     mode: Res<'w, InputMode>,
     view: Res<'w, ViewMode>,
     session: Option<Res<'w, Session>>,
+    bodies: Query<'w, 's, (&'static Body, &'static WalkPose)>,
 }
 
 fn sync_view(
-    subject: SaddleSubject<'_>,
+    subject: SaddleSubject<'_, '_>,
     camera: Query<&Projection, With<WorldCamera>>,
     mut reins: Query<(&ReinSide, &mut Transform)>,
-    mut horse: Query<&mut Transform, (With<SaddlePart>, Without<ReinSide>)>,
+    mut horse: Query<(&SaddlePart, &mut Transform), Without<ReinSide>>,
     mut roots: Query<(&mut Visibility, &SaddleCoat), With<SaddleView>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -305,14 +338,28 @@ fn sync_view(
     }
 
     let field_of_view = view_field_of_view(camera.iter().next());
-    let next_frame = framing(field_of_view);
-    for mut transform in &mut horse {
-        if *transform != next_frame {
-            *transform = next_frame;
+    let walk = subject
+        .session
+        .as_ref()
+        .and_then(|session| {
+            subject
+                .bodies
+                .iter()
+                .find_map(|(body, walk)| (body.0 == session.0.entity_id).then_some(*walk))
+        })
+        .unwrap_or_default();
+    let next_frame = horse_frame(field_of_view, walk);
+    for (part, mut transform) in &mut horse {
+        let next = match part {
+            SaddlePart::Mane(strip) => next_frame * mane_transform(*strip, walk),
+            _ => next_frame,
+        };
+        if *transform != next {
+            *transform = next;
         }
     }
     for (side, mut transform) in &mut reins {
-        let next = rein_transform(side.0, field_of_view);
+        let next = rein_transform(side.0, field_of_view, walk);
         if *transform != next {
             *transform = next;
         }
@@ -430,12 +477,20 @@ mod tests {
             (SaddlePart::Eye, 1),
             (SaddlePart::NeckExtension, 1),
             (SaddlePart::Neck, 1),
-            (SaddlePart::Mane, 1),
             (SaddlePart::Rein, 2),
         ] {
             assert_eq!(found.iter().filter(|found| **found == part).count(), count);
         }
 
+        for strip in 0..MANE_STRIPS {
+            assert_eq!(
+                found
+                    .iter()
+                    .filter(|part| **part == SaddlePart::Mane(strip))
+                    .count(),
+                1
+            );
+        }
         app.insert_resource(LocalMount::default());
         app.update();
         assert_eq!(root(&mut app).0, Visibility::Hidden);
@@ -539,38 +594,277 @@ mod tests {
         );
     }
 
-    /// Reserve room for the existing canter's three-degree crest nod (#878), without
-    /// adding animation here. The continuation must clear the near plane too.
+    fn walking(cycle: f32) -> WalkPose {
+        let rate = CANTER
+            .cycle(WalkPose {
+                phase: 1.0,
+                moving: true,
+            })
+            .unwrap();
+        WalkPose {
+            phase: cycle / rate,
+            moving: true,
+        }
+    }
+
+    #[derive(Resource)]
+    struct TestWalk(WalkPose);
+
+    fn apply_test_snapshot(sample: Res<TestWalk>, mut bodies: Query<(&Body, &mut WalkPose)>) {
+        for (body, mut walk) in &mut bodies {
+            if body.0 == 7 {
+                *walk = sample.0;
+            }
+        }
+    }
+
+    fn animated_app() -> App {
+        let mut app = app();
+        app.insert_resource(LocalMount::from_server(Some(MountKind::BrownHorse)))
+            .insert_resource(TestWalk(WalkPose::default()))
+            .insert_resource(TestFieldOfView(view_field_of_view(None)))
+            .add_systems(Update, apply_test_snapshot.in_set(ApplySnapshots))
+            .add_systems(
+                Update,
+                change_test_projection.in_set(crate::settings::ApplyDisplaySettings),
+            );
+        // The remote body arrives first and moves even when the local hidden body stands.
+        app.world_mut().spawn((Body(9), walking(1.0)));
+        app.world_mut()
+            .spawn((Body(7), WalkPose::default(), Visibility::Hidden));
+        let camera = root(&mut app).1;
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(Projection::default());
+        app.update();
+        app
+    }
+
+    fn drawn_pieces(app: &mut App) -> Vec<Piece> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&SaddlePart, &Mesh3d, &Transform)>();
+        let meshes = world.resource::<Assets<Mesh>>();
+        query
+            .iter(world)
+            .map(|(part, mesh, transform)| Piece {
+                part: *part,
+                mesh: meshes.get(&mesh.0).unwrap().clone(),
+                transform: *transform,
+            })
+            .collect()
+    }
+
     #[test]
-    fn the_framing_leaves_room_for_a_three_degree_crest_nod() {
+    fn the_actual_canter_keeps_the_frame_and_near_plane_clear_and_reins_attached() {
+        let mut app = animated_app();
         for degrees in allowed_fields_of_view() {
             for phase in 0..8 {
-                let nod = 3.0_f32.to_radians() * (phase as f32 * std::f32::consts::TAU / 8.0).sin();
-                for mut piece in pieces(degrees.to_radians()) {
+                let cycle = phase as f32 * std::f32::consts::TAU / 8.0;
+                app.insert_resource(TestWalk(walking(cycle)))
+                    .insert_resource(TestFieldOfView(degrees.to_radians()));
+                app.update();
+                let pieces = drawn_pieces(&mut app);
+                let head = pieces
+                    .iter()
+                    .find(|piece| piece.part == SaddlePart::Head)
+                    .unwrap();
+                let expected_nod = Quat::from_rotation_x(CANTER.nod * cycle.sin());
+                assert!(head.transform.rotation.abs_diff_eq(expected_nod, 1e-6));
+                assert_eq!(
+                    head.transform.translation,
+                    framing(degrees.to_radians()).translation
+                );
+                let mut neck_bottom = f32::MAX;
+                for piece in &pieces {
                     if piece.part == SaddlePart::Rein {
-                        continue;
+                        let side = piece.transform.translation.x.signum();
+                        let start = piece.transform.transform_point(Vec3::NEG_Y * 0.5);
+                        let end = piece.transform.transform_point(Vec3::Y * 0.5);
+                        let fist = mounted_hand_transform(side, degrees.to_radians()).translation;
+                        assert!(start.abs_diff_eq(fist, 1e-6));
+                        // Undo the actual nodded head transform: the end is the bit inside
+                        // the unchanged head mesh, independent of camera projection.
+                        let local_end = head
+                            .transform
+                            .compute_affine()
+                            .inverse()
+                            .transform_point3(end)
+                            + CREST;
+                        assert!(local_end.abs_diff_eq(REIN_BIT * Vec3::new(side, 1.0, 1.0), 1e-6));
+                        let Some(VertexAttributeValues::Float32x3(positions)) =
+                            head.mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                        else {
+                            panic!("head positions");
+                        };
+                        let Some(VertexAttributeValues::Float32x3(normals)) =
+                            head.mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+                        else {
+                            panic!("head normals");
+                        };
+                        for (position, normal) in positions.iter().zip(normals) {
+                            let from_face = local_end - CREST - Vec3::from_array(*position);
+                            assert!(
+                                from_face.dot(Vec3::from_array(*normal)) <= 1e-6,
+                                "bit outside head face"
+                            );
+                        }
+                    } else if !matches!(piece.part, SaddlePart::Mane(_)) {
+                        assert_eq!(piece.transform, head.transform);
                     }
-                    piece.transform.rotation = Quat::from_rotation_x(nod);
-                    for point in vertices(&piece) {
+                    for point in vertices(piece) {
+                        assert!(point.is_finite());
                         assert!(
                             -point.z > CAMERA_NEAR,
                             "{degrees}/{phase}: {:?} near plane {point:?}",
                             piece.part
                         );
+                        let frame = projected(point, degrees);
                         if matches!(
                             piece.part,
                             SaddlePart::Head | SaddlePart::Ear | SaddlePart::Eye
                         ) {
-                            let frame = projected(point, degrees);
                             assert!(
                                 frame.x.abs() <= 1.0 && frame.y.abs() <= 1.0,
                                 "{degrees}/{phase}: {:?} nods outside {frame:?}",
                                 piece.part
                             );
+                            if degrees == narrowest_field_of_view() {
+                                assert!(point.y < 0.0);
+                            }
+                        }
+                        if matches!(piece.part, SaddlePart::Neck | SaddlePart::NeckExtension) {
+                            neck_bottom = neck_bottom.min(frame.y);
                         }
                     }
                 }
+                assert!(
+                    neck_bottom <= -1.0,
+                    "{degrees}/{phase}: neck ends at {neck_bottom}"
+                );
             }
+        }
+    }
+
+    #[test]
+    fn the_hidden_local_body_drives_a_travelling_wave_and_standing_is_exact_rest() {
+        let mut app = animated_app();
+        let fov = view_field_of_view(None);
+        let rest = drawn_pieces(&mut app);
+        for cycle in [0.31, 1.21] {
+            app.insert_resource(TestWalk(walking(cycle)));
+            app.update();
+            let moving = drawn_pieces(&mut app);
+            let frame = moving
+                .iter()
+                .find(|piece| piece.part == SaddlePart::Head)
+                .unwrap()
+                .transform;
+            let mut previous_angle: Option<f32> = None;
+            for strip in 0..MANE_STRIPS {
+                let piece = moving
+                    .iter()
+                    .find(|piece| piece.part == SaddlePart::Mane(strip))
+                    .unwrap();
+                let relative = frame.rotation.inverse() * piece.transform.rotation;
+                let distance = strip as f32 * MANE_STRIP.y / MANE_STRIPS as f32;
+                let angle =
+                    MANE_REST + (cycle - distance * MANE_PHASE_PER_BLOCK).sin() * SADDLE_MANE_SWING;
+                assert!(relative.abs_diff_eq(Quat::from_rotation_x(angle), 1e-6));
+                assert!(!relative.abs_diff_eq(Quat::from_rotation_x(MANE_REST), 1e-4));
+                if let Some(previous) = previous_angle {
+                    assert!((angle - previous).abs() > 1e-4);
+                }
+                previous_angle = Some(angle);
+                assert_ne!(
+                    piece.transform,
+                    rest.iter()
+                        .find(|piece| piece.part == SaddlePart::Mane(strip))
+                        .unwrap()
+                        .transform
+                );
+            }
+        }
+        // An arbitrary residual phase cannot leave any sway behind when moving is false.
+        app.insert_resource(TestWalk(WalkPose {
+            phase: 123.0,
+            moving: false,
+        }));
+        app.update();
+        for piece in drawn_pieces(&mut app) {
+            assert_eq!(
+                piece.transform,
+                rest.iter()
+                    .find(|rest| rest.part == piece.part
+                        && rest.transform.translation.x.signum()
+                            == piece.transform.translation.x.signum())
+                    .unwrap()
+                    .transform
+            );
+        }
+        for strip in 0..MANE_STRIPS {
+            assert_eq!(
+                mane_transform(
+                    strip,
+                    WalkPose {
+                        phase: 123.0,
+                        moving: false
+                    }
+                )
+                .rotation,
+                Quat::from_rotation_x(MANE_REST)
+            );
+        }
+        // Advancing the app with an unchanged snapshot must not dirty transforms.
+        app.update();
+        let world = app.world_mut();
+        let mut changed = world.query_filtered::<Entity, (With<SaddlePart>, Changed<Transform>)>();
+        assert_eq!(changed.iter(world).count(), 0);
+        assert_eq!(
+            horse_frame(
+                fov,
+                WalkPose {
+                    phase: 123.0,
+                    moving: false
+                }
+            ),
+            framing(fov)
+        );
+    }
+
+    #[test]
+    fn the_resting_strips_partition_the_original_mane_span() {
+        let moving = mane_transform(0, walking(std::f32::consts::FRAC_PI_2));
+        let rest = mane_transform(0, WalkPose::default());
+        let amplitude = moving.rotation.angle_between(rest.rotation);
+        assert!(amplitude >= 4.0 * 0.035 - 1e-5);
+        let fov = view_field_of_view(None);
+        assert!(
+            pieces(fov)
+                .iter()
+                .filter(|piece| matches!(piece.part, SaddlePart::Mane(_)))
+                .count()
+                >= 4
+        );
+        let original = horse_piece(
+            SaddlePart::Mane(0),
+            Mesh::from(Cuboid::from_size(MANE_STRIP))
+                .translated_by(Vec3::NEG_Y * MANE_STRIP.y / 2.0)
+                .transformed_by(
+                    Transform::from_translation(MANE_ROOT)
+                        .with_rotation(Quat::from_rotation_x(MANE_REST)),
+                ),
+            fov,
+        );
+        let (old_low, old_high) = extent(vertices(&original));
+        let (low, high) = extent((0..MANE_STRIPS).flat_map(|strip| vertices(&mane(strip, fov))));
+        assert!(low.abs_diff_eq(old_low, 1e-6));
+        assert!(high.abs_diff_eq(old_high, 1e-6));
+        for strip in 1..MANE_STRIPS {
+            let previous = mane_transform(strip - 1, WalkPose::default());
+            let previous_tip =
+                previous.transform_point(Vec3::NEG_Y * MANE_STRIP.y / MANE_STRIPS as f32);
+            let root = mane_transform(strip, WalkPose::default()).translation;
+            assert!(previous_tip.abs_diff_eq(root, 1e-6));
         }
     }
 
@@ -672,16 +966,19 @@ mod tests {
             let world = app.world_mut();
             let mut query = world.query::<(&ReinSide, &Transform, &Mesh3d)>();
             for (side, transform, mesh) in query.iter(world) {
-                assert_eq!(*transform, rein_transform(side.0, degrees.to_radians()));
+                assert_eq!(
+                    *transform,
+                    rein_transform(side.0, degrees.to_radians(), WalkPose::default())
+                );
                 assert!(original.contains(&mesh.0));
             }
-            let mut horse =
-                world.query_filtered::<&Transform, (With<SaddlePart>, Without<ReinSide>)>();
-            assert!(
-                horse
-                    .iter(world)
-                    .all(|transform| *transform == framing(degrees.to_radians()))
-            );
+            let mut horse = world.query_filtered::<(&SaddlePart, &Transform), Without<ReinSide>>();
+            assert!(horse.iter(world).all(|(part, transform)| *transform
+                == match part {
+                    SaddlePart::Mane(strip) =>
+                        framing(degrees.to_radians()) * mane_transform(*strip, WalkPose::default()),
+                    _ => framing(degrees.to_radians()),
+                }));
         }
     }
 
@@ -773,7 +1070,7 @@ mod tests {
         let materials = world.resource::<Assets<StandardMaterial>>();
         for (part, material) in parts.iter(world) {
             let colour = match part {
-                SaddlePart::Mane => HAIR_COLOUR,
+                SaddlePart::Mane(_) => HAIR_COLOUR,
                 SaddlePart::Rein => LEATHER_COLOUR,
                 SaddlePart::Eye => EYE_COLOUR,
                 _ => continue,
