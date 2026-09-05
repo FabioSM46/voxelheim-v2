@@ -124,6 +124,20 @@ assert headroom == 600, (
 # request exists, which is the only moment splitting one is cheap.
 diff_cap = assignments["DEEPSEEK_MAX_DIFF_CHARS"]
 formatted_cap = f"{diff_cap:,}"
+
+# The cap and the effort are one measurement, and this is where they are pinned together.
+# 45,000 was measured at `max`; the effort moved to `high` on #796 and the number stayed,
+# describing a ratio the reviewer no longer had — the same shape as the two caps before it
+# that described a context window. 90,000 is derived from seventeen replays at `high`
+# (#925). Both values are already parsed above, so the coupling costs one assertion:
+# change either and this names the other.
+assert (reasoning_effort, diff_cap) == ("high", 90_000), (
+    "DEEPSEEK_MAX_DIFF_CHARS and DEEPSEEK_REASONING_EFFORT are one measurement: the cap "
+    f"is derived from replays at a given effort. Found effort={reasoning_effort!r} "
+    f"cap={diff_cap}, expected ('high', 90000). Re-measure with "
+    "`pr-deepseek-force-review <pr> --measure-only --measure-cap <chars>` before "
+    "changing either, and update this pin with the new pair."
+)
 for text, label in (
     (agents_md, "AGENTS.md"),
     (process_skill, "process-pr SKILL.md"),

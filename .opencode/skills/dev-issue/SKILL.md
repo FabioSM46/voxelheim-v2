@@ -191,9 +191,9 @@ So estimate from the issue, using what this repository has actually measured:
 | What the issue looks like | Measured | Parts |
 | --- | --- | --- |
 | One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
-| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
-| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
-| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+| One workspace, a new module plus its tests | 45,000–60,000 | 1 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 2 |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 2+ |
 
 Two calibration points behind the bottom rows, both from Iteration 50: **#851** named eight new
 files in one workspace and came to 74,073 — five parts; **#850** touched `schemas`, `server` and
@@ -212,9 +212,12 @@ structural rather than accidental:
   finds work the acceptance criteria did not name, and review fixes then grow a branch again (#901
   went 44,973 → 48,682 answering three findings).
 
-So the arithmetic is a floor on the count, never the count: **estimate ÷ 45,000, rounded up, then
-add one for what you have not thought of, then let the seams decide the final number.** Aim each
-part at roughly 40,000 rather than 45,000, because the cap is a truncation point and not a target.
+So the arithmetic is a floor on the count, never the count: **estimate ÷ 90,000, rounded up, then
+add one when the estimate is within a third of the cap below a multiple of it — that is how low an
+estimate runs — then let the seams decide the final number.** Aim each part at roughly 80,000
+rather than 90,000, because the cap is a truncation point and not a target. That target is the same
+fraction of the cap the 40,000 of the 45,000 era was, kept deliberately rather than re-chosen: what
+changed on #925 is the cap, and nothing measured says the safe distance from it changed with it.
 
 **Two multipliers the file count hides.** Test-heavy changes run about two-thirds tests in this
 repository, so a module with real coverage is roughly three times its production code. And a field

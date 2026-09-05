@@ -320,9 +320,9 @@ measurements:
 | What the issue looks like | Measured | Pull requests |
 | --- | --- | --- |
 | One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
-| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
-| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
-| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+| One workspace, a new module plus its tests | 45,000–60,000 | 1 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 2 |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 2+ |
 
 Two multipliers the file count hides: changes here run about two-thirds tests, so a module with
 real coverage is roughly three times its production code; and a field added to a type constructed
