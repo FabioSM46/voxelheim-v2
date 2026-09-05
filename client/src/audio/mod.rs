@@ -49,6 +49,7 @@ mod codec;
 mod device;
 mod dsp;
 mod heard;
+mod listener;
 mod mixer;
 mod voice;
 
@@ -63,8 +64,13 @@ use device::{AudioCapture, AudioDevice};
 // that module's test can pin it rather than restating the number.
 #[allow(unused_imports)]
 pub use heard::{SPEAKING_FOR, Speaking};
+// `HEARD_FOR` and `MAX_VOICE` are the Voices panel's window and its ceiling, named here so
+// `ui/settings.rs`'s tests can pin them rather than restating the numbers — the reason
+// `SPEAKING_FOR` above carries the same allowance.
+#[allow(unused_imports)]
+pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
-pub use voice::{Transmitting, VoiceControls};
+pub use voice::{MicTest, MicrophoneMissing, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.
@@ -92,6 +98,7 @@ impl Plugin for AudioPlugin {
         let mixer = Arc::new(Mixer::new());
         let controls = AudioControls::default();
         mixer.set_gain(Bus::Master, controls.master_gain);
+        mixer.set_gain(Bus::Voice, controls.voice_gain);
         let speaker_test = mixer
             .claim(Bus::Master)
             .map(SpeakerTest::new)
@@ -112,13 +119,13 @@ impl Plugin for AudioPlugin {
             .insert_resource(capture)
             .insert_resource(controls)
             .insert_resource(speaker_test)
-            .insert_resource(LastListing(0))
+            .init_resource::<LastListing>()
             .add_plugins((voice::VoicePlugin, heard::HeardPlugin))
             .add_systems(
                 Update,
                 (
                     follow_the_settings,
-                    offer_the_output_devices,
+                    offer_the_devices,
                     apply_the_controls,
                     play_the_speaker_test,
                 )
@@ -155,6 +162,12 @@ impl AudioMixer {
 pub struct AudioControls {
     /// The master bus gain, `0.0` silent to `1.0` unity. Clamped by the mixer.
     pub master_gain: f32,
+    /// The voice bus gain, `0.0` silent to `1.0` unity. Clamped by the mixer.
+    ///
+    /// **Applied to the sources on [`Bus::Voice`] and then by the master**, which is the bus
+    /// arithmetic `audio/mixer.rs` states: a listener who turns the game down turns voice
+    /// down with it, and this is what they turn down *relative* to the game.
+    pub voice_gain: f32,
     /// Which output device to open, under the name its host gives it, or `None` for "follow
     /// whatever the system calls its default".
     ///
@@ -163,6 +176,15 @@ pub struct AudioControls {
     /// `audio/device.rs` matches it against the names the host answered with and nothing
     /// else.
     pub output_device: Option<String>,
+    /// Which input device to open when one is opened at all, under the name its host gives
+    /// it, or `None` for "follow whatever the system calls its default".
+    ///
+    /// The same shape as [`Self::output_device`] and resolved the same way. What differs is
+    /// entirely on the other side of the seam: a named loudspeaker that is not attached
+    /// leaves the client silent and retrying, and a named microphone that is not attached is
+    /// substituted by the host's default with a log line. `audio/device.rs` carries that
+    /// argument beside the code that makes the choice.
+    pub input_device: Option<String>,
     /// Set to play the speaker test once. **Taken back by this module**, so a caller sets
     /// it and never has to clear it.
     pub speaker_test: bool,
@@ -178,7 +200,9 @@ impl Default for AudioControls {
             // already this module's dependency: `follow_the_settings` below reads the
             // same accessor every frame.
             master_gain: Settings::default().master_gain(),
+            voice_gain: Settings::default().voice_gain(),
             output_device: None,
+            input_device: None,
             speaker_test: false,
         }
     }
@@ -263,7 +287,12 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
         return;
     }
     let gain = settings.master_gain();
+    let voice = settings.voice_gain();
     let device = match settings.output_device() {
+        DeviceChoice::SystemDefault => None,
+        DeviceChoice::Named(name) => Some(name.clone()),
+    };
+    let microphone = match settings.input_device() {
         DeviceChoice::SystemDefault => None,
         DeviceChoice::Named(name) => Some(name.clone()),
     };
@@ -274,30 +303,50 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
     if controls.master_gain != gain {
         controls.master_gain = gain;
     }
+    if controls.voice_gain != voice {
+        controls.voice_gain = voice;
+    }
     if controls.output_device != device {
         controls.output_device = device;
     }
+    if controls.input_device != microphone {
+        controls.input_device = microphone;
+    }
 }
 
-/// The device list's version number as this module last saw it — compared rather than the
-/// list, which [`AudioDevice::output_devices`] would clone under a lock every frame.
-#[derive(Resource, Debug)]
-struct LastListing(u64);
+/// Each supervisor's device-list version number as this module last saw it — compared rather
+/// than the list, which the supervisor would clone under a lock every frame.
+///
+/// **One per side**: the supervisors enumerate on their own schedules, so a shared counter
+/// would make each side's enumeration republish the other's list.
+#[derive(Resource, Debug, Default)]
+struct LastListing {
+    outputs: u64,
+    inputs: u64,
+}
 
-/// Hands the settings knob the device names the supervisor last enumerated — the other
+/// Hands the settings knobs the device names the supervisors last enumerated — the other
 /// direction across the same seam, and the only one: [`AudioDevices`] is a bound the machine
 /// owns, so the module that talks to the machine fills it.
-fn offer_the_output_devices(
+///
+/// **Both sides in one system**, because the answer goes into one resource: written
+/// separately, a frame would mark `AudioDevices` changed twice for nothing.
+fn offer_the_devices(
     device: Res<AudioDevice>,
+    capture: Res<AudioCapture>,
     mut last: ResMut<LastListing>,
     mut offered: ResMut<AudioDevices>,
 ) {
-    let listing = device.listings();
-    if listing == last.0 {
-        return;
+    let outputs = device.listings();
+    if outputs != last.outputs {
+        last.outputs = outputs;
+        offered.offer_outputs(device.output_devices());
     }
-    last.0 = listing;
-    offered.offer_outputs(device.output_devices());
+    let inputs = capture.listings();
+    if inputs != last.inputs {
+        last.inputs = inputs;
+        offered.offer_inputs(capture.input_devices());
+    }
 }
 
 /// Puts the master gain and the chosen device where [`AudioControls`] says.
@@ -307,12 +356,15 @@ fn apply_the_controls(
     controls: Res<AudioControls>,
     audio: Res<AudioMixer>,
     device: Res<AudioDevice>,
+    capture: Res<AudioCapture>,
 ) {
     if !controls.is_changed() {
         return;
     }
     audio.0.set_gain(Bus::Master, controls.master_gain);
+    audio.0.set_gain(Bus::Voice, controls.voice_gain);
     device.use_output(controls.output_device.clone());
+    capture.use_input(controls.input_device.clone());
 }
 
 /// Starts the speaker test when one is asked for, and keeps its ring fed while it plays.
@@ -434,6 +486,63 @@ mod tests {
             AudioControls::default().master_gain
         );
         assert!(!AudioControls::default().speaker_test);
+        // And the voice bus starts at unity, for the reason `settings/mod.rs` gives beside
+        // `DEFAULT_VOICE_VOLUME`: a voice has already lost what a room, a codec and a jitter
+        // buffer take from it, so there is nothing left to reserve headroom for.
+        assert!(
+            (AudioControls::default().voice_gain - 1.0).abs() < f32::EPSILON,
+            "voice starts at {} rather than unity",
+            AudioControls::default().voice_gain
+        );
+    }
+
+    /// **The voice knob is a bus gain, and the bus arithmetic is what makes it worth having.**
+    ///
+    /// `out = master * (voice * voice_sources + master_sources)`, so turning voice down moves
+    /// a source on `Bus::Voice` and leaves one on `Bus::Master` — the speaker test — exactly
+    /// where it was. Rendered rather than read back off the mixer, because "the gain was
+    /// stored" is a claim about a field and this is a claim about what a player hears.
+    #[test]
+    fn the_voice_volume_moves_the_voice_bus_and_leaves_the_rest_alone() {
+        let mixer = Arc::new(Mixer::new());
+        mixer.set_format(48_000, 1);
+        let on_voice = mixer.claim(Bus::Voice).expect("a free slot");
+        let on_master = mixer.claim(Bus::Master).expect("a free slot");
+
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .insert_resource(AudioControls::default())
+            .insert_resource(AudioMixer(Arc::clone(&mixer)))
+            .insert_resource(AudioDevice::idle())
+            .insert_resource(AudioCapture::idle())
+            .add_systems(Update, (follow_the_settings, apply_the_controls).chain());
+        app.update();
+
+        // Master at its default 0.8, voice at unity: the voice source arrives at 0.8 and so
+        // does the master one.
+        on_voice.push(&[1.0]);
+        on_master.push(&[0.0]);
+        assert!((rendered(&mixer, 1)[0] - 0.8).abs() < 1e-6);
+
+        let mut quieter = Settings::default();
+        quieter.adjust(Knob::VoiceVolume, -10);
+        assert_eq!(quieter.voice_volume(), 50);
+        *app.world_mut().resource_mut::<Settings>() = quieter;
+        app.update();
+
+        on_voice.push(&[1.0]);
+        on_master.push(&[0.0]);
+        assert!(
+            (rendered(&mixer, 1)[0] - 0.4).abs() < 1e-6,
+            "half the voice volume did not halve what a speaker is heard at"
+        );
+
+        on_voice.push(&[0.0]);
+        on_master.push(&[1.0]);
+        assert!(
+            (rendered(&mixer, 1)[0] - 0.8).abs() < 1e-6,
+            "turning voice down moved a source that is not on the voice bus"
+        );
     }
 
     /// **The seam, in one direction only.** The tab writes a setting, this module reads it,
@@ -471,29 +580,141 @@ mod tests {
         );
     }
 
-    /// **The device seam, both ways, with no device anywhere.** The supervisor's list
-    /// reaches the knob's bound; the knob's choice reaches the supervisor. `AudioDevice`
-    /// is built through `idle()`, which is the constructor that spawns no thread — the one
-    /// that does is what would open a stream.
-    #[test]
-    fn the_chosen_device_reaches_the_supervisor_and_its_list_reaches_the_knob() {
+    /// The systems that carry the two device seams, with no device anywhere: both
+    /// supervisors are built through `idle()`, the constructors that spawn no thread — the
+    /// ones that do are what would open a stream.
+    fn device_app() -> App {
         let mixer = Arc::new(Mixer::new());
         let mut app = App::new();
         app.insert_resource(Settings::default())
             .insert_resource(AudioControls::default())
             .insert_resource(AudioMixer(mixer))
             .insert_resource(AudioDevice::idle())
+            .insert_resource(AudioCapture::idle())
             .insert_resource(AudioDevices::default())
-            .insert_resource(LastListing(0))
+            .init_resource::<LastListing>()
             .add_systems(
                 Update,
-                (
-                    follow_the_settings,
-                    offer_the_output_devices,
-                    apply_the_controls,
-                )
-                    .chain(),
+                (follow_the_settings, offer_the_devices, apply_the_controls).chain(),
             );
+        app
+    }
+
+    /// **The microphone knob's bound is filled by the assembled client, not by a fixture.**
+    ///
+    /// The knob is stepped through the `AudioDevices` **this module's own system wrote**,
+    /// which is the whole of the assertion: a bound handed to `adjust_with_choices` by hand
+    /// would pass with nothing between the capture supervisor and the settings screen at all,
+    /// and the knob would sit on "system default" in a real client with nothing failing. The
+    /// review on #929 found exactly that gap, and this is what would have failed.
+    #[test]
+    fn the_microphone_knob_can_step_onto_a_device_the_capture_supervisor_enumerated() {
+        let mut app = device_app();
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioDevices>().inputs(),
+            AudioDevices::default().inputs(),
+            "a capture supervisor that has enumerated nothing offers nothing"
+        );
+
+        app.world().resource::<AudioCapture>().enumerated(vec![
+            "Built-in microphone".to_owned(),
+            "USB headset mic".to_owned(),
+        ]);
+        app.update();
+
+        let offered = app.world().resource::<AudioDevices>().clone();
+        let monitors = MonitorChoices::default();
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust_with_choices(
+                Knob::InputDevice,
+                1,
+                Choices {
+                    monitors: &monitors,
+                    devices: &offered,
+                },
+            );
+        assert_eq!(
+            app.world().resource::<Settings>().input_device(),
+            &crate::settings::DeviceChoice::Named("Built-in microphone".to_owned()),
+            "the knob could not step off the system default in an assembled client"
+        );
+
+        // And the two sides do not overwrite one another: each supervisor's listing counter
+        // is compared on its own, so the loudspeaker enumerating does not republish an empty
+        // microphone list over the one above.
+        app.world()
+            .resource::<AudioDevice>()
+            .enumerated(vec!["Built-in speakers".to_owned()]);
+        app.update();
+        let offered = app.world().resource::<AudioDevices>();
+        assert_eq!(
+            offered,
+            &AudioDevices::named(
+                &["Built-in speakers"],
+                &["Built-in microphone", "USB headset mic"]
+            ),
+            "one side's enumeration cleared the other's"
+        );
+    }
+
+    /// **The microphone knob reaches the capture supervisor**, which is the other half of the
+    /// seam part 2 only asserted one way. The choice is stepped through the `AudioDevices`
+    /// `offer_the_devices` wrote, so nothing here hands the model a list by hand.
+    #[test]
+    fn the_chosen_microphone_reaches_the_capture_supervisor() {
+        let mut app = device_app();
+        app.world().resource::<AudioCapture>().enumerated(vec![
+            "Built-in microphone".to_owned(),
+            "USB headset mic".to_owned(),
+        ]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            None,
+            "an untouched setting asks for no microphone in particular"
+        );
+
+        let offered = app.world().resource::<AudioDevices>().clone();
+        let monitors = MonitorChoices::default();
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust_with_choices(
+                Knob::InputDevice,
+                2,
+                Choices {
+                    monitors: &monitors,
+                    devices: &offered,
+                },
+            );
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioControls>().input_device,
+            Some("USB headset mic".to_owned())
+        );
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            Some("USB headset mic".to_owned()),
+            "the capture supervisor was never told which microphone to open"
+        );
+
+        // Back to the system default, which is an instruction and not an absence of one: the
+        // supervisor has to hear it, or it keeps opening the headset.
+        app.world_mut().resource_mut::<Settings>().reset(Tab::Audio);
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            None,
+            "resetting the tab left the supervisor holding the old microphone"
+        );
+    }
+
+    /// **The device seam, both ways, with no device anywhere.** The supervisor's list
+    /// reaches the knob's bound; the knob's choice reaches the supervisor.
+    #[test]
+    fn the_chosen_device_reaches_the_supervisor_and_its_list_reaches_the_knob() {
+        let mut app = device_app();
         app.update();
         assert_eq!(
             app.world().resource::<AudioDevices>(),
@@ -510,7 +731,7 @@ mod tests {
         let offered = app.world().resource::<AudioDevices>().clone();
         assert_eq!(
             offered,
-            AudioDevices::named(&["Built-in speakers", "USB headset"]),
+            AudioDevices::named(&["Built-in speakers", "USB headset"], &[]),
             "the knob's bound never heard about the devices"
         );
 
