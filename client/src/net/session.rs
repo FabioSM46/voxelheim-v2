@@ -1364,6 +1364,18 @@ impl Priority {
     pub(super) fn voice_depth(&self) -> usize {
         self.voice.depth()
     }
+
+    /// Every voice frame waiting, taken in order. Test-only: `audio/voice.rs`'s tests are
+    /// about the frames this client produces, and the far end of this queue is a writer
+    /// thread they deliberately do not have.
+    #[cfg(test)]
+    pub(super) fn taken_voice(&self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self.voice.pop() {
+            frames.push(frame);
+        }
+        frames
+    }
 }
 
 /// A lock taken even when it is poisoned, on `audio/device.rs`'s judgement: nothing behind it
