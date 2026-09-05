@@ -1094,6 +1094,32 @@ impl AudioCapture {
     }
 }
 
+/// The seams `audio/voice.rs`'s tests drive the pipeline through, with no device anywhere.
+///
+/// Test-only for the reason [`AudioDevice::idle`] is: [`AudioCapture::start`] is the one
+/// function that spawns the thread which would open one.
+#[cfg(test)]
+impl AudioCapture {
+    /// An `AudioCapture` with no supervisor.
+    pub(super) fn idle() -> Self {
+        Self {
+            watch: Arc::new(Watch::default()),
+            capture: Arc::new(Capture::new()),
+            supervisor: None,
+        }
+    }
+
+    /// Records a stream as the supervisor would when one opens.
+    pub(super) fn opened(&self, sample_rate: u32, channels: u16) {
+        self.capture.opened_at(sample_rate, channels);
+    }
+
+    /// Pushes one block as the capture callback would.
+    pub(super) fn fed(&self, block: &[f32]) {
+        self.capture.captured(block);
+    }
+}
+
 impl Drop for AudioCapture {
     /// Dropping the resource is how the app says "close the microphone".
     fn drop(&mut self) {
