@@ -1541,7 +1541,6 @@ consent is what was at stake. Reversed in part 9, with #853's acceptance criteri
 "falls back to the default with a log line" to a refusal the player is told about.
 
 **Both supervisors enumerate at startup, and only the loudspeaker's watches for a moved
-default.****Both supervisors enumerate at startup, and only the loudspeaker's watches for a moved
 default.** A bound that stayed empty until its device had been opened would be a knob a player
 could not *choose* with, so both publish before their first open, through `offer_the_devices`.
 What the microphone's supervisor deliberately lacks is `DEFAULT_MOVED`: a loudspeaker is open
