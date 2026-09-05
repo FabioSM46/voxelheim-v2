@@ -64,7 +64,7 @@
 //! configuration is reported and retried like any other failure. [`float_config`] carries
 //! the rest, including which rate it asks for and why it is not the highest one.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -73,7 +73,7 @@ use bevy::prelude::*;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, StreamError, SupportedStreamConfig};
 
-use super::mixer::{Mixer, Sink};
+use super::mixer::{Mixer, Ring, Sink};
 
 /// How long the supervisor sleeps between looks at a stream that is playing.
 ///
@@ -119,6 +119,29 @@ const fn why(loss: u8) -> &'static str {
         CHOICE_CHANGED => "a different output device was chosen in the settings",
         _ => "the audio backend reported an error",
     }
+}
+
+/// What a supervisor does with a stream that stopped: name it, and pace what comes next.
+///
+/// **`held` is the whole of the distinction, and without it both loops spin.** A stream that
+/// ran and then failed is reopened at once, because a device that was working a moment ago
+/// probably still exists. A stream that never ran — the error callback fired while `open` was
+/// still on the stack, which is exactly the case the loss code is cleared early for — leaves
+/// the hold loop's body unexecuted, so nothing has waited and nothing has been throttled.
+/// Measured at [`Pace::REAL`] before this existed: 456 654 output reopens and 588 591 capture
+/// reopens in 200 ms, under a module doc claiming that the retry is a wait and that the log is
+/// throttled. Found by review on #919.
+fn stopped(what: &str, loss: u8, held: bool, failures: &mut u32, watch: &Watch, pace: Pace) {
+    if held {
+        *failures = 0;
+        warn!("{what} stopped: {}. Reopening.", why(loss));
+        return;
+    }
+    if failures.is_multiple_of(FAILURE_LOG_EVERY) {
+        warn!("{what} will not stay open: {}. Retrying.", why(loss));
+    }
+    *failures = failures.saturating_add(1);
+    watch.rest(pace.after_failure);
 }
 
 /// Which device the player asked for, and which ones the host named.
@@ -260,6 +283,16 @@ impl Watch {
         self.stopping.load(Ordering::Acquire)
     }
 
+    /// Wakes the supervisor without asking it to stop.
+    ///
+    /// [`Self::stop`]'s shape rather than [`Self::lose`]'s: it runs on a Bevy thread, where
+    /// taking the lock costs nothing and a missed wakeup would cost a poll interval. Nothing
+    /// in an audio callback may call this.
+    fn nudge(&self) {
+        drop(self.quiet.lock().unwrap_or_else(PoisonError::into_inner));
+        self.wake.notify_all();
+    }
+
     /// Waits for a notification, or `at_most`, whichever comes first.
     ///
     /// A poisoned lock is taken anyway: nothing is stored behind it, so no invariant can
@@ -352,19 +385,24 @@ fn supervise<H: OutputHost>(
         watch.playing();
         match opened(host, wanted.as_deref(), mixer, watch) {
             Ok((stream, format)) => {
-                failures = 0;
-                info!(
-                    "audio output: {} at {} Hz, {} channel(s)",
-                    format.shown(),
-                    format.sample_rate,
-                    format.channels
-                );
+                // Not reset here any more: a stream that never runs must keep counting, or the
+                // throttle in `stopped` never engages. It is cleared by a stream that held.
+                if failures == 0 {
+                    info!(
+                        "audio output: {} at {} Hz, {} channel(s)",
+                        format.shown(),
+                        format.sample_rate,
+                        format.channels
+                    );
+                }
                 // Refreshed on an open rather than on a poll: an open is where this
                 // machine's devices most recently changed, and is rare enough to enumerate.
                 choice.publish(host.device_names());
 
+                let mut held = false;
                 while !watch.stopping() && watch.loss() == PLAYING {
                     watch.rest(pace.playing);
+                    held = true;
                     // Two things the error callback cannot see. The first is the player
                     // choosing a different device.
                     if choice.wanted() != wanted {
@@ -387,7 +425,7 @@ fn supervise<H: OutputHost>(
                 // with two streams open on one device.
                 drop(stream);
                 if !watch.stopping() {
-                    warn!("the audio stream stopped: {}. Reopening.", why(loss));
+                    stopped("the audio stream", loss, held, &mut failures, watch, pace);
                 }
             }
             Err(err) => {
@@ -646,6 +684,526 @@ fn named<E>(devices: impl Iterator<Item = Result<String, E>>) -> Vec<String> {
         }
     }
     names
+}
+
+// -----------------------------------------------------------------------------
+// The microphone. Same shape as everything above it, pointed the other way.
+// -----------------------------------------------------------------------------
+
+/// How many samples the capture ring holds.
+///
+/// **Samples, not milliseconds**, so how long it holds depends on the stream: a quarter of a
+/// second of mono at 48 kHz, 136 ms of stereo at 44.1 kHz, 62 ms of stereo at 96 kHz. The
+/// shortest is what the number has to be sized from, and the consumer is a Bevy system at the
+/// frame rate — so what this survives is a *stall*, not a steady rate mismatch. At 60 Hz the
+/// ring is emptied every 17 ms, and 62 ms is three of those.
+const CAPTURE_CAPACITY: usize = 12_000;
+
+/// The microphone, as everything above the platform sees it.
+///
+/// **The mirror of [`Mixer`], and deliberately so.** A callback the operating system will not
+/// wait for writes into a lock-free ring; a Bevy system reads it. What crosses between them is
+/// samples and four atomics, and the rule from `audio/mod.rs` is the same one, because it is
+/// the same kind of thread: no allocation, no lock, no logging, no Bevy type.
+///
+/// **The samples are the device's own**, interleaved at whatever rate and channel count it
+/// negotiated. Resampling them to 48 kHz mono is `audio/dsp.rs`'s job and it happens on the
+/// Bevy side, because a resampler carries state and a callback may not allocate the buffers
+/// one needs. [`Self::format`] is what a consumer reads to build the right one, and
+/// [`Self::generation`] is how it learns that the answer changed under it.
+#[derive(Debug)]
+pub struct Capture {
+    samples: Ring,
+    /// The open stream's rate, channel count and identity, in **one** word.
+    ///
+    /// **Three atomics would not be one answer, and the review on #919 is where that was
+    /// found.** Written separately, a consumer can read the new rate beside the old
+    /// generation — precisely the observation the generation exists to make impossible. The
+    /// three are one fact about one stream, so they are one atomic: 32 bits of rate, 16 of
+    /// channels, 16 of generation. See [`Self::pack`].
+    stream: AtomicU64,
+    /// Which stream the consumer has read from. **Written only by the consumer**, which is
+    /// what keeps [`Ring`]'s single-consumer assumption true — see [`Self::take`].
+    read_from: AtomicU32,
+    /// How many samples the callback has had to drop for a full ring. A diagnostic, never a
+    /// decision.
+    overruns: AtomicU64,
+    /// Whether anything above wants a stream open at all.
+    ///
+    /// **A microphone nobody asked for is never opened**, which is the whole of what
+    /// `VoiceMode::Off` means and the whole of what a server relaying no voice means. The
+    /// supervisor holds no device while this is false.
+    wanted: AtomicBool,
+    /// Makes the next [`Self::take`] observe a stream opening at the one moment no fixture
+    /// can otherwise put one: **between its two generation reads**.
+    ///
+    /// **A `cfg(test)` seam, on `Transport::Plaintext`'s precedent**, and it is here because
+    /// the alternatives were both worse. The branch it reaches is unreachable from any
+    /// sequential test — every reopen a reader can see *before* it starts is caught by the
+    /// skip above — and a concurrent fixture reaches it only sometimes: measured, a stress
+    /// loop caught a deliberately removed guard in one run of three, and tuning it either way
+    /// took the detection rate to zero. A guard nobody has watched fire is a guard nobody
+    /// knows the shape of, so the fixture places the reopen exactly.
+    #[cfg(test)]
+    reopen_mid_read: AtomicBool,
+}
+
+/// What one read of the capture ring produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Captured {
+    /// The rate and channel count the samples are in.
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// **A stream this reader had not read from before**, so nothing was appended and
+    /// whatever the caller was carrying — a resampler's tail, a part-built frame — belongs to
+    /// a stream that has ended. See [`Capture::take`].
+    pub fresh: bool,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Capture {
+    pub fn new() -> Self {
+        Self {
+            samples: Ring::new(CAPTURE_CAPACITY),
+            stream: AtomicU64::new(0),
+            read_from: AtomicU32::new(0),
+            overruns: AtomicU64::new(0),
+            wanted: AtomicBool::new(false),
+            #[cfg(test)]
+            reopen_mid_read: AtomicBool::new(false),
+        }
+    }
+
+    /// The three fields as one word: rate, then channels, then generation.
+    ///
+    /// The generation wraps every 65 536 streams and skips zero, so a packed word is zero if
+    /// and only if no stream has ever opened. Nothing compares two generations for order —
+    /// only for equality — so wrapping costs nothing.
+    const fn pack(sample_rate: u32, channels: u16, generation: u16) -> u64 {
+        (sample_rate as u64) | ((channels as u64) << 32) | ((generation as u64) << 48)
+    }
+
+    /// Records what a stream negotiated and marks it a new one.
+    ///
+    /// One store, so there is no window in which half of it is visible. Called between
+    /// building a stream and starting it, which is [`opened`]'s ordering and its reason: a
+    /// callback that ran first would fill the ring with samples described by the previous
+    /// stream's rate.
+    fn opened_at(&self, sample_rate: u32, channels: u16) {
+        let previous = (self.stream.load(Ordering::Relaxed) >> 48) as u16;
+        let generation = match previous.wrapping_add(1) {
+            0 => 1,
+            next => next,
+        };
+        self.stream.store(
+            Self::pack(sample_rate.max(1), channels.max(1), generation),
+            Ordering::Release,
+        );
+    }
+
+    /// The rate, channel count and identity of the open stream, or `None` before one has
+    /// opened. One atomic load, so the three are never a mixture of two streams.
+    ///
+    /// Test-only: what a consumer uses is [`Self::take`], which answers the same format
+    /// beside the samples it belongs to rather than as a separate question.
+    #[cfg(test)]
+    fn format(&self) -> Option<(u32, u16, u16)> {
+        let packed = self.stream.load(Ordering::Acquire);
+        if packed == 0 {
+            return None;
+        }
+        Some((packed as u32, (packed >> 32) as u16, (packed >> 48) as u16))
+    }
+
+    /// Appends everything the **current** stream has captured to `out`.
+    ///
+    /// **This is the whole consumer-side contract, and it is a method rather than a rule
+    /// because the review on #919 found what the rule costs.** A ring drained naively across
+    /// a reopen hands back the tail of one stream stitched onto the head of the next, at two
+    /// different sample rates, with nothing saying where the seam is — which is the
+    /// continuation the generation exists to preclude, arriving by the other door.
+    ///
+    /// Two things make that unreachable:
+    ///
+    /// - **A stream this reader has not read from before is skipped, not appended.** What is
+    ///   waiting then is the previous stream's tail plus however much of the new one has
+    ///   arrived since, and nothing can tell them apart — so both go, and the answer says
+    ///   [`Captured::fresh`] so the caller throws its own carried state away too. A reopen is
+    ///   a gap; the skip costs a few milliseconds inside one.
+    /// - **A stream that opens *while* this is reading invalidates the batch.** The
+    ///   generation is read again afterwards and `out` is put back exactly as it was;
+    ///   `None` is the answer, and the next call reports a fresh stream.
+    ///
+    /// **One consumer, which is why its position lives here.** [`Ring`] is single-consumer
+    /// and `read_from` is written by nobody else — the supervisor never touches the ring, so
+    /// no third party races the read index.
+    // The caller is the capture pipeline in #852 part 6, the first thing with a use for a
+    // captured sample. See `audio/dsp.rs` for why the seam is here.
+    #[allow(dead_code)]
+    pub fn take(&self, out: &mut Vec<f32>) -> Option<Captured> {
+        let before = self.stream.load(Ordering::Acquire);
+        if before == 0 {
+            return None;
+        }
+        let at = out.len();
+
+        // **One check for both paths, at one exit, and the review on #921 is why.** The first
+        // version put the re-read on the draining path only — the protection was understood
+        // and applied to one of two siblings, which is the shape that survives a review most
+        // easily. A rule of the form "remember to re-read the generation" would have the same
+        // fate at the third path, so there is no third place to put it: whichever branch runs,
+        // control reaches the comparison below before anything is returned.
+        let fresh =
+            self.read_from.swap((before >> 48) as u32, Ordering::AcqRel) != (before >> 48) as u32;
+        if fresh {
+            self.samples.skip();
+        } else {
+            self.samples.drain_into(out);
+        }
+        #[cfg(test)]
+        if self.reopen_mid_read.swap(false, Ordering::Relaxed) {
+            self.opened_at(before as u32, (before >> 32) as u16);
+        }
+
+        // The whole word, not the generation: a stream that moved changed its rate too, and
+        // an answer built from `before` would describe the one that ended.
+        if self.stream.load(Ordering::Acquire) != before {
+            out.truncate(at);
+            // Zero is never a live generation, so the next call answers `fresh` — and it
+            // answers it from the word that is live then.
+            self.read_from.store(0, Ordering::Release);
+            return None;
+        }
+        Some(Captured {
+            sample_rate: before as u32,
+            channels: (before >> 32) as u16,
+            fresh,
+        })
+    }
+
+    /// How many samples a full ring has cost. A diagnostic; nothing decides from it.
+    // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
+    // a captured sample. See `audio/dsp.rs` for why the seam is here.
+    #[allow(dead_code)]
+    pub fn overruns(&self) -> u64 {
+        self.overruns.load(Ordering::Relaxed)
+    }
+
+    /// Asks for a stream to be open, or for the one that is open to be closed.
+    ///
+    /// **Recorded here and woken by [`AudioCapture::listen`]**, which is the entry a caller
+    /// uses. The output side can afford to be noticed within one [`Pace::playing`] — half a
+    /// second is under the time it takes a player to look up from the mouse they just decided
+    /// with — but the first push-to-talk press is not that: waiting out a poll would lose half
+    /// a second of the first thing anybody says. Found by review on #919.
+    // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
+    // a captured sample. See `audio/dsp.rs` for why the seam is here.
+    #[allow(dead_code)]
+    pub fn listen(&self, wanted: bool) {
+        self.wanted.store(wanted, Ordering::Release);
+    }
+
+    /// Whether a stream is wanted.
+    pub fn wanted(&self) -> bool {
+        self.wanted.load(Ordering::Acquire)
+    }
+
+    /// **The whole of what runs in the capture callback.** One push into the ring, and a
+    /// counter when it will not all fit. No allocation, no lock, no logging, no Bevy type —
+    /// `audio/mod.rs`'s rule, on the other real-time thread.
+    ///
+    /// A full ring drops the newest samples rather than overwriting the oldest, which is
+    /// [`Ring::push`]'s behaviour and the right one here: the consumer is mid-frame, and
+    /// tearing the audio it is about to encode is worse than losing the tail of a block it
+    /// has not seen.
+    fn captured(&self, block: &[f32]) {
+        let taken = self.samples.push(block);
+        if taken < block.len() {
+            self.overruns
+                .fetch_add((block.len() - taken) as u64, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What the capture supervisor needs from an audio host.
+///
+/// [`OutputHost`]'s counterpart, and shorter by two methods: **there is no device choice
+/// here.** Naming an input device is #853, so this opens the host's default and nothing else,
+/// which means it needs neither an enumeration nor a default-moved check.
+trait InputHost {
+    /// A built stream that is not yet running. Dropping it closes the device.
+    type Stream;
+
+    /// Builds a stream on the host's default input device, without running it.
+    fn open(
+        &self,
+        capture: &Arc<Capture>,
+        watch: &Arc<Watch>,
+    ) -> Result<(Self::Stream, Format), String>;
+
+    /// Runs a stream [`Self::open`] built, so its callback begins.
+    fn start(&self, stream: &Self::Stream) -> Result<(), String>;
+}
+
+/// Opens a capture stream, records what it negotiated, and only then runs it.
+///
+/// [`opened`]'s ordering for the other direction and for the same reason: starting is what
+/// lets the callback run, and a consumer that read the previous stream's rate would resample
+/// by the wrong ratio for as long as it took to notice.
+fn opened_capture<H: InputHost>(
+    host: &H,
+    capture: &Arc<Capture>,
+    watch: &Arc<Watch>,
+) -> Result<(H::Stream, Format), String> {
+    let (stream, format) = host.open(capture, watch)?;
+    capture.opened_at(format.sample_rate, format.channels);
+    host.start(&stream)?;
+    Ok((stream, format))
+}
+
+/// The capture supervisor: wait, open, hold, close, wait.
+///
+/// [`supervise`] with one state more. The output stream is open whenever a device will have
+/// it, because a client with sound is always potentially making some; a microphone is open
+/// only while something above has asked for one, because an open microphone nobody asked for
+/// is not a thing this client may have. So this loop starts and ends in a wait.
+fn supervise_capture<H: InputHost>(
+    host: &H,
+    capture: &Arc<Capture>,
+    watch: &Arc<Watch>,
+    pace: Pace,
+) {
+    let mut failures: u32 = 0;
+    while !watch.stopping() {
+        if !capture.wanted() {
+            // Nothing is open and nothing is being held: this is the ordinary state of a
+            // client whose player has not pressed the key.
+            watch.rest(pace.playing);
+            continue;
+        }
+
+        // Cleared before the attempt and never after it, for the reason `supervise` states:
+        // a stream that fails while it is starting reports its loss while this call is still
+        // on the stack, and `cpal` reports a stream error once.
+        watch.playing();
+        match opened_capture(host, capture, watch) {
+            Ok((stream, format)) => {
+                // See the output supervisor: cleared by a stream that held, not by one that
+                // opened, so a stream that dies on every attempt is still throttled.
+                if failures == 0 {
+                    info!(
+                        "voice capture: {} at {} Hz, {} channel(s)",
+                        format.shown(),
+                        format.sample_rate,
+                        format.channels
+                    );
+                }
+                let mut held = false;
+                while !watch.stopping() && watch.loss() == PLAYING && capture.wanted() {
+                    watch.rest(pace.playing);
+                    held = true;
+                }
+                let loss = watch.loss();
+                let closed_on_request = !capture.wanted() && loss == PLAYING;
+                // Before anything else, so there is never a moment with two streams open on
+                // one device.
+                drop(stream);
+                if watch.stopping() {
+                    // Nothing to say: the app is going away.
+                } else if closed_on_request {
+                    info!("voice capture closed");
+                    failures = 0;
+                } else {
+                    stopped("voice capture", loss, held, &mut failures, watch, pace);
+                }
+            }
+            Err(err) => {
+                if failures.is_multiple_of(FAILURE_LOG_EVERY) {
+                    warn!("no voice capture ({err}); nothing this player says is sent");
+                }
+                failures = failures.saturating_add(1);
+                watch.rest(pace.after_failure);
+            }
+        }
+    }
+}
+
+/// The capture supervisor thread, as the ECS holds it.
+///
+/// [`AudioDevice`]'s counterpart: a handle, a stop flag and the shared ring. Building one is
+/// infallible for the same reason — a client that cannot start an audio thread is a client
+/// nobody can hear, not one that will not start.
+#[derive(Resource, Debug)]
+pub struct AudioCapture {
+    watch: Arc<Watch>,
+    capture: Arc<Capture>,
+    supervisor: Option<JoinHandle<()>>,
+}
+
+impl AudioCapture {
+    /// Starts the supervisor. **No device is opened until something calls
+    /// [`Capture::listen`]** with `true`.
+    pub fn start() -> Self {
+        let watch = Arc::new(Watch::default());
+        let capture = Arc::new(Capture::new());
+        let supervisor = thread::Builder::new()
+            .name("voxelheim-voice-capture".to_owned())
+            .spawn({
+                let watch = Arc::clone(&watch);
+                let capture = Arc::clone(&capture);
+                move || supervise_capture(&CpalHost::new(), &capture, &watch, Pace::REAL)
+            })
+            .map_err(|err| {
+                warn!(
+                    "the voice capture thread would not start ({err}); nobody can hear this player"
+                )
+            })
+            .ok();
+        Self {
+            watch,
+            capture,
+            supervisor,
+        }
+    }
+
+    /// The ring and the flags, for the pipeline above.
+    // Read by the capture pipeline in #852 part 6, which is the first thing with a use for
+    // a captured sample. See `audio/dsp.rs` for why the seam is here.
+    #[allow(dead_code)]
+    pub fn shared(&self) -> &Arc<Capture> {
+        &self.capture
+    }
+
+    /// Asks for a stream to be open, or closed, and wakes the supervisor.
+    ///
+    /// **The wake is the point, and it is why this is here rather than on [`Capture`].** The
+    /// flag lives with the ring, where the supervisor reads it; the condvar the supervisor
+    /// sleeps on lives with [`Watch`], and only this resource holds both. Without the wake a
+    /// press waits out a whole [`POLL_WHILE_PLAYING`] before a device is even asked for — half
+    /// a second off the front of the first thing anybody says.
+    // Called by the capture pipeline in #852 part 6.
+    #[allow(dead_code)]
+    pub fn listen(&self, wanted: bool) {
+        self.capture.listen(wanted);
+        self.watch.nudge();
+    }
+}
+
+/// The seams `audio/voice.rs`'s tests drive the pipeline through, with no device anywhere.
+///
+/// Test-only for the reason [`AudioDevice::idle`] is: [`AudioCapture::start`] is the one
+/// function that spawns the thread which would open one.
+#[cfg(test)]
+impl AudioCapture {
+    /// An `AudioCapture` with no supervisor.
+    pub(super) fn idle() -> Self {
+        Self {
+            watch: Arc::new(Watch::default()),
+            capture: Arc::new(Capture::new()),
+            supervisor: None,
+        }
+    }
+
+    /// Records a stream as the supervisor would when one opens.
+    pub(super) fn opened(&self, sample_rate: u32, channels: u16) {
+        self.capture.opened_at(sample_rate, channels);
+    }
+
+    /// Pushes one block as the capture callback would.
+    pub(super) fn fed(&self, block: &[f32]) {
+        self.capture.captured(block);
+    }
+}
+
+impl Drop for AudioCapture {
+    /// Dropping the resource is how the app says "close the microphone".
+    fn drop(&mut self) {
+        self.watch.stop();
+        if let Some(supervisor) = self.supervisor.take() {
+            let _ = supervisor.join();
+        }
+    }
+}
+
+impl InputHost for CpalHost {
+    type Stream = cpal::Stream;
+
+    fn open(
+        &self,
+        capture: &Arc<Capture>,
+        watch: &Arc<Watch>,
+    ) -> Result<(cpal::Stream, Format), String> {
+        let device = self
+            .0
+            .default_input_device()
+            .ok_or_else(|| "this host has no default input device".to_owned())?;
+        let name = device.name().ok();
+        let config = float_input_config(&device).ok_or_else(|| {
+            let shown = name.as_deref().unwrap_or(UNNAMED);
+            format!("{shown} offers no 32-bit float input configuration")
+        })?;
+        let format = Format {
+            name,
+            sample_rate: config.sample_rate().0,
+            channels: config.channels(),
+        };
+
+        let recording = Arc::clone(capture);
+        let lost = Arc::clone(watch);
+        let stream = device
+            .build_input_stream(
+                &config.config(),
+                // The capture callback, and the whole of it.
+                move |block: &[f32], _: &cpal::InputCallbackInfo| {
+                    recording.captured(block);
+                },
+                // The error callback, on that same thread. A number, and a notify.
+                move |err| {
+                    lost.lose(match err {
+                        StreamError::DeviceNotAvailable => DEVICE_GONE,
+                        StreamError::BackendSpecific { .. } => BACKEND_ERROR,
+                    });
+                },
+                None,
+            )
+            .map_err(|err| format!("cannot open {}: {err}", format.shown()))?;
+        Ok((stream, format))
+    }
+
+    fn start(&self, stream: &cpal::Stream) -> Result<(), String> {
+        stream
+            .play()
+            .map_err(|err| format!("cannot start the capture stream: {err}"))
+    }
+}
+
+/// The float configuration this input device should be opened with, if it has one.
+///
+/// [`float_config`]'s reasoning, verbatim, on the input side: the device's *default* rate
+/// rather than its maximum, because the platform's own mixer runs at the default and asking
+/// for 192 kHz would only make it resample. `audio/dsp.rs` converts whatever this negotiates
+/// to 48 kHz mono, so a rate closer to the device's own is a conversion this client does once
+/// instead of one the operating system does first.
+fn float_input_config(device: &cpal::Device) -> Option<SupportedStreamConfig> {
+    let default = device.default_input_config().ok()?;
+    if default.sample_format() == SampleFormat::F32 {
+        return Some(default);
+    }
+    let wanted = default.sample_rate().0;
+    device
+        .supported_input_configs()
+        .ok()?
+        .filter(|range| range.sample_format() == SampleFormat::F32)
+        .filter_map(|range| {
+            let rate = wanted.clamp(range.min_sample_rate().0, range.max_sample_rate().0);
+            range.try_with_sample_rate(SampleRate(rate))
+        })
+        .min_by_key(|config| (config.sample_rate().0.abs_diff(wanted), config.channels()))
 }
 
 /// **No test below opens an audio device.** Every one drives [`supervise`] through
@@ -1160,5 +1718,566 @@ mod tests {
             "unreadable, duplicate and empty names are all dropped"
         );
         assert!(named(std::iter::empty::<Result<String, ()>>()).is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // The microphone
+    // -------------------------------------------------------------------------
+
+    /// An [`InputHost`] that opens nothing and records what it was asked for.
+    ///
+    /// **No test below opens an input device either.** [`CpalHost`] is the only code here
+    /// that reaches the platform, and nothing in this module constructs one.
+    #[derive(Default)]
+    struct FakeInput {
+        answers: Mutex<VecDeque<Result<Format, String>>>,
+        opens: AtomicUsize,
+        live: Arc<AtomicUsize>,
+        /// The capture the supervisor drives, kept so `open` can push samples into it the way
+        /// a real callback would.
+        captured: Mutex<Vec<f32>>,
+        /// Makes the next `open` report a loss while `open` is still on the stack.
+        lose_while_opening: AtomicBool,
+        /// The same, for every `open` rather than the next one.
+        always_lose_while_opening: AtomicBool,
+        /// The capture's sample rate when each `start` was called — how a test sees whether
+        /// the format was recorded before the callback could run.
+        rate_at_start: Mutex<Vec<u32>>,
+        /// Set by `open` so `start` can reach the shared state.
+        shared: Mutex<Option<Arc<Capture>>>,
+    }
+
+    impl FakeInput {
+        fn answering(answers: Vec<Result<Format, String>>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: Mutex::new(answers.into()),
+                ..Self::default()
+            })
+        }
+
+        fn opens(&self) -> usize {
+            self.opens.load(Ordering::Relaxed)
+        }
+    }
+
+    impl InputHost for Arc<FakeInput> {
+        type Stream = FakeStream;
+
+        fn open(
+            &self,
+            capture: &Arc<Capture>,
+            watch: &Arc<Watch>,
+        ) -> Result<(FakeStream, Format), String> {
+            self.opens.fetch_add(1, Ordering::Relaxed);
+            *lock(&self.shared) = Some(Arc::clone(capture));
+            let answer = {
+                let mut answers = lock(&self.answers);
+                match answers.len() {
+                    0 => Err("nothing left to answer".to_owned()),
+                    1 => answers[0].clone(),
+                    _ => answers.pop_front().expect("a queued answer"),
+                }
+            };
+            if self.lose_while_opening.swap(false, Ordering::Relaxed)
+                || self.always_lose_while_opening.load(Ordering::Relaxed)
+            {
+                watch.lose(DEVICE_GONE);
+            }
+            let format = answer?;
+            self.live.fetch_add(1, Ordering::Relaxed);
+            Ok((FakeStream(Arc::clone(&self.live)), format))
+        }
+
+        fn start(&self, _stream: &FakeStream) -> Result<(), String> {
+            let capture = lock(&self.shared).clone();
+            if let Some(capture) = capture {
+                lock(&self.rate_at_start).push(
+                    capture
+                        .format()
+                        .map(|(rate, _, _)| rate)
+                        .unwrap_or_default(),
+                );
+                // What the platform's callback does, and the whole of it.
+                let block = lock(&self.captured).clone();
+                if !block.is_empty() {
+                    capture.captured(&block);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Runs the capture supervisor until `done` answers true, then stops it and joins.
+    fn drive_capture(
+        host: &Arc<FakeInput>,
+        capture: &Arc<Capture>,
+        done: impl Fn() -> bool,
+    ) -> Arc<Watch> {
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(host);
+            let capture = Arc::clone(capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let reached = done();
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+        assert!(reached, "the supervisor never got there");
+        watch
+    }
+
+    /// **The state a client that has never asked for voice sits in for ever.** The supervisor
+    /// runs and no device is opened — which is the acceptance criterion's "the capture stream
+    /// is never opened", and it is a property of this loop rather than of its callers.
+    #[test]
+    fn a_microphone_nobody_asked_for_is_never_opened() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        let capture = Arc::new(Capture::new());
+        assert!(!capture.wanted());
+
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+        };
+        // Long enough for hundreds of passes at `BRISK`.
+        thread::sleep(Duration::from_millis(50));
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+
+        assert_eq!(host.opens(), 0, "a device was opened for nobody");
+        assert_eq!(
+            capture.format(),
+            None,
+            "a format was recorded for no stream"
+        );
+    }
+
+    /// Asked for, opened; unasked, closed. And the format is recorded **before** the stream
+    /// starts, so no callback can run while a consumer would read the previous stream's rate.
+    #[test]
+    fn a_stream_opens_when_it_is_asked_for_and_closes_when_it_is_not() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 44_100, 2))]);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+
+        let live = Arc::clone(&host.live);
+        // **Waited on the thing that is asserted, not on the open count.** `opens` is bumped
+        // at the *top* of `open`, before the format is recorded, so a test that waited on it
+        // could read the format a microsecond too early — which it did, in about one run in
+        // three. `rate_at_start` is pushed by `start`, which is the last step of a completed
+        // open, so it is the point after which every assertion below is settled.
+        let opened = {
+            let host = Arc::clone(&host);
+            move || !lock(&host.rate_at_start).is_empty()
+        };
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !opened() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(host.opens(), 1);
+        assert_eq!(capture.format(), Some((44_100, 2, 1)));
+        assert_eq!(
+            lock(&host.rate_at_start).as_slice(),
+            &[44_100],
+            "the stream started before its format was recorded"
+        );
+
+        // Now say no, and the stream is dropped without the supervisor ending.
+        capture.listen(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while live.load(Ordering::Relaxed) != 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(
+            live.load(Ordering::Relaxed),
+            0,
+            "the microphone stayed open after it was let go"
+        );
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+        assert_eq!(host.opens(), 1, "it reopened a device nobody asked for");
+    }
+
+    /// A microphone that will not open is a log line and a client nobody can hear, never a
+    /// panic and never a spin — [`supervise`]'s rule, on the other direction.
+    #[test]
+    fn a_microphone_that_will_not_open_is_retried_rather_than_fatal() {
+        let host = FakeInput::answering(vec![
+            Err("no default input device".to_owned()),
+            Err("still nothing".to_owned()),
+            Ok(format("a microphone", 48_000, 1)),
+        ]);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        drive_capture(&host, &capture, {
+            let capture = Arc::clone(&capture);
+            // The format, not the open count: see the note in the test above.
+            move || capture.format().is_some()
+        });
+        assert_eq!(
+            capture.format(),
+            Some((48_000, 1, 1)),
+            "the third attempt's format was never recorded"
+        );
+    }
+
+    /// **A microphone that will not open is a wait, not a spin** — and the module doc says so,
+    /// which until #919 it had no right to on either supervisor. Mutation-checked: deleting
+    /// `watch.rest(pace.after_failure)` from the `Err` arm left the whole suite green before
+    /// this test existed.
+    #[test]
+    fn a_failing_capture_open_waits_rather_than_spinning() {
+        let host = FakeInput::answering(vec![Err("no default input device".to_owned())]);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || {
+                supervise_capture(
+                    &host,
+                    &capture,
+                    &watch,
+                    Pace {
+                        playing: Duration::from_millis(1),
+                        after_failure: Duration::from_secs(2),
+                    },
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            host.opens(),
+            1,
+            "one attempt, then a wait — a retry loop that spun would have made hundreds"
+        );
+
+        // And the wait is interruptible: stopping does not have to outlast it.
+        let stopped = Instant::now();
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+        assert!(stopped.elapsed() < Duration::from_secs(2));
+    }
+
+    /// **A stream that dies before it ever runs is paced and throttled like any other
+    /// failure.** It is the one path where the hold loop's body never executes, so nothing
+    /// waits unless something says so — measured at 588 591 reopens in 200 ms before #919.
+    #[test]
+    fn a_capture_stream_that_never_runs_is_not_reopened_in_a_spin() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        // Every attempt loses the stream while `open` is still on the stack.
+        host.always_lose_while_opening
+            .store(true, Ordering::Relaxed);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || {
+                supervise_capture(
+                    &host,
+                    &capture,
+                    &watch,
+                    Pace {
+                        playing: Duration::from_millis(1),
+                        after_failure: Duration::from_secs(2),
+                    },
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(60));
+        let opens = host.opens();
+        assert!(
+            opens <= 2,
+            "a stream that never ran was reopened {opens} times in 60 ms"
+        );
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+    }
+
+    /// **The first press must not wait out a poll.** `AudioCapture::listen` wakes the
+    /// supervisor, so a device is asked for at once rather than up to `POLL_WHILE_PLAYING`
+    /// later — half a second off the front of the first thing anybody says.
+    #[test]
+    fn asking_for_a_microphone_wakes_the_supervisor_rather_than_waiting_out_a_poll() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        let capture = Arc::new(Capture::new());
+        let watch = Arc::new(Watch::default());
+        // A pace whose idle poll is far longer than this test will wait for.
+        let pace = Pace {
+            playing: Duration::from_secs(30),
+            after_failure: Duration::from_secs(30),
+        };
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, pace))
+        };
+
+        // Let it reach the idle wait before anything asks.
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(host.opens(), 0, "a device was opened for nobody");
+
+        let asked = Instant::now();
+        capture.listen(true);
+        watch.nudge();
+        let deadline = asked + Duration::from_secs(5);
+        while host.opens() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let waited = asked.elapsed();
+        assert_eq!(host.opens(), 1, "the press opened nothing");
+        assert!(
+            waited < Duration::from_secs(1),
+            "the press waited {waited:?}, which is the poll rather than a wake"
+        );
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+    }
+
+    /// A stream that dies while it is starting reports its loss with `open` still on the
+    /// stack. Clearing the loss code afterwards would discard the only notification there is,
+    /// and this is the mirror of the output side's assertion.
+    #[test]
+    fn a_capture_stream_that_dies_while_opening_is_reopened() {
+        let host = FakeInput::answering(vec![Ok(format("a microphone", 48_000, 1))]);
+        host.lose_while_opening.store(true, Ordering::Relaxed);
+        let capture = Arc::new(Capture::new());
+        capture.listen(true);
+        drive_capture(&host, &capture, {
+            let host = Arc::clone(&host);
+            move || host.opens() >= 2
+        });
+        assert!(
+            capture
+                .format()
+                .is_some_and(|(_, _, generation)| generation >= 2),
+            "the second stream was never recorded as a new one"
+        );
+    }
+
+    /// **The ring, in the order it was written, and what would not fit.**
+    ///
+    /// The ramp is the point: with one value in every slot the ordering assertion below holds
+    /// for any subset in any order, which is what the review on #919 found — inverting
+    /// `captured` to keep the newest left the whole suite green. Part 5 counts the overruns
+    /// and says only that, because nothing there can read the ring at all; this is the part
+    /// where `Capture::take` exists, so this is where the ordering can be seen.
+    #[test]
+    fn the_capture_ring_is_read_in_order_and_counts_what_it_could_not_hold() {
+        let capture = Capture::new();
+        capture.opened_at(48_000, 1);
+        let mut heard = Vec::new();
+        // The first read of a stream is the skip: see `Capture::take`.
+        assert_eq!(
+            capture.take(&mut heard),
+            Some(Captured {
+                sample_rate: 48_000,
+                channels: 1,
+                fresh: true
+            })
+        );
+
+        capture.captured(&[0.25, -0.5, 0.75]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard, vec![0.25, -0.5, 0.75]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 3, "reading nothing changed the buffer");
+        assert_eq!(capture.overruns(), 0);
+
+        // **A ramp, not a constant, and the review on #919 is why.** With the same value in
+        // every slot the assertion below holds for any subset in any order — mutating
+        // `captured` to keep the *newest* and drop the oldest left the whole suite green. A
+        // ramp makes the identity of the first and last sample the thing under test.
+        let ramp: Vec<f32> = (0..CAPTURE_CAPACITY + 40).map(|at| at as f32).collect();
+        capture.captured(&ramp);
+        assert_eq!(capture.overruns(), 40);
+        heard.clear();
+        capture.take(&mut heard).expect("a stream is open");
+        assert_eq!(heard.len(), CAPTURE_CAPACITY);
+        assert_eq!(heard[0], 0.0, "the oldest sample was dropped or reordered");
+        assert_eq!(
+            heard[CAPTURE_CAPACITY - 1],
+            (CAPTURE_CAPACITY - 1) as f32,
+            "the ring kept the newest samples rather than refusing them"
+        );
+        assert!(
+            heard
+                .iter()
+                .enumerate()
+                .all(|(at, sample)| *sample == at as f32),
+            "the ring did not read back in the order it was written"
+        );
+    }
+
+    /// Two streams can negotiate the same rate and still be two streams, and the three fields
+    /// are read as one word so a consumer can never see one stream's rate beside another's
+    /// identity.
+    #[test]
+    fn a_second_stream_at_the_same_rate_is_still_a_new_stream() {
+        let capture = Capture::new();
+        assert_eq!(capture.format(), None, "a format before any stream");
+        capture.opened_at(48_000, 1);
+        assert_eq!(capture.format(), Some((48_000, 1, 1)));
+        capture.opened_at(48_000, 1);
+        assert_eq!(
+            capture.format(),
+            Some((48_000, 1, 2)),
+            "the samples across a reopen are a gap, not a continuation"
+        );
+
+        // The packing is what makes the tuple atomic, so it is worth pinning that the three
+        // fields survive it — including a generation that has wrapped past its ceiling.
+        assert_eq!(
+            Capture::pack(44_100, 2, 7),
+            u64::from(44_100u32) | (2u64 << 32) | (7u64 << 48)
+        );
+        let wrapped = Capture::new();
+        wrapped
+            .stream
+            .store(Capture::pack(1, 1, u16::MAX), Ordering::Relaxed);
+        wrapped.opened_at(96_000, 2);
+        assert_eq!(
+            wrapped.format(),
+            Some((96_000, 2, 1)),
+            "the generation wrapped onto zero, which means no stream at all"
+        );
+    }
+
+    /// **The seam a reopen leaves, and the whole reason `take` is a method.**
+    ///
+    /// The ring can hold the tail of one stream and the head of the next at two different
+    /// sample rates, with nothing marking where one ends. A naive drain hands both back as
+    /// one batch — the review on #919 found exactly that — so the first read of a stream this
+    /// reader has not seen throws the ring away and says so.
+    #[test]
+    fn samples_are_never_spliced_across_a_reopen() {
+        let capture = Capture::new();
+        capture.opened_at(48_000, 1);
+        let mut heard = Vec::new();
+        capture
+            .take(&mut heard)
+            .expect("the first read is the skip");
+
+        // Half a second of the first stream, read normally.
+        capture.captured(&[0.5; 100]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 100);
+
+        // Its tail is still in the ring when the device is reopened at another rate, and more
+        // arrives from the new stream before anything reads again.
+        capture.captured(&[0.5; 40]);
+        capture.opened_at(16_000, 2);
+        capture.captured(&[-0.25; 60]);
+
+        let read = capture.take(&mut heard).expect("a stream is open");
+        assert!(read.fresh, "a reopen was reported as a continuation");
+        assert_eq!(read.sample_rate, 16_000, "the old stream's rate came back");
+        assert_eq!(
+            heard.len(),
+            100,
+            "the tail of one stream was spliced onto the head of another"
+        );
+
+        // And from there the new stream reads normally.
+        capture.captured(&[-0.75; 10]);
+        let read = capture.take(&mut heard).expect("a stream is open");
+        assert!(!read.fresh);
+        assert_eq!(heard.len(), 110);
+        assert!(heard[100..].iter().all(|sample| *sample == -0.75));
+    }
+
+    /// A stream that opens *while* a read is running makes the batch two streams spliced,
+    /// and there is no way to say where the seam is — so the batch is discarded and the
+    /// caller's buffer is put back exactly as it was.
+    ///
+    /// The reopen is placed by [`Capture::reopen_mid_read`]; that field's doc says why a
+    /// fixture has to place it rather than race for it.
+    #[test]
+    fn a_reopen_during_a_read_discards_the_batch_rather_than_handing_it_over() {
+        let capture = Capture::new();
+        capture.opened_at(48_000, 1);
+        let mut heard = vec![9.0, 9.0];
+        capture
+            .take(&mut heard)
+            .expect("the first read is the skip");
+
+        capture.captured(&[0.5; 20]);
+        assert_eq!(capture.take(&mut heard).map(|read| read.fresh), Some(false));
+        assert_eq!(heard.len(), 22, "an ordinary read appends");
+
+        // Now the reopen lands between the two generation reads inside `take`.
+        capture.captured(&[0.5; 30]);
+        capture.reopen_mid_read.store(true, Ordering::Relaxed);
+        assert_eq!(
+            capture.take(&mut heard),
+            None,
+            "a batch spanning a reopen was handed over"
+        );
+        assert_eq!(heard.len(), 22, "the caller's buffer was left changed");
+
+        // And the next read reports a fresh stream, so the caller throws its own carried
+        // state away.
+        assert!(
+            capture.take(&mut heard).is_some_and(|read| read.fresh),
+            "the read after a discarded batch did not report a fresh stream"
+        );
+        assert_eq!(heard.len(), 22, "a fresh stream appended something");
+
+        // **And the same on the skipping path**, which is the half the review on #921 found
+        // unprotected: a reopen that lands while a *fresh* read is skipping would otherwise
+        // answer with the ended stream's rate and leave the reader's position on the old
+        // generation, so the call after it would report `fresh` a second time.
+        capture.opened_at(16_000, 2);
+        capture.captured(&[0.5; 30]);
+        capture.reopen_mid_read.store(true, Ordering::Relaxed);
+        assert_eq!(
+            capture.take(&mut heard),
+            None,
+            "a skip that a reopen ran through answered anyway"
+        );
+        let after = capture.take(&mut heard).expect("a stream is open");
+        assert!(after.fresh);
+        assert_eq!(
+            after.sample_rate, 16_000,
+            "the answer described the stream that ended"
+        );
+        assert!(
+            !capture.take(&mut heard).expect("a stream is open").fresh,
+            "the same stream was reported fresh twice"
+        );
     }
 }
