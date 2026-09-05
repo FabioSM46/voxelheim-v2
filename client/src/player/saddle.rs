@@ -24,8 +24,9 @@ use bevy::prelude::*;
 use super::camera::{ViewMode, WorldCamera};
 use super::hands::{mounted_hand_transform, view_field_of_view};
 use super::horse::{
-    BROW, EYE_COLOUR, HORSE_HEIGHT, MANE_REST, MANE_ROOT, MANE_STRIP, MUZZLE, NECK_BASE, NECK_POLL,
-    REIN_BIT, REIN_WIDTH, horse_ear_mesh, horse_eye_mesh, lofted_along_y, lofted_along_z,
+    BROW, EYE_COLOUR, HAIR_COLOUR, HORSE_HEIGHT, HorseCoats, LEATHER_COLOUR, MANE_REST, MANE_ROOT,
+    MANE_STRIP, MUZZLE, NECK_BASE, NECK_POLL, REIN_BIT, REIN_WIDTH, coat_colour, horse_ear_mesh,
+    horse_eye_mesh, lofted_along_y, lofted_along_z,
 };
 use super::{ApplySnapshots, InputMode, LocalMount};
 use crate::net::Session;
@@ -53,10 +54,6 @@ const EARS_BELOW_HORIZON: f32 = 0.02;
 #[cfg(test)]
 const CAMERA_NEAR: f32 = 0.1;
 
-const COAT_COLOUR: Color = Color::srgb(0.22, 0.14, 0.08);
-const MANE_COLOUR: Color = Color::srgb(0.07, 0.055, 0.045);
-const REIN_COLOUR: Color = Color::srgb(0.12, 0.075, 0.04);
-
 pub(super) struct SaddleViewPlugin;
 
 impl Plugin for SaddleViewPlugin {
@@ -77,6 +74,10 @@ impl Plugin for SaddleViewPlugin {
 
 #[derive(Component)]
 struct SaddleView;
+
+/// The single coat asset shared by the head, ears and both neck pieces.
+#[derive(Component)]
+struct SaddleCoat(Handle<StandardMaterial>);
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum SaddlePart {
@@ -204,16 +205,26 @@ fn create_view(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    coats: Res<HorseCoats>,
 ) {
-    let coat_material = materials.add(view_material(COAT_COLOUR));
-    let mane_material = materials.add(view_material(MANE_COLOUR));
+    // Hidden until sync_view has resolved the authoritative mount colour.
+    let coat_material = materials.add(StandardMaterial {
+        base_color_texture: Some(coats.image.clone()),
+        ..view_material(Color::WHITE)
+    });
+    let mane_material = materials.add(view_material(HAIR_COLOUR));
     let eye_material = materials.add(StandardMaterial {
         cull_mode: None,
         ..view_material(EYE_COLOUR)
     });
-    let rein_material = materials.add(view_material(REIN_COLOUR));
+    let rein_material = materials.add(view_material(LEATHER_COLOUR));
     let root = commands
-        .spawn((SaddleView, Transform::default(), Visibility::Hidden))
+        .spawn((
+            SaddleView,
+            SaddleCoat(coat_material.clone()),
+            Transform::default(),
+            Visibility::Hidden,
+        ))
         .id();
 
     commands.entity(root).with_children(|view| {
@@ -270,13 +281,22 @@ fn sync_view(
     camera: Query<&Projection, With<WorldCamera>>,
     mut reins: Query<(&ReinSide, &mut Transform)>,
     mut horse: Query<&mut Transform, (With<SaddlePart>, Without<ReinSide>)>,
-    mut roots: Query<&mut Visibility, With<SaddleView>>,
+    mut roots: Query<(&mut Visibility, &SaddleCoat), With<SaddleView>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let visible = subject.mount.mounted()
         && subject.session.is_some()
         && subject.view.first_person()
         && matches!(*subject.mode, InputMode::Playing | InputMode::Chat);
-    for mut visibility in &mut roots {
+    for (mut visibility, coat) in &mut roots {
+        if let Some(kind) = subject.mount.kind()
+            && let Some(mut material) = materials.get_mut(&coat.0)
+        {
+            let colour = coat_colour(kind);
+            if material.base_color != colour {
+                material.base_color = colour;
+            }
+        }
         *visibility = if visible {
             Visibility::Visible
         } else {
@@ -328,8 +348,9 @@ mod tests {
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
-            .insert_resource(session())
-            .add_plugins(SaddleViewPlugin);
+            .insert_resource(session());
+        super::super::horse::register(&mut app);
+        app.add_plugins(SaddleViewPlugin);
         app.world_mut()
             .spawn((WorldCamera, Transform::default(), Visibility::Inherited));
         app.update();
@@ -683,6 +704,87 @@ mod tests {
         assert_eq!(material.base_color, EYE_COLOUR);
         assert!(material.unlit);
         assert_eq!(material.cull_mode, None);
+    }
+
+    #[test]
+    fn the_authoritative_kind_reskins_every_coat_piece_in_place() {
+        let mut app = app();
+        let image = app.world().resource::<HorseCoats>().image.clone();
+        let coat = {
+            let world = app.world_mut();
+            world
+                .query::<&SaddleCoat>()
+                .single(world)
+                .unwrap()
+                .0
+                .clone()
+        };
+        let original_assets = app.world().resource::<Assets<StandardMaterial>>().len();
+        for kind in [
+            MountKind::GreyHorse,
+            MountKind::BlackHorse,
+            MountKind::BrownHorse,
+        ] {
+            app.insert_resource(LocalMount::from_server(Some(kind)));
+            app.update();
+            assert_eq!(root(&mut app).0, Visibility::Visible);
+            let world = app.world_mut();
+            let mut parts = world.query::<(&SaddlePart, &MeshMaterial3d<StandardMaterial>)>();
+            let coats: Vec<_> = parts
+                .iter(world)
+                .filter(|(part, _)| {
+                    matches!(
+                        part,
+                        SaddlePart::Head
+                            | SaddlePart::Ear
+                            | SaddlePart::Neck
+                            | SaddlePart::NeckExtension
+                    )
+                })
+                .collect();
+            assert_eq!(coats.len(), 5);
+            assert!(coats.iter().all(|(_, material)| material.0 == coat));
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            assert_eq!(materials.len(), original_assets);
+            let material = materials.get(&coat).unwrap();
+            assert_eq!(material.base_color, coat_colour(kind));
+            assert_eq!(material.base_color_texture.as_ref(), Some(&image));
+            assert!(material.unlit);
+            assert!(!material.fog_enabled);
+            assert_eq!(material.depth_bias, 1_000.0);
+        }
+        app.insert_resource(LocalMount::default());
+        app.update();
+        assert_eq!(root(&mut app).0, Visibility::Hidden);
+        let material = app
+            .world()
+            .resource::<Assets<StandardMaterial>>()
+            .get(&coat)
+            .unwrap();
+        assert_eq!(material.base_color, coat_colour(MountKind::BrownHorse));
+        assert_eq!(material.base_color_texture.as_ref(), Some(&image));
+    }
+
+    #[test]
+    fn hair_leather_and_eyes_share_the_world_horse_palette() {
+        let mut app = app();
+        let world = app.world_mut();
+        let mut parts = world.query::<(&SaddlePart, &MeshMaterial3d<StandardMaterial>)>();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        for (part, material) in parts.iter(world) {
+            let colour = match part {
+                SaddlePart::Mane => HAIR_COLOUR,
+                SaddlePart::Rein => LEATHER_COLOUR,
+                SaddlePart::Eye => EYE_COLOUR,
+                _ => continue,
+            };
+            let material = materials.get(&material.0).unwrap();
+            assert_eq!(material.base_color, colour);
+            assert!(material.base_color_texture.is_none());
+            assert!(material.unlit);
+            assert!(!material.fog_enabled);
+            assert_eq!(material.depth_bias, 1_000.0);
+        }
     }
 
     /// The head and the neck are the world horse's solids at [`VIEW_SCALE`], the same spans

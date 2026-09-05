@@ -255,7 +255,6 @@ pub struct ApplySnapshots;
 pub(crate) struct LocalMount(Option<MountKind>);
 
 impl LocalMount {
-    #[cfg(test)]
     pub(crate) const fn kind(self) -> Option<MountKind> {
         self.0
     }
