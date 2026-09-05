@@ -302,6 +302,66 @@ pub fn advance(current: f32, target: f32, elapsed_seconds: f32) -> f32 {
     current + (target - current).clamp(-step, step)
 }
 
+/// Everything one mixer source's spatialisation is, in the form the mixer is set to.
+///
+/// **One value rather than four arguments**, because the four are computed together from one
+/// pair of positions and setting three of them from a stale reading of the fourth is a state
+/// nobody would notice. [`place`] is the only thing that builds one from a world, and
+/// [`Self::UNPOSITIONED`] is the only other value there is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// Distance attenuation, applied before the pan.
+    pub gain: f32,
+    /// The constant-power pair, or [`PanGains::UNPOSITIONED`].
+    pub pan: PanGains,
+    /// Where the filter is being asked to go, in `0..1`. The mixer smooths towards it with
+    /// [`advance`]; nothing here is the value a sample is actually filtered by.
+    pub occlusion: f32,
+    /// The front/back cue's multiplier on the high band.
+    pub high_cue: f32,
+}
+
+impl Placement {
+    /// What a speaker the world has not placed is heard at: unity in both ears, no filter.
+    ///
+    /// Every field is the identity of what it feeds, so a source set to this renders exactly
+    /// what was pushed into it — which is what "unpositioned mono at bus gain" means, and is
+    /// what the mixer did for every source before any of this existed.
+    pub const UNPOSITIONED: Self = Self {
+        gain: 1.0,
+        pan: PanGains::UNPOSITIONED,
+        occlusion: 0.0,
+        high_cue: 1.0,
+    };
+}
+
+/// Where a speaker standing at `speaker_eye` is heard from, by a listener at `listener_eye`
+/// facing `yaw`, on a server relaying voice `range_blocks` far, with `occlusion` between them.
+///
+/// The one place the functions above are composed, so a caller sets a source from a single
+/// consistent reading rather than from four it gathered separately. `occlusion` is passed in
+/// rather than computed here because it is the expensive half: it needs the world, and it is
+/// recomputed on its own slower clock.
+pub fn place(
+    listener_eye: Vec3,
+    yaw: f32,
+    speaker_eye: Vec3,
+    range_blocks: f32,
+    occlusion: f32,
+) -> Placement {
+    let azimuth = azimuth(listener_eye, yaw, speaker_eye);
+    Placement {
+        gain: attenuation(listener_eye.distance(speaker_eye), range_blocks),
+        pan: pan_gains(azimuth),
+        occlusion: if occlusion.is_finite() {
+            occlusion.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        high_cue: back_cue(azimuth),
+    }
+}
+
 /// How much of a voice one block of each material takes away.
 ///
 /// **The numbers are this module's and the classes are the palette's**, which is the whole
@@ -958,6 +1018,45 @@ mod tests {
         assert_eq!(occlusion_weight(MaterialClass::Air), 0.0);
         assert_eq!(occlusion_weight(MaterialClass::Water), 0.0);
         assert_eq!(stone, 1.0, "one wall is the whole of the effect");
+    }
+
+    #[test]
+    fn a_speaker_standing_on_the_listener_is_placed_dead_ahead_at_full_gain() {
+        let here = Vec3::new(3.0, 64.0, 9.0);
+        let placed = place(here, 1.2, here, RANGE, 0.0);
+        assert_eq!(placed.gain, 1.0);
+        assert_eq!(placed.high_cue, 1.0);
+        assert!((placed.pan.left - placed.pan.right).abs() < 1e-6);
+    }
+
+    /// The composition is what this checks: a speaker off to the right and behind must get
+    /// the right pan *and* the back cue *and* the distance gain, from one call.
+    #[test]
+    fn a_placement_carries_every_cue_at_once() {
+        let listener = Vec3::new(0.0, 64.0, 0.0);
+        // Facing -Z; the speaker is behind and to the right, eight blocks away.
+        let speaker = Vec3::new(8.0, 64.0, 0.5);
+        let placed = place(listener, 0.0, speaker, RANGE, 0.4);
+        assert!(placed.pan.right > placed.pan.left, "{placed:?}");
+        assert!(placed.high_cue < 1.0, "{placed:?}");
+        assert!(placed.gain > 0.0 && placed.gain < 1.0, "{placed:?}");
+        assert_eq!(placed.occlusion, 0.4);
+    }
+
+    #[test]
+    fn a_speaker_past_the_relay_range_is_placed_silent() {
+        let listener = Vec3::ZERO;
+        let placed = place(listener, 0.0, Vec3::new(0.0, 0.0, -RANGE - 1.0), RANGE, 0.0);
+        assert_eq!(placed.gain, 0.0);
+    }
+
+    #[test]
+    fn an_unpositioned_placement_is_the_identity_of_everything_it_feeds() {
+        let placed = Placement::UNPOSITIONED;
+        assert_eq!(placed.gain, 1.0);
+        assert_eq!(placed.pan, PanGains::UNPOSITIONED);
+        assert_eq!(band_gains(placed.occlusion), [1.0, 1.0, 1.0]);
+        assert_eq!(placed.high_cue, 1.0);
     }
 
     /// A 10 ms block is roughly what a 48 kHz device asks for at a 512-frame buffer.
