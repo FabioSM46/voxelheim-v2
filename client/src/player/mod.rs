@@ -98,7 +98,7 @@ pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it
 // is dressed out of the same wardrobe rather than from a second copy of the tables.
 pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe, RecipeCategory};
-pub use interpolate::SnapshotBuffer;
+pub use interpolate::{Interpolated, SnapshotBuffer};
 #[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;
 pub(crate) use inventory::equipment_item_fits;
@@ -119,6 +119,11 @@ pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 pub use prompt::{ConfirmationAnswer, ConfirmationPrompt};
 #[cfg(test)]
 pub(crate) use sky::NIGHT_SKY;
+// The eye is a client-owned offset from the feet the server decides, so anything drawing or
+// hearing from a body's eyes reads it here rather than choosing its own. `audio/heard.rs`
+// places a speaker's voice at their eyes for the same reason the camera sits at the local
+// player's.
+pub(crate) use constants::EYE_HEIGHT;
 // **One traversal of the voxel grid, and every consumer of it is a caller rather than a
 // second copy.** `name_plate_line_is_clear` in this file already reuses it for the same
 // reason; `audio/spatial.rs` casts the occlusion rays through it in #854. What is exported

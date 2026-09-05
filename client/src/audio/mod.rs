@@ -52,14 +52,6 @@ mod dsp;
 mod heard;
 mod listener;
 mod mixer;
-// **Nothing consumes this yet, and the allowance says which part will.** #854 is three pull
-// requests: this one is the arithmetic, part 2 is the occlusion ray through the world, and
-// part 3 gives every speaker a mixer source of its own and drives it. A `pub` item
-// reachable only from `#[cfg(test)]` is `dead_code` under `-D warnings` in a binary crate,
-// so the seam between a pure module and its caller costs this attribute — the shape
-// `net/codec.rs` uses for encoders that ship before their callers. It comes off in part 3,
-// where the last of these functions gets a reader.
-#[allow(dead_code)]
 mod spatial;
 mod voice;
 
