@@ -2554,7 +2554,6 @@ pub struct VoiceHeard {
 // alternative is a seam that puts the wire, the capture device and the codec in one pull
 // request. House style is this file's own outbound encoders, which carry the same
 // allowance for the same reason.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VoiceAudience {
     #[default]
@@ -2564,7 +2563,6 @@ pub enum VoiceAudience {
 
 impl VoiceAudience {
     /// The contract's spelling.
-    #[allow(dead_code)]
     const fn wire(self) -> fb::VoiceAudience {
         match self {
             Self::Everyone => fb::VoiceAudience::Everyone,

@@ -557,6 +557,15 @@ impl CpalHost {
             .ok()?
             .find(|device| device.name().is_ok_and(|name| name == wanted))
     }
+
+    /// [`Self::named_device`] on the other side of the card, matched the same way and for the
+    /// same reason: two cards whose names differ by a space are two cards.
+    fn named_input_device(&self, wanted: &str) -> Option<cpal::Device> {
+        self.0
+            .input_devices()
+            .ok()?
+            .find(|device| device.name().is_ok_and(|name| name == wanted))
+    }
 }
 
 impl OutputHost for CpalHost {
@@ -699,6 +708,54 @@ fn named<E>(devices: impl Iterator<Item = Result<String, E>>) -> Vec<String> {
 /// ring is emptied every 17 ms, and 62 ms is three of those.
 const CAPTURE_CAPACITY: usize = 12_000;
 
+/// [`Capture::fault`] while there is nothing wrong.
+const NO_FAULT: u8 = 0;
+
+/// Why the microphone is not open.
+///
+/// **Two causes and not five, because a player can act on two.** A device the host does not
+/// list is one they can plug in or replace in the settings; anything else — busy, no float
+/// configuration, a stream that would not start, a host with no default input at all — is one
+/// they cannot tell apart from the outside and this client must not guess between. The log
+/// carries the platform's own words for those; the screen says only that it did not work.
+///
+/// **The reason this is an enum rather than a flag** is that the flag it replaces was
+/// documented as "the microphone the player named would not open" and set for every failure,
+/// so a busy device was reported as a missing one — which sends a player to look for a cable
+/// instead of closing the other application. Found by review on #928, and it is the same shape
+/// as the diagnostic failure that helped reverse the substituting design two parts earlier: a
+/// message right about the state and wrong about the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFault {
+    /// The player named a device and the host does not list it.
+    NotAttached,
+    /// A device was there and would not open. Which of the several ways is in the log.
+    WouldNotOpen,
+}
+
+impl CaptureFault {
+    /// This fault as it is stored, never [`NO_FAULT`].
+    const fn code(self) -> u8 {
+        match self {
+            Self::NotAttached => 1,
+            Self::WouldNotOpen => 2,
+        }
+    }
+
+    /// The fault `code` names, or `None` for [`NO_FAULT`].
+    ///
+    /// Total rather than fallible, and no wildcard on the way in: only [`Self::code`] writes
+    /// these, so an unknown value is unreachable — and answering it as "nothing is wrong"
+    /// would be the one direction this must not fail in.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::NotAttached),
+            NO_FAULT => None,
+            _ => Some(Self::WouldNotOpen),
+        }
+    }
+}
+
 /// The microphone, as everything above the platform sees it.
 ///
 /// **The mirror of [`Mixer`], and deliberately so.** A callback the operating system will not
@@ -728,6 +785,14 @@ pub struct Capture {
     /// How many samples the callback has had to drop for a full ring. A diagnostic, never a
     /// decision.
     overruns: AtomicU64,
+    /// Why the microphone is not open, when it is not — a [`CaptureFault`] as `u8`, or
+    /// [`NO_FAULT`].
+    ///
+    /// **Presentation, and the HUD is its only reader.** Nothing decides anything from it —
+    /// the rule `client/AGENTS.md` states for everything under `audio/`. It is what lets the
+    /// indicator say why a held key is producing nothing, which is the whole of what makes
+    /// refusing a named device that is not there safe to do.
+    fault: AtomicU8,
     /// Whether anything above wants a stream open at all.
     ///
     /// **A microphone nobody asked for is never opened**, which is the whole of what
@@ -773,6 +838,7 @@ impl Capture {
             stream: AtomicU64::new(0),
             read_from: AtomicU32::new(0),
             overruns: AtomicU64::new(0),
+            fault: AtomicU8::new(NO_FAULT),
             wanted: AtomicBool::new(false),
             #[cfg(test)]
             reopen_mid_read: AtomicBool::new(false),
@@ -894,6 +960,20 @@ impl Capture {
         self.overruns.load(Ordering::Relaxed)
     }
 
+    /// Why a microphone that was asked for is not open, or `None` while one is — or while
+    /// nobody has asked.
+    pub fn fault(&self) -> Option<CaptureFault> {
+        CaptureFault::from_code(self.fault.load(Ordering::Acquire))
+    }
+
+    /// Records what the supervisor's last open attempt did. Its one caller is that loop.
+    fn set_fault(&self, fault: Option<CaptureFault>) {
+        self.fault.store(
+            fault.map_or(NO_FAULT, CaptureFault::code),
+            Ordering::Release,
+        );
+    }
+
     /// Asks for a stream to be open, or for the one that is open to be closed.
     ///
     /// **Recorded here and woken by [`AudioCapture::listen`]**, which is the entry a caller
@@ -932,16 +1012,25 @@ impl Capture {
 
 /// What the capture supervisor needs from an audio host.
 ///
-/// [`OutputHost`]'s counterpart, and shorter by two methods: **there is no device choice
-/// here.** Naming an input device is #853, so this opens the host's default and nothing else,
-/// which means it needs neither an enumeration nor a default-moved check.
+/// [`OutputHost`]'s counterpart, and shorter by one method: **this side has no default-moved
+/// check** — see `client/AGENTS.md` for why a microphone does not follow a moved default.
 trait InputHost {
     /// A built stream that is not yet running. Dropping it closes the device.
     type Stream;
 
-    /// Builds a stream on the host's default input device, without running it.
+    /// Every input device this host can name, in the host's own order.
+    fn device_names(&self) -> Vec<String>;
+
+    /// Builds a stream on `wanted` — or on the host's default input device when it is
+    /// `None` — without running it.
+    ///
+    /// **A named device that is not present is an error here too.** The substitution the
+    /// acceptance criterion asks for is [`supervise_capture`]'s and happens one level up,
+    /// where it can be said out loud; a host that quietly opened something else would make
+    /// the fallback unobservable and untestable.
     fn open(
         &self,
+        wanted: Option<&str>,
         capture: &Arc<Capture>,
         watch: &Arc<Watch>,
     ) -> Result<(Self::Stream, Format), String>;
@@ -957,10 +1046,11 @@ trait InputHost {
 /// by the wrong ratio for as long as it took to notice.
 fn opened_capture<H: InputHost>(
     host: &H,
+    wanted: Option<&str>,
     capture: &Arc<Capture>,
     watch: &Arc<Watch>,
 ) -> Result<(H::Stream, Format), String> {
-    let (stream, format) = host.open(capture, watch)?;
+    let (stream, format) = host.open(wanted, capture, watch)?;
     capture.opened_at(format.sample_rate, format.channels);
     host.start(&stream)?;
     Ok((stream, format))
@@ -976,23 +1066,38 @@ fn supervise_capture<H: InputHost>(
     host: &H,
     capture: &Arc<Capture>,
     watch: &Arc<Watch>,
+    choice: &Arc<Choice>,
     pace: Pace,
 ) {
+    // Once, at startup, exactly as [`supervise`] does it and for the same reason: enumeration
+    // is not free on every backend, and a knob whose bound was refreshed on every poll would
+    // pay for it while nobody was looking at the settings screen. Bound before the macro,
+    // because `debug!` evaluates its fields only when the callsite is enabled.
+    let seen = host.device_names();
+    debug!("audio input devices: {seen:?}");
+    choice.publish(seen);
+
     let mut failures: u32 = 0;
     while !watch.stopping() {
         if !capture.wanted() {
             // Nothing is open and nothing is being held: this is the ordinary state of a
-            // client whose player has not pressed the key.
+            // client whose player has not pressed the key. Nothing is wrong either — a device
+            // nobody has asked for cannot have failed to open.
+            capture.set_fault(None);
             watch.rest(pace.playing);
             continue;
         }
+
+        let wanted = choice.wanted();
 
         // Cleared before the attempt and never after it, for the reason `supervise` states:
         // a stream that fails while it is starting reports its loss while this call is still
         // on the stack, and `cpal` reports a stream error once.
         watch.playing();
-        match opened_capture(host, capture, watch) {
+        match opened_capture(host, wanted.as_deref(), capture, watch) {
             Ok((stream, format)) => {
+                // A stream opened, so whatever the player named is there and works.
+                capture.set_fault(None);
                 // See the output supervisor: cleared by a stream that held, not by one that
                 // opened, so a stream that dies on every attempt is still throttled.
                 if failures == 0 {
@@ -1003,10 +1108,23 @@ fn supervise_capture<H: InputHost>(
                         format.channels
                     );
                 }
+                // Refreshed on an open rather than on a poll, for [`supervise`]'s reason: an
+                // open is where this machine's devices most recently changed. On this side it
+                // is also the *only* time the list moves while a client is running, because a
+                // microphone is opened when somebody decides to speak — which is exactly when
+                // they have just plugged one in.
+                choice.publish(host.device_names());
+
                 let mut held = false;
                 while !watch.stopping() && watch.loss() == PLAYING && capture.wanted() {
                     watch.rest(pace.playing);
                     held = true;
+                    // The one thing the error callback cannot see: the player choosing a
+                    // different microphone. There is no `DEFAULT_MOVED` twin — see the trait
+                    // above and `client/AGENTS.md`.
+                    if choice.wanted() != wanted {
+                        watch.lose(CHOICE_CHANGED);
+                    }
                 }
                 let loss = watch.loss();
                 let closed_on_request = !capture.wanted() && loss == PLAYING;
@@ -1023,8 +1141,32 @@ fn supervise_capture<H: InputHost>(
                 }
             }
             Err(err) => {
+                // **Asked for, attempted, and not open — and *which* of those, because the
+                // player is told.** Set here rather than on the first tick something is
+                // wanted: the moment between `listen(true)` and a stream starting is not a
+                // fault, and a flag set there would flash on every first press.
+                //
+                // The enumeration is what separates the two causes, and it is worth its cost
+                // on this path alone: a named device the host does not list is one the player
+                // can do something about, and everything else is not. Failures are paced by
+                // `after_failure`, so this asks the host at most once every couple of seconds
+                // while nothing is opening — never on a poll, and never while one is held.
+                let seen = host.device_names();
+                capture.set_fault(Some(match wanted.as_deref() {
+                    Some(name) if !seen.iter().any(|found| found == name) => {
+                        CaptureFault::NotAttached
+                    }
+                    _ => CaptureFault::WouldNotOpen,
+                }));
                 if failures.is_multiple_of(FAILURE_LOG_EVERY) {
-                    warn!("no voice capture ({err}); nothing this player says is sent");
+                    warn!(
+                        "no voice capture ({err}); nothing this player says is sent. \
+                         Devices seen: {seen:?}"
+                    );
+                    // The one place the list is refreshed while nothing opens, so a
+                    // microphone chosen and then unplugged still leaves the knob offering
+                    // what is actually attached.
+                    choice.publish(seen);
                 }
                 failures = failures.saturating_add(1);
                 watch.rest(pace.after_failure);
@@ -1042,6 +1184,9 @@ fn supervise_capture<H: InputHost>(
 pub struct AudioCapture {
     watch: Arc<Watch>,
     capture: Arc<Capture>,
+    /// What the host named on this side of the card. The same type the output supervisor
+    /// keeps, and only its list half is used yet: naming an input device is #853 part 5.
+    choice: Arc<Choice>,
     supervisor: Option<JoinHandle<()>>,
 }
 
@@ -1051,12 +1196,14 @@ impl AudioCapture {
     pub fn start() -> Self {
         let watch = Arc::new(Watch::default());
         let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
         let supervisor = thread::Builder::new()
             .name("voxelheim-voice-capture".to_owned())
             .spawn({
                 let watch = Arc::clone(&watch);
                 let capture = Arc::clone(&capture);
-                move || supervise_capture(&CpalHost::new(), &capture, &watch, Pace::REAL)
+                let choice = Arc::clone(&choice);
+                move || supervise_capture(&CpalHost::new(), &capture, &watch, &choice, Pace::REAL)
             })
             .map_err(|err| {
                 warn!(
@@ -1067,8 +1214,29 @@ impl AudioCapture {
         Self {
             watch,
             capture,
+            choice,
             supervisor,
         }
+    }
+
+    /// Asks for the microphone called `name`, or for the system default when `None`.
+    ///
+    /// Recorded rather than acted on, exactly as [`AudioDevice::use_output`] is: the
+    /// supervisor owns the stream and notices within one poll while it holds one, and reads
+    /// this fresh on its next open when it does not.
+    pub fn use_input(&self, name: Option<String>) {
+        self.choice.want(name);
+    }
+
+    /// Every input device the host named, as of the supervisor's last enumeration.
+    pub fn input_devices(&self) -> Vec<String> {
+        self.choice.seen()
+    }
+
+    /// How many times that list has been replaced, so a Bevy system can tell "nothing new"
+    /// from "the same list again" without a lock or a clone every frame.
+    pub fn listings(&self) -> u64 {
+        self.choice.listings()
     }
 
     /// The ring and the flags, for the pipeline above.
@@ -1105,13 +1273,29 @@ impl AudioCapture {
         Self {
             watch: Arc::new(Watch::default()),
             capture: Arc::new(Capture::new()),
+            choice: Arc::new(Choice::default()),
             supervisor: None,
         }
+    }
+
+    /// Publishes `names` as though the supervisor had just enumerated them.
+    pub(super) fn enumerated(&self, names: Vec<String>) {
+        self.choice.publish(names);
+    }
+
+    /// What [`Self::use_input`] last recorded.
+    pub(super) fn wanted_input(&self) -> Option<String> {
+        self.choice.wanted()
     }
 
     /// Records a stream as the supervisor would when one opens.
     pub(super) fn opened(&self, sample_rate: u32, channels: u16) {
         self.capture.opened_at(sample_rate, channels);
+    }
+
+    /// Records the supervisor as having tried to open a device and failed, for `fault`.
+    pub(super) fn faulted(&self, fault: CaptureFault) {
+        self.capture.set_fault(Some(fault));
     }
 
     /// Pushes one block as the capture callback would.
@@ -1133,15 +1317,30 @@ impl Drop for AudioCapture {
 impl InputHost for CpalHost {
     type Stream = cpal::Stream;
 
+    fn device_names(&self) -> Vec<String> {
+        match self.0.input_devices() {
+            Ok(devices) => named(devices.map(|device| device.name())),
+            // Not an error worth failing over: the list is a bound, and an empty one says
+            // what a missing one would — this host offers nothing but its default.
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn open(
         &self,
+        wanted: Option<&str>,
         capture: &Arc<Capture>,
         watch: &Arc<Watch>,
     ) -> Result<(cpal::Stream, Format), String> {
-        let device = self
-            .0
-            .default_input_device()
-            .ok_or_else(|| "this host has no default input device".to_owned())?;
+        let device = match wanted {
+            Some(name) => self
+                .named_input_device(name)
+                .ok_or_else(|| format!("{name} is not one of this host's input devices"))?,
+            None => self
+                .0
+                .default_input_device()
+                .ok_or_else(|| "this host has no default input device".to_owned())?,
+        };
         let name = device.name().ok();
         let config = float_input_config(&device).ok_or_else(|| {
             let shown = name.as_deref().unwrap_or(UNNAMED);
@@ -1745,6 +1944,11 @@ mod tests {
         rate_at_start: Mutex<Vec<u32>>,
         /// Set by `open` so `start` can reach the shared state.
         shared: Mutex<Option<Arc<Capture>>>,
+        /// What this host answers an enumeration with, and how many it has been asked for.
+        names: Mutex<Vec<String>>,
+        enumerations: AtomicUsize,
+        /// The device asked for on each open, in order — `None` for the host's default.
+        opened_names: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeInput {
@@ -1755,20 +1959,51 @@ mod tests {
             })
         }
 
+        /// A host that answers `names` when asked what it has.
+        fn naming(names: &[&str], answers: Vec<Result<Format, String>>) -> Arc<Self> {
+            let host = Self::answering(answers);
+            *lock(&host.names) = names.iter().map(|name| (*name).to_owned()).collect();
+            host
+        }
+
         fn opens(&self) -> usize {
             self.opens.load(Ordering::Relaxed)
+        }
+
+        fn enumerations(&self) -> usize {
+            self.enumerations.load(Ordering::Relaxed)
+        }
+
+        /// What each open asked for, in order.
+        fn opened_names(&self) -> Vec<Option<String>> {
+            lock(&self.opened_names).clone()
         }
     }
 
     impl InputHost for Arc<FakeInput> {
         type Stream = FakeStream;
 
+        fn device_names(&self) -> Vec<String> {
+            self.enumerations.fetch_add(1, Ordering::Relaxed);
+            lock(&self.names).clone()
+        }
+
         fn open(
             &self,
+            wanted: Option<&str>,
             capture: &Arc<Capture>,
             watch: &Arc<Watch>,
         ) -> Result<(FakeStream, Format), String> {
             self.opens.fetch_add(1, Ordering::Relaxed);
+            lock(&self.opened_names).push(wanted.map(str::to_owned));
+            if let Some(name) = wanted
+                && !lock(&self.names).iter().any(|found| found == name)
+            {
+                // The real host's refusal, in twenty characters: a named device that is not
+                // there is an error, and the supervisor above answers it by opening nothing
+                // rather than by opening something else.
+                return Err(format!("{name} is not one of this host's input devices"));
+            }
             *lock(&self.shared) = Some(Arc::clone(capture));
             let answer = {
                 let mut answers = lock(&self.answers);
@@ -1813,12 +2048,23 @@ mod tests {
         capture: &Arc<Capture>,
         done: impl Fn() -> bool,
     ) -> Arc<Watch> {
+        drive_capture_with(host, capture, &Arc::new(Choice::default()), done)
+    }
+
+    /// [`drive_capture`], with the enumeration the supervisor publishes into kept.
+    fn drive_capture_with(
+        host: &Arc<FakeInput>,
+        capture: &Arc<Capture>,
+        choice: &Arc<Choice>,
+        done: impl Fn() -> bool,
+    ) -> Arc<Watch> {
         let watch = Arc::new(Watch::default());
         let supervisor = {
             let host = Arc::clone(host);
             let capture = Arc::clone(capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done() && Instant::now() < deadline {
@@ -1831,6 +2077,281 @@ mod tests {
         watch
     }
 
+    /// **The knob's bound is filled before anything is opened, and that is the point.**
+    ///
+    /// A player choosing a microphone has not asked to be recorded yet — the settings screen
+    /// is up and the capture stream is shut — so a supervisor that enumerated only on an open
+    /// would leave the knob with nothing to offer until after the choice had been made. And
+    /// it asks **once** while idle, for [`supervise`]'s reason: enumeration is not free on
+    /// every backend, and a list nobody is looking at must not be rebuilt on every poll.
+    #[test]
+    fn the_input_devices_are_named_before_a_microphone_is_ever_opened() {
+        let host = FakeInput::naming(
+            &["Built-in microphone", "USB headset mic"],
+            vec![Ok(format("Built-in microphone", 48_000, 1))],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        let listed = {
+            let choice = Arc::clone(&choice);
+            move || choice.listings() > 0
+        };
+        drive_capture_with(&host, &capture, &choice, listed);
+
+        assert_eq!(
+            choice.seen(),
+            vec![
+                "Built-in microphone".to_owned(),
+                "USB headset mic".to_owned()
+            ]
+        );
+        assert_eq!(
+            host.opens(),
+            0,
+            "a device was opened to find out what the devices are called"
+        );
+        assert_eq!(
+            host.enumerations(),
+            1,
+            "the idle loop asked the host what it had, over and over"
+        );
+    }
+
+    /// **The named microphone is what gets opened, and an absent one is refused.**
+    ///
+    /// The two halves of the acceptance criterion as amended. Both sides of the card now
+    /// answer the same way — a device that is chosen and not there is not opened and nothing
+    /// is opened in its place — and `client/AGENTS.md` carries why, including the substituting
+    /// version that was reversed. What refusing owes the player is being told, and
+    /// [`Capture::unavailable`] is how the HUD finds out.
+    #[test]
+    fn a_named_microphone_is_opened_and_an_absent_one_is_refused() {
+        let host = FakeInput::naming(
+            &["Built-in microphone", "USB headset mic"],
+            vec![Ok(format("USB headset mic", 48_000, 1))],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("USB headset mic".to_owned()));
+        capture.listen(true);
+
+        let opened = {
+            let host = Arc::clone(&host);
+            move || host.opens() > 0
+        };
+        drive_capture_with(&host, &capture, &choice, opened);
+        assert_eq!(
+            host.opened_names(),
+            vec![Some("USB headset mic".to_owned())],
+            "the supervisor opened something other than the microphone the player named"
+        );
+        assert_eq!(
+            capture.fault(),
+            None,
+            "a microphone that opened was reported at fault"
+        );
+
+        // And the same choice with that device gone: refused, over and over, and **never** the
+        // other microphone the host does have. A player who named a headset must not be
+        // recorded by whatever else is in the room.
+        let host = FakeInput::naming(
+            &["Built-in microphone"],
+            vec![Ok(format("Built-in microphone", 48_000, 1))],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("USB headset mic".to_owned()));
+        capture.listen(true);
+
+        let refused = {
+            let capture = Arc::clone(&capture);
+            move || capture.fault().is_some()
+        };
+        drive_capture_with(&host, &capture, &choice, refused);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::NotAttached),
+            "a device the host does not list was reported as something else"
+        );
+        assert!(
+            host.opened_names()
+                .iter()
+                .all(|asked| asked.as_deref() == Some("USB headset mic")),
+            "the supervisor asked for a device the player never chose: {:?}",
+            host.opened_names()
+        );
+        assert_eq!(
+            capture.format(),
+            None,
+            "a stream was recorded for a device that was refused"
+        );
+        assert_eq!(
+            choice.wanted(),
+            Some("USB headset mic".to_owned()),
+            "the refusal rewrote the player's choice"
+        );
+    }
+
+    /// **A device that is there and will not open is a different sentence from one that is
+    /// not there**, and this is the case the single flag could not tell apart.
+    ///
+    /// Busy, no float configuration, a stream that would not start, and a host with no default
+    /// input at all all land here. The client cannot distinguish them from the outside and does
+    /// not try — what it must not do is call any of them a missing device, because that sends a
+    /// player to look for a cable while another application holds the microphone. Found by
+    /// review on #928.
+    #[test]
+    fn a_device_that_is_present_and_will_not_open_is_not_reported_as_missing() {
+        // Named, listed by the host, and refusing to open.
+        let host = FakeInput::naming(
+            &["USB headset mic"],
+            vec![Err("the device is busy".to_owned())],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("USB headset mic".to_owned()));
+        capture.listen(true);
+
+        let faulted = {
+            let capture = Arc::clone(&capture);
+            move || capture.fault().is_some()
+        };
+        drive_capture_with(&host, &capture, &choice, faulted);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::WouldNotOpen),
+            "a device the host lists was reported as not connected"
+        );
+
+        // And the system default, which the player named nothing for: a host with no input at
+        // all is not "the device you chose is missing" either, because they chose none.
+        let host = FakeInput::naming(&[], vec![Err("no default input device".to_owned())]);
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        capture.listen(true);
+
+        let faulted = {
+            let capture = Arc::clone(&capture);
+            move || capture.fault().is_some()
+        };
+        drive_capture_with(&host, &capture, &choice, faulted);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::WouldNotOpen),
+            "following the system default reported a device the player never named"
+        );
+    }
+
+    /// **The flag is cleared by a device that turns up, and by nobody asking.**
+    ///
+    /// Which is what keeps "plug the headset back in and it just works" true with no state to
+    /// go stale: the choice is re-read on every open attempt, so the first one after the
+    /// device appears succeeds and the HUD stops saying anything.
+    #[test]
+    fn a_microphone_that_appears_clears_the_unavailable_flag() {
+        let host = FakeInput::naming(&[], vec![Ok(format("USB headset mic", 48_000, 1))]);
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("USB headset mic".to_owned()));
+        capture.listen(true);
+
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while capture.fault().is_none() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let refused = capture.fault() == Some(CaptureFault::NotAttached);
+
+        // The headset goes in.
+        *lock(&host.names) = vec!["USB headset mic".to_owned()];
+        while capture.fault().is_some() && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let recovered = capture.fault().is_none();
+
+        // And nothing wanted is not something missing.
+        capture.listen(false);
+        watch.nudge();
+        *lock(&host.names) = Vec::new();
+        let settled = Instant::now() + Duration::from_secs(2);
+        while capture.fault().is_some() && Instant::now() < settled {
+            thread::yield_now();
+        }
+        let idle_is_clear = capture.fault().is_none();
+
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+
+        assert!(
+            refused,
+            "an absent microphone was never reported as not attached"
+        );
+        assert!(
+            recovered,
+            "the microphone came back and the flag did not clear"
+        );
+        assert!(
+            idle_is_clear,
+            "a microphone nobody asked for was reported missing"
+        );
+    }
+
+    /// **A microphone chosen while one is open is picked up**, which is `CHOICE_CHANGED` on
+    /// this side of the card. There is no `DEFAULT_MOVED` twin, deliberately: a microphone is
+    /// open only while somebody is speaking, and moving devices mid-sentence because the host
+    /// renamed its default is not a thing this client does.
+    #[test]
+    fn choosing_a_different_microphone_reopens_on_it() {
+        let host = FakeInput::naming(
+            &["Built-in microphone", "USB headset mic"],
+            vec![
+                Ok(format("Built-in microphone", 48_000, 1)),
+                Ok(format("USB headset mic", 48_000, 1)),
+            ],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("Built-in microphone".to_owned()));
+        capture.listen(true);
+
+        let watch = Arc::new(Watch::default());
+        let supervisor = {
+            let host = Arc::clone(&host);
+            let capture = Arc::clone(&capture);
+            let watch = Arc::clone(&watch);
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while host.opens() < 1 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        choice.want(Some("USB headset mic".to_owned()));
+        while host.opens() < 2 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        let reopened = host.opens() >= 2;
+        watch.stop();
+        supervisor.join().expect("the supervisor ended cleanly");
+
+        assert!(reopened, "choosing another microphone never reopened");
+        assert_eq!(
+            host.opened_names(),
+            vec![
+                Some("Built-in microphone".to_owned()),
+                Some("USB headset mic".to_owned())
+            ]
+        );
+    }
+
     /// **The state a client that has never asked for voice sits in for ever.** The supervisor
     /// runs and no device is opened — which is the acceptance criterion's "the capture stream
     /// is never opened", and it is a property of this loop rather than of its callers.
@@ -1841,11 +2362,13 @@ mod tests {
         assert!(!capture.wanted());
 
         let watch = Arc::new(Watch::default());
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         // Long enough for hundreds of passes at `BRISK`.
         thread::sleep(Duration::from_millis(50));
@@ -1879,11 +2402,13 @@ mod tests {
             move || !lock(&host.rate_at_start).is_empty()
         };
         let watch = Arc::new(Watch::default());
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !opened() && Instant::now() < deadline {
@@ -1956,6 +2481,7 @@ mod tests {
                     &host,
                     &capture,
                     &watch,
+                    &Arc::new(Choice::default()),
                     Pace {
                         playing: Duration::from_millis(1),
                         after_failure: Duration::from_secs(2),
@@ -2003,6 +2529,7 @@ mod tests {
                     &host,
                     &capture,
                     &watch,
+                    &Arc::new(Choice::default()),
                     Pace {
                         playing: Duration::from_millis(1),
                         after_failure: Duration::from_secs(2),
@@ -2039,11 +2566,13 @@ mod tests {
             playing: Duration::from_secs(30),
             after_failure: Duration::from_secs(30),
         };
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, pace))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, pace))
         };
 
         // Let it reach the idle wait before anything asks.
