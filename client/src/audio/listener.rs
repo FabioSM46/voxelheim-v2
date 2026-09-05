@@ -95,11 +95,22 @@ impl Voices {
         match self.heard.iter_mut().find(|(held, _)| *held == entity_id) {
             Some((_, when)) => *when = at,
             None => {
-                // Bounded before the push, and the *oldest* goes: the panel is for the person
-                // who just spoke, and the entry furthest from that is the one a listener is
-                // least likely to be reaching for.
+                // Bounded before the push, and the **least recently heard** goes — which is
+                // not the same as the first inserted, because the arm above refreshes a
+                // speaker *in place* to keep the list stable for the panel. Evicting index 0
+                // dropped whoever was heard first in the session, who on a busy channel is
+                // very likely to be the person talking most. Found by review on #941.
                 while self.heard.len() >= MAX_REMEMBERED {
-                    self.heard.remove(0);
+                    let Some(stalest) = self
+                        .heard
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, (_, when))| *when)
+                        .map(|(index, _)| index)
+                    else {
+                        break;
+                    };
+                    self.heard.remove(stalest);
                 }
                 self.heard.push((entity_id, at));
             }
@@ -123,6 +134,17 @@ impl Voices {
         self.adjusted
             .get(&entity_id)
             .map_or(DEFAULT_VOICE, |held| held.volume)
+    }
+
+    /// Whether this speaker reaches the listener's ears at all.
+    ///
+    /// **Not `!muted`**, and the difference is a real state rather than a quibble: `MIN_VOICE`
+    /// is zero, so a speaker turned all the way down is inaudible without being muted. Any
+    /// reader asking "is this person being heard" wants this; `muted` answers the narrower
+    /// question of which button is in which position. Found by review on #941, where the HUD
+    /// was naming a speaker contributing nothing.
+    pub fn audible(&self, entity_id: u64) -> bool {
+        self.gain(entity_id) > 0.0
     }
 
     /// The gain this speaker is mixed at: zero while muted, else their volume.
@@ -278,6 +300,75 @@ mod tests {
             "the newest speakers were dropped, not the oldest"
         );
         assert_eq!(recent[MAX_REMEMBERED - 1], MAX_REMEMBERED as u64 + 4);
+    }
+
+    /// **The roster evicts the least recently heard, which is not the first inserted.**
+    ///
+    /// Refreshing a speaker keeps their position, so the vector is in first-heard order and
+    /// `remove(0)` drops whoever spoke first in the session — very likely the person talking
+    /// most on a busy channel. The comment claimed "the entry furthest from that is the one a
+    /// listener is least likely to be reaching for" and the code did something else. Found by
+    /// review on #941.
+    #[test]
+    fn the_roster_evicts_whoever_has_been_quiet_longest_not_whoever_arrived_first() {
+        let mut voices = Voices::default();
+        let start = Instant::now();
+
+        // The first speaker, and they never stop talking.
+        voices.heard(1, start);
+        // Then enough others to fill the roster, each heard once and long ago.
+        for entity_id in 2..=(MAX_REMEMBERED as u64) {
+            voices.heard(entity_id, start);
+        }
+        let talking = start + Duration::from_secs(1);
+        voices.heard(1, talking);
+
+        // One more speaker arrives, so somebody has to go.
+        let arriving = start + Duration::from_secs(2);
+        voices.heard(999, arriving);
+
+        let recent = voices.recent(arriving);
+        assert!(
+            recent.contains(&1),
+            "the speaker who is still talking was evicted: {recent:?}"
+        );
+        assert!(
+            !recent.contains(&2),
+            "the quietest speaker was kept: {recent:?}"
+        );
+        assert!(recent.contains(&999));
+        assert_eq!(recent.len(), MAX_REMEMBERED);
+
+        // And the order the panel draws is still stable — eviction removes, it does not sort.
+        assert_eq!(
+            recent[0], 1,
+            "the surviving rows were reordered: {recent:?}"
+        );
+    }
+
+    /// **Turned all the way down is inaudible, and `audible` is what says so.**
+    ///
+    /// `MIN_VOICE` is zero, so a speaker at the bottom of their own volume contributes nothing
+    /// while `muted` is still false. Anything asking "is this person being heard" has to ask
+    /// the gain; the HUD asked the button, and named somebody nobody could hear (#941).
+    #[test]
+    fn a_speaker_turned_all_the_way_down_is_inaudible_without_being_muted() {
+        let mut voices = Voices::default();
+        assert!(voices.audible(7), "a speaker nobody touched was inaudible");
+
+        voices.adjust_volume(7, -1_000);
+        assert_eq!(voices.volume(7), MIN_VOICE);
+        assert!(!voices.muted(7), "turning down is not muting");
+        assert!(
+            !voices.audible(7),
+            "a speaker mixed at zero was reported audible"
+        );
+
+        voices.adjust_volume(7, 1);
+        assert!(voices.audible(7));
+
+        voices.toggle_mute(7);
+        assert!(!voices.audible(7), "a muted speaker was reported audible");
     }
 
     /// Hearing somebody again moves their time and does not add a second row.
