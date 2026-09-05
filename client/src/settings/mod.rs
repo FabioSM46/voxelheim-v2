@@ -986,8 +986,14 @@ impl DeviceList {
         choices
     }
 
-    /// What the knob's reading says for `selected`.
-    fn label(&self, selected: &DeviceChoice) -> String {
+    /// What the knob's reading says for `selected`, with `when_absent` for a device that is
+    /// chosen and not attached.
+    ///
+    /// **The suffix is the caller's because the two sides do different things**, and a row
+    /// that did not distinguish them would be the more misleading half of an honest-looking
+    /// screen: an absent loudspeaker leaves the client silent, an absent microphone is
+    /// substituted by the host's default, and "unavailable" alone reads as the first.
+    fn label(&self, selected: &DeviceChoice, when_absent: &str) -> String {
         match selected {
             DeviceChoice::SystemDefault => "system default".to_owned(),
             DeviceChoice::Named(name) if self.present.iter().any(|found| found == name) => {
@@ -997,7 +1003,7 @@ impl DeviceList {
             // another machine. Said out loud, because the alternative is a row naming a
             // device while the client is silent for no reason a player can see.
             DeviceChoice::Named(name) => {
-                format!("{} (unavailable)", ascii_shown(name, "unnamed device"))
+                format!("{} {when_absent}", ascii_shown(name, "unnamed device"))
             }
         }
     }
@@ -1022,6 +1028,17 @@ impl DeviceList {
         }
     }
 }
+
+/// What an output row says about a device that is chosen and not attached.
+///
+/// Nothing is substituted on that side, so the client is silent until it comes back — which
+/// is exactly what this says and no more.
+const OUTPUT_UNAVAILABLE: &str = "(unavailable)";
+
+/// And what an input row says. `audio/device.rs` opens the host's default in its place, so a
+/// row reading only "unavailable" would leave a player believing no microphone was live when
+/// one is.
+const INPUT_UNAVAILABLE: &str = "(unavailable, using system default)";
 
 /// The dynamic bound of the two device knobs: what the host offers on each side of the card.
 ///
@@ -1482,16 +1499,11 @@ impl Settings {
 
     /// Which input device the audio module should open when it opens one at all.
     ///
-    /// **The knob is selectable and the choice is not yet acted on**, which is a real state
-    /// rather than a half-built one and is said here because nobody reads a pull request
-    /// twice. `audio/mod.rs` fills this knob's bound from the capture supervisor's
-    /// enumeration, so a player can pick their microphone and the file records it; what
-    /// arrives in part 5 of #853 is `AudioCapture` taking the name — until then the
-    /// supervisor opens the host's default whatever this says.
-    // Reachable only from the tests until that part: the settings screen reads the field
-    // through `reading_with_choices`, so this accessor is `dead_code` in a binary crate,
-    // exactly as `net/codec.rs`'s outbound encoders are before their callers.
-    #[allow(dead_code)]
+    /// **A microphone that is not attached is substituted, where a loudspeaker is not**, and
+    /// the asymmetry is deliberate: `audio/device.rs`'s `resolved_input` carries the argument
+    /// and its cost. What is the same on both sides is that the *choice* survives — nothing
+    /// under `audio/` writes a setting back, so a headset unplugged and plugged in again is
+    /// used again without anybody reopening this tab.
     pub const fn input_device(&self) -> &DeviceChoice {
         &self.input_device
     }
@@ -1705,8 +1717,14 @@ impl Settings {
             Knob::FrameCap if self.frame_cap == NO_FRAME_CAP => "uncapped".to_owned(),
             Knob::FrameCap => format!("{} fps", self.frame_cap),
             Knob::MasterVolume => format!("{}%", self.master_volume),
-            Knob::OutputDevice => choices.devices.outputs().label(&self.output_device),
-            Knob::InputDevice => choices.devices.inputs().label(&self.input_device),
+            Knob::OutputDevice => choices
+                .devices
+                .outputs()
+                .label(&self.output_device, OUTPUT_UNAVAILABLE),
+            Knob::InputDevice => choices
+                .devices
+                .inputs()
+                .label(&self.input_device, INPUT_UNAVAILABLE),
             Knob::VoiceVolume => format!("{}%", self.voice_volume),
             Knob::VoiceMode => self.voice_mode.label().to_owned(),
             Knob::VoiceActivationThreshold => {
@@ -2174,7 +2192,10 @@ mod tests {
         // this tab — and the row says out loud that it is not there.
         let one = AudioDevices::named(&["Built-in speakers"], &[]);
         let unplugged = DeviceChoice::Named("USB headset".to_owned());
-        assert_eq!(one.outputs().label(&unplugged), "USB headset (unavailable)");
+        assert_eq!(
+            one.outputs().label(&unplugged, OUTPUT_UNAVAILABLE),
+            "USB headset (unavailable)"
+        );
         assert!(
             !one.outputs().choices().contains(&unplugged),
             "an absent device is not something stepping can land back on"
@@ -2189,7 +2210,7 @@ mod tests {
         assert_eq!(
             AudioDevices::named(&[awkward.as_str()], &[])
                 .outputs()
-                .label(&DeviceChoice::Named(awkward)),
+                .label(&DeviceChoice::Named(awkward), OUTPUT_UNAVAILABLE),
             "Hoerer ?ber USB"
         );
     }
@@ -2229,6 +2250,52 @@ mod tests {
             settings.output_device(),
             &DeviceChoice::SystemDefault,
             "moving one device knob moved the other"
+        );
+    }
+
+    /// **An absent device reads differently on the two sides, because it *is* different.**
+    ///
+    /// A loudspeaker that is not attached leaves the client silent; a microphone that is not
+    /// attached is substituted by the host's default, which is live. A row that said only
+    /// "unavailable" for both would be telling a player nothing is being recorded while
+    /// something is — the one direction a settings screen must not be wrong in.
+    #[test]
+    fn an_absent_microphone_says_the_default_is_being_used_and_an_absent_speaker_does_not() {
+        let monitors = MonitorChoices::default();
+        // Neither chosen device is in the lists, which is the state both readings describe.
+        let devices = AudioDevices::named(&["Built-in speakers"], &["Built-in microphone"]);
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        let settings = Settings {
+            output_device: DeviceChoice::Named("USB headset".to_owned()),
+            input_device: DeviceChoice::Named("USB headset mic".to_owned()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            settings.reading_with_choices(Knob::OutputDevice, bounds),
+            "USB headset (unavailable)"
+        );
+        assert_eq!(
+            settings.reading_with_choices(Knob::InputDevice, bounds),
+            "USB headset mic (unavailable, using system default)",
+            "the microphone row did not say a substitute was live"
+        );
+
+        // And an attached device on either side reads as itself, with no suffix at all.
+        let devices = AudioDevices::named(&["USB headset"], &["USB headset mic"]);
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        assert_eq!(
+            settings.reading_with_choices(Knob::OutputDevice, bounds),
+            "USB headset"
+        );
+        assert_eq!(
+            settings.reading_with_choices(Knob::InputDevice, bounds),
+            "USB headset mic"
         );
     }
 

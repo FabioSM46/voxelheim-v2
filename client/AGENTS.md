@@ -91,7 +91,7 @@ keeps meaning "everything the client is".
 | `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
 | `audio/heard.rs` | the inbound half: one jitter buffer and one decoder per speaker, the slack a listener hears as continuity, the two repairs a lost frame has, and every speaker summed into one source on the `Voice` bus | ask whether a speaker should be audible, log a frame or a speaker or a count of either, or hold a source per speaker |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
-| `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
+| `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one, opens the microphone the player named or the host's default in its place, and names the input devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
@@ -1504,6 +1504,20 @@ hear their friends must not find this knob already at the top.
 The output and the input are the same question asked of two halves of one card, so they are
 one enum and one bound rather than two of each; what differs between the sides is what
 `audio/device.rs` does with the answer, never what a player may say.
+
+**A named loudspeaker that is not there leaves the client silent; a named microphone that is
+not there is substituted, and said out loud.** This is the one place the two sides deliberately
+answer the same question differently, and the reasoning is not symmetric. A player told the
+sound is going to their headset must not be hearing the speakers, so a missing output device is
+a retry and a throttled log. A missing *input* device would leave the client recording nothing
+while the HUD says SPEAKING — a player told they are heard when nobody can hear them — so
+`resolved_input` opens the host's default instead and logs both names. **The cost is real and
+is stated rather than hidden**: that default may be a microphone in the room. What bounds it is
+that the substitution is only ever *to the host's default*, never from one named device to
+another; that the player's choice is never rewritten, so plugging the headset back in uses it
+again; and that the settings row reads the chosen device as unavailable while it is in force.
+The decision is re-made on every open attempt rather than remembered, so there is no state to
+go stale when a device appears.
 
 **Both supervisors enumerate at startup, and only the loudspeaker's watches for a moved
 default.** A bound that stayed empty until its device had been opened would be a knob a player
