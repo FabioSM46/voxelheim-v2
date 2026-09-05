@@ -1272,14 +1272,14 @@ const MAX_RENDER_DISTANCE: u8 = MAX_VIEW_DISTANCE;
 const DEFAULT_RENDER_DISTANCE: u8 = 8;
 
 /// The narrowest vertical field of view this screen offers, in degrees.
-const MIN_FIELD_OF_VIEW: f32 = 40.0;
+pub(crate) const MIN_FIELD_OF_VIEW: f32 = 40.0;
 /// The widest. Past this the edges of the frame distort more than the extra view is worth.
 const MAX_FIELD_OF_VIEW: f32 = 110.0;
 /// One press of the field-of-view control, in degrees.
 const FIELD_OF_VIEW_STEP: f32 = 5.0;
 /// Bevy's own default perspective, in degrees — π/4. The default is this number so that a
 /// client whose player never opens this screen renders exactly as it did before it existed.
-const DEFAULT_FIELD_OF_VIEW: f32 = 45.0;
+pub(crate) const DEFAULT_FIELD_OF_VIEW: f32 = 45.0;
 
 /// The dimmest the ambient term may be scaled to.
 const MIN_BRIGHTNESS: f32 = 0.5;
