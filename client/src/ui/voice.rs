@@ -250,17 +250,21 @@ fn transmit_line(
 /// separately from the voice — and dropping the row would make the line disagree with the
 /// audio.
 ///
-/// **A muted speaker is dropped, and that is the same rule read the other way**: this line
-/// says who the player is hearing, and they are not hearing somebody they muted. The frames
-/// still arrive and `audio/heard.rs` still decodes them — the server decides who may be heard
-/// and nothing here overrules it — but they are mixed at zero, so naming them would be the
-/// line disagreeing with the audio in the opposite direction. The count follows: a crowd of
-/// four with two muted is `+0`, not `+2`.
+/// **A speaker nobody can hear is dropped, and that is the same rule read the other way**:
+/// this line says who the player is hearing, and they are not hearing somebody mixed at zero.
+/// The frames still arrive and `audio/heard.rs` still decodes them — the server decides who may
+/// be heard and nothing here overrules it — but naming them would be the line disagreeing with
+/// the audio in the opposite direction. The count follows: a crowd of four with two silenced is
+/// `+0`, not `+2`.
+///
+/// **The test is `Voices::audible` and not `!muted`.** A speaker turned all the way down is
+/// inaudible without being muted, because `MIN_VOICE` is zero — so filtering on the button
+/// rather than on the gain named somebody contributing nothing. Found by review on #941.
 fn hearing_line(heard: &[u64], voices: &Voices, appearances: &Appearances) -> String {
     let heard: Vec<u64> = heard
         .iter()
         .copied()
-        .filter(|entity_id| !voices.muted(*entity_id))
+        .filter(|entity_id| voices.audible(*entity_id))
         .collect();
     if heard.is_empty() {
         return String::new();
@@ -509,6 +513,24 @@ mod tests {
         );
         assert_eq!(
             hearing_line(&[7, 9], &voices, &described),
+            "hearing player 9"
+        );
+
+        // **And turned all the way down, which is inaudible without being muted.** Filtering
+        // on the button rather than on the gain named somebody contributing nothing (#941).
+        let mut turned_down = Voices::default();
+        turned_down.adjust_volume(7, -1_000);
+        assert!(
+            !turned_down.muted(7),
+            "the fixture muted instead of turning down"
+        );
+        assert_eq!(
+            hearing_line(&[7], &turned_down, &described),
+            "",
+            "a speaker mixed at zero was named as being heard"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &turned_down, &described),
             "hearing player 9"
         );
 
