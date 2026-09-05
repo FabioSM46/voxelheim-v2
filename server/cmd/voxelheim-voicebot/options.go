@@ -45,6 +45,19 @@ const (
 	// can hear any member of another, with a wide margin over the hysteresis limit.
 	defaultClusterSpacing = 512
 
+	// maxClusterRadius bounds the disc [latticeDisc] materialises.
+	//
+	// **The lattice is a slice, so a radius costs its square.** Nothing else here bounds it:
+	// the geometry rule is that a cluster must fit inside its own voice range, and
+	// -voice-range is a finite positive number of blocks with no ceiling below the float32
+	// the welcome announces. A radius of a million would ask for three trillion positions
+	// before any check could refuse the layout they fall outside of.
+	//
+	// 256 is generous by two orders of magnitude in the direction that matters: its disc
+	// holds about 205,000 blocks and a run places at most session.MaxConcurrentSessions
+	// sessions on them, and reaching it at all needs a voice that carries 512 blocks.
+	maxClusterRadius = 256
+
 	defaultDuration  = 30 * time.Second
 	defaultWorldName = "soak"
 )
@@ -131,6 +144,14 @@ func (o options) validate() error {
 		return fmt.Errorf("clusters must be in 1..%d, one per session at most, got %d", o.sessions, o.clusters)
 	case o.clusterRadius < 0:
 		return fmt.Errorf("cluster radius must not be negative, got %d", o.clusterRadius)
+	case o.clusterRadius > maxClusterRadius:
+		// Refused before the geometry is checked, because the geometry is checked by
+		// laying the plan out and a radius past this one is a lattice nothing can hold.
+		return fmt.Errorf(
+			"cluster radius must be at most %d, got %d: the lattice inside a cluster is materialised, so a "+
+				"radius costs its square, and %d already offers %d blocks for at most %d sessions to stand on",
+			maxClusterRadius, o.clusterRadius, maxClusterRadius,
+			len(latticeDisc(maxClusterRadius)), session.MaxConcurrentSessions)
 	case math.IsNaN(o.voiceRange) || math.IsInf(o.voiceRange, 0) || o.voiceRange <= 0:
 		// Zero is a legal -voice-range for a server and means it relays nothing at all,
 		// which is a server this command has nothing to measure on.
@@ -143,6 +164,9 @@ func (o options) validate() error {
 			"a cluster radius of %d blocks puts members up to %d apart, which a voice range of %v does not carry; "+
 				"a cluster has to be able to hear itself", o.clusterRadius, 2*o.clusterRadius, o.voiceRange)
 	case float64(o.clusterSpacing) <= o.voiceRange*game.VoiceExitFactor+float64(2*o.clusterRadius):
+		// A negative spacing fails this comparison too, which is why there is no separate
+		// sign check: clusters that marched backwards would be one cluster before they were
+		// anything else, and [checkInsideTheWorld] leans on their not doing so.
 		// The audible set is hysteretic: a listener leaves it only at the range widened by
 		// VoiceExitFactor, so that widened number is the one two clusters have to clear —
 		// plus the two radii, because the nearest members are not the centres.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"strings"
 	"testing"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
@@ -140,6 +141,11 @@ func TestAThousandInOneHuddleWrapTheLatticeWithoutLeavingIt(t *testing.T) {
 	}
 }
 
+// **The check is on every axis of every planned position, not on the one edge the first
+// version happened to test.** #930's review found it validating the rightmost x alone. Only
+// that edge is reachable today — [maxClusterRadius] and the spacing rule are why, and both
+// are checked here too — so this pins the reachable case and the two bounds that make the
+// others unreachable.
 func TestALayoutThatFallsOffTheWorldIsRefusedBeforeAnythingConnects(t *testing.T) {
 	t.Parallel()
 
@@ -151,5 +157,38 @@ func TestALayoutThatFallsOffTheWorldIsRefusedBeforeAnythingConnects(t *testing.T
 	}
 	if err := checkInsideTheWorld(opts); err == nil {
 		t.Error("a layout reaching past world.BlockLimit was accepted; /teleport would have refused the far clusters")
+	}
+
+	// And the layout the defaults describe is inside the world on every axis.
+	var fine options
+	registerPlanFlags(flag.NewFlagSet("test", flag.ContinueOnError), &fine)
+	fine.sessions, fine.clusters = 100, 10
+	if err := checkInsideTheWorld(fine); err != nil {
+		t.Errorf("the default layout was refused: %v", err)
+	}
+}
+
+// A radius past the bound is refused before anything tries to lay it out, because laying it
+// out is what would fail: the disc is materialised and a radius costs its square.
+func TestARadiusNoLatticeCanHoldIsRefused(t *testing.T) {
+	t.Parallel()
+
+	var opts options
+	registerPlanFlags(flag.NewFlagSet("test", flag.ContinueOnError), &opts)
+	opts.clusterRadius = maxClusterRadius + 1
+	opts.voiceRange = 4 * float64(opts.clusterRadius)
+	opts.clusterSpacing = 8 * opts.clusterRadius
+	err := opts.validate()
+	if err == nil {
+		t.Fatal("a cluster radius past the bound was accepted")
+	}
+	if !strings.Contains(err.Error(), "cluster radius must be at most") {
+		t.Errorf("it was refused with %q, which does not name the radius", err)
+	}
+
+	// The bound itself is a legal radius, given a voice that carries far enough.
+	opts.clusterRadius = maxClusterRadius
+	if err := opts.validate(); err != nil {
+		t.Errorf("a radius of exactly %d was refused: %v", maxClusterRadius, err)
 	}
 }

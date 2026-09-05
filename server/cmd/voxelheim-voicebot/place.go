@@ -113,19 +113,47 @@ func latticeDisc(radius int) [][2]int {
 	return offsets
 }
 
-// checkInsideTheWorld refuses a layout whose far edge falls off the world.
+// checkInsideTheWorld refuses a layout any of whose positions falls off the world.
 //
-// `/teleport` refuses a coordinate past world.BlockLimit and answers the session privately,
-// so a run laid out past the edge would connect, teleport nobody, and report a huddle that
-// never formed as one that produced no drops. Checked here because it is the first place
-// both the spacing and the spawn are known.
+// `/teleport` refuses a coordinate outside `|c| <= world.BlockLimit` on **every** axis and
+// answers the session privately, so a run laid out past an edge would connect, teleport
+// nobody, and report a huddle that never formed as one that produced no drops. Checked here
+// because flag validation is where a refusal an operator can act on belongs — the pattern
+// cmd/voxelheim-auth states — rather than minutes into a run.
+//
+// **It walks the plan rather than a bounding box derived from the flags**, and that is the
+// correction #930's review asked for taken one step further. A box computed from the origin,
+// the spacing and the radius is a second description of the layout, and the first version of
+// this check was exactly such a description with three of its four horizontal edges missing:
+// it tested the rightmost x and neither z edge nor the leftmost x. Rewriting the box
+// correctly would fix today's bug and leave the drift — a placement rule that moves and a box
+// that does not. [planPlacements] is the layout, so asking it is the one form of this check
+// that cannot be wrong about a layout it did not predict. It costs one pass over at most
+// session.MaxConcurrentSessions positions, at flag-validation time, once.
+//
+// **Only the +x edge is reachable today, and that is a fact about two other checks rather
+// than a reason to test one edge.** The spawn is within a few hundred blocks of the origin,
+// [maxClusterRadius] bounds how far a disc reaches from its centre, and a negative
+// -cluster-spacing is already refused for making two clusters one — so nothing marches
+// towards −x, and neither z edge nor the y one can be approached at all. Every one of those
+// three is a check somebody could move; this one does not depend on any of them.
 func checkInsideTheWorld(o options) error {
-	origin := o.origin()
-	far := origin[0] + (o.clusters-1)*o.clusterSpacing + o.clusterRadius
-	if far > world.BlockLimit {
-		return fmt.Errorf(
-			"%d clusters spaced %d blocks apart from the spawn at x=%d reach x=%d, past world.BlockLimit (%d); "+
-				"/teleport would refuse the far clusters", o.clusters, o.clusterSpacing, origin[0], far, world.BlockLimit)
+	for _, place := range planPlacements(o) {
+		for axis, coordinate := range place.at {
+			if coordinate < -world.BlockLimit || coordinate > world.BlockLimit {
+				return fmt.Errorf(
+					"%d cluster(s) of radius %d spaced %d blocks apart from the spawn put a session at %s=%d, "+
+						"outside world.BlockLimit (%d); /teleport would refuse it",
+					o.clusters, o.clusterRadius, o.clusterSpacing, axisName(axis), coordinate, world.BlockLimit)
+			}
+		}
 	}
 	return nil
+}
+
+// axisName is what a refusal calls the axis it is about, so an operator reads "x=…" rather
+// than an index. The same three letters game.axisName uses, which is the vocabulary the
+// `/teleport` refusal this check exists to pre-empt is written in.
+func axisName(axis int) string {
+	return [...]string{"x", "y", "z"}[axis]
 }
