@@ -19,7 +19,7 @@
 use bevy::prelude::*;
 
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
-use crate::audio::{AudioControls, Voices};
+use crate::audio::{AudioControls, MicTest, Voices};
 use crate::player::{Appearances, InputMode};
 use crate::settings::{
     AudioDevices, CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name,
@@ -83,6 +83,7 @@ impl Plugin for SettingsScreenPlugin {
             // screen and its tests stand up with no audio device anywhere near them.
             .init_resource::<AudioControls>()
             .init_resource::<Voices>()
+            .init_resource::<MicTest>()
             .init_resource::<Appearances>()
             .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
@@ -105,6 +106,8 @@ impl Plugin for SettingsScreenPlugin {
                     rebuild_monitor_options,
                     show_monitor_dropdown,
                     colour_monitor_controls,
+                    close_the_microphone_test_with_the_screen,
+                    show_the_microphone_meter,
                     voice_row_actions,
                     rebuild_voice_rows,
                     show_voices_panel,
@@ -156,6 +159,14 @@ struct MonitorSelectButton;
 /// its own open/close lifecycle rather than the panel's.
 #[derive(Component)]
 struct MonitorDropdownPanel;
+
+/// The microphone test's meter, its filled part, and the threshold drawn across it.
+#[derive(Component)]
+struct MicMeter;
+#[derive(Component)]
+struct MicMeterLevel;
+#[derive(Component)]
+struct MicMeterMark;
 
 /// The Voices panel: the overlay a speaker's rows are spawned into.
 #[derive(Component)]
@@ -209,6 +220,8 @@ enum SettingsAction {
     TestSpeakers,
     /// Show or hide the Voices panel.
     ToggleVoices,
+    /// Open or close the microphone test, which holds the input device and plays it back.
+    ToggleMicTest,
     /// Back to the pause menu.
     Back,
 }
@@ -227,6 +240,8 @@ enum Reading {
     MonitorControl,
     /// Whether the Voices panel is showing, as the word on its own button.
     VoicesPanel,
+    /// Whether the microphone test is running, as the word on its own button.
+    MicTestButton,
     /// One speaker's volume, as a percentage.
     VoiceLevel(u64),
     /// Whether one speaker is muted, as the word on the button that changes it.
@@ -283,6 +298,32 @@ const CONTROL_BUTTON_HEIGHT: f32 = ROW_HEIGHT - 4.0;
 
 /// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
 const WIDE_BUTTON: f32 = 40.0;
+
+/// The width of the microphone test's level meter, in logical pixels.
+///
+/// Whatever the stepper column has left once the button is drawn, so the row is the same width
+/// as every other row on the tab.
+const METER_WIDTH: f32 = STEPPER_WIDTH - STEP_BUTTON * 4.0 - CONTROL_GAP;
+
+/// The height of the meter's bar.
+const METER_HEIGHT: f32 = 12.0;
+
+/// The quietest level the meter draws, in dBFS.
+///
+/// **Deliberately the same number as the quietest threshold the knob offers**, so the marker
+/// is never off the left edge of the bar it is drawn on;
+/// `the_threshold_marker_stays_on_the_meter_across_the_whole_knob` is what keeps the two in
+/// step, because this is a presentation choice and that is a bound in `crate::settings`, and
+/// nothing but a test connects them.
+const METER_FLOOR_DB: f32 = -60.0;
+
+/// The bar's own colours: the ground it is drawn on, the level, and the threshold marker.
+const METER_GROUND: Color = Color::srgb(0.10, 0.12, 0.15);
+const METER_LEVEL: Color = Color::srgb(0.42, 0.78, 0.52);
+const METER_MARK: Color = Color::linear_rgb(1.0, 0.72, 0.25);
+
+/// The width of the threshold marker, in logical pixels.
+const METER_MARK_WIDTH: f32 = 2.0;
 
 /// The Voices panel's stacking position, and the Monitor dropdown's reasoning verbatim: a
 /// child of the row it belongs to would paint behind every row spawned after it.
@@ -516,6 +557,8 @@ enum Row {
     /// The Voices row: one button that opens the panel, plus the panel it opens. Its own
     /// variant rather than a [`Self::Toggle`] because it spawns an overlay beside the button.
     VoicesToggle,
+    /// The microphone test row: one button, and the level meter beside it.
+    MicTest,
     /// A row whose control *does* something rather than showing something: one button with
     /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
     /// this is the shape for a press with no state behind it at all.
@@ -531,6 +574,7 @@ impl Row {
             Self::Binding(control) => control.label(),
             Self::MonitorSelect => Knob::Monitor.label(),
             Self::VoicesToggle => "Voices",
+            Self::MicTest => "Test microphone",
             Self::Action(label, _, _) => label,
         }
     }
@@ -576,6 +620,9 @@ fn rows_of(tab: Tab) -> Vec<Row> {
             // Under the knob it proves, because that is the order a player uses them in: set
             // the volume, then find out whether anything comes out.
             Row::Action("Test speakers", SettingsAction::TestSpeakers, "PLAY A TONE"),
+            // Beside the speaker test, because they are the same errand pointed the two ways,
+            // and above Voices, which is about other people rather than about this machine.
+            Row::MicTest,
             // Last, and a `Toggle` rather than an `Action`: the button's face *is* the state,
             // so a player can tell an open panel from a closed one without looking at it.
             Row::VoicesToggle,
@@ -621,6 +668,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
             Row::VoicesToggle => spawn_voices_control(controls),
+            Row::MicTest => spawn_mic_test_control(controls),
             Row::Action(_, action, face) => {
                 spawn_button(
                     controls,
@@ -837,6 +885,81 @@ fn spawn_voices_control(parent: &mut ChildSpawnerCommands<'_>) {
                 },
                 BackgroundColor(PANEL_BACKGROUND),
                 BorderColor::all(CELL_EDGE),
+            ));
+        });
+}
+
+/// The microphone test row: one button, and the meter it holds open beside it.
+///
+/// The meter is always spawned and is empty while the test is shut — `show_the_microphone_meter`
+/// is the only writer of its widths, and a meter rebuilt on every press would be a node
+/// despawned under the pointer that pressed it.
+fn spawn_mic_test_control(parent: &mut ChildSpawnerCommands<'_>) {
+    parent
+        .spawn((
+            SettingsAction::ToggleMicTest,
+            Button,
+            Node {
+                width: Val::Px(STEP_BUTTON * 4.0),
+                height: Val::Px(CONTROL_BUTTON_HEIGHT),
+                flex_shrink: 0.0,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON),
+        ))
+        .with_child((
+            Reading::MicTestButton,
+            Text::new(String::new()),
+            TextFont {
+                font_size: ROW_FONT,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextLayout::no_wrap().with_justify(Justify::Center),
+        ));
+
+    parent
+        .spawn((
+            MicMeter,
+            Node {
+                width: Val::Px(METER_WIDTH),
+                height: Val::Px(METER_HEIGHT),
+                flex_shrink: 0.0,
+                border_radius: BorderRadius::all(Val::Px(2.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(METER_GROUND),
+        ))
+        .with_children(|meter| {
+            meter.spawn((
+                MicMeterLevel,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(0.0),
+                    height: Val::Px(METER_HEIGHT),
+                    ..default()
+                },
+                BackgroundColor(METER_LEVEL),
+            ));
+            // Drawn after the level, so the mark is visible through a level that has passed
+            // it — which is the one moment a player is looking at both.
+            meter.spawn((
+                MicMeterMark,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(METER_MARK_WIDTH),
+                    height: Val::Px(METER_HEIGHT),
+                    ..default()
+                },
+                BackgroundColor(METER_MARK),
             ));
         });
 }
@@ -1165,6 +1288,7 @@ fn settings_actions(
     monitors: Res<MonitorChoices>,
     devices: Res<AudioDevices>,
     mut audio: ResMut<AudioControls>,
+    mut mic_test: ResMut<MicTest>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
@@ -1208,6 +1332,13 @@ fn settings_actions(
                     screen.capturing = Some(control);
                     screen.notice = format!("press a key for {}", control.label().to_lowercase());
                 }
+                continue;
+            }
+            SettingsAction::ToggleMicTest => {
+                // The screen holds this, and holds it until the screen goes away — see
+                // `MicTest`. `SettingsScreen::close` is what takes it back, so a player who
+                // walks out of the settings does not leave a microphone open behind them.
+                mic_test.open = !mic_test.open;
                 continue;
             }
             SettingsAction::ToggleVoices => {
@@ -1414,6 +1545,80 @@ fn colour_monitor_controls(
     }
 }
 
+/// Closes the microphone test when the screen that opened it goes away, or when the player
+/// leaves the tab it is on.
+///
+/// **This is the half that matters most in this whole row.** Every other piece of screen state
+/// is forgotten by [`SettingsScreen::close`]; this one is a *held microphone*, and a player who
+/// pressed Escape and went back to the game must not be leaving an open input device behind
+/// them because a flag lives on a different resource. A tab change closes it for the weaker
+/// version of the same reason: a device held for a control the player can no longer see.
+fn close_the_microphone_test_with_the_screen(
+    screen: Res<SettingsScreen>,
+    tab: Res<Tab>,
+    mut mic_test: ResMut<MicTest>,
+) {
+    // Read through the immutable deref, so an ordinary frame does not mark the resource and
+    // wake `speak` for a flag that has not moved.
+    if mic_test.open && (!screen.is_open() || *tab != Tab::Audio) {
+        mic_test.open = false;
+    }
+}
+
+/// Where on the meter a level in dBFS falls, `0.0` at [`METER_FLOOR_DB`] and `1.0` at full
+/// scale.
+///
+/// A pure function so both the bar and the marker are placed by the same arithmetic, and so
+/// the placement is testable with no window — which is what
+/// `the_threshold_marker_stays_on_the_meter_across_the_whole_knob` needs.
+fn meter_fraction(level_db: f32) -> f32 {
+    if !level_db.is_finite() {
+        // `NaN` compares false against both ends, so a clamp would pass it straight through
+        // into a `Val::Px` — the rule `client/AGENTS.md` states about non-finite floats.
+        return 0.0;
+    }
+    ((level_db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// Draws the meter: how loud the microphone is now, and where the level that would transmit
+/// sits on the same scale.
+///
+/// **The threshold is drawn whether or not the mode uses it**, deliberately: a player setting
+/// up push to talk is still choosing a microphone gain, and the mark is the only thing on this
+/// screen that says what "loud enough" means. The bar is empty while the test is shut, because
+/// nothing is being captured and a meter frozen at its last reading is a meter that lies.
+fn show_the_microphone_meter(
+    settings: Res<Settings>,
+    mic_test: Res<MicTest>,
+    mut levels: Query<&mut Node, (With<MicMeterLevel>, Without<MicMeterMark>)>,
+    mut marks: Query<&mut Node, (With<MicMeterMark>, Without<MicMeterLevel>)>,
+) {
+    if !settings.is_changed() && !mic_test.is_changed() {
+        return;
+    }
+    let filled = Val::Px(
+        mic_test
+            .level_db
+            .map_or(0.0, |level| meter_fraction(level) * METER_WIDTH),
+    );
+    for mut node in &mut levels {
+        if node.width != filled {
+            node.width = filled;
+        }
+    }
+    // Kept inside the bar at the top of the scale, where the mark's own width would otherwise
+    // hang off the right edge.
+    let at = Val::Px(
+        (meter_fraction(settings.voice_activation_threshold_db()) * METER_WIDTH)
+            .min(METER_WIDTH - METER_MARK_WIDTH),
+    );
+    for mut node in &mut marks {
+        if node.left != at {
+            node.left = at;
+        }
+    }
+}
+
 /// Applies a press inside the open Voices panel.
 ///
 /// **It changes `Voices` and never a setting**, which is the whole of why these controls are
@@ -1533,6 +1738,7 @@ fn refresh_readings(
     monitors: Res<MonitorChoices>,
     devices: Res<AudioDevices>,
     voices: Res<Voices>,
+    mic_test: Res<MicTest>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
@@ -1544,6 +1750,7 @@ fn refresh_readings(
         && !monitors.is_changed()
         && !devices.is_changed()
         && !voices.is_changed()
+        && !mic_test.is_changed()
         && !screen.is_changed()
     {
         return;
@@ -1553,7 +1760,7 @@ fn refresh_readings(
         devices: &devices,
     };
     for (reading, mut text) in &mut readings {
-        let next = describe(&settings, choices, &voices, &screen, *reading);
+        let next = describe(&settings, choices, &voices, &mic_test, &screen, *reading);
         if text.0 != next {
             text.0 = next;
         }
@@ -1566,6 +1773,7 @@ fn describe(
     settings: &Settings,
     choices: Choices<'_>,
     voices: &Voices,
+    mic_test: &MicTest,
     screen: &SettingsScreen,
     reading: Reading,
 ) -> String {
@@ -1583,6 +1791,7 @@ fn describe(
             )
         }
         Reading::VoicesPanel => if screen.voices_open { "HIDE" } else { "SHOW" }.to_owned(),
+        Reading::MicTestButton => if mic_test.open { "STOP" } else { "LISTEN" }.to_owned(),
         Reading::VoiceLevel(entity_id) => format!("{}%", voices.volume(entity_id)),
         Reading::VoiceMuted(entity_id) => if voices.muted(entity_id) {
             "UNMUTE"
@@ -2692,6 +2901,7 @@ mod tests {
                 "Voice threshold",
                 "Heard by",
                 "Test speakers",
+                "Test microphone",
                 "Voices"
             ]
         );
@@ -3245,5 +3455,126 @@ mod tests {
         press(&mut app, SettingsAction::ToggleVoices);
         press_tab(&mut app, Tab::Graphics);
         assert!(!shown(&mut app), "the panel outlived the tab it belongs to");
+    }
+
+    // -------------------------------------------------------------------------
+    // The microphone test
+    // -------------------------------------------------------------------------
+
+    /// The width of the meter's filled part and where its threshold mark sits, in pixels.
+    fn meter(app: &mut App) -> (f32, f32) {
+        let world = app.world_mut();
+        let mut levels = world.query_filtered::<&Node, With<MicMeterLevel>>();
+        let filled = match levels.iter(world).next().map(|node| node.width) {
+            Some(Val::Px(width)) => width,
+            other => panic!("the meter's level is {other:?}"),
+        };
+        let mut marks = world.query_filtered::<&Node, With<MicMeterMark>>();
+        let at = match marks.iter(world).next().map(|node| node.left) {
+            Some(Val::Px(left)) => left,
+            other => panic!("the meter's mark is at {other:?}"),
+        };
+        (filled, at)
+    }
+
+    /// **The row holds the test, the meter follows the level, and neither survives the screen.**
+    #[test]
+    fn the_microphone_test_row_holds_the_test_and_the_meter_follows_it() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "LISTEN");
+        assert_eq!(meter(&mut app).0, 0.0, "a shut test drew a level");
+
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "STOP");
+
+        // What `audio/voice.rs` publishes while the row is open.
+        app.world_mut().resource_mut::<MicTest>().level_db = Some(-30.0);
+        app.update();
+        let (filled, _) = meter(&mut app);
+        assert!(
+            (filled - METER_WIDTH / 2.0).abs() < 0.5,
+            "half scale drew {filled} of {METER_WIDTH}"
+        );
+
+        // Its own row closes it, and the level goes with it.
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(!app.world().resource::<MicTest>().open);
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "LISTEN");
+    }
+
+    /// **A held microphone must not outlive the screen that opened it**, which is the one
+    /// thing on this row that is not merely presentation: every other piece of screen state is
+    /// forgotten by `SettingsScreen::close`, and this one lives on another resource.
+    #[test]
+    fn closing_the_screen_or_leaving_the_tab_stops_the_microphone_test() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsScreen>().is_open());
+        assert!(
+            !app.world().resource::<MicTest>().open,
+            "a microphone was left open behind a closed settings screen"
+        );
+
+        // And leaving the tab, for the weaker version of the same reason: a device held for a
+        // control the player can no longer see. The Escape above has to be let go of first —
+        // nothing in this app clears `ButtonInput` between frames, so it would close the
+        // screen again on the very next update.
+        release_keys(&mut app);
+        app.world_mut().resource_mut::<SettingsScreen>().open();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+        press_tab(&mut app, Tab::Graphics);
+        assert!(
+            !app.world().resource::<MicTest>().open,
+            "the test outlived the tab it belongs to"
+        );
+    }
+
+    /// **The threshold mark stays on the bar at every value the knob can reach**, which is the
+    /// only thing connecting `METER_FLOOR_DB` — a drawing choice here — to
+    /// `MIN_VOICE_ACTIVATION_THRESHOLD`, a bound in `crate::settings`. Move either without the
+    /// other and the mark leaves the meter; nothing but this would notice.
+    #[test]
+    fn the_threshold_marker_stays_on_the_meter_across_the_whole_knob() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+
+        // Both ends of the knob's bound, reached by stepping it rather than by naming numbers
+        // this module does not own.
+        for steps in [-1_000, 1_000] {
+            app.world_mut()
+                .resource_mut::<Settings>()
+                .adjust(Knob::VoiceActivationThreshold, steps);
+            app.update();
+            let (_, at) = meter(&mut app);
+            assert!(
+                (0.0..=METER_WIDTH - METER_MARK_WIDTH).contains(&at),
+                "the threshold mark sat at {at} on a {METER_WIDTH} wide meter"
+            );
+        }
+    }
+
+    /// A level that is not a number draws nothing, rather than reaching a `Val::Px` — the rule
+    /// `client/AGENTS.md` states about non-finite floats, at the one place a float from the
+    /// audio side becomes a width.
+    #[test]
+    fn a_level_that_is_not_a_number_draws_an_empty_meter() {
+        for level in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(meter_fraction(level), 0.0, "{level}");
+        }
+        assert_eq!(meter_fraction(METER_FLOOR_DB), 0.0);
+        assert_eq!(meter_fraction(0.0), 1.0);
+        assert_eq!(meter_fraction(20.0), 1.0, "a level over full scale ran off");
+        assert_eq!(meter_fraction(-1_000.0), 0.0);
     }
 }

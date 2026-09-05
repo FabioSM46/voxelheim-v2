@@ -88,7 +88,7 @@ keeps meaning "everything the client is".
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings, the contract's byte ceiling checked against what libopus wanted to write, and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, size its packet buffer at the ceiling, or let a diagnostic quote a payload |
-| `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
+| `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — the chain between them (resample, gate, gain, 20 ms, encode, send), and the third answer to the first question: the microphone test, which holds the device, plays it back and sends nothing | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
 | `audio/heard.rs` | the inbound half: one jitter buffer and one decoder per speaker, the slack a listener hears as continuity, the two repairs a lost frame has, and every speaker summed into one source on the `Voice` bus | ask whether a speaker should be audible, log a frame or a speaker or a count of either, or hold a source per speaker |
 | `audio/listener.rs` | the listener's own half of who they hear: one mute and one volume per speaker, kept for the session, and the roster of everybody heard in the last minute | be persisted, reach `settings/`, decide whether a speaker may be heard at all, or log a speaker or a count of one |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
@@ -1597,6 +1597,23 @@ answer to the second is that **there is no naive drain**: the only way to read t
 `Capture::take`, which skips a stream the reader has not seen and says `fresh`, and discards a
 batch that a reopen ran through. The samples across a reopen are a gap, not a continuation, and
 no API offers them as anything else.
+
+**The microphone test is a third answer to the first question below, and it is the player's
+own.** A client opens no input device unasked — that is the whole of what `VoiceMode::Off`
+means and what a server relaying no voice means — but a player pressing "Test microphone" has
+asked, out loud, on this machine. So `MicTest::open` holds the device whatever the mode says and
+whatever the server says, and it is the one path that opens an input with `Off` chosen. Three
+things bound it. **Nothing is sent**: the transmit rule is not consulted at all while the row is
+open, which matters most in the configuration where it would otherwise say yes — a held talk
+key, or a level over the threshold. **Closing it restores what was there** with no state to put
+back, because the answer is recomputed every tick from the mode and a press the test never
+touches. And **it cannot outlive the screen**: `ui/settings.rs` closes it when the settings
+screen closes or the tab changes, because every other piece of screen state is forgotten by
+`SettingsScreen::close` and this one is a held microphone living on another resource.
+
+There is no echo canceller in this client — `docs/adr/0001-voice-transport.md` is why push to
+talk is the default — so a loudspeaker and an open microphone are a feedback path. A test the
+player opened and can close is where that is acceptable; transmitting from it would not be.
 
 **Whether to hold a microphone open and whether to transmit are two questions, and
 `audio/voice.rs` answers them separately.** A client that opened the device only while
