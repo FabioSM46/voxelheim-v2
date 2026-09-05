@@ -21,7 +21,7 @@
 
 use bevy::prelude::*;
 
-use crate::audio::{Speaking, Transmitting, VoiceControls};
+use crate::audio::{MicrophoneMissing, Speaking, Transmitting, VoiceControls, Voices};
 use crate::player::{Appearances, Party};
 use crate::settings::{Control, Settings, VoiceAudience, VoiceMode, key_name};
 
@@ -77,6 +77,8 @@ impl Plugin for VoiceUiPlugin {
             .init_resource::<Speaking>()
             .init_resource::<Appearances>()
             .init_resource::<Party>()
+            .init_resource::<Voices>()
+            .init_resource::<MicrophoneMissing>()
             .add_systems(Startup, spawn_voice_hud)
             .add_systems(Update, refresh_voice_hud);
     }
@@ -126,7 +128,9 @@ fn spawn_voice_hud(mut commands: Commands) {
 fn refresh_voice_hud(
     controls: Res<VoiceControls>,
     transmitting: Res<Transmitting>,
+    missing: Res<MicrophoneMissing>,
     speaking: Res<Speaking>,
+    voices: Res<Voices>,
     appearances: Res<Appearances>,
     party: Res<Party>,
     settings: Option<Res<Settings>>,
@@ -163,6 +167,7 @@ fn refresh_voice_hud(
         controls.audience,
         in_party,
         transmitting.0,
+        missing.0,
         key,
     );
     for (mut text, mut text_colour) in &mut transmit {
@@ -175,7 +180,7 @@ fn refresh_voice_hud(
     }
 
     let heard = speaking.recent(std::time::Instant::now());
-    let line = hearing_line(&heard, &appearances);
+    let line = hearing_line(&heard, &voices, &appearances);
     for mut text in &mut hearing {
         if text.0 != line {
             text.0.clone_from(&line);
@@ -189,6 +194,9 @@ fn refresh_voice_hud(
 /// anything starts a transmission. Voice activation waits for a level, and a hint naming a key
 /// there would be telling the player about a control that does nothing.
 ///
+/// **A missing microphone is said before anything else** and without an audience tail: the
+/// player is not being heard by a narrower group, they are not being captured at all.
+///
 /// **The audience is a tail on whatever that says**, not a line of its own: it qualifies the
 /// same sentence, and a second line would be a second thing to read for a state that is only
 /// ever one word. `Everyone` adds nothing, because it is what a player who never touched the
@@ -198,8 +206,17 @@ fn transmit_line(
     audience: VoiceAudience,
     in_party: bool,
     sending: bool,
+    microphone_missing: bool,
     key: &str,
 ) -> (String, Color) {
+    // **First, and before every other state.** A client that cannot open the microphone the
+    // player named opens nothing in its place — see `client/AGENTS.md` — so what is left to do
+    // is say so, here, where a player who has just held the key and heard no answer is already
+    // looking. It takes precedence over the key hint because the key would do nothing, and
+    // over the audience because who would have heard it is not the question any more.
+    if microphone_missing {
+        return ("microphone unavailable".to_owned(), UNHEARD);
+    }
     let (line, colour) = match (sending, mode) {
         (true, _) => ("SPEAKING".to_owned(), SENDING),
         (false, VoiceMode::PushToTalk) if !key.is_empty() => {
@@ -232,7 +249,23 @@ fn transmit_line(
 /// omitted: hearing somebody the client cannot name is a real state — the description arrives
 /// separately from the voice — and dropping the row would make the line disagree with the
 /// audio.
-fn hearing_line(heard: &[u64], appearances: &Appearances) -> String {
+///
+/// **A speaker nobody can hear is dropped, and that is the same rule read the other way**:
+/// this line says who the player is hearing, and they are not hearing somebody mixed at zero.
+/// The frames still arrive and `audio/heard.rs` still decodes them — the server decides who may
+/// be heard and nothing here overrules it — but naming them would be the line disagreeing with
+/// the audio in the opposite direction. The count follows: a crowd of four with two silenced is
+/// `+0`, not `+2`.
+///
+/// **The test is `Voices::audible` and not `!muted`.** A speaker turned all the way down is
+/// inaudible without being muted, because `MIN_VOICE` is zero — so filtering on the button
+/// rather than on the gain named somebody contributing nothing. Found by review on #941.
+fn hearing_line(heard: &[u64], voices: &Voices, appearances: &Appearances) -> String {
+    let heard: Vec<u64> = heard
+        .iter()
+        .copied()
+        .filter(|entity_id| voices.audible(*entity_id))
+        .collect();
     if heard.is_empty() {
         return String::new();
     }
@@ -269,7 +302,7 @@ mod tests {
 
     /// The indicator with the audience left where a player who never touched the knob has it.
     fn heard_by_everyone(mode: VoiceMode, sending: bool, key: &str) -> (String, Color) {
-        transmit_line(mode, VoiceAudience::Everyone, false, sending, key)
+        transmit_line(mode, VoiceAudience::Everyone, false, sending, false, key)
     }
 
     /// **The indicator, in every state it has.** Sending says so; push to talk names the key
@@ -321,17 +354,19 @@ mod tests {
             (VoiceMode::VoiceActivation, false, "voice activation"),
         ] {
             let (plain, plain_colour) =
-                transmit_line(mode, VoiceAudience::Everyone, true, sending, "v");
+                transmit_line(mode, VoiceAudience::Everyone, true, sending, false, "v");
             assert_eq!(plain, base, "the widest audience narrated itself");
 
-            let (in_party, colour) = transmit_line(mode, VoiceAudience::Party, true, sending, "v");
+            let (in_party, colour) =
+                transmit_line(mode, VoiceAudience::Party, true, sending, false, "v");
             assert_eq!(in_party, format!("{base} (party)"));
             assert_eq!(
                 colour, plain_colour,
                 "a party that can hear the player read as a warning"
             );
 
-            let (alone, colour) = transmit_line(mode, VoiceAudience::Party, false, sending, "v");
+            let (alone, colour) =
+                transmit_line(mode, VoiceAudience::Party, false, sending, false, "v");
             assert_eq!(alone, format!("{base} - nobody hears you"));
             assert_eq!(colour, UNHEARD);
         }
@@ -340,11 +375,87 @@ mod tests {
         for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
             for in_party in [true, false] {
                 assert_eq!(
-                    transmit_line(VoiceMode::Off, audience, in_party, false, "v").0,
+                    transmit_line(VoiceMode::Off, audience, in_party, false, false, "v").0,
                     ""
                 );
             }
         }
+    }
+
+    /// **A missing microphone is said first, in the refusal amber, whatever else is true.**
+    ///
+    /// This line is the whole of what the client owes a player whose named microphone is not
+    /// there — nothing is opened in its place, so the alternative to saying it is a key that
+    /// silently does nothing. It takes precedence over the key hint, which would name a
+    /// control that cannot work, and over the audience tail, because who *would* have heard
+    /// them has stopped being the question.
+    #[test]
+    fn a_missing_microphone_is_said_before_every_other_state() {
+        for mode in [VoiceMode::PushToTalk, VoiceMode::VoiceActivation] {
+            for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
+                for in_party in [true, false] {
+                    for sending in [true, false] {
+                        let (line, colour) =
+                            transmit_line(mode, audience, in_party, sending, true, "v");
+                        assert_eq!(
+                            line, "microphone unavailable",
+                            "{mode:?} {audience:?} in_party={in_party} sending={sending}"
+                        );
+                        assert_eq!(colour, UNHEARD);
+                    }
+                }
+            }
+        }
+
+        // And it says nothing of the sort while the microphone is there.
+        assert_eq!(
+            transmit_line(
+                VoiceMode::PushToTalk,
+                VoiceAudience::Everyone,
+                false,
+                false,
+                false,
+                "v"
+            )
+            .0,
+            "hold [V] to speak"
+        );
+    }
+
+    /// **And it is true in the assembled HUD**, not only in the line builder: `refresh_voice_hud`
+    /// reads `MicrophoneMissing` as a resource of its own, so a state published by `audio/` and
+    /// never carried into the node is exactly the half a unit test cannot see.
+    #[test]
+    fn the_hud_says_the_microphone_is_unavailable() {
+        let mut app = App::new();
+        app.insert_resource(tuned(VoiceMode::PushToTalk))
+            .add_plugins(VoiceUiPlugin);
+        app.world_mut().resource_mut::<VoiceControls>().range_blocks = 24.0;
+        app.update();
+
+        let line = |app: &mut App| {
+            let mut lines = app
+                .world_mut()
+                .query_filtered::<&Text, With<TransmitLine>>();
+            lines
+                .iter(app.world())
+                .next()
+                .map(|text| text.0.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(line(&mut app), "hold [V] to speak");
+
+        app.world_mut().resource_mut::<MicrophoneMissing>().0 = true;
+        app.update();
+        assert_eq!(
+            line(&mut app),
+            "microphone unavailable",
+            "the HUD went on offering a key for a microphone that is not there"
+        );
+
+        app.world_mut().resource_mut::<MicrophoneMissing>().0 = false;
+        app.update();
+        assert_eq!(line(&mut app), "hold [V] to speak");
     }
 
     /// **The key is the one the player bound**, taken from the bindings rather than from the
@@ -366,24 +477,118 @@ mod tests {
     /// description yet is still named rather than dropped.
     #[test]
     fn speakers_are_named_and_an_unknown_one_is_still_shown() {
-        assert_eq!(hearing_line(&[], &Appearances::default()), "");
+        assert_eq!(
+            hearing_line(&[], &Voices::default(), &Appearances::default()),
+            ""
+        );
 
         let described = Appearances::with_player_name(7, "Skald");
-        assert_eq!(hearing_line(&[7], &described), "hearing Skald");
         assert_eq!(
-            hearing_line(&[7, 9], &described),
+            hearing_line(&[7], &Voices::default(), &described),
+            "hearing Skald"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &Voices::default(), &described),
             "hearing Skald, player 9",
             "a speaker the cache cannot name was dropped from the line"
         );
     }
 
+    /// **A muted speaker is not among the speakers heard, and the count follows.**
+    ///
+    /// The line says who the player is hearing, and they are not hearing somebody they muted.
+    /// The `+n` is asserted with the crowd too, because a count computed before the filter
+    /// would say `+2` for two people nobody can hear — the shape a filter added to a `take`
+    /// but not to the `len` produces.
+    #[test]
+    fn a_muted_speaker_is_not_named_and_is_not_counted() {
+        let described = Appearances::with_player_name(7, "Skald");
+        let mut voices = Voices::default();
+        voices.toggle_mute(7);
+
+        assert_eq!(
+            hearing_line(&[7], &voices, &described),
+            "",
+            "the only speaker was muted and the line still named somebody"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &voices, &described),
+            "hearing player 9"
+        );
+
+        // **And turned all the way down, which is inaudible without being muted.** Filtering
+        // on the button rather than on the gain named somebody contributing nothing (#941).
+        let mut turned_down = Voices::default();
+        turned_down.adjust_volume(7, -1_000);
+        assert!(
+            !turned_down.muted(7),
+            "the fixture muted instead of turning down"
+        );
+        assert_eq!(
+            hearing_line(&[7], &turned_down, &described),
+            "",
+            "a speaker mixed at zero was named as being heard"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &turned_down, &described),
+            "hearing player 9"
+        );
+
+        let heard: Vec<u64> = (1..=7).collect();
+        let mut voices = Voices::default();
+        for muted in [1, 2] {
+            voices.toggle_mute(muted);
+        }
+        let line = hearing_line(&heard, &voices, &described);
+        assert!(!line.contains("Skald"), "a muted speaker was named: {line}");
+        assert!(
+            line.ends_with("+1"),
+            "the overflow counted speakers nobody can hear: {line}"
+        );
+    }
+
+    /// **And it is true in the assembled HUD, not only in the line builder.** `refresh_voice_hud`
+    /// reads `Speaking` and `Voices` as two separate resources, so a filter applied to one of
+    /// them and not carried into the node is exactly the half that a unit test on the pure
+    /// function cannot see — the shape #924 was.
+    #[test]
+    fn the_hud_drops_a_muted_speaker_from_its_line() {
+        let mut app = App::new();
+        app.insert_resource(tuned(VoiceMode::PushToTalk))
+            .add_plugins(VoiceUiPlugin);
+        app.world_mut().resource_mut::<VoiceControls>().range_blocks = 24.0;
+        app.world_mut()
+            .resource_mut::<Speaking>()
+            .heard_for_test(7, Instant::now());
+        app.update();
+
+        let line = |app: &mut App| {
+            let mut heard = app.world_mut().query_filtered::<&Text, With<HearingLine>>();
+            heard
+                .iter(app.world())
+                .next()
+                .map(|text| text.0.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(line(&mut app), "hearing player 7");
+
+        app.world_mut().resource_mut::<Voices>().toggle_mute(7);
+        app.update();
+        assert_eq!(
+            line(&mut app),
+            "",
+            "the HUD went on naming a speaker the player had muted"
+        );
+    }
+
+    /// **A crowd is counted, not drawn.**
     /// **A crowd is counted, not drawn.** How many people are within voice range is the
     /// server's answer, and a line that grew with it would run off the screen.
     #[test]
     fn more_speakers_than_fit_are_counted() {
         let described = Appearances::with_player_name(1, "Skald");
         let heard: Vec<u64> = (1..=7).collect();
-        let line = hearing_line(&heard, &described);
+        let line = hearing_line(&heard, &Voices::default(), &described);
         assert!(line.starts_with("hearing Skald,"), "{line}");
         assert!(line.ends_with("+3"), "{line}");
         assert_eq!(

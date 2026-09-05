@@ -49,6 +49,7 @@ mod codec;
 mod device;
 mod dsp;
 mod heard;
+mod listener;
 mod mixer;
 mod voice;
 
@@ -63,8 +64,13 @@ use device::{AudioCapture, AudioDevice};
 // that module's test can pin it rather than restating the number.
 #[allow(unused_imports)]
 pub use heard::{SPEAKING_FOR, Speaking};
+// `HEARD_FOR` and `MAX_VOICE` are the Voices panel's window and its ceiling, named here so
+// `ui/settings.rs`'s tests can pin them rather than restating the numbers — the reason
+// `SPEAKING_FOR` above carries the same allowance.
+#[allow(unused_imports)]
+pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
-pub use voice::{Transmitting, VoiceControls};
+pub use voice::{MicTest, MicrophoneMissing, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.
@@ -170,6 +176,15 @@ pub struct AudioControls {
     /// `audio/device.rs` matches it against the names the host answered with and nothing
     /// else.
     pub output_device: Option<String>,
+    /// Which input device to open when one is opened at all, under the name its host gives
+    /// it, or `None` for "follow whatever the system calls its default".
+    ///
+    /// The same shape as [`Self::output_device`] and resolved the same way. What differs is
+    /// entirely on the other side of the seam: a named loudspeaker that is not attached
+    /// leaves the client silent and retrying, and a named microphone that is not attached is
+    /// substituted by the host's default with a log line. `audio/device.rs` carries that
+    /// argument beside the code that makes the choice.
+    pub input_device: Option<String>,
     /// Set to play the speaker test once. **Taken back by this module**, so a caller sets
     /// it and never has to clear it.
     pub speaker_test: bool,
@@ -187,6 +202,7 @@ impl Default for AudioControls {
             master_gain: Settings::default().master_gain(),
             voice_gain: Settings::default().voice_gain(),
             output_device: None,
+            input_device: None,
             speaker_test: false,
         }
     }
@@ -276,6 +292,10 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
         DeviceChoice::SystemDefault => None,
         DeviceChoice::Named(name) => Some(name.clone()),
     };
+    let microphone = match settings.input_device() {
+        DeviceChoice::SystemDefault => None,
+        DeviceChoice::Named(name) => Some(name.clone()),
+    };
     // Written only on a real change, so a settings change that moved nothing this module
     // reads does not mark the resource and wake `apply_the_controls` for a gain that is
     // already set. The speaker test is deliberately untouched: it is a press, not a
@@ -288,6 +308,9 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
     }
     if controls.output_device != device {
         controls.output_device = device;
+    }
+    if controls.input_device != microphone {
+        controls.input_device = microphone;
     }
 }
 
@@ -333,6 +356,7 @@ fn apply_the_controls(
     controls: Res<AudioControls>,
     audio: Res<AudioMixer>,
     device: Res<AudioDevice>,
+    capture: Res<AudioCapture>,
 ) {
     if !controls.is_changed() {
         return;
@@ -340,6 +364,7 @@ fn apply_the_controls(
     audio.0.set_gain(Bus::Master, controls.master_gain);
     audio.0.set_gain(Bus::Voice, controls.voice_gain);
     device.use_output(controls.output_device.clone());
+    capture.use_input(controls.input_device.clone());
 }
 
 /// Starts the speaker test when one is asked for, and keeps its ring fed while it plays.
@@ -489,6 +514,7 @@ mod tests {
             .insert_resource(AudioControls::default())
             .insert_resource(AudioMixer(Arc::clone(&mixer)))
             .insert_resource(AudioDevice::idle())
+            .insert_resource(AudioCapture::idle())
             .add_systems(Update, (follow_the_settings, apply_the_controls).chain());
         app.update();
 
@@ -630,6 +656,57 @@ mod tests {
                 &["Built-in microphone", "USB headset mic"]
             ),
             "one side's enumeration cleared the other's"
+        );
+    }
+
+    /// **The microphone knob reaches the capture supervisor**, which is the other half of the
+    /// seam part 2 only asserted one way. The choice is stepped through the `AudioDevices`
+    /// `offer_the_devices` wrote, so nothing here hands the model a list by hand.
+    #[test]
+    fn the_chosen_microphone_reaches_the_capture_supervisor() {
+        let mut app = device_app();
+        app.world().resource::<AudioCapture>().enumerated(vec![
+            "Built-in microphone".to_owned(),
+            "USB headset mic".to_owned(),
+        ]);
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            None,
+            "an untouched setting asks for no microphone in particular"
+        );
+
+        let offered = app.world().resource::<AudioDevices>().clone();
+        let monitors = MonitorChoices::default();
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust_with_choices(
+                Knob::InputDevice,
+                2,
+                Choices {
+                    monitors: &monitors,
+                    devices: &offered,
+                },
+            );
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioControls>().input_device,
+            Some("USB headset mic".to_owned())
+        );
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            Some("USB headset mic".to_owned()),
+            "the capture supervisor was never told which microphone to open"
+        );
+
+        // Back to the system default, which is an instruction and not an absence of one: the
+        // supervisor has to hear it, or it keeps opening the headset.
+        app.world_mut().resource_mut::<Settings>().reset(Tab::Audio);
+        app.update();
+        assert_eq!(
+            app.world().resource::<AudioCapture>().wanted_input(),
+            None,
+            "resetting the tab left the supervisor holding the old microphone"
         );
     }
 

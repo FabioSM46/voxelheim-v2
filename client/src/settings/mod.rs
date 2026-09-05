@@ -987,6 +987,11 @@ impl DeviceList {
     }
 
     /// What the knob's reading says for `selected`.
+    ///
+    /// **One suffix for both sides, because both sides now do the same thing**: a device that
+    /// is chosen and not attached is not opened and nothing is put in its place. The version
+    /// of this that took the wording from its caller belonged to a microphone substitution
+    /// that was reversed — see `client/AGENTS.md`.
     fn label(&self, selected: &DeviceChoice) -> String {
         match selected {
             DeviceChoice::SystemDefault => "system default".to_owned(),
@@ -1482,16 +1487,12 @@ impl Settings {
 
     /// Which input device the audio module should open when it opens one at all.
     ///
-    /// **The knob is selectable and the choice is not yet acted on**, which is a real state
-    /// rather than a half-built one and is said here because nobody reads a pull request
-    /// twice. `audio/mod.rs` fills this knob's bound from the capture supervisor's
-    /// enumeration, so a player can pick their microphone and the file records it; what
-    /// arrives in part 5 of #853 is `AudioCapture` taking the name — until then the
-    /// supervisor opens the host's default whatever this says.
-    // Reachable only from the tests until that part: the settings screen reads the field
-    // through `reading_with_choices`, so this accessor is `dead_code` in a binary crate,
-    // exactly as `net/codec.rs`'s outbound encoders are before their callers.
-    #[allow(dead_code)]
+    /// **A microphone that is not attached is not opened, and nothing is opened in its
+    /// place** — the loudspeaker's rule, for a stronger reason: audio the player did not
+    /// consent to reaches people who cannot tell it happened. `client/AGENTS.md` carries the
+    /// argument, including the version of it that was reversed. The *choice* survives either
+    /// way: nothing under `audio/` writes a setting back, so a headset unplugged and plugged
+    /// in again is used again without anybody reopening this tab.
     pub const fn input_device(&self) -> &DeviceChoice {
         &self.input_device
     }
