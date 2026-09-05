@@ -48,7 +48,9 @@
 mod codec;
 mod device;
 mod dsp;
+mod heard;
 mod mixer;
+mod voice;
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
@@ -57,7 +59,12 @@ use bevy::prelude::*;
 
 use crate::settings::{OutputDevice, OutputDevices, Settings};
 use device::{AudioCapture, AudioDevice};
+// `SPEAKING_FOR` is the window `ui/voice.rs` reads through `Speaking::recent`, named here so
+// that module's test can pin it rather than restating the number.
+#[allow(unused_imports)]
+pub use heard::{SPEAKING_FOR, Speaking};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
+pub use voice::{Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.
@@ -106,6 +113,7 @@ impl Plugin for AudioPlugin {
             .insert_resource(controls)
             .insert_resource(speaker_test)
             .insert_resource(LastListing(0))
+            .add_plugins((voice::VoicePlugin, heard::HeardPlugin))
             .add_systems(
                 Update,
                 (
@@ -126,6 +134,16 @@ impl Plugin for AudioPlugin {
 /// than a `Mixer`, before there is a second holder to justify it.
 #[derive(Resource, Debug)]
 pub struct AudioMixer(Arc<Mixer>);
+
+impl AudioMixer {
+    /// Takes one of the mixer's source slots for `bus`, or `None` when they are all taken.
+    ///
+    /// The one way anything outside this file reaches the mixer, so "how many sources are
+    /// there" stays a question with one answer.
+    fn claim(&self, bus: Bus) -> Option<SourceHandle> {
+        self.0.claim(bus)
+    }
+}
 
 /// Everything a screen may ask of the audio module.
 ///
