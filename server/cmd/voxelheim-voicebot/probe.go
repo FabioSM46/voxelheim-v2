@@ -16,17 +16,15 @@ import (
 // The probe: one session that joins a server somebody else started, listens, and says
 // whether a voice frame reached it.
 //
-// **It exists for scripts/interop-check.sh and it is the one thing in this command that
-// does not start its own server.** The soak measures a server it configured; the interop
-// check asks a different question — whether a frame a *Rust* client encoded and sent
-// arrives at a Go session as a VoiceHeard — and the server in that script is the script's,
-// with a ticket key the script generated with openssl. So the probe takes an address, the
+// **It exists for scripts/interop-check.sh and it is the one thing here that does not start
+// its own server.** That check asks a different question — whether a frame a *Rust* client
+// encoded arrives at a Go session as a VoiceHeard — and its server is the script's, with a
+// ticket key the script generated with openssl. So the probe takes an address, the
 // fingerprint the server announced, and a ticket already minted for it.
 //
-// It says nothing about the frame beyond its length. `client/AGENTS.md` and
-// `internal/game/voice.go` both hold the line that a voice payload never reaches a
-// diagnostic, and a probe whose whole job is to prove a payload arrived is exactly where
-// somebody would be tempted to print one.
+// It says nothing about the frame beyond its length: `internal/game/voice.go` holds the
+// line that a voice payload never reaches a diagnostic, and a probe whose job is to prove
+// one arrived is exactly where somebody would be tempted to print it.
 
 // probeOptions are the flags the probe needs and the soak does not.
 type probeOptions struct {

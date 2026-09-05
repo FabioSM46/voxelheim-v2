@@ -16,11 +16,10 @@ import (
 // What every synthetic session shares, and the two edges that decide which frames a run is
 // about.
 
-// defaultTickRate is the authoritative rate the sessions heartbeat at, and the rate a run
-// asks the server for. It is game.DefaultTickRate's value, restated here rather than
-// imported, because what this command needs is a default for a flag it passes to another
-// process — a server started at some other rate is still measured correctly, and the flag
-// is what says which.
+// defaultTickRate is the rate the sessions heartbeat at and the rate a run asks the server
+// for. It is game.DefaultTickRate's value, restated rather than imported because what this
+// command needs is a default for a flag it passes to another process; a server started at
+// another rate is still measured correctly.
 const defaultTickRate = 20
 
 // fleet is everything the bots share.

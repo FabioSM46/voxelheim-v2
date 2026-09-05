@@ -45,8 +45,17 @@ const (
 	// opusCodeArbitrary is TOC frame-packing code 3, the only code that admits padding.
 	opusCodeArbitrary = 3
 
-	// opusFrameCountCBRPadded is the frame-count byte: v=0 (every frame the same size),
-	// p=1 (padding follows), M=1 (one frame).
+	// opusFrameCountCBRPadded is the frame-count byte RFC 6716 §3.2.5 puts after a code-3
+	// TOC: v=0 (every frame the same size), p=1 (padding follows), M=1 (one frame).
+	//
+	// **M is the count itself and not the count minus one**, which is the one thing about
+	// this byte that is worth writing down. The RFC gives M the range 1..48 and says it
+	// MUST NOT be zero, and libopus reads it straight — `opus_packet_get_nb_frames` returns
+	// `packet[1] & 0x3F` for a code-3 packet, and `opus_packet_parse_impl` refuses `count
+	// <= 0`. So 0x40, which is what "minus one" would make a single-frame packet, is not a
+	// one-frame packet: it is an invalid one. Checked against the libopus the client links
+	// rather than against this comment — #931's review is where, and the numbers are 960
+	// samples decoded from 0x41 against OPUS_INVALID_PACKET from 0x40.
 	opusFrameCountCBRPadded = 0x41
 
 	// opusPaddingContinues is the padding-length byte that means "254 bytes, and read
