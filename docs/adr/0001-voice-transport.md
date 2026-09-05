@@ -4,6 +4,7 @@
 - **Date**: 2026-09-04
 - **Issue**: #849, the first of the voice iteration (#849–#855)
 - **Decides for**: #850 (the contract and the relay), #851 (device and mixer), #852 (end to end)
+- **Measured by**: #855, under "Measured" below
 
 This is the first architecture decision record in this repository, so a word on the
 form: an ADR here states what was decided, what it was decided *against*, and the
@@ -106,6 +107,187 @@ That is a cost this game can pay. Voxelheim is cooperative PvE — the GDD's
 combat is positional and its social unit is a party sharing a fjord, not a
 competitive shooter where 200 ms decides a duel. It is emphatically *not* a cost a
 competitive game could pay, and if that ever changes this ADR is what to revisit.
+
+## Measured
+
+The measurement above is about the *transport*: 20 ms frames through
+`transport.ListenTLS` on a loopback socket, with no session, no handshake, no
+simulation and one listener. It answers "does TLS cost a voice anything", and the
+answer was no.
+
+**It cannot answer what the relay costs a running server**, because everything the
+relay actually does was outside it — the audible sets, the fan-out under `Sim.mu`,
+the per-listener latency lane, and the tick loop all of that competes with.
+`server/cmd/voxelheim-voicebot` is the end-to-end measurement, added by #855. It
+starts a `voxelheimd`, connects synthetic sessions over TLS, walks each through the
+real handshake, places them in clusters with the gated `/teleport` command, and has
+a configurable share of them send a 96-byte Opus silence frame fifty times a second.
+It is not a CI step and it asserts nothing; it prints numbers, and these are them.
+
+```bash
+cd server
+go build -o /tmp/voxelheimd ./cmd/voxelheimd
+
+# A hundred players in ten conversations of ten, a third of them speaking.
+go run ./cmd/voxelheim-voicebot -server /tmp/voxelheimd \
+    -sessions 100 -clusters 10 -speaking 0.3 -duration 30s -server-log-level debug
+
+# A thousand players in one conversation, a tenth of them speaking.
+go run ./cmd/voxelheim-voicebot -server /tmp/voxelheimd \
+    -sessions 1000 -clusters 1 -cluster-radius 10 -speaking 0.1 -duration 30s
+```
+
+Each was run twice: once as written, and once with `-speaking 0` and nothing else
+changed. **The control run is what makes the numbers a cost rather than a total** —
+a thousand co-located sessions are expensive before anybody says a word, and without
+the control this section would credit voice with all of it.
+
+### A hundred players in ten conversations
+
+| | 30% speaking | nobody speaking |
+| --- | --- | --- |
+| frames sent | 45,000 | 0 |
+| deliveries owed | 405,000 | — |
+| delivered | **405,000 (100.000%)** | — |
+| dropped | **0** | — |
+| p50 relay latency | 630 µs | — |
+| p99 relay latency | 5.35 ms | — |
+| longest | 20.22 ms | — |
+| achieved tick rate | **20.00 Hz** | 20.00 Hz |
+| "fell behind" warnings | 0 | 0 |
+| server CPU | 1.05 cores | 0.75 cores |
+| server RSS | 484 MiB | 439 MiB |
+
+### A thousand players in one conversation
+
+| | 10% speaking | nobody speaking |
+| --- | --- | --- |
+| frames sent | 148,870 | 0 |
+| deliveries owed | 148,721,130 | — |
+| delivered | **537,857 (0.36%)** | — |
+| dropped at the latency lane | **148,183,273 (99.64%)** | — |
+| dropped at the limiter, the size cap, the audience | **0, 0, 0** | — |
+| p50 relay latency | 12.9 s | — |
+| p99 relay latency | 29.1 s | — |
+| longest | 30.14 s | — |
+| achieved tick rate | **1.52 Hz — 658 ms a tick** | **4.23 Hz — 236 ms a tick** |
+| "fell behind" warnings | 40 | 64 |
+| server CPU | 2.70 cores | 2.26 cores |
+| server RSS | 533 MiB | 561 MiB |
+
+Measured on loopback, `amd64` (AMD Ryzen 7 3700X, 8 cores / 16 threads, 31 GiB),
+Linux 7.0, Go 1.26.6, seed 1, tick rate 20 Hz, view distance 3, voice range 24
+blocks, 96-byte frames at 50 per second, a 30-second window after a 3-second settle.
+The relay latency is measured inside the load generator, from the instant a frame
+was written to the instant it came back off a listener's socket, so it carries the
+generator's own receive scheduling as well as the server's relay; the generator's
+own processor figure is printed beside every result for that reason, and in the
+hundred-session run it was 0.58 cores of sixteen — not the bottleneck.
+
+### A correction to two of these numbers
+
+**The function that produced them had an off-by-one, and it is fixed rather than explained
+away.** `histogram.quantile` truncated the requested rank and then compared with a strict
+`>`, so it skipped the bucket whose cumulative count *equalled* the rank: ninety-nine
+samples at 35 µs and one at 3 s reported p99 as three seconds, when 99 of the 100 are at or
+below 40 µs. #930's review found it.
+
+What it can reach here is bounded, and the bound is arithmetic rather than a guess. The two
+forms differ only where `total × fraction` is a whole number — `trunc(x) + 1` is `ceil(x)`
+for every other x — and where they differ the wrong one names the *next* bucket, so an
+affected figure is too high and never too low.
+
+| run | latency samples | rank at p50 | rank at p99 | affected |
+| --- | --- | --- | --- | --- |
+| a hundred players | 405,000 | 202,500 — whole | 400,950 — whole | **both, by at most one bucket** |
+| a thousand players | 537,857 | 268,928.5 | 532,478.4 | neither |
+
+So **12.9 s and 29.1 s are unaffected**, by arithmetic rather than by re-measurement — which
+is what matters, because that is the run this section already says does not reproduce. And
+**630 µs and 5.35 ms are each either exact or one bucket high**: both fall in the histogram's
+finest tier, where a bucket is ten microseconds, so the most either can carry is 10 µs. The
+claim they support — a p99 comfortably inside one 20 ms frame — survives the whole of that
+interval.
+
+They are not recomputed, and the reason is stated rather than glossed: the histogram is
+per-session state inside a process that has long exited, so there is nothing left to
+recompute from. Re-running does not answer the question either, because a re-run measures a
+different run — which is the next paragraph.
+
+The first table on this page is not affected: it comes from
+`voicerelay_measure_test.go`'s own `percentile`, a different function that indexes a sorted
+slice and does not have this defect.
+
+### What the numbers say
+
+- **At the scale the GDD describes, the relay is free.** A hundred players in ten
+  huddles delivered every one of 405,000 owed frames, dropped nothing anywhere, and
+  left the tick loop at its full 20 Hz with no "fell behind" warning. Voice's own
+  share is the difference between the two columns: **0.30 of a core and 45 MiB for
+  13,500 deliveries a second**. p99 at 5.35 ms is comfortably inside one 20 ms
+  frame, so a listener's jitter buffer never sees a gap.
+- **The drop attribution is arithmetic, and one run checks it against the server.**
+  The relay answers nothing on the wire and exports no counter; every refusal it
+  makes is a `Debug` line. The size cap and the audience are zero by construction
+  (96 bytes against a ceiling of 400; every frame asks for `Everyone`), the limiter
+  is predicted by running `game.VoiceBurst` and `game.VoiceRefillPerSecond` over the
+  harness's own send instants, and the latency lane is the residual. The
+  hundred-session run was made at `-server-log-level debug` for exactly this: the
+  harness's prediction and the relay's own count agree at **0 and 0**.
+- **At a thousand in one place the tick budget is gone before voice is switched
+  on.** That is the finding, and it is why the control run exists. With **nobody
+  speaking at all**, a thousand co-located sessions run the simulation at 4.23 Hz —
+  a mean `Sim.Step` of 236 ms against a 50 ms budget, **4.7 times over it**. Voice
+  makes that worse and it does not make it bad: 236 ms becomes 658 ms.
+- **What breaks first is the snapshot fan-out, not the relay.** A thousand players
+  inside one view distance means every snapshot carries a thousand entities and
+  there are a thousand recipients, twenty times a second. That is the cost the
+  control run measures and it has nothing to do with voice.
+- **Where voice's own frames go is the latency lane, exactly as designed.** Of
+  148,721,130 deliveries owed, 537,857 arrived and the rest were refused by a full
+  per-session priority queue. `Player.Voice` chose that: a listener whose lane is
+  full loses one frame rather than delaying every other listener's, and at a fan-out
+  of 999 on a server missing nineteen ticks in twenty the lane is full essentially
+  always. **A 99.64% drop rate here is not a voice defect and must not be read as
+  one** — it is what that fan-out looks like on a simulation that has already
+  stopped keeping time.
+- **Deep in saturation the second run is not reproducible, and that is part of the
+  result.** The same command was run three times while this section was being
+  prepared and delivered 0.36%, 2.70% and 4.24% of what it owed, at 1.52 Hz, 2.25 Hz
+  and 2.97 Hz. The table records one run; the spread is what the number is worth.
+- **The first run reproduces, but only in part, and the halves are worth separating.**
+  Its delivery and tick figures repeat exactly: a later run returned 45,000 sent,
+  405,000 owed, 405,000 delivered, nothing dropped and 20.00 Hz, digit for digit. Its
+  *latency* does not. That same run, on a host that happened also to be compiling a
+  Rust client at a load average of 7.3, measured p50 1.46 ms and p99 13 ms against the
+  630 µs and 5.35 ms above. **What the relay delivers is a property of the server; how
+  fast it arrives is a property of the machine that afternoon** — so every latency
+  figure on this page belongs to an otherwise idle host, and the delivery and tick
+  figures do not need one.
+  **The "fell behind" counts are not a severity ranking either** — the control
+  logged 64 and the voice run 40, because a slower tick produces fewer of them in
+  the same wall-clock window.
+
+### Two follow-ups, named rather than fixed here
+
+#855 says to report a `Sim.Step` overrun and name the follow-up rather than tune
+inline, and nothing in this measurement changed a constant.
+
+1. **The tick loop does not survive a thousand co-located players, with or without
+   voice.** The control run is the evidence and the snapshot fan-out is the suspect:
+   O(players²) entity state per tick, before the relay is asked for anything. It
+   needs its own issue and it is not a voice issue.
+2. **The audible set is unbounded.** `advanceVoiceSetsLocked` puts every player in
+   range into every speaker's set, so one crowd is an O(n²) relay however cheap each
+   frame is. A cap — the nearest *k* listeners, say — would bound the fan-out at the
+   cost of a rule about who is heard, which is a game-design decision and belongs in
+   an issue of its own rather than in a constant somebody changes.
+
+**What this measurement does not cover**, stated so nobody reads it as more than it
+is: `Sim.Step`'s own per-tick distribution. The achieved tick rate is read from the
+counter `EntitySnapshot` carries, so it is a statement about the *mean* over the
+window. A p99 tick time needs an instrument inside the server process, and #855
+deliberately did not add one.
 
 ## Decision drivers
 

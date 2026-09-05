@@ -7,6 +7,12 @@
 server/bin/
 server/dist/
 *.exe
+# `go build ./cmd/<name>` with no -o drops the binary in the working directory, which for
+# the server workspace is beside go.mod. Named rather than globbed: a bare `server/*`
+# would hide a new package, and these three are the module's whole command list.
+server/voxelheimd
+server/voxelheim-auth
+server/voxelheim-voicebot
 
 # A server run with the default -world-dir writes its saved chunks here. Deltas only —
 # the generated terrain is a function of the seed — but it is local state, not source.
