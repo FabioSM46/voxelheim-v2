@@ -191,16 +191,18 @@ So estimate from the issue, using what this repository has actually measured:
 | What the issue looks like | Measured | Parts |
 | --- | --- | --- |
 | One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
-| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
-| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
-| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+| One workspace, a new module plus its tests | 45,000–60,000 | 1 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 2 |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 2+ |
 
-Two calibration points behind the bottom rows, both from Iteration 50: **#851** named eight new
-files in one workspace and came to 74,073 — five parts; **#850** touched `schemas`, `server` and
-`client` and came to about 95,000 — four parts.
+Two calibration points behind the bottom rows, both from Iteration 50 and both measured under the
+old 45,000 cap: **#851** named eight new files in one workspace and came to 74,073 — five parts
+then, two now; **#850** touched `schemas`, `server` and `client` and came to about 95,000 — four
+parts then, two now. The Parts column was recomputed for the 90,000 cap #925 measured; the sizes
+were not, because the sizes are what was measured.
 
 **The Parts column is not the estimate divided by the cap, and reading it that way is the mistake
-this paragraph exists to stop.** 74,073 over 45,000 is 1.6, and #851 took five. Two reasons, both
+this paragraph exists to stop.** 74,073 over the 45,000 cap of the time is 1.6, and #851 took five. Two reasons, both
 structural rather than accidental:
 
 - **Seams are discrete.** You cut where the code already draws a boundary, and those boundaries fall
@@ -212,9 +214,12 @@ structural rather than accidental:
   finds work the acceptance criteria did not name, and review fixes then grow a branch again (#901
   went 44,973 → 48,682 answering three findings).
 
-So the arithmetic is a floor on the count, never the count: **estimate ÷ 45,000, rounded up, then
-add one for what you have not thought of, then let the seams decide the final number.** Aim each
-part at roughly 40,000 rather than 45,000, because the cap is a truncation point and not a target.
+So the arithmetic is a floor on the count, never the count: **estimate ÷ 90,000, rounded up, then
+add one when the estimate is within a third of the cap below a multiple of it — that is how low an
+estimate runs — then let the seams decide the final number.** Aim each part at roughly 80,000
+rather than 90,000, because the cap is a truncation point and not a target. That target is the same
+fraction of the cap the 40,000 of the 45,000 era was, kept deliberately rather than re-chosen: what
+changed on #925 is the cap, and nothing measured says the safe distance from it changed with it.
 
 **Two multipliers the file count hides.** Test-heavy changes run about two-thirds tests in this
 repository, so a module with real coverage is roughly three times its production code. And a field
@@ -417,7 +422,8 @@ what binds is how hard the model reasons about *that* content. Those measurement
 the current `high` effort trades some reasoning depth for lower latency and a lower risk of
 exhausting the shared reasoning/verdict budget, without changing its 384,000-token ceiling.
 `DEEPSEEK_MAX_DIFF_CHARS` is
-**45,000** characters, set from the worst ratio yet measured; over it the diff is truncated and
+**90,000** characters, set on #925 from seventeen replays at `high` — the worst ratio observed,
+doubled for the tail, under the 72% margin every cap here has used; over it the diff is truncated and
 every unread file is injected as a finding, which blocks the pull request until every gap has been
 read and publicly disposed of. A human may acknowledge that audit; `/process-pr` may do so only
 through its evidence-backed, dated acknowledgement sequence. Neither outcome is one to open a PR
@@ -457,7 +463,7 @@ REVIEWABLE=$(git diff "origin/$BASE_BRANCH"...HEAD -- . \
   ':(exclude)gen/*' ':(exclude)*/gen/*' ':(exclude)*_generated.*' \
   ':(exclude)Cargo.lock' ':(exclude)*/Cargo.lock' \
   ':(exclude)go.sum' ':(exclude)*/go.sum' | wc -m)
-echo "reviewable diff: ${REVIEWABLE} characters (cap 45,000)"
+echo "reviewable diff: ${REVIEWABLE} characters (cap 90,000)"
 ```
 
 **That list was wrong for as long as it existed, and the way it was wrong is the reason

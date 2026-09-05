@@ -421,6 +421,8 @@ jobs:
           bash scripts/test/ci-gate.test.sh
           bash scripts/test/deepseek-budget.test.sh
           bash scripts/test/deepseek-review-ack-policy.test.sh
+          bash scripts/test/deepseek-force-review-dispatch.test.sh
+          bash scripts/test/deepseek-samples.test.sh
           bash scripts/test/diff-measure-parity.test.sh
           bash scripts/test/split-sizing-docs.test.sh
           bash scripts/test/client-ci-budget.test.sh

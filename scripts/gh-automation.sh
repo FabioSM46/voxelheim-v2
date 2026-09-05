@@ -1213,20 +1213,59 @@ cmd_pr_deepseek_rounds() {
 # first pass; this is the way back in when a second opinion is wanted. The run
 # executes the workflow definition from <ref>, so the ref must be a branch that
 # carries the FORCE_REVIEW bypass — hence develop rather than the default branch.
+#
+# `--measure-only` replays the diff without posting a review, spending a round or
+# touching any label — the measurement path AGENTS.md names for sampling the diff cap.
+# `--measure-cap <chars>` lets such a replay truncate above DEEPSEEK_MAX_DIFF_CHARS; it
+# is refused without `--measure-only` here and again in the script, because a raised cap
+# must never reach a review that posts. Both are passed as workflow inputs, so the ref
+# must carry a workflow definition that declares them.
 cmd_pr_deepseek_force_review() {
-  local pr="${1:-}" ref="${2:-develop}"
-  [ -n "$pr" ] || die "usage: pr-deepseek-force-review <pr-number> [ref]"
+  local pr="" ref="develop" measure_only=0 measure_cap="" positional=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --measure-only) measure_only=1 ;;
+      --measure-cap)
+        [ "$#" -ge 2 ] || die "--measure-cap requires a character count"
+        measure_cap="$2"
+        shift
+        ;;
+      --*) die "unknown option '${1}' (expected --measure-only or --measure-cap <chars>)" ;;
+      *)
+        positional=$((positional + 1))
+        case "$positional" in
+          1) pr="$1" ;;
+          2) ref="$1" ;;
+          *) die "usage: pr-deepseek-force-review <pr-number> [ref] [--measure-only] [--measure-cap <chars>]" ;;
+        esac
+        ;;
+    esac
+    shift
+  done
+  [ -n "$pr" ] || die "usage: pr-deepseek-force-review <pr-number> [ref] [--measure-only] [--measure-cap <chars>]"
+  if [ -n "$measure_cap" ]; then
+    [ "$measure_only" -eq 1 ] || die "--measure-cap is only valid with --measure-only: a raised cap must never reach a review that posts"
+    [[ "$measure_cap" =~ ^[0-9]+$ ]] && [ "$measure_cap" -gt 0 ] || die "--measure-cap must be a positive integer, got '${measure_cap}'"
+  fi
   require_gh
   resolve_repo || die "Could not resolve the repository for review dispatch"
 
+  local -a inputs=(-f "pr_number=$pr" -f event_name=pull_request)
+  if [ "$measure_only" -eq 1 ]; then
+    inputs+=(-f measure_only=true)
+    [ -n "$measure_cap" ] && inputs+=(-f "measure_cap=$measure_cap")
+  fi
   gh workflow run deepseek-pr-review.yml \
     --repo "$REPO" \
     --ref "$ref" \
-    -f pr_number="$pr" \
-    -f event_name=pull_request \
+    "${inputs[@]}" \
     || die "Failed to dispatch deepseek-pr-review.yml on ref '$ref'"
 
-  echo "Dispatched a forced DeepSeek review of PR #${pr} (workflow ref: ${ref})."
+  if [ "$measure_only" -eq 1 ]; then
+    echo "Dispatched a measure-only DeepSeek replay of PR #${pr} (workflow ref: ${ref}${measure_cap:+, cap ${measure_cap}}); nothing will be posted."
+  else
+    echo "Dispatched a forced DeepSeek review of PR #${pr} (workflow ref: ${ref})."
+  fi
   echo "Watch it: gh run list --workflow=deepseek-pr-review.yml --limit 3"
 }
 
@@ -1866,8 +1905,11 @@ Commands:
   pr-label <pr> <add|remove> <label>   Add or remove a label; adding is idempotent
                                        and a failed write exits non-zero
   pr-deepseek-rounds <pr>              DeepSeek review round status (JSON)
-  pr-deepseek-force-review <pr> [ref]  Dispatch a DeepSeek review that ignores the
-                                       round cap (ref defaults to develop)
+  pr-deepseek-force-review <pr> [ref] [--measure-only] [--measure-cap <chars>]
+                                       Dispatch a DeepSeek review that ignores the
+                                       round cap (ref defaults to develop); --measure-only
+                                       replays without posting, --measure-cap overrides
+                                       the truncation cap for that replay only
   pr-check-label <pr> <label>          Exit 0 present, 1 absent, 2 undetermined
   is-ready-to-merge <pr>              Exit 0 if frozen rule met
   pr-merge <pr> [--head <sha>] [--base-head <sha>] [method]
