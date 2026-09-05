@@ -19,8 +19,8 @@
 use bevy::prelude::*;
 
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
-use crate::audio::AudioControls;
-use crate::player::InputMode;
+use crate::audio::{AudioControls, MicTest, Voices};
+use crate::player::{Appearances, InputMode};
 use crate::settings::{
     AudioDevices, CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name,
 };
@@ -39,6 +39,9 @@ pub(super) struct SettingsScreen {
     /// on a graphics reset, and `read_settings_keys` gives Escape to it before Escape can
     /// close the screen.
     monitor_dropdown_open: bool,
+    /// Whether the Voices panel is open. Its own lifecycle, exactly as the Monitor dropdown
+    /// has one: opened from its row, closed by that row, by a tab change, and by Escape.
+    voices_open: bool,
 }
 
 impl SettingsScreen {
@@ -48,6 +51,7 @@ impl SettingsScreen {
         self.capturing = None;
         self.notice.clear();
         self.monitor_dropdown_open = false;
+        self.voices_open = false;
     }
 
     /// Whether the panel is drawn. `ui/menu.rs` reads it to stand down while it is, and
@@ -62,6 +66,7 @@ impl SettingsScreen {
         self.capturing = None;
         self.notice.clear();
         self.monitor_dropdown_open = false;
+        self.voices_open = false;
     }
 }
 
@@ -77,6 +82,9 @@ impl Plugin for SettingsScreenPlugin {
             // Inserted by `AudioPlugin`, which `main.rs` adds first; this is what lets the
             // screen and its tests stand up with no audio device anywhere near them.
             .init_resource::<AudioControls>()
+            .init_resource::<Voices>()
+            .init_resource::<MicTest>()
+            .init_resource::<Appearances>()
             .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
             // Chained, and the order is what makes a press readable on the frame it
@@ -98,6 +106,11 @@ impl Plugin for SettingsScreenPlugin {
                     rebuild_monitor_options,
                     show_monitor_dropdown,
                     colour_monitor_controls,
+                    close_the_microphone_test_with_the_screen,
+                    show_the_microphone_meter,
+                    voice_row_actions,
+                    rebuild_voice_rows,
+                    show_voices_panel,
                     refresh_readings,
                 )
                     .chain(),
@@ -147,6 +160,53 @@ struct MonitorSelectButton;
 #[derive(Component)]
 struct MonitorDropdownPanel;
 
+/// The microphone test's meter, its filled part, and the threshold drawn across it.
+#[derive(Component)]
+struct MicMeter;
+#[derive(Component)]
+struct MicMeterLevel;
+#[derive(Component)]
+struct MicMeterMark;
+
+/// The Voices panel: the overlay a speaker's rows are spawned into.
+#[derive(Component)]
+struct VoicesPanel;
+
+/// One speaker's row inside it, naming whose it is so it can be despawned by entity id.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+struct VoiceRow {
+    entity_id: u64,
+    /// The name this row was **built with**.
+    ///
+    /// **Part of what the rebuild compares, because it is part of what the row draws.** The
+    /// appearance cache fills in separately from the voice, so a speaker heard before their
+    /// description arrives is drawn as `player 7` — and with only the id set compared, that
+    /// row kept saying `player 7` for the rest of the session. Found by review on #942.
+    name: String,
+}
+
+/// The line counting the speakers the panel did not draw, and how many that is.
+///
+/// **A component rather than a sentinel `VoiceRow`**, and the difference is a real bug rather
+/// than tidiness: with the count folded into the row list, "what is drawn" and "who is drawn"
+/// were the same question, so the first crowd compared equal to the eight rows already there
+/// and the count was never spawned at all. It is a second thing the rebuild has to notice.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct VoiceOverflow(usize);
+
+/// What pressing a control inside the Voices panel means.
+///
+/// Not a [`SettingsAction`]: these carry a speaker's entity id, and they change a resource
+/// `crate::audio` owns rather than a setting. Keeping them apart is also what keeps
+/// `settings_actions` from having to know that `Voices` exists.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceControl {
+    /// Mute this speaker, or un-mute them.
+    Mute(u64),
+    /// Move this speaker's volume by the given number of its own steps.
+    Nudge(u64, i32),
+}
+
 /// One option inside the open dropdown, naming its index into
 /// [`MonitorChoices::preferences`]. Rebuilt whenever the live choices change, so an index
 /// here always names [`rebuild_monitor_options`]'s current row.
@@ -167,6 +227,10 @@ enum SettingsAction {
     Reset(Tab),
     /// Play a second of tone through the master bus at whatever the volume is now.
     TestSpeakers,
+    /// Show or hide the Voices panel.
+    ToggleVoices,
+    /// Open or close the microphone test, which holds the input device and plays it back.
+    ToggleMicTest,
     /// Back to the pause menu.
     Back,
 }
@@ -183,6 +247,14 @@ enum Reading {
     /// one centred string. Distinct from `Knob(Knob::Monitor)`, which nothing spawns a
     /// text node for any more — Monitor draws as [`MonitorSelectButton`], not a stepper.
     MonitorControl,
+    /// Whether the Voices panel is showing, as the word on its own button.
+    VoicesPanel,
+    /// Whether the microphone test is running, as the word on its own button.
+    MicTestButton,
+    /// One speaker's volume, as a percentage.
+    VoiceLevel(u64),
+    /// Whether one speaker is muted, as the word on the button that changes it.
+    VoiceMuted(u64),
     /// The line under the panel.
     Notice,
 }
@@ -235,6 +307,53 @@ const CONTROL_BUTTON_HEIGHT: f32 = ROW_HEIGHT - 4.0;
 
 /// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
 const WIDE_BUTTON: f32 = 40.0;
+
+/// The width of the microphone test's level meter, in logical pixels.
+///
+/// Whatever the stepper column has left once the button is drawn, so the row is the same width
+/// as every other row on the tab.
+const METER_WIDTH: f32 = STEPPER_WIDTH - STEP_BUTTON * 4.0 - CONTROL_GAP;
+
+/// The height of the meter's bar.
+const METER_HEIGHT: f32 = 12.0;
+
+/// The quietest level the meter draws, in dBFS.
+///
+/// **Deliberately the same number as the quietest threshold the knob offers**, so the marker
+/// is never off the left edge of the bar it is drawn on;
+/// `the_threshold_marker_stays_on_the_meter_across_the_whole_knob` is what keeps the two in
+/// step, because this is a presentation choice and that is a bound in `crate::settings`, and
+/// nothing but a test connects them.
+const METER_FLOOR_DB: f32 = -60.0;
+
+/// The bar's own colours: the ground it is drawn on, the level, and the threshold marker.
+const METER_GROUND: Color = Color::srgb(0.10, 0.12, 0.15);
+const METER_LEVEL: Color = Color::srgb(0.42, 0.78, 0.52);
+const METER_MARK: Color = Color::linear_rgb(1.0, 0.72, 0.25);
+
+/// The width of the threshold marker, in logical pixels.
+const METER_MARK_WIDTH: f32 = 2.0;
+
+/// The Voices panel's stacking position, and the Monitor dropdown's reasoning verbatim: a
+/// child of the row it belongs to would paint behind every row spawned after it.
+const VOICES_PANEL_LAYER: i32 = 46;
+
+/// The most speakers the Voices panel draws at once.
+///
+/// **A bound on a length the world chooses.** `audio/listener.rs` already caps what it
+/// remembers; this caps what is *drawn*, because a panel one row per speaker tall would run
+/// off the bottom of the narrowest supported viewport long before that cap. The rest are
+/// counted, exactly as `ui/voice.rs` counts the speakers it cannot name.
+const PANEL_VOICES: usize = 8;
+
+/// The width of a speaker's name in the Voices panel, in logical pixels.
+const VOICE_NAME_WIDTH: f32 = 200.0;
+
+/// The width of a speaker's mute control, in logical pixels.
+const VOICE_MUTE_WIDTH: f32 = 90.0;
+
+/// And of the reading between its `-` and `+`.
+const VOICE_LEVEL_WIDTH: f32 = 70.0;
 
 /// The Monitor dropdown's stacking position. Without a `GlobalZIndex` of its own it would
 /// paint inside the Monitor row's slot in the panel's tree order — behind every row spawned
@@ -444,6 +563,11 @@ enum Row {
     /// Not `Knob(Knob::Monitor)` — [`rows_of`] gives Monitor this variant instead, which is
     /// what keeps the generic stepper out of its row while every other knob still gets one.
     MonitorSelect,
+    /// The Voices row: one button that opens the panel, plus the panel it opens. Its own
+    /// variant rather than a [`Self::Toggle`] because it spawns an overlay beside the button.
+    VoicesToggle,
+    /// The microphone test row: one button, and the level meter beside it.
+    MicTest,
     /// A row whose control *does* something rather than showing something: one button with
     /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
     /// this is the shape for a press with no state behind it at all.
@@ -458,6 +582,8 @@ impl Row {
             Self::Toggle(label, _, _) => label,
             Self::Binding(control) => control.label(),
             Self::MonitorSelect => Knob::Monitor.label(),
+            Self::VoicesToggle => "Voices",
+            Self::MicTest => "Test microphone",
             Self::Action(label, _, _) => label,
         }
     }
@@ -499,13 +625,17 @@ fn rows_of(tab: Tab) -> Vec<Row> {
                 Reading::ReadoutCorner,
             ),
         ]),
-        // Under the knob it proves, because that is the order a player uses them in: set
-        // the volume, then find out whether anything comes out.
-        Tab::Audio => rows.push(Row::Action(
-            "Test speakers",
-            SettingsAction::TestSpeakers,
-            "PLAY A TONE",
-        )),
+        Tab::Audio => rows.extend([
+            // Under the knob it proves, because that is the order a player uses them in: set
+            // the volume, then find out whether anything comes out.
+            Row::Action("Test speakers", SettingsAction::TestSpeakers, "PLAY A TONE"),
+            // Beside the speaker test, because they are the same errand pointed the two ways,
+            // and above Voices, which is about other people rather than about this machine.
+            Row::MicTest,
+            // Last, and a `Toggle` rather than an `Action`: the button's face *is* the state,
+            // so a player can tell an open panel from a closed one without looking at it.
+            Row::VoicesToggle,
+        ]),
     }
     rows
 }
@@ -546,6 +676,8 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                 );
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
+            Row::VoicesToggle => spawn_voices_control(controls),
+            Row::MicTest => spawn_mic_test_control(controls),
             Row::Action(_, action, face) => {
                 spawn_button(
                     controls,
@@ -701,6 +833,263 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
                 BorderColor::all(CELL_EDGE),
             ));
         });
+}
+
+/// The Voices row's control and the panel it opens.
+///
+/// [`spawn_monitor_select`]'s shape, for its reasons: an absolutely positioned overlay
+/// anchored under the button, with a `GlobalZIndex` of its own so it paints over the rows
+/// below rather than inside this row's slot in the panel's tree order. It starts empty —
+/// [`rebuild_voice_rows`] fills it, and only when the set of speakers changes.
+fn spawn_voices_control(parent: &mut ChildSpawnerCommands<'_>) {
+    parent
+        .spawn((
+            SettingsAction::ToggleVoices,
+            Button,
+            Node {
+                width: Val::Px(STEP_BUTTON * 4.0),
+                height: Val::Px(CONTROL_BUTTON_HEIGHT),
+                flex_shrink: 0.0,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON),
+        ))
+        .with_children(|button| {
+            button.spawn((
+                Reading::VoicesPanel,
+                Text::new(String::new()),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                TextLayout::no_wrap().with_justify(Justify::Center),
+            ));
+
+            button.spawn((
+                VoicesPanel,
+                GlobalZIndex(VOICES_PANEL_LAYER),
+                Node {
+                    position_type: PositionType::Absolute,
+                    // Above its own button rather than below it: this row is the last on the
+                    // tab, so a panel hanging downwards would leave the screen.
+                    bottom: Val::Px(CONTROL_BUTTON_HEIGHT),
+                    right: Val::Px(0.0),
+                    width: Val::Px(
+                        VOICE_NAME_WIDTH
+                            + VOICE_MUTE_WIDTH
+                            + VOICE_LEVEL_WIDTH
+                            + 2.0 * STEP_BUTTON
+                            + 5.0 * CONTROL_GAP,
+                    ),
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    padding: UiRect::all(Val::Px(6.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BACKGROUND),
+                BorderColor::all(CELL_EDGE),
+            ));
+        });
+}
+
+/// What the panel calls one speaker.
+///
+/// Named the way every other roster names them, and drawn as an id when the description has
+/// not arrived — `ui/voice.rs`'s rule, for its reason: hearing somebody the client cannot name
+/// is a real state, and dropping the row would leave a speaker nobody can mute. The id is a
+/// placeholder that gets replaced, which is why [`rebuild_voice_rows`] compares it.
+fn speaker_name(appearances: &Appearances, entity_id: u64) -> String {
+    appearances
+        .name(entity_id)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("player {entity_id}"))
+}
+
+/// The microphone test row: one button, and the meter it holds open beside it.
+///
+/// The meter is always spawned and is empty while the test is shut — `show_the_microphone_meter`
+/// is the only writer of its widths, and a meter rebuilt on every press would be a node
+/// despawned under the pointer that pressed it.
+fn spawn_mic_test_control(parent: &mut ChildSpawnerCommands<'_>) {
+    parent
+        .spawn((
+            SettingsAction::ToggleMicTest,
+            Button,
+            Node {
+                width: Val::Px(STEP_BUTTON * 4.0),
+                height: Val::Px(CONTROL_BUTTON_HEIGHT),
+                flex_shrink: 0.0,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON),
+        ))
+        .with_child((
+            Reading::MicTestButton,
+            Text::new(String::new()),
+            TextFont {
+                font_size: ROW_FONT,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextLayout::no_wrap().with_justify(Justify::Center),
+        ));
+
+    parent
+        .spawn((
+            MicMeter,
+            Node {
+                width: Val::Px(METER_WIDTH),
+                height: Val::Px(METER_HEIGHT),
+                flex_shrink: 0.0,
+                border_radius: BorderRadius::all(Val::Px(2.0)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(METER_GROUND),
+        ))
+        .with_children(|meter| {
+            meter.spawn((
+                MicMeterLevel,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(0.0),
+                    height: Val::Px(METER_HEIGHT),
+                    ..default()
+                },
+                BackgroundColor(METER_LEVEL),
+            ));
+            // Drawn after the level, so the mark is visible through a level that has passed
+            // it — which is the one moment a player is looking at both.
+            meter.spawn((
+                MicMeterMark,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(0.0),
+                    top: Val::Px(0.0),
+                    width: Val::Px(METER_MARK_WIDTH),
+                    height: Val::Px(METER_HEIGHT),
+                    ..default()
+                },
+                BackgroundColor(METER_MARK),
+            ));
+        });
+}
+
+/// One speaker's row inside the open Voices panel.
+fn spawn_voice_row(parent: &mut ChildSpawnerCommands<'_>, entity_id: u64, name: String) {
+    parent
+        .spawn((
+            VoiceRow {
+                entity_id,
+                name: name.clone(),
+            },
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(CONTROL_GAP),
+                height: Val::Px(ROW_HEIGHT),
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(name),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.78, 0.80, 0.84)),
+                TextLayout::no_wrap(),
+                Node {
+                    width: Val::Px(VOICE_NAME_WIDTH),
+                    flex_shrink: 0.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+            ));
+            spawn_voice_button(
+                row,
+                VoiceControl::Mute(entity_id),
+                VOICE_MUTE_WIDTH,
+                Reading::VoiceMuted(entity_id),
+            );
+            spawn_voice_button(row, VoiceControl::Nudge(entity_id, -1), STEP_BUTTON, None);
+            row.spawn((
+                Reading::VoiceLevel(entity_id),
+                Text::new(String::new()),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                TextLayout::no_wrap().with_justify(Justify::Center),
+                Node {
+                    width: Val::Px(VOICE_LEVEL_WIDTH),
+                    flex_shrink: 0.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+            ));
+            spawn_voice_button(row, VoiceControl::Nudge(entity_id, 1), STEP_BUTTON, None);
+        });
+}
+
+/// One pressable control inside a speaker's row.
+///
+/// `face` is a [`Reading`] for a button whose text *is* the state it changes, and `None` for
+/// one whose face never moves — the `-` and `+`, which are drawn from the control itself.
+fn spawn_voice_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    control: VoiceControl,
+    width: f32,
+    face: impl Into<Option<Reading>>,
+) {
+    let face = face.into();
+    let fixed = match control {
+        VoiceControl::Mute(_) => String::new(),
+        VoiceControl::Nudge(_, steps) if steps < 0 => "-".to_owned(),
+        VoiceControl::Nudge(..) => "+".to_owned(),
+    };
+    let mut button = parent.spawn((
+        control,
+        Button,
+        Node {
+            width: Val::Px(width),
+            height: Val::Px(CONTROL_BUTTON_HEIGHT),
+            flex_shrink: 0.0,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            border_radius: BorderRadius::all(Val::Px(3.0)),
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+    ));
+    button.with_children(|button| {
+        let mut text = button.spawn((
+            Text::new(fixed),
+            TextFont {
+                font_size: ROW_FONT,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextLayout::no_wrap().with_justify(Justify::Center),
+        ));
+        if let Some(face) = face {
+            text.insert(face);
+        }
+    });
 }
 
 /// One option inside the open Monitor dropdown, at `index` in
@@ -873,9 +1262,12 @@ fn switch_settings_tabs(
             }
             // The Monitor dropdown is the same trap one row over: leaving Graphics has to
             // close it explicitly, or it goes on floating over whichever rows Controls
-            // draws in its place.
+            // draws in its place. The Voices panel is the third of them, on the third tab.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
+            }
+            if screen.voices_open {
+                screen.voices_open = false;
             }
         }
     }
@@ -921,6 +1313,7 @@ fn settings_actions(
     monitors: Res<MonitorChoices>,
     devices: Res<AudioDevices>,
     mut audio: ResMut<AudioControls>,
+    mut mic_test: ResMut<MicTest>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
@@ -964,6 +1357,17 @@ fn settings_actions(
                     screen.capturing = Some(control);
                     screen.notice = format!("press a key for {}", control.label().to_lowercase());
                 }
+                continue;
+            }
+            SettingsAction::ToggleMicTest => {
+                // The screen holds this, and holds it until the screen goes away — see
+                // `MicTest`. `SettingsScreen::close` is what takes it back, so a player who
+                // walks out of the settings does not leave a microphone open behind them.
+                mic_test.open = !mic_test.open;
+                continue;
+            }
+            SettingsAction::ToggleVoices => {
+                screen.voices_open = !screen.voices_open;
                 continue;
             }
             SettingsAction::TestSpeakers => {
@@ -1014,10 +1418,14 @@ fn read_settings_keys(
 
     let Some(control) = screen.capturing else {
         if keys.just_pressed(KeyCode::Escape) {
-            // The dropdown answers to Escape before the screen does: the first press
-            // closes what was most recently opened, not the whole screen behind it.
+            // An overlay answers to Escape before the screen does: the first press closes
+            // what was most recently opened, not the whole screen behind it. The two are
+            // never open together — they are on different tabs, and a tab change closes
+            // both — so the order between them decides nothing.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
+            } else if screen.voices_open {
+                screen.voices_open = false;
             } else {
                 screen.close();
             }
@@ -1162,17 +1570,216 @@ fn colour_monitor_controls(
     }
 }
 
+/// Closes the microphone test when the screen that opened it goes away, or when the player
+/// leaves the tab it is on.
+///
+/// **This is the half that matters most in this whole row.** Every other piece of screen state
+/// is forgotten by [`SettingsScreen::close`]; this one is a *held microphone*, and a player who
+/// pressed Escape and went back to the game must not be leaving an open input device behind
+/// them because a flag lives on a different resource. A tab change closes it for the weaker
+/// version of the same reason: a device held for a control the player can no longer see.
+fn close_the_microphone_test_with_the_screen(
+    screen: Res<SettingsScreen>,
+    tab: Res<Tab>,
+    mut mic_test: ResMut<MicTest>,
+) {
+    // Read through the immutable deref, so an ordinary frame does not mark the resource and
+    // wake `speak` for a flag that has not moved.
+    if mic_test.open && (!screen.is_open() || *tab != Tab::Audio) {
+        mic_test.open = false;
+    }
+}
+
+/// Where on the meter a level in dBFS falls, `0.0` at [`METER_FLOOR_DB`] and `1.0` at full
+/// scale.
+///
+/// A pure function so both the bar and the marker are placed by the same arithmetic, and so
+/// the placement is testable with no window — which is what
+/// `the_threshold_marker_stays_on_the_meter_across_the_whole_knob` needs.
+fn meter_fraction(level_db: f32) -> f32 {
+    if !level_db.is_finite() {
+        // `NaN` compares false against both ends, so a clamp would pass it straight through
+        // into a `Val::Px` — the rule `client/AGENTS.md` states about non-finite floats.
+        return 0.0;
+    }
+    ((level_db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// Draws the meter: how loud the microphone is now, and where the level that would transmit
+/// sits on the same scale.
+///
+/// **The threshold is drawn whether or not the mode uses it**, deliberately: a player setting
+/// up push to talk is still choosing a microphone gain, and the mark is the only thing on this
+/// screen that says what "loud enough" means. The bar is empty while the test is shut, because
+/// nothing is being captured and a meter frozen at its last reading is a meter that lies.
+fn show_the_microphone_meter(
+    settings: Res<Settings>,
+    mic_test: Res<MicTest>,
+    mut levels: Query<&mut Node, (With<MicMeterLevel>, Without<MicMeterMark>)>,
+    mut marks: Query<&mut Node, (With<MicMeterMark>, Without<MicMeterLevel>)>,
+) {
+    if !settings.is_changed() && !mic_test.is_changed() {
+        return;
+    }
+    let filled = Val::Px(
+        mic_test
+            .level_db
+            .map_or(0.0, |level| meter_fraction(level) * METER_WIDTH),
+    );
+    for mut node in &mut levels {
+        if node.width != filled {
+            node.width = filled;
+        }
+    }
+    // Kept inside the bar at the top of the scale, where the mark's own width would otherwise
+    // hang off the right edge.
+    let at = Val::Px(
+        (meter_fraction(settings.voice_activation_threshold_db()) * METER_WIDTH)
+            .min(METER_WIDTH - METER_MARK_WIDTH),
+    );
+    for mut node in &mut marks {
+        if node.left != at {
+            node.left = at;
+        }
+    }
+}
+
+/// Applies a press inside the open Voices panel.
+///
+/// **It changes `Voices` and never a setting**, which is the whole of why these controls are
+/// not [`SettingsAction`]s: a mute is session state `crate::audio` owns, and #853 is explicit
+/// that it is never written to the settings file — the snapshot carries no stable player id,
+/// so a saved mute would come back attached to whoever inherited that entity number.
+fn voice_row_actions(
+    mut buttons: Query<(&Interaction, &VoiceControl, &mut BackgroundColor), Changed<Interaction>>,
+    mut voices: ResMut<Voices>,
+) {
+    for (interaction, control, mut colour) in &mut buttons {
+        colour.0 = button_colour(interaction);
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match *control {
+            VoiceControl::Mute(entity_id) => voices.toggle_mute(entity_id),
+            VoiceControl::Nudge(entity_id, steps) => voices.adjust_volume(entity_id, steps),
+        }
+    }
+}
+
+/// Rebuilds the panel's rows when the set of speakers changes, and **only** then.
+///
+/// `ui/servers.rs`'s `rebuild_rows` and [`rebuild_monitor_options`] give the same reason:
+/// rebuilding every frame would despawn and respawn the entity under a pointer mid-press. The
+/// trap here is sharper than theirs, because `Voices` is marked changed on **every frame
+/// anybody speaks** — so the comparison is against the set of speakers actually drawn, not
+/// against `Res::is_changed`.
+fn rebuild_voice_rows(
+    voices: Res<Voices>,
+    appearances: Res<Appearances>,
+    panels: Query<Entity, With<VoicesPanel>>,
+    rows: Query<(Entity, &VoiceRow)>,
+    overflow: Query<(Entity, &VoiceOverflow)>,
+    mut commands: Commands,
+) {
+    let heard = voices.recent(std::time::Instant::now());
+    let wanted: Vec<u64> = heard.iter().copied().take(PANEL_VOICES).collect();
+    let hidden = heard.len() - wanted.len();
+
+    // Every speaker the panel should draw, with the name it should draw them under — resolved
+    // once here so the comparison below and the spawn below that cannot disagree about it.
+    let wanted: Vec<(u64, String)> = wanted
+        .into_iter()
+        .map(|entity_id| (entity_id, speaker_name(&appearances, entity_id)))
+        .collect();
+
+    let drawn: Vec<(u64, String)> = {
+        let mut drawn: Vec<(u64, String)> = rows
+            .iter()
+            .map(|(_, row)| (row.entity_id, row.name.clone()))
+            .collect();
+        drawn.sort_unstable();
+        drawn
+    };
+    let counted = overflow
+        .iter()
+        .map(|(_, count)| count.0)
+        .next()
+        .unwrap_or(0);
+    let mut sorted = wanted.clone();
+    sorted.sort_unstable();
+    // **Three things, because they are three questions**: who is drawn, what each of them is
+    // called, and how many are not drawn at all. Comparing only the first is how the count came
+    // to be spawned never — the ninth speaker changes `hidden` and leaves the eight rows
+    // exactly as they were — and it is also how a name that arrived after its row never
+    // reached the screen.
+    if sorted == drawn && hidden == counted {
+        return;
+    }
+
+    for (entity, _) in &rows {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _) in &overflow {
+        commands.entity(entity).despawn();
+    }
+    for panel in &panels {
+        commands.entity(panel).with_children(|list| {
+            for (entity_id, name) in &wanted {
+                spawn_voice_row(list, *entity_id, name.clone());
+            }
+            if hidden > 0 {
+                list.spawn((
+                    VoiceOverflow(hidden),
+                    Text::new(format!("+{hidden} more")),
+                    TextFont {
+                        font_size: ROW_FONT,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.72, 0.75, 0.80, 0.75)),
+                    TextLayout::no_wrap(),
+                ));
+            }
+        });
+    }
+}
+
+/// Gives the Voices panel a `Display` and takes it away.
+///
+/// `Display`, never `Visibility`, for [`show_monitor_dropdown`]'s reason: a hidden node still
+/// occupies its layout box, and a closed panel must be out of hit-testing so the rows it
+/// covered are pressable again.
+fn show_voices_panel(screen: Res<SettingsScreen>, mut panels: Query<&mut Node, With<VoicesPanel>>) {
+    let next = if screen.voices_open {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut panels {
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
 /// Keeps every value on the panel in step with the settings behind it.
 fn refresh_readings(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
     devices: Res<AudioDevices>,
+    voices: Res<Voices>,
+    mic_test: Res<MicTest>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
+    // `Voices` is written on every frame anybody is speaking, so this is the one input that
+    // is nearly always "changed" while a conversation is happening. It is still cheaper than
+    // the alternative — a per-speaker reading that only refreshed when a *setting* moved
+    // would sit at a stale volume for as long as nobody touched the rest of the screen.
     if !settings.is_changed()
         && !monitors.is_changed()
         && !devices.is_changed()
+        && !voices.is_changed()
+        && !mic_test.is_changed()
         && !screen.is_changed()
     {
         return;
@@ -1182,7 +1789,7 @@ fn refresh_readings(
         devices: &devices,
     };
     for (reading, mut text) in &mut readings {
-        let next = describe(&settings, choices, &screen, *reading);
+        let next = describe(&settings, choices, &voices, &mic_test, &screen, *reading);
         if text.0 != next {
             text.0 = next;
         }
@@ -1194,6 +1801,8 @@ fn refresh_readings(
 fn describe(
     settings: &Settings,
     choices: Choices<'_>,
+    voices: &Voices,
+    mic_test: &MicTest,
     screen: &SettingsScreen,
     reading: Reading,
 ) -> String {
@@ -1210,6 +1819,15 @@ fn describe(
                 settings.reading_with_choices(Knob::Monitor, choices)
             )
         }
+        Reading::VoicesPanel => if screen.voices_open { "HIDE" } else { "SHOW" }.to_owned(),
+        Reading::MicTestButton => if mic_test.open { "STOP" } else { "LISTEN" }.to_owned(),
+        Reading::VoiceLevel(entity_id) => format!("{}%", voices.volume(entity_id)),
+        Reading::VoiceMuted(entity_id) => if voices.muted(entity_id) {
+            "UNMUTE"
+        } else {
+            "MUTE"
+        }
+        .to_owned(),
         Reading::Binding(control) if screen.capturing == Some(control) => "...".to_owned(),
         Reading::Binding(control) => key_name(settings.bindings().key(control))
             .unwrap_or("unbound")
@@ -1226,6 +1844,7 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{HEARD_FOR, MAX_VOICE};
     use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference, VoiceAudience};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
@@ -1348,6 +1967,45 @@ mod tests {
             .find(|(reading, _)| **reading == wanted)
             .map(|(_, text)| text.0.clone())
             .unwrap_or_else(|| panic!("no reading for {wanted:?}"))
+    }
+
+    /// Records `entity_id` as heard now, as `audio/heard.rs` does when a frame of theirs is
+    /// decoded, and runs a frame.
+    fn hear(app: &mut App, entity_id: u64) {
+        app.world_mut()
+            .resource_mut::<Voices>()
+            .heard(entity_id, std::time::Instant::now());
+        app.update();
+    }
+
+    /// Presses one of a speaker's controls inside the open Voices panel.
+    fn press_voice(app: &mut App, wanted: VoiceControl) {
+        let button = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceControl)>();
+            query
+                .iter(world)
+                .find(|(_, control)| **control == wanted)
+                .map(|(entity, _)| entity)
+                .unwrap_or_else(|| panic!("no control for {wanted:?}"))
+        };
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a button has an interaction") = Interaction::Pressed;
+        app.update();
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a button has an interaction") = Interaction::None;
+        app.update();
+    }
+
+    /// Every speaker the Voices panel currently draws a row for, in order.
+    fn voice_rows(app: &mut App) -> Vec<u64> {
+        let world = app.world_mut();
+        let mut query = world.query::<&VoiceRow>();
+        query.iter(world).map(|row| row.entity_id).collect()
     }
 
     /// Presses the Monitor row's closed control, opening or closing the dropdown.
@@ -2311,7 +2969,9 @@ mod tests {
                 "Voice",
                 "Voice threshold",
                 "Heard by",
-                "Test speakers"
+                "Test speakers",
+                "Test microphone",
+                "Voices"
             ]
         );
         for other in [Tab::Controls, Tab::Graphics] {
@@ -2674,5 +3334,380 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
         app.update();
         assert!(!app.world().resource::<SettingsScreen>().is_open());
+    }
+
+    // -------------------------------------------------------------------------
+    // The Voices panel
+    // -------------------------------------------------------------------------
+
+    /// **The panel lists whoever has been heard, and the mute and volume it offers reach the
+    /// resource the mixer reads.** Driven through the assembled screen — the press goes to a
+    /// real button and the assertion is on `Voices`, so a control wired to nothing fails here.
+    #[test]
+    fn the_voices_panel_lists_who_was_heard_and_its_controls_reach_them() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert!(
+            voice_rows(&mut app).is_empty(),
+            "a silent session drew rows"
+        );
+
+        hear(&mut app, 7);
+        hear(&mut app, 9);
+        assert_eq!(voice_rows(&mut app), vec![7, 9]);
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert_eq!(reading_of(&mut app, Reading::VoicesPanel), "HIDE");
+
+        assert_eq!(reading_of(&mut app, Reading::VoiceLevel(7)), "100%");
+        assert_eq!(reading_of(&mut app, Reading::VoiceMuted(7)), "MUTE");
+
+        press_voice(&mut app, VoiceControl::Mute(7));
+        assert!(
+            app.world().resource::<Voices>().muted(7),
+            "the mute button reached nothing"
+        );
+        assert_eq!(reading_of(&mut app, Reading::VoiceMuted(7)), "UNMUTE");
+        assert!(
+            !app.world().resource::<Voices>().muted(9),
+            "muting one speaker muted another"
+        );
+
+        press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        assert_eq!(app.world().resource::<Voices>().volume(7), 120);
+        assert_eq!(reading_of(&mut app, Reading::VoiceLevel(7)), "120%");
+
+        press_voice(&mut app, VoiceControl::Nudge(7, -1));
+        assert_eq!(app.world().resource::<Voices>().volume(7), 110);
+    }
+
+    /// **A speaker's volume runs to twice unity and stops**, which is what the acceptance
+    /// criterion's 0-200% means at the control rather than in the model.
+    #[test]
+    fn a_speakers_volume_stops_at_both_ends_from_the_panel() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        for _ in 0..15 {
+            press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        }
+        assert_eq!(app.world().resource::<Voices>().volume(7), MAX_VOICE);
+        assert_eq!(
+            reading_of(&mut app, Reading::VoiceLevel(7)),
+            format!("{MAX_VOICE}%")
+        );
+
+        for _ in 0..30 {
+            press_voice(&mut app, VoiceControl::Nudge(7, -1));
+        }
+        assert_eq!(app.world().resource::<Voices>().volume(7), 0);
+        assert!(
+            !app.world().resource::<Voices>().muted(7),
+            "turning a speaker down to nothing muted them, which is a different button"
+        );
+    }
+
+    /// What one speaker's row is drawn as, or `None` when the panel has no row for them.
+    fn voice_row_name(app: &mut App, entity_id: u64) -> Option<String> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&VoiceRow, &Children)>();
+        let child = query
+            .iter(world)
+            .find(|(row, _)| row.entity_id == entity_id)
+            .and_then(|(_, children)| children.iter().next())?;
+        world.entity(child).get::<Text>().map(|text| text.0.clone())
+    }
+
+    /// **A name that arrives after the row was built reaches the screen.**
+    ///
+    /// The appearance cache fills in separately from the voice, so a speaker heard before
+    /// their description arrives is drawn as `player 7`. With only the id set compared, that
+    /// row went on saying `player 7` for the rest of the session — the row's *contents* are
+    /// part of what the rebuild has to notice, not just which rows exist. Found by review on
+    /// #942.
+    #[test]
+    fn a_name_that_arrives_after_the_row_replaces_the_placeholder() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert_eq!(
+            voice_row_name(&mut app, 7).as_deref(),
+            Some("player 7"),
+            "a speaker with no description yet was not drawn as their id"
+        );
+
+        // The description arrives, on its own schedule, with nothing about the roster moving.
+        *app.world_mut().resource_mut::<Appearances>() = Appearances::with_player_name(7, "Skald");
+        app.update();
+        assert_eq!(
+            voice_row_name(&mut app, 7).as_deref(),
+            Some("Skald"),
+            "the row kept the placeholder after the name arrived"
+        );
+
+        // And it does not thrash: a name that has not changed rebuilds nothing.
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row")
+        };
+        for _ in 0..5 {
+            hear(&mut app, 7);
+        }
+        let after = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row")
+        };
+        assert_eq!(before, after, "an unchanged name rebuilt the row anyway");
+    }
+
+    /// **The rows are rebuilt when the set of speakers changes and never merely because
+    /// somebody spoke.** `Voices` is marked changed on every frame anybody is talking, so a
+    /// rebuild driven by `Res::is_changed` would despawn and respawn the row under a pointer
+    /// mid-press — the trap `rebuild_monitor_options` and `ui/servers.rs` both record.
+    #[test]
+    fn a_speaker_still_talking_does_not_have_their_row_rebuilt() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row for the speaker")
+        };
+
+        // Ten more frames of that speaker talking, which marks `Voices` changed every time.
+        for _ in 0..10 {
+            hear(&mut app, 7);
+        }
+
+        let after = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row for the speaker")
+        };
+        assert_eq!(
+            before, after,
+            "the row was rebuilt while its speaker was still talking"
+        );
+
+        // And a genuinely new speaker does rebuild it.
+        hear(&mut app, 9);
+        assert_eq!(voice_rows(&mut app), vec![7, 9]);
+    }
+
+    /// **A crowd is bounded and counted**, exactly as the HUD's speaker line is: the panel is
+    /// an overlay on a screen with a narrowest supported viewport, and one row per speaker
+    /// would run off the bottom of it.
+    #[test]
+    fn more_speakers_than_the_panel_draws_are_counted() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        press(&mut app, SettingsAction::ToggleVoices);
+        for entity_id in 0..(PANEL_VOICES as u64 + 3) {
+            hear(&mut app, entity_id);
+        }
+        assert_eq!(voice_rows(&mut app).len(), PANEL_VOICES);
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&VoiceOverflow, &Text)>();
+        let overflow = query.iter(world).next().map(|(_, text)| text.0.clone());
+        assert_eq!(overflow, Some("+3 more".to_owned()));
+    }
+
+    /// A speaker nobody has heard for [`HEARD_FOR`] leaves the panel — which is the criterion's
+    /// sixty seconds, read at the screen rather than at the model.
+    #[test]
+    fn a_speaker_nobody_has_heard_for_a_minute_leaves_the_panel() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        let long_ago = std::time::Instant::now() - HEARD_FOR - std::time::Duration::from_secs(1);
+        app.world_mut().resource_mut::<Voices>().heard(7, long_ago);
+        app.update();
+        assert!(
+            voice_rows(&mut app).is_empty(),
+            "somebody nobody has heard for a minute was still on the panel"
+        );
+    }
+
+    /// The panel is an overlay with its own lifecycle: its row opens and closes it, Escape
+    /// closes it before it closes the screen, and leaving the tab closes it rather than
+    /// leaving it floating over another tab's rows.
+    #[test]
+    fn the_voices_panel_closes_on_escape_and_on_a_tab_change() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+
+        let shown = |app: &mut App| {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Node, With<VoicesPanel>>();
+            query.iter(world).all(|node| node.display == Display::Flex)
+        };
+        assert!(!shown(&mut app), "the panel started open");
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert!(shown(&mut app));
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert!(!shown(&mut app), "its own row did not close it");
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!shown(&mut app), "escape did not close the panel");
+        assert!(
+            app.world().resource::<SettingsScreen>().is_open(),
+            "escape closed the whole screen while the panel was up"
+        );
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        press_tab(&mut app, Tab::Graphics);
+        assert!(!shown(&mut app), "the panel outlived the tab it belongs to");
+    }
+
+    // -------------------------------------------------------------------------
+    // The microphone test
+    // -------------------------------------------------------------------------
+
+    /// The width of the meter's filled part and where its threshold mark sits, in pixels.
+    fn meter(app: &mut App) -> (f32, f32) {
+        let world = app.world_mut();
+        let mut levels = world.query_filtered::<&Node, With<MicMeterLevel>>();
+        let filled = match levels.iter(world).next().map(|node| node.width) {
+            Some(Val::Px(width)) => width,
+            other => panic!("the meter's level is {other:?}"),
+        };
+        let mut marks = world.query_filtered::<&Node, With<MicMeterMark>>();
+        let at = match marks.iter(world).next().map(|node| node.left) {
+            Some(Val::Px(left)) => left,
+            other => panic!("the meter's mark is at {other:?}"),
+        };
+        (filled, at)
+    }
+
+    /// **The row holds the test, the meter follows the level, and neither survives the screen.**
+    #[test]
+    fn the_microphone_test_row_holds_the_test_and_the_meter_follows_it() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "LISTEN");
+        assert_eq!(meter(&mut app).0, 0.0, "a shut test drew a level");
+
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "STOP");
+
+        // What `audio/voice.rs` publishes while the row is open.
+        app.world_mut().resource_mut::<MicTest>().level_db = Some(-30.0);
+        app.update();
+        let (filled, _) = meter(&mut app);
+        assert!(
+            (filled - METER_WIDTH / 2.0).abs() < 0.5,
+            "half scale drew {filled} of {METER_WIDTH}"
+        );
+
+        // Its own row closes it, and the level goes with it.
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(!app.world().resource::<MicTest>().open);
+        assert_eq!(reading_of(&mut app, Reading::MicTestButton), "LISTEN");
+    }
+
+    /// **A held microphone must not outlive the screen that opened it**, which is the one
+    /// thing on this row that is not merely presentation: every other piece of screen state is
+    /// forgotten by `SettingsScreen::close`, and this one lives on another resource.
+    #[test]
+    fn closing_the_screen_or_leaving_the_tab_stops_the_microphone_test() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsScreen>().is_open());
+        assert!(
+            !app.world().resource::<MicTest>().open,
+            "a microphone was left open behind a closed settings screen"
+        );
+
+        // And leaving the tab, for the weaker version of the same reason: a device held for a
+        // control the player can no longer see. The Escape above has to be let go of first —
+        // nothing in this app clears `ButtonInput` between frames, so it would close the
+        // screen again on the very next update.
+        release_keys(&mut app);
+        app.world_mut().resource_mut::<SettingsScreen>().open();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        press(&mut app, SettingsAction::ToggleMicTest);
+        assert!(app.world().resource::<MicTest>().open);
+        press_tab(&mut app, Tab::Graphics);
+        assert!(
+            !app.world().resource::<MicTest>().open,
+            "the test outlived the tab it belongs to"
+        );
+    }
+
+    /// **The threshold mark stays on the bar at every value the knob can reach**, which is the
+    /// only thing connecting `METER_FLOOR_DB` — a drawing choice here — to
+    /// `MIN_VOICE_ACTIVATION_THRESHOLD`, a bound in `crate::settings`. Move either without the
+    /// other and the mark leaves the meter; nothing but this would notice.
+    #[test]
+    fn the_threshold_marker_stays_on_the_meter_across_the_whole_knob() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+
+        // Both ends of the knob's bound, reached by stepping it rather than by naming numbers
+        // this module does not own.
+        for steps in [-1_000, 1_000] {
+            app.world_mut()
+                .resource_mut::<Settings>()
+                .adjust(Knob::VoiceActivationThreshold, steps);
+            app.update();
+            let (_, at) = meter(&mut app);
+            assert!(
+                (0.0..=METER_WIDTH - METER_MARK_WIDTH).contains(&at),
+                "the threshold mark sat at {at} on a {METER_WIDTH} wide meter"
+            );
+        }
+    }
+
+    /// A level that is not a number draws nothing, rather than reaching a `Val::Px` — the rule
+    /// `client/AGENTS.md` states about non-finite floats, at the one place a float from the
+    /// audio side becomes a width.
+    #[test]
+    fn a_level_that_is_not_a_number_draws_an_empty_meter() {
+        for level in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(meter_fraction(level), 0.0, "{level}");
+        }
+        assert_eq!(meter_fraction(METER_FLOOR_DB), 0.0);
+        assert_eq!(meter_fraction(0.0), 1.0);
+        assert_eq!(meter_fraction(20.0), 1.0, "a level over full scale ran off");
+        assert_eq!(meter_fraction(-1_000.0), 0.0);
     }
 }
