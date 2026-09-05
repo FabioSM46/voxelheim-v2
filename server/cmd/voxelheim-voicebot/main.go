@@ -13,18 +13,18 @@
 // answers are about that machine; a gate that turned a slow runner into a red pull request
 // would be measuring the runner. Run it by hand, on a machine you are prepared to describe.
 //
-// Two of the three things it does are here: it describes the run — the geometry, the
-// fan-out and the frame — and it joins one session on a server somebody else started to say
-// whether a voice frame reached it. The second is what scripts/interop-check.sh needs from
-// the Go half of #855; the soak that starts a server of its own is the part after this one.
+// The soak starts the server it measures, which is what gives the run a process to read
+// /proc for and one command line in the ADR instead of a page of shell.
 //
 //	go run ./cmd/voxelheim-voicebot -h
-//	go run ./cmd/voxelheim-voicebot -sessions 100 -clusters 10 -speaking 0.3
-//	go run ./cmd/voxelheim-voicebot -probe -addr 127.0.0.1:7777 -fingerprint <64 hex> -ticket-file <path>
+//	go run ./cmd/voxelheim-voicebot -plan -sessions 100 -clusters 10 -speaking 0.3
+//	go build -o /tmp/voxelheimd ./cmd/voxelheimd
+//	go run ./cmd/voxelheim-voicebot -server /tmp/voxelheimd -sessions 100 -clusters 10 -speaking 0.3
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -39,7 +39,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	if !invocation.probe {
+	if invocation.plan {
 		if err := printPlan(os.Stdout, invocation.options); err != nil {
 			fmt.Fprintf(os.Stderr, "voxelheim-voicebot: %v\n", err)
 			os.Exit(1)
@@ -50,14 +50,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runProbe(ctx, invocation.probeOptions, os.Stdout); err != nil {
+	work := func() error { return runSoak(ctx, invocation.options, invocation.run, os.Stdout) }
+	if invocation.probe {
+		work = func() error { return runProbe(ctx, invocation.probeOptions, os.Stdout) }
+	}
+	if err := work(); err != nil {
 		fmt.Fprintf(os.Stderr, "voxelheim-voicebot: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// parseFlags builds both option sets from one argument list and validates the one the
-// invocation is actually about.
+// parseFlags builds both option sets from one argument list and validates them together.
 //
 // The flag set is created here rather than taken from flag.CommandLine so a test can parse
 // an argument list without touching process state — the shape cmd/voxelheimd's own flag
@@ -67,7 +70,11 @@ func parseFlags(name string, args []string) (invocation, error) {
 
 	var call invocation
 	registerPlanFlags(flags, &call.options)
+	registerRunFlags(flags, &call.run)
 	registerProbeFlags(flags, &call.probeOptions)
+	flags.BoolVar(&call.plan, "plan", false,
+		"print the layout the other flags describe and exit, without starting a server or "+
+			"connecting anything. The geometry is a function of the flags and the seed alone")
 	flags.BoolVar(&call.probe, "probe", false,
 		"join one session on a server this command did not start and report the first voice "+
 			"frame relayed to it. This is what scripts/interop-check.sh uses; it measures nothing")
@@ -77,6 +84,9 @@ func parseFlags(name string, args []string) (invocation, error) {
 	}
 	if flags.NArg() > 0 {
 		return call, fmt.Errorf("unexpected argument %q; this command takes flags only", flags.Arg(0))
+	}
+	if call.plan && call.probe {
+		return call, errors.New("invalid flags: -plan describes a soak and -probe is not one; ask for one of them")
 	}
 	if call.probe {
 		if err := call.probeOptions.validate(); err != nil {
@@ -90,13 +100,18 @@ func parseFlags(name string, args []string) (invocation, error) {
 	if err := checkInsideTheWorld(call.options); err != nil {
 		return call, fmt.Errorf("invalid flags: %w", err)
 	}
+	if err := call.run.validate(call.options, call.plan); err != nil {
+		return call, fmt.Errorf("invalid flags: %w", err)
+	}
 	return call, nil
 }
 
-// invocation is one command line, resolved: which of the things this command does, and the
-// options that thing needs.
+// invocation is one command line, resolved: which of the three things this command does,
+// and the options that thing needs.
 type invocation struct {
 	options      options
+	run          runOptions
 	probeOptions probeOptions
+	plan         bool
 	probe        bool
 }
