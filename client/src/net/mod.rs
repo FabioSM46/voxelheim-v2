@@ -46,6 +46,7 @@ mod signin;
 mod tickets;
 mod tls;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -122,7 +123,7 @@ pub use codec::{encode_dismount_request, encode_mount_request};
 // have to reopen `codec.rs` to find out what it is allowed to spell. The frame's ceiling is a
 // contract enum both peers read, and `audio/codec.rs` sizes its packet buffer from it.
 #[allow(unused_imports)] // The encoder's caller is #852 part 6.
-pub use codec::{MAX_OPUS_BYTES, VoiceAudience, VoiceFrame, encode_voice_frame};
+pub use codec::{MAX_OPUS_BYTES, VoiceAudience, VoiceFrame, VoiceHeard, encode_voice_frame};
 #[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
 pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
@@ -851,6 +852,48 @@ impl StormInbox {
 #[derive(Resource, Debug, Default)]
 pub struct WardsInbox(Vec<WardsNearby>);
 
+/// How many relayed voice frames may wait for the audio module in one frame.
+///
+/// Sixteen 20 ms frames is 320 ms of one speaker, or 80 ms of four. **A bound, because the
+/// number of these is the peer's choice**: every length this client allocates from gets one,
+/// even from an authoritative server. It is generous against the arrival rate a legal server
+/// produces and small against what a broken one could.
+const VOICE_INBOX: usize = 16;
+
+/// Relayed voice frames the net thread has delivered and the audio module has not read.
+///
+/// **Wire order, and nothing is ever logged from here.** A voice frame is personal data —
+/// `schemas/player.fbs` makes that a constraint on every consumer — so this queue is drained
+/// into a decoder and never into a diagnostic. Not even a count: how often somebody spoke is
+/// a fact about a person.
+///
+/// The oldest goes when it is full, on the voice queue's reasoning one direction over: what a
+/// backlog means is that presentation is behind, and a listener wants the conversation as it
+/// is now rather than as it was.
+#[derive(Resource, Debug, Default)]
+pub struct VoiceInbox(VecDeque<codec::VoiceHeard>);
+
+impl VoiceInbox {
+    /// Takes every queued frame, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<codec::VoiceHeard> {
+        self.0.drain(..).collect()
+    }
+
+    fn push(&mut self, heard: codec::VoiceHeard) {
+        if self.0.len() >= VOICE_INBOX {
+            self.0.pop_front();
+        }
+        self.0.push_back(heard);
+    }
+
+    /// Queues one frame as `drain_session_events` would. Test-only, so the audio module can
+    /// be driven without a socket — `WorldInbox::push`'s reason.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, heard: codec::VoiceHeard) {
+        self.push(heard);
+    }
+}
+
 impl WardsInbox {
     /// Whether a frame has delivered no ward answer.
     pub fn is_empty(&self) -> bool {
@@ -1325,6 +1368,7 @@ impl Plugin for NetPlugin {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<VoiceInbox>()
             .init_resource::<ChatInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(settings.clone())
@@ -1929,6 +1973,7 @@ struct Inboxes<'w> {
     refusals: ResMut<'w, RefusalInbox>,
     storms: ResMut<'w, StormInbox>,
     wards: ResMut<'w, WardsInbox>,
+    voice: ResMut<'w, VoiceInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
@@ -2161,11 +2206,10 @@ fn drain_session_events(
             }
             Ok(SessionEvent::WardsNearby(wards)) => inboxes.wards.0.push(wards),
 
-            // Dropped on purpose, and dropped *here* rather than earlier: the decode
-            // boundary is where a relayed frame is checked, and #851 grows the decoder
-            // that consumes it behind this line. Nothing is logged — a voice frame is
-            // personal data, and a count would still be a diagnostic about who spoke.
-            Ok(SessionEvent::VoiceHeard(_)) => {}
+            // Queued, never logged: a voice frame is personal data, and even a count
+            // would be a diagnostic about who spoke. The decoder that consumes these is
+            // `audio/heard.rs`.
+            Ok(SessionEvent::VoiceHeard(heard)) => inboxes.voice.push(heard),
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
@@ -5277,6 +5321,7 @@ mod tests {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<VoiceInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,

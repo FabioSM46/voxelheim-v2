@@ -89,6 +89,7 @@ keeps meaning "everything the client is".
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings, the contract's byte ceiling checked against what libopus wanted to write, and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, size its packet buffer at the ceiling, or let a diagnostic quote a payload |
 | `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
+| `audio/heard.rs` | the inbound half: one jitter buffer and one decoder per speaker, the slack a listener hears as continuity, the two repairs a lost frame has, and every speaker summed into one source on the `Voice` bus | ask whether a speaker should be audible, log a frame or a speaker or a count of either, or hold a source per speaker |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
 | `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
@@ -97,6 +98,7 @@ keeps meaning "everything the client is".
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that publishes each milestone sentence once through the tagged chat channel | infer a storm from weather, advance a phase locally, or grow a second notification surface |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
+| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent, with the bound key that would start it, and who has been heard in the last second | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — the frame-rate readout in whichever of the four corners the setting names, and routing server refusals and trade endings into tagged chat | reach into another module's internals, grow a health bar, call the snapshot age a round trip, or grow a second notification surface |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
@@ -1551,6 +1553,27 @@ non-zero `voice_range_blocks`, and in push to talk only once the key has been pr
 and nothing is sent unless the transmit rule says so, frame by frame. **A server announcing zero
 opens no microphone at all**: `schemas/handshake.fbs` calls that "a server that relays no voice",
 and recording a player for nobody is the one outcome this feature must not have.
+
+**Receiving a frame *is* the audibility decision, already made.** `audio/heard.rs` never asks
+whether a speaker is close enough or in the right party: the server owns every position and
+every roster, and it sent the frame. What that module decides is only *when* to play each 20 ms
+of it — a jitter buffer per speaker holding 60 ms of slack that grows to 200 ms when a frame
+demonstrably arrives late, and never shrinks inside a turn. A missing frame is recovered from the
+redundant copy in the **immediately** next packet — Opus puts a copy of frame N inside packet N+1
+and nowhere else, so a repair offered from any other frame plays the wrong audio in the wrong
+slot — concealed when that packet has not arrived, and played as *silence* when the speaker has
+simply stopped, because concealing that would be inventing audio nobody sent. Every speaker is summed into **one** source on the `Voice` bus, because the mixer
+has four slots for the whole client and a slot is claimed for its life — a source per speaker
+arrives with the spatialisation that needs one.
+
+**A name outlives the decoder that produced it, deliberately.** `audio/heard.rs` holds a
+speaker's decoder while frames are *arriving* — 500 ms — and `Speaking` holds their name for a
+second after one was *played*. Two questions on two clocks, and the longer one is the HUD's: a
+name that vanished the instant somebody stopped talking would flicker between sentences. The
+first version coupled them, so the second half of that second was unreachable in the assembled
+client while every unit test passed, because each half was correct alone. `Speaking` is pruned
+by age and by nothing else, and the test that holds it runs the systems together rather than
+the type on its own (#924).
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
