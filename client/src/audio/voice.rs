@@ -284,12 +284,19 @@ fn speak(
     mut test: ResMut<MicTest>,
 ) {
     let pipeline = &mut *pipeline;
+    // **The meter reads only while the row is open.** Cleared here rather than on the paths
+    // that shut the device, because those are not the same set: voice activation and a held
+    // key both keep a stream open, so a test stopped under either left its last reading on a
+    // meter nothing was feeding. Found by review on #943.
     // **The test is a third answer to "hold a microphone open?", and it is the player's own.**
     // A client opens no input device unasked — that is what `VoiceMode::Off` means and what a
     // server relaying no voice means — but a player pressing "Test microphone" has asked, out
     // loud, on this machine. So it holds the device whatever the mode and whatever the server
     // says, and it is the one path that opens one with `Off` chosen.
     let testing = test.open;
+    if !testing {
+        clear_level(&mut test);
+    }
 
     // **The key is not read while chat owns the keyboard**, which is the whole of the guard
     // and the reason it is here rather than in `player`: typing the letter the control is
@@ -722,6 +729,34 @@ mod tests {
             app.world().resource::<MicTest>().level_db,
             None,
             "the meter kept its last reading with the device shut"
+        );
+
+        // **And with the device still open, which is the case the first clear missed.** The
+        // level used to be forgotten only on the paths that shut the capture stream — but a
+        // test stopped under push to talk with the key held, or under voice activation, leaves
+        // a stream open for voice, so the meter kept its last reading while nothing was
+        // feeding it. Found by review on #943.
+        let (mut holding, _mixer) = voice_app_with_a_mixer(tuned(VoiceMode::PushToTalk), 24.0);
+        press(&mut holding, KeyCode::KeyV);
+        set_mic_test(&mut holding, true);
+        tick(&mut holding);
+        holding.world().resource::<AudioCapture>().opened(48_000, 1);
+        speak_for(&mut holding, 6, 0.3);
+        assert!(
+            holding.world().resource::<MicTest>().level_db.is_some(),
+            "the meter read nothing during the test"
+        );
+
+        set_mic_test(&mut holding, false);
+        tick(&mut holding);
+        assert!(
+            microphone_is_open(&holding),
+            "the fixture shut the device, so this is not the case under test"
+        );
+        assert_eq!(
+            holding.world().resource::<MicTest>().level_db,
+            None,
+            "a stopped test left a stale level on a meter nothing is feeding"
         );
     }
 
