@@ -77,6 +77,7 @@ WORK=$(mktemp -d)
 PORT=${PORT:-7799}
 WORLD=midgard
 SERVER_PID=""
+PROBE_PID=""
 
 # An account service that nothing listens on, and that is deliberate rather than lazy:
 # with a live ticket already cached, the development path never asks one for anything —
@@ -96,6 +97,7 @@ TICKET_AUTHORITY="127.0.0.1_7798"
 KEEP_WORK=0
 
 cleanup() {
+  [ -n "$PROBE_PID" ] && kill "$PROBE_PID" 2>/dev/null || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
   if [ "$KEEP_WORK" = 1 ]; then
     echo "logs kept in $WORK" >&2
@@ -122,13 +124,14 @@ make_ticket_key() {
 # `client/src/net/tickets.rs` reads back: the 96-byte ticket, then the expiry as an
 # i64 of Unix seconds, little-endian.
 mint_ticket() {
-  local world=$1 cache=$2 expires
+  local world=$1 cache=$2 account_byte=${3:-16} expires
   expires=$(( $(date +%s) + 3600 ))
 
   # body = account_id[16] world_id[12] expires_at:u32, little-endian.
   # The account is any non-zero sixteen bytes: the server digests it into a player id,
   # so which one it is decides only which character comes back.
-  printf '\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10' > "$WORK/body.bin"
+  printf '\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f' > "$WORK/body.bin"
+  printf "$(printf '\\x%02x' "$account_byte")" >> "$WORK/body.bin"
   # world_id = the first 12 bytes of SHA-256(domain ‖ name). The domain separates this
   # digest from every other use of SHA-256 in the repository.
   { printf 'voxelheim/world-id/v1\x00'; printf '%s' "$world"; } \
@@ -184,13 +187,16 @@ run_client() {
   # which is the whole of "reached a world". Without this the check below can only see
   # that a session opened.
   XDG_DATA_HOME="$WORK/clientdata" RUST_LOG=info,voxelheim_client=debug timeout 15 \
-    "$REPO_ROOT/client/target/debug/voxelheim-client" \
+    "$WORK/voxelheim-client" \
     --server "127.0.0.1:$PORT" --name Eivor "$@" >"$log" 2>&1 || true
 }
 
 echo "building both sides..."
 (cd "$REPO_ROOT/server" && go build -o "$WORK/voxelheimd" ./cmd/voxelheimd)
+(cd "$REPO_ROOT/server" && go build -o "$WORK/voxelheim-voicebot" ./cmd/voxelheim-voicebot)
 (cd "$REPO_ROOT/client" && cargo build --workspace --locked --quiet)
+# Keep the tested executable stable if another worktree builds into the same cache.
+cp "$REPO_ROOT/client/target/debug/voxelheim-client" "$WORK/voxelheim-client"
 
 mkdir -p "$WORK/world" "$WORK/clientdata"
 TICKET_KEY=$(make_ticket_key)
@@ -317,5 +323,52 @@ pass "a character is created on the first launch and played on the second"
   || fail "the server announced a fingerprint that is not 64 lowercase hex characters"
 pass "the server announces a fingerprint of the shape the registry and the client agree on"
 
+# ---- 8. a Rust voice frame reaches a Go session as VoiceHeard ----
+# Local-only like the other steps: no microphone is needed, but the Bevy client
+# still needs a display and a graphics driver. This has not been qualified for CI.
+# This isolated server has only one potential speaker: the Rust client. The probe
+# never sends voice, and a fresh account keeps its listener distinct from the speaker.
+# Restart first: the previous client's disconnected body may still be in logout
+# grace, during which its account correctly refuses another live session.
+kill "$SERVER_PID"
+wait "$SERVER_PID" || fail "the server did not shut down cleanly before the voice step"
+SERVER_PID=""
+start_server "$WORK/server-voice.log"
+FINGERPRINT=$(grep -o 'certificate_sha256=[a-f0-9]*' "$WORK/server-voice.log" | head -1 | cut -d= -f2)
+[ -n "$FINGERPRINT" ] || fail "the voice server logged no certificate fingerprint"
+mint_ticket "$WORLD" "$WORK/probe-ticket" 17
+"$WORK/voxelheim-voicebot" -probe -addr "127.0.0.1:$PORT" \
+  -fingerprint "$FINGERPRINT" -ticket-file "$WORK/probe-ticket" \
+  -probe-wait 30s >"$WORK/voice-probe.log" 2>&1 &
+PROBE_PID=$!
+for _ in $(seq 1 80); do
+  grep -q '^probe joined as entity ' "$WORK/voice-probe.log" && break
+  kill -0 "$PROBE_PID" 2>/dev/null || fail "the voice probe could not join; see $WORK/voice-probe.log"
+  sleep 0.25
+done
+grep -q '^probe joined as entity ' "$WORK/voice-probe.log" \
+  || fail "the voice probe never joined; see $WORK/voice-probe.log"
+# Ordinary activation controls; the environment changes only the sample source.
+# A missing opt-in must not accidentally pass by recording a real microphone.
+# A named unavailable device is refused without falling back to the system default.
+MISSING_MIC=$(printf 'voxelheim-interop-no-microphone-%s' "$(openssl rand -hex 16)" | xxd -p -c 256)
+printf 'voice-mode voice-activation\ninput-device name:%s\n' "$MISSING_MIC" \
+  > "$WORK/clientdata/voxelheim/settings"
+VOXELHEIM_INTEROP_VOICE_SOURCE=synthetic-test-source \
+  run_client "$WORK/client-voice.log" --account-service "$UNUSED_ACCOUNT_SERVICE" \
+  --account-service-fingerprint "$UNUSED_ACCOUNT_FINGERPRINT" --world "$WORLD"
+grep -q 'session established' "$WORK/client-voice.log" \
+  || fail "the voice client never joined; see $WORK/client-voice.log"
+grep -q 'voice capture:' "$WORK/client-voice.log" \
+  && fail "the voice check opened a real microphone; see $WORK/client-voice.log"
+if ! wait "$PROBE_PID"; then
+  PROBE_PID=""
+  fail "voice timeout: the client never spoke to the probe (no VoiceHeard); the source, send path or relay failed; see $WORK/client-voice.log and $WORK/voice-probe.log"
+fi
+PROBE_PID=""
+grep -Eq '^probe heard a voice frame: speaker entity [0-9]+, sequence [0-9]+, [1-9][0-9]* opus bytes$' "$WORK/voice-probe.log" \
+  || fail "the voice probe exited without proving VoiceHeard; see $WORK/voice-probe.log"
+pass "a Rust client's ordinary voice send path reaches the Go probe as VoiceHeard"
+
 echo
-echo "interop: 7/7"
+echo "interop: 8/8"

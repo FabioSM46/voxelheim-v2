@@ -319,6 +319,13 @@ fail-closed sentinel is what must answer that; the same redirection swallowed
 that needs the binary and says so in one line instead. Note that gh's built-in `--jq` is a
 different thing, evaluated inside gh, and needs nothing installed.
 
+`bash scripts/interop-check.sh` checks the real Rust client and Go server together, including
+voice sent through the ordinary encoder and queue and received by the Go probe as `VoiceHeard`.
+It is local-only: it needs both toolchains, OpenSSL, and a display with a working graphics driver.
+The script opts into `VOXELHEIM_INTEROP_VOICE_SOURCE=synthetic-test-source`, so the voice step needs
+no microphone. This test source is off by default and has no settings UI control. The display
+requirement still applies; this step has not been qualified for CI.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE). Redistributed copies and derivative

@@ -1598,6 +1598,11 @@ and never in a callback, so it may allocate, and it is still written to reuse it
 rather than allocate sixty times a second. And a level is presentation like everything else
 under `audio/`: no gameplay branch reads a decibel.
 
+`audio/voice.rs` has one opt-in interop test sample source,
+`VOXELHEIM_INTEROP_VOICE_SOURCE=synthetic-test-source`, read once at plugin construction.
+It opens no microphone and feeds the ordinary resample/gate/encode/voice queue path;
+`scripts/interop-check.sh` consumes it. It is off by default and has no player control.
+
 **The microphone is the same shape pointed the other way, with one state more.** The output
 stream is open whenever a device will have it, because a client with sound is always
 potentially making some. The capture stream is open only while something above has called

@@ -39,11 +39,12 @@
 //! transmitting because its own roster looked empty would be deciding an outcome.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 
 use super::codec::VoiceEncoder;
-use super::device::{AudioCapture, CaptureFault};
+use super::device::{AudioCapture, CaptureFault, Captured};
 use super::dsp::{Agc, FRAME_SAMPLES, Hold, NoiseGate, Resampler, level_db};
 use super::mixer::{Bus, SourceHandle};
 use crate::net::VoiceAudience as WireAudience;
@@ -58,6 +59,86 @@ use crate::settings::{Control, Settings, VoiceAudience, VoiceMode};
 /// all at once puts a burst into a queue of eight and drops most of it anyway. Six is two
 /// ordinary frames' worth of slack at 60 Hz and a hard stop on the work one tick can do.
 const MAX_FRAMES_PER_TICK: usize = 6;
+
+/// The sole sample-source boundary. The synthetic source is an interop test source,
+/// never a setting or a player control. Both variants feed the pipeline below unchanged.
+#[derive(Default)]
+enum VoiceSource {
+    #[default]
+    Microphone,
+    InteropTest {
+        last: Option<Instant>,
+        phase: usize,
+    },
+}
+
+impl VoiceSource {
+    fn from_opt_in(value: Option<&str>) -> Self {
+        if value == Some("synthetic-test-source") {
+            Self::InteropTest {
+                last: None,
+                phase: 0,
+            }
+        } else {
+            Self::Microphone
+        }
+    }
+
+    fn for_process() -> Self {
+        // Tests cannot inherit a developer's opt-in or mutate the process environment.
+        #[cfg(not(test))]
+        let value = std::env::var("VOXELHEIM_INTEROP_VOICE_SOURCE").ok();
+        #[cfg(test)]
+        let value: Option<String> = None;
+        Self::from_opt_in(value.as_deref())
+    }
+
+    fn listen(&mut self, capture: &AudioCapture, open: bool) {
+        match self {
+            Self::Microphone => capture.listen(open),
+            Self::InteropTest { last, .. } => {
+                capture.listen(false);
+                if !open {
+                    *last = None;
+                }
+            }
+        }
+    }
+
+    fn take(
+        &mut self,
+        capture: &AudioCapture,
+        out: &mut Vec<f32>,
+        now: Instant,
+    ) -> Option<Captured> {
+        match self {
+            Self::Microphone => capture.shared().take(out),
+            Self::InteropTest { last, phase } => {
+                let fresh = last.is_none();
+                let previous = last.get_or_insert(now);
+                // Use elapsed wall time, not the render cadence. Bound work after a stall
+                // just like the capture ring, dropping old speech instead of catching up.
+                let elapsed = now.duration_since(*previous);
+                let available = elapsed.as_micros() / 20_000;
+                if available > 0 {
+                    *previous = now - Duration::from_micros((elapsed.as_micros() % 20_000) as u64);
+                    for _ in 0..available.min(MAX_FRAMES_PER_TICK as u128) {
+                        out.extend((0..FRAME_SAMPLES).map(|index| {
+                            let sample = (*phase + index) as f32;
+                            0.25 * (std::f32::consts::TAU * 220.0 * sample / 48_000.0).sin()
+                        }));
+                        *phase = (*phase + FRAME_SAMPLES) % 48_000;
+                    }
+                }
+                Some(Captured {
+                    sample_rate: 48_000,
+                    channels: 1,
+                    fresh,
+                })
+            }
+        }
+    }
+}
 
 /// What the voice pipeline is being asked for, as one value.
 ///
@@ -154,6 +235,7 @@ pub struct Transmitting(pub bool);
 /// hold, a gain that had adapted and a part-built frame all belong to the one that ended.
 #[derive(Resource)]
 struct VoicePipeline {
+    source: VoiceSource,
     /// Built for the open stream's format, and thrown away with it. `None` before any stream.
     resampler: Option<Resampler>,
     gate: NoiseGate,
@@ -204,6 +286,7 @@ struct VoicePipeline {
 impl Default for VoicePipeline {
     fn default() -> Self {
         Self {
+            source: VoiceSource::default(),
             resampler: None,
             gate: NoiseGate::new(),
             agc: Agc::new(),
@@ -255,6 +338,7 @@ impl Plugin for VoicePlugin {
             .init_resource::<MicTest>()
             .insert_resource(VoicePipeline {
                 loopback,
+                source: VoiceSource::for_process(),
                 ..VoicePipeline::default()
             })
             .add_systems(Update, (follow_the_voice_settings, speak).chain());
@@ -337,7 +421,7 @@ fn speak(
         // an unpressed key.
         pipeline.asked_to_speak = false;
         pipeline.start_over();
-        capture.listen(false);
+        pipeline.source.listen(&capture, false);
         set_transmitting(&mut transmitting, false);
         set_trouble(&mut trouble, None);
         clear_level(&mut test);
@@ -354,7 +438,7 @@ fn speak(
     let open = testing
         || (controls.live()
             && (controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak));
-    capture.listen(open);
+    pipeline.source.listen(&capture, open);
     // **Only while a device has been asked for.** A microphone nobody wanted cannot be at
     // fault, and the supervisor names a cause only once an open attempt has actually failed —
     // so this cannot flash in the moment between the request and a stream starting.
@@ -371,7 +455,10 @@ fn speak(
     pipeline.activation.set_threshold(controls.activation_db);
 
     pipeline.block.clear();
-    let Some(read) = capture.shared().take(&mut pipeline.block) else {
+    let Some(read) = pipeline
+        .source
+        .take(&capture, &mut pipeline.block, Instant::now())
+    else {
         // No stream, or one that opened while that was reading. Either way the samples this
         // pipeline was carrying belong to a stream that has ended.
         pipeline.start_over();
@@ -550,6 +637,88 @@ mod tests {
     use crate::wire::voxelheim::net as fb;
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
+
+    #[test]
+    fn interop_source_requires_the_exact_opt_in() {
+        for value in [None, Some(""), Some("1"), Some("true")] {
+            assert!(matches!(
+                VoiceSource::from_opt_in(value),
+                VoiceSource::Microphone
+            ));
+        }
+        assert!(matches!(
+            VoiceSource::for_process(),
+            VoiceSource::Microphone
+        ));
+        assert!(matches!(
+            VoiceSource::from_opt_in(Some("synthetic-test-source")),
+            VoiceSource::InteropTest { .. }
+        ));
+    }
+
+    #[test]
+    fn interop_source_follows_elapsed_time_and_bounds_a_stalled_tick() {
+        let capture = AudioCapture::idle();
+        let mut source = VoiceSource::from_opt_in(Some("synthetic-test-source"));
+        let start = Instant::now();
+        let mut block = Vec::new();
+        assert!(source.take(&capture, &mut block, start).unwrap().fresh);
+        for millis in [16, 32, 48, 64, 80, 96, 100] {
+            source.take(&capture, &mut block, start + Duration::from_millis(millis));
+        }
+        assert_eq!(block.len(), 5 * FRAME_SAMPLES);
+        assert!(level_db(&block) > -20.0);
+        block.clear();
+        source.take(&capture, &mut block, start + Duration::from_secs(60));
+        assert_eq!(block.len(), MAX_FRAMES_PER_TICK * FRAME_SAMPLES);
+        source.listen(&capture, false);
+        block.clear();
+        assert!(
+            source
+                .take(&capture, &mut block, start + Duration::from_secs(61))
+                .unwrap()
+                .fresh
+        );
+        assert!(block.is_empty());
+        assert!(!capture.shared().wanted());
+    }
+
+    #[test]
+    fn interop_source_uses_the_ordinary_voice_queue_without_opening_a_device() {
+        let (mut app, _sent) = voice_app(tuned(VoiceMode::VoiceActivation));
+        app.world_mut().resource_mut::<VoicePipeline>().source =
+            VoiceSource::from_opt_in(Some("synthetic-test-source"));
+        tick(&mut app); // Fresh source establishes the ordinary resampler.
+        let mut frames = Vec::new();
+        for _ in 0..5 {
+            if let VoiceSource::InteropTest { last, .. } =
+                &mut app.world_mut().resource_mut::<VoicePipeline>().source
+            {
+                *last = Some(Instant::now() - std::time::Duration::from_millis(21));
+            }
+            tick(&mut app);
+            assert!(!microphone_is_open(&app));
+            frames.extend(app.world_mut().resource_mut::<Outbound>().taken_voice());
+        }
+        assert!(
+            !frames.is_empty(),
+            "synthetic speech never reached the voice queue"
+        );
+        for (sequence, frame) in frames.iter().enumerate() {
+            let envelope = fb::root_as_envelope(frame).unwrap();
+            let voice = envelope.payload_as_voice_frame().unwrap();
+            assert_eq!(voice.sequence(), sequence as u32);
+            assert!(!voice.opus().unwrap().is_empty());
+        }
+        app.world_mut().resource_mut::<VoiceControls>().range_blocks = 0.0;
+        tick(&mut app);
+        assert!(
+            app.world_mut()
+                .resource_mut::<Outbound>()
+                .taken_voice()
+                .is_empty()
+        );
+    }
 
     /// One 20 ms block of a sine at `amplitude`, at 48 kHz.
     fn speech(amplitude: f32, at: usize) -> Vec<f32> {
