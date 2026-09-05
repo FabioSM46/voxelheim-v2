@@ -1566,6 +1566,15 @@ simply stopped, because concealing that would be inventing audio nobody sent. Ev
 has four slots for the whole client and a slot is claimed for its life — a source per speaker
 arrives with the spatialisation that needs one.
 
+**A name outlives the decoder that produced it, deliberately.** `audio/heard.rs` holds a
+speaker's decoder while frames are *arriving* — 500 ms — and `Speaking` holds their name for a
+second after one was *played*. Two questions on two clocks, and the longer one is the HUD's: a
+name that vanished the instant somebody stopped talking would flicker between sentences. The
+first version coupled them, so the second half of that second was unreachable in the assembled
+client while every unit test passed, because each half was correct alone. `Speaking` is pruned
+by age and by nothing else, and the test that holds it runs the systems together rather than
+the type on its own (#924).
+
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
 the CI package list move once rather than twice, and the codec arrives with proximity voice.
