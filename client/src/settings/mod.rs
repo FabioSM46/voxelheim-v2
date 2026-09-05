@@ -221,6 +221,9 @@ pub enum Control {
     Menu,
     Map,
     Mount,
+    /// Speak. Held while [`VoiceMode::PushToTalk`] is chosen; unread while
+    /// [`VoiceMode::VoiceActivation`] or [`VoiceMode::Off`] is.
+    Talk,
 }
 
 /// Every control, in the order the settings screen lists them.
@@ -229,7 +232,7 @@ pub enum Control {
 /// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
 /// that array with `CONTROLS.map`, so a control listed here out of its declaration order
 /// would silently hand every control below it somebody else's key.
-pub const CONTROLS: [Control; 12] = [
+pub const CONTROLS: [Control; 13] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -242,6 +245,7 @@ pub const CONTROLS: [Control; 12] = [
     Control::Menu,
     Control::Map,
     Control::Mount,
+    Control::Talk,
 ];
 
 impl Control {
@@ -260,6 +264,7 @@ impl Control {
             Self::Menu => "menu",
             Self::Map => "map",
             Self::Mount => "mount",
+            Self::Talk => "talk",
         }
     }
 
@@ -278,6 +283,7 @@ impl Control {
             Self::Menu => "Pause menu",
             Self::Map => "World map",
             Self::Mount => "Call mount",
+            Self::Talk => "Push to talk",
         }
     }
 
@@ -287,6 +293,15 @@ impl Control {
     }
 
     /// The key this control answers to before anybody changes it.
+    ///
+    /// **A default is what an *unnamed* control gets, never what overrides a named one.**
+    /// `Talk` starts on `KeyV`, which was free before it existed — so a settings file
+    /// written by an older client may legally hold `bind consume v` and no `talk` line at
+    /// all. [`Bindings::from_pairs`] resolves that by applying the file's bindings as a set
+    /// and giving each control the file left out the first key nothing else holds: the
+    /// player keeps `consume v`, `Talk` arrives somewhere free, and no control is left
+    /// unreachable. `a_settings_file_older_than_the_talk_control_keeps_every_binding_it_saved`
+    /// in `store` is what holds that, over exactly such a file.
     const fn default_key(self) -> KeyCode {
         match self {
             Self::Forward => KeyCode::KeyW,
@@ -301,6 +316,7 @@ impl Control {
             Self::Menu => KeyCode::Escape,
             Self::Map => KeyCode::KeyM,
             Self::Mount => KeyCode::KeyZ,
+            Self::Talk => KeyCode::KeyV,
         }
     }
 }
@@ -539,10 +555,12 @@ pub enum Knob {
     FrameCap,
     MasterVolume,
     OutputDevice,
+    VoiceMode,
+    VoiceActivationThreshold,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 10] = [
+pub const KNOBS: [Knob; 12] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -553,6 +571,8 @@ pub const KNOBS: [Knob; 10] = [
     Knob::FrameCap,
     Knob::MasterVolume,
     Knob::OutputDevice,
+    Knob::VoiceMode,
+    Knob::VoiceActivationThreshold,
 ];
 
 impl Knob {
@@ -569,12 +589,14 @@ impl Knob {
             Self::FrameCap => "Frame cap",
             Self::MasterVolume => "Master volume",
             Self::OutputDevice => "Output device",
+            Self::VoiceMode => "Voice",
+            Self::VoiceActivationThreshold => "Voice threshold",
         }
     }
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so an eleventh knob has to say where it belongs before it builds —
+    /// No wildcard arm, so a thirteenth knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
@@ -586,7 +608,10 @@ impl Knob {
             | Self::Brightness
             | Self::FogStart
             | Self::FrameCap => Tab::Graphics,
-            Self::MasterVolume | Self::OutputDevice => Tab::Audio,
+            Self::MasterVolume
+            | Self::OutputDevice
+            | Self::VoiceMode
+            | Self::VoiceActivationThreshold => Tab::Audio,
         }
     }
 }
@@ -988,6 +1013,84 @@ impl OutputDevices {
     }
 }
 
+/// What the microphone is for.
+///
+/// **Three values and no fourth**, and the closed enum is the knob's whole bound. `Off` is a
+/// standing instruction rather than an absence of one: `audio/` opens no capture device
+/// while it is chosen, so a player who turns voice off is not merely muted — nothing on this
+/// machine is listening. The two live modes differ only in what starts a transmission, which
+/// is why the threshold below belongs to one of them and not to both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceMode {
+    /// Nothing is captured and nothing is sent.
+    Off,
+    /// Transmit while [`Control::Talk`] is held.
+    #[default]
+    PushToTalk,
+    /// Transmit while the gated capture level is above
+    /// [`Settings::voice_activation_threshold_db`].
+    VoiceActivation,
+}
+
+/// Every voice mode, in the order the knob steps through them.
+///
+/// Quietest first, so stepping up is stepping towards being heard more often — the
+/// direction every other knob on this tab moves in.
+const VOICE_MODES: [VoiceMode; 3] = [
+    VoiceMode::Off,
+    VoiceMode::PushToTalk,
+    VoiceMode::VoiceActivation,
+];
+
+/// One press of the voice-mode control.
+const VOICE_MODE_STEP: i32 = 1;
+
+/// What voice is set to before anybody changes it.
+///
+/// Push to talk, deliberately, and `docs/adr/0001-voice-transport.md` is why: this client
+/// runs no echo canceller, so an open microphone beside a loudspeaker is a feedback path.
+/// A key that has to be held is the mitigation, and a default that starts there is the
+/// mitigation being on for the player who never opens this tab.
+const DEFAULT_VOICE_MODE: VoiceMode = VoiceMode::PushToTalk;
+
+impl VoiceMode {
+    /// What the file calls it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::PushToTalk => "push-to-talk",
+            Self::VoiceActivation => "voice-activation",
+        }
+    }
+
+    /// What the settings screen prints beside the knob.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::PushToTalk => "push to talk",
+            Self::VoiceActivation => "voice activation",
+        }
+    }
+
+    /// The mode `name` denotes, if it denotes one.
+    fn from_name(name: &str) -> Option<Self> {
+        VOICE_MODES.into_iter().find(|mode| mode.name() == name)
+    }
+}
+
+/// The quietest level voice activation may be asked to trigger on, in dBFS.
+///
+/// Below this a domestic room's own noise floor is above the threshold on most microphones,
+/// so the setting would be an open microphone wearing the name of a gate.
+const MIN_VOICE_ACTIVATION_THRESHOLD: f32 = -60.0;
+/// And the loudest. Above this a normal speaking voice at a normal distance never opens it,
+/// which is a microphone that appears to be broken.
+const MAX_VOICE_ACTIVATION_THRESHOLD: f32 = -10.0;
+/// One press of the voice-activation control, in decibels.
+const VOICE_ACTIVATION_THRESHOLD_STEP: f32 = 2.0;
+/// Where it starts: above a quiet room, below a voice.
+const DEFAULT_VOICE_ACTIVATION_THRESHOLD: f32 = -40.0;
+
 /// The dynamic bounds of the two knobs whose values belong to the machine, not this module.
 ///
 /// One borrow rather than two arguments every caller keeps in the right order, and named for
@@ -1117,6 +1220,8 @@ pub struct Settings {
     fog_start: f32,
     master_volume: u8,
     output_device: OutputDevice,
+    voice_mode: VoiceMode,
+    voice_activation_threshold: f32,
 }
 
 impl Default for Settings {
@@ -1137,6 +1242,8 @@ impl Default for Settings {
             fog_start: DEFAULT_FOG_START,
             master_volume: DEFAULT_MASTER_VOLUME,
             output_device: OutputDevice::SystemDefault,
+            voice_mode: DEFAULT_VOICE_MODE,
+            voice_activation_threshold: DEFAULT_VOICE_ACTIVATION_THRESHOLD,
         }
     }
 }
@@ -1234,6 +1341,28 @@ impl Settings {
     /// Which output device the audio module should open.
     pub const fn output_device(&self) -> &OutputDevice {
         &self.output_device
+    }
+
+    /// What the microphone is for: nothing, a held key, or a level.
+    // The two readers this pair exists for are `audio/`'s capture supervisor and the
+    // transmit rule above it, which land in #852 part 3. Until then the settings screen
+    // reaches the fields directly through `reading_with_choices`, so the accessors are
+    // reachable only from the tests — `dead_code` in a binary crate, exactly as
+    // `net/codec.rs`'s outbound encoders are before their callers.
+    #[allow(dead_code)]
+    pub const fn voice_mode(&self) -> VoiceMode {
+        self.voice_mode
+    }
+
+    /// The level at which [`VoiceMode::VoiceActivation`] starts transmitting, in dBFS.
+    ///
+    /// A decibel and not a gain, unlike [`Self::master_gain`]: this number is compared
+    /// against a meter reading rather than multiplied into a sample, and the meter that
+    /// answers it works in decibels. The conversion that does not happen here is the point
+    /// — there is no second place a threshold could be expressed.
+    #[allow(dead_code)]
+    pub const fn voice_activation_threshold_db(&self) -> f32 {
+        self.voice_activation_threshold
     }
 
     /// Moves a fixed-bound `knob` by `steps` of its own size.
@@ -1334,6 +1463,26 @@ impl Settings {
             Knob::OutputDevice => {
                 self.output_device = choices.devices.moved(&self.output_device, steps);
             }
+            Knob::VoiceMode => {
+                let current = VOICE_MODES
+                    .iter()
+                    .position(|mode| *mode == self.voice_mode)
+                    .unwrap_or_default() as i64;
+                let moved = current
+                    .saturating_add(i64::from(steps).saturating_mul(i64::from(VOICE_MODE_STEP)))
+                    .clamp(0, VOICE_MODES.len().saturating_sub(1) as i64)
+                    as usize;
+                self.voice_mode = VOICE_MODES[moved];
+            }
+            Knob::VoiceActivationThreshold => {
+                self.voice_activation_threshold = shift(
+                    self.voice_activation_threshold,
+                    VOICE_ACTIVATION_THRESHOLD_STEP,
+                    MIN_VOICE_ACTIVATION_THRESHOLD,
+                    MAX_VOICE_ACTIVATION_THRESHOLD,
+                    1,
+                );
+            }
         }
     }
 
@@ -1367,6 +1516,10 @@ impl Settings {
             Knob::FrameCap => format!("{} fps", self.frame_cap),
             Knob::MasterVolume => format!("{}%", self.master_volume),
             Knob::OutputDevice => choices.devices.label(&self.output_device),
+            Knob::VoiceMode => self.voice_mode.label().to_owned(),
+            Knob::VoiceActivationThreshold => {
+                format!("{:.0} dB", self.voice_activation_threshold)
+            }
         }
     }
 
@@ -1429,6 +1582,8 @@ impl Settings {
             Tab::Audio => {
                 self.master_volume = defaults.master_volume;
                 self.output_device = defaults.output_device.clone();
+                self.voice_mode = defaults.voice_mode;
+                self.voice_activation_threshold = defaults.voice_activation_threshold;
             }
         }
     }
@@ -1455,6 +1610,17 @@ impl Settings {
         self.master_volume = self
             .master_volume
             .clamp(MIN_MASTER_VOLUME, MAX_MASTER_VOLUME);
+        // `NaN` compares false against both ends, so `clamp` would pass it through
+        // untouched — the rule `client/AGENTS.md` states about non-finite floats. A
+        // threshold that is not a number would make every level comparison false and turn
+        // voice activation into a microphone that never opens, silently.
+        if !self.voice_activation_threshold.is_finite() {
+            self.voice_activation_threshold = DEFAULT_VOICE_ACTIVATION_THRESHOLD;
+        }
+        self.voice_activation_threshold = self.voice_activation_threshold.clamp(
+            MIN_VOICE_ACTIVATION_THRESHOLD,
+            MAX_VOICE_ACTIVATION_THRESHOLD,
+        );
     }
 }
 
@@ -1854,6 +2020,117 @@ mod tests {
         }
     }
 
+    /// **The control the microphone is held with, end to end through the model.** It is the
+    /// thirteenth entry, and where it sits is the assertion that matters: [`Bindings`]
+    /// indexes by `control as usize`, so a control *inserted* rather than appended hands
+    /// every control below it somebody else's key while every reading still looks right.
+    #[test]
+    fn talk_is_appended_last_and_starts_on_v() {
+        assert_eq!(CONTROLS.len(), 13);
+        assert_eq!(CONTROLS[CONTROLS.len() - 1], Control::Talk);
+        assert_eq!(Control::Talk as usize, CONTROLS.len() - 1);
+
+        let mut settings = Settings::default();
+        assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
+        assert_eq!(key_name(KeyCode::KeyV), Some("v"));
+        assert_eq!(Control::Talk.label(), "Push to talk");
+
+        // It is a control like any other: a key another control holds is refused, a free
+        // one is taken, and the tab's own reset puts it back.
+        assert_eq!(
+            settings.rebind(Control::Talk, KeyCode::KeyE),
+            Err(RebindRefusal::WouldUnbind(Control::Inventory))
+        );
+        assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
+        settings
+            .rebind(Control::Talk, KeyCode::KeyB)
+            .expect("b is free");
+        assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyB);
+        settings.reset(Tab::Controls);
+        assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
+    }
+
+    /// The mode knob's whole bound: three values, stopping at each end, starting on the one
+    /// that needs a key held.
+    #[test]
+    fn the_voice_mode_knob_steps_between_three_values_and_starts_on_push_to_talk() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.voice_mode(), VoiceMode::PushToTalk);
+        assert_eq!(settings.reading(Knob::VoiceMode), "push to talk");
+
+        settings.adjust(Knob::VoiceMode, 1);
+        assert_eq!(settings.voice_mode(), VoiceMode::VoiceActivation);
+        assert_eq!(settings.reading(Knob::VoiceMode), "voice activation");
+
+        // Past the top is the top, not a wrap: a knob that wrapped would take a player who
+        // pressed once too often from "voice activation" to "off" without saying so.
+        settings.adjust(Knob::VoiceMode, 4);
+        assert_eq!(settings.voice_mode(), VoiceMode::VoiceActivation);
+
+        settings.adjust(Knob::VoiceMode, -9);
+        assert_eq!(settings.voice_mode(), VoiceMode::Off);
+        assert_eq!(settings.reading(Knob::VoiceMode), "off");
+
+        settings.reset(Tab::Audio);
+        assert_eq!(settings.voice_mode(), VoiceMode::PushToTalk);
+    }
+
+    /// The threshold is decibels, bounded at both ends, and reversible — the property the
+    /// snap in [`Settings::adjust_with_choices`] exists for.
+    #[test]
+    fn the_voice_activation_threshold_is_bounded_decibels_and_a_step_is_reversible() {
+        let mut settings = Settings::default();
+        assert!((settings.voice_activation_threshold_db() + 40.0).abs() < f32::EPSILON);
+        assert_eq!(settings.reading(Knob::VoiceActivationThreshold), "-40 dB");
+
+        settings.adjust(Knob::VoiceActivationThreshold, 1);
+        assert_eq!(settings.reading(Knob::VoiceActivationThreshold), "-38 dB");
+        settings.adjust(Knob::VoiceActivationThreshold, -1);
+        assert!(
+            (settings.voice_activation_threshold_db() + 40.0).abs() < f32::EPSILON,
+            "a step up and back down landed on {}",
+            settings.voice_activation_threshold_db()
+        );
+
+        settings.adjust(Knob::VoiceActivationThreshold, 100);
+        assert!(
+            (settings.voice_activation_threshold_db() - MAX_VOICE_ACTIVATION_THRESHOLD).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(settings.reading(Knob::VoiceActivationThreshold), "-10 dB");
+        settings.adjust(Knob::VoiceActivationThreshold, -100);
+        assert!(
+            (settings.voice_activation_threshold_db() - MIN_VOICE_ACTIVATION_THRESHOLD).abs()
+                < f32::EPSILON
+        );
+        assert_eq!(settings.reading(Knob::VoiceActivationThreshold), "-60 dB");
+
+        settings.reset(Tab::Audio);
+        assert!((settings.voice_activation_threshold_db() + 40.0).abs() < f32::EPSILON);
+    }
+
+    /// **A threshold that is not a number is the default, never itself.** `clamp` compares
+    /// false against both ends for `NaN`, so the bound alone would pass one straight
+    /// through — and a threshold nothing compares greater than is a microphone that never
+    /// opens, with nothing on screen saying why.
+    #[test]
+    fn a_threshold_that_is_not_a_number_does_not_survive_the_clamp() {
+        for hand_edited in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1_000.0, -999.0] {
+            let mut settings = Settings {
+                voice_activation_threshold: hand_edited,
+                ..Settings::default()
+            };
+            settings.clamp();
+            let held = settings.voice_activation_threshold_db();
+            assert!(
+                held.is_finite()
+                    && (MIN_VOICE_ACTIVATION_THRESHOLD..=MAX_VOICE_ACTIVATION_THRESHOLD)
+                        .contains(&held),
+                "{hand_edited} became {held}"
+            );
+        }
+    }
+
     /// Every knob is on exactly one tab, so exactly one reset owns it. Without this a knob
     /// added to the model but forgotten in [`Knob::tab`] would simply never be resettable —
     /// which no other assertion here would notice.
@@ -1907,6 +2184,8 @@ mod tests {
             settings.adjust_with_choices(Knob::Monitor, 1, bounds);
             settings.adjust(Knob::MasterVolume, -3);
             settings.adjust_with_choices(Knob::OutputDevice, 2, bounds);
+            settings.adjust(Knob::VoiceMode, 1);
+            settings.adjust(Knob::VoiceActivationThreshold, -2);
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
@@ -1947,6 +2226,11 @@ mod tests {
             before.output_device(),
             "resetting graphics moved the output device"
         );
+        assert_eq!(
+            after.voice_mode(),
+            before.voice_mode(),
+            "resetting graphics moved the voice mode"
+        );
 
         // And the mirror: controls back, graphics untouched.
         let mut after = moved();
@@ -1968,12 +2252,18 @@ mod tests {
         assert_eq!(after.default_mount(), before.default_mount());
         assert_eq!(after.master_volume(), before.master_volume());
         assert_eq!(after.output_device(), before.output_device());
+        assert_eq!(after.voice_mode(), before.voice_mode());
 
         // And the third tab: audio back, the other two untouched.
         let mut after = moved();
         after.reset(Tab::Audio);
         assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
         assert_eq!(after.output_device(), &OutputDevice::SystemDefault);
+        assert_eq!(after.voice_mode(), DEFAULT_VOICE_MODE);
+        assert!(
+            (after.voice_activation_threshold_db() - DEFAULT_VOICE_ACTIVATION_THRESHOLD).abs()
+                < f32::EPSILON
+        );
         assert_eq!(
             after.bindings(),
             before.bindings(),
@@ -2106,11 +2396,12 @@ mod tests {
         );
         assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
 
-        // A free one is taken, and the key it left becomes free for somebody else.
+        // A free one is taken, and the key it left becomes free for somebody else. Not
+        // `KeyV`: `Control::Talk` has answered to it since #852.
         settings
-            .rebind(Control::Consume, KeyCode::KeyV)
-            .expect("v is free");
-        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyV);
+            .rebind(Control::Consume, KeyCode::KeyB)
+            .expect("b is free");
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyB);
         settings
             .rebind(Control::Chat, KeyCode::KeyC)
             .expect("c is free once consume has left it");

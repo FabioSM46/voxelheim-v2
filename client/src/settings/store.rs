@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings, VoiceMode,
     key_from_name, key_name, output_device_field, output_device_from_field, valid_monitor_identity,
 };
 
@@ -205,6 +205,11 @@ fn render(settings: &Settings) -> String {
         "output-device {}\n",
         output_device_field(&settings.output_device)
     ));
+    out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
+    out.push_str(&format!(
+        "voice-activation-threshold {}\n",
+        settings.voice_activation_threshold
+    ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
@@ -306,6 +311,14 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "output-device" => match output_device_from_field(value) {
                 Some(parsed) => settings.output_device = parsed,
                 None => refuse("the system default output or a saved device"),
+            },
+            "voice-mode" => match VoiceMode::from_name(value) {
+                Some(parsed) => settings.voice_mode = parsed,
+                None => refuse("a voice mode"),
+            },
+            "voice-activation-threshold" => match value.parse::<f32>() {
+                Ok(parsed) if parsed.is_finite() => settings.voice_activation_threshold = parsed,
+                _ => refuse("a voice activation threshold"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -462,6 +475,8 @@ mod tests {
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
         settings.adjust(Knob::MasterVolume, -2);
+        settings.adjust(Knob::VoiceMode, -1);
+        settings.adjust(Knob::VoiceActivationThreshold, 3);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
@@ -470,7 +485,9 @@ mod tests {
             (Control::Forward, KeyCode::F6),
             (Control::Menu, KeyCode::KeyG),
             (Control::Jump, KeyCode::Escape),
-            (Control::Consume, KeyCode::KeyV),
+            // Not `KeyV`: that is `Control::Talk`'s default since #852, and a rebinding
+            // onto a key another control answers to is refused by design.
+            (Control::Consume, KeyCode::F7),
         ] {
             settings.rebind(control, key).expect("a free key");
         }
@@ -600,6 +617,186 @@ mod tests {
         fs::write(&path, "master-volume 250\n").expect("a scratch file");
         let (settings, _) = load(&path);
         assert_eq!(settings.master_volume(), super::super::MAX_MASTER_VOLUME);
+    }
+
+    /// **A settings file written before `Control::Talk` existed, read by a client that has
+    /// it.** `KeyV` was free before #852, so a pre-#852 file may legally hold `bind consume
+    /// v` and no `talk` line at all — the new control's default and a saved binding wanting
+    /// one key.
+    ///
+    /// What gives is `Talk`, and [`Bindings::from_pairs`] is what decides it rather than
+    /// this test: the file's bindings are applied **as a set**, and every control the file
+    /// left out then takes the first key nothing else holds — its own default first, then
+    /// another control's, then any key this screen will bind. So the player keeps what they
+    /// saved, the new control arrives on a free key, and the invariant that makes a refusal
+    /// safe holds over the whole assignment: one key per control, one control per key.
+    ///
+    /// The alternative shape — reading the file as a sequence of [`Settings::rebind`] calls
+    /// against `Settings::default()` — is what would lose the saved line to a
+    /// `WouldUnbind(Talk)` refusal, and it is exactly the shape `from_pairs` exists to
+    /// avoid. Nothing pinned that for a *newly added* control until this test.
+    #[test]
+    fn a_settings_file_older_than_the_talk_control_keeps_every_binding_it_saved() {
+        let scratch = Scratch::new("settings-pre-talk");
+        let path = scratch.join("settings");
+
+        // What a pre-#852 client wrote, verbatim: twelve `bind` lines, `consume` moved onto
+        // the key `Talk` now defaults to, and nothing naming `talk`.
+        let mut file = String::new();
+        for (control, key) in [
+            ("forward", "w"),
+            ("back", "s"),
+            ("left", "a"),
+            ("right", "d"),
+            ("jump", "space"),
+            ("chat", "t"),
+            ("interact", "f"),
+            ("inventory", "e"),
+            ("consume", "v"),
+            ("menu", "escape"),
+            ("map", "m"),
+            ("mount", "z"),
+        ] {
+            file.push_str(&format!("bind {control} {key}\n"));
+        }
+        fs::write(&path, &file).expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(
+            complaints,
+            Vec::<String>::new(),
+            "a file this client wrote itself last week was complained about"
+        );
+        assert_eq!(
+            settings.bindings().key(Control::Consume),
+            KeyCode::KeyV,
+            "the binding the player saved was silently replaced by a default"
+        );
+
+        let talk = settings.bindings().key(Control::Talk);
+        assert_ne!(talk, KeyCode::KeyV, "two controls answer to one key");
+        assert!(
+            key_name(talk).is_some(),
+            "Talk landed on {talk:?}, which this screen will not bind"
+        );
+
+        // The invariant, over the whole assignment rather than over the pair that collided:
+        // every control is reachable and no key answers for two of them.
+        let mut held: Vec<String> = super::super::CONTROLS
+            .into_iter()
+            .map(|control| format!("{:?}", settings.bindings().key(control)))
+            .collect();
+        let all = held.len();
+        held.sort();
+        held.dedup();
+        assert_eq!(all, super::super::CONTROLS.len());
+        assert_eq!(held.len(), all, "two controls share a key: {held:?}");
+
+        // And it is stable: this client writes a `talk` line back, so the key the migration
+        // chose is the key the next launch reads rather than one chosen again.
+        assert_eq!(save(&path, &settings), Ok(()));
+        let (again, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new());
+        assert_eq!(again.bindings(), settings.bindings());
+        assert_eq!(again.bindings().key(Control::Consume), KeyCode::KeyV);
+        assert_eq!(again.bindings().key(Control::Talk), talk);
+    }
+
+    /// The other half of the same rule, and the answer to "could the file end with two
+    /// controls on one key": it could not. A file that names one key twice is refused
+    /// **whole**, which is why `from_pairs` answers `Option` rather than assigning what it
+    /// can — there is no honest way to guess which half of it the player meant.
+    #[test]
+    fn a_file_that_puts_two_controls_on_v_is_refused_rather_than_half_applied() {
+        let scratch = Scratch::new("settings-double-bound");
+        let path = scratch.join("settings");
+        fs::write(&path, "bind consume v\nbind talk v\nmaster-volume 25\n")
+            .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(
+            *settings.bindings(),
+            Bindings::default(),
+            "half of an impossible assignment was applied"
+        );
+        assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
+        assert_eq!(settings.bindings().key(Control::Consume), KeyCode::KeyC);
+        assert_eq!(
+            settings.master_volume(),
+            25,
+            "one bad set took the rest with it"
+        );
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains("one key per control"),
+            "{complaints:?}"
+        );
+    }
+
+    /// The two voice lines, both directions, plus the one thing a hand-edited threshold
+    /// must not be able to do: reach a reader outside the bound the model promises.
+    #[test]
+    fn the_voice_lines_survive_a_restart_and_a_hand_edited_one_costs_only_itself() {
+        let scratch = Scratch::new("settings-voice");
+        let path = scratch.join("settings");
+
+        for mode in [
+            VoiceMode::Off,
+            VoiceMode::PushToTalk,
+            VoiceMode::VoiceActivation,
+        ] {
+            let settings = Settings {
+                voice_mode: mode,
+                voice_activation_threshold: -33.0,
+                ..Settings::default()
+            };
+            assert_eq!(save(&path, &settings), Ok(()));
+            let (reloaded, complaints) = load(&path);
+            assert_eq!(complaints, Vec::<String>::new(), "{mode:?}");
+            assert_eq!(reloaded.voice_mode(), mode);
+            assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+        }
+
+        // A line nothing can read costs that one setting and leaves the other alone —
+        // this file's whole rule, applied to the pair that arrived together.
+        fs::write(
+            &path,
+            "voice-mode shouting
+voice-activation-threshold -30
+master-volume 25
+",
+        )
+        .expect("a scratch file");
+        let (settings, complaints) = load(&path);
+        assert_eq!(settings.voice_mode(), Settings::default().voice_mode());
+        assert!((settings.voice_activation_threshold_db() + 30.0).abs() < f32::EPSILON);
+        assert_eq!(settings.master_volume(), 25);
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 1"), "{complaints:?}");
+        assert!(
+            !complaints[0].contains("shouting"),
+            "a complaint carried the file's contents: {complaints:?}"
+        );
+
+        // And a threshold outside the bound, or not a number at all, is not what a reader
+        // gets handed: `Settings::clamp` runs over whatever this parsed.
+        for line in [
+            "voice-activation-threshold -400\n",
+            "voice-activation-threshold 12\n",
+            "voice-activation-threshold NaN\n",
+            "voice-activation-threshold inf\n",
+        ] {
+            fs::write(&path, line).expect("a scratch file");
+            let (settings, _) = load(&path);
+            let held = settings.voice_activation_threshold_db();
+            assert!(
+                held.is_finite()
+                    && (super::super::MIN_VOICE_ACTIVATION_THRESHOLD
+                        ..=super::super::MAX_VOICE_ACTIVATION_THRESHOLD)
+                        .contains(&held),
+                "{line} read back as {held}"
+            );
+        }
     }
 
     /// The audio line follows the one rule this file has: a line nothing can read costs

@@ -2796,7 +2796,9 @@ mod tests {
             .collect()
     }
 
-    /// Settings with the consume control moved off its default.
+    /// Settings with the consume control moved off its default. `KeyB` is what every caller
+    /// hands it: `KeyV` was free until #852 gave it to `Control::Talk`, and a rebinding onto
+    /// a key another control answers to is refused rather than taken.
     fn consume_bound_to(key: KeyCode) -> Settings {
         let mut settings = Settings::default();
         settings
@@ -2828,14 +2830,14 @@ mod tests {
             ),
             (
                 "a rebound key",
-                Some(consume_bound_to(KeyCode::KeyV)),
-                Some(KeyCode::KeyV),
+                Some(consume_bound_to(KeyCode::KeyB)),
+                Some(KeyCode::KeyB),
                 None,
             ),
             (
                 "a rebound key beside middle-click",
-                Some(consume_bound_to(KeyCode::KeyV)),
-                Some(KeyCode::KeyV),
+                Some(consume_bound_to(KeyCode::KeyB)),
+                Some(KeyCode::KeyB),
                 Some(MouseButton::Middle),
             ),
         ] {
@@ -2890,7 +2892,7 @@ mod tests {
             ("nothing is pressed", None, None, InputMode::Inventory, true),
             (
                 "the key the control was rebound away from",
-                Some(consume_bound_to(KeyCode::KeyV)),
+                Some(consume_bound_to(KeyCode::KeyB)),
                 Some(KeyCode::KeyC),
                 InputMode::Inventory,
                 true,
