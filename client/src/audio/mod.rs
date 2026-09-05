@@ -67,10 +67,11 @@ pub use heard::{SPEAKING_FOR, Speaking};
 // `HEARD_FOR` and `MAX_VOICE` are the Voices panel's window and its ceiling, named here so
 // `ui/settings.rs`'s tests can pin them rather than restating the numbers — the reason
 // `SPEAKING_FOR` above carries the same allowance.
+pub use device::CaptureFault;
 #[allow(unused_imports)]
 pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
-pub use voice::{MicTest, MicrophoneMissing, Transmitting, VoiceControls};
+pub use voice::{MicTest, MicrophoneTrouble, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.

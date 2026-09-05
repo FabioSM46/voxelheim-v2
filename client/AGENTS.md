@@ -1512,8 +1512,20 @@ is going to their headset must not be hearing the speakers. For the microphone t
 stronger and different in kind — **audio the player never consented to, relayed to people who
 cannot tell it happened**. `docs/adr/0001-voice-transport.md` calls a voice frame personal data
 and constrains the server accordingly; opening an unchosen input is the client-side form of the
-same concern. What refusing owes the player is being *told*, and that is `MicrophoneMissing`
-and the line `ui/voice.rs` draws from it. The choice itself survives, so plugging the headset
+same concern. What refusing owes the player is being *told*, and that is `MicrophoneTrouble`
+and the line `ui/voice.rs` draws from it.
+
+**And told something true about the cause, which is why that carries a `CaptureFault` and not a
+flag.** The supervisor can tell two things apart: a named device the host does not list, and a
+device that was there and would not open — busy, no float configuration, a stream that would not
+start, or a host with no default input at all. The first is something a player can act on and the
+rest are not distinguishable from the outside, so the screen says `microphone not connected` for
+one and `microphone unavailable` for the other, and never guesses between the members of the
+second. The version of this that set one flag for every failure was documented as "the microphone
+the player named would not open" and therefore told a player with a *busy* microphone to go
+looking for a cable. Found by review on #928 — and it is the third time in this feature that a
+message was right about the state and wrong about the cause, the first being the substituting
+design's own log, which could not say which device it had opened. The choice itself survives, so plugging the headset
 back in uses it again with nobody reopening the tab, and the decision is re-made on every open
 attempt so there is no state to go stale.
 

@@ -43,7 +43,7 @@ use std::sync::Mutex;
 use bevy::prelude::*;
 
 use super::codec::VoiceEncoder;
-use super::device::AudioCapture;
+use super::device::{AudioCapture, CaptureFault};
 use super::dsp::{Agc, FRAME_SAMPLES, Hold, NoiseGate, Resampler, level_db};
 use super::mixer::{Bus, SourceHandle};
 use crate::net::VoiceAudience as WireAudience;
@@ -121,7 +121,7 @@ pub struct MicTest {
     pub level_db: Option<f32>,
 }
 
-/// Whether the microphone this player chose has been asked for and would not open.
+/// What is wrong with the microphone, when something is.
 ///
 /// **This is what makes refusing a named device that is not there safe to do.** The client
 /// opens nothing in its place — audio the player never consented to, relayed to people who
@@ -129,10 +129,16 @@ pub struct MicTest {
 /// being *told*, in the place they are already looking when they wonder why nobody answered.
 /// `ui/voice.rs` is that place.
 ///
+/// **It carries the cause rather than a bare flag**, because the two the supervisor can tell
+/// apart send a player to two different places: a device the host does not list is one to plug
+/// in, and one that would not open is one to stop using elsewhere. A single flag paired with a
+/// sentence naming *one* of those causes told the other half of the players something false
+/// about their own hardware — found by review on #928.
+///
 /// **Presentation, and the HUD is its only reader**, exactly as [`Transmitting`] is. Nothing
 /// decides anything from it.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct MicrophoneMissing(pub bool);
+pub struct MicrophoneTrouble(pub Option<CaptureFault>);
 
 /// Whether this client is sending voice right now.
 ///
@@ -245,7 +251,7 @@ impl Plugin for VoicePlugin {
         }
         app.init_resource::<VoiceControls>()
             .init_resource::<Transmitting>()
-            .init_resource::<MicrophoneMissing>()
+            .init_resource::<MicrophoneTrouble>()
             .init_resource::<MicTest>()
             .insert_resource(VoicePipeline {
                 loopback,
@@ -295,7 +301,7 @@ fn speak(
     mut pipeline: ResMut<VoicePipeline>,
     mut outbound: Option<ResMut<Outbound>>,
     mut transmitting: ResMut<Transmitting>,
-    mut missing: ResMut<MicrophoneMissing>,
+    mut trouble: ResMut<MicrophoneTrouble>,
     mut test: ResMut<MicTest>,
 ) {
     let pipeline = &mut *pipeline;
@@ -333,7 +339,7 @@ fn speak(
         pipeline.start_over();
         capture.listen(false);
         set_transmitting(&mut transmitting, false);
-        set_missing(&mut missing, false);
+        set_trouble(&mut trouble, None);
         clear_level(&mut test);
         return;
     }
@@ -349,10 +355,13 @@ fn speak(
         || (controls.live()
             && (controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak));
     capture.listen(open);
-    // **Only while a device has been asked for.** A microphone nobody wanted is not missing,
-    // and the supervisor says "unavailable" only once an open attempt has actually failed —
+    // **Only while a device has been asked for.** A microphone nobody wanted cannot be at
+    // fault, and the supervisor names a cause only once an open attempt has actually failed —
     // so this cannot flash in the moment between the request and a stream starting.
-    set_missing(&mut missing, open && capture.shared().unavailable());
+    set_trouble(
+        &mut trouble,
+        if open { capture.shared().fault() } else { None },
+    );
     if !open {
         set_transmitting(&mut transmitting, false);
         clear_level(&mut test);
@@ -493,10 +502,10 @@ fn speak(
     set_transmitting(&mut transmitting, !testing && (sending || held));
 }
 
-/// Writes the flag only when it changes, so an ordinary frame does not mark the resource.
-fn set_missing(missing: &mut ResMut<MicrophoneMissing>, gone: bool) {
-    if missing.0 != gone {
-        missing.0 = gone;
+/// Writes the cause only when it changes, so an ordinary frame does not mark the resource.
+fn set_trouble(trouble: &mut ResMut<MicrophoneTrouble>, fault: Option<CaptureFault>) {
+    if trouble.0 != fault {
+        trouble.0 = fault;
     }
 }
 
@@ -614,7 +623,7 @@ mod tests {
         .insert_resource(AudioCapture::idle())
         .insert_resource(outbound)
         .init_resource::<Transmitting>()
-        .init_resource::<MicrophoneMissing>()
+        .init_resource::<MicrophoneTrouble>()
         .init_resource::<MicTest>()
         .init_resource::<VoicePipeline>()
         .add_systems(Update, speak);
@@ -676,41 +685,50 @@ mod tests {
         frames
     }
 
-    /// **A microphone that will not open is published to the HUD, and only once one has been
+    /// **A microphone at fault reaches the HUD with its cause, and only once one has been
     /// asked for.**
     ///
     /// The second half is what stops the indicator flashing on every first press: `speak` asks
     /// the supervisor whether an attempt has *failed*, not whether a stream is open this
     /// instant, so the moment between `listen(true)` and a stream starting reads normally.
+    ///
+    /// The cause is carried rather than flattened — a busy device and a missing one are two
+    /// different things to tell a player, and the flag that answered both with one sentence is
+    /// what #928 found.
     #[test]
-    fn a_microphone_that_will_not_open_reaches_the_hud_and_an_unasked_one_does_not() {
-        let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
-        app.world().resource::<AudioCapture>().cannot_open();
-        tick(&mut app);
-        assert!(
-            !app.world().resource::<MicrophoneMissing>().0,
-            "a microphone nobody has asked for was reported missing"
-        );
+    fn a_microphone_at_fault_reaches_the_hud_with_its_cause_and_an_unasked_one_does_not() {
+        for fault in [CaptureFault::NotAttached, CaptureFault::WouldNotOpen] {
+            let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
+            app.world().resource::<AudioCapture>().faulted(fault);
+            tick(&mut app);
+            assert_eq!(
+                app.world().resource::<MicrophoneTrouble>().0,
+                None,
+                "a microphone nobody has asked for was reported at fault"
+            );
 
-        press(&mut app, KeyCode::KeyV);
-        tick(&mut app);
-        assert!(microphone_is_open(&app), "the key did not ask for a device");
-        assert!(
-            app.world().resource::<MicrophoneMissing>().0,
-            "a device that was asked for and would not open was not reported"
-        );
-        assert!(
-            !app.world().resource::<Transmitting>().0,
-            "the HUD was told this player was speaking with no microphone"
-        );
+            press(&mut app, KeyCode::KeyV);
+            tick(&mut app);
+            assert!(microphone_is_open(&app), "the key did not ask for a device");
+            assert_eq!(
+                app.world().resource::<MicrophoneTrouble>().0,
+                Some(fault),
+                "the cause the supervisor found was not the one the HUD was given"
+            );
+            assert!(
+                !app.world().resource::<Transmitting>().0,
+                "the HUD was told this player was speaking with no microphone"
+            );
 
-        // Voice off closes the device, and nothing is missing when nothing is wanted.
-        app.world_mut().resource_mut::<VoiceControls>().mode = VoiceMode::Off;
-        tick(&mut app);
-        assert!(
-            !app.world().resource::<MicrophoneMissing>().0,
-            "voice off still reported a missing microphone"
-        );
+            // Voice off closes the device, and nothing is at fault when nothing is wanted.
+            app.world_mut().resource_mut::<VoiceControls>().mode = VoiceMode::Off;
+            tick(&mut app);
+            assert_eq!(
+                app.world().resource::<MicrophoneTrouble>().0,
+                None,
+                "voice off still reported a microphone at fault"
+            );
+        }
     }
 
     /// **The test holds the microphone with voice off, plays it back, and sends nothing.**

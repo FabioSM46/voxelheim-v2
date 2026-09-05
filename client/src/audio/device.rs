@@ -708,6 +708,54 @@ fn named<E>(devices: impl Iterator<Item = Result<String, E>>) -> Vec<String> {
 /// ring is emptied every 17 ms, and 62 ms is three of those.
 const CAPTURE_CAPACITY: usize = 12_000;
 
+/// [`Capture::fault`] while there is nothing wrong.
+const NO_FAULT: u8 = 0;
+
+/// Why the microphone is not open.
+///
+/// **Two causes and not five, because a player can act on two.** A device the host does not
+/// list is one they can plug in or replace in the settings; anything else — busy, no float
+/// configuration, a stream that would not start, a host with no default input at all — is one
+/// they cannot tell apart from the outside and this client must not guess between. The log
+/// carries the platform's own words for those; the screen says only that it did not work.
+///
+/// **The reason this is an enum rather than a flag** is that the flag it replaces was
+/// documented as "the microphone the player named would not open" and set for every failure,
+/// so a busy device was reported as a missing one — which sends a player to look for a cable
+/// instead of closing the other application. Found by review on #928, and it is the same shape
+/// as the diagnostic failure that helped reverse the substituting design two parts earlier: a
+/// message right about the state and wrong about the cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFault {
+    /// The player named a device and the host does not list it.
+    NotAttached,
+    /// A device was there and would not open. Which of the several ways is in the log.
+    WouldNotOpen,
+}
+
+impl CaptureFault {
+    /// This fault as it is stored, never [`NO_FAULT`].
+    const fn code(self) -> u8 {
+        match self {
+            Self::NotAttached => 1,
+            Self::WouldNotOpen => 2,
+        }
+    }
+
+    /// The fault `code` names, or `None` for [`NO_FAULT`].
+    ///
+    /// Total rather than fallible, and no wildcard on the way in: only [`Self::code`] writes
+    /// these, so an unknown value is unreachable — and answering it as "nothing is wrong"
+    /// would be the one direction this must not fail in.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::NotAttached),
+            NO_FAULT => None,
+            _ => Some(Self::WouldNotOpen),
+        }
+    }
+}
+
 /// The microphone, as everything above the platform sees it.
 ///
 /// **The mirror of [`Mixer`], and deliberately so.** A callback the operating system will not
@@ -737,13 +785,14 @@ pub struct Capture {
     /// How many samples the callback has had to drop for a full ring. A diagnostic, never a
     /// decision.
     overruns: AtomicU64,
-    /// Whether the microphone the player named has been asked for and would not open.
+    /// Why the microphone is not open, when it is not — a [`CaptureFault`] as `u8`, or
+    /// [`NO_FAULT`].
     ///
     /// **Presentation, and the HUD is its only reader.** Nothing decides anything from it —
     /// the rule `client/AGENTS.md` states for everything under `audio/`. It is what lets the
-    /// indicator say *why* a held key is producing nothing, which is the whole of what makes
+    /// indicator say why a held key is producing nothing, which is the whole of what makes
     /// refusing a named device that is not there safe to do.
-    unavailable: AtomicBool,
+    fault: AtomicU8,
     /// Whether anything above wants a stream open at all.
     ///
     /// **A microphone nobody asked for is never opened**, which is the whole of what
@@ -789,7 +838,7 @@ impl Capture {
             stream: AtomicU64::new(0),
             read_from: AtomicU32::new(0),
             overruns: AtomicU64::new(0),
-            unavailable: AtomicBool::new(false),
+            fault: AtomicU8::new(NO_FAULT),
             wanted: AtomicBool::new(false),
             #[cfg(test)]
             reopen_mid_read: AtomicBool::new(false),
@@ -911,14 +960,18 @@ impl Capture {
         self.overruns.load(Ordering::Relaxed)
     }
 
-    /// Whether a microphone was asked for, attempted, and would not open.
-    pub fn unavailable(&self) -> bool {
-        self.unavailable.load(Ordering::Acquire)
+    /// Why a microphone that was asked for is not open, or `None` while one is — or while
+    /// nobody has asked.
+    pub fn fault(&self) -> Option<CaptureFault> {
+        CaptureFault::from_code(self.fault.load(Ordering::Acquire))
     }
 
     /// Records what the supervisor's last open attempt did. Its one caller is that loop.
-    fn set_unavailable(&self, missing: bool) {
-        self.unavailable.store(missing, Ordering::Release);
+    fn set_fault(&self, fault: Option<CaptureFault>) {
+        self.fault.store(
+            fault.map_or(NO_FAULT, CaptureFault::code),
+            Ordering::Release,
+        );
     }
 
     /// Asks for a stream to be open, or for the one that is open to be closed.
@@ -1028,9 +1081,9 @@ fn supervise_capture<H: InputHost>(
     while !watch.stopping() {
         if !capture.wanted() {
             // Nothing is open and nothing is being held: this is the ordinary state of a
-            // client whose player has not pressed the key. Nothing is missing either — a
-            // device nobody has asked for cannot be unavailable.
-            capture.set_unavailable(false);
+            // client whose player has not pressed the key. Nothing is wrong either — a device
+            // nobody has asked for cannot have failed to open.
+            capture.set_fault(None);
             watch.rest(pace.playing);
             continue;
         }
@@ -1043,8 +1096,8 @@ fn supervise_capture<H: InputHost>(
         watch.playing();
         match opened_capture(host, wanted.as_deref(), capture, watch) {
             Ok((stream, format)) => {
-                // A stream opened, so whatever the player named is there.
-                capture.set_unavailable(false);
+                // A stream opened, so whatever the player named is there and works.
+                capture.set_fault(None);
                 // See the output supervisor: cleared by a stream that held, not by one that
                 // opened, so a stream that dies on every attempt is still throttled.
                 if failures == 0 {
@@ -1088,13 +1141,24 @@ fn supervise_capture<H: InputHost>(
                 }
             }
             Err(err) => {
-                // **Asked for, attempted, and not open.** This is what the HUD reads, and it
-                // is deliberately set here rather than on the first tick something is wanted:
-                // the moment between `listen(true)` and a stream starting is not a missing
-                // device, and a flag set there would flash on every first press.
-                capture.set_unavailable(true);
+                // **Asked for, attempted, and not open — and *which* of those, because the
+                // player is told.** Set here rather than on the first tick something is
+                // wanted: the moment between `listen(true)` and a stream starting is not a
+                // fault, and a flag set there would flash on every first press.
+                //
+                // The enumeration is what separates the two causes, and it is worth its cost
+                // on this path alone: a named device the host does not list is one the player
+                // can do something about, and everything else is not. Failures are paced by
+                // `after_failure`, so this asks the host at most once every couple of seconds
+                // while nothing is opening — never on a poll, and never while one is held.
+                let seen = host.device_names();
+                capture.set_fault(Some(match wanted.as_deref() {
+                    Some(name) if !seen.iter().any(|found| found == name) => {
+                        CaptureFault::NotAttached
+                    }
+                    _ => CaptureFault::WouldNotOpen,
+                }));
                 if failures.is_multiple_of(FAILURE_LOG_EVERY) {
-                    let seen = host.device_names();
                     warn!(
                         "no voice capture ({err}); nothing this player says is sent. \
                          Devices seen: {seen:?}"
@@ -1229,9 +1293,9 @@ impl AudioCapture {
         self.capture.opened_at(sample_rate, channels);
     }
 
-    /// Records the supervisor as having tried to open a device and failed.
-    pub(super) fn cannot_open(&self) {
-        self.capture.set_unavailable(true);
+    /// Records the supervisor as having tried to open a device and failed, for `fault`.
+    pub(super) fn faulted(&self, fault: CaptureFault) {
+        self.capture.set_fault(Some(fault));
     }
 
     /// Pushes one block as the capture callback would.
@@ -2081,9 +2145,10 @@ mod tests {
             vec![Some("USB headset mic".to_owned())],
             "the supervisor opened something other than the microphone the player named"
         );
-        assert!(
-            !capture.unavailable(),
-            "a microphone that opened was reported missing"
+        assert_eq!(
+            capture.fault(),
+            None,
+            "a microphone that opened was reported at fault"
         );
 
         // And the same choice with that device gone: refused, over and over, and **never** the
@@ -2100,9 +2165,14 @@ mod tests {
 
         let refused = {
             let capture = Arc::clone(&capture);
-            move || capture.unavailable()
+            move || capture.fault().is_some()
         };
         drive_capture_with(&host, &capture, &choice, refused);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::NotAttached),
+            "a device the host does not list was reported as something else"
+        );
         assert!(
             host.opened_names()
                 .iter()
@@ -2119,6 +2189,56 @@ mod tests {
             choice.wanted(),
             Some("USB headset mic".to_owned()),
             "the refusal rewrote the player's choice"
+        );
+    }
+
+    /// **A device that is there and will not open is a different sentence from one that is
+    /// not there**, and this is the case the single flag could not tell apart.
+    ///
+    /// Busy, no float configuration, a stream that would not start, and a host with no default
+    /// input at all all land here. The client cannot distinguish them from the outside and does
+    /// not try — what it must not do is call any of them a missing device, because that sends a
+    /// player to look for a cable while another application holds the microphone. Found by
+    /// review on #928.
+    #[test]
+    fn a_device_that_is_present_and_will_not_open_is_not_reported_as_missing() {
+        // Named, listed by the host, and refusing to open.
+        let host = FakeInput::naming(
+            &["USB headset mic"],
+            vec![Err("the device is busy".to_owned())],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        choice.want(Some("USB headset mic".to_owned()));
+        capture.listen(true);
+
+        let faulted = {
+            let capture = Arc::clone(&capture);
+            move || capture.fault().is_some()
+        };
+        drive_capture_with(&host, &capture, &choice, faulted);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::WouldNotOpen),
+            "a device the host lists was reported as not connected"
+        );
+
+        // And the system default, which the player named nothing for: a host with no input at
+        // all is not "the device you chose is missing" either, because they chose none.
+        let host = FakeInput::naming(&[], vec![Err("no default input device".to_owned())]);
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        capture.listen(true);
+
+        let faulted = {
+            let capture = Arc::clone(&capture);
+            move || capture.fault().is_some()
+        };
+        drive_capture_with(&host, &capture, &choice, faulted);
+        assert_eq!(
+            capture.fault(),
+            Some(CaptureFault::WouldNotOpen),
+            "following the system default reported a device the player never named"
         );
     }
 
@@ -2144,32 +2264,35 @@ mod tests {
             thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !capture.unavailable() && Instant::now() < deadline {
+        while capture.fault().is_none() && Instant::now() < deadline {
             thread::yield_now();
         }
-        let refused = capture.unavailable();
+        let refused = capture.fault() == Some(CaptureFault::NotAttached);
 
         // The headset goes in.
         *lock(&host.names) = vec!["USB headset mic".to_owned()];
-        while capture.unavailable() && Instant::now() < deadline {
+        while capture.fault().is_some() && Instant::now() < deadline {
             thread::yield_now();
         }
-        let recovered = !capture.unavailable();
+        let recovered = capture.fault().is_none();
 
         // And nothing wanted is not something missing.
         capture.listen(false);
         watch.nudge();
         *lock(&host.names) = Vec::new();
         let settled = Instant::now() + Duration::from_secs(2);
-        while capture.unavailable() && Instant::now() < settled {
+        while capture.fault().is_some() && Instant::now() < settled {
             thread::yield_now();
         }
-        let idle_is_clear = !capture.unavailable();
+        let idle_is_clear = capture.fault().is_none();
 
         watch.stop();
         supervisor.join().expect("the supervisor ended cleanly");
 
-        assert!(refused, "an absent microphone was never reported missing");
+        assert!(
+            refused,
+            "an absent microphone was never reported as not attached"
+        );
         assert!(
             recovered,
             "the microphone came back and the flag did not clear"
