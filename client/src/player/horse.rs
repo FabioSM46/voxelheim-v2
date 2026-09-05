@@ -24,6 +24,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use std::time::{Duration, Instant};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::primitives::MeshAabb;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -66,6 +67,14 @@ impl Deck {
     const fn new(y: f32, half_x: f32, z: (f32, f32)) -> Self {
         Self { y, half_x, z }
     }
+
+    /// Continue a view's neck below its withers without re-authoring the footprint.
+    pub(super) fn lowered(self, distance: f32) -> Self {
+        Self {
+            y: self.y - distance,
+            ..self
+        }
+    }
 }
 
 // The barrel, breast to rump: a chest that is deepest at the girth, a loin that shallows
@@ -81,8 +90,9 @@ pub(super) const NECK_BASE: Deck = Deck::new(1.44, 0.16, (-0.78, -0.40));
 pub(super) const NECK_POLL: Deck = Deck::new(1.94, 0.11, (-1.12, -0.96));
 pub(super) const BROW: Slice = Slice::new(-0.96, 0.15, (1.66, 2.08));
 pub(super) const MUZZLE: Slice = Slice::new(-1.52, 0.09, (1.42, 1.64));
-pub(super) const EAR: Vec3 = Vec3::new(0.06, 0.20, 0.05);
 pub(super) const EAR_CENTRE: Vec3 = Vec3::new(0.09, 2.10, -1.02);
+const EAR_BASE: Deck = Deck::new(2.00, 0.03, (-1.045, -0.995));
+const EAR_TIP: Deck = Deck::new(2.20, 0.003, (-1.0225, -1.0175));
 const EYE: Vec2 = Vec2::new(0.05, 0.05);
 const EYE_CENTRE: Vec3 = Vec3::new(0.135, 1.84, -1.14);
 
@@ -94,7 +104,7 @@ const DEGREE: f32 = PI / 180.0;
 
 /// How tall the drawn horse is: its ear tips. `mobs.rs` reads it as the presentation
 /// envelope of a paddock horse.
-pub(super) const HORSE_HEIGHT: f32 = EAR_CENTRE.y + EAR.y / 2.0;
+pub(super) const HORSE_HEIGHT: f32 = EAR_TIP.y;
 
 // Each leg is two segments. The upper runs from its pivot — the shoulder for a foreleg,
 // the hip for a hind leg, both inside the barrel — down to the knee or the hock, cut at
@@ -153,6 +163,7 @@ const _: () = assert!(NECK_BASE.z.0 > BREAST.z && NECK_BASE.z.1 < GIRTH.z);
 const _: () = assert!(NECK_POLL.half_x < NECK_BASE.half_x);
 const _: () = assert!(BROW.y.1 > NECK_POLL.y && BROW.y.0 < NECK_POLL.y && BROW.z >= NECK_POLL.z.1);
 const _: () = assert!(MUZZLE.z < BROW.z && MUZZLE.half_x < BROW.half_x);
+const _: () = assert!(EAR_TIP.y > EAR_BASE.y);
 const _: () = assert!(MUZZLE.y.1 - MUZZLE.y.0 < BROW.y.1 - BROW.y.0);
 const _: () = assert!(HOOF_TOP.y > HOOF_SOLE.y && HOOF_TOP.half_x < HOOF_SOLE.half_x);
 const _: () = assert!(HOOF_TOP.z.1 - HOOF_TOP.z.0 < HOOF_SOLE.z.1 - HOOF_SOLE.z.0);
@@ -175,7 +186,7 @@ const BROWN_COAT: Color = Color::srgb(0.30, 0.16, 0.075);
 const GREY_COAT: Color = Color::srgb(0.43, 0.45, 0.44);
 const HAIR_COLOUR: Color = Color::srgb(0.055, 0.045, 0.038);
 const LEATHER_COLOUR: Color = Color::srgb(0.25, 0.105, 0.045);
-const EYE_COLOUR: Color = Color::srgb(0.82, 0.61, 0.18);
+pub(super) const EYE_COLOUR: Color = Color::srgb(0.82, 0.61, 0.18);
 
 #[derive(Resource, Clone)]
 pub(super) struct HorseCoats {
@@ -587,11 +598,14 @@ fn horse_neck_mesh() -> Mesh {
     lofted_along_y(NECK_BASE, NECK_POLL)
 }
 
+/// One pointed ear in horse space, shared by the world horse and the saddle view.
+pub(super) fn horse_ear_mesh(side: f32) -> Mesh {
+    lofted_along_y(EAR_BASE, EAR_TIP).translated_by(Vec3::X * EAR_CENTRE.x * side)
+}
+
 fn horse_head_mesh() -> Mesh {
     let mut head = lofted_along_z(BROW, MUZZLE);
-    let ears = [-1.0, 1.0].map(|side| {
-        Mesh::from(Cuboid::from_size(EAR)).translated_by(EAR_CENTRE * Vec3::new(side, 1.0, 1.0))
-    });
+    let ears = [-1.0, 1.0].map(horse_ear_mesh);
     merge_all(&mut head, ears, "horse head");
     head
 }
@@ -603,13 +617,17 @@ fn horse_head_mesh() -> Mesh {
 /// choose their own existing scale without re-authoring the silhouette.
 pub(super) fn horse_head_item_mesh(edge: f32) -> Mesh {
     const CENTRE: Vec3 = Vec3::new(0.0, 1.82, -0.96);
-    const LONGEST_EXTENT: f32 = 1.12;
-
     let mut head = horse_neck_mesh();
     merge_all(&mut head, [horse_head_mesh()], "horse-head item silhouette");
-    head.translated_by(-CENTRE)
-        .scaled_by(Vec3::splat(edge / LONGEST_EXTENT))
-        .rotated_by(Quat::from_rotation_y(-0.55))
+
+    let head = head
+        .translated_by(-CENTRE)
+        .rotated_by(Quat::from_rotation_y(-0.55));
+    let bounds = head
+        .compute_aabb()
+        .expect("the horse-head lofts have positions");
+    let longest_extent = 2.0 * bounds.half_extents.max_element();
+    head.scaled_by(Vec3::splat(edge / longest_extent))
 }
 
 /// Shoulder or hip to the knee, authored downwards from the pivot; shared by all four.
@@ -667,7 +685,7 @@ fn horse_rein_mesh() -> Mesh {
 
 /// Two eyes on the sides of the head, where a horse's are: each a rectangle turned to
 /// face its own side and set a hair proud of the tapering cheek.
-fn horse_eye_mesh() -> Mesh {
+pub(super) fn horse_eye_mesh() -> Mesh {
     let [mut left, right] = [-1.0_f32, 1.0].map(|side| {
         Mesh::from(Rectangle::new(EYE.x, EYE.y)).transformed_by(
             Transform::from_translation(EYE_CENTRE * Vec3::new(side, 1.0, 1.0))
@@ -1231,6 +1249,36 @@ mod tests {
             "something stands above the ears: {}",
             whole.y
         );
+    }
+
+    #[test]
+    fn the_shared_ear_tapers_to_a_tenth_and_defines_the_horse_height() {
+        for side in [-1.0, 1.0] {
+            let points = positions(&[horse_ear_mesh(side)]);
+            let footprint = |y: f32| {
+                let (low, high) = points
+                    .iter()
+                    .filter(|point| (point.y - y).abs() < 1e-6)
+                    .fold((Vec3::MAX, Vec3::MIN), |(low, high), point| {
+                        (low.min(*point), high.max(*point))
+                    });
+                assert!(low.is_finite() && high.is_finite());
+                high - low
+            };
+            let base = footprint(EAR_BASE.y);
+            let tip = footprint(EAR_TIP.y);
+            assert!(tip.x <= base.x * 0.1 + 1e-6);
+            assert!(tip.z <= base.z * 0.1 + 1e-6);
+            assert_eq!(EAR_TIP.y, HORSE_HEIGHT);
+        }
+    }
+
+    #[test]
+    fn the_pointed_head_token_fits_its_requested_edge() {
+        for edge in [0.12, 0.5, 1.0] {
+            let (low, high) = extent(&[horse_head_item_mesh(edge)]);
+            assert!(((high - low).max_element() - edge).abs() < 1e-5);
+        }
     }
 
     /// What the `const` asserts beside the constants cannot state: a slope, and a

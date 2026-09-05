@@ -11,11 +11,11 @@
 //! a block below it and a block ahead, and the narrowest field of view the settings allow
 //! shows twenty degrees below the horizon — the ear tips and nothing else, which
 //! `from_the_saddle_the_real_crest_is_below_the_narrowest_frame` measures. So the
-//! composition hangs the horse's own head from a crest placed [`CREST_IN_VIEW`] at
-//! [`VIEW_SCALE`] — the picture of that head from about three times the distance: ears just
-//! under the horizon, the head wedge forward and below it, the crest and the mane running
-//! down to the bottom edge of the narrowest frame, and the reins from the fists to the
-//! horse's own bit.
+//! composition hangs the horse's own head from the crest at one [`VIEW_SCALE`]. The
+//! narrowest view keeps the ears below the horizon; opening to the default view brings
+//! the head nearer and raises it, allowing the ear tips above the horizon. This makes the
+//! default head twice its old projected height without clipping it at the narrowest FOV.
+//! The neck continues below the world withers so even the widest frame has no sky under it.
 
 use bevy::ecs::system::SystemParam;
 use bevy::light::NotShadowCaster;
@@ -24,8 +24,8 @@ use bevy::prelude::*;
 use super::camera::{ViewMode, WorldCamera};
 use super::hands::{mounted_hand_transform, view_field_of_view};
 use super::horse::{
-    BROW, EAR, EAR_CENTRE, HORSE_HEIGHT, MANE_REST, MANE_ROOT, MANE_STRIP, MUZZLE, NECK_BASE,
-    NECK_POLL, REIN_BIT, REIN_WIDTH, lofted_along_y, lofted_along_z,
+    BROW, EYE_COLOUR, HORSE_HEIGHT, MANE_REST, MANE_ROOT, MANE_STRIP, MUZZLE, NECK_BASE, NECK_POLL,
+    REIN_BIT, REIN_WIDTH, horse_ear_mesh, horse_eye_mesh, lofted_along_y, lofted_along_z,
 };
 use super::{ApplySnapshots, InputMode, LocalMount};
 use crate::net::Session;
@@ -37,33 +37,18 @@ use super::camera::SADDLE_EYE_HEIGHT;
 /// -Z): the mane's root on the crest at the poll, where the head is hung and the neck ends.
 const CREST: Vec3 = MANE_ROOT;
 
-/// One block of horse is this much of camera space.
-///
-/// The picture does not depend on it — scaling about the eye leaves every angle alone — so
-/// it is chosen for the near plane: small enough that the nearest part of the neck sits well
-/// inside the pocket terrain cannot enter.
-const VIEW_SCALE: f32 = 0.2;
+/// One block of horse is this much of camera space, at every field of view.
+const VIEW_SCALE: f32 = 0.30;
 
-/// How far ahead of the eye the crest sits, in camera space.
-///
-/// Set from the narrowest frame: the crest and the mane run from the poll back and down to
-/// the withers, the lowest and nearest thing in the composition, and this is the depth at
-/// which they reach the bottom edge at the minimum field of view without crossing it.
-/// Nearer, and the frame cuts the neck; further, and it floats above the edge.
-const CREST_DEPTH: f32 = 0.62;
+/// Default-view crest placement. Bringing the head nearer doubles its projected height;
+/// raising it leaves room for the muzzle below, with the ears just above the horizon.
+const CREST_DEPTH: f32 = 0.395;
+const CREST_Y: f32 = -0.048;
 
-/// How far below the horizon the ear tips sit, in camera space.
-///
-/// Below rather than on it: an ear touching the horizon reads as something on the skyline.
+/// The narrow frame needs a more distant, lower composition to keep the whole head and
+/// ears below the horizon. Only translation changes: every solid keeps the same scale.
+const NARROW_CREST_DEPTH: f32 = 0.57;
 const EARS_BELOW_HORIZON: f32 = 0.02;
-
-/// Where the crest sits in camera space: the height puts the ear tips, [`HORSE_HEIGHT`]
-/// above the horse's feet, exactly [`EARS_BELOW_HORIZON`] under the horizon.
-const CREST_IN_VIEW: Vec3 = Vec3::new(
-    0.0,
-    -(HORSE_HEIGHT - CREST.y) * VIEW_SCALE - EARS_BELOW_HORIZON,
-    -CREST_DEPTH,
-);
 
 #[cfg(test)]
 const CAMERA_NEAR: f32 = 0.1;
@@ -97,7 +82,9 @@ struct SaddleView;
 enum SaddlePart {
     Head,
     Ear,
+    Eye,
     Neck,
+    NeckExtension,
     Mane,
     Rein,
 }
@@ -115,28 +102,32 @@ struct Piece {
 }
 
 /// The one transform every horse piece shares: crest space into camera space.
-fn framing() -> Transform {
-    Transform::from_translation(CREST_IN_VIEW).with_scale(Vec3::splat(VIEW_SCALE))
+fn framing(field_of_view: f32) -> Transform {
+    let narrow = crate::settings::MIN_FIELD_OF_VIEW.to_radians();
+    let default_fov = crate::settings::DEFAULT_FIELD_OF_VIEW.to_radians();
+    let opening = ((field_of_view - narrow) / (default_fov - narrow)).clamp(0.0, 1.0);
+    let low = -(HORSE_HEIGHT - CREST.y) * VIEW_SCALE - EARS_BELOW_HORIZON;
+    let narrow_crest = Vec3::new(0.0, low, -NARROW_CREST_DEPTH);
+    let default_crest = Vec3::new(0.0, CREST_Y, -CREST_DEPTH);
+    Transform::from_translation(narrow_crest.lerp(default_crest, opening))
+        .with_scale(Vec3::splat(VIEW_SCALE))
 }
 
 /// A solid of the world horse, authored in the horse's own space, hung from the crest.
-fn horse_piece(part: SaddlePart, mesh: Mesh) -> Piece {
+fn horse_piece(part: SaddlePart, mesh: Mesh, field_of_view: f32) -> Piece {
     Piece {
         part,
         mesh: mesh.translated_by(-CREST),
-        transform: framing(),
+        transform: framing(field_of_view),
     }
 }
 
-fn ear(side: f32) -> Piece {
-    horse_piece(
-        SaddlePart::Ear,
-        Mesh::from(Cuboid::from_size(EAR)).translated_by(EAR_CENTRE * Vec3::new(side, 1.0, 1.0)),
-    )
+fn ear(side: f32, field_of_view: f32) -> Piece {
+    horse_piece(SaddlePart::Ear, horse_ear_mesh(side), field_of_view)
 }
 
 /// The mane at rest, lying along the crest exactly as the world horse wears it standing.
-fn mane() -> Piece {
+fn mane(field_of_view: f32) -> Piece {
     horse_piece(
         SaddlePart::Mane,
         Mesh::from(Cuboid::from_size(MANE_STRIP))
@@ -145,6 +136,7 @@ fn mane() -> Piece {
                 Transform::from_translation(MANE_ROOT)
                     .with_rotation(Quat::from_rotation_x(MANE_REST)),
             ),
+        field_of_view,
     )
 }
 
@@ -153,7 +145,7 @@ fn mane() -> Piece {
 fn rein_transform(side: f32, field_of_view: f32) -> Transform {
     let mirror = Vec3::new(side, 1.0, 1.0);
     let start = mounted_hand_transform(side, field_of_view).translation;
-    let end = framing().transform_point((REIN_BIT - CREST) * mirror);
+    let end = framing(field_of_view).transform_point((REIN_BIT - CREST) * mirror);
     let direction = end - start;
     Transform::from_translation((start + end) / 2.0)
         .with_rotation(Quat::from_rotation_arc(Vec3::Y, direction.normalize()))
@@ -169,13 +161,29 @@ fn rein(side: f32, field_of_view: f32) -> Piece {
     }
 }
 
-fn pieces(field_of_view: f32) -> [Piece; 7] {
+fn pieces(field_of_view: f32) -> [Piece; 9] {
     [
-        horse_piece(SaddlePart::Head, lofted_along_z(BROW, MUZZLE)),
-        ear(-1.0),
-        ear(1.0),
-        horse_piece(SaddlePart::Neck, lofted_along_y(NECK_BASE, NECK_POLL)),
-        mane(),
+        horse_piece(
+            SaddlePart::Head,
+            lofted_along_z(BROW, MUZZLE),
+            field_of_view,
+        ),
+        ear(-1.0, field_of_view),
+        ear(1.0, field_of_view),
+        horse_piece(SaddlePart::Eye, horse_eye_mesh(), field_of_view),
+        horse_piece(
+            SaddlePart::Neck,
+            lofted_along_y(NECK_BASE, NECK_POLL),
+            field_of_view,
+        ),
+        // The original neck is unchanged. Continue its own base footprint down by one
+        // mane length, only in this view, to cover the bottom edge at the widest FOV.
+        horse_piece(
+            SaddlePart::NeckExtension,
+            lofted_along_y(NECK_BASE.lowered(MANE_STRIP.y), NECK_BASE),
+            field_of_view,
+        ),
+        mane(field_of_view),
         rein(-1.0, field_of_view),
         rein(1.0, field_of_view),
     ]
@@ -199,6 +207,10 @@ fn create_view(
 ) {
     let coat_material = materials.add(view_material(COAT_COLOUR));
     let mane_material = materials.add(view_material(MANE_COLOUR));
+    let eye_material = materials.add(StandardMaterial {
+        cull_mode: None,
+        ..view_material(EYE_COLOUR)
+    });
     let rein_material = materials.add(view_material(REIN_COLOUR));
     let root = commands
         .spawn((SaddleView, Transform::default(), Visibility::Hidden))
@@ -207,7 +219,11 @@ fn create_view(
     commands.entity(root).with_children(|view| {
         for piece in pieces(view_field_of_view(None)) {
             let material = match piece.part {
-                SaddlePart::Head | SaddlePart::Ear | SaddlePart::Neck => coat_material.clone(),
+                SaddlePart::Head
+                | SaddlePart::Ear
+                | SaddlePart::Neck
+                | SaddlePart::NeckExtension => coat_material.clone(),
+                SaddlePart::Eye => eye_material.clone(),
                 SaddlePart::Mane => mane_material.clone(),
                 SaddlePart::Rein => rein_material.clone(),
             };
@@ -253,6 +269,7 @@ fn sync_view(
     subject: SaddleSubject<'_>,
     camera: Query<&Projection, With<WorldCamera>>,
     mut reins: Query<(&ReinSide, &mut Transform)>,
+    mut horse: Query<&mut Transform, (With<SaddlePart>, Without<ReinSide>)>,
     mut roots: Query<&mut Visibility, With<SaddleView>>,
 ) {
     let visible = subject.mount.mounted()
@@ -268,6 +285,12 @@ fn sync_view(
     }
 
     let field_of_view = view_field_of_view(camera.iter().next());
+    let next_frame = framing(field_of_view);
+    for mut transform in &mut horse {
+        if *transform != next_frame {
+            *transform = next_frame;
+        }
+    }
     for (side, mut transform) in &mut reins {
         let next = rein_transform(side.0, field_of_view);
         if *transform != next {
@@ -383,6 +406,8 @@ mod tests {
         for (part, count) in [
             (SaddlePart::Head, 1),
             (SaddlePart::Ear, 2),
+            (SaddlePart::Eye, 1),
+            (SaddlePart::NeckExtension, 1),
             (SaddlePart::Neck, 1),
             (SaddlePart::Mane, 1),
             (SaddlePart::Rein, 2),
@@ -408,68 +433,138 @@ mod tests {
         assert_eq!(root(&mut app).0, Visibility::Visible);
     }
 
+    fn allowed_fields_of_view() -> impl Iterator<Item = f32> {
+        // Include intermediate degrees as well as settings' five-degree steps: translation
+        // blends continuously between the narrow and default compositions.
+        let low = narrowest_field_of_view() as u32;
+        let high = widest_field_of_view() as u32;
+        (low..=high).map(|degrees| degrees as f32)
+    }
+
     #[test]
-    fn every_piece_clears_the_near_plane_and_the_whole_allowed_fov_range() {
-        let mut settings = crate::settings::Settings::default();
-        settings.adjust(crate::settings::Knob::FieldOfView, -1_000);
-        loop {
-            let degrees = settings.field_of_view();
+    fn every_piece_clears_the_near_plane_at_every_field_of_view() {
+        for degrees in allowed_fields_of_view() {
             for piece in &pieces(degrees.to_radians()) {
                 for point in vertices(piece) {
-                    assert!(-point.z > CAMERA_NEAR, "{degrees} degrees: {point:?}");
-                    let frame = projected(point, degrees);
                     assert!(
-                        frame.x.abs() <= 1.0 && frame.y.abs() <= 1.0,
-                        "{degrees} degrees: {:?} {point:?} projects to {frame:?}",
+                        -point.z > CAMERA_NEAR,
+                        "{degrees}: {:?} {point:?}",
                         piece.part
                     );
                 }
             }
-            settings.adjust(crate::settings::Knob::FieldOfView, 1);
-            if settings.field_of_view() == degrees {
-                break;
+        }
+    }
+
+    #[test]
+    fn the_head_ears_and_eyes_stay_inside_every_frame() {
+        for degrees in allowed_fields_of_view() {
+            for piece in pieces(degrees.to_radians()).iter().filter(|piece| {
+                matches!(
+                    piece.part,
+                    SaddlePart::Head | SaddlePart::Ear | SaddlePart::Eye
+                )
+            }) {
+                for point in vertices(piece) {
+                    let frame = projected(point, degrees);
+                    assert!(
+                        frame.x.abs() <= 1.0 && frame.y.abs() <= 1.0,
+                        "{degrees}: {:?} projects to {frame:?}",
+                        piece.part
+                    );
+                    if degrees == narrowest_field_of_view() {
+                        assert!(
+                            point.y < 0.0,
+                            "the narrow frame puts {:?} above the horizon",
+                            piece.part
+                        );
+                    }
+                }
             }
         }
     }
 
-    /// The composition, pinned where a number could drift: head and ears forward of the
-    /// fists and under the horizon, crest and mane reaching the bottom of the narrowest frame.
     #[test]
-    fn the_head_hangs_forward_and_below_the_horizon_and_the_crest_fills_the_lower_frame() {
-        let pieces = pieces(view_field_of_view(None));
-        let nearest_fist = -mounted_hand_transform(1.0, view_field_of_view(None))
-            .translation
-            .z;
-
-        for piece in pieces
-            .iter()
-            .filter(|piece| matches!(piece.part, SaddlePart::Head | SaddlePart::Ear))
-        {
-            for point in vertices(piece) {
-                assert!(
-                    point.y < 0.0,
-                    "{:?} rises to the horizon: {point}",
-                    piece.part
-                );
-                assert!(
-                    -point.z > nearest_fist,
-                    "{:?} sits behind the fists: {point}",
-                    piece.part
-                );
-            }
+    fn the_neck_crosses_the_bottom_edge_at_every_field_of_view() {
+        for degrees in allowed_fields_of_view() {
+            let lowest = pieces(degrees.to_radians())
+                .iter()
+                .filter(|piece| matches!(piece.part, SaddlePart::Neck | SaddlePart::NeckExtension))
+                .flat_map(vertices)
+                .map(|point| projected(point, degrees).y)
+                .fold(f32::MAX, f32::min);
+            assert!(lowest <= -1.0, "{degrees}: neck ends at {lowest}");
         }
+    }
 
-        let degrees = narrowest_field_of_view();
-        let lowest = pieces
+    #[test]
+    fn the_default_head_has_at_least_twice_its_old_projected_height() {
+        // Measured once from the old BROW/MUZZLE at scale 0.2, crest depth 0.62,
+        // ear offset 0.02 and default 45-degree FOV: max(y/z) - min(y/z), / tan(22.5°).
+        const OLD_PROJECTED_HEIGHT: f32 = 0.407_078_92;
+        let degrees = crate::settings::Settings::default().field_of_view();
+        let (low, high) = pieces(degrees.to_radians())
             .iter()
-            .filter(|piece| matches!(piece.part, SaddlePart::Neck | SaddlePart::Mane))
+            .filter(|piece| piece.part == SaddlePart::Head)
             .flat_map(vertices)
             .map(|point| projected(point, degrees).y)
-            .fold(f32::MAX, f32::min);
+            .fold((f32::MAX, f32::MIN), |(low, high), y| {
+                (low.min(y), high.max(y))
+            });
         assert!(
-            lowest <= -0.9,
-            "at {degrees} degrees the crest reaches only {lowest} of the way to the bottom edge"
+            high - low >= 2.0 * OLD_PROJECTED_HEIGHT,
+            "new height {}, old {OLD_PROJECTED_HEIGHT}",
+            high - low
         );
+    }
+
+    /// Reserve room for the existing canter's three-degree crest nod (#878), without
+    /// adding animation here. The continuation must clear the near plane too.
+    #[test]
+    fn the_framing_leaves_room_for_a_three_degree_crest_nod() {
+        for degrees in allowed_fields_of_view() {
+            for phase in 0..8 {
+                let nod = 3.0_f32.to_radians() * (phase as f32 * std::f32::consts::TAU / 8.0).sin();
+                for mut piece in pieces(degrees.to_radians()) {
+                    if piece.part == SaddlePart::Rein {
+                        continue;
+                    }
+                    piece.transform.rotation = Quat::from_rotation_x(nod);
+                    for point in vertices(&piece) {
+                        assert!(
+                            -point.z > CAMERA_NEAR,
+                            "{degrees}/{phase}: {:?} near plane {point:?}",
+                            piece.part
+                        );
+                        if matches!(
+                            piece.part,
+                            SaddlePart::Head | SaddlePart::Ear | SaddlePart::Eye
+                        ) {
+                            let frame = projected(point, degrees);
+                            assert!(
+                                frame.x.abs() <= 1.0 && frame.y.abs() <= 1.0,
+                                "{degrees}/{phase}: {:?} nods outside {frame:?}",
+                                piece.part
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_head_stays_ahead_of_the_fists() {
+        for degrees in allowed_fields_of_view() {
+            let fov = degrees.to_radians();
+            let fist_depth = -mounted_hand_transform(1.0, fov).translation.z;
+            for piece in pieces(fov)
+                .iter()
+                .filter(|piece| matches!(piece.part, SaddlePart::Head | SaddlePart::Ear))
+            {
+                assert!(vertices(piece).iter().all(|point| -point.z > fist_depth));
+            }
+        }
     }
 
     /// Each rein starts inside its fist and ends inside the head, in the mouth.
@@ -546,7 +641,11 @@ mod tests {
                 .map(|mesh| mesh.0.clone())
                 .collect()
         };
-        for degrees in [narrowest_field_of_view(), widest_field_of_view()] {
+        for degrees in [
+            narrowest_field_of_view(),
+            crate::settings::DEFAULT_FIELD_OF_VIEW,
+            widest_field_of_view(),
+        ] {
             app.insert_resource(TestFieldOfView(degrees.to_radians()));
             app.update();
             let world = app.world_mut();
@@ -555,7 +654,35 @@ mod tests {
                 assert_eq!(*transform, rein_transform(side.0, degrees.to_radians()));
                 assert!(original.contains(&mesh.0));
             }
+            let mut horse =
+                world.query_filtered::<&Transform, (With<SaddlePart>, Without<ReinSide>)>();
+            assert!(
+                horse
+                    .iter(world)
+                    .all(|transform| *transform == framing(degrees.to_radians()))
+            );
         }
+    }
+
+    #[test]
+    fn the_eyes_are_the_world_horses_own_unlit_colour() {
+        let mut app = app();
+        let world = app.world_mut();
+        let mut query = world.query::<(&SaddlePart, &MeshMaterial3d<StandardMaterial>)>();
+        let eye = query
+            .iter(world)
+            .find(|(part, _)| **part == SaddlePart::Eye)
+            .unwrap()
+            .1
+            .0
+            .clone();
+        let material = world
+            .resource::<Assets<StandardMaterial>>()
+            .get(&eye)
+            .unwrap();
+        assert_eq!(material.base_color, EYE_COLOUR);
+        assert!(material.unlit);
+        assert_eq!(material.cull_mode, None);
     }
 
     /// The head and the neck are the world horse's solids at [`VIEW_SCALE`], the same spans
@@ -588,6 +715,7 @@ mod tests {
         for (part, world) in [
             (SaddlePart::Head, lofted_along_z(BROW, MUZZLE)),
             (SaddlePart::Neck, lofted_along_y(NECK_BASE, NECK_POLL)),
+            (SaddlePart::Eye, horse_eye_mesh()),
         ] {
             let wanted = span(world_positions(&world)) * VIEW_SCALE;
             let got = view_span(part);
@@ -609,7 +737,14 @@ mod tests {
             crest.y < -1.0,
             "the real crest is in the narrowest frame at {crest}, so the view need not be framed"
         );
-        let ear_tip = projected(EAR_CENTRE + Vec3::Y * (EAR.y / 2.0) - eye, degrees);
+        let ear_tip = projected(
+            Vec3::new(
+                super::super::horse::EAR_CENTRE.x,
+                HORSE_HEIGHT,
+                super::super::horse::EAR_CENTRE.z,
+            ) - eye,
+            degrees,
+        );
         assert!(
             ear_tip.y > -1.0 && ear_tip.y < 0.0,
             "the real ear tips are at {ear_tip}"
