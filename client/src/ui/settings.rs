@@ -1226,7 +1226,7 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference};
+    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference, VoiceAudience};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
@@ -2249,6 +2249,46 @@ mod tests {
     // -------------------------------------------------------------------------
     // The Audio tab
     // -------------------------------------------------------------------------
+
+    /// **The audience knob is reachable by a player, and this says so by name.**
+    ///
+    /// It is a generic stepper, so `rows_of` gives it `-`/`+` and `settings_actions` moves it
+    /// through `Settings::adjust_with_choices` — the production setter, not the `#[cfg(test)]`
+    /// `adjust`. `every_knob_has_a_control_at_each_end_and_a_reading_between_them` already
+    /// covers it, but only as one iteration of a loop over `KNOBS`, and a reader checking
+    /// whether *this* knob is wired has to reconstruct that. Raised in review on #937, where
+    /// the answer was yes and the evidence was hard to find; this is the evidence.
+    #[test]
+    fn the_audience_row_moves_the_setting_a_player_can_reach() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Everyone
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
+            "everyone"
+        );
+
+        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, 1));
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Party,
+            "the Heard by row's + button reached nothing"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
+            "party only"
+        );
+
+        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, -1));
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Everyone
+        );
+    }
 
     /// Third in the strip, holding its own knobs and the speaker test and nothing the other
     /// two tabs claim.
