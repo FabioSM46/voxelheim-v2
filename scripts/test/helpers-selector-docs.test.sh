@@ -1,26 +1,21 @@
 #!/usr/bin/env bash
 # Pin the documented local helper gate to the `helpers` selector that actually runs it.
 #
-# Two claims live in two places and must agree. `.github/workflows/ci.yml` decides which
-# changed paths select the `automation` job; the skills tell an agent which changed paths
-# oblige it to run that job's suite locally. When the workflow grew the three skill
-# directories, both skills kept saying `scripts/` and `.github/` — and one of them still
-# listed `.claude/` as a path with no gate at all, which is the exact opposite of what CI
-# had just started doing. Nothing failed, because nothing compared them.
-#
-# The third check is about the gate's verdict rather than its trigger: the documented block
-# is a script, and a script that prints FAILED and exits 0 is not a gate. It is run here, in
-# both directions, against fixtures.
+# CI always runs the suite because helper tests read across workspace boundaries.
+# Pin that selection to both local skill instructions, execute the workflow's shell
+# with workspace-only diffs, and retain the gate-verdict and suite-completeness checks.
 
 set -euo pipefail
 
 REPO_ROOT=$(git rev-parse --show-toplevel)
 
 python3 - "$REPO_ROOT" <<'PY'
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -37,57 +32,79 @@ def exactly_one(pattern, text, label):
 
 
 # ---------------------------------------------------------------- the selector itself
-# The grep in detect's `helpers` step is the source of truth. Read the alternation out of
-# it rather than restating the list here: a copy in this file would be one more thing to
-# keep in step by hand, which is the failure being tested for.
-alternation = exactly_one(
-    r"grep -Eq '\^\(([^)]+)\)/'", workflow, "helpers selector grep in ci.yml"
+# Execute the actual classify step, not a copied selector. The gh function supplies
+# synthetic changed paths; the bash function can simulate a classifier that has
+# stopped recognising every workspace. Its output must never decide automation.
+classify = textwrap.dedent(exactly_one(
+    r"- name: Classify changed files\n.*?        run: \|\n(.*?)(?=\n  # Go backend gates)",
+    workflow,
+    "classify step shell",
+))
+job = exactly_one(
+    r"\n  automation:\n(.*?)(?=\n  [a-z][\w-]*:\n)", workflow, "automation job block"
 )
-prefixes = [alt.replace("\\.", ".") for alt in alternation.split("|")]
+assert "if: ${{ !cancelled() && needs.detect.outputs.helpers != 'false' }}" in job, (
+    "automation must run on true or missing helpers output, including detect failure"
+)
+assert "helpers: ${{ steps.classify.outputs.helpers }}" in workflow
+assert not re.search(r"^\s*paths(?:-ignore)?:", workflow, re.MULTILINE), (
+    "CI must not suppress workload results with path filters"
+)
 
-assert prefixes, "helpers selector matched nothing"
-for skill_dir in (".claude", ".agents", ".opencode"):
-    assert skill_dir in prefixes, (
-        f"{skill_dir}/ must select the automation job — agent-skills-sync.test.sh is the only "
-        "test that catches a stale adapter, and it runs in that job"
+with tempfile.TemporaryDirectory() as tmp:
+    output = Path(tmp) / "outputs"
+    fixtures = (
+        ("server/internal/world/chunk.go", "real"),
+        ("client/src/world/palette.rs", "real"),
+        ("docs/guide.md", "real"),
+        (".claude/skills/dev-issue/SKILL.md", "real"),
+        ("server/internal/world/future_input.go", "false"),
+        ("client/src/future_input.rs", "crash"),
+        ("", "real"),
     )
+    for changed_path, mode in fixtures:
+        output.write_text("")
+        env = dict(os.environ, GITHUB_OUTPUT=str(output), BASE_REF="develop",
+                   GITHUB_REPOSITORY="example/project", PR_NUMBER="1",
+                   FIXTURE_PATH=changed_path, CLASSIFIER_MODE=mode)
+        stub = '''
+gh() { printf '%s\\n' "$FIXTURE_PATH"; }
+bash() {
+  if [ "$1" = scripts/changed-areas.sh ]; then
+    case "$CLASSIFIER_MODE" in
+      false) cat >/dev/null; printf 'server=false\\nclient=false\\nschemas=false\\n'; return 0 ;;
+      crash) cat >/dev/null; return 1 ;;
+    esac
+  fi
+  command bash "$@"
+}
+'''
+        result = subprocess.run(["bash", "-e", "-c", stub + classify], cwd=root,
+                                env=env, capture_output=True, text=True)
+        selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        if mode == "crash":
+            assert result.returncode != 0, "classifier crash must fail detect"
+            assert selected.get("helpers") != "false", "crash must not skip automation"
+        else:
+            assert result.returncode == 0, result.stderr
+            assert selected.get("helpers") == "true", (
+                f"{changed_path!r} with {mode} classifier skipped automation: {selected}"
+            )
+        if changed_path == "docs/guide.md":
+            assert all(selected[key] == "false" for key in ("server", "client", "schemas")), (
+                "docs-only changes should still skip workspace builds"
+            )
 
-# ------------------------------------------------------- /dev-issue documents every one
-# Scoped to the sentence that states the condition, not to the file: the whole point is
-# that a mention somewhere else in the document does not tell an agent when to run this.
-condition = exactly_one(
-    r"\*\*If the diff touches(.*?)```bash", dev_issue, "dev-issue local helper-gate condition"
-)
-missing = [p for p in prefixes if f"`{p}/`" not in condition]
-assert not missing, (
-    "/dev-issue Step 6 does not name every path that selects the automation job: "
-    f"missing {missing}. ci.yml selects {prefixes}."
-)
-
-# The same sentence's mirror image: the "nothing to run here" list must not claim a path
-# that CI gates. This is the regression that shipped — `.claude/` sat in both roles.
-no_gate = exactly_one(
-    r"A diff that touches none of the above \(([^)]*)\)", dev_issue, "dev-issue no-gate list"
-)
-contradictions = [p for p in prefixes if p in no_gate]
-assert not contradictions, (
-    f"/dev-issue calls {contradictions} gate-free while ci.yml selects the automation job "
-    "for those paths"
-)
-
-# ------------------------------------------------- /process-pr's detector matches exactly
-# This one is executable, so hold it to equality in both directions rather than
-# containment: an extra prefix here would send an agent to run a suite CI never selected.
-selector = exactly_one(
-    r"TOUCHES_SCRIPTS=\$\(gh pr view <pr-number> --json files --jq '(.*?)'\)",
-    process_pr,
-    "process-pr TOUCHES_SCRIPTS selector",
-)
-documented = set(re.findall(r'startswith\("([^"]+)/"\)', selector))
-assert documented == set(prefixes), (
-    "/process-pr Step 2 detects a different path set than ci.yml selects: "
-    f"skill={sorted(documented)} ci.yml={sorted(prefixes)}"
-)
+# ------------------------------------------------------- local gates match CI selection
+for label, text in (("dev-issue", dev_issue), ("process-pr", process_pr)):
+    assert "**Every PR runs the automation helper suite**" in text, (
+        f"{label} must require the same unconditional helper gate as CI"
+    )
+    assert "PR has no gate to run" not in text
+    assert "A diff that touches none of the above" not in text
+assert "TOUCHES_SCRIPTS=" not in process_pr, "no local path selector may exempt automation"
+agents = (root / "AGENTS.md").read_text()
+assert "The `helpers` selector (which gates `automation`) is always true" in agents
 
 # ------------------------------------------------------------- the block reports failure
 # Extract the documented gate and run it. Both concrete commands are swapped for fixtures:
@@ -164,7 +181,7 @@ assert not missing_files, (
 )
 
 print(
-    f"helpers selector documented and enforced — prefixes={prefixes}; "
+    "unconditional helpers selection documented and enforced; "
     f"{len(on_disk)} helper tests, all enumerated in ci.yml"
 )
 PY
