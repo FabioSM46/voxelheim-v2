@@ -7,7 +7,6 @@ import types
 import contextlib
 import inspect
 import io
-import pathlib
 import json
 import re
 import unittest
@@ -109,10 +108,14 @@ class DiffCapTests(unittest.TestCase):
     _TAIL_ALLOWANCE = 2.0
     # The fraction 90,000 was of its own fill point (90,000 / 124,000), reused by 45,000.
     _MARGIN = 0.72
-    # The exhaustions on record, all at reasoning_effort=max. They no longer bind the cap,
-    # because the setting they were measured under is not the one in force — and that is
-    # a claim test_the_effort_the_cap_was_measured_at_is_the_one_in_force exists to keep true.
-    _MAX_EFFORT_FAILURES = (60_863, 124_711)
+    # Diffs measured to spend the whole ceiling and return no verdict, by the effort they
+    # were measured at. `high` is empty because seventeen replays produced no exhaustion;
+    # an effort absent from this table has no exhaustion record at all, which the test
+    # below refuses rather than reads as "none".
+    _NO_VERDICT_DIFFS_BY_EFFORT = {
+        "max": (60_863, 124_711),  # #488 and #164
+        "high": (),
+    }
 
     @classmethod
     def _worst_ratio(cls):
@@ -187,36 +190,69 @@ class DiffCapTests(unittest.TestCase):
             "that reasons harder still",
         )
 
-    def test_the_max_effort_failures_are_above_the_cap_only_because_the_effort_moved(self):
-        """The old binding constraint, kept as a record rather than a pin.
+    @staticmethod
+    def _workflow_effort():
+        """The effort the reviewer actually runs at, read from the workflow's env block.
 
-        A cap above a diff that once produced no verdict needs a reason, and the reason
-        is that #488 and #164 were measured at `max`: the same #506 diff that reasoned at
-        31.3 and answered nothing under `max` reasoned at 2.2 under `high`. So this test
-        does not assert the cap is below them — it asserts that the cap is above them ONLY
-        while the effort is the one they were not measured at, which the next test pins.
+        An anchored match on the assignment, not a substring of the file: a bare
+        `assertIn` stays green when the live line is commented out and a different value
+        set beneath it, which is the one edit this pin exists to catch.
         """
-        self.assertGreater(
-            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS, min(self._MAX_EFFORT_FAILURES)
+        workflow = (
+            Path(__file__).resolve().parents[1] / "workflows" / "deepseek-pr-review.yml"
+        ).read_text()
+        matches = re.findall(
+            r'^\s+DEEPSEEK_REASONING_EFFORT:\s*"([a-z]+)"\s*$', workflow, re.M
         )
+        assert len(matches) == 1, (
+            f"expected exactly one DEEPSEEK_REASONING_EFFORT assignment, found {matches}"
+        )
+        return matches[0]
+
+    def test_the_cap_is_below_every_no_verdict_diff_at_the_effort_in_force(self):
+        """The original invariant, made conditional on the setting it belongs to.
+
+        It used to read `cap < 60,863` unconditionally, from #488. That is right at
+        `max` and wrong at `high`: the #506 diff that reasoned at 31.3 and answered
+        nothing under `max` reasoned at 2.2 and answered in under four minutes at
+        `high`. Asserting the inverse — `cap > 60,863` — was worse still, because it put
+        a *floor* under the cap and the standing rule says an exhaustion under the cap
+        is what brings the number down; a maintainer following that rule would have had
+        to delete the test to obey it.
+
+        So the table is keyed by effort and this iterates it. At `high` there is nothing
+        to iterate, which is the finding rather than a gap; at `max` the old invariant
+        comes back automatically; at an effort nobody has measured it refuses.
+        """
+        effort = self._workflow_effort()
+        exhaustions = self._NO_VERDICT_DIFFS_BY_EFFORT.get(effort)
+        self.assertIsNotNone(
+            exhaustions,
+            f"no exhaustion record exists for reasoning_effort={effort!r}; the ratio "
+            "belongs to that setting, so measure before trusting any cap under it",
+        )
+        for diff_chars in exhaustions:
+            self.assertLess(
+                deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
+                diff_chars,
+                f"a diff of {diff_chars:,} characters was measured at {effort} to spend "
+                "the whole ceiling and return no verdict; the cap must sit below it",
+            )
 
     def test_the_effort_the_cap_was_measured_at_is_the_one_in_force(self):
         """A number defended by a claim about the world, made to fail when the world moves.
 
         Twice a cap described a context window the model did not have; the third time it
-        was measured under a setting that then changed. The ratio belongs to the effort, so
-        the effort is pinned here beside the cap: switch it and this fails until the cap
-        is measured again at the new setting — with `pr-deepseek-force-review
-        --measure-only --measure-cap`, which is what #925 built to take these samples.
+        was measured under a setting that then changed, and nothing said so. The ratio
+        belongs to the effort, so the effort is pinned here beside the cap: switch it and
+        this fails until the cap is measured again at the new setting — with
+        `pr-deepseek-force-review --measure-only --measure-cap`, which is what #925 built
+        to take these samples. `scripts/test/deepseek-budget.test.sh` pins the same pair
+        from the other side, so the coupling survives either file being rewritten.
         """
-        workflow = (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "workflows"
-            / "deepseek-pr-review.yml"
-        ).read_text()
-        self.assertIn(
-            'DEEPSEEK_REASONING_EFFORT: "high"',
-            workflow,
+        self.assertEqual(
+            "high",
+            self._workflow_effort(),
             "DEEPSEEK_MAX_DIFF_CHARS was measured at reasoning_effort=high (#925); "
             "changing the effort invalidates every sample the cap is derived from — "
             "measure again at the new setting before changing this pin",
@@ -774,6 +810,59 @@ class ReportedDiffSizeTests(unittest.TestCase):
 class _RejectingPR(_RecordingPR):
     def create_review(self, **kwargs):
         raise deepseek_review.GithubException("approval rejected")
+
+
+class SplitCommentsTests(unittest.TestCase):
+    """One classification rule, because the log has to describe the posting path.
+
+    The measure-only log used to call a comment inline whenever it carried a `path`,
+    while the posting path also required a numeric `line`. The log exists to say what
+    the review would have been, so the two rules disagreeing was the one defect it
+    could not afford (#925).
+    """
+
+    def test_a_path_without_a_numeric_line_is_general_in_both_readers(self):
+        inline, general = deepseek_review.split_comments(
+            [{"path": "server/x.go", "line": "n/a", "body": "b"}]
+        )
+        self.assertEqual([], inline)
+        self.assertEqual(1, len(general))
+
+    def test_a_path_with_a_numeric_line_is_inline(self):
+        inline, general = deepseek_review.split_comments(
+            [{"path": "server/x.go", "line": 12, "body": "b"}]
+        )
+        self.assertEqual(1, len(inline))
+        self.assertEqual([], general)
+
+    def test_a_non_dict_element_is_general_rather_than_an_exception(self):
+        """A measurement that dies on a stray string has spent the API call for nothing."""
+        inline, general = deepseek_review.split_comments(["just a string", 7])
+        self.assertEqual([], inline)
+        self.assertEqual([{"body": "just a string"}, {"body": "7"}], general)
+
+    def setUp(self):
+        self._real_call = deepseek_review.call_deepseek
+
+    def tearDown(self):
+        deepseek_review.call_deepseek = self._real_call
+
+    def test_the_measure_only_log_reports_the_posting_path_classification(self):
+        deepseek_review.call_deepseek = lambda *args, **kwargs: (
+            '{"review_complete": false, "comments": ['
+            '{"path": "server/x.go", "line": "n/a", "body": "not really anchored"}]}'
+        )
+        pr = _RecordingPR()
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "MAX_ROUNDS": "1"},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual([], pr.posted)
+        self.assertIn("comment 1 at (general): not really anchored", output.getvalue())
 
 
 class MeasureCapOverrideTests(unittest.TestCase):
