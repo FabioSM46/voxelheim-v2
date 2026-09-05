@@ -50,10 +50,21 @@ func TestACeilingBelowTheSessionsIsRefusedAndZeroMeansTheFloor(t *testing.T) {
 	}
 }
 
-func TestAnUnknownLogLevelIsRefusedRatherThanPassedOn(t *testing.T) {
+// **A level the server accepts is not automatically one this command can use.** `warn` and
+// `error` are legal for voxelheimd and silence the two Info startup lines the address and
+// the certificate are read out of, so a run given one would start a server it could never
+// find. #935's review is where that was caught.
+func TestALogLevelThisCommandCannotReadTheServerThroughIsRefused(t *testing.T) {
 	t.Parallel()
 
-	if _, err := parseFlags("test", []string{"-plan", "-server-log-level", "trace"}); err == nil {
-		t.Error("-server-log-level trace was accepted; the server would refuse it after this command had started it")
+	for _, level := range []string{"trace", "warn", "error", "INFO", ""} {
+		if _, err := parseFlags("test", []string{"-plan", "-server-log-level", level}); err == nil {
+			t.Errorf("-server-log-level %q was accepted", level)
+		}
+	}
+	for _, level := range []string{"debug", "info"} {
+		if _, err := parseFlags("test", []string{"-plan", "-server-log-level", level}); err != nil {
+			t.Errorf("-server-log-level %q was refused: %v", level, err)
+		}
 	}
 }

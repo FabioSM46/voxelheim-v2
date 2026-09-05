@@ -38,9 +38,11 @@ func registerRunFlags(flags *flag.FlagSet, run *runOptions) {
 		"the server's chunk-streaming radius, in chunks. It is not a voice setting, and it is the "+
 			"largest thing voice is competing with, so a run that changes it is not comparable with one that did not")
 	flags.StringVar(&run.serverLogLevel, "server-log-level", "info",
-		"the level the server logs at. Every voice refusal is a Debug line, so only `debug` can "+
-			"attribute a drop to the limiter, the size cap or the audience — at the cost of writing "+
-			"one line per dropped delivery, which at a thousand sessions is its own load")
+		"the level the server logs at: `debug` or `info`, and nothing quieter, because the address "+
+			"and the certificate this command dials are read out of the server's own Info startup "+
+			"lines. Every voice refusal is a Debug line, so only debug can attribute a drop to the "+
+			"limiter, the size cap or the audience — at the cost of one line per dropped delivery, "+
+			"which at a thousand sessions is its own load")
 	flags.DurationVar(&run.settle, "settle", 3*time.Second,
 		"how long to wait after the last session is placed before the window opens. It has to "+
 			"cover a recompute of the audible sets, which happens every game.VoiceSetInterval ticks")
@@ -78,9 +80,16 @@ func (r *runOptions) validate(o options, plan bool) error {
 		return fmt.Errorf("the sampling interval must be positive, got %v", r.sampleEvery)
 	}
 	switch r.serverLogLevel {
-	case "debug", "info", "warn", "error":
+	case "debug", "info":
 	default:
-		return fmt.Errorf("the server log level must be debug, info, warn or error, got %q", r.serverLogLevel)
+		// warn and error are levels voxelheimd accepts and this command cannot use: it reads
+		// the listening address and the certificate fingerprint out of two Info lines, so a
+		// quieter server is one it can start and never find. Refused here rather than
+		// discovered as a run that hangs.
+		return fmt.Errorf(
+			"the server log level must be debug or info, got %q: this command reads the address and the "+
+				"certificate fingerprint out of the server's own startup lines, and both are Info",
+			r.serverLogLevel)
 	}
 	return nil
 }

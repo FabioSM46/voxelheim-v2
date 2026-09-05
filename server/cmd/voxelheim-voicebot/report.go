@@ -9,10 +9,10 @@ import (
 
 // What a run says, and the care taken over what it does not.
 //
-// Three numbers here are measured directly — frames sent, frames heard, and how long each
-// receipt took — and everything else is derived from them or read off the operating system.
-// The derivations are stated in the report itself rather than only in this file, because a
-// number pasted into an ADR outlives the command that produced it.
+// Three numbers are measured directly — frames sent, frames heard, and how long each receipt
+// took — and everything else is derived from them or read off the operating system. The
+// derivations are stated in the report itself and not only here, because a number pasted
+// into an ADR outlives the command that produced it.
 
 // tickRateTolerance is how far under the configured rate the achieved rate may sit before
 // the report calls the tick budget exceeded: one percent, which at 20 Hz is 0.5 ms of a
@@ -181,16 +181,12 @@ func (r *soakReport) absorbServerLog(s *serverProcess) {
 
 // achievedTickRate is how fast the simulation actually ticked over the measured window.
 //
-// **This is the only statement about the tick budget a bot outside the server can make,
-// and it is a statement about the mean rather than about any one tick.** EntitySnapshot
-// carries server_tick, the loop's own counter, and the loop advances it by exactly one per
-// call to Sim.Step. So the number of ticks a window contained, divided by how long the
-// window was, is the rate the loop achieved — and since the loop's schedule is fixed and it
-// never skips a number, a rate below the configured one means the average Sim.Step plus the
-// loop's own overhead did not fit in the interval.
-//
-// What it cannot say is what any single tick cost. A p99 tick time needs an instrument
-// inside the process, and this command deliberately does not put one there.
+// **The only statement about the tick budget a bot outside the server can make, and one
+// about the mean rather than any single tick.** EntitySnapshot carries server_tick, which
+// the loop advances by exactly one per Sim.Step and never skips, so ticks per wall-clock
+// second is the rate it achieved — and a rate under the configured one means the average
+// Sim.Step plus the loop's overhead did not fit in the interval. A p99 would need an
+// instrument inside the process, and this command deliberately does not put one there.
 func (r *soakReport) achievedTickRate() (float64, bool) {
 	if !r.haveTicks || r.lastTick <= r.firstTick {
 		return 0, false
@@ -233,9 +229,9 @@ func (r *soakReport) render(out io.Writer) error {
 
 	l.printf("\nthe same question asked of the server's own diagnostics\n")
 	if r.run.serverLogLevel != "debug" {
-		l.printf("  the server ran at -log-level %s, and every refusal below is a Debug line.\n", r.run.serverLogLevel)
-		l.printf("  These four counts are therefore zero because nothing was logged, not because\n")
-		l.printf("  nothing was dropped. Re-run with -server-log-level debug to attribute them.\n")
+		l.printf("  the server ran at -log-level %s and every refusal below is a Debug line, so\n", r.run.serverLogLevel)
+		l.printf("  these counts are zero because nothing was logged, not because nothing was\n")
+		l.printf("  dropped. Re-run with -server-log-level debug to attribute them.\n")
 	}
 	l.printf("  limiter       %d\n", r.limiterDrops)
 	l.printf("  size cap      %d\n", r.sizeCapDrops)
@@ -244,10 +240,9 @@ func (r *soakReport) render(out io.Writer) error {
 	l.printf("  server log lines seen: %d\n", r.logLines)
 
 	l.printf("\nrelay latency, send to receipt at a listener in the same cluster\n")
-	l.printf("  measured inside this process, from the instant the frame was written to the\n")
-	l.printf("  instant it came back off a listener's socket, so it carries this command's own\n")
-	l.printf("  receive scheduling as well as the server's relay. The bot's core figure below\n")
-	l.printf("  is what says how much of it to believe.\n")
+	l.printf("  measured inside this process, write to receipt, so it carries this command's\n")
+	l.printf("  own receive scheduling as well as the server's relay — the bot's core figure\n")
+	l.printf("  below is what says how much of it to believe.\n")
 	l.printf("  samples       %d\n", r.latency.count())
 	l.printf("  p50           %s\n", quantileText(&r.latency, 0.50))
 	l.printf("  p99           %s\n", quantileText(&r.latency, 0.99))
