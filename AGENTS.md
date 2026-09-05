@@ -671,6 +671,87 @@ stays at 45,000 and the decision is **deferred, not resolved**. What would settl
 `measure_only: true` replays of a diff in the 40,000–46,000 band: one run is not a sample, and this
 row is why.
 
+**Taken, on #925 — seventeen replays at `high`, and the number is 90,000.** Everything above this
+paragraph was measured at `max`; the effort moved to `high` on #796 and AGENTS.md said in the same
+breath that the ratio belongs to that setting and has to be measured again when it changes. Nobody
+had, and the reason is worth one sentence because it is the #134 family again: the helper this file
+names for the replays, `pr-deepseek-force-review`, could not send `measure_only` at all — it passed
+`pr_number` and `event_name` and nothing else — so every "measurement" dispatched through the
+prescribed tool was a forced review that posted. And with the flag sent, a replay above the cap
+still measured the cap, because the truncation runs before the API call. #927 fixed both (the
+helper takes `--measure-only` and `--measure-cap`, honoured by the script only on a run that posts
+nothing) and printed `reasoning_chars` on success, which is the column of dashes above.
+
+| PR | Diff chars | Files | Reasoning chars | Completion tokens | Ratio | Outcome |
+|---|---|---|---|---|---|---|
+| #897 | 40,112 | 5 | 121,355 | 30,297 | 3.0 | clean verdict, 4m32s |
+| #740 | 42,635 | 48 | 125,358 | 28,778 | 2.9 | clean verdict, 4m23s |
+| #772 | 42,771 | 6 | 221,677 | 48,786 | 5.2 | clean verdict, 10m34s |
+| #772 (again) | 42,771 | 6 | 215,695 | 49,145 | 5.0 | one anchored finding, 6m59s |
+| #899 | 43,550 | 4 | 191,276 | 46,937 | 4.4 | clean verdict, 7m10s |
+| #766 | 43,867 | 4 | 113,202 | 26,912 | 2.6 | clean verdict, 4m04s |
+| #720 | 43,987 | 4 | 208,395 | 51,792 | 4.7 | clean verdict, 8m10s |
+| #720 (again) | 43,987 | 4 | **265,097** | 65,300 | **6.0** | clean verdict, 10m19s |
+| #506 | 44,414 | 11 | 99,709 | 24,333 | 2.2 | clean verdict, 3m57s — the diff that reasoned at 31.3 under `max` |
+| #501 | 53,142 | 5 | 144,057 | 33,165 | 2.7 | clean verdict, 5m12s |
+| #508 | 67,381 | 34 | 149,091 | 35,123 | 2.2 | clean verdict, 5m20s |
+| #509 | 68,507 | 9 | 118,792 | 32,280 | 1.7 | clean verdict, 4m43s |
+| #509 (again) | 68,507 | 9 | 189,674 | 51,615 | 2.8 | clean verdict, 7m19s |
+| #923 | 70,133 | 7 | 236,017 | 57,399 | 3.4 | one anchored finding, 8m34s |
+| #923 (again) | 70,133 | 7 | 297,450 | 72,201 | 4.2 | clean verdict, 10m23s |
+| #920 | 139,626 | 11 | 239,216 | 57,151 | 1.7 | one anchored finding, 8m02s |
+| #920 (again) | 139,626 | 11 | 224,138 | 54,852 | 1.6 | one anchored finding, 7m48s |
+
+Every row is `DEEPSEEK_REASONING_EFFORT=high`, `deepseek-v4-flash`, the 384,000-token ceiling,
+`measure_only: true`, over the diff the pull-request files API returns today — which for a merged
+member of a leaf-first stack is the diff *at merge*, with its leaves folded in, so #923 replays at
+70,133 rather than the 44,945 it was reviewed at (runs 33952051991–33952071995 and
+33952678069–33952685808). The repeats above 45,000 ran under `--measure-cap 80000` and #920 under
+`150000`; nothing was truncated. The findings on #772, #923 and #920 are real and anchored — a
+`Cancel` branch unreachable behind an inventory lock, a `Transmitting` flag dropped on a no-frame
+tick — and not the model declining a diff it judged too large, which the measure-only log now
+prints the comment bodies to be able to tell apart.
+
+**What the seventeen say.** The ratio at `high` runs from 1.6 to 6.0, against 11.9 to 31.3 at
+`max`; the heaviest run spent 72,201 of 384,000 completion tokens, under 19% of the ceiling, and
+the 139,626-character assembled head — 3.1× the old cap, the review that truncated across nine
+files when it ran for real — reviewed twice in eight minutes with a substantive finding each time.
+Run-to-run variance on identical input, the thing #80 and #506 measured at a factor of four or
+more under `max`, is a factor of 1.6 at most here (#509: 1.7 then 2.8) and near 1.0 on the two
+hardest diffs. The two outcomes the cap exists to keep apart — a review that answers and a run
+that spends the ceiling on nothing — did not come within a factor of five of each other in any
+sample.
+
+**90,000 is derived the same way 45,000 was, from the tail, with the tail allowance stated
+rather than folded into the margin.** The budget stays at the 1,481,000 characters #164 measured
+against a ceiling it actually filled; `high` emits 4.16 characters per token, which would make the
+budget larger, and the smaller number is the one to size under. The worst ratio observed is 6.0,
+and it is doubled — to 12.1 — before anything is derived from it, because seventeen samples bound
+the tail of a run-to-run distribution loosely and the observed 1.6× swing needs room above it.
+The diff that fills the budget at 12.1 is about 122,800 characters; 72% of that, the margin every
+cap since 90,000 has used, is 88,400, and **90,000 is 73% of the fill point at twice the worst
+observed ratio.** At that doubled ratio it spends about 282,000 tokens reasoning, 73% of the
+ceiling, which is the same "a quarter left over" criterion `DiffCapTests` has always checked; at
+the worst ratio actually observed it spends about 141,000, and at the median it is never close.
+100,000 fails the same check — 82% of the ceiling at the doubled ratio — and that is why the
+number is 90,000 and not a rounder one.
+
+**The asymmetry is unchanged and still decides the direction, and it now points the other way.**
+Too high still costs a half-hour run producing nothing and a manual split; too low costs an
+audited `DEEPSEEK_REVIEW_READ` — and under 45,000 at `high` the second cost was being paid on
+nearly every stack head while the first had not occurred once since #796. Iteration 50 turned
+three issues into ten pull requests and paid two audited acknowledgements on assembled heads that
+this table shows would have reviewed whole. At 90,000 those three issues are one, one and two.
+
+**What a reader must not conclude from this.** Not that the cap is generous: a run at `high`
+that exhausts the budget under 90,000 is still the new measurement that brings it down, and the
+instrumentation to replay it now exists. Not that the number survives a change of model or
+effort: `test_deepseek_review.py` pins the workflow's effort to `high` beside the cap, so
+switching it back to `max` fails the suite until the cap is measured again at that setting — the
+executable form of the lesson three paragraphs down. And not that seventeen is many: it is
+enough to see that the `high` distribution is narrow and nowhere near the ceiling, and it is what
+the standing rule below asks for before a number moves in either direction.
+
 **Set it from the tail, because the two failure directions are not symmetric.** Too high costs a
 33-minute run that produces nothing, a failing `review` check and a pull request nobody can merge
 until it is split by hand — and nothing says the size was the problem until you open the job. Too
@@ -790,7 +871,9 @@ worst-case two-attempt output envelope is about $0.215, excluding input tokens.
 a lower risk that reasoning consumes the shared 384,000-token output budget before a verdict can
 be emitted. The model, output ceiling, diff cap, retry and timeout budgets remain unchanged; the
 historical exhaustion measurements above were collected at `max` and must not be relabelled as
-measurements of `high`.
+measurements of `high`. The seventeen-row table under "Taken, on #925" is the measurement at `high`,
+and the cap now in force is derived from it; the `max` rows stay as the record of why the
+derivation carries a stated tail allowance.
 
 **Timeouts — two of them, and the order matters**: the request budget is
 `DEEPSEEK_REQUEST_TIMEOUT_SECONDS` × (`DEEPSEEK_MAX_RETRIES` + 1) — currently 2700s × 2 =
