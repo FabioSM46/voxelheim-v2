@@ -31,6 +31,7 @@ mod storm;
 mod text_input;
 mod trade;
 mod vendor;
+mod voice;
 
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
@@ -226,6 +227,7 @@ impl Plugin for UiPlugin {
                     health::HealthUiPlugin,
                     leaving::LeavingUiPlugin,
                     cast::CastUiPlugin,
+                    voice::VoiceUiPlugin,
                 ),
                 hunger::HungerUiPlugin,
                 experience::ExperienceUiPlugin,
