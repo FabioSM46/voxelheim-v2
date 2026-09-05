@@ -46,9 +46,10 @@ mod signin;
 mod tickets;
 mod tls;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -118,11 +119,16 @@ pub use codec::{
     encode_remove_structure_request, encode_repair_request,
 };
 pub use codec::{encode_dismount_request, encode_mount_request};
+// V30's voice surface, named here for the reason the blocks above are: `audio/` should not
+// have to reopen `codec.rs` to find out what it is allowed to spell. The frame's ceiling is a
+// contract enum both peers read, and `audio/codec.rs` sizes its packet buffer from it.
+#[allow(unused_imports)] // The encoder's caller is #852 part 6.
+pub use codec::{MAX_OPUS_BYTES, VoiceAudience, VoiceFrame, VoiceHeard, encode_voice_frame};
 #[allow(unused_imports)] // V25 outbound encoders precede their UI controls (#458, #459).
 pub use codec::{encode_npc_interact_request, encode_trade_request};
 pub use servers::ListedServer;
 use servers::ServerListEvent;
-use session::{Choice, NetCommand, SessionEvent};
+use session::{Choice, NetCommand, Priority, SessionEvent, VoiceQueue};
 
 pub use signin::AccountService;
 use signin::{SignInCommand, SignInEvent};
@@ -846,6 +852,48 @@ impl StormInbox {
 #[derive(Resource, Debug, Default)]
 pub struct WardsInbox(Vec<WardsNearby>);
 
+/// How many relayed voice frames may wait for the audio module in one frame.
+///
+/// Sixteen 20 ms frames is 320 ms of one speaker, or 80 ms of four. **A bound, because the
+/// number of these is the peer's choice**: every length this client allocates from gets one,
+/// even from an authoritative server. It is generous against the arrival rate a legal server
+/// produces and small against what a broken one could.
+const VOICE_INBOX: usize = 16;
+
+/// Relayed voice frames the net thread has delivered and the audio module has not read.
+///
+/// **Wire order, and nothing is ever logged from here.** A voice frame is personal data —
+/// `schemas/player.fbs` makes that a constraint on every consumer — so this queue is drained
+/// into a decoder and never into a diagnostic. Not even a count: how often somebody spoke is
+/// a fact about a person.
+///
+/// The oldest goes when it is full, on the voice queue's reasoning one direction over: what a
+/// backlog means is that presentation is behind, and a listener wants the conversation as it
+/// is now rather than as it was.
+#[derive(Resource, Debug, Default)]
+pub struct VoiceInbox(VecDeque<codec::VoiceHeard>);
+
+impl VoiceInbox {
+    /// Takes every queued frame, leaving the inbox empty.
+    pub fn take(&mut self) -> Vec<codec::VoiceHeard> {
+        self.0.drain(..).collect()
+    }
+
+    fn push(&mut self, heard: codec::VoiceHeard) {
+        if self.0.len() >= VOICE_INBOX {
+            self.0.pop_front();
+        }
+        self.0.push_back(heard);
+    }
+
+    /// Queues one frame as `drain_session_events` would. Test-only, so the audio module can
+    /// be driven without a socket — `WorldInbox::push`'s reason.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, heard: codec::VoiceHeard) {
+        self.push(heard);
+    }
+}
+
 impl WardsInbox {
     /// Whether a frame has delivered no ward answer.
     pub fn is_empty(&self) -> bool {
@@ -949,7 +997,7 @@ impl SessionEndingInbox {
 /// [`NetLink`]: a Bevy resource must be `Sync`. The one accessor takes `ResMut` and reaches
 /// the contents with `get_mut`, so no lock is ever taken.
 #[derive(Resource)]
-pub struct Outbound(Mutex<SyncSender<Vec<u8>>>);
+pub struct Outbound(Mutex<Priority>);
 
 /// The writer set aside while a live leave makes gameplay inert.
 #[derive(Resource)]
@@ -966,17 +1014,41 @@ pub enum Sent {
     Closed,
 }
 
+/// What became of a voice frame handed to [`Outbound::send_voice`].
+///
+/// Its own enum rather than [`Sent`], because the two answer different questions. `Sent`
+/// reports what became of *this* frame — queued, dropped, or nowhere to send. A voice frame
+/// is always queued; what varies is whether an older one had to give way for it, and reusing
+/// `Sent::Dropped` would say the opposite of what happened.
+// Read by the capture pipeline in #852 part 5, the first thing with a frame to send.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceSent {
+    /// Queued behind whatever was already waiting.
+    Queued,
+    /// Queued, and the oldest frame waiting was dropped to make room.
+    Displaced,
+}
+
 /// The pause menu asking the network thread to end this session.
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisconnectRequest;
 
 impl Outbound {
-    fn sibling(&mut self) -> Self {
-        let sender = match self.0.get_mut() {
-            Ok(sender) => sender,
+    /// The one accessor, so the recovery below is written once.
+    ///
+    /// Recovered rather than propagated, for the reason NetLink gives: nothing here panics
+    /// while holding it, and a client that stopped sending input because of an unrelated
+    /// panic elsewhere would be a worse outcome than a recovered mutex.
+    fn priority(&mut self) -> &mut Priority {
+        match self.0.get_mut() {
+            Ok(priority) => priority,
             Err(poisoned) => poisoned.into_inner(),
-        };
-        Self(Mutex::new(sender.clone()))
+        }
+    }
+
+    fn sibling(&mut self) -> Self {
+        Self(Mutex::new(self.priority().clone()))
     }
 
     /// Hands one encoded frame to the writer thread, without ever blocking.
@@ -985,19 +1057,38 @@ impl Outbound {
     /// block on a socket is a frame that can stall on a network. A full queue costs the
     /// frame, which for input is the right trade — the next tick's frame supersedes it.
     pub fn send(&mut self, frame: Vec<u8>) -> Sent {
-        let sender = match self.0.get_mut() {
-            Ok(sender) => sender,
-            // Recovered rather than propagated, for the reason NetLink gives: nothing here
-            // panics while holding it, and a client that stopped sending input because of
-            // an unrelated panic elsewhere would be a worse outcome than a recovered mutex.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        match sender.try_send(frame) {
+        // `Priority` is what wakes the writer, and it does so for every producer on this
+        // channel rather than for the ones that remembered — see its doc.
+        match self.priority().try_send(frame) {
             Ok(()) => Sent::Queued,
             Err(TrySendError::Full(_)) => Sent::Dropped,
             Err(TrySendError::Disconnected(_)) => Sent::Closed,
         }
+    }
+
+    /// Queues one encoded voice frame behind everything already waiting on the channel above.
+    ///
+    /// **It never blocks and it never refuses.** A full queue drops its own oldest frame and
+    /// answers [`VoiceSent::Displaced`], which is a diagnostic rather than a failure: what
+    /// the listener gets is a gap their decoder conceals, and what they are spared is a
+    /// conversation that plays out further and further behind. Nothing an input frame needed
+    /// is spent either way — the two queues are separate, which is the whole reason there
+    /// are two.
+    // Called by #852 part 5; see `VoiceSent` above.
+    #[allow(dead_code)]
+    pub fn send_voice(&mut self, frame: Vec<u8>) -> VoiceSent {
+        if self.priority().queue_voice(frame) {
+            VoiceSent::Displaced
+        } else {
+            VoiceSent::Queued
+        }
+    }
+
+    /// How many voice frames a full queue has cost this session. For a diagnostic; nothing
+    /// decides anything from it.
+    #[allow(dead_code)]
+    pub fn voice_dropped(&mut self) -> u64 {
+        self.priority().voice_dropped()
     }
 
     /// The ECS end of a channel whose far side is a test rather than a writer thread.
@@ -1010,7 +1101,27 @@ impl Outbound {
     #[cfg(test)]
     pub fn to_a_test(capacity: usize) -> (Self, Receiver<Vec<u8>>) {
         let (sender, receiver) = mpsc::sync_channel(capacity);
-        (Self(Mutex::new(sender)), receiver)
+        (
+            Self(Mutex::new(Priority::new(
+                sender,
+                Arc::new(VoiceQueue::default()),
+            ))),
+            receiver,
+        )
+    }
+
+    /// How many voice frames are waiting, so a test can read what was queued without a writer
+    /// thread to take it. Test-only for the reason [`Self::to_a_test`] is.
+    #[cfg(test)]
+    pub(in crate::net) fn voice_depth(&mut self) -> usize {
+        self.priority().voice_depth()
+    }
+
+    /// Every voice frame queued for the writer, taken in order. Test-only, and `pub(crate)`
+    /// because `audio/voice.rs` is the producer whose output these are.
+    #[cfg(test)]
+    pub(crate) fn taken_voice(&mut self) -> Vec<Vec<u8>> {
+        self.priority().taken_voice()
     }
 }
 
@@ -1257,6 +1368,7 @@ impl Plugin for NetPlugin {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<VoiceInbox>()
             .init_resource::<ChatInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(settings.clone())
@@ -1379,7 +1491,14 @@ fn start_session(
     // Bounded, unlike the other two: this is the only channel the ECS *produces* into,
     // and a producer that cannot block has to be able to drop. See OUTBOUND_QUEUE.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(OUTBOUND_QUEUE);
-    let session_outbound = outbound_tx.clone();
+    // The second queue, shared by value between the ECS end below and the writer thread the
+    // session starts. Bounded and lossy like the channel above, and for the same reason —
+    // but it drops its oldest rather than its newest. See `session::VoiceQueue`.
+    let voice = Arc::new(VoiceQueue::default());
+    // Both producers hold the same pairing, so neither can reach the channel without waking
+    // the writer. See `session::Priority`.
+    let priority = Priority::new(outbound_tx, voice);
+    let session_priority = priority.clone();
 
     let addr = addr.to_owned();
     let player_name = settings.player_name.clone();
@@ -1402,7 +1521,7 @@ fn start_session(
                 },
                 event_tx,
                 command_rx,
-                session_outbound,
+                session_priority,
                 outbound_rx,
             )
         })
@@ -1413,7 +1532,7 @@ fn start_session(
             events: event_rx,
             commands: command_tx,
         })),
-        Outbound(Mutex::new(outbound_tx)),
+        Outbound(Mutex::new(priority)),
     ))
 }
 
@@ -1854,6 +1973,7 @@ struct Inboxes<'w> {
     refusals: ResMut<'w, RefusalInbox>,
     storms: ResMut<'w, StormInbox>,
     wards: ResMut<'w, WardsInbox>,
+    voice: ResMut<'w, VoiceInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
@@ -2086,11 +2206,10 @@ fn drain_session_events(
             }
             Ok(SessionEvent::WardsNearby(wards)) => inboxes.wards.0.push(wards),
 
-            // Dropped on purpose, and dropped *here* rather than earlier: the decode
-            // boundary is where a relayed frame is checked, and #851 grows the decoder
-            // that consumes it behind this line. Nothing is logged — a voice frame is
-            // personal data, and a count would still be a diagnostic about who spoke.
-            Ok(SessionEvent::VoiceHeard(_)) => {}
+            // Queued, never logged: a voice frame is personal data, and even a count
+            // would be a diagnostic about who spoke. The decoder that consumes these is
+            // `audio/heard.rs`.
+            Ok(SessionEvent::VoiceHeard(heard)) => inboxes.voice.push(heard),
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
@@ -3019,6 +3138,45 @@ mod tests {
     use super::session::Scratch;
     use super::*;
     use crate::wire::voxelheim::net as fb;
+
+    /// **The ECS side of the second queue.** Voice goes to its own queue, the ninth frame
+    /// displaces the oldest rather than failing, and none of it reaches the channel input
+    /// waits on — which is the acceptance criterion's "voice can never evict an input".
+    #[test]
+    fn voice_fills_its_own_queue_and_never_the_input_one() {
+        let (mut outbound, input) = Outbound::to_a_test(OUTBOUND_QUEUE);
+
+        for byte in 0..8u8 {
+            assert_eq!(
+                outbound.send_voice(vec![byte; 4]),
+                VoiceSent::Queued,
+                "frame {byte} displaced something"
+            );
+        }
+        assert_eq!(
+            outbound.send_voice(vec![8; 4]),
+            VoiceSent::Displaced,
+            "the ninth frame did not report the one it pushed out"
+        );
+        assert_eq!(outbound.voice_depth(), 8);
+        assert_eq!(outbound.voice_dropped(), 1);
+
+        // The input channel never saw any of it, and every one of its slots is still free.
+        assert_eq!(input.try_recv(), Err(TryRecvError::Empty));
+        for byte in 0..OUTBOUND_QUEUE as u8 {
+            assert_eq!(
+                outbound.send(vec![byte; 2]),
+                Sent::Queued,
+                "voice had taken input slot {byte}"
+            );
+        }
+        assert_eq!(
+            outbound.send(vec![0xFF; 2]),
+            Sent::Dropped,
+            "the input channel is still the bounded one it was"
+        );
+        assert_eq!(outbound.voice_depth(), 8, "an input reached voice");
+    }
 
     /// The list [`ConnectionState::every`] hands the sweeps holds every variant.
     ///
@@ -5163,6 +5321,7 @@ mod tests {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<VoiceInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
                 events: event_rx,
