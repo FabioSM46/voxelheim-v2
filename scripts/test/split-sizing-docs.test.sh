@@ -61,6 +61,35 @@ if cap is not None:
             f"/scrum-master says the cap is {stated.group(1)} but the reviewer enforces {cap}"
         )
 
+# 2b. The operative arithmetic divides by the cap, and it is the copy that was left behind.
+#     `/dev-issue` Step 5 went on saying "estimate ÷ 45,000 ... aim at 40,000" for a while
+#     after the constant moved to 90,000, two hundred lines above a Step 7 that measured
+#     against the new number — so the one instruction an agent acts on before writing code
+#     sized against a cap that no longer existed, and it split issues two to three times
+#     more than the cap required. Check 2 above pins the *stated* cap; nothing pinned the
+#     divisor, because it is prose with a number in it. This is that pin.
+if cap is not None:
+    divisor = re.search(r"\*\*estimate ÷ ([\d,]+), rounded up", dev_issue)
+    if divisor is None:
+        failures.append("/dev-issue Step 5 no longer states the arithmetic; the estimate is back to intuition")
+    elif int(divisor.group(1).replace(",", "")) != cap:
+        failures.append(
+            f"/dev-issue Step 5 divides an estimate by {divisor.group(1)} while the reviewer "
+            f"enforces {cap}; the instruction and the cap are one number"
+        )
+    target = re.search(r"part at roughly ([\d,]+)\s*\n?rather than ([\d,]+)", dev_issue)
+    if target is None:
+        failures.append("/dev-issue Step 5 no longer names a per-part target")
+    else:
+        aim, ceiling = (int(g.replace(",", "")) for g in target.groups())
+        if ceiling != cap:
+            failures.append(f"/dev-issue Step 5 aims below {ceiling} while the cap is {cap}")
+        elif not 0.8 * cap <= aim < cap:
+            failures.append(
+                f"/dev-issue Step 5 aims each part at {aim} against a cap of {cap}; the target "
+                "is meant to sit just under the cap, not at it and not far below it"
+            )
+
 # 3. Both skills carry the same calibration table. Compare the rows, not the prose around
 #    them: a table that disagrees with itself sends the two ceremonies to different answers
 #    about the same issue.

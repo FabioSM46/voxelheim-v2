@@ -297,7 +297,7 @@ Trigger: `/scrum-master feature-spec <feature-description>`
 **This is the one place a seam can be chosen with no code sunk at all, and until Iteration 50 this
 skill had never heard of the cap.**
 
-`DEEPSEEK_MAX_DIFF_CHARS` is **45,000** characters. A pull request above it is truncated, every
+`DEEPSEEK_MAX_DIFF_CHARS` is **90,000** characters. A pull request above it is truncated, every
 unread file is injected as a finding, and the pull request blocks until somebody acknowledges the
 gap. `/dev-issue` Step 5 therefore splits an oversized issue into parts — but splitting is damage
 control. By the time `/dev-issue` reads an issue, its shape is already fixed: the acceptance
@@ -321,17 +321,18 @@ measurements:
 | What the issue looks like | Measured | Pull requests |
 | --- | --- | --- |
 | One workspace, one or two new files, no UI | 15,000–35,000 | 1 |
-| One workspace, a new module plus its tests | 45,000–60,000 | 2 |
-| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 3+ |
-| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 4+ |
+| One workspace, a new module plus its tests | 45,000–60,000 | 1 |
+| One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 2 |
+| Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 2+ |
 
 Two multipliers the file count hides: changes here run about two-thirds tests, so a module with
 real coverage is roughly three times its production code; and a field added to a type constructed
 by literal costs every construction site — `SessionParams` has 45, which was 14,000 characters
 before any behaviour existed.
 
-**The Parts column is not the estimate divided by the cap.** 74,073 over 45,000 is 1.6 and #851
-took five. Seams are discrete — you cut where the code already draws a boundary, and #851's parts
+**The Parts column is not the estimate divided by the cap.** 74,073 over the 45,000 cap of the
+time is 1.6 and #851 took five; the column was recomputed for the 90,000 cap #925 measured, the
+sizes were not. Seams are discrete — you cut where the code already draws a boundary, and #851's parts
 came out around 16k, 44k, 49k, 36k and 42k because that is where its module edges are — and an
 estimate made before any code exists is systematically low: #851 was estimated whole at 74,073 and
 its fifth part *alone* measured 80,534 once written. Treat the arithmetic as a floor on the count
@@ -367,7 +368,7 @@ while being the first sentence of its Step 5.
 - Never modify closed issues or closed milestones
 - Respect workspace boundaries: don't create server issues for a client-only feature
 - A feature that moves data between client and server ALWAYS has a schemas component — surface it explicitly rather than burying contract changes in a server issue
-- **Size every issue against the 45,000-character review cap before it is committed to a milestone** — see "Sizing" above. A cross-workspace feature is never one pull request, and an issue that needs five parts should say five.
+- **Size every issue against the 90,000-character review cap before it is committed to a milestone** — see "Sizing" above. A cross-workspace feature is never one pull request, and an issue that needs five parts should say five.
 - When in doubt about scope, ask — don't assume
 - Ceremony issues (labeled `ceremony`) are excluded from all iteration/backlog reports
 

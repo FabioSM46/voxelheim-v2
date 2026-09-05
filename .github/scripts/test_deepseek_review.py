@@ -62,75 +62,100 @@ class DiffCapTests(unittest.TestCase):
     answer. Both were defended by a claim about the world and neither was pinned to an
     observation, so both went on being wrong after the world changed (#167).
 
-    **The third one was measured and was still wrong, which is why these tests changed
-    shape.** 90,000 was derived from #164's reasoning ratio, the only sample of it that
-    existed. #488 then reasoned at twice that rate and exhausted the whole ceiling on a
-    diff half the size (#491), which killed the assumption these tests were built on: that
-    a larger diff is a harder one. It is not. Size is a proxy for how hard the model
-    reasons about *that* content, and the proxy is loose enough that 72,350 came back with
-    a verdict while 60,863 came back with nothing.
+    The third was measured and was still wrong: 90,000 came from #164's ratio, the only
+    sample, and #488 then reasoned at twice that rate on a diff half the size (#491). The
+    fourth, 45,000, was set from #488's ratio as the tail of a two-sample distribution —
+    and then the effort moved from `max` to `high` (#796), which is the setting the ratio
+    belongs to, and nothing was measured again until #925.
 
-    So the pin is no longer "somewhere between the largest success and the smallest
-    failure" — there is no such interval any more. It is the arithmetic itself, bounded on
-    both sides: above, by the diff that exhausts the budget at the worst ratio yet seen;
-    below, by the derived number, so a future scare cannot quietly tighten the cap to
-    nothing.
+    **These tests now pin the cap to the `high` samples, and pin the effort to `high`
+    beside it.** The derivation is unchanged in shape: a budget measured against a ceiling
+    that was actually filled, the worst ratio observed, a stated allowance for the tail
+    the samples cannot see, and a margin under the fill point. What changed is that the
+    allowance is a named number rather than a margin quietly doing two jobs, and that the
+    seventeen rows below sample the ratio on successes too — `reasoning_chars` used to be
+    printed only when a run returned nothing.
     """
 
-    # These historical cap measurements used reasoning_effort=max. The current high
-    # default changes the ratio and must be measured independently before re-deriving it.
     _OUTPUT_BUDGET_CHARS = 1_481_442  # PR #164 emitted this for a 384,000-token ceiling
     _CEILING_TOKENS = 384_000
-    # Diffs that exhausted the budget and returned no verdict. The *smallest* is the one
-    # that binds: a cap above it admits a diff already measured to produce nothing.
-    _OBSERVED_FAILURES = (
-        60_863,  # PR #488: 1,448,213 reasoning chars — a ratio of 23.8
-        124_711,  # PR #164: 1,481,442 reasoning chars — a ratio of 11.9
+    # Seventeen measure-only replays at reasoning_effort=high (#925): (diff chars,
+    # reasoning chars). Every one returned a verdict; the table with tokens, timings and
+    # outcomes is in AGENTS.md under "Taken, on #925".
+    _HIGH_SAMPLES = (
+        (40_112, 121_355),  # #897
+        (42_635, 125_358),  # #740
+        (42_771, 221_677),  # #772
+        (42_771, 215_695),  # #772, again
+        (43_550, 191_276),  # #899
+        (43_867, 113_202),  # #766
+        (43_987, 208_395),  # #720
+        (43_987, 265_097),  # #720, again — the worst ratio observed at high
+        (44_414, 99_709),  # #506 — 31.3 and no verdict under max
+        (53_142, 144_057),  # #501
+        (67_381, 149_091),  # #508
+        (68_507, 118_792),  # #509
+        (68_507, 189_674),  # #509, again — the widest run-to-run swing, 1.6x
+        (70_133, 236_017),  # #923
+        (70_133, 297_450),  # #923, again
+        (139_626, 239_216),  # #920, an assembled stack head
+        (139_626, 224_138),  # #920, again
     )
-    _WORST_OBSERVED_RATIO = 1_448_213 / 60_863  # reasoning chars per char of diff
-    # The fraction 90,000 was of its own fill point (90,000 / 124,000). Reused rather than
-    # re-chosen: the margin was never the thing that was wrong, the ratio under it was.
+    # Seventeen samples bound the tail of a run-to-run distribution loosely, and the
+    # widest swing on identical input was 1.6x. Doubling the worst observed ratio is the
+    # allowance the derivation carries for what it did not see; it is a named number here
+    # so that a later reader can see what was assumed and re-measure it.
+    _TAIL_ALLOWANCE = 2.0
+    # The fraction 90,000 was of its own fill point (90,000 / 124,000), reused by 45,000.
     _MARGIN = 0.72
+    # Diffs measured to spend the whole ceiling and return no verdict, by the effort they
+    # were measured at. `high` is empty because seventeen replays produced no exhaustion;
+    # an effort absent from this table has no exhaustion record at all, which the test
+    # below refuses rather than reads as "none".
+    _NO_VERDICT_DIFFS_BY_EFFORT = {
+        "max": (60_863, 124_711),  # #488 and #164
+        "high": (),
+    }
 
-    def _derived_cap(self):
-        fill_point = self._OUTPUT_BUDGET_CHARS / self._WORST_OBSERVED_RATIO
-        return fill_point * self._MARGIN
+    @classmethod
+    def _worst_ratio(cls):
+        return max(reasoning / diff for diff, reasoning in cls._HIGH_SAMPLES)
 
-    def test_the_cap_is_below_every_diff_that_produced_no_verdict(self):
-        smallest_failure = min(self._OBSERVED_FAILURES)
+    @classmethod
+    def _fill_point(cls):
+        return cls._OUTPUT_BUDGET_CHARS / (cls._worst_ratio() * cls._TAIL_ALLOWANCE)
+
+    @classmethod
+    def _derived_cap(cls):
+        return cls._fill_point() * cls._MARGIN
+
+    def test_the_samples_are_what_the_derivation_says_they_are(self):
+        self.assertEqual(17, len(self._HIGH_SAMPLES))
+        self.assertAlmostEqual(6.03, self._worst_ratio(), places=2)
         self.assertLess(
-            deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
-            smallest_failure,
-            "the cap must keep every diff smaller than the smallest one measured to "
-            "exhaust the output budget; above it the guard cannot fire before the API "
-            "call does",
+            max(reasoning for _, reasoning in self._HIGH_SAMPLES),
+            0.25 * self._OUTPUT_BUDGET_CHARS,
+            "no high sample came within a factor of four of the budget; if one has, "
+            "it belongs in the table and the derivation is no longer this one",
         )
 
-    def test_the_cap_is_below_the_worst_ratio_fill_point(self):
-        """Above this, exhaustion is not a risk — it is the arithmetic.
-
-        A diff this size reasons for the entire ceiling at the ratio #488 measured, so
-        there is nothing left to write a verdict with. #488 landed within 3% of it.
-        """
-        fill_point = self._OUTPUT_BUDGET_CHARS / self._WORST_OBSERVED_RATIO
+    def test_the_cap_is_below_the_fill_point_at_the_allowed_tail(self):
+        fill_point = self._fill_point()
         self.assertLess(
             deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
             fill_point,
             f"a diff of {fill_point:,.0f} characters spends the whole output budget "
-            f"reasoning at {self._WORST_OBSERVED_RATIO:.1f} characters per character of "
-            "diff; a cap at or above it admits a review that cannot answer",
+            f"reasoning at {self._worst_ratio() * self._TAIL_ALLOWANCE:.1f} characters "
+            "per character of diff; a cap at or above it admits a review that cannot answer",
         )
 
     def test_the_cap_is_not_tightened_far_below_its_derivation(self):
         """The floor, and it exists because truncation is not free.
 
-        The old floor was the largest diff a verdict had come back for. That reading died
-        with #488: a success at 72,350 says nothing about a cap of 62,000 once a failure
-        at 60,863 is on the record. What is left to hold the number up is the derivation —
-        worst observed ratio, measured budget, the margin the previous cap already used —
-        and a cap far under it is somebody reacting to one bad run rather than measuring.
-        Five of Iteration 29's seven issues already needed splitting at 90,000; every
-        character taken off this number is more of that.
+        Under 45,000 at `high`, every stack head in Iteration 50 truncated and two paid
+        an audited acknowledgement, while no run had exhausted the budget since #796. A
+        cap far under the derivation is somebody reacting to one bad run rather than
+        measuring, and every character taken off this number is more of that.
         """
         derived = self._derived_cap()
         self.assertGreaterEqual(
@@ -141,23 +166,19 @@ class DiffCapTests(unittest.TestCase):
         )
 
     def test_the_cap_leaves_the_reasoning_room_to_finish(self):
-        """The arithmetic the constant's comment states, checked rather than asserted.
+        """A quarter of the ceiling left over at twice the worst ratio observed.
 
-        1,481,442 characters emitted for 384,000 tokens is 3.86 characters per token, and
-        the hardest-reasoning run measured emitted 23.8 characters per character of diff.
-
-        **What the headroom is for is the reasoning, not the verdict.** A verdict is small
-        — #80 returned 1,060 final characters, about 275 tokens — and a margin sized on it
-        would be no margin at all. The number that has to fit with room to spare is the
-        reasoning itself. It is checked at the *worst* ratio rather than the average
-        because the average is what 90,000 was sized on, and the average is not what turned
-        up on #488. A quarter of the ceiling left over is the margin this cap claims;
-        anything less and the cap is a coin toss.
+        What the headroom is for is the reasoning, not the verdict — a verdict is a few
+        hundred tokens. Checked at the doubled worst ratio rather than at the observed one,
+        because the observed one is what seventeen runs happened to show and the cap has
+        to hold for the eighteenth. 100,000 spends 82% here, which is why the number is
+        90,000 and not a rounder one.
         """
         chars_per_token = self._OUTPUT_BUDGET_CHARS / self._CEILING_TOKENS
         reasoning_tokens = (
             deepseek_review.DEEPSEEK_MAX_DIFF_CHARS
-            * self._WORST_OBSERVED_RATIO
+            * self._worst_ratio()
+            * self._TAIL_ALLOWANCE
             / chars_per_token
         )
         ceiling = deepseek_review.DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS
@@ -165,8 +186,76 @@ class DiffCapTests(unittest.TestCase):
             reasoning_tokens,
             0.75 * ceiling,
             f"a diff at the cap reasons for about {reasoning_tokens:,.0f} of {ceiling:,} "
-            "tokens at the worst ratio measured, which leaves too little for a diff that "
-            "reasons harder still",
+            "tokens at twice the worst ratio measured, which leaves too little for a diff "
+            "that reasons harder still",
+        )
+
+    @staticmethod
+    def _workflow_effort():
+        """The effort the reviewer actually runs at, read from the workflow's env block.
+
+        An anchored match on the assignment, not a substring of the file: a bare
+        `assertIn` stays green when the live line is commented out and a different value
+        set beneath it, which is the one edit this pin exists to catch.
+        """
+        workflow = (
+            Path(__file__).resolve().parents[1] / "workflows" / "deepseek-pr-review.yml"
+        ).read_text()
+        matches = re.findall(
+            r'^\s+DEEPSEEK_REASONING_EFFORT:\s*"([a-z]+)"\s*$', workflow, re.M
+        )
+        assert len(matches) == 1, (
+            f"expected exactly one DEEPSEEK_REASONING_EFFORT assignment, found {matches}"
+        )
+        return matches[0]
+
+    def test_the_cap_is_below_every_no_verdict_diff_at_the_effort_in_force(self):
+        """The original invariant, made conditional on the setting it belongs to.
+
+        It used to read `cap < 60,863` unconditionally, from #488. That is right at
+        `max` and wrong at `high`: the #506 diff that reasoned at 31.3 and answered
+        nothing under `max` reasoned at 2.2 and answered in under four minutes at
+        `high`. Asserting the inverse — `cap > 60,863` — was worse still, because it put
+        a *floor* under the cap and the standing rule says an exhaustion under the cap
+        is what brings the number down; a maintainer following that rule would have had
+        to delete the test to obey it.
+
+        So the table is keyed by effort and this iterates it. At `high` there is nothing
+        to iterate, which is the finding rather than a gap; at `max` the old invariant
+        comes back automatically; at an effort nobody has measured it refuses.
+        """
+        effort = self._workflow_effort()
+        exhaustions = self._NO_VERDICT_DIFFS_BY_EFFORT.get(effort)
+        self.assertIsNotNone(
+            exhaustions,
+            f"no exhaustion record exists for reasoning_effort={effort!r}; the ratio "
+            "belongs to that setting, so measure before trusting any cap under it",
+        )
+        for diff_chars in exhaustions:
+            self.assertLess(
+                deepseek_review.DEEPSEEK_MAX_DIFF_CHARS,
+                diff_chars,
+                f"a diff of {diff_chars:,} characters was measured at {effort} to spend "
+                "the whole ceiling and return no verdict; the cap must sit below it",
+            )
+
+    def test_the_effort_the_cap_was_measured_at_is_the_one_in_force(self):
+        """A number defended by a claim about the world, made to fail when the world moves.
+
+        Twice a cap described a context window the model did not have; the third time it
+        was measured under a setting that then changed, and nothing said so. The ratio
+        belongs to the effort, so the effort is pinned here beside the cap: switch it and
+        this fails until the cap is measured again at the new setting — with
+        `pr-deepseek-force-review --measure-only --measure-cap`, which is what #925 built
+        to take these samples. `scripts/test/deepseek-budget.test.sh` pins the same pair
+        from the other side, so the coupling survives either file being rewritten.
+        """
+        self.assertEqual(
+            "high",
+            self._workflow_effort(),
+            "DEEPSEEK_MAX_DIFF_CHARS was measured at reasoning_effort=high (#925); "
+            "changing the effort invalidates every sample the cap is derived from — "
+            "measure again at the new setting before changing this pin",
         )
 
 
@@ -723,6 +812,59 @@ class _RejectingPR(_RecordingPR):
         raise deepseek_review.GithubException("approval rejected")
 
 
+class SplitCommentsTests(unittest.TestCase):
+    """One classification rule, because the log has to describe the posting path.
+
+    The measure-only log used to call a comment inline whenever it carried a `path`,
+    while the posting path also required a numeric `line`. The log exists to say what
+    the review would have been, so the two rules disagreeing was the one defect it
+    could not afford (#925).
+    """
+
+    def test_a_path_without_a_numeric_line_is_general_in_both_readers(self):
+        inline, general = deepseek_review.split_comments(
+            [{"path": "server/x.go", "line": "n/a", "body": "b"}]
+        )
+        self.assertEqual([], inline)
+        self.assertEqual(1, len(general))
+
+    def test_a_path_with_a_numeric_line_is_inline(self):
+        inline, general = deepseek_review.split_comments(
+            [{"path": "server/x.go", "line": 12, "body": "b"}]
+        )
+        self.assertEqual(1, len(inline))
+        self.assertEqual([], general)
+
+    def test_a_non_dict_element_is_general_rather_than_an_exception(self):
+        """A measurement that dies on a stray string has spent the API call for nothing."""
+        inline, general = deepseek_review.split_comments(["just a string", 7])
+        self.assertEqual([], inline)
+        self.assertEqual([{"body": "just a string"}, {"body": "7"}], general)
+
+    def setUp(self):
+        self._real_call = deepseek_review.call_deepseek
+
+    def tearDown(self):
+        deepseek_review.call_deepseek = self._real_call
+
+    def test_the_measure_only_log_reports_the_posting_path_classification(self):
+        deepseek_review.call_deepseek = lambda *args, **kwargs: (
+            '{"review_complete": false, "comments": ['
+            '{"path": "server/x.go", "line": "n/a", "body": "not really anchored"}]}'
+        )
+        pr = _RecordingPR()
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "MAX_ROUNDS": "1"},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual([], pr.posted)
+        self.assertIn("comment 1 at (general): not really anchored", output.getvalue())
+
+
 class MeasureCapOverrideTests(unittest.TestCase):
     """A replay above the cap is impossible unless the cap moves for that replay.
 
@@ -827,6 +969,28 @@ class MeasureOnlyReviewTests(unittest.TestCase):
         self.assertEqual([], pr.posted)
         self.assertIn("MEASURE ONLY", output.getvalue())
         self.assertIn("parsed final review content successfully", output.getvalue())
+
+    def test_the_verdict_substance_is_logged_because_a_count_cannot_be_read(self):
+        deepseek_review.call_deepseek = lambda *args, **kwargs: (
+            '{"review_complete": false, "comments": ['
+            '{"path": "server/x.go", "line": 3, "body": "The loop\nnever ends"},'
+            '{"body": "This diff is too large to review in one pass"}]}'
+        )
+        pr = _RecordingPR()
+
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "MAX_ROUNDS": "1"},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual([], pr.posted)
+        text = output.getvalue()
+        self.assertIn("review_complete=False, comments=2", text)
+        self.assertIn("comment 1 at server/x.go: The loop never ends", text)
+        self.assertIn("comment 2 at (general): This diff is too large", text)
 
 
 class ReviewBodyMarkerTests(unittest.TestCase):

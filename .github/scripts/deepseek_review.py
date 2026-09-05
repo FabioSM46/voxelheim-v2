@@ -120,7 +120,51 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 #
 # The ratio is a property of DEEPSEEK_REASONING_EFFORT and of the model. Change either and
 # every number above has to be measured again.
-DEEPSEEK_MAX_DIFF_CHARS = 45_000
+#
+# **Everything above was measured at `max`, and the effort has been `high` since #796.** The
+# samples that paragraph kept asking for were taken on #925 — seventeen measure-only replays
+# at `high`, the full table in AGENTS.md under "Taken, on #925" — and they are why the
+# number below is 90,000 and not 45,000:
+#
+#   * ratio 1.6–6.0 chars of reasoning per char of diff, against 11.9–31.3 at `max`;
+#   * the heaviest run spent 72,201 of 384,000 completion tokens — under 19% of the ceiling;
+#   * run-to-run variance on identical input at most 1.6× (#509: 1.7 then 2.8), against
+#     the 4× or more #80 and #506 showed under `max`;
+#   * #506 — 31.3 and no verdict under `max` — reasoned at 2.2 and answered in 3m57s;
+#   * a 139,626-character assembled head reviewed twice in eight minutes with a real,
+#     anchored finding each time; the heaviest sample emitted 297,450 characters, a
+#     factor of 4.98 under the budget, and the test below pins that bound at four.
+#
+# The samples are runs 33952051991-33952071995 and 33952678069-33952685808, and their
+# (diff, reasoning) pairs are `_HIGH_SAMPLES` in test_deepseek_review.py — that tuple is
+# the machine-readable copy and the AGENTS.md table adds tokens, timings and outcomes.
+#
+# The derivation is the one 45,000 used, with the tail allowance stated instead of folded
+# into the margin: budget 1,481,000 chars (the #164 figure — `high` emits 4.16 chars per
+# token, which would make it larger, and the smaller number is the one to size under);
+# worst observed ratio 6.0, **doubled to 12.1** because seventeen samples bound the tail
+# loosely and the observed 1.6× swing needs room above it; fill point at 12.1 about
+# 122,800; 72% of that 88,400, and 90,000 is 73% of it. At the doubled ratio a diff at the
+# cap reasons for about 281,200 tokens, 73% of the ceiling — the "quarter left over" the
+# tests below have always checked. 100,000 spends 82% and fails it, which is why the
+# number is not rounder.
+#
+# **Two things about that margin, said out loud rather than rounded away.** The
+# derivation gives 88,493 and the constant is 90,000, so this number is rounded *up*
+# past its own margin — by 1.7%, inside the noise of a seventeen-sample ratio, and the
+# floor test below allows it deliberately. And the headroom the other test measures is
+# 2.4%, not a quarter: 281,200 tokens against the 288,000 that check allows. A future
+# sample reasoning above about 6.18 characters per character therefore reddens the suite
+# with the cap untouched, which is the intended alarm rather than a surprise — the worst
+# observed is 6.03 and the run-to-run swing is 1.6×, so that alarm is reachable.
+#
+# The tests pin the workflow's effort to `high` beside this constant: change the effort
+# and the suite fails until the cap is measured again.
+#
+# Still a truncation threshold and not a promise: a run at `high` that exhausts the budget
+# under it is the next measurement, and `pr-deepseek-force-review --measure-only
+# --measure-cap` is how it gets replayed.
+DEEPSEEK_MAX_DIFF_CHARS = 90_000
 
 
 def is_measure_only():
@@ -138,10 +182,11 @@ def effective_diff_cap():
 
     `DEEPSEEK_MAX_DIFF_CHARS` for every review. A measure-only replay may override it
     through `DEEPSEEK_MEASURE_CAP`, and that is the only way a diff larger than the cap
-    ever reaches the model: without the override, replaying a 65,000-character pull
-    request measures a 45,000-character diff, because the truncation runs before the
-    API call — which is what made the upper band in #925 unsampleable through the
-    dispatch the documentation named for exactly that purpose.
+    ever reaches the model: truncation runs before the API call, so without the override
+    a replay of any pull request over the cap measures the cap and reports it under the
+    requested size. That is what made the band above the old 45,000 unsampleable through
+    the dispatch the documentation named for exactly that purpose (#925), and it is why
+    every sample above it carries an explicit `--measure-cap`.
 
     Fails closed in both directions the override could be misused in. A value that is
     not a positive integer is refused rather than ignored, because ignoring it would
@@ -349,6 +394,35 @@ def _sanitize_error(err: str) -> str:
     # Redact common API key patterns: sk-..., and similar prefixes with 20+ base62 chars
     err = re.sub(r"\b[a-z]{2,4}-[A-Za-z0-9_-]{20,}", "***REDACTED***", err)
     return err
+
+
+#: How much of a comment body a diagnostic prints. A log is not a review, and an
+#: unbounded body in a run log is neither readable nor a review either.
+BODY_EXCERPT_CHARS = 400
+
+
+def split_comments(comments):
+    """Split a parsed review's comments into (inline, general). One rule, two readers.
+
+    There were two. The posting path called a comment inline only with a `path` *and* a
+    numeric `line`; the measure-only log called it inline whenever it had a `path`, so a
+    comment carrying `"line": "n/a"` logged as anchored to a file and would have posted
+    as general. That log exists to say what the review would have been, which is the one
+    place a second rule cannot be afforded (#925).
+
+    A non-dict element becomes a general comment rather than an exception. `comments` is
+    whatever the model's JSON held, and a measurement that dies on a stray string has
+    spent the whole API call to report nothing.
+    """
+    inline, general = [], []
+    for c in comments:
+        if not isinstance(c, dict):
+            general.append({"body": str(c)})
+        elif c.get("path") and isinstance(c.get("line"), (int, float)):
+            inline.append(c)
+        else:
+            general.append(c)
+    return inline, general
 
 
 def _safe_int(value, default=None):
@@ -979,6 +1053,19 @@ Rules:
             f"(review_complete={review_complete}, comments={len(comments)}); "
             "nothing was posted to GitHub."
         )
+        # The verdict's substance, because a count cannot be read. Seventeen replays for
+        # #925 came back with counts, and the three answering
+        # `review_complete=False, comments=1` were either real findings or the model
+        # declining a diff it judged too large — which justify opposite cap decisions.
+        # Classified by `split_comments`, so the log reports what the posting path would
+        # have done rather than what a second rule here thought. Bounded per comment; the
+        # diff is public and so is the review it would have been, so nothing here is
+        # secret, but a log is not a review.
+        measured_inline, measured_general = split_comments(comments)
+        for i, c in enumerate(measured_inline + measured_general, 1):
+            body = " ".join(str(c.get("body", "")).split())
+            where = c.get("path") if i <= len(measured_inline) else "(general)"
+            print(f"MEASURE ONLY — comment {i} at {where}: {body[:BODY_EXCERPT_CHARS]}")
         return
 
     if not comments and review_complete:
@@ -1014,8 +1101,7 @@ Rules:
             ) from exc
         return
 
-    inline = [c for c in comments if c.get("path") and isinstance(c.get("line"), (int, float))]
-    general = [c for c in comments if not c.get("path") or not isinstance(c.get("line"), (int, float))]
+    inline, general = split_comments(comments)
 
     print(f"Parsed {len(inline)} inline + {len(general)} general comments (review_complete={review_complete})")
 
@@ -1172,7 +1258,7 @@ def mode_reply(client, repo, pr, comment_body, comment_id, comment_author, bot_u
             in_reply = getattr(c, "in_reply_to_id", None)
             threads_context += (
                 f"  [{author}] on {c.path}:{c.line} "
-                f"(id={c.id}, in_reply_to={in_reply}): {c.body[:400]}\n"
+                f"(id={c.id}, in_reply_to={in_reply}): {c.body[:BODY_EXCERPT_CHARS]}\n"
             )
     except GithubException:
         threads_context = "(could not fetch review comments)"
