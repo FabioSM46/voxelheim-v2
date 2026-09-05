@@ -22,8 +22,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings, VoiceMode,
-    device_field, device_from_field, key_from_name, key_name, valid_monitor_identity,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    VoiceAudience, VoiceMode, device_field, device_from_field, key_from_name, key_name,
+    valid_monitor_identity,
 };
 
 /// The environment variable naming the XDG data directory.
@@ -209,10 +210,15 @@ fn render(settings: &Settings) -> String {
         "input-device {}\n",
         device_field(&settings.input_device)
     ));
+    out.push_str(&format!("voice-volume {}\n", settings.voice_volume));
     out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
     out.push_str(&format!(
         "voice-activation-threshold {}\n",
         settings.voice_activation_threshold
+    ));
+    out.push_str(&format!(
+        "voice-audience {}\n",
+        settings.voice_audience.name()
     ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
@@ -320,6 +326,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
                 Some(parsed) => settings.input_device = parsed,
                 None => refuse("the system default microphone or a saved device"),
             },
+            "voice-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.voice_volume = parsed,
+                Err(_) => refuse("a voice volume"),
+            },
             "voice-mode" => match VoiceMode::from_name(value) {
                 Some(parsed) => settings.voice_mode = parsed,
                 None => refuse("a voice mode"),
@@ -327,6 +337,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "voice-activation-threshold" => match value.parse::<f32>() {
                 Ok(parsed) if parsed.is_finite() => settings.voice_activation_threshold = parsed,
                 _ => refuse("a voice activation threshold"),
+            },
+            "voice-audience" => match VoiceAudience::from_name(value) {
+                Some(parsed) => settings.voice_audience = parsed,
+                None => refuse("a voice audience"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -486,8 +500,10 @@ mod tests {
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
         settings.adjust(Knob::MasterVolume, -2);
+        settings.adjust(Knob::VoiceVolume, -3);
         settings.adjust(Knob::VoiceMode, -1);
         settings.adjust(Knob::VoiceActivationThreshold, 3);
+        settings.adjust(Knob::VoiceAudience, 1);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
@@ -756,16 +772,22 @@ mod tests {
             VoiceMode::PushToTalk,
             VoiceMode::VoiceActivation,
         ] {
-            let settings = Settings {
-                voice_mode: mode,
-                voice_activation_threshold: -33.0,
-                ..Settings::default()
-            };
-            assert_eq!(save(&path, &settings), Ok(()));
-            let (reloaded, complaints) = load(&path);
-            assert_eq!(complaints, Vec::<String>::new(), "{mode:?}");
-            assert_eq!(reloaded.voice_mode(), mode);
-            assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+            for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
+                let settings = Settings {
+                    voice_mode: mode,
+                    voice_activation_threshold: -33.0,
+                    voice_audience: audience,
+                    voice_volume: 45,
+                    ..Settings::default()
+                };
+                assert_eq!(save(&path, &settings), Ok(()));
+                let (reloaded, complaints) = load(&path);
+                assert_eq!(complaints, Vec::<String>::new(), "{mode:?} {audience:?}");
+                assert_eq!(reloaded.voice_mode(), mode);
+                assert_eq!(reloaded.voice_audience(), audience);
+                assert_eq!(reloaded.voice_volume(), 45);
+                assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+            }
         }
 
         // A line nothing can read costs that one setting and leaves the other alone —
@@ -774,15 +796,21 @@ mod tests {
             &path,
             "voice-mode shouting
 voice-activation-threshold -30
+voice-audience nobody
 master-volume 25
 ",
         )
         .expect("a scratch file");
         let (settings, complaints) = load(&path);
         assert_eq!(settings.voice_mode(), Settings::default().voice_mode());
+        assert_eq!(
+            settings.voice_audience(),
+            Settings::default().voice_audience(),
+            "an audience nothing can read is not a narrower one"
+        );
         assert!((settings.voice_activation_threshold_db() + 30.0).abs() < f32::EPSILON);
         assert_eq!(settings.master_volume(), 25);
-        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert_eq!(complaints.len(), 2, "{complaints:?}");
         assert!(complaints[0].contains("line 1"), "{complaints:?}");
         assert!(
             !complaints[0].contains("shouting"),
@@ -819,7 +847,7 @@ master-volume 25
         fs::write(
             &path,
             "render-distance 5\nmaster-volume loud\nvsync off\noutput-device name:6f6b\n\
-             input-device name:zz\n",
+             input-device name:zz\nvoice-volume loud\n",
         )
         .expect("a scratch file");
 
@@ -831,6 +859,11 @@ master-volume 25
         assert_eq!(settings.render_distance(), 5);
         assert!(!settings.vsync(), "a bad volume line took the rest with it");
         assert_eq!(
+            settings.voice_volume(),
+            Settings::default().voice_volume(),
+            "an unreadable voice volume is the default, not silence"
+        );
+        assert_eq!(
             settings.input_device(),
             &DeviceChoice::SystemDefault,
             "an unreadable microphone line named a device anyway"
@@ -840,7 +873,7 @@ master-volume 25
             &DeviceChoice::Named("ok".to_owned()),
             "a bad volume line took the device with it"
         );
-        assert_eq!(complaints.len(), 2, "{complaints:?}");
+        assert_eq!(complaints.len(), 3, "{complaints:?}");
         assert!(complaints[0].contains("line 2"), "{complaints:?}");
         for complaint in &complaints {
             assert!(

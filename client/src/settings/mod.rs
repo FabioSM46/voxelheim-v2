@@ -556,12 +556,14 @@ pub enum Knob {
     MasterVolume,
     OutputDevice,
     InputDevice,
+    VoiceVolume,
     VoiceMode,
     VoiceActivationThreshold,
+    VoiceAudience,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 13] = [
+pub const KNOBS: [Knob; 15] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -573,8 +575,10 @@ pub const KNOBS: [Knob; 13] = [
     Knob::MasterVolume,
     Knob::OutputDevice,
     Knob::InputDevice,
+    Knob::VoiceVolume,
     Knob::VoiceMode,
     Knob::VoiceActivationThreshold,
+    Knob::VoiceAudience,
 ];
 
 impl Knob {
@@ -592,14 +596,16 @@ impl Knob {
             Self::MasterVolume => "Master volume",
             Self::OutputDevice => "Output device",
             Self::InputDevice => "Microphone",
+            Self::VoiceVolume => "Voice volume",
             Self::VoiceMode => "Voice",
             Self::VoiceActivationThreshold => "Voice threshold",
+            Self::VoiceAudience => "Heard by",
         }
     }
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so a fourteenth knob has to say where it belongs before it builds —
+    /// No wildcard arm, so a sixteenth knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
@@ -614,8 +620,10 @@ impl Knob {
             Self::MasterVolume
             | Self::OutputDevice
             | Self::InputDevice
+            | Self::VoiceVolume
             | Self::VoiceMode
-            | Self::VoiceActivationThreshold => Tab::Audio,
+            | Self::VoiceActivationThreshold
+            | Self::VoiceAudience => Tab::Audio,
         }
     }
 }
@@ -979,6 +987,11 @@ impl DeviceList {
     }
 
     /// What the knob's reading says for `selected`.
+    ///
+    /// **One suffix for both sides, because both sides now do the same thing**: a device that
+    /// is chosen and not attached is not opened and nothing is put in its place. The version
+    /// of this that took the wording from its caller belonged to a microphone substitution
+    /// that was reversed — see `client/AGENTS.md`.
     fn label(&self, selected: &DeviceChoice) -> String {
         match selected {
             DeviceChoice::SystemDefault => "system default".to_owned(),
@@ -1133,6 +1146,63 @@ const VOICE_ACTIVATION_THRESHOLD_STEP: f32 = 2.0;
 /// Where it starts: above a quiet room, below a voice.
 const DEFAULT_VOICE_ACTIVATION_THRESHOLD: f32 = -40.0;
 
+/// Who the player is asking to be heard by.
+///
+/// **A request, and never an answer.** The server owns every position and every roster and
+/// decides who actually receives a frame; this is the narrowing the frame carries with it.
+/// `Party` on a player who is in no party is therefore a real and reachable state — it means
+/// nobody — and the HUD says so rather than this module refusing to hold the value.
+///
+/// **Two values and no third.** "Nobody" is [`VoiceMode::Off`], one knob up: a player who
+/// wants silence turns the microphone off rather than aiming it at an empty set, because only
+/// the first of those closes the capture device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceAudience {
+    /// Everybody the server judges close enough.
+    #[default]
+    Everyone,
+    /// Only this player's party, among those the server judges close enough.
+    Party,
+}
+
+/// Every audience, in the order the knob steps through them.
+///
+/// Widest first, so stepping up narrows — the direction a player reaching for this knob is
+/// reaching in, since the reason to touch it at all is to be heard by fewer people.
+const VOICE_AUDIENCES: [VoiceAudience; 2] = [VoiceAudience::Everyone, VoiceAudience::Party];
+
+/// One press of the audience control.
+const VOICE_AUDIENCE_STEP: i32 = 1;
+
+/// Who hears this player before anybody changes it.
+///
+/// Everyone, because proximity voice is a thing that happens in a place: the player who never
+/// opens this tab expects the people standing next to them to hear them.
+const DEFAULT_VOICE_AUDIENCE: VoiceAudience = VoiceAudience::Everyone;
+
+impl VoiceAudience {
+    /// What the file calls it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Everyone => "everyone",
+            Self::Party => "party",
+        }
+    }
+
+    /// What the settings screen prints beside the knob.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Everyone => "everyone",
+            Self::Party => "party only",
+        }
+    }
+
+    /// The audience `name` denotes, if it denotes one.
+    fn from_name(name: &str) -> Option<Self> {
+        VOICE_AUDIENCES.into_iter().find(|it| it.name() == name)
+    }
+}
+
 /// The dynamic bounds of the knobs whose values belong to the machine, not this module.
 ///
 /// One borrow rather than an argument per bound that every caller keeps in the right order,
@@ -1245,6 +1315,24 @@ const MASTER_VOLUME_STEP: u8 = 5;
 /// What the game starts at: audible, with room above it for a quiet recording.
 const DEFAULT_MASTER_VOLUME: u8 = 80;
 
+/// Silence, for the same reason [`MIN_MASTER_VOLUME`] is a real value: a player who wants
+/// voice muted has to be able to say so with this knob. It is not the same as
+/// [`VoiceMode::Off`] two rows down — that closes the microphone, this only stops the
+/// listening.
+const MIN_VOICE_VOLUME: u8 = 0;
+/// Unity gain, and the top. `audio/mixer.rs` clamps its own gains and a knob asking for more
+/// asks for clipping, exactly as the master's does.
+const MAX_VOICE_VOLUME: u8 = 100;
+/// One press of the voice volume control.
+const VOICE_VOLUME_STEP: u8 = 5;
+/// Where voice starts: unity, unlike the master.
+///
+/// **Not [`DEFAULT_MASTER_VOLUME`]'s 80, and the difference is deliberate.** The master has
+/// room above its default because a recording wants headroom over the game; voice is speech
+/// that is already quiet by the time it has crossed a room, a codec and a jitter buffer, and
+/// a player who cannot hear their friends turns this up and finds it is already at the top.
+const DEFAULT_VOICE_VOLUME: u8 = 100;
+
 /// Everything a player may change, as one resource.
 ///
 /// The fields are private and every one of them is inside its stated bound, always: the
@@ -1269,8 +1357,10 @@ pub struct Settings {
     master_volume: u8,
     output_device: DeviceChoice,
     input_device: DeviceChoice,
+    voice_volume: u8,
     voice_mode: VoiceMode,
     voice_activation_threshold: f32,
+    voice_audience: VoiceAudience,
 }
 
 impl Default for Settings {
@@ -1292,8 +1382,10 @@ impl Default for Settings {
             master_volume: DEFAULT_MASTER_VOLUME,
             output_device: DeviceChoice::SystemDefault,
             input_device: DeviceChoice::SystemDefault,
+            voice_volume: DEFAULT_VOICE_VOLUME,
             voice_mode: DEFAULT_VOICE_MODE,
             voice_activation_threshold: DEFAULT_VOICE_ACTIVATION_THRESHOLD,
+            voice_audience: DEFAULT_VOICE_AUDIENCE,
         }
     }
 }
@@ -1395,18 +1487,29 @@ impl Settings {
 
     /// Which input device the audio module should open when it opens one at all.
     ///
-    /// **The knob is selectable and the choice is not yet acted on**, which is a real state
-    /// rather than a half-built one and is said here because nobody reads a pull request
-    /// twice. `audio/mod.rs` fills this knob's bound from the capture supervisor's
-    /// enumeration, so a player can pick their microphone and the file records it; what
-    /// arrives in part 5 of #853 is `AudioCapture` taking the name — until then the
-    /// supervisor opens the host's default whatever this says.
-    // Reachable only from the tests until that part: the settings screen reads the field
-    // through `reading_with_choices`, so this accessor is `dead_code` in a binary crate,
-    // exactly as `net/codec.rs`'s outbound encoders are before their callers.
-    #[allow(dead_code)]
+    /// **A microphone that is not attached is not opened, and nothing is opened in its
+    /// place** — the loudspeaker's rule, for a stronger reason: audio the player did not
+    /// consent to reaches people who cannot tell it happened. `client/AGENTS.md` carries the
+    /// argument, including the version of it that was reversed. The *choice* survives either
+    /// way: nothing under `audio/` writes a setting back, so a headset unplugged and plugged
+    /// in again is used again without anybody reopening this tab.
     pub const fn input_device(&self) -> &DeviceChoice {
         &self.input_device
+    }
+
+    /// How loud the voice bus is, from 0 to 100.
+    pub const fn voice_volume(&self) -> u8 {
+        self.voice_volume
+    }
+
+    /// The gain the voice bus is set to, `0.0` silent to `1.0` unity.
+    ///
+    /// [`Self::master_gain`]'s counterpart and its arithmetic: the one conversion between the
+    /// number a player reads and the number a sample is multiplied by. Linear for the same
+    /// reason — a perceptual curve is a change to how a volume *sounds*, and it arrives with
+    /// the feature that needs it rather than with the knob.
+    pub fn voice_gain(&self) -> f32 {
+        f32::from(self.voice_volume()) / f32::from(MAX_VOICE_VOLUME)
     }
 
     /// What the microphone is for: nothing, a held key, or a level.
@@ -1422,6 +1525,13 @@ impl Settings {
     /// — there is no second place a threshold could be expressed.
     pub const fn voice_activation_threshold_db(&self) -> f32 {
         self.voice_activation_threshold
+    }
+
+    /// Who this player is asking to be heard by.
+    ///
+    /// A request the frame carries, never an answer: see [`VoiceAudience`].
+    pub const fn voice_audience(&self) -> VoiceAudience {
+        self.voice_audience
     }
 
     /// Moves a fixed-bound `knob` by `steps` of its own size.
@@ -1525,6 +1635,14 @@ impl Settings {
             Knob::InputDevice => {
                 self.input_device = choices.devices.inputs().moved(&self.input_device, steps);
             }
+            Knob::VoiceVolume => {
+                self.voice_volume = step_u8(
+                    self.voice_volume,
+                    steps.saturating_mul(i32::from(VOICE_VOLUME_STEP)),
+                    MIN_VOICE_VOLUME,
+                    MAX_VOICE_VOLUME,
+                );
+            }
             Knob::VoiceMode => {
                 let current = VOICE_MODES
                     .iter()
@@ -1544,6 +1662,17 @@ impl Settings {
                     MAX_VOICE_ACTIVATION_THRESHOLD,
                     1,
                 );
+            }
+            Knob::VoiceAudience => {
+                let current = VOICE_AUDIENCES
+                    .iter()
+                    .position(|audience| *audience == self.voice_audience)
+                    .unwrap_or_default() as i64;
+                let moved = current
+                    .saturating_add(i64::from(steps).saturating_mul(i64::from(VOICE_AUDIENCE_STEP)))
+                    .clamp(0, VOICE_AUDIENCES.len().saturating_sub(1) as i64)
+                    as usize;
+                self.voice_audience = VOICE_AUDIENCES[moved];
             }
         }
     }
@@ -1579,10 +1708,12 @@ impl Settings {
             Knob::MasterVolume => format!("{}%", self.master_volume),
             Knob::OutputDevice => choices.devices.outputs().label(&self.output_device),
             Knob::InputDevice => choices.devices.inputs().label(&self.input_device),
+            Knob::VoiceVolume => format!("{}%", self.voice_volume),
             Knob::VoiceMode => self.voice_mode.label().to_owned(),
             Knob::VoiceActivationThreshold => {
                 format!("{:.0} dB", self.voice_activation_threshold)
             }
+            Knob::VoiceAudience => self.voice_audience.label().to_owned(),
         }
     }
 
@@ -1646,8 +1777,10 @@ impl Settings {
                 self.master_volume = defaults.master_volume;
                 self.output_device = defaults.output_device.clone();
                 self.input_device = defaults.input_device.clone();
+                self.voice_volume = defaults.voice_volume;
                 self.voice_mode = defaults.voice_mode;
                 self.voice_activation_threshold = defaults.voice_activation_threshold;
+                self.voice_audience = defaults.voice_audience;
             }
         }
     }
@@ -1674,6 +1807,7 @@ impl Settings {
         self.master_volume = self
             .master_volume
             .clamp(MIN_MASTER_VOLUME, MAX_MASTER_VOLUME);
+        self.voice_volume = self.voice_volume.clamp(MIN_VOICE_VOLUME, MAX_VOICE_VOLUME);
         // `NaN` compares false against both ends, so `clamp` would pass it through
         // untouched — the rule `client/AGENTS.md` states about non-finite floats. A
         // threshold that is not a number would make every level comparison false and turn
@@ -2099,6 +2233,80 @@ mod tests {
         );
     }
 
+    /// **The voice volume is a gain of its own, and it starts at unity.**
+    ///
+    /// The master's default has headroom over it deliberately; this one does not, because a
+    /// voice has already lost everything a room, a codec and a jitter buffer take from it by
+    /// the time this knob sees it. The conversion is the master's arithmetic — the one place
+    /// the number a player reads becomes the number a sample is multiplied by.
+    #[test]
+    fn the_voice_volume_runs_from_silence_to_unity_and_starts_at_the_top() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.voice_volume(), MAX_VOICE_VOLUME);
+        assert!((settings.voice_gain() - 1.0).abs() < f32::EPSILON);
+        assert_eq!(settings.reading(Knob::VoiceVolume), "100%");
+
+        settings.adjust(Knob::VoiceVolume, 1);
+        assert_eq!(
+            settings.voice_volume(),
+            MAX_VOICE_VOLUME,
+            "the voice volume climbed past unity into clipping"
+        );
+
+        settings.adjust(Knob::VoiceVolume, -4);
+        assert_eq!(settings.voice_volume(), 80);
+        assert!((settings.voice_gain() - 0.8).abs() < f32::EPSILON);
+        assert_eq!(settings.reading(Knob::VoiceVolume), "80%");
+
+        settings.adjust(Knob::VoiceVolume, -1_000);
+        assert_eq!(
+            settings.voice_volume(),
+            MIN_VOICE_VOLUME,
+            "a player who wants voice muted cannot say so with this knob"
+        );
+        assert!(settings.voice_gain().abs() < f32::EPSILON);
+
+        settings.reset(Tab::Audio);
+        assert_eq!(settings.voice_volume(), DEFAULT_VOICE_VOLUME);
+    }
+
+    /// **The audience is a request, and the knob holds both of its values.**
+    ///
+    /// Widest first, so one press narrows. Nothing here asks whether the player *has* a
+    /// party: that is the server's answer and this module never reads one — the state where
+    /// `Party` means nobody is real, reachable, and the HUD's to say out loud.
+    #[test]
+    fn the_audience_knob_narrows_and_stops_at_both_ends() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.voice_audience(), VoiceAudience::Everyone);
+        assert_eq!(settings.reading(Knob::VoiceAudience), "everyone");
+
+        settings.adjust(Knob::VoiceAudience, 1);
+        assert_eq!(settings.voice_audience(), VoiceAudience::Party);
+        assert_eq!(settings.reading(Knob::VoiceAudience), "party only");
+
+        settings.adjust(Knob::VoiceAudience, 5);
+        assert_eq!(
+            settings.voice_audience(),
+            VoiceAudience::Party,
+            "stepping past the narrowest audience found a third one"
+        );
+        settings.adjust(Knob::VoiceAudience, -5);
+        assert_eq!(settings.voice_audience(), VoiceAudience::Everyone);
+
+        settings.adjust(Knob::VoiceAudience, 1);
+        settings.reset(Tab::Audio);
+        assert_eq!(settings.voice_audience(), DEFAULT_VOICE_AUDIENCE);
+
+        // Every audience the file can write reads back as itself, and nothing else does.
+        for audience in VOICE_AUDIENCES {
+            assert_eq!(VoiceAudience::from_name(audience.name()), Some(audience));
+        }
+        for nonsense in ["", "party only", "nobody", "Everyone"] {
+            assert_eq!(VoiceAudience::from_name(nonsense), None, "{nonsense}");
+        }
+    }
+
     /// A device name is a platform string with spaces and punctuation in it, and the
     /// settings file is one whitespace-separated value per setting. The encoding is what
     /// keeps the second true of the first.
@@ -2287,8 +2495,10 @@ mod tests {
             settings.adjust(Knob::MasterVolume, -3);
             settings.adjust_with_choices(Knob::OutputDevice, 2, bounds);
             settings.adjust_with_choices(Knob::InputDevice, 2, bounds);
+            settings.adjust(Knob::VoiceVolume, -3);
             settings.adjust(Knob::VoiceMode, 1);
             settings.adjust(Knob::VoiceActivationThreshold, -2);
+            settings.adjust(Knob::VoiceAudience, 1);
             settings.toggle_vsync();
             settings.toggle_readout();
             settings.cycle_readout_corner();
@@ -2356,7 +2566,9 @@ mod tests {
         assert_eq!(after.master_volume(), before.master_volume());
         assert_eq!(after.output_device(), before.output_device());
         assert_eq!(after.input_device(), before.input_device());
+        assert_eq!(after.voice_volume(), before.voice_volume());
         assert_eq!(after.voice_mode(), before.voice_mode());
+        assert_eq!(after.voice_audience(), before.voice_audience());
 
         // And the third tab: audio back, the other two untouched.
         let mut after = moved();
@@ -2364,7 +2576,9 @@ mod tests {
         assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
         assert_eq!(after.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(after.input_device(), &DeviceChoice::SystemDefault);
+        assert_eq!(after.voice_volume(), DEFAULT_VOICE_VOLUME);
         assert_eq!(after.voice_mode(), DEFAULT_VOICE_MODE);
+        assert_eq!(after.voice_audience(), DEFAULT_VOICE_AUDIENCE);
         assert!(
             (after.voice_activation_threshold_db() - DEFAULT_VOICE_ACTIVATION_THRESHOLD).abs()
                 < f32::EPSILON
