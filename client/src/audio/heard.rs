@@ -66,6 +66,13 @@ const MAX_HELD_FRAMES: usize = MAX_TARGET_FRAMES * 2;
 /// stopped, not somebody mid-sentence.
 const RELEASE_AFTER: Duration = Duration::from_millis(500);
 
+/// How long a speaker counts as speaking for, once a frame of theirs has been played.
+///
+/// **Presentation, and the HUD in #852 part 8 is its only reader.** A second is long enough
+/// that a name does not flicker between words and short enough that it is gone before the
+/// listener wonders why it is still there.
+pub const SPEAKING_FOR: Duration = Duration::from_millis(1_000);
+
 /// How much audio is kept queued for the output callback, in frames.
 ///
 /// The source ring is a quarter of a second; this is the depth each tick tops it back up to.
@@ -217,6 +224,60 @@ struct Speaker {
     decoder: Option<VoiceDecoder>,
 }
 
+/// Who has been heard, and when they were last played.
+///
+/// **Presentation only.** The HUD names the speakers heard in the last second; nothing decides
+/// anything from it, which is the rule `client/AGENTS.md` states for everything under `audio/`.
+///
+/// **Its lifetime is [`SPEAKING_FOR`] and nothing else's**, which the first version got wrong:
+/// `release_speakers` forgot an entry the moment it let go of the speaker's decoder, so a name
+/// could not outlive [`RELEASE_AFTER`] and the second half of the window this constant
+/// describes was unreachable in the assembled client. The two are different questions on
+/// different clocks — a decoder is held while frames are *arriving*, a name is shown for a
+/// second after one was *played* — and the second is longer on purpose: a name that vanished
+/// the instant somebody stopped talking would flicker between sentences and be gone before a
+/// listener could look at it. Found by review on #924, and only findable by reading this file
+/// against the HUD, because in isolation each half is correct.
+#[derive(Resource, Debug, Default)]
+pub struct Speaking(Vec<(u64, Instant)>);
+
+impl Speaking {
+    /// Every entity heard within [`SPEAKING_FOR`] of `now`, in the order they were first
+    /// heard, so a name does not move in a list while somebody is reading it.
+    pub fn recent(&self, now: Instant) -> Vec<u64> {
+        self.0
+            .iter()
+            .filter(|(_, at)| now.duration_since(*at) < SPEAKING_FOR)
+            .map(|(entity_id, _)| *entity_id)
+            .collect()
+    }
+
+    fn heard(&mut self, entity_id: u64, at: Instant) {
+        match self.0.iter_mut().find(|(held, _)| *held == entity_id) {
+            Some((_, when)) => *when = at,
+            None => self.0.push((entity_id, at)),
+        }
+    }
+
+    /// Records a speaker as heard, as `play` does. Test-only, so `ui/voice.rs` can be driven
+    /// without a decoder or a mixer.
+    #[cfg(test)]
+    pub fn heard_for_test(&mut self, entity_id: u64, at: Instant) {
+        self.heard(entity_id, at);
+    }
+
+    /// Drops every entry older than [`SPEAKING_FOR`].
+    ///
+    /// **Age is the only thing that removes one.** Not the speaker being released, not their
+    /// entity leaving the snapshot: somebody who walked out of range a moment ago was still
+    /// heard in the last second, and that is what this list is. Pruning by age is also what
+    /// bounds it — an entry lives one second whatever else happens.
+    fn forget_stale(&mut self, now: Instant) {
+        self.0
+            .retain(|(_, at)| now.duration_since(*at) < SPEAKING_FOR);
+    }
+}
+
 /// Everything the playback half carries between ticks.
 #[derive(Resource)]
 struct Listening {
@@ -259,6 +320,7 @@ impl Plugin for HeardPlugin {
             warn!("no mixer source is free for voice; nobody will be heard");
         }
         app.insert_resource(Listening::new(source))
+            .init_resource::<Speaking>()
             .add_systems(Update, (hear, play, release_speakers).chain());
     }
 }
@@ -295,7 +357,7 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
 }
 
 /// Decodes what is due and mixes it into the voice source.
-fn play(mut listening: ResMut<Listening>) {
+fn play(mut listening: ResMut<Listening>, mut speaking: ResMut<Speaking>) {
     let listening = &mut *listening;
     let Some(source) = listening.source.as_ref() else {
         return;
@@ -308,6 +370,7 @@ fn play(mut listening: ResMut<Listening>) {
         return;
     }
 
+    let now = Instant::now();
     // Topped up rather than drained: a buffer that played everything it had would have no
     // slack a moment later. `SOURCE_CAPACITY - free` is what is still queued.
     let queued = SOURCE_CAPACITY.saturating_sub(source.free());
@@ -315,7 +378,7 @@ fn play(mut listening: ResMut<Listening>) {
     for _ in 0..wanted {
         listening.mixed.fill(0.0);
         let mut anybody = false;
-        for speaker in speakers.values_mut() {
+        for (entity_id, speaker) in speakers.iter_mut() {
             let slot = speaker.jitter.slot();
             let Some(decoder) = speaker.decoder.as_mut() else {
                 continue;
@@ -334,6 +397,7 @@ fn play(mut listening: ResMut<Listening>) {
                 continue;
             }
             anybody = true;
+            speaking.heard(*entity_id, now);
             for (out, sample) in listening.mixed.iter_mut().zip(listening.decoded.iter()) {
                 *out += *sample;
             }
@@ -356,7 +420,15 @@ fn play(mut listening: ResMut<Listening>) {
 /// talking; one whose entity has left the snapshot has gone, and the server stopped relaying
 /// them at the same moment — so waiting out the silence timer there would hold a decoder for
 /// half a second of nothing.
-fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<SnapshotBuffer>>) {
+///
+/// **It releases decoders, and it does not release names.** [`Speaking`] is pruned by age here
+/// because this is the system that runs every tick, not because a released speaker should be
+/// forgotten — see that type for why the two lifetimes are separate.
+fn release_speakers(
+    mut listening: ResMut<Listening>,
+    mut speaking: ResMut<Speaking>,
+    snapshots: Option<Res<SnapshotBuffer>>,
+) {
     let now = Instant::now();
     let listening = &mut *listening;
     let speakers = match listening.speakers.get_mut() {
@@ -377,6 +449,7 @@ fn release_speakers(mut listening: ResMut<Listening>, snapshots: Option<Res<Snap
         let gone = speaker.seen && !present;
         !gone && !speaker.jitter.silent_since(now)
     });
+    speaking.forget_stale(now);
 }
 
 /// **No test here opens a device or a socket.** The wire side is `VoiceInbox::push_for_test`,
@@ -601,6 +674,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
+            .init_resource::<Speaking>()
             .init_resource::<VoiceInbox>()
             .add_systems(Update, (hear, play, release_speakers).chain());
         app
@@ -758,6 +832,7 @@ mod tests {
     fn a_listener_with_no_source_is_silent_rather_than_broken() {
         let mut app = App::new();
         app.insert_resource(Listening::new(None))
+            .init_resource::<Speaking>()
             .init_resource::<VoiceInbox>()
             .add_systems(Update, (hear, play, release_speakers).chain());
         let opus = frames();
@@ -765,5 +840,92 @@ mod tests {
             say(&mut app, 7, sequence as u32, frame.clone());
         }
         app.update();
+    }
+    /// **The pair, and the only place this property lives.** A speaker whose decoder has been
+    /// released is still a speaker who was heard in the last second.
+    ///
+    /// This is the shape the whole stack has no other defence against, and it is why the test
+    /// runs the real systems rather than `Speaking` on its own: in isolation both halves were
+    /// correct — `recent` filtered at one second, `release_speakers` let a decoder go after
+    /// half of one — and the assembly was wrong, because releasing the decoder also forgot the
+    /// name. Every unit test passed. Found by review on #924, by reading this file against the
+    /// HUD.
+    ///
+    /// The wait is real time because `Jitter::silent_since` reads the clock, and it is the one
+    /// place in this suite that sleeps. 600 ms is past `RELEASE_AFTER` and well inside
+    /// `SPEAKING_FOR`; the window half is asserted against an explicit instant rather than the
+    /// clock, so only the release half depends on how long the sleep actually took.
+    #[test]
+    fn a_released_speaker_is_still_a_speaker_heard_in_the_last_second() {
+        let mut app = listening_app();
+        let opus = frames();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.update();
+        let played = Instant::now();
+        assert_eq!(
+            app.world().resource::<Speaking>().recent(played),
+            vec![7],
+            "the speaker was never recorded as heard"
+        );
+
+        // Nothing more arrives. The decoder is let go; the name is not.
+        std::thread::sleep(RELEASE_AFTER + Duration::from_millis(100));
+        app.update();
+
+        {
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            assert!(
+                !speakers.contains_key(&7),
+                "the decoder was held past {RELEASE_AFTER:?} of silence"
+            );
+        }
+        assert_eq!(
+            app.world()
+                .resource::<Speaking>()
+                .recent(played + Duration::from_millis(700)),
+            vec![7],
+            "releasing the decoder also forgot the name, so the HUD's second half of a \
+             second is unreachable"
+        );
+
+        // And a second after it was played, it is gone — by age, which is the only thing that
+        // removes one.
+        app.update();
+        assert!(
+            app.world()
+                .resource::<Speaking>()
+                .recent(played + SPEAKING_FOR)
+                .is_empty(),
+            "a name outlived the window it is documented to have"
+        );
+    }
+
+    /// A name stops being current a second after it was last heard, so the HUD in part 8 has
+    /// something that goes away on its own.
+    #[test]
+    fn a_speaker_stops_being_recent_after_a_second() {
+        let mut speaking = Speaking::default();
+        let now = Instant::now();
+        speaking.heard(7, now);
+        assert_eq!(speaking.recent(now), vec![7]);
+        assert_eq!(speaking.recent(now + Duration::from_millis(999)), vec![7]);
+        assert!(speaking.recent(now + SPEAKING_FOR).is_empty());
+
+        // And the order is the order they were first heard, so a name does not move in a
+        // list while somebody is reading it.
+        speaking.heard(9, now);
+        speaking.heard(7, now + Duration::from_millis(10));
+        assert_eq!(speaking.recent(now + Duration::from_millis(20)), vec![7, 9]);
+        // **Age is the only thing that drops an entry, and it drops them one at a time.** At
+        // exactly `SPEAKING_FOR` after 9 was heard, 9 goes and 7 — heard ten milliseconds
+        // later — stays. Nothing else removes an entry: not the speaker being released, not
+        // their entity leaving the snapshot.
+        speaking.forget_stale(now + SPEAKING_FOR);
+        assert_eq!(speaking.recent(now + Duration::from_millis(20)), vec![7]);
+        speaking.forget_stale(now + SPEAKING_FOR + Duration::from_millis(10));
+        assert!(speaking.recent(now + Duration::from_millis(20)).is_empty());
     }
 }

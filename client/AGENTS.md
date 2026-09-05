@@ -98,6 +98,7 @@ keeps meaning "everything the client is".
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that publishes each milestone sentence once through the tagged chat channel | infer a storm from weather, advance a phase locally, or grow a second notification surface |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
+| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent, with the bound key that would start it, and who has been heard in the last second | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — the frame-rate readout in whichever of the four corners the setting names, and routing server refusals and trade endings into tagged chat | reach into another module's internals, grow a health bar, call the snapshot age a round trip, or grow a second notification surface |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
@@ -1564,6 +1565,15 @@ slot — concealed when that packet has not arrived, and played as *silence* whe
 simply stopped, because concealing that would be inventing audio nobody sent. Every speaker is summed into **one** source on the `Voice` bus, because the mixer
 has four slots for the whole client and a slot is claimed for its life — a source per speaker
 arrives with the spatialisation that needs one.
+
+**A name outlives the decoder that produced it, deliberately.** `audio/heard.rs` holds a
+speaker's decoder while frames are *arriving* — 500 ms — and `Speaking` holds their name for a
+second after one was *played*. Two questions on two clocks, and the longer one is the HUD's: a
+name that vanished the instant somebody stopped talking would flicker between sentences. The
+first version coupled them, so the second half of that second was unreachable in the assembled
+client while every unit test passed, because each half was correct alone. `Speaking` is pruned
+by age and by nothing else, and the test that holds it runs the systems together rather than
+the type on its own (#924).
 
 **What is deliberately not here yet.**
 Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
