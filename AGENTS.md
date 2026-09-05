@@ -1005,13 +1005,13 @@ none of them, so an agent following the skills ran four server gates where CI ru
 That is the pull-request half. `.github/workflows/integration.yml` runs the same workload again
 on `develop` after every merge — see "Nothing verified `develop` after a merge" below.
 
-#### CI runs only the jobs the diff can affect (the `detect` job)
+#### CI selects workspace jobs by diff and always runs automation (the `detect` job)
 
 Every `ci.yml` run starts with `detect`. On a PR targeting any non-main branch, it classifies changed
 files through `scripts/changed-areas.sh` and lets unaffected jobs skip via job-level `if:`.
-A server-only PR runs `server`; a schema PR runs `schemas` + `server` + `client` (the
-contract fan-out); a docs-only PR runs nothing but `detect`, possibly `automation`, and
-`ci-gate`. A skipped job still reports a terminal `SKIPPED` result, which `ci-gate` accepts
+Every PR runs `automation`. A server-only PR also runs `server`; a schema PR also runs
+`schemas` + `server` + `client` (the contract fan-out); a docs-only PR runs `detect`,
+`automation`, and `ci-gate`. A skipped job still reports a terminal `SKIPPED` result, which `ci-gate` accepts
 only when the corresponding selector is exactly `false`.
 
 On a PR targeting `main`, `detect` bypasses diff classification and selects **everything
@@ -1026,10 +1026,14 @@ falls back to all-true when it cannot enumerate the diff (API error or the pulls
 3000-file cap); and the consumers test `!= 'false'`, so a crashed `detect` runs the full
 matrix while `ci-gate` also rejects the failed classifier.
 
-The `helpers` selector (which gates `automation`) is the one output the classifier does NOT
-produce: it is a plain grep over the raw changed-path list in the workflow. The automation
-job runs `changed-areas.sh`'s own tests, so gating it on that classifier's output would let
-a classifier bug exempt itself from the tests that would have caught it.
+The `helpers` selector (which gates `automation`) is always true, independently of
+`changed-areas.sh`. The job tests that classifier itself and reads files in other workspaces,
+including both halves of the block palette. Its former five-prefix grep missed those inputs
+(#890), so changing only a workspace could skip the test that pinned it to its peer.
+The suite took 33 seconds locally and 31 seconds in the measured Integration step; running it
+on every PR avoids maintaining a second list of files its tests read. Docs-only PRs therefore
+run it too. The output remains in `detect` so the existing `ci-gate` audit still requires its
+success; a classifier failure cannot exempt the tests that would have caught it.
 
 When a new top-level path appears, the fallback costs a few extra minutes per run until
 someone classifies it: fix that by adding a rule to `changed-areas.sh` **with a test**,

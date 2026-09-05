@@ -340,8 +340,8 @@ prints exactly what a piped gate that failed prints, so nothing about the transc
 wrong. `head` and `tail` stay in `allowed-tools` because step 4's slug recipe needs them; what
 must not happen is a gate command on the left of that pipe.
 
-**If the diff touches `scripts/`, `.github/`, or any of the three skill directories
-(`.claude/`, `.agents/`, `.opencode/`)**, CI also runs the automation helper suite. Run it too:
+**Every PR runs the automation helper suite**, including workspace-only and docs-only changes.
+Run it locally too; helper tests may read any tracked file:
 
 ```bash
 failed=0
@@ -382,17 +382,12 @@ is the same hand-kept mirror of a directory this block replaced, one layer furth
 number would have been wrong the moment this pull request added its own guard test, which is
 exactly how long a hand-kept count survives.
 
-**Why the skill directories are in that list**: `agent-skills-sync.test.sh` is what keeps the
-Codex and OpenCode adapters in step with `.claude/skills/`, and it lives in the `automation`
-job. A PR that edits a canonical skill and forgets `scripts/sync-agent-skills.sh` therefore
-has exactly one test standing between it and a stale adapter — the one that never runs unless
-those prefixes select the job. `.github/workflows/ci.yml` holds the same five prefixes in its
-`helpers` grep; `scripts/test/helpers-selector-docs.test.sh` pins this sentence to it, so the
-two cannot drift apart silently.
-
-A diff that touches none of the above (docs, root markdown) has no gate to run; say so rather
-than inventing one. Skill-directory edits are **not** in that category — they run the helper
-suite, and the sync script must be re-run and all three copies committed together.
+**Automation is unconditional because its inputs cross workspace boundaries.** The block
+palette parity test reads server and client source, and `agent-skills-sync.test.sh` reads the
+canonical and generated skills. A path selector can skip the very test a change needs (#890).
+The full suite costs about half a minute, so CI runs it even for docs-only changes.
+`scripts/test/helpers-selector-docs.test.sh` pins this local rule to the workflow.
+Skill-directory edits also require re-running the sync script and committing all three copies.
 
 Formatting (`gofmt`, `cargo fmt`) is the gate most often skipped and the one that most often reddens CI. It is not optional. Fix formatting with `gofmt -w .` / `cargo fmt --all`, lint with what clippy's messages say — then re-run the full gate.
 

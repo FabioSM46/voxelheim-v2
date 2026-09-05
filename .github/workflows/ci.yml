@@ -43,11 +43,10 @@ jobs:
   # `detect` is audited by `ci-gate`; a failed classifier can never be hidden by
   # successful workload jobs.
   #
-  # `helpers` is the one output the classifier does NOT produce, and that is the
-  # entire point of it (clinic-deck #529): the `automation` job runs
-  # changed-areas.sh's own tests, so gating it on that classifier's output would
-  # let a classifier bug exempt itself from the tests that would have caught it.
-  # `helpers` is a plain grep over the raw changed-path list, computed below.
+  # `helpers` is always true, independently of the workspace classifier: automation
+  # tests read workspace files and test changed-areas.sh itself. A path selector
+  # can miss those inputs; the full suite costs only about half a minute (#890).
+  # Keep the output so ci-gate audits automation through its existing contract.
   detect:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -117,27 +116,9 @@ jobs:
             # all-true to empty input, and its own crash fails this step, which
             # the `!= 'false'` consumers below also read as "run everything".
             printf '%s\n' "$files" | bash scripts/changed-areas.sh >> "$GITHUB_OUTPUT"
-            # Read from `$files`, never from the lines just written: the whole
-            # value of this flag is that it survives a classifier that has stopped
-            # recognising `scripts/**`. Same polarity as everything else here — it
-            # starts true and is flipped to false only by a non-empty list in which
-            # nothing matched, so an empty or unreadable list keeps the helper
-            # tests running.
-            #
-            # The three skill directories are in this list because
-            # agent-skills-sync.test.sh is what guards them being in step, and it
-            # lives in the job this flag selects. Without them, a PR that edits a
-            # canonical skill and forgets to regenerate its adapters matches
-            # nothing here, `automation` skips, and the one test that exists to
-            # catch exactly that never runs — which is how "CI fails when a
-            # committed adapter is stale" stops being true without anything
-            # turning red.
-            helpers=true
-            if [ -n "$files" ] &&
-               ! printf '%s\n' "$files" | grep -Eq '^(scripts|\.github|\.claude|\.agents|\.opencode)/'; then
-              helpers=false
-            fi
-            printf 'helpers=%s\n' "$helpers" >> "$GITHUB_OUTPUT"
+            # Run on every diff, including docs-only changes. No second list of
+            # files read by helper tests can drift away from the tests themselves.
+            printf 'helpers=true\n' >> "$GITHUB_OUTPUT"
           else
             echo "::warning::detect: could not enumerate changed files for non-main PR; failing open — all jobs run"
             printf 'server=true\nclient=true\nschemas=true\nhelpers=true\n' >> "$GITHUB_OUTPUT"
@@ -389,9 +370,9 @@ jobs:
         run: bash scripts/check-schemas.sh
 
   # The automation-helper suite: gh-automation.sh, the CI scripts, the labeler
-  # step, and deepseek_review.py all have their only CI coverage here. Selected by
-  # detect's classifier-independent `helpers` flag — see the detect job for why the
-  # classifier is not allowed to compute this selector for itself.
+  # step, and deepseek_review.py all have their only CI coverage here. Every PR
+  # selects this job, independently of the workspace classifier; its missing-output
+  # fallback also keeps it running if detect fails.
   automation:
     needs: detect
     if: ${{ !cancelled() && needs.detect.outputs.helpers != 'false' }}

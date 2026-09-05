@@ -112,17 +112,13 @@ WORKSPACES=$(gh pr view <pr-number> --json files --jq '
   | map(select(. == "server" or . == "client" or . == "schemas"))
   | join(" ")')
 
-# Does the PR touch pipeline code? CI runs a separate job for that. The five prefixes
-# mirror the `helpers` grep in ci.yml's detect job — the skill directories are in it
-# because agent-skills-sync.test.sh guards them and lives in the job it selects.
-TOUCHES_SCRIPTS=$(gh pr view <pr-number> --json files --jq '
-  [.files[].path | select(startswith("scripts/") or startswith(".github/")
-    or startswith(".claude/") or startswith(".agents/") or startswith(".opencode/"))] | length')
-
-echo "Workspaces: ${WORKSPACES:-<none>} | pipeline files: $TOUCHES_SCRIPTS | Worktree: $WORKTREE_DIR"
+echo "Workspaces: ${WORKSPACES:-<none>} | Worktree: $WORKTREE_DIR"
 ```
 
-Guard: an empty `WORKSPACES` with a non-zero `TOUCHES_SCRIPTS` is normal for pipeline PRs — run only the helper suite. If **both** are empty the PR has no gate to run, which is legitimate for `docs/` or root-markdown-only changes; say so and move on rather than inventing a gate. A skill-directory edit is **not** in that category: `.claude/`, `.agents/` and `.opencode/` select the helper suite, because `agent-skills-sync.test.sh` is the one test that catches an adapter left stale. Anything else with no detected workspace is suspicious — report it and ask the user before proceeding.
+**Every PR runs the automation helper suite**, including workspace-only and docs-only changes.
+An empty `WORKSPACES` means run the helper suite alone. Helper tests read across workspace
+boundaries, so no path selector may exempt them; this matches CI's unconditional automation
+selection. Skill-directory edits also require regenerating the adapters.
 
 **Gate commands — these mirror `.github/workflows/ci.yml` exactly, and `scripts/test/gate-tables.test.sh` is what makes that a fact rather than a claim. Run one per detected workspace:**
 
@@ -136,7 +132,7 @@ other place the mistake is available.
 | `server` | `cd server && test -z "$(gofmt -l .)" && go vet ./... && golangci-lint run && go build ./... && GOARCH=386 go build ./... && GOARCH=arm go build ./... && go test ./...` |
 | `client` | `cd client && cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo build --workspace --locked && cargo test --workspace --locked` |
 | `schemas` | `bash scripts/check-schemas.sh` — and because a contract change rebuilds both consumers, run the `server` and `client` gates too |
-| `scripts/`, `.github/`, `.claude/`, `.agents/` or `.opencode/` touched | the full `scripts/test/*.test.sh` suite (glob it — never retype the list) plus `python3 .github/scripts/test_deepseek_review.py`; run them under a failure flag so a red test is the block's exit status, as `/dev-issue` Step 6 spells out |
+| Every PR | the full `scripts/test/*.test.sh` suite (glob it — never retype the list) plus `python3 .github/scripts/test_deepseek_review.py`; run them under a failure flag so a red test is the block's exit status, as `/dev-issue` Step 6 spells out |
 
 Formatting is the gate most often skipped and the one that most often reddens CI. It is not optional.
 

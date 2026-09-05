@@ -96,7 +96,7 @@ EOF
 echo
 echo "changed-areas — automation helpers are the automation job's problem, not a workspace's"
 
-# The `helpers` selector is computed in the workflow from the raw path list —
+# The `helpers` selector is always true in the workflow, independently of this list —
 # never by this script — so the classifier cannot exempt itself from its own
 # tests. Here these paths must simply not trigger any workspace build.
 expect "gh-automation.sh and its tests trigger no workspace job" \

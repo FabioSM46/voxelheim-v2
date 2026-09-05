@@ -19,8 +19,8 @@
 # The `helpers` selector (which gates the `automation` job) is deliberately NOT
 # computed here. The automation job runs this script's own tests, so gating it
 # on this script's output would let a classifier bug exempt itself from the
-# tests that would have caught it. ci.yml derives `helpers` from the raw
-# changed-path list with a plain grep — see the detect job.
+# tests that would have caught it. ci.yml always sets `helpers=true`, independently
+# of this classifier — see the detect job.
 #
 # ci.yml consumes these through `if: … != 'false'` — a job skips only on a
 # positive, well-formed "false". That polarity is half of the safety story; this
@@ -64,11 +64,11 @@ while IFS= read -r path; do
     # Changes every job's meaning: the workflow itself.
     .github/workflows/ci.yml) global=true ;;
     # Automation helpers. Inert HERE by design: the `automation` job that tests
-    # them is selected by detect's classifier-independent `helpers` grep, never
+    # them runs on every PR, independently of this classifier, never
     # by this script (see the header). Routing them to a workspace would run
     # builds they cannot affect.
     scripts/* | .github/scripts/*) : ;;
-    # Inert for CI: nothing any job builds, lints or tests reads these. The
+    # Inert for workspace builds; automation still verifies these files. The
     # `.github/*` arm is reached only for files the two .github arms above did
     # not claim — other workflows run themselves; changing them cannot change
     # what THIS run must verify. `*.md` here is root- and docs-level markdown
