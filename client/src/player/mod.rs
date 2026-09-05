@@ -119,6 +119,11 @@ pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 pub use prompt::{ConfirmationAnswer, ConfirmationPrompt};
 #[cfg(test)]
 pub(crate) use sky::NIGHT_SKY;
+// **One traversal of the voxel grid, and every consumer of it is a caller rather than a
+// second copy.** `name_plate_line_is_clear` in this file already reuses it for the same
+// reason; `audio/spatial.rs` casts the occlusion rays through it in #854. What is exported
+// is the function and not the module, so the aiming machinery around it stays private.
+pub(crate) use target::raycast;
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 pub use trade::{PlayerTradeClick, PlayerTradeEnded, PlayerTradePromptRequest, PlayerTradeWindow};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};

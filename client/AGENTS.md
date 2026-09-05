@@ -1732,6 +1732,32 @@ range a player can actually hear over are not the same number. That is what `1/d
 than an accident of the arithmetic, and the server relaying further than the ear reaches is
 the intended shape.
 
+**Occlusion is three rays through the world, and it borrows the traversal rather than
+writing one.** `spatial::occlusion` casts three parallel rays between the two eyes through
+`player/target.rs`'s `raycast`, whose `solid` closure is called once per voxel entered, in
+order; answering `false` every time turns the search into the enumeration this needs. That
+is the same reasoning `name_plate_line_is_clear` gives one module over: the server's
+`clearLineOfSight` is authoritative for gameplay and neither of these is, so the client half
+must not become a second hand-written walk that can disagree with the one driving the aiming
+outline. Each ray sums a per-material weight and is **capped at 1.0 individually**, and the
+answer is the mean — so the value reads as "how many rays got through", and a ray behind two
+walls is exactly as blocked as a ray behind one.
+
+**The classes are `world/palette.rs`'s and the weights are `audio/spatial.rs`'s**, and the
+split is not tidiness: the palette knows slate is stone, and how much stone muffles a voice
+is an opinion about sound that a second consumer might hold differently.
+`palette::material_class` is the fourth answer that file gives about a block and the first
+that is about none of drawing, stopping a body or hiding a face. Two consequences fall out of
+reusing `is_solid` as the filter rather than inventing a predicate: **a bush occludes
+nothing** while tree leaves occlude a little, because #874 made bushes cover and cover stops
+no body; and **water occludes nothing**, for the same reason a ray passes through a lake to
+outline the bed. An id from a contract this build has never heard of is stone, which is the
+same direction `is_solid` and `is_opaque` already fail in.
+
+Two limits are real, and both fail towards *less* occlusion rather than towards a confident
+wrong answer: a voxel the session has not been streamed reads as air, and `raycast` stops
+after 256 voxels.
+
 ## Conventions that are not obvious from the code
 
 - **`net/codec.rs` is the only place untrusted bytes are read.** It copies every field it needs
