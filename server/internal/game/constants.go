@@ -161,10 +161,11 @@ const (
 	// pinning the number the integrator happens to produce.
 	JumpImpulse = 9.0
 
-	// MountJumpImpulse clears two blocks without reaching three. Jump height is
-	// v squared over twice Gravity: 11 gives roughly 2.16 blocks, while doubling
-	// JumpImpulse would give a flight-like 5.8 blocks.
-	MountJumpImpulse = 11.0
+	// MountJumpImpulse clears two blocks without reaching three at DefaultTickRate.
+	// Gravity-before-movement integration reaches 2.28 blocks at 20 Hz with 12;
+	// the continuous 2.57-block apex is only a ceiling, not the simulated height.
+	// Two-block clearance has margin from 11 Hz upwards; 10 Hz reaches just 2.00.
+	MountJumpImpulse = 12.0
 
 	// TerminalFallSpeed caps downward velocity, in blocks per second.
 	//
@@ -340,7 +341,9 @@ const (
 	// harmless at every rate an operator can set, and at 1 Hz a single tick applies a
 	// whole second of gravity. The settlement is the worse of the two — it arrives at a
 	// full second of gravity, where a jump arrives at that minus its impulse — so the
-	// threshold is what the settlement lands at.
+	// threshold is what the settlement lands at. The mounted jump is harmless too:
+	// its 2.28-block apex at 20 Hz lands well below 28 blocks/s, and simulation
+	// tests verify the landing at every accepted integer rate (1..255 Hz).
 	//
 	// **An integrator artefact is setting a gameplay number here, and that is worth
 	// knowing rather than discovering.** At 20 Hz the settlement lands at 10.5 and a

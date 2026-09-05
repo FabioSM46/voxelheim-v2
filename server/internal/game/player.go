@@ -1929,7 +1929,11 @@ func (p *Player) step(dt float64, terrain Terrain) {
 	// them — so a rider is stopped by the alley and the lintel a walker clears, and
 	// the water read above and the landing read below describe the same box.
 	delta := [3]float64{p.vel[0] * dt, p.vel[1] * dt, p.vel[2] * dt}
-	pos, blocked := moveAndCollideWithStep(terrain, p.body(), p.pos, delta, playerStepHeight)
+	stepHeight := playerStepHeight
+	if p.mounted != vnet.MountKindUnknown {
+		stepHeight = mountedStepHeight
+	}
+	pos, blocked := moveAndCollideWithStep(terrain, p.body(), p.pos, delta, stepHeight)
 	p.pos = pos
 
 	// The ground is "a downward move that was stopped". Deriving it from the collision
