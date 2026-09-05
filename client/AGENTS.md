@@ -1558,10 +1558,11 @@ and recording a player for nobody is the one outcome this feature must not have.
 whether a speaker is close enough or in the right party: the server owns every position and
 every roster, and it sent the frame. What that module decides is only *when* to play each 20 ms
 of it — a jitter buffer per speaker holding 60 ms of slack that grows to 200 ms when a frame
-demonstrably arrives late, and never shrinks inside a turn. A frame that is missing is recovered
-from the redundant copy in the next packet when there is one and concealed when there is not; a
-speaker who has simply stopped is *silence*, because concealing that would be inventing audio
-nobody sent. Every speaker is summed into **one** source on the `Voice` bus, because the mixer
+demonstrably arrives late, and never shrinks inside a turn. A missing frame is recovered from the
+redundant copy in the **immediately** next packet — Opus puts a copy of frame N inside packet N+1
+and nowhere else, so a repair offered from any other frame plays the wrong audio in the wrong
+slot — concealed when that packet has not arrived, and played as *silence* when the speaker has
+simply stopped, because concealing that would be inventing audio nobody sent. Every speaker is summed into **one** source on the `Voice` bus, because the mixer
 has four slots for the whole client and a slot is claimed for its life — a source per speaker
 arrives with the spatialisation that needs one.
 
