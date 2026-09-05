@@ -173,8 +173,17 @@ struct MicMeterMark;
 struct VoicesPanel;
 
 /// One speaker's row inside it, naming whose it is so it can be despawned by entity id.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct VoiceRow(u64);
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+struct VoiceRow {
+    entity_id: u64,
+    /// The name this row was **built with**.
+    ///
+    /// **Part of what the rebuild compares, because it is part of what the row draws.** The
+    /// appearance cache fills in separately from the voice, so a speaker heard before their
+    /// description arrives is drawn as `player 7` — and with only the id set compared, that
+    /// row kept saying `player 7` for the rest of the session. Found by review on #942.
+    name: String,
+}
 
 /// The line counting the speakers the panel did not draw, and how many that is.
 ///
@@ -889,6 +898,19 @@ fn spawn_voices_control(parent: &mut ChildSpawnerCommands<'_>) {
         });
 }
 
+/// What the panel calls one speaker.
+///
+/// Named the way every other roster names them, and drawn as an id when the description has
+/// not arrived — `ui/voice.rs`'s rule, for its reason: hearing somebody the client cannot name
+/// is a real state, and dropping the row would leave a speaker nobody can mute. The id is a
+/// placeholder that gets replaced, which is why [`rebuild_voice_rows`] compares it.
+fn speaker_name(appearances: &Appearances, entity_id: u64) -> String {
+    appearances
+        .name(entity_id)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("player {entity_id}"))
+}
+
 /// The microphone test row: one button, and the meter it holds open beside it.
 ///
 /// The meter is always spawned and is empty while the test is shut — `show_the_microphone_meter`
@@ -968,7 +990,10 @@ fn spawn_mic_test_control(parent: &mut ChildSpawnerCommands<'_>) {
 fn spawn_voice_row(parent: &mut ChildSpawnerCommands<'_>, entity_id: u64, name: String) {
     parent
         .spawn((
-            VoiceRow(entity_id),
+            VoiceRow {
+                entity_id,
+                name: name.clone(),
+            },
             Node {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
@@ -1660,8 +1685,18 @@ fn rebuild_voice_rows(
     let wanted: Vec<u64> = heard.iter().copied().take(PANEL_VOICES).collect();
     let hidden = heard.len() - wanted.len();
 
-    let drawn: Vec<u64> = {
-        let mut drawn: Vec<u64> = rows.iter().map(|(_, row)| row.0).collect();
+    // Every speaker the panel should draw, with the name it should draw them under — resolved
+    // once here so the comparison below and the spawn below that cannot disagree about it.
+    let wanted: Vec<(u64, String)> = wanted
+        .into_iter()
+        .map(|entity_id| (entity_id, speaker_name(&appearances, entity_id)))
+        .collect();
+
+    let drawn: Vec<(u64, String)> = {
+        let mut drawn: Vec<(u64, String)> = rows
+            .iter()
+            .map(|(_, row)| (row.entity_id, row.name.clone()))
+            .collect();
         drawn.sort_unstable();
         drawn
     };
@@ -1672,9 +1707,11 @@ fn rebuild_voice_rows(
         .unwrap_or(0);
     let mut sorted = wanted.clone();
     sorted.sort_unstable();
-    // **Both halves**, because they are two questions: who is drawn, and how many are not.
-    // Comparing only the first is how the count came to be spawned never — the ninth speaker
-    // changes `hidden` and leaves the eight rows exactly as they were.
+    // **Three things, because they are three questions**: who is drawn, what each of them is
+    // called, and how many are not drawn at all. Comparing only the first is how the count came
+    // to be spawned never — the ninth speaker changes `hidden` and leaves the eight rows
+    // exactly as they were — and it is also how a name that arrived after its row never
+    // reached the screen.
     if sorted == drawn && hidden == counted {
         return;
     }
@@ -1687,16 +1724,8 @@ fn rebuild_voice_rows(
     }
     for panel in &panels {
         commands.entity(panel).with_children(|list| {
-            for entity_id in &wanted {
-                // Named the way every other roster names them, and drawn as an id when the
-                // description has not arrived — `ui/voice.rs`'s rule, for its reason: hearing
-                // somebody the client cannot name is a real state, and dropping the row would
-                // leave a speaker nobody can mute.
-                let name = appearances
-                    .name(*entity_id)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| format!("player {entity_id}"));
-                spawn_voice_row(list, *entity_id, name);
+            for (entity_id, name) in &wanted {
+                spawn_voice_row(list, *entity_id, name.clone());
             }
             if hidden > 0 {
                 list.spawn((
@@ -1816,7 +1845,7 @@ fn on_or_off(flag: bool) -> String {
 mod tests {
     use super::*;
     use crate::audio::{HEARD_FOR, MAX_VOICE};
-    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference};
+    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference, VoiceAudience};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
@@ -1976,7 +2005,7 @@ mod tests {
     fn voice_rows(app: &mut App) -> Vec<u64> {
         let world = app.world_mut();
         let mut query = world.query::<&VoiceRow>();
-        query.iter(world).map(|row| row.0).collect()
+        query.iter(world).map(|row| row.entity_id).collect()
     }
 
     /// Presses the Monitor row's closed control, opening or closing the dropdown.
@@ -2879,6 +2908,46 @@ mod tests {
     // The Audio tab
     // -------------------------------------------------------------------------
 
+    /// **The audience knob is reachable by a player, and this says so by name.**
+    ///
+    /// It is a generic stepper, so `rows_of` gives it `-`/`+` and `settings_actions` moves it
+    /// through `Settings::adjust_with_choices` — the production setter, not the `#[cfg(test)]`
+    /// `adjust`. `every_knob_has_a_control_at_each_end_and_a_reading_between_them` already
+    /// covers it, but only as one iteration of a loop over `KNOBS`, and a reader checking
+    /// whether *this* knob is wired has to reconstruct that. Raised in review on #937, where
+    /// the answer was yes and the evidence was hard to find; this is the evidence.
+    #[test]
+    fn the_audience_row_moves_the_setting_a_player_can_reach() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Everyone
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
+            "everyone"
+        );
+
+        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, 1));
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Party,
+            "the Heard by row's + button reached nothing"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
+            "party only"
+        );
+
+        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, -1));
+        assert_eq!(
+            app.world().resource::<Settings>().voice_audience(),
+            VoiceAudience::Everyone
+        );
+    }
+
     /// Third in the strip, holding its own knobs and the speaker test and nothing the other
     /// two tabs claim.
     ///
@@ -3342,6 +3411,70 @@ mod tests {
         );
     }
 
+    /// What one speaker's row is drawn as, or `None` when the panel has no row for them.
+    fn voice_row_name(app: &mut App, entity_id: u64) -> Option<String> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&VoiceRow, &Children)>();
+        let child = query
+            .iter(world)
+            .find(|(row, _)| row.entity_id == entity_id)
+            .and_then(|(_, children)| children.iter().next())?;
+        world.entity(child).get::<Text>().map(|text| text.0.clone())
+    }
+
+    /// **A name that arrives after the row was built reaches the screen.**
+    ///
+    /// The appearance cache fills in separately from the voice, so a speaker heard before
+    /// their description arrives is drawn as `player 7`. With only the id set compared, that
+    /// row went on saying `player 7` for the rest of the session — the row's *contents* are
+    /// part of what the rebuild has to notice, not just which rows exist. Found by review on
+    /// #942.
+    #[test]
+    fn a_name_that_arrives_after_the_row_replaces_the_placeholder() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert_eq!(
+            voice_row_name(&mut app, 7).as_deref(),
+            Some("player 7"),
+            "a speaker with no description yet was not drawn as their id"
+        );
+
+        // The description arrives, on its own schedule, with nothing about the roster moving.
+        *app.world_mut().resource_mut::<Appearances>() = Appearances::with_player_name(7, "Skald");
+        app.update();
+        assert_eq!(
+            voice_row_name(&mut app, 7).as_deref(),
+            Some("Skald"),
+            "the row kept the placeholder after the name arrived"
+        );
+
+        // And it does not thrash: a name that has not changed rebuilds nothing.
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row")
+        };
+        for _ in 0..5 {
+            hear(&mut app, 7);
+        }
+        let after = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.entity_id == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row")
+        };
+        assert_eq!(before, after, "an unchanged name rebuilt the row anyway");
+    }
+
     /// **The rows are rebuilt when the set of speakers changes and never merely because
     /// somebody spoke.** `Voices` is marked changed on every frame anybody is talking, so a
     /// rebuild driven by `Res::is_changed` would despawn and respawn the row under a pointer
@@ -3358,7 +3491,7 @@ mod tests {
             let mut query = world.query::<(Entity, &VoiceRow)>();
             query
                 .iter(world)
-                .find(|(_, row)| row.0 == 7)
+                .find(|(_, row)| row.entity_id == 7)
                 .map(|(entity, _)| entity)
                 .expect("a row for the speaker")
         };
@@ -3373,7 +3506,7 @@ mod tests {
             let mut query = world.query::<(Entity, &VoiceRow)>();
             query
                 .iter(world)
-                .find(|(_, row)| row.0 == 7)
+                .find(|(_, row)| row.entity_id == 7)
                 .map(|(entity, _)| entity)
                 .expect("a row for the speaker")
         };
