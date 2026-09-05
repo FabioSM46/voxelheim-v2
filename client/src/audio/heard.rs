@@ -248,11 +248,16 @@ struct Speaker {
     /// unpositioned. Dropping the handle — which happens when [`release_speakers`] drops the
     /// whole entry — gives the slot back.
     source: Option<SourceHandle>,
-    /// When [`place_the_speakers`] last cast this speaker's occlusion rays.
+    /// How long since [`place_the_speakers`] last cast this speaker's occlusion rays.
     ///
-    /// `None` until the first cast, so a speaker who has just been placed is not heard
-    /// through a wall for a tenth of a second before anybody looks.
-    rays_at: Option<Instant>,
+    /// **Accumulated from `Time::delta`, never from an `Instant`.** The cadence is a rule
+    /// about elapsed time, and a test of it has to control that time rather than hope the
+    /// machine is quick — review on #946 pointed out that two `app.update()` calls are
+    /// sub-millisecond apart *usually*, and this repository has a soak measurement from a
+    /// loaded host where they would not have been. It starts at [`RAY_PERIOD`] so the first
+    /// frame that can place a speaker looks at the world rather than hearing them through a
+    /// wall for a tenth of a second first.
+    since_rays: Duration,
     /// What those rays answered, held until the next cast. The mixer smooths it; this is the
     /// raw reading and steps.
     occlusion: f32,
@@ -410,7 +415,7 @@ fn hear(
                 // else: the entry is still made, so nothing retries per frame.
                 decoder: VoiceDecoder::new().map_err(|err| warn!("{err}")).ok(),
                 source: mixer.as_deref().and_then(|mixer| mixer.claim(Bus::Voice)),
-                rays_at: None,
+                since_rays: RAY_PERIOD,
                 occlusion: 0.0,
             }
         });
@@ -449,6 +454,7 @@ const RAY_PERIOD: Duration = Duration::from_millis(100);
 /// appears to come from is presentation like every other thing under `audio/`.
 fn place_the_speakers(
     mut listening: ResMut<Listening>,
+    time: Res<Time>,
     session: Option<Res<Session>>,
     snapshots: Option<Res<SnapshotBuffer>>,
     store: Option<Res<ChunkStore>>,
@@ -469,10 +475,9 @@ fn place_the_speakers(
         .zip(eyes.iter().next())
         .map(|(session, eye)| Listener {
             eye: eye.translation,
-            // The camera's rotation is `from_rotation_y(yaw) * from_rotation_x(pitch)`, so
-            // `YXZ` reads that yaw back exactly. Taking a horizontal forward from the
-            // transform instead would be a tiny vector to normalise at a steep pitch.
-            yaw: eye.rotation.to_euler(EulerRot::YXZ).0,
+            // The turn and not the tilt — see `spatial::listener_yaw`, which owns that
+            // convention and carries the measurement behind it.
+            yaw: spatial::listener_yaw(eye.rotation),
             range: session.0.voice_range_blocks,
             chunk_size: usize::from(session.0.chunk_size),
             positions: snapshots
@@ -486,7 +491,13 @@ fn place_the_speakers(
                 .unwrap_or_default(),
         });
 
+    let delta = time.delta();
     for (entity_id, speaker) in speakers.iter_mut() {
+        // Every speaker ages, including the ones this frame cannot place. A clock that only
+        // ran while somebody was placeable would leave a speaker who walked out of the
+        // snapshot and back holding a reading from before they left.
+        speaker.since_rays = speaker.since_rays.saturating_add(delta);
+
         // A speaker the mixer had no slot for has nowhere to be placed, and casting their
         // rays would be work with no reader.
         if speaker.source.is_none() {
@@ -498,14 +509,11 @@ fn place_the_speakers(
             && let Some((_, at)) = listener.positions.iter().find(|(id, _)| id == entity_id)
         {
             let speaker_eye = at.pos + Vec3::Y * EYE_HEIGHT;
-            if speaker
-                .rays_at
-                .is_none_or(|last| now.duration_since(last) >= RAY_PERIOD)
-            {
+            if speaker.since_rays >= RAY_PERIOD {
                 speaker.occlusion = store.as_deref().map_or(0.0, |store| {
                     spatial::occlusion(store, listener.chunk_size, listener.eye, speaker_eye)
                 });
-                speaker.rays_at = Some(now);
+                speaker.since_rays = Duration::ZERO;
             }
             placement = Some(spatial::place(
                 listener.eye,
@@ -708,10 +716,18 @@ fn release_speakers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    use bevy::time::TimeUpdateStrategy;
+
     use crate::audio::codec::VoiceEncoder;
     use crate::audio::mixer::Mixer;
     use crate::net::{EntityState, Snapshot, VoiceHeard};
     use std::sync::Arc;
+
+    /// What one `app.update()` advances the clock by. Ten milliseconds is a tenth of
+    /// [`RAY_PERIOD`], which makes the cadence countable rather than approximate.
+    const FRAME: Duration = Duration::from_millis(10);
 
     /// Twelve real Opus frames of a tone, so the decoder is fed something it can decode.
     fn frames() -> Vec<Vec<u8>> {
@@ -923,7 +939,9 @@ mod tests {
         mixer.set_gain(Bus::Master, 1.0);
         let source = mixer.claim(Bus::Voice).expect("a free slot");
         let mut app = App::new();
-        app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
+        app.add_plugins(bevy::time::TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
             .init_resource::<Speaking>()
             .init_resource::<Voices>()
@@ -1202,7 +1220,12 @@ mod tests {
         mixer.set_gain(Bus::Master, 1.0);
         let source = mixer.claim(Bus::Voice).expect("a free slot");
         let mut app = App::new();
-        app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
+        app.add_plugins(bevy::time::TimePlugin)
+            // **Every fixture drives the clock by hand.** The ray cadence is a rule about
+            // elapsed time, so a test of anything near it must not be a test of how busy the
+            // machine is (#946).
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
             .insert_resource(spatial_session())
             .insert_resource(store)
@@ -1242,6 +1265,22 @@ mod tests {
                 ..Snapshot::default()
             },
             Instant::now(),
+        );
+    }
+
+    /// Points the listener's camera, with a pitch on it so nothing here can pass by
+    /// accident on a rig that is looking straight ahead.
+    fn faces(app: &mut App, yaw: f32, pitch: f32) {
+        let camera = app
+            .world_mut()
+            .query_filtered::<Entity, With<WorldCamera>>()
+            .iter(app.world())
+            .next()
+            .expect("the fixture spawned one");
+        let eye = Vec3::new(4.5, 4.5, 4.5);
+        app.world_mut().entity_mut(camera).insert(
+            Transform::from_translation(eye)
+                .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)),
         );
     }
 
@@ -1435,15 +1474,32 @@ mod tests {
         assert_eq!(occlusion_after(false), 0.0, "open air occluded something");
     }
 
-    /// **The cadence, asserted by its consequence.** The rays are cast on the tick a speaker
-    /// is first placed and then not again for a tenth of a second, so a wall that vanishes
-    /// in between is still heard on the next frame. An implementation that cast per frame
-    /// would answer zero immediately and fail this.
+    /// **The cadence, asserted by its consequence, on a clock this test owns.** The rays are
+    /// cast on the frame a speaker is first placed and then not again for [`RAY_PERIOD`], so
+    /// a wall that vanishes in between is still heard until the period is up — and *is* heard
+    /// to have gone once it is.
+    ///
+    /// The first version of this asserted only the first half and read the wall clock through
+    /// `Instant::now()`. Two `app.update()` calls are sub-millisecond apart on an idle
+    /// machine; this repository has a soak measurement from a loaded one where they would not
+    /// have been, and a test that fails because the host was busy gets its assertion deleted
+    /// rather than its cause found (#946). `TimeUpdateStrategy::ManualDuration` makes the
+    /// elapsed time an input, which also bought the second half of the assertion: hoping for
+    /// 100 ms to pass is not something a test can do at all.
     #[test]
-    fn the_rays_are_not_recast_on_every_frame() {
+    fn the_rays_are_recast_on_the_period_and_not_before_it() {
         let wall: Vec<(IVec3, crate::world::BlockId)> = (3..=6)
             .flat_map(|y| (3..=6).map(move |z| (IVec3::new(8, y, z), palette::STONE)))
             .collect();
+        // **The rate itself, because everything below is measured in periods rather than in
+        // milliseconds.** Without this the loop count moves with the constant and the
+        // acceptance criterion — ten casts a second — is pinned by nothing.
+        assert_eq!(
+            1_000 / RAY_PERIOD.as_millis(),
+            10,
+            "the rays are specified at 10 Hz"
+        );
+
         let mut app = placed_app(world_of(&wall));
         stands_at(&mut app, 7, Vec3::new(12.5, 4.0, 4.5));
         speak(&mut app, 7);
@@ -1456,12 +1512,58 @@ mod tests {
         };
         assert!(read_occlusion(&app) > 0.9, "the wall was never read");
 
-        // The wall is gone, and the next frame is well inside the ray period.
+        // The wall is gone. Nine more frames is 90 ms, which is inside the period.
         app.world_mut().insert_resource(world_of(&[]));
+        let inside = (RAY_PERIOD.as_millis() / FRAME.as_millis()) as usize - 1;
+        for frame in 0..inside {
+            app.update();
+            assert!(
+                read_occlusion(&app) > 0.9,
+                "the rays were recast {} ms in, inside a {} ms period",
+                (frame + 1) * FRAME.as_millis() as usize,
+                RAY_PERIOD.as_millis()
+            );
+        }
+
+        // And the frame that crosses it takes the reading again.
         app.update();
+        assert_eq!(
+            read_occlusion(&app),
+            0.0,
+            "the rays were never recast at all"
+        );
+    }
+
+    /// **A listener turning is what moves a voice**, and #946's review asked for this because
+    /// nothing rotated the `WorldCamera`. The camera faces due east here with a real tilt on
+    /// it: facing east, north is on your left, whatever your head is doing.
+    ///
+    /// This is the test that settles that finding at the level a player would notice. A yaw
+    /// read as a pitch would put both cases mildly to the right, and both halves fail.
+    #[test]
+    fn a_speaker_moves_around_a_listener_who_turns() {
+        let sides = |yaw: f32| {
+            let mut app = placed_app(world_of(&[]));
+            faces(&mut app, yaw, 0.5);
+            // Four blocks due north of the listener, who stands at z 4.5.
+            stands_at(&mut app, 7, Vec3::new(4.5, 4.0, 0.5));
+            speak(&mut app, 7);
+            app.update();
+            heard_sides(&app)
+        };
+
+        // `from_rotation_y(-π/2)` takes Bevy's `-Z` forward onto `+X`: due east.
+        let (left, right) = sides(-FRAC_PI_2);
         assert!(
-            read_occlusion(&app) > 0.9,
-            "the rays were recast on the very next frame"
+            left > right * 4.0,
+            "facing east, a speaker to the north was heard {left} left and {right} right"
+        );
+
+        // And due west, where north is on the other side.
+        let (left, right) = sides(FRAC_PI_2);
+        assert!(
+            right > left * 4.0,
+            "facing west, a speaker to the north was heard {left} left and {right} right"
         );
     }
 
@@ -1550,7 +1652,9 @@ mod tests {
     #[test]
     fn a_listener_with_no_source_is_silent_rather_than_broken() {
         let mut app = App::new();
-        app.insert_resource(Listening::new(None))
+        app.add_plugins(bevy::time::TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(Listening::new(None))
             .init_resource::<Speaking>()
             .init_resource::<Voices>()
             .init_resource::<VoiceInbox>()
@@ -1558,10 +1662,6 @@ mod tests {
                 Update,
                 (
                     hear,
-                    // Between the two on purpose: a speaker heard for the first time this
-                    // tick is placed before a single sample of theirs is queued, so nothing
-                    // of them is ever pushed into the shared source and then repeated from
-                    // a source of their own.
                     place_the_speakers,
                     play,
                     release_speakers,

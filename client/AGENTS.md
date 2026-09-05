@@ -1772,6 +1772,16 @@ Two limits are real, and both fail towards *less* occlusion rather than towards 
 wrong answer: a voxel the session has not been streamed reads as air, and `raycast` stops
 after 256 voxels.
 
+**The listener's yaw is the turn and not the tilt, and that was measured rather than read.**
+`spatial::listener_yaw` owns the one conversion: `player/camera.rs` builds the camera's
+rotation as `from_rotation_y(yaw) * from_rotation_x(pitch)`, and `to_euler(EulerRot::YXZ)`
+returns the angles **in the order of the sequence it names** — Y, then X, then Z — not in a
+fixed X, Y, Z order. Review on #946 read it the other way and concluded that a voice would
+follow a listener's tilt and not their turn, which is the one thing #854 exists to deliver;
+`from_rotation_y(0.7) * from_rotation_x(0.3)` decomposes to `(0.7, 0.3, 0.0)`. The convention
+lives in a named function with that measurement under it because two readers disagreed about
+it, and a test that rotates the camera is what settles it at the level a player would notice.
+
 **Two clocks, and neither of them is the frame the other runs on.** A speaker's *position* is
 read every frame from the same interpolated answer the renderer draws them at — their eye is
 their feet plus `EYE_HEIGHT`, the listener's is the `WorldCamera`'s translation, and the
@@ -1780,7 +1790,15 @@ three rays per speaker is far too much to do sixty times a second and far more o
 wall moves. What the coarser clock costs is bounded by the one below it: the smoothing takes
 50 ms to close a filter and 300 ms to open one, so a reading up to 100 ms old is being ramped
 towards over a window of the same order and there is nothing for the ear to catch.
-`player/ambience.rs` samples the world on a fixed period for the same reason.
+`player/ambience.rs` samples the world on a fixed period for the same reason — and, like it,
+the cadence is accumulated from `Time::delta` rather than from `Instant::now()`. **A rule about
+elapsed time needs a test that controls the elapsed time**: two `app.update()` calls are
+sub-millisecond apart on an idle machine and this repository has a soak measurement from a
+loaded one where they would not have been, so a wall-clock version of that test fails for a
+reason that has nothing to do with the code — and a test that fails because the host was busy
+gets its assertion deleted rather than its cause found. Every fixture in `audio/heard.rs`
+therefore drives `TimeUpdateStrategy::ManualDuration`, which is also what buys the *other* half
+of the assertion: hoping for 100 ms to pass is not something a test can do at all (#946).
 
 **The smoothing runs in the callback, once per block, and that is where its state lives.** It
 is the only part of the chain that has to, and the reason is the same one that shapes

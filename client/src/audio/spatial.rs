@@ -41,6 +41,8 @@
 
 use std::f32::consts::{FRAC_PI_4, TAU};
 
+use bevy::prelude::EulerRot;
+use bevy::prelude::Quat;
 use bevy::prelude::Vec2;
 use bevy::prelude::Vec3;
 
@@ -133,6 +135,23 @@ pub fn azimuth(listener: Vec3, yaw: f32, speaker: Vec3) -> f32 {
     let forward = Vec2::new(-yaw.sin(), -yaw.cos());
     let right = Vec2::new(yaw.cos(), -yaw.sin());
     to.dot(right).atan2(to.dot(forward))
+}
+
+/// The listener's yaw, read back out of the camera's rotation.
+///
+/// `player/camera.rs` builds that rotation as `from_rotation_y(yaw) * from_rotation_x(pitch)`,
+/// and this is the inverse of the first half of it.
+///
+/// **`.0` is the yaw, and that is a measurement rather than a reading of the documentation.**
+/// `to_euler(EulerRot::YXZ)` returns the angles **in the order of the sequence it names** — Y
+/// first, then X, then Z — not in a fixed X, Y, Z order. Review on #946 read it the other way
+/// and concluded that azimuth would follow the listener's tilt and not their turn, which is
+/// the one thing #854 exists to deliver; `Quat::from_rotation_y(0.7) *
+/// Quat::from_rotation_x(0.3)` decomposes to `(0.7, 0.3, 0.0)`, so the code was right. The
+/// function exists because of that exchange: a convention two readers can disagree about
+/// belongs in one named place with a test under it, not inline at its one call site.
+pub fn listener_yaw(rotation: Quat) -> f32 {
+    rotation.to_euler(EulerRot::YXZ).0
 }
 
 /// One source's two output gains, before the bus arithmetic.
@@ -663,6 +682,54 @@ mod tests {
         assert_eq!(level, overhead);
         // Directly above has no horizontal direction at all, and is placed dead ahead.
         assert_eq!(azimuth(listener, 0.0, Vec3::new(0.0, 128.0, 0.0)), 0.0);
+    }
+
+    /// The measurement that settled #946's first finding, kept as the test that stops it
+    /// coming back. **Every pair here has a non-zero pitch except the last two**, and the
+    /// pair with a zero yaw is the one that fails loudest if the tuple is indexed the other
+    /// way: reading the pitch would answer `1.0` where the yaw is `0.0`.
+    #[test]
+    fn the_listener_yaw_is_the_turn_and_not_the_tilt() {
+        for (yaw, pitch) in [
+            (0.7, 0.3),
+            (-1.2, 0.9),
+            (2.5, -0.4),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (-FRAC_PI_2, 0.5),
+        ] {
+            let rotation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
+            let read = listener_yaw(rotation);
+            assert!(
+                (read - yaw).abs() < 1e-5,
+                "yaw {yaw} with pitch {pitch} read back as {read}"
+            );
+        }
+    }
+
+    /// And the consequence, at the level a listener would notice: the tilt of the head must
+    /// not move a voice sideways, however far it goes.
+    #[test]
+    fn tilting_the_head_does_not_pan_a_voice() {
+        let listener = Vec3::new(0.0, 64.0, 0.0);
+        let speaker = Vec3::new(6.0, 64.0, 0.0);
+        let level = pan_gains(azimuth(
+            listener,
+            listener_yaw(Quat::from_rotation_y(0.4)),
+            speaker,
+        ));
+        for pitch in [-1.4, -0.5, 0.0, 0.5, 1.4] {
+            let tilted = pan_gains(azimuth(
+                listener,
+                listener_yaw(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(pitch)),
+                speaker,
+            ));
+            assert!(
+                (tilted.left - level.left).abs() < 1e-4
+                    && (tilted.right - level.right).abs() < 1e-4,
+                "a pitch of {pitch} moved the pan from {level:?} to {tilted:?}"
+            );
+        }
     }
 
     #[test]
