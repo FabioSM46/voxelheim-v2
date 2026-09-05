@@ -32,6 +32,10 @@ const collisionSkin = 1e-4
 // while a full cube still intersects the raised body and remains a wall.
 const playerStepHeight = 0.5
 
+// mountedStepHeight lets a horse climb a full cube without jumping. Two cubes
+// remain a wall, and the raised mounted body must still clear every ceiling.
+const mountedStepHeight = 1.0
+
 // worldLimit is the arithmetic edge of the world, in blocks.
 //
 // Beyond it a float32 cannot address individual blocks (2²⁴ is where the spacing

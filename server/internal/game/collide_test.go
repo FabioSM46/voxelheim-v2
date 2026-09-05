@@ -240,3 +240,41 @@ func TestSightDoesNotCrossTerrainThatHasNotArrived(t *testing.T) {
 		t.Error("the same line over resident air reported blocked")
 	}
 }
+
+func TestMountedStepRespectsRisersAndCeilingClearance(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		blocks  map[[3]int64]world.Block
+		wantY   float64
+		blocked bool
+	}{
+		{name: "full cube", blocks: map[[3]int64]world.Block{{1, 1, 0}: world.Stone}, wantY: 2},
+		{name: "bottom slab", blocks: map[[3]int64]world.Block{{1, 1, 0}: world.SlateSlabBottom}, wantY: 1.5},
+		{name: "two cubes", blocks: map[[3]int64]world.Block{{1, 1, 0}: world.Stone, {1, 2, 0}: world.Stone}, wantY: 1, blocked: true},
+		// Three blocks of headroom fit the 2.8-block horse before the rise, but
+		// lifting it a full block hits the roof above the approach (blockedUp).
+		{name: "low ceiling", blocks: map[[3]int64]world.Block{{1, 1, 0}: world.Stone, {0, 4, 0}: world.Stone, {1, 4, 0}: world.Stone}, wantY: 1, blocked: true},
+		{name: "three blocks above step", blocks: map[[3]int64]world.Block{{1, 1, 0}: world.Stone, {0, 5, 0}: world.Stone, {1, 5, 0}: world.Stone}, wantY: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terrain := blockTerrain{blocks: tc.blocks}
+			start := [3]float64{0.4, 1 + collisionSkin, 0.5}
+			got, blocked := moveAndCollideWithStep(terrain, mountedBody, start, [3]float64{0.6, 0, 0}, mountedStepHeight)
+			if blocked[0] != tc.blocked {
+				t.Errorf("horizontal blocked=%v, want %v", blocked[0], tc.blocked)
+			}
+			if !tc.blocked && math.Abs(got[0]-1) > collisionSkin {
+				t.Errorf("step lost horizontal distance: %v", got)
+			}
+			// The step lifts by the allowed riser; gravity settles onto shorter shapes.
+			got, _ = moveAndCollide(terrain, mountedBody, got, [3]float64{0, -1, 0})
+			if math.Abs(got[1]-tc.wantY) > 2*collisionSkin {
+				t.Errorf("feet y=%v, want %v", got[1], tc.wantY)
+			}
+			if overlaps(terrain, mountedBody.boxAt(got)) {
+				t.Fatalf("mounted body overlaps terrain at %v", got)
+			}
+		})
+	}
+}

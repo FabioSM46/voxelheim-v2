@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -170,10 +171,6 @@ func TestMountCastCompletesIntoSnapshotsAndDismountIsImmediate(t *testing.T) {
 func TestMountedMovementUsesHorseNumbersAndTheMountedBodyWithoutChangingWater(t *testing.T) {
 	t.Parallel()
 
-	apex := MountJumpImpulse * MountJumpImpulse / (2 * Gravity)
-	if apex <= 2 || apex >= 3 {
-		t.Fatalf("mounted jump apex = %v blocks, want over two and under three", apex)
-	}
 	if MountSpeed != 2*WalkSpeed {
 		t.Fatalf("MountSpeed = %v, want twice WalkSpeed %v", MountSpeed, WalkSpeed)
 	}
@@ -603,5 +600,103 @@ func TestEverySaddleActionIsRefusedByTheServer(t *testing.T) {
 	}
 	if reason, err := player.Trade(protocol.TradeRequest{EntityID: 99, Count: 1}); !errors.Is(err, ErrActionForbiddenWhileMounted) || reason != vnet.RefusalReasonActionForbiddenWhileMounted {
 		t.Errorf("Trade: reason %s, error %v", reason, err)
+	}
+}
+
+// Gravity is applied before movement: 12 blocks/s reaches 2.28 blocks at 20 Hz,
+// but only 2.00 at 10 Hz. The first integer rate with clearance margin is 11 Hz.
+func TestMountedJumpClimbsTwoBlocksButNotThree(t *testing.T) {
+	t.Parallel()
+	for _, rate := range []uint8{11, 12, 15, DefaultTickRate, 30, 60, 120, 255} {
+		for _, height := range []int64{2, 3} {
+			t.Run(strconv.Itoa(int(rate))+"Hz/"+strconv.Itoa(int(height))+"blocks", func(t *testing.T) {
+				terrain := stepTerrain{groundTop: 63, shelfFromX: 4, shelfTop: 63 + height}
+				h := newVitalsHarness(t, rate, terrain)
+				player, _ := h.join(1, [3]float32{3, 64, 0.5})
+				forceMounted(player, vnet.MountKindBrownHorse)
+				h.advance(2)
+				ground := player.State().Pos[1]
+				peak := ground
+				for tick := 1; tick <= int(rate)*2; tick++ {
+					if err := player.Submit(protocol.PlayerInput{ClientTick: uint32(tick), MoveX: 1, Jump: tick == 1}); err != nil {
+						t.Fatal(err)
+					}
+					h.step()
+					peak = max(peak, player.State().Pos[1])
+				}
+				state := player.State()
+				if !state.OnGround {
+					t.Fatalf("horse never landed: %+v", state)
+				}
+				if height == 2 {
+					if state.Pos[0] <= 4 || math.Abs(float64(state.Pos[1])-66) > 2*collisionSkin {
+						t.Fatalf("horse did not land on the two-block shelf: %+v", state)
+					}
+				} else if state.Pos[0]+MountedWidth/2 > 4 || math.Abs(float64(state.Pos[1])-64) > 2*collisionSkin {
+					t.Fatalf("horse crossed the three-block wall: %+v", state)
+				}
+				rise := float64(peak - ground)
+				ceiling := MountJumpImpulse * MountJumpImpulse / (2 * Gravity)
+				if rise <= 2 || rise > ceiling || rise >= 3 {
+					t.Errorf("jump rose %v blocks, want over two and at most %v (under three)", rise, ceiling)
+				}
+			})
+		}
+	}
+}
+
+func TestMountedPlayerStepsOneBlockAtMountSpeedButNotTwo(t *testing.T) {
+	t.Parallel()
+	for _, height := range []int64{1, 2} {
+		t.Run(strconv.Itoa(int(height))+"blocks", func(t *testing.T) {
+			h := newVitalsHarness(t, DefaultTickRate, stepTerrain{groundTop: 63, shelfFromX: 4, shelfTop: 63 + height})
+			player, _ := h.join(1, [3]float32{3, 64, 0.5})
+			forceMounted(player, vnet.MountKindBrownHorse)
+			h.advance(2)
+			for tick := 1; tick <= DefaultTickRate; tick++ {
+				if err := player.Submit(protocol.PlayerInput{ClientTick: uint32(tick), MoveX: 1}); err != nil {
+					t.Fatal(err)
+				}
+				h.step()
+			}
+			state := player.State()
+			if height == 1 {
+				wantX := 3 + MountSpeed
+				if math.Abs(float64(state.Pos[0])-wantX) > 1e-4 || math.Abs(float64(state.Pos[1])-65) > 2*collisionSkin {
+					t.Fatalf("one-block ride = %v, want x=%v, y=65", state.Pos, wantX)
+				}
+			} else if state.Pos[0]+MountedWidth/2 > 4 || math.Abs(float64(state.Pos[1])-64) > 2*collisionSkin {
+				t.Fatalf("rode through two blocks: %+v", state)
+			}
+		})
+	}
+}
+
+func TestMountedJumpLandingIsHarmlessAtEveryAcceptedRate(t *testing.T) {
+	t.Parallel()
+	for rate := 1; rate <= 255; rate++ {
+		h := newVitalsHarness(t, uint8(rate), dropTerrain{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		forceMounted(player, vnet.MountKindBrownHorse)
+		h.advance(2)
+		if err := player.Submit(protocol.PlayerInput{ClientTick: 1, Jump: true}); err != nil {
+			t.Fatal(err)
+		}
+		h.step()
+		if err := player.Submit(protocol.PlayerInput{ClientTick: 2}); err != nil {
+			t.Fatal(err)
+		}
+		for tick := 0; tick < rate*2; tick++ {
+			h.step()
+			if got := h.vitals(player).Health; got != PlayerMaxHealth {
+				t.Fatalf("%d Hz: mounted jump cost %d health", rate, PlayerMaxHealth-got)
+			}
+			if player.State().OnGround {
+				break
+			}
+		}
+		if !player.State().OnGround {
+			t.Fatalf("%d Hz: horse never landed", rate)
+		}
 	}
 }
