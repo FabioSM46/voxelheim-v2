@@ -184,13 +184,13 @@ const RIDER_ARM_ANGLE: f32 = 0.75;
 const BLACK_COAT: Color = Color::srgb(0.075, 0.065, 0.055);
 const BROWN_COAT: Color = Color::srgb(0.30, 0.16, 0.075);
 const GREY_COAT: Color = Color::srgb(0.43, 0.45, 0.44);
-const HAIR_COLOUR: Color = Color::srgb(0.055, 0.045, 0.038);
-const LEATHER_COLOUR: Color = Color::srgb(0.25, 0.105, 0.045);
+pub(super) const HAIR_COLOUR: Color = Color::srgb(0.055, 0.045, 0.038);
+pub(super) const LEATHER_COLOUR: Color = Color::srgb(0.25, 0.105, 0.045);
 pub(super) const EYE_COLOUR: Color = Color::srgb(0.82, 0.61, 0.18);
 
 #[derive(Resource, Clone)]
 pub(super) struct HorseCoats {
-    image: Handle<Image>,
+    pub(super) image: Handle<Image>,
 }
 
 impl FromWorld for HorseCoats {
