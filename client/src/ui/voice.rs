@@ -21,7 +21,7 @@
 
 use bevy::prelude::*;
 
-use crate::audio::{Speaking, Transmitting, VoiceControls, Voices};
+use crate::audio::{MicrophoneMissing, Speaking, Transmitting, VoiceControls, Voices};
 use crate::player::{Appearances, Party};
 use crate::settings::{Control, Settings, VoiceAudience, VoiceMode, key_name};
 
@@ -78,6 +78,7 @@ impl Plugin for VoiceUiPlugin {
             .init_resource::<Appearances>()
             .init_resource::<Party>()
             .init_resource::<Voices>()
+            .init_resource::<MicrophoneMissing>()
             .add_systems(Startup, spawn_voice_hud)
             .add_systems(Update, refresh_voice_hud);
     }
@@ -127,6 +128,7 @@ fn spawn_voice_hud(mut commands: Commands) {
 fn refresh_voice_hud(
     controls: Res<VoiceControls>,
     transmitting: Res<Transmitting>,
+    missing: Res<MicrophoneMissing>,
     speaking: Res<Speaking>,
     voices: Res<Voices>,
     appearances: Res<Appearances>,
@@ -165,6 +167,7 @@ fn refresh_voice_hud(
         controls.audience,
         in_party,
         transmitting.0,
+        missing.0,
         key,
     );
     for (mut text, mut text_colour) in &mut transmit {
@@ -191,6 +194,9 @@ fn refresh_voice_hud(
 /// anything starts a transmission. Voice activation waits for a level, and a hint naming a key
 /// there would be telling the player about a control that does nothing.
 ///
+/// **A missing microphone is said before anything else** and without an audience tail: the
+/// player is not being heard by a narrower group, they are not being captured at all.
+///
 /// **The audience is a tail on whatever that says**, not a line of its own: it qualifies the
 /// same sentence, and a second line would be a second thing to read for a state that is only
 /// ever one word. `Everyone` adds nothing, because it is what a player who never touched the
@@ -200,8 +206,17 @@ fn transmit_line(
     audience: VoiceAudience,
     in_party: bool,
     sending: bool,
+    microphone_missing: bool,
     key: &str,
 ) -> (String, Color) {
+    // **First, and before every other state.** A client that cannot open the microphone the
+    // player named opens nothing in its place — see `client/AGENTS.md` — so what is left to do
+    // is say so, here, where a player who has just held the key and heard no answer is already
+    // looking. It takes precedence over the key hint because the key would do nothing, and
+    // over the audience because who would have heard it is not the question any more.
+    if microphone_missing {
+        return ("microphone unavailable".to_owned(), UNHEARD);
+    }
     let (line, colour) = match (sending, mode) {
         (true, _) => ("SPEAKING".to_owned(), SENDING),
         (false, VoiceMode::PushToTalk) if !key.is_empty() => {
@@ -287,7 +302,7 @@ mod tests {
 
     /// The indicator with the audience left where a player who never touched the knob has it.
     fn heard_by_everyone(mode: VoiceMode, sending: bool, key: &str) -> (String, Color) {
-        transmit_line(mode, VoiceAudience::Everyone, false, sending, key)
+        transmit_line(mode, VoiceAudience::Everyone, false, sending, false, key)
     }
 
     /// **The indicator, in every state it has.** Sending says so; push to talk names the key
@@ -339,17 +354,19 @@ mod tests {
             (VoiceMode::VoiceActivation, false, "voice activation"),
         ] {
             let (plain, plain_colour) =
-                transmit_line(mode, VoiceAudience::Everyone, true, sending, "v");
+                transmit_line(mode, VoiceAudience::Everyone, true, sending, false, "v");
             assert_eq!(plain, base, "the widest audience narrated itself");
 
-            let (in_party, colour) = transmit_line(mode, VoiceAudience::Party, true, sending, "v");
+            let (in_party, colour) =
+                transmit_line(mode, VoiceAudience::Party, true, sending, false, "v");
             assert_eq!(in_party, format!("{base} (party)"));
             assert_eq!(
                 colour, plain_colour,
                 "a party that can hear the player read as a warning"
             );
 
-            let (alone, colour) = transmit_line(mode, VoiceAudience::Party, false, sending, "v");
+            let (alone, colour) =
+                transmit_line(mode, VoiceAudience::Party, false, sending, false, "v");
             assert_eq!(alone, format!("{base} - nobody hears you"));
             assert_eq!(colour, UNHEARD);
         }
@@ -358,11 +375,87 @@ mod tests {
         for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
             for in_party in [true, false] {
                 assert_eq!(
-                    transmit_line(VoiceMode::Off, audience, in_party, false, "v").0,
+                    transmit_line(VoiceMode::Off, audience, in_party, false, false, "v").0,
                     ""
                 );
             }
         }
+    }
+
+    /// **A missing microphone is said first, in the refusal amber, whatever else is true.**
+    ///
+    /// This line is the whole of what the client owes a player whose named microphone is not
+    /// there — nothing is opened in its place, so the alternative to saying it is a key that
+    /// silently does nothing. It takes precedence over the key hint, which would name a
+    /// control that cannot work, and over the audience tail, because who *would* have heard
+    /// them has stopped being the question.
+    #[test]
+    fn a_missing_microphone_is_said_before_every_other_state() {
+        for mode in [VoiceMode::PushToTalk, VoiceMode::VoiceActivation] {
+            for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
+                for in_party in [true, false] {
+                    for sending in [true, false] {
+                        let (line, colour) =
+                            transmit_line(mode, audience, in_party, sending, true, "v");
+                        assert_eq!(
+                            line, "microphone unavailable",
+                            "{mode:?} {audience:?} in_party={in_party} sending={sending}"
+                        );
+                        assert_eq!(colour, UNHEARD);
+                    }
+                }
+            }
+        }
+
+        // And it says nothing of the sort while the microphone is there.
+        assert_eq!(
+            transmit_line(
+                VoiceMode::PushToTalk,
+                VoiceAudience::Everyone,
+                false,
+                false,
+                false,
+                "v"
+            )
+            .0,
+            "hold [V] to speak"
+        );
+    }
+
+    /// **And it is true in the assembled HUD**, not only in the line builder: `refresh_voice_hud`
+    /// reads `MicrophoneMissing` as a resource of its own, so a state published by `audio/` and
+    /// never carried into the node is exactly the half a unit test cannot see.
+    #[test]
+    fn the_hud_says_the_microphone_is_unavailable() {
+        let mut app = App::new();
+        app.insert_resource(tuned(VoiceMode::PushToTalk))
+            .add_plugins(VoiceUiPlugin);
+        app.world_mut().resource_mut::<VoiceControls>().range_blocks = 24.0;
+        app.update();
+
+        let line = |app: &mut App| {
+            let mut lines = app
+                .world_mut()
+                .query_filtered::<&Text, With<TransmitLine>>();
+            lines
+                .iter(app.world())
+                .next()
+                .map(|text| text.0.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(line(&mut app), "hold [V] to speak");
+
+        app.world_mut().resource_mut::<MicrophoneMissing>().0 = true;
+        app.update();
+        assert_eq!(
+            line(&mut app),
+            "microphone unavailable",
+            "the HUD went on offering a key for a microphone that is not there"
+        );
+
+        app.world_mut().resource_mut::<MicrophoneMissing>().0 = false;
+        app.update();
+        assert_eq!(line(&mut app), "hold [V] to speak");
     }
 
     /// **The key is the one the player bound**, taken from the bindings rather than from the
