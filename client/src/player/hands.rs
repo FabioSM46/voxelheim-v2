@@ -125,6 +125,23 @@ fn base_translation(field_of_view: f32) -> Vec3 {
     )
 }
 
+/// The walking bare hand's resting pose, mirrored for the left rein.
+///
+/// All three limb boxes are symmetric in Z. Turning the left model halfway around Y
+/// therefore mirrors their X geometry while preserving outward triangle winding and the
+/// shared mesh/material. Negating the resting roll mirrors its lean as well.
+/// A negative X scale alone would reverse winding and back-face-cull the outside.
+pub(super) fn mounted_hand_transform(side: f32, field_of_view: f32) -> Transform {
+    let mut pose = presented_transform(&HandAnimation::default(), None, field_of_view);
+    if side < 0.0 {
+        pose.translation.x = -pose.translation.x;
+        pose.rotation = Quat::from_rotation_x(REST_PITCH_RADIANS)
+            * Quat::from_rotation_z(-REST_ROLL_RADIANS)
+            * Quat::from_rotation_y(PI);
+    }
+    pose
+}
+
 /// How far below the eye a view model at `depth` sits, to land `fraction` of the way down
 /// the lower half of the frame.
 ///
@@ -150,7 +167,7 @@ fn shield_translation(field_of_view: f32) -> Vec3 {
 /// projects.** `settings::apply` writes the setting into `Projection::Perspective::fov`, and
 /// reading the projection means the hand follows anything else that ever writes it too — and
 /// follows nothing at all when a test world has no camera, which is what the fallback is for.
-fn view_field_of_view(projection: Option<&Projection>) -> f32 {
+pub(super) fn view_field_of_view(projection: Option<&Projection>) -> f32 {
     match projection {
         Some(Projection::Perspective(perspective)) => perspective.fov,
         _ => crate::settings::Settings::default()
@@ -1947,6 +1964,7 @@ impl Plugin for HandsPlugin {
                     // After this frame's appearance message has been cached, so the fist
                     // takes the local player's skin colour on the same frame as their body.
                     .after(super::ApplySnapshots)
+                    .after(crate::settings::ApplyDisplaySettings)
                     .after(ApplyInventory)
                     .after(ApplyTargetInput)
                     // After this frame's authoritative progress has been applied, so the
@@ -1999,6 +2017,7 @@ struct Forearm;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct OffHandShield {
     skin_colour: u32,
+    mounted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2280,7 +2299,10 @@ fn spawn_view_model(
         .with_child(arm(forearm_mesh_handle.clone(), material.clone()));
     commands
         .spawn((
-            OffHandShield { skin_colour },
+            OffHandShield {
+                skin_colour,
+                mounted: false,
+            },
             ViewModel,
             Mesh3d(shield_mesh_handle),
             MeshMaterial3d(material.clone()),
@@ -2369,7 +2391,7 @@ type OffHandShieldViewModelQuery<'w, 's> = Query<
     's,
     (
         &'static mut OffHandShield,
-        &'static Mesh3d,
+        &'static mut Mesh3d,
         &'static mut Visibility,
     ),
     Without<HeldItem>,
@@ -2383,9 +2405,8 @@ fn refresh_held_item(
     vitals: Res<SelfVitals>,
 ) {
     let (selected, skin_colour) = subject.read();
-    // The saddle composition owns both visible hands. Rebuild this hidden arrangement as
-    // an empty fist while mounted so no selected item shape remains reachable through a
-    // slot or appearance change; the authoritative stack is read again on dismount.
+    // Both rein hands share this empty fist while mounted. The authoritative selected
+    // stack is read again on dismount, including changes made while riding.
     let appearance = if subject.mount.mounted() {
         selected_appearance(None)
     } else {
@@ -2407,7 +2428,8 @@ fn refresh_held_item(
         *subject.mode,
         *subject.view,
         subject.session.is_some(),
-        subject.mount.mounted(),
+        // Mounting hides the selected item, not the bare hands that own the reins.
+        false,
     ) == HeldItemSurface::ViewModel
     {
         Visibility::Visible
@@ -2458,21 +2480,19 @@ fn refresh_held_item(
                         && stack.durability > 0
                 })
     });
+    let mounted = subject.mount.mounted();
     let shield_visible = if visible == Visibility::Visible
-        && shield_equipped
-        && vitals.get().is_some_and(|vitals| vitals.blocking)
+        && (mounted || (shield_equipped && vitals.get().is_some_and(|vitals| vitals.blocking)))
     {
         Visibility::Visible
     } else {
         Visibility::Hidden
     };
     let shield_mesh = assets.visuals.shield_mesh.clone();
-    for (mut shield, mesh, mut visibility) in &mut shields {
+    for (mut shield, mut mesh, mut visibility) in &mut shields {
         if shield.skin_colour != skin_colour {
             shield.skin_colour = skin_colour;
-            if mesh.0 == shield_mesh
-                && let Some(mut mesh) = assets.meshes.get_mut(&shield_mesh)
-            {
+            if let Some(mut mesh) = assets.meshes.get_mut(&shield_mesh) {
                 *mesh = held_mesh(
                     skin_colour,
                     HeldAppearance {
@@ -2485,6 +2505,13 @@ fn refresh_held_item(
                 );
             }
         }
+        // While mounted both entities draw the very same bare-hand asset. Keep the
+        // shield asset ready for dismount even when an appearance arrived while riding.
+        let wanted = if mounted { &view_mesh } else { &shield_mesh };
+        if mesh.0 != *wanted {
+            mesh.0 = wanted.clone();
+        }
+        shield.mounted = mounted;
         *visibility = shield_visible;
     }
 }
@@ -2707,7 +2734,11 @@ fn animate_view_model(
     // child below rather than being a second reading of the animation.
     let arm = forearm_transform(&next_animation);
     for (entity, item, mut transform) in &mut held {
-        let next = presented_transform(&next_animation, item.shape, field_of_view);
+        let next = if intent.mount.mounted() {
+            mounted_hand_transform(1.0, field_of_view)
+        } else {
+            presented_transform(&next_animation, item.shape, field_of_view)
+        };
         if *transform != next {
             *transform = next;
         }
@@ -2728,15 +2759,22 @@ fn animate_view_model(
 /// transform was written once at spawn and never again. That was correct while the height
 /// was a constant and is not correct now: [`base_height`] follows the frame, and a main hand
 /// that follows it while the off hand stays put is two hands at two heights the moment a
-/// player moves the slider. This writes the one axis that derives and leaves the roll alone.
+/// player moves the slider. Walking keeps that shield pose; mounting borrows the entity
+/// for the mirrored bare hand, and dismount restores the shield pose on the same frame.
 fn place_off_hand(
     camera: Query<&Projection, With<ViewModelCamera>>,
-    mut shields: Query<&mut Transform, With<OffHandShield>>,
+    mut shields: Query<(&OffHandShield, &mut Transform)>,
 ) {
-    let translation = shield_translation(view_field_of_view(camera.iter().next()));
-    for mut transform in &mut shields {
-        if transform.translation != translation {
-            transform.translation = translation;
+    let fov = view_field_of_view(camera.iter().next());
+    for (shield, mut transform) in &mut shields {
+        let next = if shield.mounted {
+            mounted_hand_transform(-1.0, fov)
+        } else {
+            Transform::from_translation(shield_translation(fov))
+                .with_rotation(Quat::from_rotation_z(-0.48))
+        };
+        if *transform != next {
+            *transform = next;
         }
     }
 }
@@ -7038,7 +7076,7 @@ mod tests {
         app.update();
 
         let (mounted, visibility, _) = held(&mut app);
-        assert_eq!(visibility, Visibility::Hidden);
+        assert_eq!(visibility, Visibility::Visible);
         assert_eq!(mounted.shape, None);
         assert_eq!(
             *app.world().resource::<HandAnimation>(),
@@ -7055,6 +7093,223 @@ mod tests {
         app.update();
         assert_eq!(held(&mut app).1, Visibility::Visible);
         assert_eq!(held(&mut app).0.shape, Some(ItemShape::Block));
+    }
+
+    #[test]
+    fn mounted_hands_share_the_walking_geometry_and_project_as_mirrors() {
+        let animation = HandAnimation::default();
+        let walking = presented_transform(&animation, None, default_fov());
+        let projected = |point: Vec3, fov: f32| {
+            let half = (fov / 2.0).tan();
+            Vec2::new(
+                point.x / (-point.z * half * (16.0 / 9.0)),
+                point.y / (-point.z * half),
+            )
+        };
+        let width = |pose: Transform| {
+            let xs: Vec<f32> = positions(&fist_mesh())
+                .into_iter()
+                .map(|p| projected(pose.transform_point(Vec3::from_array(p)), default_fov()).x)
+                .collect();
+            xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+                - xs.iter().copied().fold(f32::INFINITY, f32::min)
+        };
+        for side in [-1.0, 1.0] {
+            let mounted = mounted_hand_transform(side, default_fov());
+            assert!((width(mounted) / width(walking) - 1.0).abs() < 1e-3);
+        }
+        for fov in every_field_of_view() {
+            let right = mounted_hand_transform(1.0, fov);
+            let left = mounted_hand_transform(-1.0, fov);
+            for mesh in [fist_mesh(), wrist_mesh(), placed_forearm(&animation)] {
+                let points = positions(&mesh);
+                for p in &points {
+                    let mirrored =
+                        right.transform_point(Vec3::from_array(*p)) * Vec3::new(-1.0, 1.0, 1.0);
+                    assert!(
+                        points.iter().any(|q| left
+                            .transform_point(Vec3::from_array(*q))
+                            .abs_diff_eq(mirrored, 1e-6)),
+                        "the left limb is not the right limb mirrored at {} degrees",
+                        fov.to_degrees()
+                    );
+                }
+                for pose in [left, right] {
+                    assert!(
+                        points
+                            .iter()
+                            .all(|p| -pose.transform_point(Vec3::from_array(*p)).z
+                                > PerspectiveProjection::default().near)
+                    );
+                }
+            }
+            for pose in [left, right] {
+                let lowest = positions(&placed_forearm(&animation))
+                    .into_iter()
+                    .map(|p| projected(pose.transform_point(Vec3::from_array(p)), fov).y)
+                    .fold(f32::INFINITY, f32::min);
+                assert!(
+                    lowest <= -1.0,
+                    "the mounted forearm ends in frame at {} degrees",
+                    fov.to_degrees()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_mounted_hands_follow_this_frames_projection_change() {
+        let mut app = app();
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 1,
+                mounts: vec![MountState {
+                    entity_id: session().0.entity_id,
+                    mount: MountKind::BrownHorse,
+                }],
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        let fov = *every_field_of_view().last().unwrap();
+        app.add_systems(
+            Update,
+            (move |mut cameras: Query<&mut Projection, With<Camera3d>>| {
+                for mut projection in &mut cameras {
+                    if let Projection::Perspective(perspective) = projection.as_mut() {
+                        perspective.fov = fov;
+                    }
+                }
+            })
+            .in_set(crate::settings::ApplyDisplaySettings),
+        );
+        app.update();
+        let world = app.world_mut();
+        let right = world
+            .query_filtered::<&Transform, With<HeldItem>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(*right, mounted_hand_transform(1.0, fov));
+        let left = world
+            .query_filtered::<&Transform, With<OffHandShield>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(*left, mounted_hand_transform(-1.0, fov));
+    }
+
+    #[test]
+    fn mounting_shares_the_bare_mesh_and_dismount_restores_the_selected_sword() {
+        let mut app = app();
+        app.insert_resource(Inventory::from_stacks(vec![InventoryStack {
+            item_id: ITEM_RUSTY_SWORD,
+            count: 1,
+            durability: 10,
+            ..default()
+        }]));
+        app.update();
+        assert_eq!(held(&mut app).0.shape, Some(ItemShape::Blade));
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 1,
+                mounts: vec![MountState {
+                    entity_id: session().0.entity_id,
+                    mount: MountKind::BrownHorse,
+                }],
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        app.update();
+        // A late authoritative appearance must recolour both shared hands and arms.
+        app.world_mut()
+            .resource_mut::<AppearanceInbox>()
+            .push(PlayerAppearance {
+                entity_id: session().0.entity_id,
+                appearance: PlayerLook::new(
+                    TEST_SKIN,
+                    0x0011_2233,
+                    0x0044_5566,
+                    0x0077_8899,
+                    crate::net::HairModel::Shaved,
+                    0x000F_0E0D,
+                )
+                .unwrap(),
+                name: "Test Character".to_owned(),
+                worn_head: 0,
+                worn_chest: 0,
+                worn_legs: 0,
+                worn_offhand: 0,
+                level: 1,
+            });
+        app.update();
+        let (item, visibility, _) = held(&mut app);
+        assert_eq!(item.shape, None);
+        assert_eq!(item.skin_colour, TEST_SKIN);
+        assert_eq!(visibility, Visibility::Visible);
+        let main_mesh = app.world().resource::<HandVisuals>().mesh.clone();
+        let shield_mesh = app.world().resource::<HandVisuals>().shield_mesh.clone();
+        let off = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<OffHandShield>>()
+                .single(world)
+                .unwrap()
+        };
+        assert_eq!(app.world().get::<Mesh3d>(off).unwrap().0, main_mesh);
+        assert_eq!(
+            *app.world().get::<Visibility>(off).unwrap(),
+            Visibility::Visible
+        );
+        assert_eq!(
+            *app.world().get::<Transform>(off).unwrap(),
+            mounted_hand_transform(-1.0, default_fov())
+        );
+        assert_eq!(
+            app.world().get::<OffHandShield>(off).unwrap().skin_colour,
+            item.skin_colour
+        );
+        let expected = held_mesh(item.skin_colour, selected_appearance(None));
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        assert_eq!(
+            positions(meshes.get(&main_mesh).unwrap()),
+            positions(&expected)
+        );
+        assert_eq!(
+            raw_tints(meshes.get(&main_mesh).unwrap()),
+            raw_tints(&expected)
+        );
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+        app.update();
+        assert_eq!(held(&mut app).1, Visibility::Hidden);
+        assert_eq!(
+            *app.world().get::<Visibility>(off).unwrap(),
+            Visibility::Hidden
+        );
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 2,
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        app.update();
+        assert_eq!(held(&mut app).0.shape, Some(ItemShape::Blade));
+        assert_eq!(held(&mut app).1, Visibility::Visible);
+        assert_eq!(
+            *app.world().get::<Visibility>(off).unwrap(),
+            Visibility::Hidden
+        );
+        assert_eq!(app.world().get::<Mesh3d>(off).unwrap().0, shield_mesh);
+        assert_eq!(
+            app.world().get::<Transform>(off).unwrap().translation,
+            shield_translation(default_fov())
+        );
+        assert_eq!(
+            app.world().get::<Transform>(off).unwrap().rotation,
+            Quat::from_rotation_z(-0.48)
+        );
     }
 
     #[test]

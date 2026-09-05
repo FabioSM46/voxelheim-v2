@@ -22,13 +22,13 @@ use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
 
 use super::camera::{ViewMode, WorldCamera};
-use super::hands::HAND_SIZE;
+use super::hands::{mounted_hand_transform, view_field_of_view};
 use super::horse::{
     BROW, EAR, EAR_CENTRE, HORSE_HEIGHT, MANE_REST, MANE_ROOT, MANE_STRIP, MUZZLE, NECK_BASE,
     NECK_POLL, REIN_BIT, REIN_WIDTH, lofted_along_y, lofted_along_z,
 };
-use super::{Appearances, ApplySnapshots, InputMode, LocalMount};
-use crate::net::{PLACEHOLDER_APPEARANCE, Session};
+use super::{ApplySnapshots, InputMode, LocalMount};
+use crate::net::Session;
 
 #[cfg(test)]
 use super::camera::SADDLE_EYE_HEIGHT;
@@ -65,9 +65,6 @@ const CREST_IN_VIEW: Vec3 = Vec3::new(
     -CREST_DEPTH,
 );
 
-/// Where each fist sits, in camera space. The reins leave from its top.
-const HAND_CENTRE: Vec3 = Vec3::new(0.105, -0.075, -0.30);
-
 #[cfg(test)]
 const CAMERA_NEAR: f32 = 0.1;
 
@@ -82,13 +79,13 @@ impl Plugin for SaddleViewPlugin {
         app.init_resource::<LocalMount>()
             .init_resource::<InputMode>()
             .init_resource::<ViewMode>()
-            .init_resource::<Appearances>()
             .add_systems(Startup, create_view)
             .add_systems(
                 Update,
                 (attach_to_camera, ApplyDeferred, sync_view)
                     .chain()
-                    .after(ApplySnapshots),
+                    .after(ApplySnapshots)
+                    .after(crate::settings::ApplyDisplaySettings),
             );
     }
 }
@@ -102,14 +99,11 @@ enum SaddlePart {
     Ear,
     Neck,
     Mane,
-    Hand,
     Rein,
 }
 
-#[derive(Resource)]
-struct SaddleVisuals {
-    skin: Handle<StandardMaterial>,
-}
+#[derive(Component)]
+struct ReinSide(f32);
 
 /// One solid of the composition: a mesh in its own space, and where that space sits in
 /// the camera's.
@@ -154,41 +148,36 @@ fn mane() -> Piece {
     )
 }
 
-fn hand(side: f32) -> Piece {
-    Piece {
-        part: SaddlePart::Hand,
-        mesh: Mesh::from(Cuboid::from_size(HAND_SIZE)),
-        transform: Transform::from_translation(HAND_CENTRE * Vec3::new(side, 1.0, 1.0)),
-    }
-}
-
-/// From the top of the fist to the horse's own bit under the head's framing, so the reins
-/// end in the mouth because the head is where it is.
-fn rein(side: f32) -> Piece {
+/// The rein begins inside the shared bare fist and ends at the horse's own bit.
+/// Its unit bar keeps one mesh while the projection changes its length and direction.
+fn rein_transform(side: f32, field_of_view: f32) -> Transform {
     let mirror = Vec3::new(side, 1.0, 1.0);
-    let start = (HAND_CENTRE + Vec3::Y * (HAND_SIZE.y / 2.0)) * mirror;
+    let start = mounted_hand_transform(side, field_of_view).translation;
     let end = framing().transform_point((REIN_BIT - CREST) * mirror);
     let direction = end - start;
+    Transform::from_translation((start + end) / 2.0)
+        .with_rotation(Quat::from_rotation_arc(Vec3::Y, direction.normalize()))
+        .with_scale(Vec3::new(1.0, direction.length(), 1.0))
+}
+
+fn rein(side: f32, field_of_view: f32) -> Piece {
     let width = REIN_WIDTH * VIEW_SCALE;
     Piece {
         part: SaddlePart::Rein,
-        mesh: Mesh::from(Cuboid::new(width, direction.length(), width)),
-        transform: Transform::from_translation((start + end) / 2.0)
-            .with_rotation(Quat::from_rotation_arc(Vec3::Y, direction.normalize())),
+        mesh: Mesh::from(Cuboid::new(width, 1.0, width)),
+        transform: rein_transform(side, field_of_view),
     }
 }
 
-fn pieces() -> [Piece; 9] {
+fn pieces(field_of_view: f32) -> [Piece; 7] {
     [
         horse_piece(SaddlePart::Head, lofted_along_z(BROW, MUZZLE)),
         ear(-1.0),
         ear(1.0),
         horse_piece(SaddlePart::Neck, lofted_along_y(NECK_BASE, NECK_POLL)),
         mane(),
-        hand(-1.0),
-        hand(1.0),
-        rein(-1.0),
-        rein(1.0),
+        rein(-1.0, field_of_view),
+        rein(1.0, field_of_view),
     ]
 }
 
@@ -208,11 +197,6 @@ fn create_view(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let visuals = SaddleVisuals {
-        skin: materials.add(view_material(skin_colour(
-            PLACEHOLDER_APPEARANCE.skin_color(),
-        ))),
-    };
     let coat_material = materials.add(view_material(COAT_COLOUR));
     let mane_material = materials.add(view_material(MANE_COLOUR));
     let rein_material = materials.add(view_material(REIN_COLOUR));
@@ -221,14 +205,15 @@ fn create_view(
         .id();
 
     commands.entity(root).with_children(|view| {
-        for piece in pieces() {
+        for piece in pieces(view_field_of_view(None)) {
             let material = match piece.part {
                 SaddlePart::Head | SaddlePart::Ear | SaddlePart::Neck => coat_material.clone(),
                 SaddlePart::Mane => mane_material.clone(),
-                SaddlePart::Hand => visuals.skin.clone(),
                 SaddlePart::Rein => rein_material.clone(),
             };
-            view.spawn((
+            let part = piece.part;
+            let side = piece.transform.translation.x.signum();
+            let mut entity = view.spawn((
                 piece.part,
                 Mesh3d(meshes.add(piece.mesh)),
                 MeshMaterial3d(material),
@@ -236,9 +221,11 @@ fn create_view(
                 Visibility::Inherited,
                 NotShadowCaster,
             ));
+            if part == SaddlePart::Rein {
+                entity.insert(ReinSide(side));
+            }
         }
     });
-    commands.insert_resource(visuals);
 }
 
 fn attach_to_camera(
@@ -254,32 +241,18 @@ fn attach_to_camera(
     }
 }
 
-fn skin_colour(colour: u32) -> Color {
-    Color::srgb_u8(
-        ((colour >> 16) & 0xFF) as u8,
-        ((colour >> 8) & 0xFF) as u8,
-        (colour & 0xFF) as u8,
-    )
-}
-
 #[derive(SystemParam)]
 struct SaddleSubject<'w> {
     mount: Res<'w, LocalMount>,
     mode: Res<'w, InputMode>,
     view: Res<'w, ViewMode>,
     session: Option<Res<'w, Session>>,
-    appearances: Res<'w, Appearances>,
-}
-
-#[derive(SystemParam)]
-struct SaddleAssets<'w> {
-    visuals: Res<'w, SaddleVisuals>,
-    materials: ResMut<'w, Assets<StandardMaterial>>,
 }
 
 fn sync_view(
     subject: SaddleSubject<'_>,
-    mut assets: SaddleAssets<'_>,
+    camera: Query<&Projection, With<WorldCamera>>,
+    mut reins: Query<(&ReinSide, &mut Transform)>,
     mut roots: Query<&mut Visibility, With<SaddleView>>,
 ) {
     let visible = subject.mount.mounted()
@@ -294,17 +267,11 @@ fn sync_view(
         };
     }
 
-    let skin = subject
-        .session
-        .as_deref()
-        .and_then(|session| subject.appearances.0.get(&session.0.entity_id))
-        .map_or(PLACEHOLDER_APPEARANCE.skin_color(), |described| {
-            described.appearance.skin_color()
-        });
-    if let Some(mut material) = assets.materials.get_mut(&assets.visuals.skin) {
-        let wanted = skin_colour(skin);
-        if material.base_color != wanted {
-            material.base_color = wanted;
+    let field_of_view = view_field_of_view(camera.iter().next());
+    for (side, mut transform) in &mut reins {
+        let next = rein_transform(side.0, field_of_view);
+        if *transform != next {
+            *transform = next;
         }
     }
 }
@@ -381,6 +348,12 @@ mod tests {
         settings.field_of_view()
     }
 
+    fn widest_field_of_view() -> f32 {
+        let mut settings = crate::settings::Settings::default();
+        settings.adjust(crate::settings::Knob::FieldOfView, 1_000);
+        settings.field_of_view()
+    }
+
     /// Where a camera-space point lands in a 16:9 frame at `degrees` of vertical field of
     /// view: ±1 is the edge on either axis.
     fn projected(point: Vec3, degrees: f32) -> Vec2 {
@@ -394,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn the_authoritative_mount_owns_one_camera_child_head_neck_hands_and_reins() {
+    fn the_authoritative_mount_owns_one_camera_child_head_neck_and_reins() {
         let mut app = app();
         assert_eq!(root(&mut app).0, Visibility::Hidden);
 
@@ -412,7 +385,6 @@ mod tests {
             (SaddlePart::Ear, 2),
             (SaddlePart::Neck, 1),
             (SaddlePart::Mane, 1),
-            (SaddlePart::Hand, 2),
             (SaddlePart::Rein, 2),
         ] {
             assert_eq!(found.iter().filter(|found| **found == part).count(), count);
@@ -442,7 +414,7 @@ mod tests {
         settings.adjust(crate::settings::Knob::FieldOfView, -1_000);
         loop {
             let degrees = settings.field_of_view();
-            for piece in &pieces() {
+            for piece in &pieces(degrees.to_radians()) {
                 for point in vertices(piece) {
                     assert!(-point.z > CAMERA_NEAR, "{degrees} degrees: {point:?}");
                     let frame = projected(point, degrees);
@@ -464,13 +436,10 @@ mod tests {
     /// fists and under the horizon, crest and mane reaching the bottom of the narrowest frame.
     #[test]
     fn the_head_hangs_forward_and_below_the_horizon_and_the_crest_fills_the_lower_frame() {
-        let pieces = pieces();
-        let nearest_fist = pieces
-            .iter()
-            .filter(|piece| piece.part == SaddlePart::Hand)
-            .flat_map(vertices)
-            .map(|point| -point.z)
-            .fold(f32::MAX, f32::min);
+        let pieces = pieces(view_field_of_view(None));
+        let nearest_fist = -mounted_hand_transform(1.0, view_field_of_view(None))
+            .translation
+            .z;
 
         for piece in pieces
             .iter()
@@ -506,45 +475,87 @@ mod tests {
     /// Each rein starts inside its fist and ends inside the head, in the mouth.
     #[test]
     fn the_reins_run_from_the_fists_to_the_bit_in_the_mouth() {
-        let pieces = pieces();
-        let (head_low, head_high) = extent(
-            pieces
-                .iter()
-                .filter(|piece| piece.part == SaddlePart::Head)
-                .flat_map(vertices),
-        );
-        let fists: Vec<(Vec3, Vec3)> = pieces
-            .iter()
-            .filter(|piece| piece.part == SaddlePart::Hand)
-            .map(|piece| extent(vertices(piece)))
-            .collect();
-
-        let mut reins = 0;
-        for piece in pieces.iter().filter(|piece| piece.part == SaddlePart::Rein) {
-            // A rein is a bar along its own Y, so its ends are the centres of the two end
-            // faces: half its own length either way from its origin.
-            let Some(VertexAttributeValues::Float32x3(local)) =
-                piece.mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-            else {
-                panic!("a rein has no positions");
-            };
-            let (low, high) = extent(local.iter().copied().map(Vec3::from_array));
-            let half = (high.y - low.y) / 2.0;
-            let start = piece.transform.transform_point(Vec3::Y * -half);
-            let end = piece.transform.transform_point(Vec3::Y * half);
-            assert!(
-                fists.iter().any(|(low, high)| {
-                    start.cmpge(*low - 1e-4).all() && start.cmple(*high + 1e-4).all()
-                }),
-                "a rein starts outside every fist: {start}"
+        for degrees in [
+            narrowest_field_of_view(),
+            crate::settings::Settings::default().field_of_view(),
+            widest_field_of_view(),
+        ] {
+            let fov = degrees.to_radians();
+            let pieces = pieces(fov);
+            let (head_low, head_high) = extent(
+                pieces
+                    .iter()
+                    .filter(|piece| piece.part == SaddlePart::Head)
+                    .flat_map(vertices),
             );
-            assert!(
-                end.cmpge(head_low).all() && end.cmple(head_high).all(),
-                "a rein ends outside the head: {end} not in {head_low}..{head_high}"
-            );
-            reins += 1;
+            let mut reins = 0;
+            for piece in pieces.iter().filter(|piece| piece.part == SaddlePart::Rein) {
+                let start = piece.transform.transform_point(Vec3::Y * -0.5);
+                let end = piece.transform.transform_point(Vec3::Y * 0.5);
+                assert!(
+                    [-1.0, 1.0].into_iter().any(|side| {
+                        let local = mounted_hand_transform(side, fov)
+                            .compute_affine()
+                            .inverse()
+                            .transform_point3(start);
+                        local
+                            .abs()
+                            .cmple(super::super::hands::HAND_SIZE / 2.0)
+                            .all()
+                    }),
+                    "{degrees}: a rein starts outside every fist: {start}"
+                );
+                assert!(
+                    end.cmpge(head_low).all() && end.cmple(head_high).all(),
+                    "a rein ends outside the head: {end} not in {head_low}..{head_high}"
+                );
+                reins += 1;
+            }
+            assert_eq!(reins, 2);
         }
-        assert_eq!(reins, 2);
+    }
+
+    #[derive(Resource)]
+    struct TestFieldOfView(f32);
+
+    fn change_test_projection(fov: Res<TestFieldOfView>, mut cameras: Query<&mut Projection>) {
+        for mut projection in &mut cameras {
+            if let Projection::Perspective(perspective) = projection.as_mut() {
+                perspective.fov = fov.0;
+            }
+        }
+    }
+
+    #[test]
+    fn changing_the_projection_moves_both_reins_without_rebuilding_their_meshes() {
+        let mut app = app();
+        app.insert_resource(LocalMount::from_server(Some(MountKind::BrownHorse)));
+        let camera = root(&mut app).1;
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(Projection::default());
+        app.add_systems(
+            Update,
+            change_test_projection.in_set(crate::settings::ApplyDisplaySettings),
+        );
+        let original: Vec<Handle<Mesh>> = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<&Mesh3d, With<ReinSide>>()
+                .iter(world)
+                .map(|mesh| mesh.0.clone())
+                .collect()
+        };
+        for degrees in [narrowest_field_of_view(), widest_field_of_view()] {
+            app.insert_resource(TestFieldOfView(degrees.to_radians()));
+            app.update();
+            let world = app.world_mut();
+            let mut query = world.query::<(&ReinSide, &Transform, &Mesh3d)>();
+            for (side, transform, mesh) in query.iter(world) {
+                assert_eq!(*transform, rein_transform(side.0, degrees.to_radians()));
+                assert!(original.contains(&mesh.0));
+            }
+        }
     }
 
     /// The head and the neck are the world horse's solids at [`VIEW_SCALE`], the same spans
@@ -564,7 +575,7 @@ mod tests {
             positions.iter().copied().map(Vec3::from_array).collect()
         };
 
-        let pieces = pieces();
+        let pieces = pieces(view_field_of_view(None));
         let view_span = |part: SaddlePart| {
             span(
                 pieces

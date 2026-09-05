@@ -102,12 +102,16 @@ impl Plugin for SettingsPlugin {
             (
                 refresh_monitor_choices,
                 save_when_changed,
-                apply_to_the_display,
+                apply_to_the_display.in_set(ApplyDisplaySettings),
             )
                 .chain(),
         );
     }
 }
+
+/// Camera-space presentation reads the projection after this frame's settings apply.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ApplyDisplaySettings;
 
 /// The file the settings came from, and the copy that is currently in it.
 ///
