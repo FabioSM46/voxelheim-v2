@@ -49,6 +49,7 @@ mod codec;
 mod device;
 mod dsp;
 mod heard;
+mod listener;
 mod mixer;
 mod voice;
 
@@ -63,6 +64,8 @@ use device::{AudioCapture, AudioDevice};
 // that module's test can pin it rather than restating the number.
 #[allow(unused_imports)]
 pub use heard::{SPEAKING_FOR, Speaking};
+// `HEARD_FOR` is the Voices panel's window and is exported with the panel, in part 7 of #853.
+pub use listener::Voices;
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
 pub use voice::{Transmitting, VoiceControls};
 

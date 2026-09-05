@@ -39,6 +39,7 @@ use bevy::prelude::*;
 
 use super::codec::{Missing, VoiceDecoder};
 use super::dsp::FRAME_SAMPLES;
+use super::listener::{Voices, forget_stale_voices};
 use super::mixer::{Bus, SOURCE_CAPACITY, SourceHandle};
 use crate::net::{MAX_OPUS_BYTES, VoiceInbox};
 use crate::player::SnapshotBuffer;
@@ -321,7 +322,11 @@ impl Plugin for HeardPlugin {
         }
         app.insert_resource(Listening::new(source))
             .init_resource::<Speaking>()
-            .add_systems(Update, (hear, play, release_speakers).chain());
+            .init_resource::<Voices>()
+            .add_systems(
+                Update,
+                (hear, play, release_speakers, forget_stale_voices).chain(),
+            );
     }
 }
 
@@ -357,7 +362,18 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
 }
 
 /// Decodes what is due and mixes it into the voice source.
-fn play(mut listening: ResMut<Listening>, mut speaking: ResMut<Speaking>) {
+///
+/// **The per-speaker gain is multiplied in here, and it is not an audibility decision.** The
+/// server sent the frame, which is its answer that this speaker may be heard; what
+/// `audio/listener.rs` supplies is a number the listener chose for their own ears. A muted
+/// speaker is still decoded, deliberately: an Opus decoder's output depends on everything
+/// before it, so skipping the decode would make the first frame after an un-mute an artefact,
+/// and the jitter buffer would stop advancing through slots it has to advance through anyway.
+fn play(
+    mut listening: ResMut<Listening>,
+    mut speaking: ResMut<Speaking>,
+    mut voices: ResMut<Voices>,
+) {
     let listening = &mut *listening;
     let Some(source) = listening.source.as_ref() else {
         return;
@@ -398,8 +414,12 @@ fn play(mut listening: ResMut<Listening>, mut speaking: ResMut<Speaking>) {
             }
             anybody = true;
             speaking.heard(*entity_id, now);
+            voices.heard(*entity_id, now);
+            // Zero for a muted speaker, so they contribute nothing to the sum while their
+            // decoder stays exactly where an un-mute would need it.
+            let gain = voices.gain(*entity_id);
             for (out, sample) in listening.mixed.iter_mut().zip(listening.decoded.iter()) {
-                *out += *sample;
+                *out += *sample * gain;
             }
         }
         if !anybody {
@@ -675,8 +695,12 @@ mod tests {
         app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
             .init_resource::<Speaking>()
+            .init_resource::<Voices>()
             .init_resource::<VoiceInbox>()
-            .add_systems(Update, (hear, play, release_speakers).chain());
+            .add_systems(
+                Update,
+                (hear, play, release_speakers, forget_stale_voices).chain(),
+            );
         app
     }
 
@@ -720,6 +744,75 @@ mod tests {
         );
     }
 
+    /// **A muted speaker contributes nothing, and a turned-down one contributes less.**
+    ///
+    /// Measured off the bus rather than off the gain, because "the gain was read" is a claim
+    /// about a call and this is a claim about what a listener hears. The frames still arrive
+    /// and are still decoded — the server decided this speaker may be heard and nothing here
+    /// overrules that — they are multiplied by zero on the way into the sum.
+    #[test]
+    fn a_muted_speaker_is_silence_and_a_quietened_one_is_quieter() {
+        let opus = frames();
+
+        let mut app = listening_app();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.world_mut().resource_mut::<Voices>().toggle_mute(7);
+        app.update();
+        let muted = heard_level(&app);
+        assert!(
+            muted < -100.0,
+            "a muted speaker was audible on the voice bus ({muted} dB)"
+        );
+
+        // The same frames, the same speaker, half as loud: audible, and measurably under what
+        // the unmuted test above asserts.
+        let mut app = listening_app();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.world_mut()
+            .resource_mut::<Voices>()
+            .adjust_volume(7, -5);
+        app.update();
+        let halved = heard_level(&app);
+        assert!(
+            halved > -100.0,
+            "turning a speaker down to half silenced them ({halved} dB)"
+        );
+
+        let mut app = listening_app();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.update();
+        let whole = heard_level(&app);
+        assert!(
+            halved < whole - 3.0,
+            "half the volume was not audibly quieter: {halved} dB against {whole} dB"
+        );
+    }
+
+    /// **A muted speaker is still on the panel's roster**, which is the distinction the
+    /// Voices panel rests on: a row a player muted has to stay somewhere they can un-mute it.
+    #[test]
+    fn a_muted_speaker_is_still_somebody_the_panel_lists() {
+        let mut app = listening_app();
+        let opus = frames();
+        app.world_mut().resource_mut::<Voices>().toggle_mute(7);
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.update();
+        assert_eq!(
+            app.world().resource::<Voices>().recent(Instant::now()),
+            vec![7],
+            "a muted speaker fell off the list that offers the un-mute"
+        );
+    }
+
+    /// Two speakers are summed rather than one of them winning.
     /// Two speakers are summed rather than one of them winning.
     #[test]
     fn two_speakers_are_both_heard() {
@@ -833,8 +926,12 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(Listening::new(None))
             .init_resource::<Speaking>()
+            .init_resource::<Voices>()
             .init_resource::<VoiceInbox>()
-            .add_systems(Update, (hear, play, release_speakers).chain());
+            .add_systems(
+                Update,
+                (hear, play, release_speakers, forget_stale_voices).chain(),
+            );
         let opus = frames();
         for (sequence, frame) in opus.iter().enumerate().take(6) {
             say(&mut app, 7, sequence as u32, frame.clone());

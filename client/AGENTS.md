@@ -90,6 +90,7 @@ keeps meaning "everything the client is".
 | `audio/codec.rs` | libopus, wrapped: the encoder's settings, the contract's byte ceiling checked against what libopus wanted to write, and the two ways a lost frame is repaired — concealment from what was played, or the redundant copy inside the packet after it | decide *when* a frame is missing, hold a jitter buffer, size its packet buffer at the ceiling, or let a diagnostic quote a payload |
 | `audio/voice.rs` | the two decisions proximity voice makes on the way out — whether to hold a microphone open, and whether to transmit this frame — and the chain between them: resample, gate, gain, 20 ms, encode, send | read the player's own position, choose who hears this, decide any gameplay outcome, or be read by anything that does |
 | `audio/heard.rs` | the inbound half: one jitter buffer and one decoder per speaker, the slack a listener hears as continuity, the two repairs a lost frame has, and every speaker summed into one source on the `Voice` bus | ask whether a speaker should be audible, log a frame or a speaker or a count of either, or hold a source per speaker |
+| `audio/listener.rs` | the listener's own half of who they hear: one mute and one volume per speaker, kept for the session, and the roster of everybody heard in the last minute | be persisted, reach `settings/`, decide whether a speaker may be heard at all, or log a speaker or a count of one |
 | `audio/dsp.rs` | the four pieces of arithmetic a captured voice goes through: the resampler to 48 kHz mono, the noise gate, the slow automatic gain control and the level meter that reads dBFS | run in an audio callback, hold a device, know what a frame is for, or let anything that decides an outcome read a level |
 | `audio/device.rs` | the supervisor thread that owns the one output `cpal::Stream`, opens the device the player named or the system default, reopens it when that device errors, disappears, stops being the system default or is replaced in the settings, and names the output devices the host has — plus the second supervisor that owns the capture stream, which is open only while something has asked for one, opens the microphone the player named or the host's default in its place, and names the input devices the host has | panic on any path a device can reach, hold a stream anywhere but on that thread, or let its error callback lock, allocate or log |
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
@@ -98,7 +99,7 @@ keeps meaning "everything the client is".
 | `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that publishes each milestone sentence once through the tagged chat channel | infer a storm from weather, advance a phase locally, or grow a second notification surface |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
-| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent, with the bound key that would start it, and who has been heard in the last second | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
+| `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent, with the bound key that would start it and who is going to hear it, and who has been heard in the last second and not muted | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — the frame-rate readout in whichever of the four corners the setting names, and routing server refusals and trade endings into tagged chat | reach into another module's internals, grow a health bar, call the snapshot age a round trip, or grow a second notification surface |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
@@ -1606,6 +1607,28 @@ non-zero `voice_range_blocks`, and in push to talk only once the key has been pr
 and nothing is sent unless the transmit rule says so, frame by frame. **A server announcing zero
 opens no microphone at all**: `schemas/handshake.fbs` calls that "a server that relays no voice",
 and recording a player for nobody is the one outcome this feature must not have.
+
+**A gain the listener chose is not an audibility decision, and `audio/listener.rs` is where
+the line is drawn.** The rule below stands unchanged: `audio/heard.rs` never asks whether a
+speaker is close enough or in the right party, because the server owns both and it sent the
+frame. What a listener may do is decide **how loud each speaker is for them** — a mute is a
+gain of zero, not a claim that the server was wrong — so the per-speaker table lives in a
+module of its own and `heard.rs` multiplies by a number rather than asking a question. Two
+consequences worth keeping: a **muted speaker is still decoded**, because an Opus decoder's
+output depends on everything before it and skipping the decode would make the first frame
+after an un-mute an artefact; and a muted speaker is still on the panel's roster, because a
+row somebody muted has to stay where they can un-mute it. The HUD is the one place they
+disappear from, and that is the same rule read the other way — that line says who the player
+is *hearing*.
+
+**Two lifetimes again, and again they are separate on purpose.** The roster is pruned at
+`HEARD_FOR` (a minute) because it describes the last minute; an *adjustment* is kept for the
+session, because a player who mutes somebody has not asked to un-mute them a minute later when
+that person goes quiet. Pruning the two together would do exactly that, silently, and only for
+somebody who had stopped talking — the `Speaking`-versus-decoder shape from #924, one level
+out. Nothing here is persisted: `#853` says why, and the reason is that the snapshot carries no
+stable player id, so a mute written to a file would come back attached to whoever inherited
+that entity number.
 
 **Receiving a frame *is* the audibility decision, already made.** `audio/heard.rs` never asks
 whether a speaker is close enough or in the right party: the server owns every position and

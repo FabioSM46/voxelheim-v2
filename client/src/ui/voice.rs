@@ -21,7 +21,7 @@
 
 use bevy::prelude::*;
 
-use crate::audio::{Speaking, Transmitting, VoiceControls};
+use crate::audio::{Speaking, Transmitting, VoiceControls, Voices};
 use crate::player::{Appearances, Party};
 use crate::settings::{Control, Settings, VoiceAudience, VoiceMode, key_name};
 
@@ -77,6 +77,7 @@ impl Plugin for VoiceUiPlugin {
             .init_resource::<Speaking>()
             .init_resource::<Appearances>()
             .init_resource::<Party>()
+            .init_resource::<Voices>()
             .add_systems(Startup, spawn_voice_hud)
             .add_systems(Update, refresh_voice_hud);
     }
@@ -127,6 +128,7 @@ fn refresh_voice_hud(
     controls: Res<VoiceControls>,
     transmitting: Res<Transmitting>,
     speaking: Res<Speaking>,
+    voices: Res<Voices>,
     appearances: Res<Appearances>,
     party: Res<Party>,
     settings: Option<Res<Settings>>,
@@ -175,7 +177,7 @@ fn refresh_voice_hud(
     }
 
     let heard = speaking.recent(std::time::Instant::now());
-    let line = hearing_line(&heard, &appearances);
+    let line = hearing_line(&heard, &voices, &appearances);
     for mut text in &mut hearing {
         if text.0 != line {
             text.0.clone_from(&line);
@@ -232,7 +234,19 @@ fn transmit_line(
 /// omitted: hearing somebody the client cannot name is a real state — the description arrives
 /// separately from the voice — and dropping the row would make the line disagree with the
 /// audio.
-fn hearing_line(heard: &[u64], appearances: &Appearances) -> String {
+///
+/// **A muted speaker is dropped, and that is the same rule read the other way**: this line
+/// says who the player is hearing, and they are not hearing somebody they muted. The frames
+/// still arrive and `audio/heard.rs` still decodes them — the server decides who may be heard
+/// and nothing here overrules it — but they are mixed at zero, so naming them would be the
+/// line disagreeing with the audio in the opposite direction. The count follows: a crowd of
+/// four with two muted is `+0`, not `+2`.
+fn hearing_line(heard: &[u64], voices: &Voices, appearances: &Appearances) -> String {
+    let heard: Vec<u64> = heard
+        .iter()
+        .copied()
+        .filter(|entity_id| !voices.muted(*entity_id))
+        .collect();
     if heard.is_empty() {
         return String::new();
     }
@@ -366,24 +380,100 @@ mod tests {
     /// description yet is still named rather than dropped.
     #[test]
     fn speakers_are_named_and_an_unknown_one_is_still_shown() {
-        assert_eq!(hearing_line(&[], &Appearances::default()), "");
+        assert_eq!(
+            hearing_line(&[], &Voices::default(), &Appearances::default()),
+            ""
+        );
 
         let described = Appearances::with_player_name(7, "Skald");
-        assert_eq!(hearing_line(&[7], &described), "hearing Skald");
         assert_eq!(
-            hearing_line(&[7, 9], &described),
+            hearing_line(&[7], &Voices::default(), &described),
+            "hearing Skald"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &Voices::default(), &described),
             "hearing Skald, player 9",
             "a speaker the cache cannot name was dropped from the line"
         );
     }
 
+    /// **A muted speaker is not among the speakers heard, and the count follows.**
+    ///
+    /// The line says who the player is hearing, and they are not hearing somebody they muted.
+    /// The `+n` is asserted with the crowd too, because a count computed before the filter
+    /// would say `+2` for two people nobody can hear — the shape a filter added to a `take`
+    /// but not to the `len` produces.
+    #[test]
+    fn a_muted_speaker_is_not_named_and_is_not_counted() {
+        let described = Appearances::with_player_name(7, "Skald");
+        let mut voices = Voices::default();
+        voices.toggle_mute(7);
+
+        assert_eq!(
+            hearing_line(&[7], &voices, &described),
+            "",
+            "the only speaker was muted and the line still named somebody"
+        );
+        assert_eq!(
+            hearing_line(&[7, 9], &voices, &described),
+            "hearing player 9"
+        );
+
+        let heard: Vec<u64> = (1..=7).collect();
+        let mut voices = Voices::default();
+        for muted in [1, 2] {
+            voices.toggle_mute(muted);
+        }
+        let line = hearing_line(&heard, &voices, &described);
+        assert!(!line.contains("Skald"), "a muted speaker was named: {line}");
+        assert!(
+            line.ends_with("+1"),
+            "the overflow counted speakers nobody can hear: {line}"
+        );
+    }
+
+    /// **And it is true in the assembled HUD, not only in the line builder.** `refresh_voice_hud`
+    /// reads `Speaking` and `Voices` as two separate resources, so a filter applied to one of
+    /// them and not carried into the node is exactly the half that a unit test on the pure
+    /// function cannot see — the shape #924 was.
+    #[test]
+    fn the_hud_drops_a_muted_speaker_from_its_line() {
+        let mut app = App::new();
+        app.insert_resource(tuned(VoiceMode::PushToTalk))
+            .add_plugins(VoiceUiPlugin);
+        app.world_mut().resource_mut::<VoiceControls>().range_blocks = 24.0;
+        app.world_mut()
+            .resource_mut::<Speaking>()
+            .heard_for_test(7, Instant::now());
+        app.update();
+
+        let line = |app: &mut App| {
+            let mut heard = app.world_mut().query_filtered::<&Text, With<HearingLine>>();
+            heard
+                .iter(app.world())
+                .next()
+                .map(|text| text.0.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(line(&mut app), "hearing player 7");
+
+        app.world_mut().resource_mut::<Voices>().toggle_mute(7);
+        app.update();
+        assert_eq!(
+            line(&mut app),
+            "",
+            "the HUD went on naming a speaker the player had muted"
+        );
+    }
+
+    /// **A crowd is counted, not drawn.**
     /// **A crowd is counted, not drawn.** How many people are within voice range is the
     /// server's answer, and a line that grew with it would run off the screen.
     #[test]
     fn more_speakers_than_fit_are_counted() {
         let described = Appearances::with_player_name(1, "Skald");
         let heard: Vec<u64> = (1..=7).collect();
-        let line = hearing_line(&heard, &described);
+        let line = hearing_line(&heard, &Voices::default(), &described);
         assert!(line.starts_with("hearing Skald,"), "{line}");
         assert!(line.ends_with("+3"), "{line}");
         assert_eq!(
