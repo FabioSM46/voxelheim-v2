@@ -386,6 +386,15 @@ dated acknowledgement that every body finding was read and publicly disposed of,
 
 ### Frozen Acceptance Rule
 
+**Stacking decision (#926): retain the current hand-built, leaf-first workflow; do not adopt
+native `gh stack`.** [ADR 0002](docs/adr/0002-stacking-mechanism.md) evaluates hand-built
+bottom-first merging first, including the existing `pr-merge --merge` option that preserves
+ancestry without a rebase. It is the first candidate for a declared single-issue experiment,
+not an adopted merge direction. Leaf-first assembly still grows the remaining diffs: a small
+child review does not cover the assembled parent, and the orchestrator's final assembled-head
+review remains required. The 90,000-character cap reduces the need for stacks but does not
+remove that cost. This decision grants no force-push authorization and changes no merge guard.
+
 **Add the `READY TO MERGE` label only when: the stable `ci-gate` check is present and
 successful on the head commit, no CI check is failing or pending, the PR is mergeable, no
 review requests changes, unresolved review thread count is zero, no DeepSeek review is
