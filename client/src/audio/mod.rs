@@ -39,11 +39,12 @@
 //!
 //! ## What this module does not do yet
 //!
-//! Nothing encodes either. `audiopus` is a dependency of this client from #851 part 1 so the
-//! lockfile and the CI package list move once rather than twice, and the codec arrives with
-//! proximity voice. There is no capture device, no spatialisation and no bus beyond `Voice`
-//! and `Master` — each of those is its own issue, and a bus nothing feeds is a gain nobody
-//! can hear moving. See `docs/adr/0001-voice-transport.md`.
+//! There is no bus beyond `Voice` and `Master`, because a bus nothing feeds is a gain
+//! nobody can hear moving; an SFX or music bus arrives with the feature that needs one.
+//! Everything else this paragraph used to disclaim has since arrived and it was not
+//! rewritten at the time: `codec.rs` encodes and decodes, `device.rs` opens an input as
+//! well as an output, and `spatial.rs` below is #854 starting. See
+//! `docs/adr/0001-voice-transport.md`.
 
 mod codec;
 mod device;
@@ -51,6 +52,7 @@ mod dsp;
 mod heard;
 mod listener;
 mod mixer;
+mod spatial;
 mod voice;
 
 use std::f32::consts::TAU;

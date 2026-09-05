@@ -457,6 +457,68 @@ pub fn is_opaque(block: BlockId) -> bool {
     block != AIR && !is_water(block) && !is_cover(block)
 }
 
+/// What a block is made of.
+///
+/// **The palette's fourth answer about a block, and the first that is about none of
+/// drawing, stopping a body or hiding a face.** [`is_solid`], [`is_opaque`] and
+/// [`is_cover`] each answer a yes-or-no question a specific consumer asks; this groups
+/// the ids by substance so a consumer can ask "what kind of thing is this" without
+/// enumerating fifty-five constants of its own.
+///
+/// **It carries no weights and no numbers.** How much a stone wall muffles a voice is
+/// `audio/spatial.rs`'s opinion, not the palette's — the palette knows slate is stone and
+/// nothing about what stone does to sound. Keeping the two apart is what lets a second
+/// consumer arrive with a different opinion about the same classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialClass {
+    /// Nothing there.
+    Air,
+    /// Rock, ore, brick, tile and worked stone. Dense and hard.
+    Stone,
+    /// Loose ground: soil, sand, gravel, snow. Solid, and nothing like rock.
+    Earth,
+    /// Cut and grown timber.
+    Wood,
+    /// Anything leafy or strawy — grown, porous, and mostly gaps.
+    Foliage,
+    /// Worked transparent stock.
+    Glass,
+    /// The water family, still and flowing alike.
+    Water,
+}
+
+/// Which [`MaterialClass`] `block` belongs to.
+///
+/// **An id this build has never heard of is [`MaterialClass::Stone`]**, for exactly the
+/// reason [`is_solid`] and [`is_opaque`] answer true for one: this client renders what the
+/// server sent rather than deciding an unknown id is see-through, and stone is the class
+/// that assumes the least about a block being permeable.
+///
+/// Three groupings are worth stating because they are choices rather than readings:
+///
+/// - **Gravel is earth, not stone.** It is loose aggregate rather than rock, and it sits
+///   with the sand and soil it is found among.
+/// - **Ice is stone, not glass.** Glass here means worked transparent stock; ice is a
+///   dense frozen slab, and being see-through is a rendering fact rather than a material
+///   one.
+/// - **Thatch is foliage, not wood.** A thatched roof is bundled straw — grown and porous,
+///   which is what the class means, and nothing like a sawn plank.
+pub fn material_class(block: BlockId) -> MaterialClass {
+    match block {
+        AIR => MaterialClass::Air,
+        DIRT | GRASS | SNOW | SAND | GRAVEL => MaterialClass::Earth,
+        LOG | PLANKS | PALM_LOG | DARK_TIMBER | PALE_TIMBER => MaterialClass::Wood,
+        LEAVES | PALM_FRONDS | BROAD_LEAVES | THATCH => MaterialClass::Foliage,
+        DESERT_SHRUB | BUSH | WINTER_BRAMBLE => MaterialClass::Foliage,
+        FLOWER_RED | FLOWER_YELLOW | FLOWER_BLUE => MaterialClass::Foliage,
+        DARK_GLASS => MaterialClass::Glass,
+        _ if is_water(block) => MaterialClass::Water,
+        // Stone by construction and by fallthrough alike: rock, ore, brick, tile, ice, the
+        // slate slabs and stairs, and every id from a contract newer than this build.
+        _ => MaterialClass::Stone,
+    }
+}
+
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
@@ -790,6 +852,107 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything the water family holds is water and nothing else is, so a caller that
+    /// wants to know whether a voxel is a liquid never has to enumerate eleven ids.
+    #[test]
+    fn the_water_family_is_exactly_the_water_class() {
+        for block in 0..=(WINTER_BRAMBLE + 8) {
+            assert_eq!(
+                is_water(block),
+                material_class(block) == MaterialClass::Water,
+                "block {block}"
+            );
+        }
+    }
+
+    /// Cover is grown, so it is foliage. Stated as a test rather than as a comment because
+    /// a later cover id — another flower, another bramble — must join the class rather
+    /// than fall through to the stone default.
+    #[test]
+    fn everything_that_is_cover_is_foliage() {
+        for block in 0..=(WINTER_BRAMBLE + 8) {
+            if is_cover(block) {
+                assert_eq!(
+                    material_class(block),
+                    MaterialClass::Foliage,
+                    "block {block}"
+                );
+            }
+        }
+    }
+
+    /// The three groupings the doc calls out as choices. Each of them is one id away from
+    /// a defensible different answer, which is why each gets an assertion.
+    #[test]
+    fn the_three_judgement_calls_are_where_the_documentation_says() {
+        assert_eq!(material_class(GRAVEL), MaterialClass::Earth);
+        assert_eq!(material_class(ICE), MaterialClass::Stone);
+        assert_eq!(material_class(THATCH), MaterialClass::Foliage);
+    }
+
+    #[test]
+    fn an_id_from_a_newer_contract_is_stone() {
+        assert_eq!(material_class(WINTER_BRAMBLE + 1), MaterialClass::Stone);
+        assert_eq!(material_class(BlockId::MAX), MaterialClass::Stone);
+    }
+
+    /// The discriminating one: an implementation that answered a single class for
+    /// everything, or that collapsed the worked materials together, would satisfy every
+    /// assertion above about water and cover and still be useless. Every class the palette
+    /// declares has to be reachable from an id this build knows.
+    #[test]
+    fn every_class_is_claimed_by_some_block_in_the_palette() {
+        let classes: Vec<MaterialClass> =
+            PALETTE.iter().map(|block| material_class(*block)).collect();
+        for class in [
+            MaterialClass::Stone,
+            MaterialClass::Earth,
+            MaterialClass::Wood,
+            MaterialClass::Foliage,
+            MaterialClass::Glass,
+            MaterialClass::Water,
+        ] {
+            assert!(
+                classes.contains(&class),
+                "nothing in the palette is {class:?}"
+            );
+        }
+        // `PALETTE` is the drawable ids and deliberately excludes air, so that one is
+        // checked directly rather than looked for in the list.
+        assert_eq!(material_class(AIR), MaterialClass::Air);
+        assert!(
+            !classes.contains(&MaterialClass::Air),
+            "a drawable block classified as air"
+        );
+    }
+
+    /// One named representative per class, so a wholesale reshuffle of the match arms
+    /// cannot pass on the structural tests alone.
+    #[test]
+    fn the_named_members_of_each_class() {
+        for (block, class) in [
+            (STONE, MaterialClass::Stone),
+            (COBBLESTONE, MaterialClass::Stone),
+            (BLACK_BRICK, MaterialClass::Stone),
+            (SLATE_STAIR_NORTH_BOTTOM, MaterialClass::Stone),
+            (COAL_ORE, MaterialClass::Stone),
+            (DIRT, MaterialClass::Earth),
+            (SNOW, MaterialClass::Earth),
+            (SAND, MaterialClass::Earth),
+            (LOG, MaterialClass::Wood),
+            (PLANKS, MaterialClass::Wood),
+            (DARK_TIMBER, MaterialClass::Wood),
+            (LEAVES, MaterialClass::Foliage),
+            (PALM_FRONDS, MaterialClass::Foliage),
+            (BROAD_LEAVES, MaterialClass::Foliage),
+            (DARK_GLASS, MaterialClass::Glass),
+            (WATER, MaterialClass::Water),
+            (WATER_FLOW3, MaterialClass::Water),
+        ] {
+            assert_eq!(material_class(block), class, "block {block}");
+        }
+    }
 
     /// The sRGB electro-optical transfer function, from the sRGB standard. The
     /// reference the constants above are checked against.

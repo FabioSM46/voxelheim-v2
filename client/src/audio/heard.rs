@@ -22,10 +22,27 @@
 //! demonstrably needed it. **It is not a queue that drains** — one that played everything it
 //! had would have no slack a moment later.
 //!
-//! `audio/mixer.rs` has four source slots for the whole client and a claimed one is kept for
-//! the mixer's life, so every speaker is summed here and pushed into **one** source on
-//! `Bus::Voice`. Per-speaker attenuation and panning is #854, and it belongs to a source per
-//! speaker — a change to the mixer rather than to this file.
+//! ## A source per speaker, and one shared source behind them
+//!
+//! Since #854 a mixer slot can be given back, so [`hear`] takes one for each speaker it
+//! starts listening to and the slot goes when the speaker does. [`place_the_speakers`] then
+//! sets that source's gain, pan and occlusion every frame from the interpolated snapshot,
+//! and [`Mixer::render`] applies them — which is why a voice comes from where its speaker is
+//! standing rather than from the middle of the listener's head.
+//!
+//! **The pool is finite and the fallback is the old behaviour**, deliberately. A speaker who
+//! arrives when every slot is taken gets no source of their own; their audio is summed into
+//! the one source this module has always held and is heard unpositioned, which is exactly
+//! what every speaker sounded like before #854. Being heard from the wrong place is a great
+//! deal better than not being heard, and it is the same answer the acceptance criterion asks
+//! for when the snapshot has not placed somebody.
+//!
+//! **The slot is decided once, when the speaker is first heard, and never mid-sentence.**
+//! Moving a speaker from the shared sum onto a source of their own would leave up to
+//! [`QUEUED_FRAMES`] frames of their audio already summed into the shared ring while the new
+//! ring started filling, so they would briefly be heard twice.
+//!
+//! [`Mixer::render`]: super::mixer::Mixer::render
 //!
 //! Nothing here is written down. A voice frame is personal data, so nothing logs a payload, a
 //! speaker, or a count of either: how often somebody spoke is a fact about a person.
@@ -41,8 +58,10 @@ use super::codec::{Missing, VoiceDecoder};
 use super::dsp::FRAME_SAMPLES;
 use super::listener::{Voices, forget_stale_voices};
 use super::mixer::{Bus, SOURCE_CAPACITY, SourceHandle};
-use crate::net::{MAX_OPUS_BYTES, VoiceInbox};
-use crate::player::SnapshotBuffer;
+use super::spatial::{self, Placement};
+use crate::net::{MAX_OPUS_BYTES, Session, VoiceInbox};
+use crate::player::{EYE_HEIGHT, SnapshotBuffer, WorldCamera};
+use crate::world::ChunkStore;
 
 /// The slack a speaker's buffer starts with, in frames of 20 ms.
 ///
@@ -223,6 +242,25 @@ struct Speaker {
     /// nothing else — never a panic, and never a retry per frame, which is why the entry is
     /// made either way.
     decoder: Option<VoiceDecoder>,
+    /// This speaker's own mixer slot, when one was free when they were first heard.
+    ///
+    /// `None` is not a failure: it means they are summed into the shared source and heard
+    /// unpositioned. Dropping the handle — which happens when [`release_speakers`] drops the
+    /// whole entry — gives the slot back.
+    source: Option<SourceHandle>,
+    /// How long since [`place_the_speakers`] last cast this speaker's occlusion rays.
+    ///
+    /// **Accumulated from `Time::delta`, never from an `Instant`.** The cadence is a rule
+    /// about elapsed time, and a test of it has to control that time rather than hope the
+    /// machine is quick — review on #946 pointed out that two `app.update()` calls are
+    /// sub-millisecond apart *usually*, and this repository has a soak measurement from a
+    /// loaded host where they would not have been. It starts at [`RAY_PERIOD`] so the first
+    /// frame that can place a speaker looks at the world rather than hearing them through a
+    /// wall for a tenth of a second first.
+    since_rays: Duration,
+    /// What those rays answered, held until the next cast. The mixer smooths it; this is the
+    /// raw reading and steps.
+    occlusion: f32,
 }
 
 /// Who has been heard, and when they were last played.
@@ -325,13 +363,34 @@ impl Plugin for HeardPlugin {
             .init_resource::<Voices>()
             .add_systems(
                 Update,
-                (hear, play, release_speakers, forget_stale_voices).chain(),
+                (
+                    hear,
+                    // Between the two on purpose: a speaker heard for the first time this
+                    // tick is placed before a single sample of theirs is queued, so nothing
+                    // of them is ever pushed into the shared source and then repeated from
+                    // a source of their own.
+                    place_the_speakers,
+                    play,
+                    release_speakers,
+                    forget_stale_voices,
+                )
+                    .chain(),
             );
     }
 }
 
-/// Puts every relayed frame into its speaker's buffer.
-fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
+/// Puts every relayed frame into its speaker's buffer, and gives each new speaker a mixer
+/// source of their own if one is free.
+///
+/// **The slot is taken here, beside the decoder, and for the same reason**: both are per
+/// speaker, both are made once, and both go when [`release_speakers`] drops the entry. A
+/// slot that could not be had is `None` and costs that speaker their position, not their
+/// voice — see the module doc.
+fn hear(
+    mut inbox: ResMut<VoiceInbox>,
+    mut listening: ResMut<Listening>,
+    mixer: Option<Res<super::AudioMixer>>,
+) {
     let heard = inbox.take();
     if heard.is_empty() {
         return;
@@ -355,10 +414,139 @@ fn hear(mut inbox: ResMut<VoiceInbox>, mut listening: ResMut<Listening>) {
                 // A decoder that will not open costs this speaker their voice and nothing
                 // else: the entry is still made, so nothing retries per frame.
                 decoder: VoiceDecoder::new().map_err(|err| warn!("{err}")).ok(),
+                source: mixer.as_deref().and_then(|mixer| mixer.claim(Bus::Voice)),
+                since_rays: RAY_PERIOD,
+                occlusion: 0.0,
             }
         });
         speaker.jitter.push(frame.sequence, frame.opus, now);
     }
+}
+
+/// How often each speaker's occlusion rays are cast.
+///
+/// **10 Hz, and it is a cost decision with a stated bound.** Three rays each up to a few
+/// hundred voxels long, per speaker, is far too much to do sixty times a second and far more
+/// often than a wall moves. What it costs in responsiveness is bounded by the smoothing it
+/// feeds: the mixer takes 50 ms to close a filter and 300 ms to open one, so a reading that
+/// is up to 100 ms old is being ramped towards over a window of the same order and there is
+/// nothing for the ear to catch. `player/ambience.rs` samples the world on a fixed period
+/// for the same reason.
+const RAY_PERIOD: Duration = Duration::from_millis(100);
+
+/// Tells each speaker's mixer source where that speaker is standing.
+///
+/// **Every frame, and from the same interpolated answer the renderer draws them at**: the
+/// speaker's eye is their interpolated feet plus [`EYE_HEIGHT`], the listener's eye is the
+/// `WorldCamera`'s translation — which `player/camera.rs` documents as the authoritative
+/// interpolated position — and the azimuth is measured against that camera's yaw.
+///
+/// **Occlusion is the one part that is not per frame**, because it is the one part that
+/// walks the world. Its cadence is [`RAY_PERIOD`], and the reading is held between casts.
+///
+/// **A speaker the snapshot does not place is set to [`Placement::UNPOSITIONED`]**, which is
+/// unity in both ears and no filter — the acceptance criterion's "unpositioned mono at bus
+/// gain", and exactly what this mixer did for every source before #854. That covers a
+/// speaker who has just come into range and is not in a snapshot yet, a session with no
+/// snapshot at all, and a client whose camera has not been spawned.
+///
+/// Nothing here decides anything. The server sent every frame this places, and where a voice
+/// appears to come from is presentation like every other thing under `audio/`.
+fn place_the_speakers(
+    mut listening: ResMut<Listening>,
+    time: Res<Time>,
+    session: Option<Res<Session>>,
+    snapshots: Option<Res<SnapshotBuffer>>,
+    store: Option<Res<ChunkStore>>,
+    eyes: Query<&Transform, With<WorldCamera>>,
+) {
+    let listening = &mut *listening;
+    let speakers = match listening.speakers.get_mut() {
+        Ok(speakers) => speakers,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if speakers.is_empty() {
+        return;
+    }
+
+    let now = Instant::now();
+    let listener = session
+        .as_deref()
+        .zip(eyes.iter().next())
+        .map(|(session, eye)| Listener {
+            eye: eye.translation,
+            // The turn and not the tilt — see `spatial::listener_yaw`, which owns that
+            // convention and carries the measurement behind it.
+            yaw: spatial::listener_yaw(eye.rotation),
+            range: session.0.voice_range_blocks,
+            chunk_size: usize::from(session.0.chunk_size),
+            positions: snapshots
+                .as_deref()
+                .map(|snapshots| {
+                    snapshots.sample(
+                        now,
+                        Duration::from_secs(1) / u32::from(session.0.tick_rate.max(1)),
+                    )
+                })
+                .unwrap_or_default(),
+        });
+
+    let delta = time.delta();
+    for (entity_id, speaker) in speakers.iter_mut() {
+        // Every speaker ages, including the ones this frame cannot place. A clock that only
+        // ran while somebody was placeable would leave a speaker who walked out of the
+        // snapshot and back holding a reading from before they left.
+        speaker.since_rays = speaker.since_rays.saturating_add(delta);
+
+        // A speaker the mixer had no slot for has nowhere to be placed, and casting their
+        // rays would be work with no reader.
+        if speaker.source.is_none() {
+            continue;
+        }
+
+        let mut placement = None;
+        if let Some(listener) = listener.as_ref()
+            && let Some((_, at)) = listener.positions.iter().find(|(id, _)| id == entity_id)
+        {
+            let speaker_eye = at.pos + Vec3::Y * EYE_HEIGHT;
+            if speaker.since_rays >= RAY_PERIOD {
+                speaker.occlusion = store.as_deref().map_or(0.0, |store| {
+                    spatial::occlusion(store, listener.chunk_size, listener.eye, speaker_eye)
+                });
+                speaker.since_rays = Duration::ZERO;
+            }
+            placement = Some(spatial::place(
+                listener.eye,
+                listener.yaw,
+                speaker_eye,
+                listener.range,
+                speaker.occlusion,
+            ));
+        }
+
+        // **One place a source is set, and one fallback.** Every way of not knowing where
+        // somebody is ends here: no session, no camera, no snapshot yet, or a snapshot that
+        // does not name them. Writing the fallback per branch would let one of them be
+        // forgotten, and a forgotten one leaves a voice panned to wherever it last was.
+        if let Some(source) = speaker.source.as_ref() {
+            source.place(placement.unwrap_or(Placement::UNPOSITIONED));
+        }
+    }
+}
+
+/// Everything one frame's placements are measured against.
+///
+/// Gathered once rather than per speaker, because the camera is read through a query and the
+/// snapshot sample allocates: doing either inside the loop would be the same answer computed
+/// as many times as somebody is talking.
+struct Listener {
+    /// The authoritative interpolated eye — `player/camera.rs`'s translation.
+    eye: Vec3,
+    yaw: f32,
+    /// The server's relay range, never a constant here.
+    range: f32,
+    chunk_size: usize,
+    positions: Vec<(u64, crate::player::Interpolated)>,
 }
 
 /// Decodes what is due and mixes it into the voice source.
@@ -375,9 +563,6 @@ fn play(
     mut voices: ResMut<Voices>,
 ) {
     let listening = &mut *listening;
-    let Some(source) = listening.source.as_ref() else {
-        return;
-    };
     let speakers = match listening.speakers.get_mut() {
         Ok(speakers) => speakers,
         Err(poisoned) => poisoned.into_inner(),
@@ -385,31 +570,51 @@ fn play(
     if speakers.is_empty() {
         return;
     }
-
     let now = Instant::now();
+
+    // Everybody with a source of their own, each paced by their own ring. One speaker's
+    // buffer running dry no longer stops another's slot being topped up, which it did while
+    // every speaker shared one ring and one frame count.
+    for (entity_id, speaker) in speakers.iter_mut() {
+        // Read once, before the loop that decodes into this speaker: `speaker` has to be
+        // borrowed mutably below, so the handle is reached through it a statement at a time
+        // rather than held across the body.
+        let Some(wanted) = speaker.source.as_ref().map(frames_wanted) else {
+            continue;
+        };
+        for _ in 0..wanted {
+            if !decode_slot(speaker, &mut listening.decoded) {
+                break;
+            }
+            speaking.heard(*entity_id, now);
+            voices.heard(*entity_id, now);
+            let gain = voices.gain(*entity_id);
+            // Clamped for the same reason the sum below is: a listener may push a single
+            // speaker to twice unity, and the mixer is no place to absorb it.
+            for sample in listening.decoded.iter_mut() {
+                *sample = (*sample * gain).clamp(-1.0, 1.0);
+            }
+            if let Some(source) = speaker.source.as_ref() {
+                source.push(&listening.decoded);
+            }
+        }
+    }
+
+    // And everybody the mixer had no slot for, summed into the one source this module holds
+    // and heard unpositioned — which is what every speaker sounded like before #854.
+    let Some(shared) = listening.source.as_ref() else {
+        return;
+    };
     // Topped up rather than drained: a buffer that played everything it had would have no
-    // slack a moment later. `SOURCE_CAPACITY - free` is what is still queued.
-    let queued = SOURCE_CAPACITY.saturating_sub(source.free());
-    let wanted = (QUEUED_FRAMES * FRAME_SAMPLES).saturating_sub(queued) / FRAME_SAMPLES;
-    for _ in 0..wanted {
+    // slack a moment later.
+    for _ in 0..frames_wanted(shared) {
         listening.mixed.fill(0.0);
         let mut anybody = false;
         for (entity_id, speaker) in speakers.iter_mut() {
-            let slot = speaker.jitter.slot();
-            let Some(decoder) = speaker.decoder.as_mut() else {
+            if speaker.source.is_some() {
                 continue;
-            };
-            let decoded = match &slot {
-                Slot::Nothing => continue,
-                Slot::Frame(frame) => decoder.decode(frame, &mut listening.decoded),
-                Slot::Recover(next) => {
-                    decoder.repair(Missing::FromTheNext, Some(next), &mut listening.decoded)
-                }
-                Slot::Conceal => decoder.repair(Missing::Conceal, None, &mut listening.decoded),
-            };
-            // A frame that will not decode is a gap, never a log line: the message would
-            // name a speaker.
-            if decoded.is_err() {
+            }
+            if !decode_slot(speaker, &mut listening.decoded) {
                 continue;
             }
             anybody = true;
@@ -430,8 +635,42 @@ fn play(
         for sample in listening.mixed.iter_mut() {
             *sample = sample.clamp(-1.0, 1.0);
         }
-        source.push(&listening.mixed);
+        shared.push(&listening.mixed);
     }
+}
+
+/// How many more 20 ms frames `source` wants before it is topped back up to
+/// [`QUEUED_FRAMES`].
+///
+/// `SOURCE_CAPACITY - free` is what is still queued.
+fn frames_wanted(source: &SourceHandle) -> usize {
+    let queued = SOURCE_CAPACITY.saturating_sub(source.free());
+    (QUEUED_FRAMES * FRAME_SAMPLES).saturating_sub(queued) / FRAME_SAMPLES
+}
+
+/// Advances `speaker`'s buffer by one slot and decodes it into `decoded`.
+///
+/// Answers whether `decoded` now holds audio. `false` covers all three ways it might not:
+/// a buffer with nothing due, a speaker whose decoder would not open, and a frame that would
+/// not decode — the last of which is a gap and never a log line, because the message would
+/// name a speaker.
+///
+/// **The slot is taken before the decoder is checked, and the order is not incidental.** A
+/// jitter buffer advances through its slots whether or not anybody can decode them; skipping
+/// the advance for a speaker with no decoder would leave their buffer holding frames it
+/// should have retired.
+fn decode_slot(speaker: &mut Speaker, decoded: &mut [f32]) -> bool {
+    let slot = speaker.jitter.slot();
+    let Some(decoder) = speaker.decoder.as_mut() else {
+        return false;
+    };
+    let outcome = match &slot {
+        Slot::Nothing => return false,
+        Slot::Frame(frame) => decoder.decode(frame, decoded),
+        Slot::Recover(next) => decoder.repair(Missing::FromTheNext, Some(next), decoded),
+        Slot::Conceal => decoder.repair(Missing::Conceal, None, decoded),
+    };
+    outcome.is_ok()
 }
 
 /// Lets go of speakers who have stopped, and of speakers who are no longer there.
@@ -477,10 +716,18 @@ fn release_speakers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    use bevy::time::TimeUpdateStrategy;
+
     use crate::audio::codec::VoiceEncoder;
     use crate::audio::mixer::Mixer;
     use crate::net::{EntityState, Snapshot, VoiceHeard};
     use std::sync::Arc;
+
+    /// What one `app.update()` advances the clock by. Ten milliseconds is a tenth of
+    /// [`RAY_PERIOD`], which makes the cadence countable rather than approximate.
+    const FRAME: Duration = Duration::from_millis(10);
 
     /// Twelve real Opus frames of a tone, so the decoder is fed something it can decode.
     fn frames() -> Vec<Vec<u8>> {
@@ -692,14 +939,26 @@ mod tests {
         mixer.set_gain(Bus::Master, 1.0);
         let source = mixer.claim(Bus::Voice).expect("a free slot");
         let mut app = App::new();
-        app.insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
+        app.add_plugins(bevy::time::TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
             .insert_resource(Listening::new(Some(source)))
             .init_resource::<Speaking>()
             .init_resource::<Voices>()
             .init_resource::<VoiceInbox>()
             .add_systems(
                 Update,
-                (hear, play, release_speakers, forget_stale_voices).chain(),
+                // The plugin's own chain, in its order: what these tests exercise is the
+                // assembled behaviour, and a test that ran the systems in a different order
+                // from the client would be measuring a client nobody ships.
+                (
+                    hear,
+                    place_the_speakers,
+                    play,
+                    release_speakers,
+                    forget_stale_voices,
+                )
+                    .chain(),
             );
         app
     }
@@ -920,17 +1179,495 @@ mod tests {
         );
     }
 
-    /// A listener with no mixer slot: silence, and a client that keeps running.
-    #[test]
-    fn a_listener_with_no_source_is_silent_rather_than_broken() {
+    // ---------------------------------------------------------------------------
+    // Spatialisation, through the assembled systems
+    // ---------------------------------------------------------------------------
+
+    use crate::net::{ChunkCoord, SessionParams};
+    use crate::world::{VoxelChunk, palette};
+
+    const CHUNK: u16 = 32;
+    /// A relay range wide enough that the test speakers are inside it and the distance
+    /// curve has not taken them to nothing.
+    const VOICE_RANGE: f32 = 32.0;
+
+    fn spatial_session() -> Session {
+        Session(SessionParams {
+            clock: Default::default(),
+            entity_id: 1,
+            spawn: [4.5, 4.0, 4.5],
+            world_seed: 1,
+            tick_rate: 20,
+            chunk_size: CHUNK,
+            view_distance: 8,
+            inventory_slots: 37,
+            hotbar_slots: 9,
+            equipment_slots: 4,
+            player_token: crate::net::ANY_TOKEN,
+            voice_range_blocks: VOICE_RANGE,
+        })
+    }
+
+    /// The same app as [`listening_app`] with two channels, a world, a camera and a
+    /// snapshot — everything [`place_the_speakers`] reads.
+    ///
+    /// The camera sits at the origin facing Bevy's `-Z`, which is yaw zero, so a speaker at
+    /// `+X` is on the listener's right and one at `-X` is on their left.
+    fn placed_app(store: ChunkStore) -> App {
+        let mixer = Arc::new(Mixer::new());
+        mixer.set_format(48_000, 2);
+        mixer.set_gain(Bus::Voice, 1.0);
+        mixer.set_gain(Bus::Master, 1.0);
+        let source = mixer.claim(Bus::Voice).expect("a free slot");
         let mut app = App::new();
-        app.insert_resource(Listening::new(None))
+        app.add_plugins(bevy::time::TimePlugin)
+            // **Every fixture drives the clock by hand.** The ray cadence is a rule about
+            // elapsed time, so a test of anything near it must not be a test of how busy the
+            // machine is (#946).
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(super::super::AudioMixer(Arc::clone(&mixer)))
+            .insert_resource(Listening::new(Some(source)))
+            .insert_resource(spatial_session())
+            .insert_resource(store)
+            .init_resource::<SnapshotBuffer>()
             .init_resource::<Speaking>()
             .init_resource::<Voices>()
             .init_resource::<VoiceInbox>()
             .add_systems(
                 Update,
-                (hear, play, release_speakers, forget_stale_voices).chain(),
+                (
+                    hear,
+                    place_the_speakers,
+                    play,
+                    release_speakers,
+                    forget_stale_voices,
+                )
+                    .chain(),
+            );
+        app.world_mut().spawn((
+            WorldCamera,
+            Transform::from_translation(Vec3::new(4.5, 4.5, 4.5)),
+        ));
+        app
+    }
+
+    /// Tells the app where one speaker is standing, in **feet** coordinates.
+    fn stands_at(app: &mut App, entity_id: u64, feet: Vec3) {
+        app.world_mut().resource_mut::<SnapshotBuffer>().accept(
+            Snapshot {
+                server_tick: 1,
+                entities: vec![EntityState {
+                    entity_id,
+                    pos: [feet.x, feet.y, feet.z],
+                    vel: [0.0; 3],
+                    yaw: 0.0,
+                }],
+                ..Snapshot::default()
+            },
+            Instant::now(),
+        );
+    }
+
+    /// Points the listener's camera, with a pitch on it so nothing here can pass by
+    /// accident on a rig that is looking straight ahead.
+    fn faces(app: &mut App, yaw: f32, pitch: f32) {
+        let camera = app
+            .world_mut()
+            .query_filtered::<Entity, With<WorldCamera>>()
+            .iter(app.world())
+            .next()
+            .expect("the fixture spawned one");
+        let eye = Vec3::new(4.5, 4.5, 4.5);
+        app.world_mut().entity_mut(camera).insert(
+            Transform::from_translation(eye)
+                .with_rotation(Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch)),
+        );
+    }
+
+    /// The energy in each channel of what has been queued for the output callback.
+    fn heard_sides(app: &App) -> (f32, f32) {
+        let mixer = app.world().resource::<super::super::AudioMixer>();
+        struct VecSink(Vec<f32>);
+        impl crate::audio::mixer::Sink for VecSink {
+            fn block(&mut self) -> &mut [f32] {
+                &mut self.0
+            }
+        }
+        let mut sink = VecSink(vec![0.0; FRAME_SAMPLES * QUEUED_FRAMES * 2]);
+        mixer.0.render(&mut sink);
+        let left = sink.0.iter().step_by(2).map(|s| s.abs()).sum();
+        let right = sink.0.iter().skip(1).step_by(2).map(|s| s.abs()).sum();
+        (left, right)
+    }
+
+    /// A world holding one all-air chunk at the origin, with the named voxels set.
+    fn world_of(blocks: &[(IVec3, crate::world::BlockId)]) -> ChunkStore {
+        let mut chunk = VoxelChunk::all_air(usize::from(CHUNK));
+        for (voxel, block) in blocks {
+            chunk.set(voxel.x as usize, voxel.y as usize, voxel.z as usize, *block);
+        }
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            chunk,
+        );
+        store
+    }
+
+    fn speak(app: &mut App, entity_id: u64) {
+        for (sequence, frame) in frames().into_iter().enumerate().take(6) {
+            say(app, entity_id, sequence as u32, frame);
+        }
+    }
+
+    /// The one that fails with the channels swapped, and the mirror case is why it is not
+    /// enough to assert that one side is louder.
+    #[test]
+    fn a_speaker_is_heard_from_the_side_they_are_standing_on() {
+        let sides = |x: f32| {
+            let mut app = placed_app(world_of(&[]));
+            stands_at(&mut app, 7, Vec3::new(x, 4.0, 4.5));
+            speak(&mut app, 7);
+            app.update();
+            heard_sides(&app)
+        };
+
+        let (left, right) = sides(10.5);
+        assert!(
+            right > left * 4.0,
+            "a speaker to the east was heard {left} left and {right} right"
+        );
+
+        let (left, right) = sides(-1.5);
+        assert!(
+            left > right * 4.0,
+            "a speaker to the west was heard {left} left and {right} right"
+        );
+    }
+
+    /// A speaker no snapshot places is heard exactly as every speaker was before #854:
+    /// centred and at full gain, which is what "unpositioned mono at bus gain" means.
+    #[test]
+    fn a_speaker_the_snapshot_has_not_placed_is_heard_unpositioned() {
+        let mut app = placed_app(world_of(&[]));
+        speak(&mut app, 7);
+        app.update();
+
+        let (left, right) = heard_sides(&app);
+        assert!(left > 0.0, "an unplaced speaker was not heard at all");
+        assert!(
+            (left - right).abs() < 1e-3,
+            "an unplaced speaker was panned: {left} against {right}"
+        );
+
+        // And once the world does place them, the same speaker moves off centre — so the
+        // centring above is the absence of a position rather than a placement that failed.
+        stands_at(&mut app, 7, Vec3::new(10.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+        let (left, right) = heard_sides(&app);
+        assert!(right > left, "{left} against {right}");
+    }
+
+    /// **Nothing stays where it last was.** A frame with no camera cannot place anybody, and
+    /// a source left at its last placement would keep a voice panned hard to one side for as
+    /// long as that lasted. This is the one branch of the fallback that is reachable without
+    /// releasing the speaker, so it is the one that holds the single-site `unwrap_or`.
+    #[test]
+    fn a_frame_that_can_place_nobody_leaves_nobody_where_they_were() {
+        let mut app = placed_app(world_of(&[]));
+        stands_at(&mut app, 7, Vec3::new(10.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+        let (left, right) = heard_sides(&app);
+        assert!(right > left * 4.0, "{left} against {right}");
+
+        // The camera goes; the speaker stays and keeps talking.
+        let camera = app
+            .world_mut()
+            .query_filtered::<Entity, With<WorldCamera>>()
+            .iter(app.world())
+            .next()
+            .expect("the fixture spawned one");
+        app.world_mut().entity_mut(camera).despawn();
+        speak(&mut app, 7);
+        app.update();
+
+        let (left, right) = heard_sides(&app);
+        assert!(left > 0.0, "the speaker went silent rather than centring");
+        assert!(
+            (left - right).abs() < 1e-3,
+            "a voice stayed panned with no camera to pan it against: {left} against {right}"
+        );
+    }
+
+    /// **A voice comes from a speaker's head, not their boots**, which matters exactly where
+    /// the two are on opposite sides of something. The wall here sits at head height and
+    /// stops nothing at foot height: taking `EYE_HEIGHT` out of the speaker's position makes
+    /// the rays run under it and answer open air.
+    #[test]
+    fn a_speaker_is_heard_from_their_eyes_and_not_their_feet() {
+        // The listener's eye is at y 4.5 and the speaker's at 4.0 + EYE_HEIGHT; the ray
+        // climbs into the voxel row at y 5 about halfway along, which is where this wall is.
+        let wall: Vec<(IVec3, crate::world::BlockId)> = (3..=6)
+            .map(|z| (IVec3::new(9, 5, z), palette::STONE))
+            .collect();
+        let mut app = placed_app(world_of(&wall));
+        stands_at(&mut app, 7, Vec3::new(12.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+
+        let listening = app.world().resource::<Listening>();
+        let speakers = listening.speakers.lock().expect("no test poisons it");
+        assert!(
+            speakers[&7].occlusion > 0.9,
+            "a wall at head height was heard as {} of one",
+            speakers[&7].occlusion
+        );
+    }
+
+    /// Occlusion reaching the source at all, and reaching it through the smoothing rather
+    /// than instead of it.
+    #[test]
+    fn a_wall_between_the_two_of_them_muffles_the_voice() {
+        let occlusion_after = |wall: bool| {
+            let blocks: Vec<(IVec3, crate::world::BlockId)> = if wall {
+                (3..=6)
+                    .flat_map(|y| (3..=6).map(move |z| (IVec3::new(8, y, z), palette::STONE)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut app = placed_app(world_of(&blocks));
+            stands_at(&mut app, 7, Vec3::new(12.5, 4.0, 4.5));
+            speak(&mut app, 7);
+            app.update();
+            // 100 ms of output, which is twice the attack: enough for the ramp to arrive.
+            let mixer = app.world().resource::<super::super::AudioMixer>();
+            struct VecSink(Vec<f32>);
+            impl crate::audio::mixer::Sink for VecSink {
+                fn block(&mut self) -> &mut [f32] {
+                    &mut self.0
+                }
+            }
+            for _ in 0..10 {
+                let mut sink = VecSink(vec![0.0; 480 * 2]);
+                mixer.0.render(&mut sink);
+            }
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            speakers[&7]
+                .source
+                .as_ref()
+                .expect("the speaker got a slot")
+                .reached_occlusion()
+        };
+
+        assert!(
+            occlusion_after(true) > 0.9,
+            "a stone wall was not heard as one"
+        );
+        assert_eq!(occlusion_after(false), 0.0, "open air occluded something");
+    }
+
+    /// **The cadence, asserted by its consequence, on a clock this test owns.** The rays are
+    /// cast on the frame a speaker is first placed and then not again for [`RAY_PERIOD`], so
+    /// a wall that vanishes in between is still heard until the period is up — and *is* heard
+    /// to have gone once it is.
+    ///
+    /// The first version of this asserted only the first half and read the wall clock through
+    /// `Instant::now()`. Two `app.update()` calls are sub-millisecond apart on an idle
+    /// machine; this repository has a soak measurement from a loaded one where they would not
+    /// have been, and a test that fails because the host was busy gets its assertion deleted
+    /// rather than its cause found (#946). `TimeUpdateStrategy::ManualDuration` makes the
+    /// elapsed time an input, which also bought the second half of the assertion: hoping for
+    /// 100 ms to pass is not something a test can do at all.
+    #[test]
+    fn the_rays_are_recast_on_the_period_and_not_before_it() {
+        let wall: Vec<(IVec3, crate::world::BlockId)> = (3..=6)
+            .flat_map(|y| (3..=6).map(move |z| (IVec3::new(8, y, z), palette::STONE)))
+            .collect();
+        // **The rate itself, because everything below is measured in periods rather than in
+        // milliseconds.** Without this the loop count moves with the constant and the
+        // acceptance criterion — ten casts a second — is pinned by nothing.
+        assert_eq!(
+            1_000 / RAY_PERIOD.as_millis(),
+            10,
+            "the rays are specified at 10 Hz"
+        );
+
+        let mut app = placed_app(world_of(&wall));
+        stands_at(&mut app, 7, Vec3::new(12.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+
+        let read_occlusion = |app: &App| {
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            speakers[&7].occlusion
+        };
+        assert!(read_occlusion(&app) > 0.9, "the wall was never read");
+
+        // The wall is gone. Nine more frames is 90 ms, which is inside the period.
+        app.world_mut().insert_resource(world_of(&[]));
+        let inside = (RAY_PERIOD.as_millis() / FRAME.as_millis()) as usize - 1;
+        for frame in 0..inside {
+            app.update();
+            assert!(
+                read_occlusion(&app) > 0.9,
+                "the rays were recast {} ms in, inside a {} ms period",
+                (frame + 1) * FRAME.as_millis() as usize,
+                RAY_PERIOD.as_millis()
+            );
+        }
+
+        // And the frame that crosses it takes the reading again.
+        app.update();
+        assert_eq!(
+            read_occlusion(&app),
+            0.0,
+            "the rays were never recast at all"
+        );
+    }
+
+    /// **A listener turning is what moves a voice**, and #946's review asked for this because
+    /// nothing rotated the `WorldCamera`. The camera faces due east here with a real tilt on
+    /// it: facing east, north is on your left, whatever your head is doing.
+    ///
+    /// This is the test that settles that finding at the level a player would notice. A yaw
+    /// read as a pitch would put both cases mildly to the right, and both halves fail.
+    #[test]
+    fn a_speaker_moves_around_a_listener_who_turns() {
+        let sides = |yaw: f32| {
+            let mut app = placed_app(world_of(&[]));
+            faces(&mut app, yaw, 0.5);
+            // Four blocks due north of the listener, who stands at z 4.5.
+            stands_at(&mut app, 7, Vec3::new(4.5, 4.0, 0.5));
+            speak(&mut app, 7);
+            app.update();
+            heard_sides(&app)
+        };
+
+        // `from_rotation_y(-π/2)` takes Bevy's `-Z` forward onto `+X`: due east.
+        let (left, right) = sides(-FRAC_PI_2);
+        assert!(
+            left > right * 4.0,
+            "facing east, a speaker to the north was heard {left} left and {right} right"
+        );
+
+        // And due west, where north is on the other side.
+        let (left, right) = sides(FRAC_PI_2);
+        assert!(
+            right > left * 4.0,
+            "facing west, a speaker to the north was heard {left} left and {right} right"
+        );
+    }
+
+    /// Every slot taken, and a speaker still heard. The fallback is the shared source this
+    /// module has always held, which is the same answer an unplaced speaker gets.
+    #[test]
+    fn a_speaker_the_mixer_had_no_slot_for_is_still_heard() {
+        let mut app = placed_app(world_of(&[]));
+        let held: Vec<_> = {
+            let mixer = app.world().resource::<super::super::AudioMixer>();
+            std::iter::from_fn(|| mixer.0.claim(Bus::Voice)).collect()
+        };
+        assert!(!held.is_empty(), "the fixture left no slots to take");
+
+        stands_at(&mut app, 7, Vec3::new(10.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+
+        {
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            assert!(
+                speakers[&7].source.is_none(),
+                "a slot was found where none was free"
+            );
+        }
+        let (left, right) = heard_sides(&app);
+        assert!(left > 0.0, "a speaker with no slot was silent");
+        assert!(
+            (left - right).abs() < 1e-3,
+            "a speaker with no slot was somehow panned: {left} against {right}"
+        );
+    }
+
+    /// The slot goes back when the speaker does, which is the whole reason the pool works
+    /// for a session rather than for the first thirteen people to speak.
+    #[test]
+    fn a_released_speaker_gives_their_slot_back() {
+        let mut app = placed_app(world_of(&[]));
+        stands_at(&mut app, 7, Vec3::new(10.5, 4.0, 4.5));
+        speak(&mut app, 7);
+        app.update();
+
+        let free_slots = |app: &App| {
+            let mixer = app.world().resource::<super::super::AudioMixer>();
+            let taken: Vec<_> = std::iter::from_fn(|| mixer.0.claim(Bus::Voice)).collect();
+            taken.len()
+        };
+        let while_speaking = free_slots(&app);
+
+        // A newer snapshot that no longer names them. The tick has to advance: `accept`
+        // refuses one that is older than what it holds, and a refused snapshot would leave
+        // the speaker present rather than gone.
+        app.world_mut().resource_mut::<SnapshotBuffer>().accept(
+            Snapshot {
+                server_tick: 2,
+                ..Snapshot::default()
+            },
+            Instant::now(),
+        );
+        app.update();
+        {
+            let listening = app.world().resource::<Listening>();
+            let speakers = listening.speakers.lock().expect("no test poisons it");
+            assert!(!speakers.contains_key(&7), "the speaker was not released");
+        }
+        // The callback has to run before a released slot can be handed out again.
+        let mixer = Arc::clone(&app.world().resource::<super::super::AudioMixer>().0);
+        struct VecSink(Vec<f32>);
+        impl crate::audio::mixer::Sink for VecSink {
+            fn block(&mut self) -> &mut [f32] {
+                &mut self.0
+            }
+        }
+        let mut sink = VecSink(vec![0.0; 8]);
+        mixer.render(&mut sink);
+
+        assert!(
+            free_slots(&app) > while_speaking,
+            "a released speaker's slot never came back: {while_speaking} then {}",
+            free_slots(&app)
+        );
+    }
+
+    /// A listener with no mixer slot: silence, and a client that keeps running.
+    #[test]
+    fn a_listener_with_no_source_is_silent_rather_than_broken() {
+        let mut app = App::new();
+        app.add_plugins(bevy::time::TimePlugin)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
+            .insert_resource(Listening::new(None))
+            .init_resource::<Speaking>()
+            .init_resource::<Voices>()
+            .init_resource::<VoiceInbox>()
+            .add_systems(
+                Update,
+                (
+                    hear,
+                    place_the_speakers,
+                    play,
+                    release_speakers,
+                    forget_stale_voices,
+                )
+                    .chain(),
             );
         let opus = frames();
         for (sequence, frame) in opus.iter().enumerate().take(6) {
