@@ -1714,11 +1714,23 @@ by age and by nothing else, and the test that holds it runs the systems together
 the type on its own (#924).
 
 **What is deliberately not here yet.**
-Nothing encodes: `audiopus` is a dependency from #851 part 1 so that the lockfile and
-the CI package list move once rather than twice, and the codec arrives with proximity voice.
-No capture device, no spatialisation, no `bevy_audio` and no Bevy `audio` feature — the
-reasoning for that last one is in `docs/adr/0001-voice-transport.md` and in `Cargo.toml`
-beside the `cpal` entry.
+No `bevy_audio` and no Bevy `audio` feature — the reasoning is in
+`docs/adr/0001-voice-transport.md` and in `Cargo.toml` beside the `cpal` entry. The rest of
+what this paragraph used to disclaim arrived across #852 and #853 without it being rewritten:
+`codec.rs` encodes and decodes, and `device.rs` opens an input as well as an output.
+
+**Spatialisation is arriving, and `audio/spatial.rs` is the half of it that is pure.**
+Attenuation, azimuth, the constant-power pan law, the front/back cue and the band gains an
+occlusion value produces are functions of their arguments and nothing else — no resource, no
+state, no clock. Two of them are worth knowing before reading the module. The pan law is
+**blind to front and back** by construction, because two loudspeakers in front of a listener
+cannot place a sound behind them; the front/back cue is a multiplier on the high band and is
+the whole of what tells the two apart, and #854's Out of Scope declines the alternative by
+name. And the distance curve is **inverse distance, which is steep**: on a 32-block server a
+voice is at 0.20 eight blocks out and 0.07 at sixteen, so the server's relay range and the
+range a player can actually hear over are not the same number. That is what `1/d` is rather
+than an accident of the arithmetic, and the server relaying further than the ear reaches is
+the intended shape.
 
 ## Conventions that are not obvious from the code
 
