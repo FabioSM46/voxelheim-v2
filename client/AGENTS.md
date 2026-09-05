@@ -104,7 +104,7 @@ keeps meaning "everything the client is".
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints and one reset per tab | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the two overlays with lifecycles of their own — the Monitor dropdown and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1620,6 +1620,19 @@ after an un-mute an artefact; and a muted speaker is still on the panel's roster
 row somebody muted has to stay where they can un-mute it. The HUD is the one place they
 disappear from, and that is the same rule read the other way — that line says who the player
 is *hearing*.
+
+**The Voices panel is an overlay, and it is rebuilt on a *set* rather than on a change.** It
+takes the Monitor dropdown's shape for the Monitor dropdown's reasons — absolutely positioned,
+its own `GlobalZIndex`, its own open/close lifecycle, closed by a tab change and by Escape
+before Escape reaches the screen. What differs is the trap: `Voices` is marked changed on
+**every frame anybody is speaking**, so a rebuild driven by `Res::is_changed` would despawn and
+respawn a row under a pointer sixty times a second. `rebuild_voice_rows` therefore compares
+what is drawn against what should be — and it compares **two** things, the set of speakers and
+the number not drawn, because with the count folded into the row list the first crowd compares
+equal to the rows already there and the "+n more" line is never spawned at all. Its controls
+are `VoiceControl`, not `SettingsAction`: they carry a speaker's entity id and they write a
+resource `audio/` owns rather than a setting, which is also what keeps `settings_actions` from
+having to know that `Voices` exists.
 
 **Two lifetimes again, and again they are separate on purpose.** The roster is pruned at
 `HEARD_FOR` (a minute) because it describes the last minute; an *adjustment* is kept for the

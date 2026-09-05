@@ -19,8 +19,8 @@
 use bevy::prelude::*;
 
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
-use crate::audio::AudioControls;
-use crate::player::InputMode;
+use crate::audio::{AudioControls, Voices};
+use crate::player::{Appearances, InputMode};
 use crate::settings::{
     AudioDevices, CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name,
 };
@@ -39,6 +39,9 @@ pub(super) struct SettingsScreen {
     /// on a graphics reset, and `read_settings_keys` gives Escape to it before Escape can
     /// close the screen.
     monitor_dropdown_open: bool,
+    /// Whether the Voices panel is open. Its own lifecycle, exactly as the Monitor dropdown
+    /// has one: opened from its row, closed by that row, by a tab change, and by Escape.
+    voices_open: bool,
 }
 
 impl SettingsScreen {
@@ -48,6 +51,7 @@ impl SettingsScreen {
         self.capturing = None;
         self.notice.clear();
         self.monitor_dropdown_open = false;
+        self.voices_open = false;
     }
 
     /// Whether the panel is drawn. `ui/menu.rs` reads it to stand down while it is, and
@@ -62,6 +66,7 @@ impl SettingsScreen {
         self.capturing = None;
         self.notice.clear();
         self.monitor_dropdown_open = false;
+        self.voices_open = false;
     }
 }
 
@@ -77,6 +82,8 @@ impl Plugin for SettingsScreenPlugin {
             // Inserted by `AudioPlugin`, which `main.rs` adds first; this is what lets the
             // screen and its tests stand up with no audio device anywhere near them.
             .init_resource::<AudioControls>()
+            .init_resource::<Voices>()
+            .init_resource::<Appearances>()
             .init_resource::<Tab>()
             .add_systems(Startup, spawn_settings_screen)
             // Chained, and the order is what makes a press readable on the frame it
@@ -98,6 +105,9 @@ impl Plugin for SettingsScreenPlugin {
                     rebuild_monitor_options,
                     show_monitor_dropdown,
                     colour_monitor_controls,
+                    voice_row_actions,
+                    rebuild_voice_rows,
+                    show_voices_panel,
                     refresh_readings,
                 )
                     .chain(),
@@ -147,6 +157,36 @@ struct MonitorSelectButton;
 #[derive(Component)]
 struct MonitorDropdownPanel;
 
+/// The Voices panel: the overlay a speaker's rows are spawned into.
+#[derive(Component)]
+struct VoicesPanel;
+
+/// One speaker's row inside it, naming whose it is so it can be despawned by entity id.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct VoiceRow(u64);
+
+/// The line counting the speakers the panel did not draw, and how many that is.
+///
+/// **A component rather than a sentinel `VoiceRow`**, and the difference is a real bug rather
+/// than tidiness: with the count folded into the row list, "what is drawn" and "who is drawn"
+/// were the same question, so the first crowd compared equal to the eight rows already there
+/// and the count was never spawned at all. It is a second thing the rebuild has to notice.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct VoiceOverflow(usize);
+
+/// What pressing a control inside the Voices panel means.
+///
+/// Not a [`SettingsAction`]: these carry a speaker's entity id, and they change a resource
+/// `crate::audio` owns rather than a setting. Keeping them apart is also what keeps
+/// `settings_actions` from having to know that `Voices` exists.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum VoiceControl {
+    /// Mute this speaker, or un-mute them.
+    Mute(u64),
+    /// Move this speaker's volume by the given number of its own steps.
+    Nudge(u64, i32),
+}
+
 /// One option inside the open dropdown, naming its index into
 /// [`MonitorChoices::preferences`]. Rebuilt whenever the live choices change, so an index
 /// here always names [`rebuild_monitor_options`]'s current row.
@@ -167,6 +207,8 @@ enum SettingsAction {
     Reset(Tab),
     /// Play a second of tone through the master bus at whatever the volume is now.
     TestSpeakers,
+    /// Show or hide the Voices panel.
+    ToggleVoices,
     /// Back to the pause menu.
     Back,
 }
@@ -183,6 +225,12 @@ enum Reading {
     /// one centred string. Distinct from `Knob(Knob::Monitor)`, which nothing spawns a
     /// text node for any more — Monitor draws as [`MonitorSelectButton`], not a stepper.
     MonitorControl,
+    /// Whether the Voices panel is showing, as the word on its own button.
+    VoicesPanel,
+    /// One speaker's volume, as a percentage.
+    VoiceLevel(u64),
+    /// Whether one speaker is muted, as the word on the button that changes it.
+    VoiceMuted(u64),
     /// The line under the panel.
     Notice,
 }
@@ -235,6 +283,27 @@ const CONTROL_BUTTON_HEIGHT: f32 = ROW_HEIGHT - 4.0;
 
 /// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
 const WIDE_BUTTON: f32 = 40.0;
+
+/// The Voices panel's stacking position, and the Monitor dropdown's reasoning verbatim: a
+/// child of the row it belongs to would paint behind every row spawned after it.
+const VOICES_PANEL_LAYER: i32 = 46;
+
+/// The most speakers the Voices panel draws at once.
+///
+/// **A bound on a length the world chooses.** `audio/listener.rs` already caps what it
+/// remembers; this caps what is *drawn*, because a panel one row per speaker tall would run
+/// off the bottom of the narrowest supported viewport long before that cap. The rest are
+/// counted, exactly as `ui/voice.rs` counts the speakers it cannot name.
+const PANEL_VOICES: usize = 8;
+
+/// The width of a speaker's name in the Voices panel, in logical pixels.
+const VOICE_NAME_WIDTH: f32 = 200.0;
+
+/// The width of a speaker's mute control, in logical pixels.
+const VOICE_MUTE_WIDTH: f32 = 90.0;
+
+/// And of the reading between its `-` and `+`.
+const VOICE_LEVEL_WIDTH: f32 = 70.0;
 
 /// The Monitor dropdown's stacking position. Without a `GlobalZIndex` of its own it would
 /// paint inside the Monitor row's slot in the panel's tree order — behind every row spawned
@@ -444,6 +513,9 @@ enum Row {
     /// Not `Knob(Knob::Monitor)` — [`rows_of`] gives Monitor this variant instead, which is
     /// what keeps the generic stepper out of its row while every other knob still gets one.
     MonitorSelect,
+    /// The Voices row: one button that opens the panel, plus the panel it opens. Its own
+    /// variant rather than a [`Self::Toggle`] because it spawns an overlay beside the button.
+    VoicesToggle,
     /// A row whose control *does* something rather than showing something: one button with
     /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
     /// this is the shape for a press with no state behind it at all.
@@ -458,6 +530,7 @@ impl Row {
             Self::Toggle(label, _, _) => label,
             Self::Binding(control) => control.label(),
             Self::MonitorSelect => Knob::Monitor.label(),
+            Self::VoicesToggle => "Voices",
             Self::Action(label, _, _) => label,
         }
     }
@@ -499,13 +572,14 @@ fn rows_of(tab: Tab) -> Vec<Row> {
                 Reading::ReadoutCorner,
             ),
         ]),
-        // Under the knob it proves, because that is the order a player uses them in: set
-        // the volume, then find out whether anything comes out.
-        Tab::Audio => rows.push(Row::Action(
-            "Test speakers",
-            SettingsAction::TestSpeakers,
-            "PLAY A TONE",
-        )),
+        Tab::Audio => rows.extend([
+            // Under the knob it proves, because that is the order a player uses them in: set
+            // the volume, then find out whether anything comes out.
+            Row::Action("Test speakers", SettingsAction::TestSpeakers, "PLAY A TONE"),
+            // Last, and a `Toggle` rather than an `Action`: the button's face *is* the state,
+            // so a player can tell an open panel from a closed one without looking at it.
+            Row::VoicesToggle,
+        ]),
     }
     rows
 }
@@ -546,6 +620,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                 );
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
+            Row::VoicesToggle => spawn_voices_control(controls),
             Row::Action(_, action, face) => {
                 spawn_button(
                     controls,
@@ -701,6 +776,172 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
                 BorderColor::all(CELL_EDGE),
             ));
         });
+}
+
+/// The Voices row's control and the panel it opens.
+///
+/// [`spawn_monitor_select`]'s shape, for its reasons: an absolutely positioned overlay
+/// anchored under the button, with a `GlobalZIndex` of its own so it paints over the rows
+/// below rather than inside this row's slot in the panel's tree order. It starts empty —
+/// [`rebuild_voice_rows`] fills it, and only when the set of speakers changes.
+fn spawn_voices_control(parent: &mut ChildSpawnerCommands<'_>) {
+    parent
+        .spawn((
+            SettingsAction::ToggleVoices,
+            Button,
+            Node {
+                width: Val::Px(STEP_BUTTON * 4.0),
+                height: Val::Px(CONTROL_BUTTON_HEIGHT),
+                flex_shrink: 0.0,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON),
+        ))
+        .with_children(|button| {
+            button.spawn((
+                Reading::VoicesPanel,
+                Text::new(String::new()),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                TextLayout::no_wrap().with_justify(Justify::Center),
+            ));
+
+            button.spawn((
+                VoicesPanel,
+                GlobalZIndex(VOICES_PANEL_LAYER),
+                Node {
+                    position_type: PositionType::Absolute,
+                    // Above its own button rather than below it: this row is the last on the
+                    // tab, so a panel hanging downwards would leave the screen.
+                    bottom: Val::Px(CONTROL_BUTTON_HEIGHT),
+                    right: Val::Px(0.0),
+                    width: Val::Px(
+                        VOICE_NAME_WIDTH
+                            + VOICE_MUTE_WIDTH
+                            + VOICE_LEVEL_WIDTH
+                            + 2.0 * STEP_BUTTON
+                            + 5.0 * CONTROL_GAP,
+                    ),
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(2.0),
+                    padding: UiRect::all(Val::Px(6.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(PANEL_BACKGROUND),
+                BorderColor::all(CELL_EDGE),
+            ));
+        });
+}
+
+/// One speaker's row inside the open Voices panel.
+fn spawn_voice_row(parent: &mut ChildSpawnerCommands<'_>, entity_id: u64, name: String) {
+    parent
+        .spawn((
+            VoiceRow(entity_id),
+            Node {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(CONTROL_GAP),
+                height: Val::Px(ROW_HEIGHT),
+                ..default()
+            },
+        ))
+        .with_children(|row| {
+            row.spawn((
+                Text::new(name),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.78, 0.80, 0.84)),
+                TextLayout::no_wrap(),
+                Node {
+                    width: Val::Px(VOICE_NAME_WIDTH),
+                    flex_shrink: 0.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+            ));
+            spawn_voice_button(
+                row,
+                VoiceControl::Mute(entity_id),
+                VOICE_MUTE_WIDTH,
+                Reading::VoiceMuted(entity_id),
+            );
+            spawn_voice_button(row, VoiceControl::Nudge(entity_id, -1), STEP_BUTTON, None);
+            row.spawn((
+                Reading::VoiceLevel(entity_id),
+                Text::new(String::new()),
+                TextFont {
+                    font_size: ROW_FONT,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                TextLayout::no_wrap().with_justify(Justify::Center),
+                Node {
+                    width: Val::Px(VOICE_LEVEL_WIDTH),
+                    flex_shrink: 0.0,
+                    overflow: Overflow::clip(),
+                    ..default()
+                },
+            ));
+            spawn_voice_button(row, VoiceControl::Nudge(entity_id, 1), STEP_BUTTON, None);
+        });
+}
+
+/// One pressable control inside a speaker's row.
+///
+/// `face` is a [`Reading`] for a button whose text *is* the state it changes, and `None` for
+/// one whose face never moves — the `-` and `+`, which are drawn from the control itself.
+fn spawn_voice_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    control: VoiceControl,
+    width: f32,
+    face: impl Into<Option<Reading>>,
+) {
+    let face = face.into();
+    let fixed = match control {
+        VoiceControl::Mute(_) => String::new(),
+        VoiceControl::Nudge(_, steps) if steps < 0 => "-".to_owned(),
+        VoiceControl::Nudge(..) => "+".to_owned(),
+    };
+    let mut button = parent.spawn((
+        control,
+        Button,
+        Node {
+            width: Val::Px(width),
+            height: Val::Px(CONTROL_BUTTON_HEIGHT),
+            flex_shrink: 0.0,
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            border_radius: BorderRadius::all(Val::Px(3.0)),
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+    ));
+    button.with_children(|button| {
+        let mut text = button.spawn((
+            Text::new(fixed),
+            TextFont {
+                font_size: ROW_FONT,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextLayout::no_wrap().with_justify(Justify::Center),
+        ));
+        if let Some(face) = face {
+            text.insert(face);
+        }
+    });
 }
 
 /// One option inside the open Monitor dropdown, at `index` in
@@ -873,9 +1114,12 @@ fn switch_settings_tabs(
             }
             // The Monitor dropdown is the same trap one row over: leaving Graphics has to
             // close it explicitly, or it goes on floating over whichever rows Controls
-            // draws in its place.
+            // draws in its place. The Voices panel is the third of them, on the third tab.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
+            }
+            if screen.voices_open {
+                screen.voices_open = false;
             }
         }
     }
@@ -966,6 +1210,10 @@ fn settings_actions(
                 }
                 continue;
             }
+            SettingsAction::ToggleVoices => {
+                screen.voices_open = !screen.voices_open;
+                continue;
+            }
             SettingsAction::TestSpeakers => {
                 // The whole of the row: a request, taken back by `audio/mod.rs` on the
                 // frame it starts the tone. This screen owns no sample, no bus and no
@@ -1014,10 +1262,14 @@ fn read_settings_keys(
 
     let Some(control) = screen.capturing else {
         if keys.just_pressed(KeyCode::Escape) {
-            // The dropdown answers to Escape before the screen does: the first press
-            // closes what was most recently opened, not the whole screen behind it.
+            // An overlay answers to Escape before the screen does: the first press closes
+            // what was most recently opened, not the whole screen behind it. The two are
+            // never open together — they are on different tabs, and a tab change closes
+            // both — so the order between them decides nothing.
             if screen.monitor_dropdown_open {
                 screen.monitor_dropdown_open = false;
+            } else if screen.voices_open {
+                screen.voices_open = false;
             } else {
                 screen.close();
             }
@@ -1162,17 +1414,136 @@ fn colour_monitor_controls(
     }
 }
 
+/// Applies a press inside the open Voices panel.
+///
+/// **It changes `Voices` and never a setting**, which is the whole of why these controls are
+/// not [`SettingsAction`]s: a mute is session state `crate::audio` owns, and #853 is explicit
+/// that it is never written to the settings file — the snapshot carries no stable player id,
+/// so a saved mute would come back attached to whoever inherited that entity number.
+fn voice_row_actions(
+    mut buttons: Query<(&Interaction, &VoiceControl, &mut BackgroundColor), Changed<Interaction>>,
+    mut voices: ResMut<Voices>,
+) {
+    for (interaction, control, mut colour) in &mut buttons {
+        colour.0 = button_colour(interaction);
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match *control {
+            VoiceControl::Mute(entity_id) => voices.toggle_mute(entity_id),
+            VoiceControl::Nudge(entity_id, steps) => voices.adjust_volume(entity_id, steps),
+        }
+    }
+}
+
+/// Rebuilds the panel's rows when the set of speakers changes, and **only** then.
+///
+/// `ui/servers.rs`'s `rebuild_rows` and [`rebuild_monitor_options`] give the same reason:
+/// rebuilding every frame would despawn and respawn the entity under a pointer mid-press. The
+/// trap here is sharper than theirs, because `Voices` is marked changed on **every frame
+/// anybody speaks** — so the comparison is against the set of speakers actually drawn, not
+/// against `Res::is_changed`.
+fn rebuild_voice_rows(
+    voices: Res<Voices>,
+    appearances: Res<Appearances>,
+    panels: Query<Entity, With<VoicesPanel>>,
+    rows: Query<(Entity, &VoiceRow)>,
+    overflow: Query<(Entity, &VoiceOverflow)>,
+    mut commands: Commands,
+) {
+    let heard = voices.recent(std::time::Instant::now());
+    let wanted: Vec<u64> = heard.iter().copied().take(PANEL_VOICES).collect();
+    let hidden = heard.len() - wanted.len();
+
+    let drawn: Vec<u64> = {
+        let mut drawn: Vec<u64> = rows.iter().map(|(_, row)| row.0).collect();
+        drawn.sort_unstable();
+        drawn
+    };
+    let counted = overflow
+        .iter()
+        .map(|(_, count)| count.0)
+        .next()
+        .unwrap_or(0);
+    let mut sorted = wanted.clone();
+    sorted.sort_unstable();
+    // **Both halves**, because they are two questions: who is drawn, and how many are not.
+    // Comparing only the first is how the count came to be spawned never — the ninth speaker
+    // changes `hidden` and leaves the eight rows exactly as they were.
+    if sorted == drawn && hidden == counted {
+        return;
+    }
+
+    for (entity, _) in &rows {
+        commands.entity(entity).despawn();
+    }
+    for (entity, _) in &overflow {
+        commands.entity(entity).despawn();
+    }
+    for panel in &panels {
+        commands.entity(panel).with_children(|list| {
+            for entity_id in &wanted {
+                // Named the way every other roster names them, and drawn as an id when the
+                // description has not arrived — `ui/voice.rs`'s rule, for its reason: hearing
+                // somebody the client cannot name is a real state, and dropping the row would
+                // leave a speaker nobody can mute.
+                let name = appearances
+                    .name(*entity_id)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| format!("player {entity_id}"));
+                spawn_voice_row(list, *entity_id, name);
+            }
+            if hidden > 0 {
+                list.spawn((
+                    VoiceOverflow(hidden),
+                    Text::new(format!("+{hidden} more")),
+                    TextFont {
+                        font_size: ROW_FONT,
+                        ..default()
+                    },
+                    TextColor(Color::srgba(0.72, 0.75, 0.80, 0.75)),
+                    TextLayout::no_wrap(),
+                ));
+            }
+        });
+    }
+}
+
+/// Gives the Voices panel a `Display` and takes it away.
+///
+/// `Display`, never `Visibility`, for [`show_monitor_dropdown`]'s reason: a hidden node still
+/// occupies its layout box, and a closed panel must be out of hit-testing so the rows it
+/// covered are pressable again.
+fn show_voices_panel(screen: Res<SettingsScreen>, mut panels: Query<&mut Node, With<VoicesPanel>>) {
+    let next = if screen.voices_open {
+        Display::Flex
+    } else {
+        Display::None
+    };
+    for mut node in &mut panels {
+        if node.display != next {
+            node.display = next;
+        }
+    }
+}
+
 /// Keeps every value on the panel in step with the settings behind it.
 fn refresh_readings(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
     devices: Res<AudioDevices>,
+    voices: Res<Voices>,
     screen: Res<SettingsScreen>,
     mut readings: Query<(&Reading, &mut Text)>,
 ) {
+    // `Voices` is written on every frame anybody is speaking, so this is the one input that
+    // is nearly always "changed" while a conversation is happening. It is still cheaper than
+    // the alternative — a per-speaker reading that only refreshed when a *setting* moved
+    // would sit at a stale volume for as long as nobody touched the rest of the screen.
     if !settings.is_changed()
         && !monitors.is_changed()
         && !devices.is_changed()
+        && !voices.is_changed()
         && !screen.is_changed()
     {
         return;
@@ -1182,7 +1553,7 @@ fn refresh_readings(
         devices: &devices,
     };
     for (reading, mut text) in &mut readings {
-        let next = describe(&settings, choices, &screen, *reading);
+        let next = describe(&settings, choices, &voices, &screen, *reading);
         if text.0 != next {
             text.0 = next;
         }
@@ -1194,6 +1565,7 @@ fn refresh_readings(
 fn describe(
     settings: &Settings,
     choices: Choices<'_>,
+    voices: &Voices,
     screen: &SettingsScreen,
     reading: Reading,
 ) -> String {
@@ -1210,6 +1582,14 @@ fn describe(
                 settings.reading_with_choices(Knob::Monitor, choices)
             )
         }
+        Reading::VoicesPanel => if screen.voices_open { "HIDE" } else { "SHOW" }.to_owned(),
+        Reading::VoiceLevel(entity_id) => format!("{}%", voices.volume(entity_id)),
+        Reading::VoiceMuted(entity_id) => if voices.muted(entity_id) {
+            "UNMUTE"
+        } else {
+            "MUTE"
+        }
+        .to_owned(),
         Reading::Binding(control) if screen.capturing == Some(control) => "...".to_owned(),
         Reading::Binding(control) => key_name(settings.bindings().key(control))
             .unwrap_or("unbound")
@@ -1226,6 +1606,7 @@ fn on_or_off(flag: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::{HEARD_FOR, MAX_VOICE};
     use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference};
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
@@ -1348,6 +1729,45 @@ mod tests {
             .find(|(reading, _)| **reading == wanted)
             .map(|(_, text)| text.0.clone())
             .unwrap_or_else(|| panic!("no reading for {wanted:?}"))
+    }
+
+    /// Records `entity_id` as heard now, as `audio/heard.rs` does when a frame of theirs is
+    /// decoded, and runs a frame.
+    fn hear(app: &mut App, entity_id: u64) {
+        app.world_mut()
+            .resource_mut::<Voices>()
+            .heard(entity_id, std::time::Instant::now());
+        app.update();
+    }
+
+    /// Presses one of a speaker's controls inside the open Voices panel.
+    fn press_voice(app: &mut App, wanted: VoiceControl) {
+        let button = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceControl)>();
+            query
+                .iter(world)
+                .find(|(_, control)| **control == wanted)
+                .map(|(entity, _)| entity)
+                .unwrap_or_else(|| panic!("no control for {wanted:?}"))
+        };
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a button has an interaction") = Interaction::Pressed;
+        app.update();
+        *app.world_mut()
+            .entity_mut(button)
+            .get_mut::<Interaction>()
+            .expect("a button has an interaction") = Interaction::None;
+        app.update();
+    }
+
+    /// Every speaker the Voices panel currently draws a row for, in order.
+    fn voice_rows(app: &mut App) -> Vec<u64> {
+        let world = app.world_mut();
+        let mut query = world.query::<&VoiceRow>();
+        query.iter(world).map(|row| row.0).collect()
     }
 
     /// Presses the Monitor row's closed control, opening or closing the dropdown.
@@ -2271,7 +2691,8 @@ mod tests {
                 "Voice",
                 "Voice threshold",
                 "Heard by",
-                "Test speakers"
+                "Test speakers",
+                "Voices"
             ]
         );
         for other in [Tab::Controls, Tab::Graphics] {
@@ -2634,5 +3055,195 @@ mod tests {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
         app.update();
         assert!(!app.world().resource::<SettingsScreen>().is_open());
+    }
+
+    // -------------------------------------------------------------------------
+    // The Voices panel
+    // -------------------------------------------------------------------------
+
+    /// **The panel lists whoever has been heard, and the mute and volume it offers reach the
+    /// resource the mixer reads.** Driven through the assembled screen — the press goes to a
+    /// real button and the assertion is on `Voices`, so a control wired to nothing fails here.
+    #[test]
+    fn the_voices_panel_lists_who_was_heard_and_its_controls_reach_them() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+        assert!(
+            voice_rows(&mut app).is_empty(),
+            "a silent session drew rows"
+        );
+
+        hear(&mut app, 7);
+        hear(&mut app, 9);
+        assert_eq!(voice_rows(&mut app), vec![7, 9]);
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert_eq!(reading_of(&mut app, Reading::VoicesPanel), "HIDE");
+
+        assert_eq!(reading_of(&mut app, Reading::VoiceLevel(7)), "100%");
+        assert_eq!(reading_of(&mut app, Reading::VoiceMuted(7)), "MUTE");
+
+        press_voice(&mut app, VoiceControl::Mute(7));
+        assert!(
+            app.world().resource::<Voices>().muted(7),
+            "the mute button reached nothing"
+        );
+        assert_eq!(reading_of(&mut app, Reading::VoiceMuted(7)), "UNMUTE");
+        assert!(
+            !app.world().resource::<Voices>().muted(9),
+            "muting one speaker muted another"
+        );
+
+        press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        assert_eq!(app.world().resource::<Voices>().volume(7), 120);
+        assert_eq!(reading_of(&mut app, Reading::VoiceLevel(7)), "120%");
+
+        press_voice(&mut app, VoiceControl::Nudge(7, -1));
+        assert_eq!(app.world().resource::<Voices>().volume(7), 110);
+    }
+
+    /// **A speaker's volume runs to twice unity and stops**, which is what the acceptance
+    /// criterion's 0-200% means at the control rather than in the model.
+    #[test]
+    fn a_speakers_volume_stops_at_both_ends_from_the_panel() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        for _ in 0..15 {
+            press_voice(&mut app, VoiceControl::Nudge(7, 1));
+        }
+        assert_eq!(app.world().resource::<Voices>().volume(7), MAX_VOICE);
+        assert_eq!(
+            reading_of(&mut app, Reading::VoiceLevel(7)),
+            format!("{MAX_VOICE}%")
+        );
+
+        for _ in 0..30 {
+            press_voice(&mut app, VoiceControl::Nudge(7, -1));
+        }
+        assert_eq!(app.world().resource::<Voices>().volume(7), 0);
+        assert!(
+            !app.world().resource::<Voices>().muted(7),
+            "turning a speaker down to nothing muted them, which is a different button"
+        );
+    }
+
+    /// **The rows are rebuilt when the set of speakers changes and never merely because
+    /// somebody spoke.** `Voices` is marked changed on every frame anybody is talking, so a
+    /// rebuild driven by `Res::is_changed` would despawn and respawn the row under a pointer
+    /// mid-press — the trap `rebuild_monitor_options` and `ui/servers.rs` both record.
+    #[test]
+    fn a_speaker_still_talking_does_not_have_their_row_rebuilt() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        hear(&mut app, 7);
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        let before = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.0 == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row for the speaker")
+        };
+
+        // Ten more frames of that speaker talking, which marks `Voices` changed every time.
+        for _ in 0..10 {
+            hear(&mut app, 7);
+        }
+
+        let after = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &VoiceRow)>();
+            query
+                .iter(world)
+                .find(|(_, row)| row.0 == 7)
+                .map(|(entity, _)| entity)
+                .expect("a row for the speaker")
+        };
+        assert_eq!(
+            before, after,
+            "the row was rebuilt while its speaker was still talking"
+        );
+
+        // And a genuinely new speaker does rebuild it.
+        hear(&mut app, 9);
+        assert_eq!(voice_rows(&mut app), vec![7, 9]);
+    }
+
+    /// **A crowd is bounded and counted**, exactly as the HUD's speaker line is: the panel is
+    /// an overlay on a screen with a narrowest supported viewport, and one row per speaker
+    /// would run off the bottom of it.
+    #[test]
+    fn more_speakers_than_the_panel_draws_are_counted() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        press(&mut app, SettingsAction::ToggleVoices);
+        for entity_id in 0..(PANEL_VOICES as u64 + 3) {
+            hear(&mut app, entity_id);
+        }
+        assert_eq!(voice_rows(&mut app).len(), PANEL_VOICES);
+
+        let world = app.world_mut();
+        let mut query = world.query::<(&VoiceOverflow, &Text)>();
+        let overflow = query.iter(world).next().map(|(_, text)| text.0.clone());
+        assert_eq!(overflow, Some("+3 more".to_owned()));
+    }
+
+    /// A speaker nobody has heard for [`HEARD_FOR`] leaves the panel — which is the criterion's
+    /// sixty seconds, read at the screen rather than at the model.
+    #[test]
+    fn a_speaker_nobody_has_heard_for_a_minute_leaves_the_panel() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        press(&mut app, SettingsAction::ToggleVoices);
+
+        let long_ago = std::time::Instant::now() - HEARD_FOR - std::time::Duration::from_secs(1);
+        app.world_mut().resource_mut::<Voices>().heard(7, long_ago);
+        app.update();
+        assert!(
+            voice_rows(&mut app).is_empty(),
+            "somebody nobody has heard for a minute was still on the panel"
+        );
+    }
+
+    /// The panel is an overlay with its own lifecycle: its row opens and closes it, Escape
+    /// closes it before it closes the screen, and leaving the tab closes it rather than
+    /// leaving it floating over another tab's rows.
+    #[test]
+    fn the_voices_panel_closes_on_escape_and_on_a_tab_change() {
+        let mut app = screen_app();
+        *app.world_mut().resource_mut::<Tab>() = Tab::Audio;
+        app.update();
+
+        let shown = |app: &mut App| {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<&Node, With<VoicesPanel>>();
+            query.iter(world).all(|node| node.display == Display::Flex)
+        };
+        assert!(!shown(&mut app), "the panel started open");
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert!(shown(&mut app));
+        press(&mut app, SettingsAction::ToggleVoices);
+        assert!(!shown(&mut app), "its own row did not close it");
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!shown(&mut app), "escape did not close the panel");
+        assert!(
+            app.world().resource::<SettingsScreen>().is_open(),
+            "escape closed the whole screen while the panel was up"
+        );
+
+        press(&mut app, SettingsAction::ToggleVoices);
+        press_tab(&mut app, Tab::Graphics);
+        assert!(!shown(&mut app), "the panel outlived the tab it belongs to");
     }
 }
