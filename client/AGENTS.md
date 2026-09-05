@@ -83,7 +83,7 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume, the output device and what the microphone is for — the voice mode and the level voice activation triggers at; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume, the output device and the microphone, and what the microphone is for — the voice mode and the level voice activation triggers at; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
@@ -1496,6 +1496,14 @@ the frame it starts the tone, so the screen never has to remember to clear it.
 The output and the input are the same question asked of two halves of one card, so they are
 one enum and one bound rather than two of each; what differs between the sides is what
 `audio/device.rs` does with the answer, never what a player may say.
+
+**Both supervisors enumerate at startup, and only the loudspeaker's watches for a moved
+default.** A bound that stayed empty until its device had been opened would be a knob a player
+could not *choose* with, so both publish before their first open, through `offer_the_devices`.
+What the microphone's supervisor deliberately lacks is `DEFAULT_MOVED`: a loudspeaker is open
+whenever a device will have it, so following the host's default means reopening when it moves;
+a microphone is open only while somebody is speaking, and the moment to notice a new default
+is the next time one is opened rather than mid-sentence.
 
 **The output device is a choice, and `SystemDefault` is one of its values rather than the
 absence of one.** Following the system means reopening when the host moves its own default,

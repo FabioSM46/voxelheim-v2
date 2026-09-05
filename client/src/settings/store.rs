@@ -205,6 +205,10 @@ fn render(settings: &Settings) -> String {
         "output-device {}\n",
         device_field(&settings.output_device)
     ));
+    out.push_str(&format!(
+        "input-device {}\n",
+        device_field(&settings.input_device)
+    ));
     out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
     out.push_str(&format!(
         "voice-activation-threshold {}\n",
@@ -311,6 +315,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "output-device" => match device_from_field(value) {
                 Some(parsed) => settings.output_device = parsed,
                 None => refuse("the system default output or a saved device"),
+            },
+            "input-device" => match device_from_field(value) {
+                Some(parsed) => settings.input_device = parsed,
+                None => refuse("the system default microphone or a saved device"),
             },
             "voice-mode" => match VoiceMode::from_name(value) {
                 Some(parsed) => settings.voice_mode = parsed,
@@ -459,7 +467,10 @@ mod tests {
         let monitors = super::super::MonitorChoices::named(&["Main display", "Side display"]);
         // A name with spaces and a colon in it: the shape `device_field` exists for, so the
         // round trip runs over the case that would otherwise be read back as its first word.
-        let devices = super::super::AudioDevices::named(&["HDA Intel PCH: ALC295 Analog"]);
+        let devices = super::super::AudioDevices::named(
+            &["HDA Intel PCH: ALC295 Analog"],
+            &["HDA Intel PCH: ALC295 Analog Mic"],
+        );
         let bounds = Choices {
             monitors: &monitors,
             devices: &devices,
@@ -468,6 +479,7 @@ mod tests {
         settings.adjust_with_choices(Knob::WindowMode, 1, bounds);
         settings.adjust_with_choices(Knob::Monitor, 1, bounds);
         settings.adjust_with_choices(Knob::OutputDevice, 1, bounds);
+        settings.adjust_with_choices(Knob::InputDevice, 1, bounds);
         settings.adjust(Knob::RenderDistance, -3);
         settings.adjust(Knob::FieldOfView, 3);
         settings.adjust(Knob::Brightness, -2);
@@ -806,7 +818,8 @@ master-volume 25
         let path = scratch.join("settings");
         fs::write(
             &path,
-            "render-distance 5\nmaster-volume loud\nvsync off\noutput-device name:6f6b\n",
+            "render-distance 5\nmaster-volume loud\nvsync off\noutput-device name:6f6b\n\
+             input-device name:zz\n",
         )
         .expect("a scratch file");
 
@@ -818,16 +831,23 @@ master-volume 25
         assert_eq!(settings.render_distance(), 5);
         assert!(!settings.vsync(), "a bad volume line took the rest with it");
         assert_eq!(
+            settings.input_device(),
+            &DeviceChoice::SystemDefault,
+            "an unreadable microphone line named a device anyway"
+        );
+        assert_eq!(
             settings.output_device(),
             &DeviceChoice::Named("ok".to_owned()),
             "a bad volume line took the device with it"
         );
-        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert_eq!(complaints.len(), 2, "{complaints:?}");
         assert!(complaints[0].contains("line 2"), "{complaints:?}");
-        assert!(
-            !complaints[0].contains("loud"),
-            "a complaint carried the file's contents: {complaints:?}"
-        );
+        for complaint in &complaints {
+            assert!(
+                !complaint.contains("loud") && !complaint.contains("name:zz"),
+                "a complaint carried the file's contents: {complaints:?}"
+            );
+        }
 
         // And the mirror: an unreadable device line is the system default, not a device
         // called `speakers`, and it costs the volume beside it nothing.

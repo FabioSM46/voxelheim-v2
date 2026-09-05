@@ -932,12 +932,16 @@ impl Capture {
 
 /// What the capture supervisor needs from an audio host.
 ///
-/// [`OutputHost`]'s counterpart, and shorter by two methods: **there is no device choice
-/// here.** Naming an input device is #853, so this opens the host's default and nothing else,
-/// which means it needs neither an enumeration nor a default-moved check.
+/// [`OutputHost`]'s counterpart, and shorter by one method: **this side has no default-moved
+/// check** — see `client/AGENTS.md` for why a microphone does not follow a moved default.
+/// Opening a *named* device is #853 part 5; this enumerates, so the knob has something to
+/// offer, and opens the host's default.
 trait InputHost {
     /// A built stream that is not yet running. Dropping it closes the device.
     type Stream;
+
+    /// Every input device this host can name, in the host's own order.
+    fn device_names(&self) -> Vec<String>;
 
     /// Builds a stream on the host's default input device, without running it.
     fn open(
@@ -976,8 +980,17 @@ fn supervise_capture<H: InputHost>(
     host: &H,
     capture: &Arc<Capture>,
     watch: &Arc<Watch>,
+    choice: &Arc<Choice>,
     pace: Pace,
 ) {
+    // Once, at startup, exactly as [`supervise`] does it and for the same reason: enumeration
+    // is not free on every backend, and a knob whose bound was refreshed on every poll would
+    // pay for it while nobody was looking at the settings screen. Bound before the macro,
+    // because `debug!` evaluates its fields only when the callsite is enabled.
+    let seen = host.device_names();
+    debug!("audio input devices: {seen:?}");
+    choice.publish(seen);
+
     let mut failures: u32 = 0;
     while !watch.stopping() {
         if !capture.wanted() {
@@ -1003,6 +1016,13 @@ fn supervise_capture<H: InputHost>(
                         format.channels
                     );
                 }
+                // Refreshed on an open rather than on a poll, for [`supervise`]'s reason: an
+                // open is where this machine's devices most recently changed. On this side it
+                // is also the *only* time the list moves while a client is running, because a
+                // microphone is opened when somebody decides to speak — which is exactly when
+                // they have just plugged one in.
+                choice.publish(host.device_names());
+
                 let mut held = false;
                 while !watch.stopping() && watch.loss() == PLAYING && capture.wanted() {
                     watch.rest(pace.playing);
@@ -1024,7 +1044,15 @@ fn supervise_capture<H: InputHost>(
             }
             Err(err) => {
                 if failures.is_multiple_of(FAILURE_LOG_EVERY) {
-                    warn!("no voice capture ({err}); nothing this player says is sent");
+                    let seen = host.device_names();
+                    warn!(
+                        "no voice capture ({err}); nothing this player says is sent. \
+                         Devices seen: {seen:?}"
+                    );
+                    // The one place the list is refreshed while nothing opens, so a
+                    // microphone chosen and then unplugged still leaves the knob offering
+                    // what is actually attached.
+                    choice.publish(seen);
                 }
                 failures = failures.saturating_add(1);
                 watch.rest(pace.after_failure);
@@ -1042,6 +1070,9 @@ fn supervise_capture<H: InputHost>(
 pub struct AudioCapture {
     watch: Arc<Watch>,
     capture: Arc<Capture>,
+    /// What the host named on this side of the card. The same type the output supervisor
+    /// keeps, and only its list half is used yet: naming an input device is #853 part 5.
+    choice: Arc<Choice>,
     supervisor: Option<JoinHandle<()>>,
 }
 
@@ -1051,12 +1082,14 @@ impl AudioCapture {
     pub fn start() -> Self {
         let watch = Arc::new(Watch::default());
         let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
         let supervisor = thread::Builder::new()
             .name("voxelheim-voice-capture".to_owned())
             .spawn({
                 let watch = Arc::clone(&watch);
                 let capture = Arc::clone(&capture);
-                move || supervise_capture(&CpalHost::new(), &capture, &watch, Pace::REAL)
+                let choice = Arc::clone(&choice);
+                move || supervise_capture(&CpalHost::new(), &capture, &watch, &choice, Pace::REAL)
             })
             .map_err(|err| {
                 warn!(
@@ -1067,8 +1100,20 @@ impl AudioCapture {
         Self {
             watch,
             capture,
+            choice,
             supervisor,
         }
+    }
+
+    /// Every input device the host named, as of the supervisor's last enumeration.
+    pub fn input_devices(&self) -> Vec<String> {
+        self.choice.seen()
+    }
+
+    /// How many times that list has been replaced, so a Bevy system can tell "nothing new"
+    /// from "the same list again" without a lock or a clone every frame.
+    pub fn listings(&self) -> u64 {
+        self.choice.listings()
     }
 
     /// The ring and the flags, for the pipeline above.
@@ -1105,8 +1150,14 @@ impl AudioCapture {
         Self {
             watch: Arc::new(Watch::default()),
             capture: Arc::new(Capture::new()),
+            choice: Arc::new(Choice::default()),
             supervisor: None,
         }
+    }
+
+    /// Publishes `names` as though the supervisor had just enumerated them.
+    pub(super) fn enumerated(&self, names: Vec<String>) {
+        self.choice.publish(names);
     }
 
     /// Records a stream as the supervisor would when one opens.
@@ -1132,6 +1183,15 @@ impl Drop for AudioCapture {
 
 impl InputHost for CpalHost {
     type Stream = cpal::Stream;
+
+    fn device_names(&self) -> Vec<String> {
+        match self.0.input_devices() {
+            Ok(devices) => named(devices.map(|device| device.name())),
+            // Not an error worth failing over: the list is a bound, and an empty one says
+            // what a missing one would — this host offers nothing but its default.
+            Err(_) => Vec::new(),
+        }
+    }
 
     fn open(
         &self,
@@ -1745,6 +1805,9 @@ mod tests {
         rate_at_start: Mutex<Vec<u32>>,
         /// Set by `open` so `start` can reach the shared state.
         shared: Mutex<Option<Arc<Capture>>>,
+        /// What this host answers an enumeration with, and how many it has been asked for.
+        names: Mutex<Vec<String>>,
+        enumerations: AtomicUsize,
     }
 
     impl FakeInput {
@@ -1755,13 +1818,29 @@ mod tests {
             })
         }
 
+        /// A host that answers `names` when asked what it has.
+        fn naming(names: &[&str], answers: Vec<Result<Format, String>>) -> Arc<Self> {
+            let host = Self::answering(answers);
+            *lock(&host.names) = names.iter().map(|name| (*name).to_owned()).collect();
+            host
+        }
+
         fn opens(&self) -> usize {
             self.opens.load(Ordering::Relaxed)
+        }
+
+        fn enumerations(&self) -> usize {
+            self.enumerations.load(Ordering::Relaxed)
         }
     }
 
     impl InputHost for Arc<FakeInput> {
         type Stream = FakeStream;
+
+        fn device_names(&self) -> Vec<String> {
+            self.enumerations.fetch_add(1, Ordering::Relaxed);
+            lock(&self.names).clone()
+        }
 
         fn open(
             &self,
@@ -1813,12 +1892,23 @@ mod tests {
         capture: &Arc<Capture>,
         done: impl Fn() -> bool,
     ) -> Arc<Watch> {
+        drive_capture_with(host, capture, &Arc::new(Choice::default()), done)
+    }
+
+    /// [`drive_capture`], with the enumeration the supervisor publishes into kept.
+    fn drive_capture_with(
+        host: &Arc<FakeInput>,
+        capture: &Arc<Capture>,
+        choice: &Arc<Choice>,
+        done: impl Fn() -> bool,
+    ) -> Arc<Watch> {
         let watch = Arc::new(Watch::default());
         let supervisor = {
             let host = Arc::clone(host);
             let capture = Arc::clone(capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done() && Instant::now() < deadline {
@@ -1831,6 +1921,46 @@ mod tests {
         watch
     }
 
+    /// **The knob's bound is filled before anything is opened, and that is the point.**
+    ///
+    /// A player choosing a microphone has not asked to be recorded yet — the settings screen
+    /// is up and the capture stream is shut — so a supervisor that enumerated only on an open
+    /// would leave the knob with nothing to offer until after the choice had been made. And
+    /// it asks **once** while idle, for [`supervise`]'s reason: enumeration is not free on
+    /// every backend, and a list nobody is looking at must not be rebuilt on every poll.
+    #[test]
+    fn the_input_devices_are_named_before_a_microphone_is_ever_opened() {
+        let host = FakeInput::naming(
+            &["Built-in microphone", "USB headset mic"],
+            vec![Ok(format("Built-in microphone", 48_000, 1))],
+        );
+        let capture = Arc::new(Capture::new());
+        let choice = Arc::new(Choice::default());
+        let listed = {
+            let choice = Arc::clone(&choice);
+            move || choice.listings() > 0
+        };
+        drive_capture_with(&host, &capture, &choice, listed);
+
+        assert_eq!(
+            choice.seen(),
+            vec![
+                "Built-in microphone".to_owned(),
+                "USB headset mic".to_owned()
+            ]
+        );
+        assert_eq!(
+            host.opens(),
+            0,
+            "a device was opened to find out what the devices are called"
+        );
+        assert_eq!(
+            host.enumerations(),
+            1,
+            "the idle loop asked the host what it had, over and over"
+        );
+    }
+
     /// **The state a client that has never asked for voice sits in for ever.** The supervisor
     /// runs and no device is opened — which is the acceptance criterion's "the capture stream
     /// is never opened", and it is a property of this loop rather than of its callers.
@@ -1841,11 +1971,13 @@ mod tests {
         assert!(!capture.wanted());
 
         let watch = Arc::new(Watch::default());
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         // Long enough for hundreds of passes at `BRISK`.
         thread::sleep(Duration::from_millis(50));
@@ -1879,11 +2011,13 @@ mod tests {
             move || !lock(&host.rate_at_start).is_empty()
         };
         let watch = Arc::new(Watch::default());
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, BRISK))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, BRISK))
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !opened() && Instant::now() < deadline {
@@ -1956,6 +2090,7 @@ mod tests {
                     &host,
                     &capture,
                     &watch,
+                    &Arc::new(Choice::default()),
                     Pace {
                         playing: Duration::from_millis(1),
                         after_failure: Duration::from_secs(2),
@@ -2003,6 +2138,7 @@ mod tests {
                     &host,
                     &capture,
                     &watch,
+                    &Arc::new(Choice::default()),
                     Pace {
                         playing: Duration::from_millis(1),
                         after_failure: Duration::from_secs(2),
@@ -2039,11 +2175,13 @@ mod tests {
             playing: Duration::from_secs(30),
             after_failure: Duration::from_secs(30),
         };
+        let choice = Arc::new(Choice::default());
         let supervisor = {
             let host = Arc::clone(&host);
             let capture = Arc::clone(&capture);
             let watch = Arc::clone(&watch);
-            thread::spawn(move || supervise_capture(&host, &capture, &watch, pace))
+            let choice = Arc::clone(&choice);
+            thread::spawn(move || supervise_capture(&host, &capture, &watch, &choice, pace))
         };
 
         // Let it reach the idle wait before anything asks.

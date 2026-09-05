@@ -1238,7 +1238,10 @@ mod tests {
             // Two of each, so a knob whose bound is the machine's has somewhere to step.
             // No `AudioPlugin` and therefore no device anywhere: this is the list
             // `offer_the_output_devices` would have written, inserted by hand.
-            .insert_resource(AudioDevices::named(&["Built-in speakers", "USB headset"]))
+            .insert_resource(AudioDevices::named(
+                &["Built-in speakers", "USB headset"],
+                &["Built-in microphone", "USB headset mic"],
+            ))
             .add_plugins(SettingsScreenPlugin);
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
         app.world_mut().resource_mut::<SettingsScreen>().open();
@@ -1766,8 +1769,8 @@ mod tests {
     }
 
     /// Every value with a model-owned bound fits in the reading area at both ends of that
-    /// bound. The monitor and the output device are deliberately excluded: hardware owns
-    /// both names, so they follow the clipped overflow policy asserted separately below.
+    /// bound. The monitor and the two devices are deliberately excluded: hardware owns all
+    /// three names, so they follow the clipped overflow policy asserted separately below.
     #[test]
     fn every_bounded_reading_fits_complete_on_one_line() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
@@ -1778,7 +1781,10 @@ mod tests {
         };
         let mut values = Vec::new();
         for knob in KNOBS.into_iter().filter(|knob| {
-            knob.tab() != Tab::Controls && *knob != Knob::Monitor && *knob != Knob::OutputDevice
+            knob.tab() != Tab::Controls
+                && *knob != Knob::Monitor
+                && *knob != Knob::OutputDevice
+                && *knob != Knob::InputDevice
         }) {
             for steps in [-10_000, 10_000] {
                 let mut settings = Settings::default();
@@ -2233,8 +2239,12 @@ mod tests {
     // The Audio tab
     // -------------------------------------------------------------------------
 
-    /// Third in the strip, holding its own knob and the speaker test and nothing the other
+    /// Third in the strip, holding its own knobs and the speaker test and nothing the other
     /// two tabs claim.
+    ///
+    /// **The order is the assertion, not just the membership.** The two devices sit under
+    /// the volume they feed, in the order a player reads them: what comes out, then what
+    /// goes in, then what the microphone is for.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -2245,6 +2255,7 @@ mod tests {
             vec![
                 "Master volume",
                 "Output device",
+                "Microphone",
                 "Voice",
                 "Voice threshold",
                 "Test speakers"
@@ -2316,7 +2327,7 @@ mod tests {
 
         // The headset is unplugged. The choice stands, and the row says why it is silent.
         *app.world_mut().resource_mut::<AudioDevices>() =
-            AudioDevices::named(&["Built-in speakers"]);
+            AudioDevices::named(&["Built-in speakers"], &["Built-in microphone"]);
         app.update();
         assert_eq!(
             app.world().resource::<Settings>().output_device(),
