@@ -1700,9 +1700,23 @@ demonstrably arrives late, and never shrinks inside a turn. A missing frame is r
 redundant copy in the **immediately** next packet — Opus puts a copy of frame N inside packet N+1
 and nowhere else, so a repair offered from any other frame plays the wrong audio in the wrong
 slot — concealed when that packet has not arrived, and played as *silence* when the speaker has
-simply stopped, because concealing that would be inventing audio nobody sent. Every speaker is summed into **one** source on the `Voice` bus, because the mixer
-has four slots for the whole client and a slot is claimed for its life — a source per speaker
-arrives with the spatialisation that needs one.
+simply stopped, because concealing that would be inventing audio nobody sent.
+
+**Every speaker gets a mixer source of their own, and one shared source stands behind them.**
+This used to say the opposite — one source for everybody, because the mixer had four slots and
+a claim was for its life — and #854 is where a slot became something a `SourceHandle` gives
+back when it drops. `hear` takes one for each speaker beside their decoder and
+`release_speakers` returns it with the entry, `place_the_speakers` sets its gain, pan and
+occlusion every frame, and there are sixteen slots: three are spoken for, so thirteen people
+are heard from where they are standing. **A fourteenth is heard unpositioned rather than not
+at all** — summed into the source this module has always held, which is exactly what everybody
+sounded like before. Being in the wrong place beats being inaudible, and it is the same answer
+the snapshot-has-not-placed-them case gets.
+
+**Which side of the seam a slot is decided on, and when.** Once, when the speaker is first
+heard, and never mid-sentence: moving somebody from the shared sum onto a source of their own
+would leave up to four frames of their audio already summed into the shared ring while the new
+ring started filling, and they would briefly be heard twice.
 
 **A name outlives the decoder that produced it, deliberately.** `audio/heard.rs` holds a
 speaker's decoder while frames are *arriving* — 500 ms — and `Speaking` holds their name for a
@@ -1731,6 +1745,59 @@ voice is at 0.20 eight blocks out and 0.07 at sixteen, so the server's relay ran
 range a player can actually hear over are not the same number. That is what `1/d` is rather
 than an accident of the arithmetic, and the server relaying further than the ear reaches is
 the intended shape.
+
+**Occlusion is three rays through the world, and it borrows the traversal rather than
+writing one.** `spatial::occlusion` casts three parallel rays between the two eyes through
+`player/target.rs`'s `raycast`, whose `solid` closure is called once per voxel entered, in
+order; answering `false` every time turns the search into the enumeration this needs. That
+is the same reasoning `name_plate_line_is_clear` gives one module over: the server's
+`clearLineOfSight` is authoritative for gameplay and neither of these is, so the client half
+must not become a second hand-written walk that can disagree with the one driving the aiming
+outline. Each ray sums a per-material weight and is **capped at 1.0 individually**, and the
+answer is the mean — so the value reads as "how many rays got through", and a ray behind two
+walls is exactly as blocked as a ray behind one.
+
+**The classes are `world/palette.rs`'s and the weights are `audio/spatial.rs`'s**, and the
+split is not tidiness: the palette knows slate is stone, and how much stone muffles a voice
+is an opinion about sound that a second consumer might hold differently.
+`palette::material_class` is the fourth answer that file gives about a block and the first
+that is about none of drawing, stopping a body or hiding a face. Two consequences fall out of
+reusing `is_solid` as the filter rather than inventing a predicate: **a bush occludes
+nothing** while tree leaves occlude a little, because #874 made bushes cover and cover stops
+no body; and **water occludes nothing**, for the same reason a ray passes through a lake to
+outline the bed. An id from a contract this build has never heard of is stone, which is the
+same direction `is_solid` and `is_opaque` already fail in.
+
+Two limits are real, and both fail towards *less* occlusion rather than towards a confident
+wrong answer: a voxel the session has not been streamed reads as air, and `raycast` stops
+after 256 voxels.
+
+**Two clocks, and neither of them is the frame the other runs on.** A speaker's *position* is
+read every frame from the same interpolated answer the renderer draws them at — their eye is
+their feet plus `EYE_HEIGHT`, the listener's is the `WorldCamera`'s translation, and the
+azimuth is measured against that camera's yaw. Their *occlusion* is read at 10 Hz, because
+three rays per speaker is far too much to do sixty times a second and far more often than a
+wall moves. What the coarser clock costs is bounded by the one below it: the smoothing takes
+50 ms to close a filter and 300 ms to open one, so a reading up to 100 ms old is being ramped
+towards over a window of the same order and there is nothing for the ear to catch.
+`player/ambience.rs` samples the world on a fixed period for the same reason.
+
+**The smoothing runs in the callback, once per block, and that is where its state lives.** It
+is the only part of the chain that has to, and the reason is the same one that shapes
+everything else in `mixer.rs`: the ramp has to advance with the audio it is filtering, not with
+the frame rate of whatever is looking at the world. So a Bevy system writes a *target* and the
+render path advances towards it by exactly that block's worth of time. The crossover
+coefficients are the counter-example that makes the rule readable — they depend on the device's
+rate and on two fixed frequencies and on nothing else, so they are computed once per stream in
+`set_format` rather than per block by every source.
+
+**A source with nothing in its way is reconstructed exactly**, not approximately: at zero
+occlusion every band gain is `1.0` and `low + (mid − low) + (x − mid)` is `x` whatever the
+crossovers are. A speaker in the open therefore sounds like one this stage never touched, which
+is what makes it safe to put in front of every voice rather than only occluded ones. **And a
+mono device is not panned at all** — one loudspeaker cannot carry a direction, so the distance
+gain and the filter apply and the pan is skipped, rather than averaging the pair and making a
+hard-panned voice 3 dB quieter for no reason a listener could act on.
 
 ## Conventions that are not obvious from the code
 

@@ -44,6 +44,11 @@ use std::f32::consts::{FRAC_PI_4, TAU};
 use bevy::prelude::Vec2;
 use bevy::prelude::Vec3;
 
+use crate::net::BlockCoord;
+use crate::player::raycast;
+use crate::world::palette::MaterialClass;
+use crate::world::{ChunkStore, palette};
+
 /// How close a speaker may be before distance takes anything away, in blocks.
 ///
 /// Inside it a voice is at full gain. Two blocks is about arm's length in this world and
@@ -295,6 +300,201 @@ pub fn advance(current: f32, target: f32, elapsed_seconds: f32) -> f32 {
     };
     let step = elapsed_seconds / full_travel;
     current + (target - current).clamp(-step, step)
+}
+
+/// Everything one mixer source's spatialisation is, in the form the mixer is set to.
+///
+/// **One value rather than four arguments**, because the four are computed together from one
+/// pair of positions and setting three of them from a stale reading of the fourth is a state
+/// nobody would notice. [`place`] is the only thing that builds one from a world, and
+/// [`Self::UNPOSITIONED`] is the only other value there is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placement {
+    /// Distance attenuation, applied before the pan.
+    pub gain: f32,
+    /// The constant-power pair, or [`PanGains::UNPOSITIONED`].
+    pub pan: PanGains,
+    /// Where the filter is being asked to go, in `0..1`. The mixer smooths towards it with
+    /// [`advance`]; nothing here is the value a sample is actually filtered by.
+    pub occlusion: f32,
+    /// The front/back cue's multiplier on the high band.
+    pub high_cue: f32,
+}
+
+impl Placement {
+    /// What a speaker the world has not placed is heard at: unity in both ears, no filter.
+    ///
+    /// Every field is the identity of what it feeds, so a source set to this renders exactly
+    /// what was pushed into it — which is what "unpositioned mono at bus gain" means, and is
+    /// what the mixer did for every source before any of this existed.
+    pub const UNPOSITIONED: Self = Self {
+        gain: 1.0,
+        pan: PanGains::UNPOSITIONED,
+        occlusion: 0.0,
+        high_cue: 1.0,
+    };
+}
+
+/// Where a speaker standing at `speaker_eye` is heard from, by a listener at `listener_eye`
+/// facing `yaw`, on a server relaying voice `range_blocks` far, with `occlusion` between them.
+///
+/// The one place the functions above are composed, so a caller sets a source from a single
+/// consistent reading rather than from four it gathered separately. `occlusion` is passed in
+/// rather than computed here because it is the expensive half: it needs the world, and it is
+/// recomputed on its own slower clock.
+pub fn place(
+    listener_eye: Vec3,
+    yaw: f32,
+    speaker_eye: Vec3,
+    range_blocks: f32,
+    occlusion: f32,
+) -> Placement {
+    let azimuth = azimuth(listener_eye, yaw, speaker_eye);
+    Placement {
+        gain: attenuation(listener_eye.distance(speaker_eye), range_blocks),
+        pan: pan_gains(azimuth),
+        occlusion: if occlusion.is_finite() {
+            occlusion.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        high_cue: back_cue(azimuth),
+    }
+}
+
+/// How much of a voice one block of each material takes away.
+///
+/// **The numbers are this module's and the classes are the palette's**, which is the whole
+/// reason [`MaterialClass`] carries no weights. The palette knows slate is stone; how much
+/// stone muffles a voice is an opinion about sound, and it belongs beside the filter the
+/// opinion drives.
+///
+/// One block of stone is the whole of the effect — a wall is a wall, and a second course of
+/// masonry behind the first changes nothing a listener could name. The rest are fractions of
+/// that: earth is nearly as good, sawn timber lets a good deal through, a hedge or a
+/// thatched roof barely interrupts a shout, and glass is the thinnest thing this world has.
+///
+/// **Air and water are unreachable through [`occlusion`] and are still answered**, because a
+/// total function over the enum is what stops a later class from silently taking the wrong
+/// arm. The ray only ever asks about voxels [`palette::is_solid`] accepts, and neither air
+/// nor water is solid — nor is *cover*, so a bush occludes nothing while tree leaves, which
+/// fill their voxel, occlude a little. That asymmetry is #874's `is_cover` decision read
+/// through this module rather than a judgement made here.
+pub fn occlusion_weight(class: MaterialClass) -> f32 {
+    match class {
+        MaterialClass::Air | MaterialClass::Water => 0.0,
+        MaterialClass::Stone => 1.0,
+        MaterialClass::Earth => 0.9,
+        MaterialClass::Wood => 0.6,
+        MaterialClass::Foliage => 0.3,
+        MaterialClass::Glass => 0.2,
+    }
+}
+
+/// How many rays are cast between two eyes.
+pub const RAYS: usize = 3;
+
+/// How far to either side of the centre ray the other two run, in blocks.
+///
+/// 0.4 puts the outer pair 0.8 blocks apart — narrower than a one-block doorway, so a voice
+/// through an open door is partly clear rather than all-or-nothing, and wide enough that a
+/// pillar or a window mullion between the listener and the speaker registers as something
+/// rather than as everything.
+///
+/// **Narrower than a voxel, so the three rays often agree, and that is the intent.** An
+/// aperture 0.8 blocks wide crosses a voxel boundary for about four fifths of the positions
+/// a listener can stand in, and for the other fifth all three rays walk the same column and
+/// return the same answer. This is a mechanism for softening an edge as somebody moves past
+/// it, not for sampling a wide cone; a spread that reliably straddled two columns from every
+/// position would have to be wider than the doorway it is trying to hear through.
+pub const RAY_SPREAD_BLOCKS: f32 = 0.4;
+
+/// How much of the world stands between two eyes, from `0.0` (open air) to `1.0`.
+///
+/// [`RAYS`] parallel rays, offset laterally by [`RAY_SPREAD_BLOCKS`], each accumulating
+/// [`occlusion_weight`] for every solid voxel it enters and each capped at `1.0`; the answer
+/// is their mean. Three rays rather than one is what makes a doorway sound like a doorway:
+/// a single ray answers "wall" or "no wall" and flickers between them as somebody walks past
+/// a gap.
+///
+/// **The traversal is [`raycast`]'s, not a second walk of the grid.** Its `solid` closure is
+/// called once for each voxel the ray enters, in order — that seam is what its own
+/// documentation offers for recording a traversal — so answering `false` every time turns
+/// the search into exactly the enumeration this needs, and the returned hit is discarded.
+/// The alternative, restarting the cast past each hit, would be a second implementation of
+/// a traversal this client deliberately has one of.
+///
+/// **Two limits are real and are not errors.** A voxel the session has not been streamed
+/// reads as air, because `ChunkStore::block_at` says so and a chunk that has not arrived
+/// contains nothing this client knows about — so a speaker beyond the loaded volume is
+/// heard unoccluded rather than guessed at. And `raycast` stops after 256 voxels, which is
+/// past any plausible relay range but not past every one; a ray that runs out of steps
+/// stops accumulating, so the failure direction is *less* occlusion rather than a wrong
+/// answer with a confident value.
+///
+/// Non-finite endpoints, a chunk size of zero and two eyes at the same point all answer
+/// `0.0`: no geometry, nothing in the way.
+pub fn occlusion(
+    store: &ChunkStore,
+    chunk_size: usize,
+    listener_eye: Vec3,
+    speaker_eye: Vec3,
+) -> f32 {
+    if chunk_size == 0 || !listener_eye.is_finite() || !speaker_eye.is_finite() {
+        return 0.0;
+    }
+    let to = speaker_eye - listener_eye;
+    let distance = to.length();
+    if distance <= 0.0 {
+        return 0.0;
+    }
+    let direction = to / distance;
+    // Horizontal and perpendicular to the line of sight, so the three rays lie in a
+    // vertical plane and spread across a doorway rather than up and down it. A voice
+    // directly overhead has no horizontal perpendicular; `Vec3::X` is as good an answer as
+    // any there, and the three rays are then genuinely three.
+    let lateral = Vec3::new(-direction.z, 0.0, direction.x);
+    let lateral = if lateral.length() > 1e-4 {
+        lateral.normalize()
+    } else {
+        Vec3::X
+    };
+
+    let mut total = 0.0;
+    for index in 0..RAYS {
+        // -1, 0, +1 for three rays, and the centre ray is the unoffset one.
+        let offset = (index as f32 - (RAYS as f32 - 1.0) * 0.5) * RAY_SPREAD_BLOCKS;
+        let from = listener_eye + lateral * offset;
+        total += ray_occlusion(store, chunk_size, from, to);
+    }
+    (total / RAYS as f32).clamp(0.0, 1.0)
+}
+
+/// One ray's worth of occlusion: every solid voxel it enters, weighted and capped at `1.0`.
+///
+/// The cap is per ray and not on the mean, which is what makes the mean a fraction of the
+/// rays that were blocked. Summed first and capped afterwards, two stone walls would read
+/// the same as one — which is correct — but a hedge behind a pane of glass would read as
+/// half a wall, which is also correct and is not what capping the mean would give.
+fn ray_occlusion(store: &ChunkStore, chunk_size: usize, from: Vec3, along: Vec3) -> f32 {
+    let mut weight = 0.0;
+    let _ = raycast(from, along, along.length(), |voxel| {
+        let block = store.block_at(
+            BlockCoord {
+                x: voxel.x,
+                y: voxel.y,
+                z: voxel.z,
+            },
+            chunk_size,
+        );
+        if palette::is_solid(block) {
+            weight += occlusion_weight(palette::material_class(block));
+        }
+        // Never a hit: this is a traversal, and stopping at the first wall would make a
+        // second wall behind it invisible to a sum that is capped anyway.
+        false
+    });
+    weight.min(1.0)
 }
 
 /// Where the low band ends, in hertz.
@@ -575,6 +775,288 @@ mod tests {
         // caller's arithmetic error and must not invert a gain.
         assert_eq!(band_gains(2.0), band_gains(1.0));
         assert_eq!(band_gains(-1.0), band_gains(0.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Occlusion
+    // -----------------------------------------------------------------------
+
+    use crate::net::ChunkCoord;
+    use crate::world::{BlockId, VoxelChunk, palette};
+    use bevy::prelude::IVec3;
+
+    /// The chunk edge these fixtures use. One chunk at the origin, so every world
+    /// coordinate in `0..32` is expressible and everything outside it is a chunk the
+    /// session has not been streamed.
+    const CHUNK: usize = 32;
+
+    /// A store holding one chunk with the named voxels set, in **world** coordinates.
+    fn store_of(blocks: &[(IVec3, BlockId)]) -> ChunkStore {
+        let mut chunk = VoxelChunk::all_air(CHUNK);
+        for (voxel, block) in blocks {
+            chunk.set(voxel.x as usize, voxel.y as usize, voxel.z as usize, *block);
+        }
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            chunk,
+        );
+        store
+    }
+
+    /// A wall across the line of sight at `x`, three voxels tall and three wide, which is
+    /// more than the 0.8-block ray spread can miss.
+    fn wall_at(x: i32, block: BlockId) -> Vec<(IVec3, BlockId)> {
+        let mut voxels = Vec::new();
+        for y in 3..=5 {
+            for z in 3..=5 {
+                voxels.push((IVec3::new(x, y, z), block));
+            }
+        }
+        voxels
+    }
+
+    /// Two eyes eight blocks apart along `+X`, both centred in their voxel.
+    const LISTENER: Vec3 = Vec3::new(4.5, 4.5, 4.5);
+    const SPEAKER: Vec3 = Vec3::new(12.5, 4.5, 4.5);
+
+    #[test]
+    fn open_air_occludes_nothing() {
+        let store = store_of(&[]);
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, SPEAKER), 0.0);
+    }
+
+    #[test]
+    fn one_stone_wall_occludes_completely() {
+        let store = store_of(&wall_at(8, palette::STONE));
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, SPEAKER), 1.0);
+    }
+
+    /// **The discriminating test for the weights.** An implementation that gave every
+    /// material the same weight — or that answered "solid or not" — would pass every
+    /// assertion about walls and doorways and fail every line of this one.
+    #[test]
+    fn a_wall_is_as_thick_as_what_it_is_made_of() {
+        for (block, expected) in [
+            (palette::STONE, 1.0),
+            (palette::DIRT, 0.9),
+            (palette::PLANKS, 0.6),
+            (palette::LEAVES, 0.3),
+            (palette::DARK_GLASS, 0.2),
+        ] {
+            let store = store_of(&wall_at(8, block));
+            let heard = occlusion(&store, CHUNK, LISTENER, SPEAKER);
+            assert!(
+                (heard - expected).abs() < 1e-5,
+                "block {block} occluded {heard}, expected {expected}"
+            );
+        }
+    }
+
+    /// Three rays, and the answer is their mean — which a single-ray implementation cannot
+    /// produce. The doorway is a gap one voxel wide in an otherwise solid wall, and the
+    /// eyes are offset within their voxel so the outer rays straddle its edge: two rays
+    /// walk the column the doorway is in and one walks the column beside it.
+    #[test]
+    fn a_doorway_hit_by_one_of_three_rays_is_a_third_occluded() {
+        let listener = Vec3::new(4.5, 4.5, 4.9);
+        let speaker = Vec3::new(12.5, 4.5, 4.9);
+        // Rays run at z = 4.5, 4.9 and 5.3 — voxel columns 4, 4 and 5.
+        let mut wall = wall_at(8, palette::STONE);
+        // The doorway: column 4 is open, and every other column of the wall is not.
+        wall.retain(|(voxel, _)| voxel.z != 4);
+        let store = store_of(&wall);
+        let heard = occlusion(&store, CHUNK, listener, speaker);
+        assert!(
+            (heard - 1.0 / 3.0).abs() < 1e-5,
+            "one blocked ray of three should be {}, got {heard}",
+            1.0 / 3.0
+        );
+    }
+
+    /// The offsets are lateral rather than vertical, so a wall with a *horizontal* slot in
+    /// it blocks all three rays equally. Together with the test above this pins the plane
+    /// the rays spread in, which a swapped axis in `lateral` would move.
+    #[test]
+    fn the_rays_spread_sideways_and_not_up_and_down() {
+        let mut wall = wall_at(8, palette::STONE);
+        // Open the whole row the eyes are level with, leaving the rows above and below.
+        wall.retain(|(voxel, _)| voxel.y != 4);
+        let store = store_of(&wall);
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, SPEAKER), 0.0);
+
+        // And close that row while opening a vertical one: every ray is level, so every
+        // ray is blocked.
+        let mut wall = wall_at(8, palette::STONE);
+        wall.retain(|(voxel, _)| voxel.y == 4);
+        let store = store_of(&wall);
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, SPEAKER), 1.0);
+    }
+
+    /// **The cap is per ray, and this is the only shape that can tell.** With every ray
+    /// blocked, capping the sum and capping the mean give the same `1.0`; with one ray of
+    /// three seeing two stone walls they give a third and two thirds. A ray that is
+    /// thoroughly blocked is exactly as blocked as one that is barely blocked, because the
+    /// mean is meant to read as "how many rays got through".
+    #[test]
+    fn a_ray_through_two_walls_is_no_more_blocked_than_a_ray_through_one() {
+        let listener = Vec3::new(4.5, 4.5, 4.9);
+        let speaker = Vec3::new(12.5, 4.5, 4.9);
+        let mut walls = wall_at(8, palette::STONE);
+        walls.extend(wall_at(10, palette::STONE));
+        // Column 4 — the one two of the three rays run down — is open in both walls.
+        walls.retain(|(voxel, _)| voxel.z != 4);
+        let store = store_of(&walls);
+        let heard = occlusion(&store, CHUNK, listener, speaker);
+        assert!(
+            (heard - 1.0 / 3.0).abs() < 1e-5,
+            "one doubly-blocked ray of three should still be {}, got {heard}",
+            1.0 / 3.0
+        );
+    }
+
+    #[test]
+    fn a_second_wall_behind_the_first_changes_nothing() {
+        let mut walls = wall_at(8, palette::STONE);
+        walls.extend(wall_at(10, palette::STONE));
+        let store = store_of(&walls);
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, SPEAKER), 1.0);
+    }
+
+    /// The one that fails if the traversal stops at the first solid voxel: neither of these
+    /// materials reaches the cap on its own, so the sum is visible.
+    #[test]
+    fn a_hedge_behind_a_pane_of_glass_adds_up() {
+        let mut layers = wall_at(8, palette::DARK_GLASS);
+        layers.extend(wall_at(10, palette::LEAVES));
+        let store = store_of(&layers);
+        let heard = occlusion(&store, CHUNK, LISTENER, SPEAKER);
+        assert!((heard - 0.5).abs() < 1e-5, "{heard}");
+    }
+
+    /// A bush stops no body (#874 made it cover), and the ray asks the same predicate the
+    /// aiming machinery does — so it stops no voice either, while tree leaves, which fill
+    /// their voxel, take a little.
+    #[test]
+    fn nothing_that_stops_no_body_stops_a_voice() {
+        for block in [
+            palette::BUSH,
+            palette::DESERT_SHRUB,
+            palette::FLOWER_RED,
+            palette::WATER,
+            palette::WATER_FLOW3,
+        ] {
+            let store = store_of(&wall_at(8, block));
+            let heard = occlusion(&store, CHUNK, LISTENER, SPEAKER);
+            assert_eq!(heard, 0.0, "block {block} occluded {heard}");
+        }
+        let store = store_of(&wall_at(8, palette::LEAVES));
+        assert!(occlusion(&store, CHUNK, LISTENER, SPEAKER) > 0.0);
+    }
+
+    /// A chunk that has not arrived contains nothing this client knows about, so a speaker
+    /// beyond the streamed volume is heard unoccluded rather than guessed at.
+    #[test]
+    fn a_chunk_the_session_does_not_hold_is_open_air() {
+        let store = store_of(&wall_at(8, palette::STONE));
+        // Both eyes outside the one chunk the fixture holds, with the wall nowhere near.
+        let far = Vec3::new(100.5, 100.5, 100.5);
+        assert_eq!(
+            occlusion(&store, CHUNK, far, far + Vec3::new(8.0, 0.0, 0.0)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_voice_directly_overhead_still_hears_the_ceiling() {
+        let store = store_of(&[
+            (IVec3::new(4, 6, 4), palette::STONE),
+            (IVec3::new(5, 6, 4), palette::STONE),
+            (IVec3::new(3, 6, 4), palette::STONE),
+        ]);
+        let above = Vec3::new(4.5, 10.5, 4.5);
+        let heard = occlusion(&store, CHUNK, LISTENER, above);
+        assert!(heard > 0.0, "a ceiling overhead occluded {heard}");
+    }
+
+    #[test]
+    fn nothing_between_two_eyes_in_the_same_place() {
+        let store = store_of(&wall_at(8, palette::STONE));
+        assert_eq!(occlusion(&store, CHUNK, LISTENER, LISTENER), 0.0);
+    }
+
+    #[test]
+    fn an_unusable_world_answers_open_air() {
+        let store = store_of(&wall_at(8, palette::STONE));
+        assert_eq!(occlusion(&store, 0, LISTENER, SPEAKER), 0.0);
+        assert_eq!(
+            occlusion(&store, CHUNK, Vec3::splat(f32::NAN), SPEAKER),
+            0.0
+        );
+        assert_eq!(
+            occlusion(&store, CHUNK, LISTENER, Vec3::splat(f32::INFINITY)),
+            0.0
+        );
+    }
+
+    #[test]
+    fn the_weights_are_ordered_by_how_solid_a_material_is() {
+        let stone = occlusion_weight(MaterialClass::Stone);
+        let earth = occlusion_weight(MaterialClass::Earth);
+        let wood = occlusion_weight(MaterialClass::Wood);
+        let foliage = occlusion_weight(MaterialClass::Foliage);
+        let glass = occlusion_weight(MaterialClass::Glass);
+        assert!(stone > earth, "{stone} vs {earth}");
+        assert!(earth > wood, "{earth} vs {wood}");
+        assert!(wood > foliage, "{wood} vs {foliage}");
+        assert!(foliage > glass, "{foliage} vs {glass}");
+        assert!(glass > 0.0, "{glass}");
+        assert_eq!(occlusion_weight(MaterialClass::Air), 0.0);
+        assert_eq!(occlusion_weight(MaterialClass::Water), 0.0);
+        assert_eq!(stone, 1.0, "one wall is the whole of the effect");
+    }
+
+    #[test]
+    fn a_speaker_standing_on_the_listener_is_placed_dead_ahead_at_full_gain() {
+        let here = Vec3::new(3.0, 64.0, 9.0);
+        let placed = place(here, 1.2, here, RANGE, 0.0);
+        assert_eq!(placed.gain, 1.0);
+        assert_eq!(placed.high_cue, 1.0);
+        assert!((placed.pan.left - placed.pan.right).abs() < 1e-6);
+    }
+
+    /// The composition is what this checks: a speaker off to the right and behind must get
+    /// the right pan *and* the back cue *and* the distance gain, from one call.
+    #[test]
+    fn a_placement_carries_every_cue_at_once() {
+        let listener = Vec3::new(0.0, 64.0, 0.0);
+        // Facing -Z; the speaker is behind and to the right, eight blocks away.
+        let speaker = Vec3::new(8.0, 64.0, 0.5);
+        let placed = place(listener, 0.0, speaker, RANGE, 0.4);
+        assert!(placed.pan.right > placed.pan.left, "{placed:?}");
+        assert!(placed.high_cue < 1.0, "{placed:?}");
+        assert!(placed.gain > 0.0 && placed.gain < 1.0, "{placed:?}");
+        assert_eq!(placed.occlusion, 0.4);
+    }
+
+    #[test]
+    fn a_speaker_past_the_relay_range_is_placed_silent() {
+        let listener = Vec3::ZERO;
+        let placed = place(listener, 0.0, Vec3::new(0.0, 0.0, -RANGE - 1.0), RANGE, 0.0);
+        assert_eq!(placed.gain, 0.0);
+    }
+
+    #[test]
+    fn an_unpositioned_placement_is_the_identity_of_everything_it_feeds() {
+        let placed = Placement::UNPOSITIONED;
+        assert_eq!(placed.gain, 1.0);
+        assert_eq!(placed.pan, PanGains::UNPOSITIONED);
+        assert_eq!(band_gains(placed.occlusion), [1.0, 1.0, 1.0]);
+        assert_eq!(placed.high_cue, 1.0);
     }
 
     /// A 10 ms block is roughly what a 48 kHz device asks for at a 512-frame buffer.
