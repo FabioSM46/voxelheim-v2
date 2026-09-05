@@ -1451,9 +1451,20 @@ mod tests {
                 continue;
             }
             let before = app.world().resource::<Settings>().clone();
-            press(&mut app, SettingsAction::Nudge(knob, 1));
+            // **The outward press is not always `+`.** A knob whose default already sits at
+            // one end of its bound cannot be nudged further that way, and `VoiceVolume` is
+            // deliberately one of those — it starts at unity, because a player who cannot
+            // hear their friends turns it up. Pressing `+` and asserting movement would make
+            // "every knob starts below its maximum" a silent precondition of this row test,
+            // true by accident until this part and false from it on.
+            let mut steps = 1;
+            press(&mut app, SettingsAction::Nudge(knob, steps));
+            if *app.world().resource::<Settings>() == before {
+                steps = -1;
+                press(&mut app, SettingsAction::Nudge(knob, steps));
+            }
             let after = app.world().resource::<Settings>().clone();
-            assert_ne!(before, after, "{knob:?} did not move");
+            assert_ne!(before, after, "{knob:?} did not move in either direction");
             let expected = after.reading_with_choices(
                 knob,
                 Choices {
@@ -1463,7 +1474,7 @@ mod tests {
             );
             assert_eq!(reading_of(&mut app, Reading::Knob(knob)), expected);
 
-            press(&mut app, SettingsAction::Nudge(knob, -1));
+            press(&mut app, SettingsAction::Nudge(knob, -steps));
             assert_eq!(
                 *app.world().resource::<Settings>(),
                 before,
@@ -2256,6 +2267,7 @@ mod tests {
                 "Master volume",
                 "Output device",
                 "Microphone",
+                "Voice volume",
                 "Voice",
                 "Voice threshold",
                 "Heard by",

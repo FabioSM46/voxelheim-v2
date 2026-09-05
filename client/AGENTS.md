@@ -83,7 +83,7 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume, the output device and the microphone, what the microphone is for — the voice mode and the level voice activation triggers at — and who the player is asking to be heard by; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master and voice volumes, the output device and the microphone, what the microphone is for — the voice mode and the level voice activation triggers at — and who the player is asking to be heard by; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
@@ -1491,6 +1491,14 @@ a sample is multiplied by, and it crosses **one way**: `follow_the_settings` rea
 setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
+
+**`Knob::VoiceVolume` is the same statement one bus down, and its default is not the
+master's.** `Settings::voice_gain()` is `master_gain()`'s arithmetic and reaches `Bus::Voice`,
+so the bus line above applies unchanged: a listener who turns the game down takes voice with
+it, and this knob is what they move voice *relative* to the game. It starts at **unity** where
+the master starts at 80, because the master reserves headroom for a recording while a voice has
+already lost everything a room, a codec and a jitter buffer take from it — a player who cannot
+hear their friends must not find this knob already at the top.
 
 **`DeviceChoice` is named for what it is, and `AudioDevices` for the module that fills it.**
 The output and the input are the same question asked of two halves of one card, so they are

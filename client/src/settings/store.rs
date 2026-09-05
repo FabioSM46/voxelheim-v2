@@ -210,6 +210,7 @@ fn render(settings: &Settings) -> String {
         "input-device {}\n",
         device_field(&settings.input_device)
     ));
+    out.push_str(&format!("voice-volume {}\n", settings.voice_volume));
     out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
     out.push_str(&format!(
         "voice-activation-threshold {}\n",
@@ -324,6 +325,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "input-device" => match device_from_field(value) {
                 Some(parsed) => settings.input_device = parsed,
                 None => refuse("the system default microphone or a saved device"),
+            },
+            "voice-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.voice_volume = parsed,
+                Err(_) => refuse("a voice volume"),
             },
             "voice-mode" => match VoiceMode::from_name(value) {
                 Some(parsed) => settings.voice_mode = parsed,
@@ -495,6 +500,7 @@ mod tests {
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
         settings.adjust(Knob::MasterVolume, -2);
+        settings.adjust(Knob::VoiceVolume, -3);
         settings.adjust(Knob::VoiceMode, -1);
         settings.adjust(Knob::VoiceActivationThreshold, 3);
         settings.adjust(Knob::VoiceAudience, 1);
@@ -771,6 +777,7 @@ mod tests {
                     voice_mode: mode,
                     voice_activation_threshold: -33.0,
                     voice_audience: audience,
+                    voice_volume: 45,
                     ..Settings::default()
                 };
                 assert_eq!(save(&path, &settings), Ok(()));
@@ -778,6 +785,7 @@ mod tests {
                 assert_eq!(complaints, Vec::<String>::new(), "{mode:?} {audience:?}");
                 assert_eq!(reloaded.voice_mode(), mode);
                 assert_eq!(reloaded.voice_audience(), audience);
+                assert_eq!(reloaded.voice_volume(), 45);
                 assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
             }
         }
@@ -839,7 +847,7 @@ master-volume 25
         fs::write(
             &path,
             "render-distance 5\nmaster-volume loud\nvsync off\noutput-device name:6f6b\n\
-             input-device name:zz\n",
+             input-device name:zz\nvoice-volume loud\n",
         )
         .expect("a scratch file");
 
@@ -851,6 +859,11 @@ master-volume 25
         assert_eq!(settings.render_distance(), 5);
         assert!(!settings.vsync(), "a bad volume line took the rest with it");
         assert_eq!(
+            settings.voice_volume(),
+            Settings::default().voice_volume(),
+            "an unreadable voice volume is the default, not silence"
+        );
+        assert_eq!(
             settings.input_device(),
             &DeviceChoice::SystemDefault,
             "an unreadable microphone line named a device anyway"
@@ -860,7 +873,7 @@ master-volume 25
             &DeviceChoice::Named("ok".to_owned()),
             "a bad volume line took the device with it"
         );
-        assert_eq!(complaints.len(), 2, "{complaints:?}");
+        assert_eq!(complaints.len(), 3, "{complaints:?}");
         assert!(complaints[0].contains("line 2"), "{complaints:?}");
         for complaint in &complaints {
             assert!(

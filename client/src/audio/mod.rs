@@ -92,6 +92,7 @@ impl Plugin for AudioPlugin {
         let mixer = Arc::new(Mixer::new());
         let controls = AudioControls::default();
         mixer.set_gain(Bus::Master, controls.master_gain);
+        mixer.set_gain(Bus::Voice, controls.voice_gain);
         let speaker_test = mixer
             .claim(Bus::Master)
             .map(SpeakerTest::new)
@@ -155,6 +156,12 @@ impl AudioMixer {
 pub struct AudioControls {
     /// The master bus gain, `0.0` silent to `1.0` unity. Clamped by the mixer.
     pub master_gain: f32,
+    /// The voice bus gain, `0.0` silent to `1.0` unity. Clamped by the mixer.
+    ///
+    /// **Applied to the sources on [`Bus::Voice`] and then by the master**, which is the bus
+    /// arithmetic `audio/mixer.rs` states: a listener who turns the game down turns voice
+    /// down with it, and this is what they turn down *relative* to the game.
+    pub voice_gain: f32,
     /// Which output device to open, under the name its host gives it, or `None` for "follow
     /// whatever the system calls its default".
     ///
@@ -178,6 +185,7 @@ impl Default for AudioControls {
             // already this module's dependency: `follow_the_settings` below reads the
             // same accessor every frame.
             master_gain: Settings::default().master_gain(),
+            voice_gain: Settings::default().voice_gain(),
             output_device: None,
             speaker_test: false,
         }
@@ -263,6 +271,7 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
         return;
     }
     let gain = settings.master_gain();
+    let voice = settings.voice_gain();
     let device = match settings.output_device() {
         DeviceChoice::SystemDefault => None,
         DeviceChoice::Named(name) => Some(name.clone()),
@@ -273,6 +282,9 @@ fn follow_the_settings(settings: Res<Settings>, mut controls: ResMut<AudioContro
     // setting, and the screen that asks for one writes it straight onto this resource.
     if controls.master_gain != gain {
         controls.master_gain = gain;
+    }
+    if controls.voice_gain != voice {
+        controls.voice_gain = voice;
     }
     if controls.output_device != device {
         controls.output_device = device;
@@ -326,6 +338,7 @@ fn apply_the_controls(
         return;
     }
     audio.0.set_gain(Bus::Master, controls.master_gain);
+    audio.0.set_gain(Bus::Voice, controls.voice_gain);
     device.use_output(controls.output_device.clone());
 }
 
@@ -448,6 +461,62 @@ mod tests {
             AudioControls::default().master_gain
         );
         assert!(!AudioControls::default().speaker_test);
+        // And the voice bus starts at unity, for the reason `settings/mod.rs` gives beside
+        // `DEFAULT_VOICE_VOLUME`: a voice has already lost what a room, a codec and a jitter
+        // buffer take from it, so there is nothing left to reserve headroom for.
+        assert!(
+            (AudioControls::default().voice_gain - 1.0).abs() < f32::EPSILON,
+            "voice starts at {} rather than unity",
+            AudioControls::default().voice_gain
+        );
+    }
+
+    /// **The voice knob is a bus gain, and the bus arithmetic is what makes it worth having.**
+    ///
+    /// `out = master * (voice * voice_sources + master_sources)`, so turning voice down moves
+    /// a source on `Bus::Voice` and leaves one on `Bus::Master` — the speaker test — exactly
+    /// where it was. Rendered rather than read back off the mixer, because "the gain was
+    /// stored" is a claim about a field and this is a claim about what a player hears.
+    #[test]
+    fn the_voice_volume_moves_the_voice_bus_and_leaves_the_rest_alone() {
+        let mixer = Arc::new(Mixer::new());
+        mixer.set_format(48_000, 1);
+        let on_voice = mixer.claim(Bus::Voice).expect("a free slot");
+        let on_master = mixer.claim(Bus::Master).expect("a free slot");
+
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .insert_resource(AudioControls::default())
+            .insert_resource(AudioMixer(Arc::clone(&mixer)))
+            .insert_resource(AudioDevice::idle())
+            .add_systems(Update, (follow_the_settings, apply_the_controls).chain());
+        app.update();
+
+        // Master at its default 0.8, voice at unity: the voice source arrives at 0.8 and so
+        // does the master one.
+        on_voice.push(&[1.0]);
+        on_master.push(&[0.0]);
+        assert!((rendered(&mixer, 1)[0] - 0.8).abs() < 1e-6);
+
+        let mut quieter = Settings::default();
+        quieter.adjust(Knob::VoiceVolume, -10);
+        assert_eq!(quieter.voice_volume(), 50);
+        *app.world_mut().resource_mut::<Settings>() = quieter;
+        app.update();
+
+        on_voice.push(&[1.0]);
+        on_master.push(&[0.0]);
+        assert!(
+            (rendered(&mixer, 1)[0] - 0.4).abs() < 1e-6,
+            "half the voice volume did not halve what a speaker is heard at"
+        );
+
+        on_voice.push(&[0.0]);
+        on_master.push(&[1.0]);
+        assert!(
+            (rendered(&mixer, 1)[0] - 0.8).abs() < 1e-6,
+            "turning voice down moved a source that is not on the voice bus"
+        );
     }
 
     /// **The seam, in one direction only.** The tab writes a setting, this module reads it,
