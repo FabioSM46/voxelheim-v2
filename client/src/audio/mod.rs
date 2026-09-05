@@ -70,7 +70,7 @@ pub use heard::{SPEAKING_FOR, Speaking};
 #[allow(unused_imports)]
 pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
-pub use voice::{MicTest, Transmitting, VoiceControls};
+pub use voice::{MicTest, MicrophoneMissing, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
 /// noise, and low enough that a small laptop speaker reproduces it.
