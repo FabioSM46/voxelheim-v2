@@ -17,6 +17,11 @@ on:
         required: false
         type: boolean
         default: false
+      measure_cap:
+        description: 'measure_only only: truncate at this many characters instead of DEEPSEEK_MAX_DIFF_CHARS'
+        required: false
+        type: string
+        default: ''
   pull_request:
     types: [opened, synchronize]
   pull_request_review_comment:
@@ -122,4 +127,9 @@ jobs:
           # Empirical budget measurement can replay a real PR diff without
           # creating a review, spending a round or changing merge-gate state.
           MEASURE_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.measure_only }}
+          # A replay above the cap is impossible without this: truncation runs before
+          # the API call, so a measure-only dispatch of a 65,000-character pull request
+          # would measure 45,000. The script refuses the override on any run that is not
+          # measure-only, so a raised cap can never reach a review that posts.
+          DEEPSEEK_MEASURE_CAP: ${{ github.event_name == 'workflow_dispatch' && inputs.measure_cap || '' }}
         run: python3 .github/scripts/deepseek_review.py

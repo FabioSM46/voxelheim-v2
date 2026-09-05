@@ -389,6 +389,31 @@ class CallDeepSeekContractTests(unittest.TestCase):
         self.assertIn("41 chars", output.getvalue())
         self.assertIn("completion_tokens=73421", output.getvalue())
 
+    def test_success_log_records_the_reasoning_length_but_never_its_text(self):
+        """A success used to bound the reasoning ratio without sampling it.
+
+        `reasoning_chars` was printed only where a run returned no content, so every
+        row of the AGENTS.md table that ended in a verdict has a dash where the ratio
+        goes and the cap could only ever be set from the failures (#925). The length is
+        an output somebody sets a number from; the text is a chain of thought and stays
+        out of the log.
+        """
+        response = self._response(
+            '{"review_complete": true, "comments": []}',
+            reasoning_content="r" * 12_345,
+        )
+        response.usage = types.SimpleNamespace(completion_tokens=4_321)
+        completions = self._Completions(response)
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=completions)
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            deepseek_review.call_deepseek(client, "system", "user", json_mode=True)
+
+        self.assertIn("reasoning_chars=12345", output.getvalue())
+        self.assertNotIn("r" * 100, output.getvalue(), "reasoning content must never be logged")
+
 
 class _FakeFile:
     def __init__(self, filename, patch, status="modified", additions=None, deletions=0):
@@ -696,6 +721,86 @@ class ReportedDiffSizeTests(unittest.TestCase):
 class _RejectingPR(_RecordingPR):
     def create_review(self, **kwargs):
         raise deepseek_review.GithubException("approval rejected")
+
+
+class MeasureCapOverrideTests(unittest.TestCase):
+    """A replay above the cap is impossible unless the cap moves for that replay.
+
+    Truncation runs before the API call, so a measure-only dispatch of a 65,000-character
+    pull request measured a 45,000-character diff and reported it under the requested
+    size — the upper band #925 asked for could not be sampled through the very dispatch
+    AGENTS.md named for it. The override exists for that, and it fails closed in both
+    directions it could be misused in.
+    """
+
+    @staticmethod
+    def _two_file_pr():
+        return _FakePR(
+            [
+                _FakeFile("server/internal/a.go", _patch_of(_CAP // 2 + 10_000, "a")),
+                _FakeFile("server/internal/b.go", _patch_of(_CAP // 2 + 10_000, "b")),
+            ]
+        )
+
+    def test_without_an_override_the_cap_is_the_constant(self):
+        with mock.patch.dict(deepseek_review.os.environ, {}, clear=False):
+            deepseek_review.os.environ.pop("DEEPSEEK_MEASURE_CAP", None)
+            self.assertEqual(_CAP, deepseek_review.effective_diff_cap())
+
+    def test_a_measure_only_replay_truncates_at_the_override(self):
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "DEEPSEEK_MEASURE_CAP": str(_CAP * 10)},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                diff = deepseek_review.get_diff(self._two_file_pr())
+
+        self.assertNotIn("DIFF TRUNCATED", diff.text)
+        self.assertEqual([], diff.dropped)
+        self.assertIn(f"diff cap overridden to {_CAP * 10} chars", output.getvalue())
+        self.assertIn(f"DEEPSEEK_MAX_DIFF_CHARS is {_CAP}", output.getvalue())
+
+    def test_the_override_is_read_as_a_number_with_separators(self):
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "DEEPSEEK_MEASURE_CAP": "70,000"},
+            clear=False,
+        ):
+            self.assertEqual(70_000, deepseek_review.effective_diff_cap())
+
+    def test_an_override_on_a_posting_run_is_refused_not_ignored(self):
+        """The direction that matters: a raised cap must never reach a review that posts."""
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "", "DEEPSEEK_MEASURE_CAP": str(_CAP * 10)},
+            clear=False,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                deepseek_review.get_diff(self._two_file_pr())
+
+        self.assertIn("not measure-only", str(raised.exception))
+
+    def test_an_unreadable_override_is_refused_not_defaulted(self):
+        for bad in ("", "0", "-5", "lots", "4.5e4"):
+            with self.subTest(value=bad):
+                env = {"MEASURE_ONLY": "true", "DEEPSEEK_MEASURE_CAP": bad}
+                with mock.patch.dict(deepseek_review.os.environ, env, clear=False):
+                    if bad == "":
+                        # Empty is "no override", the shape every non-dispatch run has.
+                        self.assertEqual(_CAP, deepseek_review.effective_diff_cap())
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            deepseek_review.effective_diff_cap()
+
+    def test_the_real_reviews_never_see_the_override(self):
+        """The constant the DiffCapTests pin is still the one a pull request meets."""
+        with mock.patch.dict(deepseek_review.os.environ, {}, clear=False):
+            deepseek_review.os.environ.pop("DEEPSEEK_MEASURE_CAP", None)
+            deepseek_review.os.environ.pop("MEASURE_ONLY", None)
+            diff = deepseek_review.get_diff(self._two_file_pr())
+
+        self.assertIn("DIFF TRUNCATED", diff.text)
 
 
 class MeasureOnlyReviewTests(unittest.TestCase):

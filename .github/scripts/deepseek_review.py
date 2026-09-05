@@ -123,6 +123,53 @@ DEEPSEEK_PROVIDER_MAX_OUTPUT_TOKENS = 384_000
 DEEPSEEK_MAX_DIFF_CHARS = 45_000
 
 
+def is_measure_only():
+    """True when the run was dispatched with `measure_only: true`.
+
+    A measurement path: the reviewer is called and its answer parsed, and nothing is
+    posted, stamped or labelled. Read from the environment at call time rather than at
+    import, because the tests flip it per case.
+    """
+    return os.environ.get("MEASURE_ONLY", "").strip().lower() in ("1", "true", "yes")
+
+
+def effective_diff_cap():
+    """The diff cap this run truncates at.
+
+    `DEEPSEEK_MAX_DIFF_CHARS` for every review. A measure-only replay may override it
+    through `DEEPSEEK_MEASURE_CAP`, and that is the only way a diff larger than the cap
+    ever reaches the model: without the override, replaying a 65,000-character pull
+    request measures a 45,000-character diff, because the truncation runs before the
+    API call — which is what made the upper band in #925 unsampleable through the
+    dispatch the documentation named for exactly that purpose.
+
+    Fails closed in both directions the override could be misused in. A value that is
+    not a positive integer is refused rather than ignored, because ignoring it would
+    silently measure the wrong quantity and report it under the requested one. And an
+    override on a run that is *not* measure-only is refused outright: a raised cap must
+    never reach a review that posts, since the truncation is what turns an unanswerable
+    diff into a partial review somebody has to acknowledge.
+    """
+    raw = os.environ.get("DEEPSEEK_MEASURE_CAP", "").strip()
+    if not raw:
+        return DEEPSEEK_MAX_DIFF_CHARS
+    if not is_measure_only():
+        raise RuntimeError(
+            "DEEPSEEK_MEASURE_CAP is set on a run that is not measure-only; a diff cap "
+            "override may only apply to a replay that posts nothing. Refusing to review."
+        )
+    try:
+        cap = int(raw.replace("_", "").replace(",", ""))
+    except ValueError:
+        cap = 0
+    if cap <= 0:
+        raise RuntimeError(
+            f"DEEPSEEK_MEASURE_CAP={raw!r} is not a positive integer; refusing to measure "
+            "under a cap that cannot be stated."
+        )
+    return cap
+
+
 def _no_verdict_remedy(finish_reason):
     """What an operator should do about a review that produced no verdict.
 
@@ -512,7 +559,12 @@ def get_diff(pr):
     # the size was the problem. A cap the model can actually reach is what turns that back
     # into the outcome this code was written for — a partial review, every unread file
     # named, and a reviewer who has to acknowledge the gap before the PR can merge (#32).
-    MAX_CHARS = DEEPSEEK_MAX_DIFF_CHARS
+    MAX_CHARS = effective_diff_cap()
+    if MAX_CHARS != DEEPSEEK_MAX_DIFF_CHARS:
+        print(
+            f"MEASURE ONLY — diff cap overridden to {MAX_CHARS} chars for this replay "
+            f"(DEEPSEEK_MAX_DIFF_CHARS is {DEEPSEEK_MAX_DIFF_CHARS})"
+        )
     if len(diff) > MAX_CHARS:
         truncated_notice = (
             f"\n\n[DIFF TRUNCATED — exceeded {MAX_CHARS} characters. Some files may not be reviewed.]"
@@ -689,7 +741,16 @@ def call_deepseek(client, system_prompt, user_prompt, *, json_mode):
         if isinstance(completion_tokens, int)
         else ""
     )
-    print(f"← DeepSeek responded with {len(content)} chars{usage_note}")
+    # The reasoning length is printed on success as well as on exhaustion. Until #925 it
+    # was printed only where a run returned no content, so every successful review
+    # *bounded* the reasoning ratio without sampling it — the AGENTS.md table has a
+    # column of dashes for exactly that reason — and the cap could only ever be set
+    # from the failures. Length only, never the text: the chain of thought is not logged.
+    reasoning = getattr(choice.message, "reasoning_content", None) or ""
+    print(
+        f"← DeepSeek responded with {len(content)} chars{usage_note}, "
+        f"reasoning_chars={len(reasoning)}"
+    )
     return content
 
 
@@ -761,11 +822,7 @@ def mode_full_review(client, repo, pr, bot_username):
     print("=== Mode A — Full Review ===")
 
     max_rounds = int(os.environ.get("MAX_ROUNDS", "1"))
-    measure_only = os.environ.get("MEASURE_ONLY", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    measure_only = is_measure_only()
     # Set by the workflow for manual dispatch: an explicitly requested review is
     # never what the cap is protecting against.
     forced = measure_only or os.environ.get("FORCE_REVIEW", "").strip().lower() in (
