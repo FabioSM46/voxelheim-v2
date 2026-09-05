@@ -979,6 +979,16 @@ Rules:
             f"(review_complete={review_complete}, comments={len(comments)}); "
             "nothing was posted to GitHub."
         )
+        # The verdict's substance, because a count cannot be read. Twelve replays for #925
+        # came back with counts, and the two largest diffs each answered
+        # `review_complete=False, comments=1` — which is either a real finding or the
+        # model declining a diff it judged too large, and those two justify opposite cap
+        # decisions. Bounded per comment; the diff is public and so is the review it
+        # would have been, so nothing here is secret, but a log is not a review.
+        for i, c in enumerate(comments, 1):
+            body = " ".join(str(c.get("body", "")).split())
+            where = c.get("path") or "(general)"
+            print(f"MEASURE ONLY — comment {i} at {where}: {body[:400]}")
         return
 
     if not comments and review_complete:

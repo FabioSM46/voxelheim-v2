@@ -828,6 +828,28 @@ class MeasureOnlyReviewTests(unittest.TestCase):
         self.assertIn("MEASURE ONLY", output.getvalue())
         self.assertIn("parsed final review content successfully", output.getvalue())
 
+    def test_the_verdict_substance_is_logged_because_a_count_cannot_be_read(self):
+        deepseek_review.call_deepseek = lambda *args, **kwargs: (
+            '{"review_complete": false, "comments": ['
+            '{"path": "server/x.go", "line": 3, "body": "The loop\nnever ends"},'
+            '{"body": "This diff is too large to review in one pass"}]}'
+        )
+        pr = _RecordingPR()
+
+        with mock.patch.dict(
+            deepseek_review.os.environ,
+            {"MEASURE_ONLY": "true", "MAX_ROUNDS": "1"},
+            clear=False,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual([], pr.posted)
+        text = output.getvalue()
+        self.assertIn("review_complete=False, comments=2", text)
+        self.assertIn("comment 1 at server/x.go: The loop never ends", text)
+        self.assertIn("comment 2 at (general): This diff is too large", text)
+
 
 class ReviewBodyMarkerTests(unittest.TestCase):
     """
