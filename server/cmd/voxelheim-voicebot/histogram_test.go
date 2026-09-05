@@ -110,3 +110,46 @@ func TestMergingKeepsEveryCountAndTheLongestSample(t *testing.T) {
 		t.Errorf("the merged longest sample is %v, want 500ms", a.max)
 	}
 }
+
+// **The shape that discriminates: a rank that falls exactly on a bucket boundary.**
+//
+// #930's review found `quantile` skipping the bucket whose cumulative count *equals* the
+// requested rank, because the rank was truncated and the comparison was strictly greater.
+// The tests above did not catch it, and the reason is worth recording: they asked for
+// p99.5 of a hundred samples, where the rank is 99.5 and the hundredth sample is genuinely
+// needed. The bug bites only when `total × fraction` is a whole number, because
+// `trunc(x)+1` and `ceil(x)` agree everywhere else — so a fraction that lands mid-sample
+// cannot see it.
+//
+// Ninety-nine samples in one bucket and one far away is the smallest case that can: 99 of
+// 100 are at or below 40 µs, which is what "the smallest ceiling at or below which 99% of
+// samples fall" means, and the old comparison answered with the 3-second bucket instead.
+func TestAQuantileWhoseRankLandsOnABucketBoundaryTakesThatBucket(t *testing.T) {
+	t.Parallel()
+
+	var h histogram
+	for range 99 {
+		h.add(35 * time.Microsecond)
+	}
+	h.add(3 * time.Second)
+
+	p99, exact := h.quantile(0.99)
+	if !exact {
+		t.Fatal("p99 was reported as a bound; 99 of 100 samples are inside the fine tier")
+	}
+	if p99 != 40*time.Microsecond {
+		t.Errorf("p99 is %v, want 40µs: 99 samples of 100 are at or below that edge, so the "+
+			"rank falls on the last of them and not on the one after it", p99)
+	}
+
+	// The sample past the rank is still reachable, and asking for all of them still lands
+	// on the far bucket — the fix must not shift every quantile down by one.
+	if p100, exact := h.quantile(1); !exact || p100 != bucketEdge(bucketOf(3*time.Second)) {
+		t.Errorf("p100 is %v (exact=%v), want the 3s bucket's edge", p100, exact)
+	}
+
+	// A rank below one sample is the smallest sample's bucket rather than nothing.
+	if p0, exact := h.quantile(0); !exact || p0 != 40*time.Microsecond {
+		t.Errorf("p0 is %v (exact=%v), want the first occupied bucket's edge", p0, exact)
+	}
+}

@@ -184,6 +184,40 @@ generator's own receive scheduling as well as the server's relay; the generator'
 own processor figure is printed beside every result for that reason, and in the
 hundred-session run it was 0.58 cores of sixteen — not the bottleneck.
 
+### A correction to two of these numbers
+
+**The function that produced them had an off-by-one, and it is fixed rather than explained
+away.** `histogram.quantile` truncated the requested rank and then compared with a strict
+`>`, so it skipped the bucket whose cumulative count *equalled* the rank: ninety-nine
+samples at 35 µs and one at 3 s reported p99 as three seconds, when 99 of the 100 are at or
+below 40 µs. #930's review found it.
+
+What it can reach here is bounded, and the bound is arithmetic rather than a guess. The two
+forms differ only where `total × fraction` is a whole number — `trunc(x) + 1` is `ceil(x)`
+for every other x — and where they differ the wrong one names the *next* bucket, so an
+affected figure is too high and never too low.
+
+| run | latency samples | rank at p50 | rank at p99 | affected |
+| --- | --- | --- | --- | --- |
+| a hundred players | 405,000 | 202,500 — whole | 400,950 — whole | **both, by at most one bucket** |
+| a thousand players | 537,857 | 268,928.5 | 532,478.4 | neither |
+
+So **12.9 s and 29.1 s are unaffected**, by arithmetic rather than by re-measurement — which
+is what matters, because that is the run this section already says does not reproduce. And
+**630 µs and 5.35 ms are each either exact or one bucket high**: both fall in the histogram's
+finest tier, where a bucket is ten microseconds, so the most either can carry is 10 µs. The
+claim they support — a p99 comfortably inside one 20 ms frame — survives the whole of that
+interval.
+
+They are not recomputed, and the reason is stated rather than glossed: the histogram is
+per-session state inside a process that has long exited, so there is nothing left to
+recompute from. Re-running does not answer the question either, because a re-run measures a
+different run — which is the next paragraph.
+
+The first table on this page is not affected: it comes from
+`voicerelay_measure_test.go`'s own `percentile`, a different function that indexes a sorted
+slice and does not have this defect.
+
 ### What the numbers say
 
 - **At the scale the GDD describes, the relay is free.** A hundred players in ten
@@ -221,7 +255,15 @@ hundred-session run it was 0.58 cores of sixteen — not the bottleneck.
   result.** The same command was run three times while this section was being
   prepared and delivered 0.36%, 2.70% and 4.24% of what it owed, at 1.52 Hz, 2.25 Hz
   and 2.97 Hz. The table records one run; the spread is what the number is worth.
-  The first run, by contrast, was identical every time: 100% delivered, 20.00 Hz.
+- **The first run reproduces, but only in part, and the halves are worth separating.**
+  Its delivery and tick figures repeat exactly: a later run returned 45,000 sent,
+  405,000 owed, 405,000 delivered, nothing dropped and 20.00 Hz, digit for digit. Its
+  *latency* does not. That same run, on a host that happened also to be compiling a
+  Rust client at a load average of 7.3, measured p50 1.46 ms and p99 13 ms against the
+  630 µs and 5.35 ms above. **What the relay delivers is a property of the server; how
+  fast it arrives is a property of the machine that afternoon** — so every latency
+  figure on this page belongs to an otherwise idle host, and the delivery and tick
+  figures do not need one.
   **The "fell behind" counts are not a severity ranking either** — the control
   logged 64 and the voice run 40, because a slower tick produces fewer of them in
   the same wall-clock window.

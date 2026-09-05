@@ -1,6 +1,9 @@
 package main
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // A fixed-shape latency histogram, and the reason it is not a slice of samples.
 //
@@ -117,22 +120,41 @@ func (h *histogram) count() uint64 {
 // is a bound, and rounding towards the middle invents precision the counts do not have.
 // false means it landed in the overflow bucket, where the only honest answer is "at least
 // the ceiling" and [histogram.max] is what to print.
+//
+// **The rank is rounded up and reached with `>=`, and both halves of that are the fix for
+// #930's review.** It read `uint64(total × fraction)` and `seen > rank`, which skipped the
+// bucket whose cumulative count *equalled* the rank: 99 samples at 35 µs and one at 3 s
+// reported p99 as three seconds, when 99 of the 100 are at or below 40 µs. The two forms
+// agree everywhere `total × fraction` is not a whole number — `trunc(x)+1` is `ceil(x)`
+// for any other x — which is why a test asking for p99.5 of a hundred samples passed
+// against the defect and why the one that catches it asks for p99 of exactly a hundred.
+//
+// This is the nearest-rank definition: the smallest value at or below which at least the
+// requested fraction of the samples fall. A rank of zero is raised to one, because the
+// smallest occupied bucket is the honest answer to "the 0th percentile" and no samples at
+// all is answered by the total check above.
 func (h *histogram) quantile(fraction float64) (time.Duration, bool) {
 	total := h.count()
 	if total == 0 {
 		return 0, false
 	}
-	want := uint64(float64(total) * fraction)
+	rank := uint64(math.Ceil(float64(total) * fraction))
+	if rank == 0 {
+		rank = 1
+	}
 	var seen uint64
 	for bucket, count := range h.counts {
 		seen += uint64(count)
-		if seen > want {
+		if seen >= rank {
 			if bucket >= overflowBucket {
 				return histogramCeiling, false
 			}
 			return bucketEdge(bucket), true
 		}
 	}
+	// Unreachable: rank is at most total, and the loop walks every bucket the samples are
+	// in. Kept because the compiler needs a return and because a silent wrong answer here
+	// would be worse than the longest sample.
 	return h.max, true
 }
 
