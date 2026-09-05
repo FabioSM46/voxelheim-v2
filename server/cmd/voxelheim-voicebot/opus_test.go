@@ -34,9 +34,24 @@ func TestASilenceFrameIsAPaddedOpusPacketAtEverySizeItOffers(t *testing.T) {
 		if got := packet[0] & 0x03; got != opusCodeArbitrary {
 			t.Errorf("size %d: TOC names frame-packing code %d, want %d", size, got, opusCodeArbitrary)
 		}
-		// The frame-count byte: CBR, padded, one frame.
-		if packet[1] != opusFrameCountCBRPadded {
-			t.Errorf("size %d: frame-count byte is %#x, want %#x", size, packet[1], opusFrameCountCBRPadded)
+		// The frame-count byte, read as the three fields RFC 6716 §3.2.5 lays it out in
+		// rather than compared against the constant that defines it. #931's review is why:
+		// `packet[1] != opusFrameCountCBRPadded` is a tautology, and it would have passed
+		// on any value at all — including one a decoder refuses.
+		//
+		// **M is the frame count itself, in 1..48, not the count minus one.** That is the
+		// claim the tautology was hiding, it is the one the review disputed, and 0x40 —
+		// what "minus one" would make of a single-frame packet — is refused by libopus as
+		// a corrupted stream rather than read as one frame.
+		if vbr := packet[1] & 0x80; vbr != 0 {
+			t.Errorf("size %d: the frame-count byte says VBR, and every frame here is the same size", size)
+		}
+		if padded := packet[1] & 0x40; padded == 0 {
+			t.Errorf("size %d: the frame-count byte says there is no padding, and the packet is almost all padding", size)
+		}
+		if frames := packet[1] & 0x3F; frames != 1 {
+			t.Errorf("size %d: the frame-count byte carries M=%d, want the one frame this packet holds "+
+				"(M is the count, and 0 is a value the RFC forbids)", size, frames)
 		}
 
 		// The padding the length bytes declare has to be exactly the padding that is

@@ -15,10 +15,9 @@ import (
 // The run: connect the plan, let it settle, measure a window, and report.
 //
 // **The measured window starts after everybody has joined and stopped moving**, and that is
-// not a convenience. The audible sets are recomputed every game.VoiceSetInterval ticks from
-// the positions the tick has just produced, so a frame sent before the recompute that
-// follows a teleport reaches an audience that no longer describes where anybody is. Counted
-// in, those frames would look like drops.
+// not a convenience: the audible sets are recomputed every game.VoiceSetInterval ticks, so a
+// frame sent before the recompute after a teleport reaches an audience that no longer says
+// where anybody is. Counted in, it looks like a drop.
 
 // joinConcurrency is how many sessions are handshaking at once.
 //
@@ -214,8 +213,7 @@ func sleepFor(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// expectedDeliveries is how many receipts a run's frames should produce if nothing is
-// dropped anywhere.
+// expectedDeliveries is how many receipts a run's frames owe if nothing is dropped.
 //
 // Arithmetic rather than observation, and that is the point: a speaker's audible set is
 // every other member of its own cluster — options.validate is what makes that true — so
