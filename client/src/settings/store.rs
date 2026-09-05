@@ -22,8 +22,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings, VoiceMode,
-    device_field, device_from_field, key_from_name, key_name, valid_monitor_identity,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    VoiceAudience, VoiceMode, device_field, device_from_field, key_from_name, key_name,
+    valid_monitor_identity,
 };
 
 /// The environment variable naming the XDG data directory.
@@ -214,6 +215,10 @@ fn render(settings: &Settings) -> String {
         "voice-activation-threshold {}\n",
         settings.voice_activation_threshold
     ));
+    out.push_str(&format!(
+        "voice-audience {}\n",
+        settings.voice_audience.name()
+    ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
@@ -327,6 +332,10 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "voice-activation-threshold" => match value.parse::<f32>() {
                 Ok(parsed) if parsed.is_finite() => settings.voice_activation_threshold = parsed,
                 _ => refuse("a voice activation threshold"),
+            },
+            "voice-audience" => match VoiceAudience::from_name(value) {
+                Some(parsed) => settings.voice_audience = parsed,
+                None => refuse("a voice audience"),
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
@@ -488,6 +497,7 @@ mod tests {
         settings.adjust(Knob::MasterVolume, -2);
         settings.adjust(Knob::VoiceMode, -1);
         settings.adjust(Knob::VoiceActivationThreshold, 3);
+        settings.adjust(Knob::VoiceAudience, 1);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.cycle_readout_corner();
@@ -756,16 +766,20 @@ mod tests {
             VoiceMode::PushToTalk,
             VoiceMode::VoiceActivation,
         ] {
-            let settings = Settings {
-                voice_mode: mode,
-                voice_activation_threshold: -33.0,
-                ..Settings::default()
-            };
-            assert_eq!(save(&path, &settings), Ok(()));
-            let (reloaded, complaints) = load(&path);
-            assert_eq!(complaints, Vec::<String>::new(), "{mode:?}");
-            assert_eq!(reloaded.voice_mode(), mode);
-            assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+            for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
+                let settings = Settings {
+                    voice_mode: mode,
+                    voice_activation_threshold: -33.0,
+                    voice_audience: audience,
+                    ..Settings::default()
+                };
+                assert_eq!(save(&path, &settings), Ok(()));
+                let (reloaded, complaints) = load(&path);
+                assert_eq!(complaints, Vec::<String>::new(), "{mode:?} {audience:?}");
+                assert_eq!(reloaded.voice_mode(), mode);
+                assert_eq!(reloaded.voice_audience(), audience);
+                assert!((reloaded.voice_activation_threshold_db() + 33.0).abs() < f32::EPSILON);
+            }
         }
 
         // A line nothing can read costs that one setting and leaves the other alone —
@@ -774,15 +788,21 @@ mod tests {
             &path,
             "voice-mode shouting
 voice-activation-threshold -30
+voice-audience nobody
 master-volume 25
 ",
         )
         .expect("a scratch file");
         let (settings, complaints) = load(&path);
         assert_eq!(settings.voice_mode(), Settings::default().voice_mode());
+        assert_eq!(
+            settings.voice_audience(),
+            Settings::default().voice_audience(),
+            "an audience nothing can read is not a narrower one"
+        );
         assert!((settings.voice_activation_threshold_db() + 30.0).abs() < f32::EPSILON);
         assert_eq!(settings.master_volume(), 25);
-        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert_eq!(complaints.len(), 2, "{complaints:?}");
         assert!(complaints[0].contains("line 1"), "{complaints:?}");
         assert!(
             !complaints[0].contains("shouting"),

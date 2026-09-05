@@ -2243,8 +2243,8 @@ mod tests {
     /// two tabs claim.
     ///
     /// **The order is the assertion, not just the membership.** The two devices sit under
-    /// the volume they feed, in the order a player reads them: what comes out, then what
-    /// goes in, then what the microphone is for.
+    /// the volume they feed, and the voice rows read as one sentence downwards: what the
+    /// microphone is for, what opens it, and who hears the result.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -2258,6 +2258,7 @@ mod tests {
                 "Microphone",
                 "Voice",
                 "Voice threshold",
+                "Heard by",
                 "Test speakers"
             ]
         );

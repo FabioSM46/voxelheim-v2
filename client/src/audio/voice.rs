@@ -30,10 +30,13 @@
 //!
 //! ## What is deliberately not decided here
 //!
-//! Who hears this. The frame carries no position and no recipient, the server owns both, and
-//! the audience is `Everyone` — a request for the audible set the server already computed.
-//! `#853` adds the knob that narrows it. Nothing in this file reads the player's own position,
-//! and there is nothing here it could read it from.
+//! Who hears this. The frame carries no position and no recipient, and the server owns both.
+//! `VoiceAudience` is a *request* stamped on every frame — `Everyone` asks for the audible set
+//! the server already computed, `Party` asks it to narrow that set — and the answer is the
+//! server's either way. Nothing in this file reads the player's own position or the party
+//! roster, and there is nothing here it could read either from: whether the player is in a
+//! party at all is a question for the HUD, which has the snapshot. A client that stopped
+//! transmitting because its own roster looked empty would be deciding an outcome.
 
 use std::sync::Mutex;
 
@@ -42,9 +45,10 @@ use bevy::prelude::*;
 use super::codec::VoiceEncoder;
 use super::device::AudioCapture;
 use super::dsp::{Agc, FRAME_SAMPLES, Hold, NoiseGate, Resampler, level_db};
-use crate::net::{Outbound, Session, VoiceAudience, VoiceFrame, encode_voice_frame};
+use crate::net::VoiceAudience as WireAudience;
+use crate::net::{Outbound, Session, VoiceFrame, encode_voice_frame};
 use crate::player::InputMode;
-use crate::settings::{Control, Settings, VoiceMode};
+use crate::settings::{Control, Settings, VoiceAudience, VoiceMode};
 
 /// How many 20 ms frames one Bevy frame may encode.
 ///
@@ -68,6 +72,9 @@ pub struct VoiceControls {
     /// How far a voice carries on this server, in blocks, or zero for a server that relays no
     /// voice at all — and for no session, which is the same thing from here.
     pub range_blocks: f32,
+    /// Who the player is asking to be heard by. Stamped on every frame; never consulted here
+    /// about whether to send one.
+    pub audience: VoiceAudience,
 }
 
 impl Default for VoiceControls {
@@ -79,6 +86,7 @@ impl Default for VoiceControls {
             // No session means no server, which relays no voice. The welcome is what makes
             // this non-zero, and it is the only thing that does.
             range_blocks: 0.0,
+            audience: settings.voice_audience(),
         }
     }
 }
@@ -210,6 +218,7 @@ fn follow_the_voice_settings(
         // Absent session, absent server, no voice. Not a default worth having an opinion
         // about: it is the state before a welcome arrives and after one ends.
         range_blocks: session.map_or(0.0, |session| session.0.voice_range_blocks),
+        audience: settings.voice_audience(),
     };
     // Written only on a change, so an ordinary frame does not mark the resource.
     if *controls != wanted {
@@ -357,9 +366,12 @@ fn speak(
         };
         let wire = encode_voice_frame(&VoiceFrame {
             sequence,
-            // `Everyone` asks for the audible set the server already computed. The knob that
-            // narrows it to a party is #853; the wire has carried both since #850.
-            audience: VoiceAudience::Everyone,
+            // **Every frame carries the knob's current value**, rather than the value the
+            // transmission started at. A player who narrows the audience mid-sentence has
+            // narrowed it from the next 20 ms on, which is the only reading of that press a
+            // listener can be given; carrying a value forward would mean a frame the player
+            // no longer intends to be public going out as one.
+            audience: wire_audience(controls.audience),
             opus: packet,
         });
         if let Some(outbound) = outbound.as_mut() {
@@ -377,6 +389,19 @@ fn speak(
     // no whole frame, which is what keeps the indicator from flickering at the frame rate.
     let held = controls.mode == VoiceMode::PushToTalk && talk;
     set_transmitting(&mut transmitting, sending || held);
+}
+
+/// The contract's word for what the player asked for.
+///
+/// **The one place the two enums meet, and it points one way.** `settings::VoiceAudience` is a
+/// preference and `net::VoiceAudience` is a wire tag; `settings/` may not name a contract type,
+/// which is the rule that keeps a knob from becoming a message. No wildcard arm, so a third
+/// audience has to say what it is on the wire before it builds.
+const fn wire_audience(audience: VoiceAudience) -> WireAudience {
+    match audience {
+        VoiceAudience::Everyone => WireAudience::Everyone,
+        VoiceAudience::Party => WireAudience::Party,
+    }
 }
 
 /// Writes the flag only when it changes, so an ordinary frame does not mark the resource.
@@ -431,6 +456,7 @@ mod tests {
             mode: settings.voice_mode(),
             activation_db: settings.voice_activation_threshold_db(),
             range_blocks,
+            audience: settings.voice_audience(),
         })
         .insert_resource(settings)
         .insert_resource(ButtonInput::<KeyCode>::default())
@@ -684,6 +710,96 @@ mod tests {
             assert_eq!(pair[1], pair[0] + 1, "the sequence skipped: {sequences:?}");
         }
         assert_eq!(sequences[0], 0, "the first frame of a session is not zero");
+    }
+
+    /// **Every frame carries the knob's current value, including the ones mid-sentence.**
+    ///
+    /// A player who narrows the audience while speaking has narrowed it from the next 20 ms on.
+    /// Stamping the value the transmission *started* at would send frames the player no longer
+    /// intends to be public — and it is the shape a pipeline naturally takes if the audience is
+    /// captured once, which is why the assertion is on frames either side of the press rather
+    /// than on a fresh transmission.
+    #[test]
+    fn the_audience_on_a_frame_is_the_one_the_knob_holds_when_it_is_encoded() {
+        let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        app.world().resource::<AudioCapture>().opened(48_000, 1);
+
+        let public = speak_for(&mut app, 6, 0.3);
+        assert!(!public.is_empty(), "nothing went out before the press");
+        for frame in &public {
+            assert_eq!(audience_of(frame), fb::VoiceAudience::Everyone);
+        }
+
+        // The press, mid-transmission: the key is still held and the pipeline is still running.
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust(Knob::VoiceAudience, 1);
+        // `follow_the_voice_settings` is not in this fixture — see `app_on_a_server` — so the
+        // controls are moved the way that system would move them, and by nothing else.
+        app.world_mut().resource_mut::<VoiceControls>().audience = VoiceAudience::Party;
+
+        let narrowed = speak_for(&mut app, 6, 0.3);
+        assert!(!narrowed.is_empty(), "nothing went out after the press");
+        for frame in &narrowed {
+            assert_eq!(
+                audience_of(frame),
+                fb::VoiceAudience::Party,
+                "a frame encoded after the press still asked to be public"
+            );
+        }
+    }
+
+    /// The audience tag on one frame this client built.
+    fn audience_of(frame: &[u8]) -> fb::VoiceAudience {
+        fb::root_as_envelope(frame)
+            .expect("a frame this client built")
+            .payload_as_voice_frame()
+            .expect("the tag names the payload")
+            .audience()
+    }
+
+    /// **The settings knob reaches the controls, and nothing reaches it back.**
+    ///
+    /// `follow_the_voice_settings` is the one writer of `VoiceControls::audience`, and the
+    /// mapping to the contract's enum is total — a third audience cannot be added without
+    /// saying what it is on the wire.
+    #[test]
+    fn the_audience_setting_reaches_the_controls_and_maps_onto_the_contract() {
+        let mut app = App::new();
+        app.insert_resource(Settings::default())
+            .init_resource::<VoiceControls>()
+            .add_systems(Update, follow_the_voice_settings);
+        app.update();
+        assert_eq!(
+            app.world().resource::<VoiceControls>().audience,
+            VoiceAudience::Everyone
+        );
+
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .adjust(Knob::VoiceAudience, 1);
+        app.update();
+        assert_eq!(
+            app.world().resource::<VoiceControls>().audience,
+            VoiceAudience::Party
+        );
+        assert_eq!(
+            *app.world().resource::<Settings>(),
+            {
+                let mut expected = Settings::default();
+                expected.adjust(Knob::VoiceAudience, 1);
+                expected
+            },
+            "the voice pipeline wrote a setting back"
+        );
+
+        assert_eq!(
+            wire_audience(VoiceAudience::Everyone),
+            WireAudience::Everyone
+        );
+        assert_eq!(wire_audience(VoiceAudience::Party), WireAudience::Party);
     }
 
     /// **A frame that is not sent is a gap, and the sequence is what makes the listener hear

@@ -6,6 +6,14 @@
 //! `audio/` produces; nothing here decides anything, and nothing that decides anything reads
 //! this module.
 //!
+//! **The audience is the one thing this line knows that `audio/` deliberately does not.**
+//! `VoiceAudience::Party` on a player who is in no party means *nobody*, and saying so needs
+//! the party roster — a server answer, which the HUD already has and `audio/voice.rs` must not
+//! read. So the pipeline goes on stamping `Party` on every frame and the server goes on
+//! delivering it to an empty set, which is the correct behaviour on both sides: a client that
+//! stopped transmitting because its own roster looked empty would be deciding an outcome. What
+//! is left is telling the player, and that is this file's whole share of the feature.
+//!
 //! **It is hidden entirely on a server that relays no voice.** `voice_range_blocks` of zero is
 //! `schemas/handshake.fbs`'s "a server that relays no voice at all", so a client there has no
 //! voice to indicate — and a key hint for a control that would do nothing is worse than no hint
@@ -14,8 +22,8 @@
 use bevy::prelude::*;
 
 use crate::audio::{Speaking, Transmitting, VoiceControls};
-use crate::player::Appearances;
-use crate::settings::{Control, Settings, VoiceMode, key_name};
+use crate::player::{Appearances, Party};
+use crate::settings::{Control, Settings, VoiceAudience, VoiceMode, key_name};
 
 /// Where the pair sits: above the chat log's own lane on the left, out of the way of the
 /// vital bars along the bottom.
@@ -28,6 +36,13 @@ const VOICE_LAYER: i32 = 12;
 /// The transmit indicator's two colours: sending, and the idle hint.
 const SENDING: Color = Color::srgb(0.88, 0.36, 0.30);
 const IDLE: Color = Color::srgba(0.72, 0.75, 0.80, 0.75);
+
+/// And the third, for the one state in which the line is a warning rather than a report: a
+/// player asking to be heard by a party they are not in.
+///
+/// The amber `ui/status.rs` answers a server refusal in, deliberately — this is the same kind
+/// of sentence, a thing the player asked for that is not going to happen.
+const UNHEARD: Color = Color::linear_rgb(1.0, 0.72, 0.25);
 
 /// What the speaker names are drawn in.
 const HEARING: Color = Color::srgb(0.72, 0.84, 0.94);
@@ -61,6 +76,7 @@ impl Plugin for VoiceUiPlugin {
             .init_resource::<Transmitting>()
             .init_resource::<Speaking>()
             .init_resource::<Appearances>()
+            .init_resource::<Party>()
             .add_systems(Startup, spawn_voice_hud)
             .add_systems(Update, refresh_voice_hud);
     }
@@ -112,6 +128,7 @@ fn refresh_voice_hud(
     transmitting: Res<Transmitting>,
     speaking: Res<Speaking>,
     appearances: Res<Appearances>,
+    party: Res<Party>,
     settings: Option<Res<Settings>>,
     mut roots: Query<&mut Node, With<VoiceHud>>,
     mut transmit: Query<(&mut Text, &mut TextColor), (With<TransmitLine>, Without<HearingLine>)>,
@@ -136,7 +153,18 @@ fn refresh_voice_hud(
         .map(|settings| settings.bindings().key(Control::Talk))
         .and_then(key_name)
         .unwrap_or("");
-    let (line, colour) = transmit_line(controls.mode, transmitting.0, key);
+    // **The roster and nothing else.** `Party::roster` is the complete authoritative order and
+    // includes this character, so a player in a party has a non-empty one and a player in none
+    // has an empty one — no count, no threshold, and nothing inferred from `members`, which
+    // holds only the *other* online members and is empty for a party of one.
+    let in_party = !party.roster.is_empty();
+    let (line, colour) = transmit_line(
+        controls.mode,
+        controls.audience,
+        in_party,
+        transmitting.0,
+        key,
+    );
     for (mut text, mut text_colour) in &mut transmit {
         if text.0 != line {
             text.0.clone_from(&line);
@@ -160,21 +188,41 @@ fn refresh_voice_hud(
 /// **The key hint is push to talk's alone**, because it is the only mode in which pressing
 /// anything starts a transmission. Voice activation waits for a level, and a hint naming a key
 /// there would be telling the player about a control that does nothing.
-fn transmit_line(mode: VoiceMode, sending: bool, key: &str) -> (String, Color) {
-    if sending {
-        return ("SPEAKING".to_owned(), SENDING);
-    }
-    match mode {
-        VoiceMode::PushToTalk if !key.is_empty() => {
+///
+/// **The audience is a tail on whatever that says**, not a line of its own: it qualifies the
+/// same sentence, and a second line would be a second thing to read for a state that is only
+/// ever one word. `Everyone` adds nothing, because it is what a player who never touched the
+/// knob has and a HUD that narrated the default would be noise.
+fn transmit_line(
+    mode: VoiceMode,
+    audience: VoiceAudience,
+    in_party: bool,
+    sending: bool,
+    key: &str,
+) -> (String, Color) {
+    let (line, colour) = match (sending, mode) {
+        (true, _) => ("SPEAKING".to_owned(), SENDING),
+        (false, VoiceMode::PushToTalk) if !key.is_empty() => {
             (format!("hold [{}] to speak", key.to_uppercase()), IDLE)
         }
         // A control this screen cannot name is a control the player cannot be told about, so
         // the hint says nothing rather than naming a key that is not there.
-        VoiceMode::PushToTalk => ("push to talk".to_owned(), IDLE),
-        VoiceMode::VoiceActivation => ("voice activation".to_owned(), IDLE),
+        (false, VoiceMode::PushToTalk) => ("push to talk".to_owned(), IDLE),
+        (false, VoiceMode::VoiceActivation) => ("voice activation".to_owned(), IDLE),
         // Unreachable while the root is shown, since `VoiceControls::live` is false for `Off`.
         // Answered rather than left to a wildcard so a fourth mode has to say what it draws.
-        VoiceMode::Off => (String::new(), IDLE),
+        (false, VoiceMode::Off) => (String::new(), IDLE),
+    };
+    if line.is_empty() {
+        return (line, colour);
+    }
+    match audience {
+        VoiceAudience::Everyone => (line, colour),
+        VoiceAudience::Party if in_party => (format!("{line} (party)"), colour),
+        // **The one state the HUD exists to make visible.** The frames are still going out and
+        // the server is still the one deciding they reach nobody; what would be wrong is a
+        // player believing they were heard.
+        VoiceAudience::Party => (format!("{line} - nobody hears you"), UNHEARD),
     }
 }
 
@@ -219,35 +267,84 @@ mod tests {
         settings
     }
 
+    /// The indicator with the audience left where a player who never touched the knob has it.
+    fn heard_by_everyone(mode: VoiceMode, sending: bool, key: &str) -> (String, Color) {
+        transmit_line(mode, VoiceAudience::Everyone, false, sending, key)
+    }
+
     /// **The indicator, in every state it has.** Sending says so; push to talk names the key
     /// that would start it; voice activation names itself, because there is no key to press.
     #[test]
     fn the_indicator_names_the_bound_key_only_where_a_key_would_do_something() {
         assert_eq!(
-            transmit_line(VoiceMode::PushToTalk, true, "v").0,
+            heard_by_everyone(VoiceMode::PushToTalk, true, "v").0,
             "SPEAKING"
         );
         assert_eq!(
-            transmit_line(VoiceMode::VoiceActivation, true, "v").0,
+            heard_by_everyone(VoiceMode::VoiceActivation, true, "v").0,
             "SPEAKING",
             "a mode with no key still says it is sending"
         );
         assert_eq!(
-            transmit_line(VoiceMode::PushToTalk, false, "v").0,
+            heard_by_everyone(VoiceMode::PushToTalk, false, "v").0,
             "hold [V] to speak"
         );
         assert_eq!(
-            transmit_line(VoiceMode::VoiceActivation, false, "v").0,
+            heard_by_everyone(VoiceMode::VoiceActivation, false, "v").0,
             "voice activation",
             "a key hint was drawn for a mode where pressing it does nothing"
         );
         assert_eq!(
-            transmit_line(VoiceMode::PushToTalk, false, "").0,
+            heard_by_everyone(VoiceMode::PushToTalk, false, "").0,
             "push to talk",
             "a hint named a key this screen cannot spell"
         );
-        assert_eq!(transmit_line(VoiceMode::PushToTalk, true, "v").1, SENDING);
-        assert_eq!(transmit_line(VoiceMode::PushToTalk, false, "v").1, IDLE);
+        assert_eq!(
+            heard_by_everyone(VoiceMode::PushToTalk, true, "v").1,
+            SENDING
+        );
+        assert_eq!(heard_by_everyone(VoiceMode::PushToTalk, false, "v").1, IDLE);
+    }
+
+    /// **The audience qualifies the line rather than replacing it, and it has three states.**
+    ///
+    /// `Everyone` says nothing, because narrating the default is noise. `Party` with a party
+    /// says which one. `Party` with no party is the state this whole line exists for: the
+    /// client is still transmitting — the server owns who receives, and a client that stopped
+    /// on the strength of its own roster would be deciding an outcome — so what is left is
+    /// telling the player, in the amber a refusal is answered in.
+    #[test]
+    fn the_audience_is_a_tail_and_no_party_is_said_out_loud() {
+        for (mode, sending, base) in [
+            (VoiceMode::PushToTalk, true, "SPEAKING"),
+            (VoiceMode::PushToTalk, false, "hold [V] to speak"),
+            (VoiceMode::VoiceActivation, false, "voice activation"),
+        ] {
+            let (plain, plain_colour) =
+                transmit_line(mode, VoiceAudience::Everyone, true, sending, "v");
+            assert_eq!(plain, base, "the widest audience narrated itself");
+
+            let (in_party, colour) = transmit_line(mode, VoiceAudience::Party, true, sending, "v");
+            assert_eq!(in_party, format!("{base} (party)"));
+            assert_eq!(
+                colour, plain_colour,
+                "a party that can hear the player read as a warning"
+            );
+
+            let (alone, colour) = transmit_line(mode, VoiceAudience::Party, false, sending, "v");
+            assert_eq!(alone, format!("{base} - nobody hears you"));
+            assert_eq!(colour, UNHEARD);
+        }
+
+        // `Off` draws nothing at all, and a tail on nothing would be a tail on its own.
+        for audience in [VoiceAudience::Everyone, VoiceAudience::Party] {
+            for in_party in [true, false] {
+                assert_eq!(
+                    transmit_line(VoiceMode::Off, audience, in_party, false, "v").0,
+                    ""
+                );
+            }
+        }
     }
 
     /// **The key is the one the player bound**, taken from the bindings rather than from the
@@ -260,7 +357,7 @@ mod tests {
             .expect("b is free");
         let key = key_name(settings.bindings().key(Control::Talk)).expect("a name");
         assert_eq!(
-            transmit_line(VoiceMode::PushToTalk, false, key).0,
+            heard_by_everyone(VoiceMode::PushToTalk, false, key).0,
             "hold [B] to speak"
         );
     }

@@ -83,7 +83,7 @@ keeps meaning "everything the client is".
 | `player/target.rs` | the voxel raycast, target outline, held mining intent and authoritative progress presentation | apply an edit, compute mining progress, or judge an action legal |
 | `player/structures.rs` | the tents, forges and campfires the newest snapshot names, the footprint arithmetic mirrored from the server, the fire's own light, and the two requests that ask for one | stand a structure up locally, decide whether a placement is legal, move one, or let the fire's glow state where the server's safe radius ends |
 | `player/constants.rs` | the body's dimensions, the look controls and the aiming reach | hold a number the server owns |
-| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume, the output device and the microphone, and what the microphone is for — the voice mode and the level voice activation triggers at; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
+| `settings/mod.rs` | what a player may change: the mouse sensitivity, the key bindings and the one rule that refuses a rebinding rather than leaving a control unreachable, the eight graphics values — including window mode and the attached monitor — the frame-rate readout, the master volume, the output device and the microphone, what the microphone is for — the voice mode and the level voice activation triggers at — and who the player is asking to be heard by; each setting keeps its bound, step and default here, plus the tab that scopes its reset | reach the wire, take a value from something the server sent, decide any outcome, or let one tab's reset reach another tab's fields |
 | `settings/store.rs` | the settings file — its path under the data directory, its text format, and the temporary-file-and-rename that replaces it | refuse to start over a line it cannot read, hold a bound of its own, or let a test build ask where the data directory is |
 | `audio/mod.rs` | `AudioPlugin`, the `AudioControls` a screen writes, the one place a `Settings` value becomes a gain or a device name, the device list handed back to the knob's bound, and the speaker test's sample generation | decide any outcome, be read by anything that does, own a `cpal::Stream`, or grow a second owner of the output device |
 | `audio/mixer.rs` | the bus arithmetic, the fixed-capacity SPSC rings, and the render the output callback runs | allocate, lock, log or mention a Bevy type anywhere reachable from `render` |
@@ -1504,6 +1504,24 @@ What the microphone's supervisor deliberately lacks is `DEFAULT_MOVED`: a loudsp
 whenever a device will have it, so following the host's default means reopening when it moves;
 a microphone is open only while somebody is speaking, and the moment to notice a new default
 is the next time one is opened rather than mid-sentence.
+
+**`Knob::VoiceAudience` is a request the frame carries, and never an answer.** The server owns
+every position and every roster and decides who actually receives; `Everyone` asks for the
+audible set it already computed and `Party` asks it to narrow that set. So `Party` on a player
+who is in no party is a real and reachable state meaning *nobody*, and it is the **HUD's** job
+to say so — `audio/voice.rs` goes on stamping and sending, because a client that stopped
+transmitting on the strength of its own roster would be deciding an outcome. `ui/voice.rs` is
+where the roster is read, and it is the one thing that line knows which `audio/` deliberately
+does not. "Nobody" in the other sense is `VoiceMode::Off` one row up, which is a different
+thing because only that one closes the capture device.
+
+**The two `VoiceAudience` enums meet in exactly one place, and it points one way.**
+`settings::VoiceAudience` is a preference; `net::VoiceAudience` is a wire tag; `wire_audience`
+in `audio/voice.rs` is the only conversion, because `settings/` may not name a contract type —
+the rule that keeps a knob from becoming a message. And **every frame carries the knob's
+current value**, not the value the transmission started at: a player who narrows the audience
+mid-sentence has narrowed it from the next 20 ms on, and carrying a captured value forward
+would send frames the player no longer intends to be public.
 
 **The output device is a choice, and `SystemDefault` is one of its values rather than the
 absence of one.** Following the system means reopening when the host moves its own default,
