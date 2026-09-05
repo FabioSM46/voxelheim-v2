@@ -4,11 +4,11 @@ import "time"
 
 // A fixed-shape latency histogram, and the reason it is not a slice of samples.
 //
-// At a thousand sessions in one cluster a hundred speakers relay to nine hundred and
-// ninety-nine listeners fifty times a second, which is about five million receipts a
-// second. Keeping one time.Duration per receipt would allocate gigabytes and would measure
-// this command's allocator rather than the server's relay. A bucketed count is a fixed
-// eight kilobytes per session and one increment per frame.
+// At a thousand sessions in one cluster, a hundred speakers relaying to nine hundred and
+// ninety-nine listeners fifty times a second is about five million receipts a second. One
+// time.Duration per receipt would allocate gigabytes and measure this command's allocator
+// rather than the server's relay; a bucketed count is a few kilobytes per session and one
+// increment per frame.
 //
 // **Two resolutions rather than one**, because the interesting numbers are three orders of
 // magnitude apart: a relay on loopback is tens of microseconds and a relay that has gone
@@ -18,15 +18,13 @@ import "time"
 // tiers are the resolutions the histogram is built out of, coarsest last.
 //
 // **Three of them rather than one, because the interesting numbers are four orders of
-// magnitude apart.** A relay on a quiet server is tens of microseconds; the same relay on
-// a server whose tick has collapsed is tens of seconds. One resolution fine enough for the
-// first would need three million buckets to reach the second, and one coarse enough for
-// the second answers every healthy p50 with "under a tenth of a second", which is the whole
-// question thrown away.
+// magnitude apart.** A relay on a quiet server is tens of microseconds; the same relay on a
+// server whose tick has collapsed is tens of seconds. One resolution fine enough for the
+// first needs three million buckets to reach the second, and one coarse enough for the
+// second answers every healthy p50 with "under a tenth of a second".
 //
-// Each tier's range is its step times its bucket count, and the tiers are contiguous: the
-// first covers 0..10 ms at ten microseconds, the second 10 ms..1 s at a millisecond, the
-// third 1 s..31 s at a tenth of a second.
+// The tiers are contiguous, each spanning its step times its bucket count: 0..10 ms at ten
+// microseconds, 10 ms..1 s at a millisecond, 1 s..31 s at a tenth of a second.
 var tiers = [...]struct {
 	step    time.Duration
 	buckets int
@@ -115,10 +113,10 @@ func (h *histogram) count() uint64 {
 // quantile is the smallest bucket ceiling at or below which the given fraction of samples
 // fall, and whether the answer is a real number at all.
 //
-// **It returns the bucket's upper edge, not its middle.** A percentile read off a
-// histogram is a bound, and rounding it towards the middle would be inventing precision
-// the buckets do not have. false means the quantile landed in the overflow bucket, where
-// the only honest answer is "at least the ceiling" and [histogram.max] is what to print.
+// **It returns the bucket's upper edge, not its middle**: a percentile read off a histogram
+// is a bound, and rounding towards the middle invents precision the counts do not have.
+// false means it landed in the overflow bucket, where the only honest answer is "at least
+// the ceiling" and [histogram.max] is what to print.
 func (h *histogram) quantile(fraction float64) (time.Duration, bool) {
 	total := h.count()
 	if total == 0 {

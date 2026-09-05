@@ -23,23 +23,26 @@ import (
 //
 // **There is no client library in this module to reuse.** Every handshake driver in the
 // server tree is a `_test.go` helper in an external test package, so a command cannot
-// import one; what it can import is `internal/protocol`'s encoders,
-// `internal/transport`'s framing and `internal/ticket`'s minting, which between them are
-// the whole of a client. That is deliberate rather than a gap: the wire is the contract,
-// and a bot built out of the same three packages the real server admits is a bot that
-// proves the contract rather than a mock of it.
+// import one; what it can import is `internal/protocol`'s encoders, `internal/transport`'s
+// framing and `internal/ticket`'s minting, which between them are the whole of a client. A
+// bot built out of the three packages the real server admits proves the contract rather
+// than mocking it.
 //
-// **The connection keeps the one-reader-one-writer promise** `transport.Conn` makes. The
-// handshake writes before either goroutine starts; after it, [bot.listen] owns the read
-// side and [bot.speak] owns the write side, and nothing else touches the socket.
+// **The connection keeps `transport.Conn`'s one-reader-one-writer promise**: the handshake
+// writes before either goroutine starts, and after it [bot.listen] owns the read side and
+// [bot.speak] the write side.
 
 // connBufferSize matches internal/transport's own framed connection, so a bot's socket
 // behaves like a session's on the other end of it.
 const connBufferSize = 64 << 10
 
-// joinDeadline bounds the handshake. It is generous against the server's five-second
-// handshake window on purpose: a thousand sessions arriving at once queue behind each
-// other's TLS handshakes, and a bot that gave up early would be reported as a refusal.
+// joinDeadline bounds the dial and the handshake when the caller's context does not. It is
+// generous against the server's five-second handshake window on purpose: a thousand
+// sessions arriving at once queue behind each other's TLS handshakes, and a bot that gave
+// up early would be reported as a refusal.
+//
+// **It is a backstop and not the bound that matters**: the caller's context is, and
+// [bot.answerCancellation] is what makes a socket notice one.
 const joinDeadline = 60 * time.Second
 
 type bot struct {
@@ -47,7 +50,7 @@ type bot struct {
 	place placement
 	name  string
 
-	conn   *tls.Conn
+	conn   net.Conn
 	reader *bufio.Reader
 
 	// entityID is this session's own id, learned from ServerWelcome. A speaker's frames
@@ -80,27 +83,33 @@ type bot struct {
 
 	// firstVoice, when it is not nil, is handed the first frame relayed to this session.
 	//
-	// **It is the probe's whole answer and the soak never asks for one**, which is why it
-	// is a nil channel there: the soak counts millions of receipts and a non-blocking send
-	// on each of them would be work done for nobody. A buffer of one and a send that gives
-	// up rather than blocks, because what the probe wants is that a frame arrived, not
-	// which of them was first past a scheduler.
+	// **It is the probe's whole answer, and the soak leaves it nil** because the soak counts
+	// millions of receipts and a send on each would be work done for nobody. One slot, and a
+	// send that gives up rather than blocks: what the probe wants is that a frame arrived,
+	// not which one won a scheduler.
 	firstVoice chan relayed
 }
 
 // join dials, handshakes and returns once the server has welcomed this session.
 //
 // Hello and the character creation are written back to back before anything is read, which
-// is what the session's own TCP test does and what the protocol allows: a client that
-// already knows which character it wants need not wait to be shown the list.
+// the protocol allows and the session's own TCP test does: a client that already knows
+// which character it wants need not wait to be shown the list.
 func (b *bot) join(ctx context.Context) error {
-	dialer := &net.Dialer{Timeout: joinDeadline}
-	conn, err := tls.DialWithDialer(dialer, "tcp", b.fleet.addr, b.fleet.tlsConfig())
+	// DialContext rather than DialWithDialer: the latter takes a timeout and no context, so
+	// a cancelled run would wait out joinDeadline before noticing.
+	dialer := &tls.Dialer{NetDialer: &net.Dialer{Timeout: joinDeadline}, Config: b.fleet.tlsConfig()}
+	conn, err := dialer.DialContext(ctx, "tcp", b.fleet.addr)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	b.conn = conn
 	b.reader = bufio.NewReaderSize(conn, connBufferSize)
+
+	// From here the handshake reads, and a read is not interruptible by a context — see
+	// answerCancellation. Stopped on the way out, because the session's own context takes
+	// over the moment the welcome lands.
+	defer b.answerCancellation(ctx)()
 
 	credential, err := b.fleet.ticketFor(b.name)
 	if err != nil {
@@ -148,21 +157,18 @@ func (b *bot) join(ctx context.Context) error {
 			return nil
 		case vnet.PayloadServerReject:
 			return fmt.Errorf("refused: %s", rejectDetail(envelope))
-		default:
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
 		}
 	}
 }
 
-// listen is the read half, and it is the only goroutine that touches this bot's histogram.
+// listen is the read half, and the only goroutine that touches this bot's histogram.
 //
-// Everything that is not a snapshot or a relayed voice frame is read and dropped on the
-// floor: a soak test is not a client, and the chunks, inventories and marker lists a
-// session is handed exist here only as the bytes a real listener would have to receive
-// while the relay is trying to reach it.
+// Everything that is not a snapshot or a relayed voice frame is read and dropped: the
+// chunks, inventories and marker lists a session is handed exist here only as the bytes a
+// real listener has to receive while the relay is trying to reach it.
 func (b *bot) listen(ctx context.Context) error {
+	defer b.answerCancellation(ctx)()
+
 	for {
 		frame, err := transport.ReadFrame(b.reader)
 		if err != nil {
@@ -183,10 +189,9 @@ func (b *bot) listen(ctx context.Context) error {
 
 // absorbVoice counts one receipt and measures how long it took to arrive.
 //
-// **The Opus is read for its last eight bytes and for nothing else**, and those eight bytes
-// are the padding this command wrote — see opus.go. Nothing about a frame is logged, kept
-// or written down: the repository's rule that a voice payload never reaches a diagnostic
-// holds for a load generator exactly as it holds for the relay.
+// **The Opus is read for its last eight bytes and for nothing else** — the padding this
+// command wrote, see opus.go. Nothing about a frame is logged or kept: the rule that a
+// voice payload never reaches a diagnostic holds for a load generator too.
 func (b *bot) absorbVoice(envelope *vnet.Envelope) {
 	if !b.fleet.measuring.Load() {
 		return
@@ -243,10 +248,10 @@ func (b *bot) absorbSnapshot(envelope *vnet.Envelope) {
 // speak is the write half: the heartbeat every session owes, and the frames the speakers
 // among them send.
 //
-// **A silent session still sends PlayerInput**, because the server closes a welcomed
-// session that has said nothing for its idle window and because that is what a real client
-// does every tick. The cost of the heartbeat is part of what the relay is competing with,
-// so removing it would measure a server nobody runs.
+// **A silent session still sends PlayerInput**: the server closes a welcomed session that
+// has said nothing for its idle window, and it is what a real client does every tick. The
+// heartbeat is part of what the relay competes with, so removing it would measure a server
+// nobody runs.
 func (b *bot) speak(ctx context.Context) {
 	heartbeat := time.NewTicker(b.fleet.tickInterval)
 	defer heartbeat.Stop()
@@ -296,6 +301,25 @@ func (b *bot) speak(ctx context.Context) {
 	}
 }
 
+// answerCancellation makes this session's socket notice the context, and returns the
+// function that stops it doing so.
+//
+// **A blocked read is not interruptible by a context, and a deadline is the only thing
+// that ends one.** Nothing in transport.ReadFrame's path takes a context, so before #932's
+// review a server that accepted a connection and then said nothing held the reader for
+// joinDeadline whatever the caller had asked for: a probe told to wait thirty waited sixty.
+//
+// The deadline is set to now rather than to the zero time, because a deadline in the past
+// fails the read already in flight as well as every later one. It bounds the writer too —
+// both goroutines share one socket and SetDeadline is not per-direction. [context.AfterFunc]
+// fires immediately on a context that is already done, so there is no window between one
+// watcher being stopped and the next being set.
+func (b *bot) answerCancellation(ctx context.Context) func() bool {
+	return context.AfterFunc(ctx, func() {
+		_ = b.conn.SetDeadline(time.Now())
+	})
+}
+
 func (b *bot) close() {
 	if b.conn != nil {
 		_ = b.conn.Close()
@@ -333,17 +357,16 @@ func rejectDetail(envelope *vnet.Envelope) string {
 // speakerBucket is this command's own copy of the allowance the server charges a speaker,
 // run over the instants at which this session actually wrote a frame.
 //
-// **It exists because the server answers nothing and logs a refusal at Debug.** At a
-// hundred speakers relaying to nine hundred and ninety-nine listeners, turning Debug on to
-// attribute drops writes one line per dropped delivery — a hundred and forty-five million
-// of them in a thirty-second run — which is a load of its own and not a measurement. So the
-// one class of drop that depends on *this command's* behaviour rather than the server's is
-// predicted here, from the two constants game exports for the purpose, and confirmed
-// against the server's own Debug lines on the runs small enough to log.
+// **It exists because the server answers nothing and logs its refusals at Debug**, and at a
+// thousand sessions turning Debug on to attribute drops writes one line per dropped delivery
+// — a load of its own rather than a measurement. So the one class of drop that depends on
+// *this command's* behaviour rather than the server's is predicted here, from the two
+// constants game exports for the purpose.
 //
 // It is a prediction and the report says so. What makes it a useful one is that it is
 // falsifiable in exactly the way an assertion would not be: a run at -server-log-level
-// debug prints both numbers, and they either agree or this is wrong.
+// debug prints this number and the server's own beside it, and they either agree or this
+// is wrong.
 type speakerBucket struct {
 	tokens float64
 	last   time.Time
