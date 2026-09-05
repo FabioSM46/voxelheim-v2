@@ -121,6 +121,19 @@ pub struct MicTest {
     pub level_db: Option<f32>,
 }
 
+/// Whether the microphone this player chose has been asked for and would not open.
+///
+/// **This is what makes refusing a named device that is not there safe to do.** The client
+/// opens nothing in its place — audio the player never consented to, relayed to people who
+/// cannot tell it happened, is the harm that decides it — so what is owed to the player is
+/// being *told*, in the place they are already looking when they wonder why nobody answered.
+/// `ui/voice.rs` is that place.
+///
+/// **Presentation, and the HUD is its only reader**, exactly as [`Transmitting`] is. Nothing
+/// decides anything from it.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MicrophoneMissing(pub bool);
+
 /// Whether this client is sending voice right now.
 ///
 /// **Presentation, and the HUD in #852 part 7 is its only reader.** Nothing decides anything
@@ -232,6 +245,7 @@ impl Plugin for VoicePlugin {
         }
         app.init_resource::<VoiceControls>()
             .init_resource::<Transmitting>()
+            .init_resource::<MicrophoneMissing>()
             .init_resource::<MicTest>()
             .insert_resource(VoicePipeline {
                 loopback,
@@ -281,6 +295,7 @@ fn speak(
     mut pipeline: ResMut<VoicePipeline>,
     mut outbound: Option<ResMut<Outbound>>,
     mut transmitting: ResMut<Transmitting>,
+    mut missing: ResMut<MicrophoneMissing>,
     mut test: ResMut<MicTest>,
 ) {
     let pipeline = &mut *pipeline;
@@ -318,6 +333,7 @@ fn speak(
         pipeline.start_over();
         capture.listen(false);
         set_transmitting(&mut transmitting, false);
+        set_missing(&mut missing, false);
         clear_level(&mut test);
         return;
     }
@@ -333,6 +349,10 @@ fn speak(
         || (controls.live()
             && (controls.mode == VoiceMode::VoiceActivation || pipeline.asked_to_speak));
     capture.listen(open);
+    // **Only while a device has been asked for.** A microphone nobody wanted is not missing,
+    // and the supervisor says "unavailable" only once an open attempt has actually failed —
+    // so this cannot flash in the moment between the request and a stream starting.
+    set_missing(&mut missing, open && capture.shared().unavailable());
     if !open {
         set_transmitting(&mut transmitting, false);
         clear_level(&mut test);
@@ -473,6 +493,13 @@ fn speak(
     set_transmitting(&mut transmitting, !testing && (sending || held));
 }
 
+/// Writes the flag only when it changes, so an ordinary frame does not mark the resource.
+fn set_missing(missing: &mut ResMut<MicrophoneMissing>, gone: bool) {
+    if missing.0 != gone {
+        missing.0 = gone;
+    }
+}
+
 /// Forgets the last level when nothing is being captured, so a meter cannot sit at whatever it
 /// last read while the device is shut.
 fn clear_level(test: &mut ResMut<MicTest>) {
@@ -587,6 +614,7 @@ mod tests {
         .insert_resource(AudioCapture::idle())
         .insert_resource(outbound)
         .init_resource::<Transmitting>()
+        .init_resource::<MicrophoneMissing>()
         .init_resource::<MicTest>()
         .init_resource::<VoicePipeline>()
         .add_systems(Update, speak);
@@ -646,6 +674,43 @@ mod tests {
             frames.extend(app.world_mut().resource_mut::<Outbound>().taken_voice());
         }
         frames
+    }
+
+    /// **A microphone that will not open is published to the HUD, and only once one has been
+    /// asked for.**
+    ///
+    /// The second half is what stops the indicator flashing on every first press: `speak` asks
+    /// the supervisor whether an attempt has *failed*, not whether a stream is open this
+    /// instant, so the moment between `listen(true)` and a stream starting reads normally.
+    #[test]
+    fn a_microphone_that_will_not_open_reaches_the_hud_and_an_unasked_one_does_not() {
+        let (mut app, _sent) = voice_app(tuned(VoiceMode::PushToTalk));
+        app.world().resource::<AudioCapture>().cannot_open();
+        tick(&mut app);
+        assert!(
+            !app.world().resource::<MicrophoneMissing>().0,
+            "a microphone nobody has asked for was reported missing"
+        );
+
+        press(&mut app, KeyCode::KeyV);
+        tick(&mut app);
+        assert!(microphone_is_open(&app), "the key did not ask for a device");
+        assert!(
+            app.world().resource::<MicrophoneMissing>().0,
+            "a device that was asked for and would not open was not reported"
+        );
+        assert!(
+            !app.world().resource::<Transmitting>().0,
+            "the HUD was told this player was speaking with no microphone"
+        );
+
+        // Voice off closes the device, and nothing is missing when nothing is wanted.
+        app.world_mut().resource_mut::<VoiceControls>().mode = VoiceMode::Off;
+        tick(&mut app);
+        assert!(
+            !app.world().resource::<MicrophoneMissing>().0,
+            "voice off still reported a missing microphone"
+        );
     }
 
     /// **The test holds the microphone with voice off, plays it back, and sends nothing.**
