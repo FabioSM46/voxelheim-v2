@@ -332,8 +332,9 @@ real coverage is roughly three times its production code; and a field added to a
 by literal costs every construction site — `SessionParams` has 45, which was 14,000 characters
 before any behaviour existed.
 
-**The Parts column is not the estimate divided by the cap.** 74,073 over 45,000 is 1.6 and #851
-took five. Seams are discrete — you cut where the code already draws a boundary, and #851's parts
+**The Parts column is not the estimate divided by the cap.** 74,073 over the 45,000 cap of the
+time is 1.6 and #851 took five; the column was recomputed for the 90,000 cap #925 measured, the
+sizes were not. Seams are discrete — you cut where the code already draws a boundary, and #851's parts
 came out around 16k, 44k, 49k, 36k and 42k because that is where its module edges are — and an
 estimate made before any code exists is systematically low: #851 was estimated whole at 74,073 and
 its fifth part *alone* measured 80,534 once written. Treat the arithmetic as a floor on the count

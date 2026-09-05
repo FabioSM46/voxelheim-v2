@@ -195,12 +195,14 @@ So estimate from the issue, using what this repository has actually measured:
 | One workspace, a module *and* a settings/UI surface | 74,000–84,000 | 2 |
 | Two or more workspaces (`schemas` + `server` + `client`) | 95,000+ | 2+ |
 
-Two calibration points behind the bottom rows, both from Iteration 50: **#851** named eight new
-files in one workspace and came to 74,073 — five parts; **#850** touched `schemas`, `server` and
-`client` and came to about 95,000 — four parts.
+Two calibration points behind the bottom rows, both from Iteration 50 and both measured under the
+old 45,000 cap: **#851** named eight new files in one workspace and came to 74,073 — five parts
+then, two now; **#850** touched `schemas`, `server` and `client` and came to about 95,000 — four
+parts then, two now. The Parts column was recomputed for the 90,000 cap #925 measured; the sizes
+were not, because the sizes are what was measured.
 
 **The Parts column is not the estimate divided by the cap, and reading it that way is the mistake
-this paragraph exists to stop.** 74,073 over 45,000 is 1.6, and #851 took five. Two reasons, both
+this paragraph exists to stop.** 74,073 over the 45,000 cap of the time is 1.6, and #851 took five. Two reasons, both
 structural rather than accidental:
 
 - **Seams are discrete.** You cut where the code already draws a boundary, and those boundaries fall
