@@ -726,7 +726,13 @@ that spends the ceiling on nothing — never came close in any sample: the heavi
 **90,000 is derived the same way 45,000 was, from the tail, with the tail allowance stated
 rather than folded into the margin.** The budget stays at the 1,481,000 characters #164 measured
 against a ceiling it actually filled; `high` emits 4.16 characters per token, which would make the
-budget larger, and the smaller number is the one to size under. The worst ratio observed is 6.03,
+budget larger, and the smaller number is the one to size under — and it is used as a *pair* with
+#164's 3.86 characters per token, which is what makes the two halves of this arithmetic the same
+measurement: 1,481,442 characters over 3.86 is exactly the 384,000-token ceiling. Substituting
+`high`'s 4.16 into the token conversion while keeping #164's character budget mixes two runs and
+reports about 262,000 tokens instead of 281,200; using `high`'s pair throughout would raise the
+budget to roughly 1,597,000 characters and license a *larger* cap. Both alternatives are less
+conservative than what is written, which is why the pair is kept. The worst ratio observed is 6.03,
 and it is doubled — to 12.05 — before anything is derived from it, because seventeen samples bound
 the tail of a run-to-run distribution loosely and the observed 1.6× swing needs room above it.
 The diff that fills the budget at 12.05 is about 122,900 characters; 72% of that, the margin every
@@ -879,7 +885,8 @@ worst-case two-attempt output envelope is about $0.215, excluding input tokens.
 
 **Reasoning effort is `high`, not `max`.** That trades some reasoning depth for lower latency and
 a lower risk that reasoning consumes the shared 384,000-token output budget before a verdict can
-be emitted. The model, output ceiling, diff cap, retry and timeout budgets remain unchanged; the
+be emitted. The model, output ceiling, retry and timeout budgets remain unchanged; the diff cap is
+now 90,000, derived from replays at this effort — see "Taken, on #925" above. The
 historical exhaustion measurements above were collected at `max` and must not be relabelled as
 measurements of `high`. The seventeen-row table under "Taken, on #925" is the measurement at `high`,
 and the cap now in force is derived from it; the `max` rows stay as the record of why the
