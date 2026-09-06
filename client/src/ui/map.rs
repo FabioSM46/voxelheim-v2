@@ -1042,6 +1042,75 @@ impl FromWorld for ArrowPicture {
 }
 
 /// Keeps the map's viewport and its tile cache in step with the server.
+/// Only the open world needs a retained cache: instance identities are ephemeral,
+/// and their map is discarded on departure. Never accumulate one cache per crossing.
+#[derive(Resource, Default)]
+struct OpenWorldMap(Option<(i64, MapTiles, Markers, Landmarks)>);
+
+pub(super) fn reset_session(world: &mut World) {
+    use crate::world::transition::reset;
+    reset::<OpenWorldMap>(world);
+    reset::<MapTiles>(world);
+    reset::<Markers>(world);
+    reset::<Landmarks>(world);
+    reset::<MapScreen>(world);
+    reset::<Painted>(world);
+}
+
+pub(super) fn replace_world(
+    world: &mut World,
+    change: crate::net::WorldChange,
+    pending: Vec<MapEvent>,
+) {
+    let Some(mut tiles) = world.remove_resource::<MapTiles>() else {
+        return;
+    };
+    let mut markers = world.remove_resource::<Markers>().unwrap_or_default();
+    let mut landmarks = world.remove_resource::<Landmarks>().unwrap_or_default();
+    for event in pending {
+        apply_map_event(event, &mut tiles, &mut markers, &mut landmarks);
+    }
+    // Replies still in flight were ordered before WorldChange, so no destination
+    // reply can finish an old request. Retained pixels and discovery stay intact.
+    tiles.in_flight.clear();
+    landmarks.pending.clear();
+    let old = world
+        .get_resource::<crate::world::transition::CurrentWorld>()
+        .copied()
+        .unwrap_or_default();
+    let mut saved = world.remove_resource::<OpenWorldMap>().unwrap_or_default();
+    if old.id == 0 {
+        saved.0 = Some((old.seed, tiles, markers, landmarks));
+    }
+    let (tiles, markers, landmarks) = if change.world_id == 0 {
+        saved
+            .0
+            .take()
+            .filter(|(seed, ..)| *seed == change.world_seed)
+            .map(|(_, tiles, markers, landmarks)| (tiles, markers, landmarks))
+            .unwrap_or_default()
+    } else {
+        (
+            MapTiles::default(),
+            Markers::default(),
+            Landmarks::default(),
+        )
+    };
+    world.insert_resource(saved);
+    world.insert_resource(tiles);
+    world.insert_resource(markers);
+    world.insert_resource(landmarks);
+    use crate::world::transition::reset;
+    reset::<MapScreen>(world);
+    reset::<MarkerForm>(world);
+    reset::<MapPress>(world);
+    reset::<MapDrag>(world);
+    reset::<MapPointer>(world);
+    reset::<Painted>(world);
+    crate::world::transition::despawn::<LandmarkPin>(world);
+    crate::world::transition::despawn::<MarkerPin>(world);
+}
+
 pub(super) struct MapUiPlugin;
 
 impl Plugin for MapUiPlugin {
@@ -1057,7 +1126,8 @@ impl Plugin for MapUiPlugin {
         }
         // Initialised here as well as by their producers, which is what keeps this module
         // headlessly testable on its own — the same reason every other panel does it.
-        app.init_resource::<MapScreen>()
+        app.init_resource::<OpenWorldMap>()
+            .init_resource::<MapScreen>()
             .init_resource::<MapTiles>()
             .init_resource::<MapInbox>()
             .init_resource::<Markers>()
@@ -2286,7 +2356,9 @@ fn spawn_marker_form(overlay: &mut ChildSpawnerCommands<'_>) {
 /// begin identically, so nothing can be decided until the button comes up; [`CLICK_SLOP`] is
 /// the whole of the distinction. The block is the picture's answer for the release rather
 /// than for the press, which is the position the pointer is actually over.
+#[allow(clippy::too_many_arguments)] // The current world gates marker editing.
 fn click_the_map(
+    current: Option<Res<crate::world::transition::CurrentWorld>>,
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     pointer: Res<MapPointer>,
@@ -2295,6 +2367,13 @@ fn click_the_map(
     landmarks: Query<&Interaction, With<LandmarkPin>>,
     mut form: ResMut<MarkerForm>,
 ) {
+    if current
+        .as_deref()
+        .is_some_and(|world| world.id != 0 || world.loading)
+    {
+        return;
+    }
+
     let Some(buttons) = buttons else {
         return;
     };
@@ -2341,6 +2420,7 @@ fn click_the_map(
 /// so a note that could not be stored is one the field would not take rather than one the
 /// server has to refuse.
 fn type_the_note(
+    current: Option<Res<crate::world::transition::CurrentWorld>>,
     mut typed: MessageReader<KeyboardInput>,
     screen: Res<MapScreen>,
     mut form: ResMut<MarkerForm>,
@@ -2348,6 +2428,14 @@ fn type_the_note(
     mut outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
+    if current
+        .as_deref()
+        .is_some_and(|world| world.id != 0 || world.loading)
+    {
+        typed.clear();
+        return;
+    }
+
     if form.0.is_none() || !screen.is_open() {
         // Always drain, for the reason chat does: a key pressed while no field was open must
         // not reach one that opens later.
@@ -2375,6 +2463,7 @@ fn type_the_note(
 
 /// Reads the form's own controls: the seven kinds, `Place` and `Cancel`.
 fn press_the_form(
+    current: Option<Res<crate::world::transition::CurrentWorld>>,
     mut form: ResMut<MarkerForm>,
     kinds: Query<(&Interaction, &MarkerKindButton), Changed<Interaction>>,
     actions: Query<(&Interaction, &MarkerFormAction), Changed<Interaction>>,
@@ -2382,6 +2471,13 @@ fn press_the_form(
     mut outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
+    if current
+        .as_deref()
+        .is_some_and(|world| world.id != 0 || world.loading)
+    {
+        return;
+    }
+
     if form.0.is_none() {
         return;
     }
@@ -2447,6 +2543,7 @@ fn ask_to_place(
 /// direction.
 #[allow(clippy::too_many_arguments)] // The landmark guard prevents removing an overlapping mark.
 fn remove_a_mark(
+    current: Option<Res<crate::world::transition::CurrentWorld>>,
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     screen: Res<MapScreen>,
     form: Res<MarkerForm>,
@@ -2456,6 +2553,13 @@ fn remove_a_mark(
     mut outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
+    if current
+        .as_deref()
+        .is_some_and(|world| world.id != 0 || world.loading)
+    {
+        return;
+    }
+
     // Suspended while the form is up, so the two gestures cannot be in flight at once -- and
     // because the form is what the pointer is over.
     if !screen.is_open() || form.is_open() || landmarks.iter().any(|hit| *hit != Interaction::None)
@@ -2579,6 +2683,7 @@ fn follow_input_mode(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
     stats: Res<PlayerStats>,
+    mut saved: ResMut<OpenWorldMap>,
     mut screen: ResMut<MapScreen>,
     mut tiles: ResMut<MapTiles>,
     mut markers: ResMut<Markers>,
@@ -2591,6 +2696,9 @@ fn follow_input_mode(
         form.0 = None;
     }
     if session.is_none() {
+        if saved.0.is_some() {
+            saved.0 = None;
+        }
         if screen.is_open() {
             screen.close();
         }
@@ -2659,24 +2767,33 @@ fn ingest_map_payloads(
         if session.is_none() {
             continue;
         }
-        match event {
-            MapEvent::Landmarks(list) => landmarks.replace(list),
-            MapEvent::RefreshLandmarks => {
-                landmarks.generation = landmarks.generation.wrapping_add(1);
+        apply_map_event(event, &mut tiles, &mut markers, &mut landmarks);
+    }
+}
+
+fn apply_map_event(
+    event: MapEvent,
+    tiles: &mut MapTiles,
+    markers: &mut Markers,
+    landmarks: &mut Landmarks,
+) {
+    match event {
+        MapEvent::Landmarks(list) => landmarks.replace(list),
+        MapEvent::RefreshLandmarks => {
+            landmarks.generation = landmarks.generation.wrapping_add(1);
+        }
+        MapEvent::Tile(tile) => tiles.insert(tile),
+        MapEvent::Explored(explored) => {
+            for column in explored.columns {
+                tiles.evict(column);
             }
-            MapEvent::Tile(tile) => tiles.insert(tile),
-            MapEvent::Explored(explored) => {
-                for column in explored.columns {
-                    tiles.evict(column);
-                }
-            }
-            // Assigned, never merged: the list is complete by contract, so the last one
-            // received is the state. Two lists in one frame therefore leave the second,
-            // which is the only reading of them that is not a guess about order.
-            MapEvent::Markers(list) => {
-                if markers.0 != list.markers {
-                    markers.0 = list.markers;
-                }
+        }
+        // Assigned, never merged: the list is complete by contract, so the last one
+        // received is the state. Two lists in one frame therefore leave the second,
+        // which is the only reading of them that is not a guess about order.
+        MapEvent::Markers(list) => {
+            if markers.0 != list.markers {
+                markers.0 = list.markers;
             }
         }
     }
@@ -2684,6 +2801,7 @@ fn ingest_map_payloads(
 
 /// Asks for the squares the viewport overlaps that this client does not hold.
 fn request_map_tiles(
+    current: Option<Res<crate::world::transition::CurrentWorld>>,
     time: Res<Time>,
     screen: Res<MapScreen>,
     session: Option<Res<Session>>,
@@ -2700,7 +2818,12 @@ fn request_map_tiles(
     tiles.in_flight.retain(|_, note| note.expires > now);
     landmarks.pending.retain(|_, (expires, _)| *expires > now);
 
-    if !screen.is_open() || session.is_none() {
+    if !screen.is_open()
+        || session.is_none()
+        || current
+            .as_deref()
+            .is_some_and(|world| world.id != 0 || world.loading)
+    {
         return;
     }
     let Some(outbound) = outbound.as_deref_mut() else {
@@ -2800,6 +2923,88 @@ mod tests {
             .iter(app.world())
             .map(|(entity, pin, node)| (entity, *pin, node.clone()))
             .collect()
+    }
+
+    #[test]
+    fn world_map_round_trip_keeps_every_open_world_pixel_and_no_instance_mark() {
+        let (mut app, frames) = app();
+        app.update();
+        let seed = app.world().resource::<Session>().0.world_seed;
+        crate::world::transition::new_session(app.world_mut(), seed);
+        let overworld = tile(0, 0, 1);
+        let mark = Marker {
+            marker_id: 1,
+            x: 4,
+            z: 5,
+            kind: MarkerKind::Camp,
+            note: "Home".to_owned(),
+        };
+        let pending = vec![
+            MapEvent::Tile(overworld.clone()),
+            MapEvent::Markers(MarkerList {
+                markers: vec![mark.clone()],
+            }),
+            MapEvent::Landmarks(scoped(0, 0, 1, vec![portal(7, 4, 5, true)])),
+        ];
+        crate::world::transition::replace(
+            app.world_mut(),
+            crate::net::WorldChange {
+                world_id: 1,
+                world_seed: 8,
+                arrival: [0.0; 3],
+                exit_arch: Some(crate::net::BlockCoord { x: 0, y: 0, z: 0 }),
+            },
+            pending,
+        );
+        assert!(app.world().resource::<MapTiles>().tiles.is_empty());
+        assert!(app.world().resource::<Markers>().0.is_empty());
+        assert!(app.world().resource::<Landmarks>().places.is_empty());
+        assert!(app.world().resource::<Landmarks>().discovered.is_empty());
+        assert!(!app.world().resource::<MapScreen>().is_open());
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.world_mut()
+            .resource_mut::<crate::world::transition::CurrentWorld>()
+            .loading = false;
+        requested(&frames);
+        app.update();
+        assert_eq!(
+            requested(&frames),
+            0,
+            "instance maps must not ask the open-world generator"
+        );
+        let mut instance_tile = tile(0, 0, 1);
+        instance_tile.height.fill(99);
+        instance_tile.explored.fill(0);
+        let pending = vec![
+            MapEvent::Tile(instance_tile),
+            MapEvent::Markers(MarkerList { markers: vec![] }),
+            MapEvent::Landmarks(scoped(0, 0, 1, vec![portal(8, 4, 5, true)])),
+        ];
+        crate::world::transition::replace(
+            app.world_mut(),
+            crate::net::WorldChange {
+                world_id: 0,
+                world_seed: seed,
+                arrival: [0.0; 3],
+                exit_arch: None,
+            },
+            pending,
+        );
+        let held = app.world().resource::<MapTiles>();
+        assert_eq!(held.tiles.len(), 1);
+        let actual = held.tiles.values().next().unwrap();
+        assert_eq!(actual.height, overworld.height);
+        assert_eq!(actual.surface, overworld.surface);
+        assert_eq!(actual.explored, overworld.explored);
+        assert_eq!(app.world().resource::<Markers>().0, vec![mark]);
+        assert_eq!(
+            app.world().resource::<Landmarks>().discovered,
+            HashSet::from([7])
+        );
+        assert!(!app.world().resource::<Landmarks>().places.contains_key(&8));
+        crate::world::transition::new_session(app.world_mut(), seed);
+        assert!(app.world().resource::<MapTiles>().tiles.is_empty());
+        assert!(app.world().resource::<OpenWorldMap>().0.is_none());
     }
 
     #[test]

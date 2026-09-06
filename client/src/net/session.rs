@@ -54,6 +54,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::codec::WorldChange;
+
 use super::codec::{
     self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress, MobHit,
     PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
@@ -214,6 +216,7 @@ pub(super) enum SessionEvent {
     /// frame that consumes it. Interpolation divides by the gap between two arrivals, so
     /// a frame's worth of scheduling jitter in that number is a frame's worth of jitter
     /// in every position on screen.
+    WorldChange(WorldChange),
     Snapshot {
         snapshot: Snapshot,
         at: Instant,
@@ -1698,6 +1701,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                     // whether this was the answer to a creation before it turns the
                     // value into the display string `Reject::describe` owns.
                     return Some(SessionEvent::ServerRefused(reject));
+                }
+                Ok(Transition::WorldChange(change)) => {
+                    events.send(SessionEvent::WorldChange(change)).ok()?;
                 }
                 Ok(Transition::World(update)) => {
                     events.send(SessionEvent::World(update)).ok()?;

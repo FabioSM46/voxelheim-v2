@@ -3164,3 +3164,66 @@ pub(super) fn bundle_strap_linear_rgba() -> [f32; 4] {
 
 #[cfg(test)]
 mod tests;
+
+/// Discard all world-derived state at the authoritative replacement boundary.
+/// Inventory, learned mounts, selected slot and input tick sequence are personal
+/// connection state and deliberately survive.
+pub(crate) fn reset_world(world: &mut World) {
+    use crate::world::transition::{despawn, reset};
+    reset::<SnapshotBuffer>(world);
+    reset::<Appearances>(world);
+    reset::<SelfVitals>(world);
+    reset::<LocalMount>(world);
+    reset::<Party>(world);
+    reset::<PartyLogInbox>(world);
+    reset::<SkyClock>(world);
+    reset::<Weather>(world);
+    reset::<Ambience>(world);
+    reset::<ambience::AmbienceState>(world);
+    reset::<PlayerStats>(world);
+    reset::<MoveIntent>(world);
+    reset::<LootWindow>(world);
+    reset::<VendorWindow>(world);
+    reset::<PlayerTradeWindow>(world);
+    reset::<ConfirmationPrompt>(world);
+    reset::<PickedStack>(world);
+    reset::<structures::StructureTarget>(world);
+    reset::<structures::FootprintPreview>(world);
+    despawn::<Body>(world);
+    despawn::<NamePlate>(world);
+    despawn::<drops::DroppedItem>(world);
+    despawn::<mobs::Mob>(world);
+    despawn::<structures::Structure>(world);
+    despawn::<horse::PaddockHorse>(world);
+    despawn::<birds::Bird>(world);
+    target::reset_world(world);
+    projectiles::reset_world(world);
+    wards::reset_world(world);
+    precipitation::reset_world(world);
+    camera::reset_world(world);
+    hands::reset_world(world);
+    combat::reset_world(world);
+    trade::reset_world(world);
+    use crate::world::transition::clear_messages;
+    clear_messages::<ConfirmationAnswer>(world);
+    clear_messages::<PlayerTradePromptRequest>(world);
+    clear_messages::<PlayerTradeClick>(world);
+    clear_messages::<PlayerTradeEnded>(world);
+    clear_messages::<LootTakeClick>(world);
+    clear_messages::<VendorTradeClick>(world);
+    clear_messages::<InventoryClick>(world);
+    clear_messages::<CraftClick>(world);
+    clear_messages::<combat::SwingSent>(world);
+    clear_messages::<inventory::ConsumeSent>(world);
+}
+
+pub(crate) fn arrival_body_width(world: &World) -> f32 {
+    if world
+        .get_resource::<LocalMount>()
+        .is_some_and(|mount| mount.0.is_some())
+    {
+        constants::MOUNTED_WIDTH
+    } else {
+        constants::PLAYER_WIDTH
+    }
+}

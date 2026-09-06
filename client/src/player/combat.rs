@@ -322,6 +322,10 @@ fn send_attacks(
     }
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<BlockIntent>(world);
+}
+
 #[cfg(test)]
 mod tests {
     //! No window, no display and no GPU. What is asserted is the bytes that left, because

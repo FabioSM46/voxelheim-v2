@@ -444,6 +444,10 @@ fn show_window(
     }
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<SilverDraft>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

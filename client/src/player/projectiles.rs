@@ -297,6 +297,11 @@ fn projectile_visibility(mode: InputMode) -> Visibility {
     }
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::despawn::<ProjectileBody>(world);
+    crate::world::transition::despawn::<OrbTrail>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::asset::AssetPlugin;

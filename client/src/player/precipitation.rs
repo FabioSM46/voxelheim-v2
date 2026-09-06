@@ -678,6 +678,10 @@ fn unit_from(index: u32) -> f32 {
     hash as f32 / 4_294_967_296.0
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<PrecipitationShelter>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};

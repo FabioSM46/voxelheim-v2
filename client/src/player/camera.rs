@@ -172,7 +172,7 @@ fn spawn_camera(mut commands: Commands) {
 /// It also covers a server that welcomes and then goes quiet — the player sees the world
 /// they cannot move in, which is a great deal more diagnosable than an empty screen.
 ///
-/// Runs only when the session resource changes, which happens once.
+/// Runs when session parameters change, including a server-declared world arrival.
 fn place_camera_at_spawn(
     session: Option<Res<Session>>,
     mut cameras: Query<&mut Transform, With<WorldCamera>>,
@@ -665,6 +665,10 @@ fn face_distance(eye: Vec3, direction: Vec3, reach: f32, hit: BlockHit) -> f32 {
         return reach;
     }
     ((plane - eye[axis]) / component).clamp(0.0, reach)
+}
+
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<SaddlePresentation>(world);
 }
 
 #[cfg(test)]

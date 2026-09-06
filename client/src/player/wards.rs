@@ -511,6 +511,22 @@ fn hidden_mesh() -> Mesh {
     .with_inserted_indices(Indices::U32(vec![0, 1, 2]))
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    let handles = world
+        .get_resource::<WardVisuals>()
+        .map(|visuals| visuals.meshes.clone());
+    if let Some(handles) = handles
+        && let Some(mut meshes) = world.get_resource_mut::<Assets<Mesh>>()
+    {
+        for handle in &handles {
+            replace_mesh(&mut meshes, handle, hidden_mesh());
+        }
+    }
+
+    crate::world::transition::reset::<Wards>(world);
+    crate::world::transition::reset::<WardMeshState>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
