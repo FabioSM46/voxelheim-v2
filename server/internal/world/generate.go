@@ -275,6 +275,13 @@ func unloweredHeightAt(seed, worldX, worldZ int64) int {
 // function already had; worse, a second reading could disagree with the ground,
 // because a column near the origin passes the river field and has no channel.
 func shapeAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface int, river, settled bool) {
+	surface, riverSurface, river, settled = shapeBeforeRuinsAt(seed, worldX, worldZ, climate)
+	site := ruinForArea(seed, worldX, worldZ, worldX, worldZ)
+	surface, _ = site.shape(worldX, worldZ, surface)
+	return
+}
+
+func shapeBeforeRuinsAt(seed, worldX, worldZ int64, climate Climate) (surface, riverSurface int, river, settled bool) {
 	base := unloweredHeightAt(seed, worldX, worldZ)
 
 	// The square around the origin column keeps the terrain it would have had. See
@@ -513,7 +520,8 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // a tree's canopy or another plant's own root. Stored deltas there resolve against a
 // different base, so the precondition advances even though most of the world does not
 // move at all.
-const WorldgenVersion uint32 = 28
+// 28 → 29: rare ruins, their narrow ground blend and excavated antechambers.
+const WorldgenVersion uint32 = 29
 
 // Generate builds the chunk at coord for seed.
 //
@@ -524,6 +532,8 @@ func Generate(seed int64, coord Coord) *Chunk {
 	chunk := NewChunk(coord)
 	originX, originY, originZ := coord.Origin()
 	var columns [ChunkSize][ChunkSize]column
+	ruinMargin := int64(max(1, largestPlantFootprint()))
+	ruin := ruinForArea(seed, originX-ruinMargin, originZ-ruinMargin, originX+ChunkSize-1+ruinMargin, originZ+ChunkSize-1+ruinMargin)
 
 	// **Two passes over the columns, and the second one is what the bank rule costs
 	// here rather than four times over.** Every column needs the standing water of
@@ -538,7 +548,7 @@ func Generate(seed int64, coord Coord) *Chunk {
 		for x := range ChunkSize {
 			// One height and one climate per column, not per voxel: both are the
 			// expensive part and neither depends on y.
-			columns[x][z] = columnShapeAt(seed, originX+int64(x), originZ+int64(z))
+			columns[x][z] = columnShapeWithRuin(seed, originX+int64(x), originZ+int64(z), ruin)
 		}
 	}
 
@@ -546,11 +556,12 @@ func Generate(seed int64, coord Coord) *Chunk {
 	// absent because no column asks for one: the rule reads the four columns sharing
 	// a face, never the four sharing an edge.
 	var westward, eastward, northward, southward [ChunkSize]bankWater
+	bankAt := func(x, z int64) bankWater { c := columnShapeWithRuin(seed, x, z, ruin); return c.bank() }
 	for i := range ChunkSize {
-		westward[i] = bankWaterAt(seed, originX-1, originZ+int64(i))
-		eastward[i] = bankWaterAt(seed, originX+ChunkSize, originZ+int64(i))
-		northward[i] = bankWaterAt(seed, originX+int64(i), originZ-1)
-		southward[i] = bankWaterAt(seed, originX+int64(i), originZ+ChunkSize)
+		westward[i] = bankAt(originX-1, originZ+int64(i))
+		eastward[i] = bankAt(originX+ChunkSize, originZ+int64(i))
+		northward[i] = bankAt(originX+int64(i), originZ-1)
+		southward[i] = bankAt(originX+int64(i), originZ+ChunkSize)
 	}
 	bandAt := func(x, z int) bankWater {
 		switch {
@@ -599,7 +610,8 @@ func Generate(seed int64, coord Coord) *Chunk {
 	// column, that never happens. The order is the decision this file wants to have already made
 	// when it does, not a behaviour under test.
 	placeSettlements(seed, chunk)
-	placeTrees(seed, chunk, &columns)
+	placeRuins(chunk, ruin)
+	placeTrees(seed, chunk, &columns, ruin)
 
 	return chunk
 }
@@ -670,6 +682,7 @@ type column struct {
 	// that is actually in a settlement, so paying it per voxel would cost more than
 	// the rest of generation put together.
 	settlement bool
+	ruin       bool // footprint and blend: no roots or shallow natural cave carving
 }
 
 // columnAt resolves one world column. Pure in (seed, x, z), like everything else
@@ -709,8 +722,13 @@ func (c *column) bank() bankWater {
 // [plantAtColumnIn] resolves them at the one refusal that reads them. Anything else
 // wants [columnAt].
 func columnShapeAt(seed, worldX, worldZ int64) column {
+	return columnShapeWithRuin(seed, worldX, worldZ, ruinForArea(seed, worldX, worldZ, worldX, worldZ))
+}
+
+func columnShapeWithRuin(seed, worldX, worldZ int64, site *ruinSite) column {
 	climate := ClimateAt(seed, worldX, worldZ)
-	surface, riverSurface, river, settled := shapeAt(seed, worldX, worldZ, climate)
+	surface, riverSurface, river, settled := shapeBeforeRuinsAt(seed, worldX, worldZ, climate)
+	surface, ruined := site.shape(worldX, worldZ, surface)
 	waterSurface, standingWater := standingWaterSurface(surface, riverSurface, river)
 
 	// A channel is never a shore, and this is where that is said. A terraced bed can
@@ -735,6 +753,7 @@ func columnShapeAt(seed, worldX, worldZ int64) column {
 		fallSurface:   fallSurface,
 		waterBlock:    waterBlock,
 		settlement:    settled,
+		ruin:          ruined,
 	}
 
 	// The downward scan is paid only by a column that has a body to be part of, and
@@ -762,6 +781,9 @@ func columnShapeAt(seed, worldX, worldZ int64) column {
 // run is the longest there could be — the safe direction, since the extra water it
 // admits stands against rock the bank rule has already left in place.
 func (c *column) carveFieldAt(seed, worldX, worldY, worldZ int64) bool {
+	if c.ruin && int64(c.surface)-worldY < ruinCaveClearance {
+		return false
+	}
 	if c.settlement && int64(c.surface)-worldY < settlementCaveClearance {
 		return false
 	}
@@ -1232,9 +1254,9 @@ func plantAtColumn(seed, worldX, worldZ int64, col column) (species *plantSpecie
 }
 
 func plantAtColumnIn(table []plantSpecies, seed, worldX, worldZ int64, col column) (species *plantSpecies, h uint64, ok bool) {
-	// Nothing grows inside a settlement. This is the cheapest refusal because the
+	// Nothing grows inside a settlement or ruin blend. This is the cheapest refusal because the
 	// resolved column already carries the answer, and it applies to every row.
-	if col.settlement {
+	if col.settlement || col.ruin {
 		return nil, 0, false
 	}
 
@@ -1489,7 +1511,7 @@ func absInt(v int) int {
 // writes only the yielded voxels that belong to this chunk. Interior roots reuse
 // the terrain pass's heights; border roots are recomputed from world coordinates,
 // which completes their trees without reading or mutating a neighbour.
-func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column) {
+func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column, ruin *ruinSite) {
 	originX, _, originZ := chunk.Coord.Origin()
 	footprint := int64(largestPlantFootprint())
 	for rootZ := originZ - footprint; rootZ < originZ+ChunkSize+footprint; rootZ++ {
@@ -1500,7 +1522,7 @@ func placeTrees(seed int64, chunk *Chunk, columns *[ChunkSize][ChunkSize]column)
 			} else {
 				// No bands: [plantAtColumnIn] resolves them for the few columns
 				// that reach its carve test. See the note there.
-				col = columnShapeAt(seed, rootX, rootZ)
+				col = columnShapeWithRuin(seed, rootX, rootZ, ruin)
 			}
 
 			visitPlantAtColumn(seed, rootX, rootZ, col, func(worldX, worldY, worldZ int64, block Block) {

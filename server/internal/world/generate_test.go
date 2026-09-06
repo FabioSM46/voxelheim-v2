@@ -140,6 +140,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		{"plains-conifer", goldenPlainsCoord, goldenPlainsPath},
 		{"river", goldenRiverCoord, goldenRiverPath},
 		{"bush", goldenBushCoord, goldenBushPath},
+		{"ruin-arch", Coord{X: -1462, Y: 2, Z: 1716}, "testdata/chunk_golden_ruin.bin"},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 
@@ -309,8 +310,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 28 {
-		t.Fatalf("WorldgenVersion = %d, want 28 after Bush and DesertShrub joined Cover", WorldgenVersion)
+	if WorldgenVersion != 29 {
+		t.Fatalf("WorldgenVersion = %d, want 29 after ruin siting and excavation", WorldgenVersion)
 	}
 }
 
