@@ -60,6 +60,10 @@ const (
 	// Scenic landmarks: the sealed arch names a solid cell, not an entity slot.
 	AnchorRuinArch
 	AnchorRuinStair
+
+	// Instance entry and return slots, both standing in air.
+	AnchorInstanceArrival
+	AnchorInstanceExit
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -89,6 +93,10 @@ func (a AnchorKind) String() string {
 		return "ruin arch"
 	case AnchorRuinStair:
 		return "ruin stair"
+	case AnchorInstanceArrival:
+		return "instance arrival"
+	case AnchorInstanceExit:
+		return "instance exit"
 	default:
 		return "no anchor"
 	}
