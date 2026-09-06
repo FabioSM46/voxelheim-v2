@@ -1446,11 +1446,33 @@ both safe and lock-free, so the sample buffers are `Box<[AtomicU32]>` holding `f
 and the indices are `AtomicUsize`. It costs one atomic load per sample and buys a real-time
 path a reviewer can read without checking an invariant by hand.
 
-**The bus arithmetic, in one line.** `out = master_gain * (voice_gain * voice_sources +
-master_sources)`. `Voice` has a gain of its own; `Master` *is* the output stage, so a source
-claimed onto it is scaled once and never squared. Two buses and deliberately only two — an SFX
-or music bus arrives with the feature that feeds it, because a gain nobody can hear moving is
-a knob that cannot be tested.
+**The bus arithmetic, in one line.** `out = master_gain * (voice_gain * voice_sources + duck *
+music_gain * music_sources + sfx_gain * sfx_sources + duck * ambience_gain * ambience_sources +
+master_sources)`. Each bus has a gain of its own; `Master` *is* the output stage, so a source
+claimed onto it is scaled once and never squared.
+
+**Five buses since #982, and three of them arrived empty — which reverses what this paragraph
+used to say.** It said two and deliberately only two, because a gain nobody can hear moving is
+a knob that cannot be tested, and an SFX or music bus would arrive with the feature that feeds
+it. What that argument leaves out is the *policy*: `MAX_SOURCES` is one pool of sixteen shared
+with voice, and "who gets the last slot" is cheap to answer while nothing is feeding the new
+buses and expensive once an ambience bed and a conversation are competing for one in front of
+a player. So the buses, their gains and their allocation policy landed first, and the sounds
+arrive after them. The knobs are still tested: a bus with a source on it is testable through
+`mixer::Sink` whether or not anything in the shipped client claims one, and every assertion
+about the new gains renders a source rather than reading a field back.
+
+**`duck` is one multiplier on two buses and it is exactly `1.0` when nobody is speaking.** A
+Bevy system writes the target; the render path advances towards it by one block's worth of
+time, the arrangement the occlusion ramp already has, because a gain that moved with the frame
+rate of whatever was looking at the world would step audibly on a long frame. At a target of
+`1.0` the multiply is the identity, for the same reason the occlusion filter is transparent at
+zero: a stage in front of every source has to be provably doing nothing when it is turned off.
+
+**A player's mono fold reuses the branch a mono device already takes.** `Mixer::set_mono` makes
+the render path choose `PanGains::UNPOSITIONED` exactly as one loudspeaker does, so both ears
+carry the identical sum and there is no second downmix to keep in step with the first. It is
+deliberately not the average of the pair, for the 3 dB reason the device case gives.
 
 **The device has exactly one owner and it is not a resource.** A `cpal::Stream` is not
 `Send` on every platform, so `audio/device.rs` puts it on a supervisor thread of its own —
@@ -1717,6 +1739,41 @@ are heard from where they are standing. **A fourteenth is heard unpositioned rat
 at all** — summed into the source this module has always held, which is exactly what everybody
 sounded like before. Being in the wrong place beats being inaudible, and it is the same answer
 the snapshot-has-not-placed-them case gets.
+
+**The pool is shared with the world's own sounds, and #982 wrote the policy down before any of
+them existed.** `MAX_SOURCES` carries it in full; these are the three rules it must not lose,
+each enforced by `Mixer::claim` rather than asked of its callers:
+
+- **Only `Voice` and `Master` may take the last slot.** `VOICE_RESERVE` is eight of the sixteen
+  and `Music`, `Sfx` and `Ambience` may not spend it, so a busy scene can never starve a
+  conversation. `Master` is exempt with voice because its two claims — the tone test and the
+  loopback monitor — are each made once at startup, before anything exists to be starved.
+- **Ambience is stolen first, then music, then effects, and only ever by a bus above the
+  victim.** `Bus::steal_order` is the ranking and the two protected buses answer `None` to it,
+  so no arrangement of the other three can reach a slot somebody is being heard through. That
+  is the acceptance criterion, and it is asserted by filling the pool with voice and finding
+  that nothing beneath it can take a slot.
+- **The sound that triggers a steal does not get the slot.** A stolen slot goes to `Dirty` and
+  comes back through the callback like every released one, because the only thread that may
+  reset a ring's read index is the one that owns it. So the claim is refused, its one-shot is
+  dropped rather than queued, and the slot is there for whoever asks a few milliseconds later.
+  **A loop that claims until it is told no has therefore already taken a bed by the time it
+  stops** — every caller in this client claims once for one sound, which is the shape the
+  policy is written for.
+
+**A slot can now be taken away, so `SlotState` grew a generation and #948's lesson applied a
+second time.** A stolen slot's previous owner still holds a `SourceHandle`, and that owner's
+`Drop` must not mark `Dirty` a slot somebody else has since been given. Two locations would be
+two loads for a claim to land between, exactly as the two booleans were — so the state and its
+generation are packed into **one** `AtomicU32` and every transition is a compare-exchange over
+the whole word. A handle whose generation has moved is *inert*: it pushes nothing, places
+nothing and drops nothing, so a caller that never checks writes into a void rather than into
+somebody else's audio.
+
+**A bus can be switched off, and off means no source rather than a gain of zero.** `Music` is
+the only bus that will have that control. `Mixer::set_enabled` refuses new claims *and*
+releases what the bus is holding, because a generator running into a ring that is multiplied by
+nothing still spends one of sixteen slots.
 
 **Which side of the seam a slot is decided on, and when.** Once, when the speaker is first
 heard, and never mid-sentence: moving somebody from the shared sum onto a source of their own
