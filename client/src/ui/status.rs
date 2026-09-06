@@ -532,13 +532,16 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
 /// stall on screen, and a refused trade is answered beside it.
 ///
-/// Two names remain, so [`the_deliberate_silences_do_not_overlap`]'s non-empty assertion
-/// still holds. When both acquire an explicit surface, that test says so rather than the
-/// category quietly becoming decorative.
+/// The V33 portal reasons join this list until #974 provides their answering surface.
+/// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
-        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
+        RefusalReason::TileMisaligned
+            | RefusalReason::TradeNotOpen
+            | RefusalReason::NotAtPortal
+            | RefusalReason::InstanceLimit
+            | RefusalReason::InstanceUnavailable
     )
 }
 
@@ -606,6 +609,9 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::TradeSlotTaken
         | RefusalReason::NothingToOffer
         | RefusalReason::TradeCooldown
+        | RefusalReason::NotAtPortal
+        | RefusalReason::InstanceLimit
+        | RefusalReason::InstanceUnavailable
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1303,7 +1309,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 52] = [
+    const EVERY_REASON: [RefusalReason; 55] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1357,6 +1363,9 @@ mod tests {
         RefusalReason::TradeSlotTaken,
         RefusalReason::NothingToOffer,
         RefusalReason::TradeCooldown,
+        RefusalReason::NotAtPortal,
+        RefusalReason::InstanceLimit,
+        RefusalReason::InstanceUnavailable,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1365,6 +1374,9 @@ mod tests {
 
     fn refusal(reason: RefusalReason) -> ActionRefused {
         let action = match reason {
+            RefusalReason::NotAtPortal
+            | RefusalReason::InstanceLimit
+            | RefusalReason::InstanceUnavailable => RefusedAction::CrossPortal,
             RefusalReason::TooFast => RefusedAction::Chat,
             RefusalReason::PartyFull
             | RefusalReason::NoSuchPlayer
