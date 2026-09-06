@@ -369,6 +369,22 @@ impl ToneTest {
     ///
     /// Answers whether there is anything to feed.
     fn settle(&mut self, mixer: &AudioMixer) -> bool {
+        // **A slot can be taken away, so a handle held across frames has to be re-checked
+        // before it is reused.** Switching the music bus off is how a player does it: that
+        // revokes every source on the bus, this one included, and a revoked handle pushes
+        // into nothing. Letting go here is what returns the slot to the pool — a revoked slot
+        // stays its owner's until the owner drops it — and it is what stops a half-played
+        // tone being fed forever, since `feed` can never drain `remaining` through a handle
+        // that accepts no samples.
+        //
+        // Found by review on #998. The fast path below reused `self.source` on the strength
+        // of `self.bus` alone, so music off, music on, and a second press left the button
+        // silently doing nothing and the slot spent for the life of the client.
+        if self.source.as_ref().is_some_and(|source| !source.live()) {
+            self.source = None;
+            self.bus = None;
+            self.remaining = 0;
+        }
         let Some(bus) = self.wanted else {
             return self.remaining > 0;
         };
@@ -1129,6 +1145,74 @@ mod tests {
         );
         drop(beds);
         drop(voices);
+    }
+
+    /// **Music TEST, music off, music on, music TEST — and the second press is heard.**
+    ///
+    /// The sequence the review on #998 asked for. Switching the bus off revokes every source
+    /// on it, the tone test's included, and the tone test holds its handle across frames: on
+    /// the strength of `self.bus` alone the second press took the fast path and fed a handle
+    /// that accepts no samples, so the button did nothing and the slot was spent for the life
+    /// of the client. `settle` now lets go of a handle that is no longer live before it looks
+    /// at anything else.
+    ///
+    /// Asserted through what comes out of the mixer rather than through the resource's own
+    /// fields: "a tone was started" is a claim about a counter, and this is a claim about
+    /// whether a player hears the button they pressed.
+    #[test]
+    fn a_music_test_is_heard_again_after_music_is_switched_off_and_back_on() {
+        let mixer = Arc::new(Mixer::new());
+        mixer.set_format(48_000, 1);
+        let mut app = App::new();
+        app.insert_resource(AudioControls::default())
+            .insert_resource(AudioMixer(Arc::clone(&mixer)))
+            .insert_resource(ToneTest::new(
+                Some(mixer.claim(Bus::Master).expect("a free slot")),
+                Bus::Master,
+            ))
+            .add_systems(Update, play_the_tone_test);
+
+        // What one press sounds like, so the second press has something to be compared with.
+        let press_and_listen = |app: &mut App| {
+            app.world_mut().resource_mut::<AudioControls>().tone_test = Some(Bus::Music);
+            let mut loudest = 0.0f32;
+            for _ in 0..8 {
+                app.update();
+                for sample in rendered(&mixer, 480) {
+                    loudest = loudest.max(sample.abs());
+                }
+            }
+            loudest
+        };
+
+        let first = press_and_listen(&mut app);
+        assert!(first > 0.0, "the first press was not audible at all");
+
+        // The player switches music off and back on. `apply_to` is what does this in an
+        // assembled client; calling the mixer directly keeps the test to one moving part.
+        mixer.set_enabled(Bus::Music, false);
+        let _ = rendered(&mixer, 480);
+        mixer.set_enabled(Bus::Music, true);
+        let _ = rendered(&mixer, 480);
+
+        let second = press_and_listen(&mut app);
+        assert!(
+            second > 0.0,
+            "the button went silent after music was switched off and on: {second}"
+        );
+        assert!(
+            (second - first).abs() < 1e-6,
+            "the second press was heard at {second} rather than the first's {first}"
+        );
+
+        // And the slot was returned rather than spent: the pool is whole but for the one the
+        // tone test is holding.
+        let free = std::iter::from_fn(|| mixer.claim(Bus::Voice)).count();
+        assert_eq!(
+            free,
+            MAX_SOURCES - 1,
+            "the revoked slot was never given back: {free} of {MAX_SOURCES} left"
+        );
     }
 
     /// The first-launch levels, pinned as the numbers a player actually hears rather than as
