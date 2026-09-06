@@ -250,10 +250,10 @@ func (s *Sim) removePartyMemberLocked(partyID uint64, key partyMemberKey) bool {
 	if held.lootCursor == key && len(held.members) > 1 {
 		held.lootCursor = held.members[(index+1)%len(held.members)].key
 	}
-	if removed.player != nil && s.onlineLocked(removed.player) {
+	if removed.player != nil && removed.player.sim.onlineLocked(removed.player) {
 		for memberIndex := range held.members {
 			member := held.members[memberIndex].player
-			if member == nil || member == removed.player || !s.onlineLocked(member) {
+			if member == nil || member == removed.player || !member.sim.onlineLocked(member) {
 				continue
 			}
 			delete(removed.player.described, member.entityID)
@@ -268,7 +268,7 @@ func (s *Sim) removePartyMemberLocked(partyID uint64, key partyMemberKey) bool {
 		if len(held.members) == 1 {
 			remaining := held.members[0]
 			delete(s.partyMemberships, remaining.key)
-			if remaining.player != nil && s.onlineLocked(remaining.player) {
+			if remaining.player != nil && remaining.player.sim.onlineLocked(remaining.player) {
 				remaining.player.partyID = 0
 			}
 		}
@@ -301,7 +301,7 @@ func (s *Sim) markPartyMemberOfflineLocked(p *Player) {
 		member := &held.members[index]
 		if member.key == key && member.player == p {
 			member.player = nil
-			member.offlineUntilTick = s.currentTick + s.partyOfflineTicks
+			member.offlineUntilTick = max(s.group.tick, s.currentTick) + s.partyOfflineTicks
 			p.partyID = 0
 			return
 		}
@@ -365,6 +365,7 @@ func (s *Sim) clearInvitesFromLocked(entityID uint64) {
 }
 
 func (s *Sim) advancePartyInvitesLocked(tick uint64) {
+	s.group.tick = max(s.group.tick, tick)
 	for _, player := range s.players {
 		if player.invite != nil && tick >= player.invite.expiresTick {
 			player.invite = nil
@@ -381,7 +382,7 @@ func (s *Sim) advancePartyInvitesLocked(tick uint64) {
 	var expired []expiredMember
 	for partyID, held := range s.parties {
 		for _, member := range held.members {
-			if member.player == nil && member.offlineUntilTick != 0 && tick >= member.offlineUntilTick {
+			if member.player == nil && member.offlineUntilTick != 0 && s.group.tick >= member.offlineUntilTick {
 				expired = append(expired, expiredMember{partyID: partyID, key: member.key})
 			}
 		}

@@ -30,6 +30,7 @@ import (
 // deliberate rather than lazy: see Leave for the guarantee it buys, and Step for why
 // nothing under the lock is allowed to block.
 type Sim struct {
+	group *WorldGroup
 	// dt is the physics timestep, derived from the tick rate rather than measured.
 	// The fixed timestep is what makes the simulation reproducible from the same
 	// inputs, and what makes -tick-rate 40 a server that moves players at the same
@@ -134,7 +135,7 @@ type Sim struct {
 
 	log *slog.Logger
 
-	mu      sync.Mutex
+	mu      *sync.Mutex
 	players map[uint64]*Player
 
 	// chatLimiters are keyed by the identity that survives a connection, not by the
@@ -391,6 +392,7 @@ type Sim struct {
 }
 
 type simOptions struct {
+	group       *WorldGroup
 	devCommands bool
 	voiceRange  float64
 }
@@ -467,7 +469,12 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		return nil, fmt.Errorf("game: voice range must be a finite number of blocks and not negative, got %v", configured.voiceRange)
 	}
 
+	if configured.group == nil {
+		configured.group = NewWorldGroup()
+	}
 	return &Sim{
+		mu:                 &configured.group.mu,
+		group:              configured.group,
 		dt:                 1 / float64(tickRate),
 		devCommands:        configured.devCommands,
 		viewDistance:       int32(viewDistance),
@@ -507,8 +514,8 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		chatNow:              SystemClock{}.Now,
 		voiceNow:             SystemClock{}.Now,
 		pendingExperience:    make(map[characterKey]ExperienceAward),
-		parties:              make(map[uint64]*party),
-		partyMemberships:     make(map[partyMemberKey]uint64),
+		parties:              configured.group.parties,
+		partyMemberships:     configured.group.memberships,
 		byName:               make(map[string]*Player),
 		partyInviteTicks:     uint64(ticksFor(PartyInviteTTL, tickRate)),
 		partyOfflineTicks:    uint64(ticksFor(PartyOfflineGrace, tickRate)),

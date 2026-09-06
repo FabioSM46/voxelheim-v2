@@ -377,6 +377,9 @@ func (s *Streamer) MoveTo(ctx context.Context, center world.Coord) error {
 	s.repairing = false
 
 	load, unload := s.view.MoveTo(center)
+	// Bounded worlds never generate beyond their envelope, even if a view
+	// radius straddles its edge. Keep the delivered-count diagnostic exact too.
+	load = slices.DeleteFunc(load, func(coord world.Coord) bool { return !s.cache.Contains(coord) })
 
 	for _, coord := range unload {
 		if err := s.send(protocol.EncodeChunkUnload(toProtocolCoord(coord))); err != nil {

@@ -408,18 +408,19 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// The seed goes in beside them and generates nothing: it seeds the spawn director's
 	// one generator, so where the dark puts creatures is a property of this world rather
 	// than of this process. See game.NewSim.
+	worldGroup := game.NewWorldGroup()
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log,
-		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup))
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
 	instances, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, int(opts.maxInstances), registry.NextID, log,
-		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup))
 	if err != nil {
 		return fmt.Errorf("invalid instance manager: %w", err)
 	}
 	defer instances.Close()
-	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
+	if err := sim.ConfigureChunkRegeneration(chunks, registry.ForWorld(chunks).ResendChunk); err != nil {
 		return fmt.Errorf("configure chunk regeneration: %w", err)
 	}
 	if err := sim.ConfigureWater(chunks); err != nil {
