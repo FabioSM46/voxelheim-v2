@@ -55,22 +55,22 @@ func TestDisconnectedPortalRestoresExactLifeAndReservesLiveCopy(t *testing.T) {
 	}
 }
 
-func TestDisconnectedPortalExpiresAndRetainsOnlySafeOpenWorldLife(t *testing.T) {
-	m, _, entry, life := disconnectedPortal(t)
+func TestDisconnectedPortalExpiryEvictsFullLifeAndResources(t *testing.T) {
+	m, _, entry, _ := disconnectedPortal(t)
+	if len(m.disconnected) != 1 {
+		t.Fatal("fixture has no remembered life")
+	}
 	m.sessions[entry.Session.ID].emptyTicks = m.graceTicks - 1
 	m.Step()
 	if _, ok := m.Lookup(entry.Session.ID); ok || entry.Session.Context.Err() == nil {
 		t.Fatal("offline member kept world alive")
 	}
+	if len(m.disconnected) != 0 || len(m.portalEntries) != 0 || len(m.visits) != 0 {
+		t.Fatal("expired instance retained character snapshots or routes")
+	}
 	restored, visit, err := m.ResumePortal(entry.Character)
-	if err != nil || restored == nil || visit != nil {
-		t.Fatal("expired world restored", err)
-	}
-	for axis, value := range entry.Return {
-		life.Pos[axis] = float64(value)
-	}
-	if *restored != life {
-		t.Fatal("fallback used instance coordinates or lost inventory/vitals")
+	if err != nil || restored != nil || visit != nil {
+		t.Fatal("expired life restored instead of using the persisted open-world record", err)
 	}
 	if m.Count() != 0 {
 		t.Fatal("resume allocated a new instance")
@@ -157,5 +157,29 @@ func TestInstanceAutosaveWithoutKnownPortalNeverPublishesForeignCoordinates(t *t
 	}
 	if records := m.Records(open); len(records) != 0 {
 		t.Fatal("unknown external transfer exposed instance coordinates")
+	}
+}
+
+func TestInstanceExpiryEvictsOnlyItsDisconnectedLives(t *testing.T) {
+	m, _, entry, life := disconnectedPortal(t)
+	other, err := m.Create(InstanceRuin{CellX: 123, CellZ: 456})
+	if err != nil {
+		t.Fatal(err)
+	}
+	character := instanceTestCharacter(888)
+	if _, err := m.Join(other.ID, character); err != nil {
+		t.Fatal(err)
+	}
+	m.DisconnectPortal(PortalEntry{Session: other, Character: character}, life)
+	m.sessions[entry.Session.ID].emptyTicks = m.graceTicks - 1
+	m.Step()
+	if _, found := m.disconnected[entry.Character]; found {
+		t.Fatal("expired instance retained full life")
+	}
+	if len(m.disconnected) != 1 {
+		t.Fatal("expiry discarded another live instance's reconnect")
+	}
+	if restored, visit, err := m.ResumePortal(character); err != nil || restored == nil || visit == nil || visit.Session.ID != other.ID {
+		t.Fatal("other live instance no longer resumable", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/transport"
@@ -13,10 +14,14 @@ import (
 )
 
 func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
-	for _, mode := range []string{"live", "expired", "restart", "welcome-write", "transition-write"} {
+	for _, mode := range []string{"live", "expired", "restart", "ephemeral", "welcome-write", "transition-write"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg, chunks, open, peers, request := portalSession(t, 2)
 			identities, store := knownIdentities(t)
+			if mode == "ephemeral" {
+				store = persist.NewMemoryStore()
+				identities = identitiesOver(store)
+			}
 			var fallback [3]float64
 			for axis, value := range cfg.Spawn {
 				fallback[axis] = float64(value)
@@ -59,7 +64,7 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved, found, err := store.Load(character.ID)
-			if err != nil || !found || saved.Pos != fallback {
+			if mode != "ephemeral" && (err != nil || !found || saved.Pos != fallback) {
 				t.Fatal("autosave wrote instance coordinates", err)
 			}
 			_ = conn.Close()
@@ -68,20 +73,23 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 				t.Fatal("teardown retained account claim")
 			}
 			saved, found, err = store.Load(character.ID)
-			if err != nil || !found || saved.Pos != fallback {
+			if mode != "ephemeral" && (err != nil || !found || saved.Pos != fallback) {
 				t.Fatal("teardown wrote instance coordinates", err)
 			}
 			retained, _ := cfg.Instances.Lookup(change.WorldID)
 			if len(retained.Members) != 0 {
 				t.Fatal("disconnected member remains inside")
 			}
-			if mode == "expired" {
+			if mode == "expired" || mode == "ephemeral" {
 				for range int(30*time.Minute/time.Second) * int(cfg.TickRate) {
 					cfg.Instances.Step()
 				}
 				if cfg.Instances.Count() != 0 {
 					t.Fatal("disconnected member prevented expiry")
 				}
+			}
+			if mode == "ephemeral" {
+				cfg.Spawn[0] += 100 // ensure the default spawn cannot masquerade as the arch fallback
 			}
 			if mode == "restart" {
 				cfg.Instances.Close()
@@ -107,7 +115,7 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			}
 			welcome := welcomeFrom(t, vnet.GetRootAsEnvelope(nextFrame(t, conn), 0))
 			spawn := welcome.Spawn(nil)
-			if spawn == nil || [3]float32{spawn.X(), spawn.Y(), spawn.Z()} != cfg.Spawn {
+			if spawn == nil || [3]float32{spawn.X(), spawn.Y(), spawn.Z()} != [3]float32{float32(fallback[0]), float32(fallback[1]), float32(fallback[2])} {
 				t.Fatal("welcome exposed instance coordinates as open world")
 			}
 			if mode == "live" {

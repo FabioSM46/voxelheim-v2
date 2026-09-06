@@ -643,6 +643,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// rather than hold both until the process restarts.
 		if claimed {
 			if portalVisit != nil && player == nil && self.Life != nil {
+				identities.rememberPortalReturn(self, portalVisit.Return)
 				cfg.Instances.DisconnectPortal(*portalVisit, *self.Life)
 			}
 			// An external world binding without a portal visit has no known return
@@ -650,6 +651,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			if current == phaseInWorld && player != nil && (portalVisit != nil || chunks == openBinding.Chunks) {
 				life := player.Record()
 				if portalVisit != nil {
+					identities.rememberPortalReturn(self, portalVisit.Return)
 					cfg.Instances.DisconnectPortal(*portalVisit, life)
 					// Disk always contains the open-world return point, including
 					// on graceful shutdown. The instance life stays in memory only.
@@ -1179,6 +1181,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return refuse(cErr)
 			}
 			self = resolved
+			returnPosition, hadPortalReturn := identities.takePortalReturn(self)
 			if cfg.Instances != nil {
 				life, entry, resumeErr := cfg.Instances.ResumePortal(game.InstanceCharacter{PlayerID: self.ID, CharacterID: uint64(self.Character)})
 				if resumeErr != nil {
@@ -1196,8 +1199,21 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// The welcome answers the choice rather than the hello, and it is the first
 			// moment every field in it is true: the spawn is this character's, because
 			// there is finally a character to have one.
-			welcomeSelf := self
+			welcomeCfg := cfg
 			joinSpawn := cfg.Spawn
+			if portalVisit == nil && hadPortalReturn {
+				if self.Life == nil {
+					// Ephemeral worlds still start with their ordinary starter life;
+					// only placement differs. Restore the normal respawn below.
+					welcomeCfg.Spawn = returnPosition
+					joinSpawn = returnPosition
+				} else {
+					for axis, value := range returnPosition {
+						self.Life.Pos[axis] = float64(value)
+					}
+				}
+			}
+			welcomeSelf := self
 			if portalVisit != nil {
 				fallback := *self.Life
 				for axis, value := range portalVisit.Return {
@@ -1206,10 +1222,10 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				welcomeSelf.Life = &fallback
 			}
 			if portalVisit == nil {
-				out <- Welcome(cfg, entityID, welcomeSelf)
+				out <- Welcome(welcomeCfg, entityID, welcomeSelf)
 			} else {
 				ack := make(chan struct{})
-				flushWriter <- writerBarrier{frame: Welcome(cfg, entityID, welcomeSelf), done: ack}
+				flushWriter <- writerBarrier{frame: Welcome(welcomeCfg, entityID, welcomeSelf), done: ack}
 				<-ack
 			}
 			if portalVisit != nil {
@@ -1266,6 +1282,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}
 			player = admitted
+			if portalVisit == nil && hadPortalReturn && self.Life == nil {
+				player.RestoreFallbackRespawn(cfg.Spawn)
+			}
 
 			// Welcome first, then the whole inventory and learned-mount set before streaming
 			// can fill the queue with chunks — the starter pack or restored pack, and the

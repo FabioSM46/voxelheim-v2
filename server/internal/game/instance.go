@@ -272,6 +272,14 @@ func (m *InstanceManager) Step() {
 
 func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	s.cancel()
+	// A remembered life is useful only while its instance can be resumed.
+	// Teardown has already saved the safe open-world life; keeping a second
+	// full inventory here would grow memory for characters who never return.
+	for character, visit := range m.disconnected {
+		if visit.session == id {
+			delete(m.disconnected, character)
+		}
+	}
 	for character := range s.members {
 		delete(m.inside, character)
 	}

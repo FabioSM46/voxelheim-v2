@@ -1,9 +1,9 @@
 package game
 
 // A disconnected visit holds values only: expiry must release the simulation and
-// cache even when its former members never reconnect. The open-world return point
-// survives expiry in memory, while the same safe position is written to the
-// existing character record for a cold start. No session identity reaches disk.
+// cache even when its former members never reconnect. Expiry evicts this snapshot;
+// the existing character record already holds the safe open-world return point.
+// No session identity reaches disk.
 type portalReconnect struct {
 	session   uint64
 	life      Life
@@ -34,8 +34,8 @@ func (m *InstanceManager) DisconnectPortal(entry PortalEntry, life Life) {
 }
 
 // ResumePortal claims a remembered live copy atomically with respect to expiry.
-// A nil entry with a non-nil life means the copy expired: the life now names only
-// its open-world return position. With no remembered visit both answers are nil.
+// With no live remembered visit both answers are nil: the caller uses the safe
+// open-world character record it loaded during character selection.
 // Authentication and character ownership must have been resolved by the caller.
 func (m *InstanceManager) ResumePortal(character InstanceCharacter) (*Life, *PortalEntry, error) {
 	m.mu.Lock()
@@ -54,11 +54,8 @@ func (m *InstanceManager) ResumePortal(character InstanceCharacter) (*Life, *Por
 		delete(m.disconnected, character)
 		return &life, &entry, nil
 	}
-	for axis, value := range recalled.returnPos {
-		life.Pos[axis] = float64(value)
-	}
 	delete(m.disconnected, character)
-	return &life, nil, nil
+	return nil, nil, nil
 }
 
 // Records captures connected characters across the open world and every instance

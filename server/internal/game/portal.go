@@ -121,3 +121,12 @@ func (entry PortalEntry) RestoreRespawn(p *Player) {
 		p.spawn = entry.respawn
 	}
 }
+
+// RestoreFallbackRespawn separates reconnect placement from the open-world death
+// fallback when an ephemeral character has no stored Life to provide its position.
+// Called by the authoritative session owner after admission, before streaming.
+func (p *Player) RestoreFallbackRespawn(spawn [3]float32) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	p.spawn = [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
+}
