@@ -288,6 +288,12 @@ type Identities struct {
 	mu   sync.Mutex
 	live map[identity.PlayerID]*liveIdentity
 
+	// portalReturns holds only the safe placement, never a Life or instance pointer.
+	// One slot per existing character (the index has no deletion API), populated
+	// only by an authenticated live claim and consumed on its next selection.
+	// Ephemeral stores intentionally retain no Life, so expiry cannot use disk there.
+	portalReturns map[persist.CharacterID][3]float32
+
 	// writeMu serialises every record write, so that the last write for an identity is
 	// the last *decision* about it rather than whichever goroutine's rename happened to
 	// land second. See RememberAll.
@@ -367,12 +373,13 @@ func NewIdentities(store *persist.Store, exploration *persist.ExplorationStore, 
 		store = persist.NewMemoryStore()
 	}
 	return &Identities{
-		store:       store,
-		exploration: exploration,
-		markers:     markers,
-		verifier:    verifier,
-		log:         log,
-		live:        make(map[identity.PlayerID]*liveIdentity),
+		store:         store,
+		exploration:   exploration,
+		markers:       markers,
+		verifier:      verifier,
+		log:           log,
+		live:          make(map[identity.PlayerID]*liveIdentity),
+		portalReturns: make(map[persist.CharacterID][3]float32),
 	}, nil
 }
 
@@ -881,6 +888,13 @@ func (i *Identities) Remember(self Resolved, life game.Life) error {
 	defer i.writeMu.Unlock()
 
 	err := i.write(self.Character, life, self.Explored, self.Marks)
+	if err == nil && i.store.Dir() != "" {
+		// The durable record now owns the fallback; retain metadata only where
+		// no disk record was written (ephemeral storage or a failed save).
+		i.mu.Lock()
+		delete(i.portalReturns, self.Character)
+		i.mu.Unlock()
+	}
 	i.finalise(self.ID)
 	return err
 }
@@ -971,6 +985,47 @@ func (i *Identities) RememberAll(lives map[identity.PlayerID]game.Life) error {
 		// word, has no character here to write under.
 		character, explored, marks, playing := i.stillPlaying(id)
 		if !playing {
+			continue
+		}
+		if err := i.write(character, life, explored, marks); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// rememberPortalReturn retains the smallest placement needed after a dungeon
+// expires, including when the character store is ephemeral or its disk write fails.
+// Repeated visits replace the same slot; no per-visit history is accumulated.
+func (i *Identities) rememberPortalReturn(self Resolved, position [3]float32) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if held := i.live[self.ID]; held != nil && held.character == self.Character && !self.Character.IsZero() {
+		i.portalReturns[self.Character] = position
+	}
+}
+
+func (i *Identities) takePortalReturn(self Resolved) ([3]float32, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if held := i.live[self.ID]; held == nil || held.character != self.Character || self.Character.IsZero() {
+		return [3]float32{}, false
+	}
+	position, found := i.portalReturns[self.Character]
+	delete(i.portalReturns, self.Character)
+	return position, found
+}
+
+// RememberCharacters is the world-manager autosave. It carries the character as
+// well as its account, so a captured life cannot be written to a different character
+// selected between capture and write. Teardown still wins under the same write lock.
+func (i *Identities) RememberCharacters(lives map[game.InstanceCharacter]game.Life) error {
+	i.writeMu.Lock()
+	defer i.writeMu.Unlock()
+	var errs []error
+	for key, life := range lives {
+		character, explored, marks, playing := i.stillPlaying(key.PlayerID)
+		if !playing || uint64(character) != key.CharacterID {
 			continue
 		}
 		if err := i.write(character, life, explored, marks); err != nil {

@@ -78,7 +78,9 @@ func (m *InstanceManager) EnterPortal(p *Player, request protocol.PortalRequest)
 	if partyID != 0 {
 		m.partyVisits[key] = selected.id
 	}
-	return PortalEntry{Session: selected.snapshot(), Character: character, Return: pos, respawn: respawn}, vnet.RefusalReasonUnknown
+	entry := PortalEntry{Session: selected.snapshot(), Character: character, Return: pos, respawn: respawn}
+	m.portalEntries[character] = entry
+	return entry, vnet.RefusalReasonUnknown
 }
 
 // AtPortal validates exit intent against the selected instance's own anchor.
@@ -118,4 +120,13 @@ func (entry PortalEntry) RestoreRespawn(p *Player) {
 	if p.sim != entry.Session.Sim && p.playerID == entry.Character.PlayerID && p.characterID == entry.Character.CharacterID {
 		p.spawn = entry.respawn
 	}
+}
+
+// RestoreFallbackRespawn separates reconnect placement from the open-world death
+// fallback when an ephemeral character has no stored Life to provide its position.
+// Called by the authoritative session owner after admission, before streaming.
+func (p *Player) RestoreFallbackRespawn(spawn [3]float32) {
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	p.spawn = [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
 }

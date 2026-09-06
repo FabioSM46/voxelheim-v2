@@ -820,3 +820,147 @@ func TestACreationWithAForbiddenAppearanceIsRefusedBeforeItIsStored(t *testing.T
 		t.Error("a refused creation took the name anyway")
 	}
 }
+
+func TestWorldAutosaveCannotWriteAnotherCharacterOrUndoFinalRecord(t *testing.T) {
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities, _ := internalIdentities(t, store)
+	id := identity.IDOf(identity.Account{77})
+	first, err := store.Create(id, "Traveller", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(id, "Keeper", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !identities.claim(id) {
+		t.Fatal("claim failed")
+	}
+	self := identities.playing(Admitted{ID: id}, second, false, nil)
+	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40, Hunger: 12, Experience: 50}
+	current := game.Life{Pos: [3]float64{9, 70, 9}, Health: 100, Hunger: 83, Experience: 725}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{{PlayerID: id, CharacterID: uint64(first.ID)}: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := store.Load(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Unplayed() {
+		t.Fatal("old character's life written to newly selected character")
+	}
+	key := game.InstanceCharacter{PlayerID: id, CharacterID: uint64(second.ID)}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: current}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("correct character autosave lost", err)
+	}
+	if err := identities.Remember(self, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("stale autosave replaced teardown", err)
+	}
+	identities.Release(id)
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("released claim accepted stale autosave", err)
+	}
+}
+
+func TestPortalFallbackKeepsOnePositionPerAuthenticatedCharacterAndIsConsumed(t *testing.T) {
+	store := persist.NewMemoryStore()
+	i, _ := internalIdentities(t, store)
+	id := identity.IDOf(identity.Account{78})
+	first, err := store.Create(id, "Traveller", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(id, "Keeper", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := [3]float32{10.5, 64, 20.5}
+	i.rememberPortalReturn(Resolved{ID: id, Character: first.ID}, position)
+	if len(i.portalReturns) != 0 {
+		t.Fatal("unclaimed identity added fallback")
+	}
+	if !i.claim(id) {
+		t.Fatal("claim failed")
+	}
+	one := i.playing(Admitted{ID: id}, first, false, nil)
+	i.rememberPortalReturn(one, position)
+	position[0]++
+	i.rememberPortalReturn(one, position)
+	if len(i.portalReturns) != 1 {
+		t.Fatal("visits accumulated metadata")
+	}
+	two := i.playing(Admitted{ID: id}, second, false, nil)
+	if _, found := i.takePortalReturn(two); found {
+		t.Fatal("same-account character inherited return point")
+	}
+	i.rememberPortalReturn(one, [3]float32{999, 999, 999})
+	if len(i.portalReturns) != 1 {
+		t.Fatal("non-playing character changed metadata")
+	}
+	i.rememberPortalReturn(two, [3]float32{30.5, 70, 40.5})
+	if len(i.portalReturns) > store.Count() {
+		t.Fatal("fallback count exceeded existing characters")
+	}
+	one = i.playing(Admitted{ID: id}, first, false, nil)
+	if got, found := i.takePortalReturn(one); !found || got != position {
+		t.Fatal("return point was not retained")
+	}
+	if _, found := i.takePortalReturn(one); found {
+		t.Fatal("return point consumed twice")
+	}
+	if len(i.portalReturns) != 1 {
+		t.Fatal("consumption removed another character's metadata")
+	}
+	i.Release(id)
+	i.rememberPortalReturn(one, position)
+	if len(i.portalReturns) != 1 {
+		t.Fatal("released identity added metadata")
+	}
+}
+
+func TestDurablePortalSaveReleasesFallbackMetadata(t *testing.T) {
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	i, _ := internalIdentities(t, store)
+	id := identity.IDOf(identity.Account{79})
+	character, err := store.Create(id, "Traveller", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !i.claim(id) {
+		t.Fatal("claim failed")
+	}
+	self := i.playing(Admitted{ID: id}, character, false, nil)
+	i.rememberPortalReturn(self, [3]float32{10.5, 64, 20.5})
+	life := game.Life{Pos: [3]float64{10.5, 64, 20.5}, Health: 100, Hunger: 80}
+	if err := i.Remember(self, life); err != nil {
+		t.Fatal(err)
+	}
+	if len(i.portalReturns) != 0 {
+		t.Fatal("durable record retained redundant fallback")
+	}
+	saved, found, err := store.Load(character.ID)
+	if err != nil || !found || saved.Pos != life.Pos {
+		t.Fatal("fallback removed before durable record existed", err)
+	}
+}

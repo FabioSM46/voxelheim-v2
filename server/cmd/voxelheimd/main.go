@@ -1030,8 +1030,14 @@ func (s *server) savePlayersLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.identities.RememberAll(s.sim.Records()); err != nil {
-				s.log.Error("saving the connected players failed; they will be retried", "error", err)
+			var saveErr error
+			if s.instances != nil {
+				saveErr = s.identities.RememberCharacters(s.instances.Records(s.sim))
+			} else {
+				saveErr = s.identities.RememberAll(s.sim.Records())
+			}
+			if saveErr != nil {
+				s.log.Error("saving the connected players failed; they will be retried", "error", saveErr)
 			}
 			s.flushExperienceAwards()
 		}

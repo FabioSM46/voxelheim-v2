@@ -97,6 +97,8 @@ type InstanceManager struct {
 	inside                 map[InstanceCharacter]uint64
 	visits                 map[instanceVisit]uint64
 	partyVisits            map[portalPartyVisit]uint64
+	portalEntries          map[InstanceCharacter]PortalEntry
+	disconnected           map[InstanceCharacter]portalReconnect
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -115,8 +117,9 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 	return &InstanceManager{
 		tickRate: tickRate, viewDistance: viewDistance, maxSessions: maxSessions,
 		mintEntityID: mintEntityID, log: log, options: append([]SimOption(nil), options...),
-		graceTicks: ticksFor(InstanceEmptyGrace, tickRate),
-		sessions:   make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
+		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
+		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
+		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
 
@@ -225,6 +228,7 @@ func (m *InstanceManager) Leave(id uint64, character InstanceCharacter) bool {
 	}
 	delete(s.members, character)
 	delete(m.inside, character)
+	delete(m.portalEntries, character)
 	if len(s.members) == 0 {
 		s.emptyTicks = 0
 	}
@@ -268,6 +272,14 @@ func (m *InstanceManager) Step() {
 
 func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	s.cancel()
+	// A remembered life is useful only while its instance can be resumed.
+	// Teardown has already saved the safe open-world life; keeping a second
+	// full inventory here would grow memory for characters who never return.
+	for character, visit := range m.disconnected {
+		if visit.session == id {
+			delete(m.disconnected, character)
+		}
+	}
 	for character := range s.members {
 		delete(m.inside, character)
 	}
@@ -291,6 +303,8 @@ func (m *InstanceManager) Close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = true
+	clear(m.disconnected)
+	clear(m.portalEntries)
 	for id, s := range m.sessions {
 		m.removeLocked(id, s)
 	}
