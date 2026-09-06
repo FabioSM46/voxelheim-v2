@@ -85,6 +85,7 @@ type options struct {
 	tickRate            uint
 	viewDistance        uint
 	maxPlayers          uint
+	maxInstances        uint
 	terrainMemoryMiB    uint64
 	handshakeTimeout    time.Duration
 	characterTimeout    time.Duration
@@ -139,6 +140,7 @@ func parseFlags() options {
 	flag.UintVar(&opts.viewDistance, "view-distance", game.DefaultViewDistance, "chunk streaming radius in chunks (0..16)")
 	flag.UintVar(&opts.maxPlayers, "max-players", session.DefaultConcurrentSessions,
 		"maximum concurrent sessions (100..1000); a connection past it receives SERVER_FULL")
+	flag.UintVar(&opts.maxInstances, "max-instances", game.DefaultMaxInstances, "maximum concurrent ephemeral dungeon instances (1..1024; 0 uses the default)")
 	flag.Uint64Var(&opts.terrainMemoryMiB, "terrain-memory-mib", world.DefaultTerrainMemoryMiB,
 		"memory budget for resident terrain chunks, in MiB; one chunk is budgeted as 96 KiB")
 	flag.DurationVar(&opts.handshakeTimeout, "handshake-timeout", session.DefaultHandshakeTimeout,
@@ -285,6 +287,12 @@ func newLogger(level, format string) (*slog.Logger, error) {
 }
 
 func run(ctx context.Context, opts options, log *slog.Logger) error {
+	if opts.maxInstances == 0 {
+		opts.maxInstances = game.DefaultMaxInstances
+	}
+	if opts.maxInstances > 1024 {
+		return errors.New("max-instances must not exceed 1024")
+	}
 	if err := opts.validate(); err != nil {
 		return fmt.Errorf("invalid flags: %w", err)
 	}
@@ -405,6 +413,12 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
+	instances, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, int(opts.maxInstances), registry.NextID, log,
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange))
+	if err != nil {
+		return fmt.Errorf("invalid instance manager: %w", err)
+	}
+	defer instances.Close()
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
 		return fmt.Errorf("configure chunk regeneration: %w", err)
 	}
@@ -441,6 +455,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// are actually connected — so a server nobody has joined holds no creatures at all.
 
 	srv := &server{
+		instances:   instances,
 		tr:          tr,
 		registry:    registry,
 		identities:  identities,
@@ -811,6 +826,7 @@ func restoreClock(sim *game.Sim, store *persist.ClockStore, log *slog.Logger) {
 // together. It is a type so that the shutdown ordering below can be tested with a
 // fake transport, instead of only through a signal and a real socket.
 type server struct {
+	instances  *game.InstanceManager
 	tr         transport.Transport
 	registry   *session.Registry
 	identities *session.Identities
@@ -870,6 +886,9 @@ func (s *server) run(ctx context.Context) {
 		// from their intent and every session is handed what it can see — nothing here
 		// blocks, and nothing here generates terrain.
 		s.broadcastWaterChanges(s.sim.Step(tick))
+		if s.instances != nil {
+			s.instances.Step()
+		}
 
 		if tick%heartbeatEvery == 0 {
 			// Peek-only, never Get: the tick loop must not generate terrain, because a
@@ -1189,6 +1208,9 @@ func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 	accepting.Wait()
 	s.registry.CloseAll()
 	workers.Wait()
+	if s.instances != nil {
+		s.instances.Close()
+	}
 
 	// A mob can die after its tap owner disconnected and after that session wrote its
 	// final record. The award is queued by the simulation and this is the last durable
