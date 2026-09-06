@@ -634,7 +634,7 @@ pub(crate) fn reset_world(world: &mut World) {
 mod tests {
     use super::*;
     use crate::settings::{Choices, Knob, MonitorChoices, Tab};
-    use mixer::MAX_SOURCES;
+    use mixer::{MAX_SOURCES, VOICE_RESERVE};
 
     /// A mixer and a tone test with no device anywhere near them.
     ///
@@ -1096,12 +1096,26 @@ mod tests {
                 Bus::Master,
             ))
             .add_systems(Update, play_the_tone_test);
-        // Everything else is voice, so the reserve refuses a world bus however many frames
-        // it waits.
+        // **The world buses hold their whole share, so no world claim can be granted however
+        // many frames it waits.** Filling the pool with voice instead would not do it since
+        // the review on #996: the budget bounds what the world *holds*, not how many slots
+        // happen to be free, so a pool full of voice still leaves the world its own eight —
+        // and this test asserted the opposite by accident until the fix propagated here.
+        let beds: Vec<SourceHandle> = (0..MAX_SOURCES - VOICE_RESERVE)
+            .map(|_| mixer.claim(Bus::Ambience).expect("a free slot"))
+            .collect();
         let voices: Vec<SourceHandle> = std::iter::from_fn(|| mixer.claim(Bus::Voice)).collect();
-        assert_eq!(voices.len(), MAX_SOURCES - 1);
+        assert_eq!(
+            beds.len() + voices.len(),
+            MAX_SOURCES - 1,
+            "the pool is full"
+        );
+        assert!(
+            mixer.claim(Bus::Music).is_none(),
+            "the world budget is spent, so this is a refusal the policy will keep making"
+        );
 
-        app.world_mut().resource_mut::<AudioControls>().tone_test = Some(Bus::Ambience);
+        app.world_mut().resource_mut::<AudioControls>().tone_test = Some(Bus::Music);
         for _ in 0..TONE_TEST_PATIENCE {
             app.update();
             let _ = rendered(&mixer, 64);
@@ -1113,6 +1127,7 @@ mod tests {
             voices.iter().all(|held| held.live()),
             "the tone test took a slot off somebody being heard"
         );
+        drop(beds);
         drop(voices);
     }
 
