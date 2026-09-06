@@ -1407,6 +1407,28 @@ const VOICE_DUCKING_STEP: u8 = 5;
 /// depends on the music, which does not exist yet.
 const DEFAULT_VOICE_DUCKING: u8 = 60;
 
+const _: () = {
+    // **The three world defaults are an ordering, and this is where that is enforced.**
+    // Effects over ambience over music: the one-shots are what the master volume is for,
+    // ambience sits under the effects it stands behind, and a score arriving at the level of
+    // the world it is scoring is a score a player's first act is turning down.
+    //
+    // A `const` block rather than a test, because the review on #997 asked for an assertion
+    // and this is the stronger one available: reordering the three stops the client
+    // compiling rather than reddening a suite. The gap it found was real — the sweep over the
+    // three knobs compares each default against its own constant, which is a comparison of a
+    // thing with itself, so it would have stayed green through any reordering while this
+    // file and the pull request both claimed the ordering was pinned.
+    assert!(
+        DEFAULT_SFX_VOLUME > DEFAULT_AMBIENCE_VOLUME,
+        "effects must start louder than ambience"
+    );
+    assert!(
+        DEFAULT_AMBIENCE_VOLUME > DEFAULT_MUSIC_VOLUME,
+        "ambience must start louder than music"
+    );
+};
+
 /// Whether music is generated at all, by default. On: a player who does not want it has a
 /// switch, and one who does should not have to find it.
 const DEFAULT_MUSIC_ON: bool = true;
@@ -2587,6 +2609,28 @@ mod tests {
             settings.reset(Tab::Audio);
             assert_eq!(read(&settings), default);
         }
+    }
+
+    /// **The ordering survives the conversion**, which is the half of it a `const` block
+    /// cannot reach.
+    ///
+    /// The constants are pinned where they are declared, at compile time. What a listener
+    /// actually gets is the *gain* each one converts to, and three correct constants read
+    /// through a wrong conversion would be three wrong levels — so the order is asserted
+    /// again on the values `audio/` reads. The review on #997 is why either exists: the sweep
+    /// over the three knobs compares each default against its own constant, which is a
+    /// comparison of a thing with itself and would have stayed green through any reordering
+    /// while this file and the pull request both claimed the ordering was pinned.
+    #[test]
+    fn the_world_defaults_keep_their_ordering_once_they_are_gains() {
+        // The constants themselves are pinned at compile time beside their declarations —
+        // clippy rightly refuses a runtime assertion over two constants, and a build error is
+        // the stronger answer anyway. What is left to check here is the half that is not
+        // constant-folded: the gains a reader actually takes, which is what `audio/` reaches
+        // for and where a broken conversion would show up.
+        let settings = Settings::default();
+        assert!(settings.sfx_gain() > settings.ambience_gain());
+        assert!(settings.ambience_gain() > settings.music_gain());
     }
 
     /// **The ducking knob is a depth and the mixer wants a gain, so one of the two has to be
