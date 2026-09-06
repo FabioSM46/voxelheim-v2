@@ -355,12 +355,55 @@ invent one. Say how many parts: there is no limit of two, and #851 needed five.
 its consumer, the mechanism and its callers, a decision and the wiring that carries it. A split
 made to hit a number leaves parts that each read as an excerpt of something else.
 
-### Say the estimate out loud
+### Count the kinds of surface, because that is the column the table is really keyed on
+
+The rows above read like sizes and are really shapes, and the row that gets misread is always the
+same one. **Before reaching for a band, count the *kinds* of surface the issue names** — a
+mechanism, a data model, a control surface, a wire payload, a persistence store. One kind is one
+pull request. Two kinds is the row that says two parts, whatever the character estimate feels
+like. Two or more workspaces is the bottom row, and that row says 95,000+ and two or more parts
+even when the change sounds small.
+
+Two symptoms that the count is above one, both readable in the body while you are still writing it:
+
+- **The summary needs "and" between two nouns of different kinds** — a mixer *and* a settings tab,
+  a contract *and* the client that draws from it.
+- **More than six or seven acceptance criteria.** The clusters they fall into are the seams. On
+  #982 there were nine, and the three groups they formed became the three pull requests almost
+  one for one.
+
+### Say the estimate out loud — but say the axes, not the verdict
 
 Put the estimate and its reasoning in the issue body, or in the refinement comment for an issue you
 did not author. **An estimate nobody records is one nobody can be shown to have skipped** — which
 is exactly how `/dev-issue`'s identical instruction went unfollowed three times in Iteration 50
 while being the first sentence of its Step 5.
+
+**But do not write the count as a verdict, because a verdict in the body suppresses the estimate
+`/dev-issue` is supposed to make.** Step 5 of that skill says to decide the number of pull requests
+before any code exists. An agent that opens an issue body already asserting **"One pull request"**
+does not re-derive it; it inherits it, and the decision is then made by whoever wrote the issue —
+the person furthest from the code, working from a table rather than from the diff. The estimate
+stops being an input and becomes an anchor.
+
+So record what the estimate is *made of* and leave the count where the information is:
+
+- the workspaces, counted;
+- the kinds of surface, counted and named;
+- the table row that shape lands on, quoted;
+- the multipliers that apply — fixture-heavy tests, a type constructed at many sites, two
+  implementations rather than one with a flag;
+- the resulting band, stated explicitly as **a floor, not the count**, with the number of parts
+  left to Step 5.
+
+**The calibration point this section was rewritten from.** #982 named a mixer *and* a settings
+surface — the *module and a settings/UI surface* row, which says 74,000–84,000 and **two parts**.
+It was written up as the row above, *a module plus its tests*, at 40,000–55,000 and **one pull
+request**. It measured **167,203** characters: wrong by a factor of three, and split into three
+pull requests at Step 7, which `/dev-issue` names the most expensive moment to split because every
+seam must then be cut back out of finished work. Nothing about the implementation caused this. The
+row was misread while the issue was being written, and the verdict written beside it stopped the
+agent from noticing.
 
 ## Guardrails
 
