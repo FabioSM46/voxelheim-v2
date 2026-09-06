@@ -2112,6 +2112,34 @@ pub struct Marker {
     pub note: String,
 }
 
+/// A portal location and discovery evidence supplied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Landmark {
+    pub landmark_id: u64,
+    pub x: i32,
+    pub z: i32,
+    pub discovered: bool,
+}
+
+/// Complete membership of one validated half-open map-tile rectangle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LandmarkList {
+    pub origin_x: i32,
+    pub origin_z: i32,
+    pub scale: u8,
+    pub landmarks: Vec<Landmark>,
+}
+
+impl LandmarkList {
+    pub fn contains(&self, x: i32, z: i32) -> bool {
+        let span = i64::from(self.scale) * MAP_TILE_EDGE as i64;
+        i64::from(x) >= i64::from(self.origin_x)
+            && i64::from(x) < i64::from(self.origin_x) + span
+            && i64::from(z) >= i64::from(self.origin_z)
+            && i64::from(z) < i64::from(self.origin_z) + span
+    }
+}
+
 /// Every mark this character holds, **replacing** the client's copy wholesale.
 ///
 /// An empty list is meaningful and ordinary — a character who has marked nothing — which
@@ -2732,6 +2760,7 @@ pub enum Message {
     MapExplored(MapExplored),
     /// Every mark this character holds, replacing the client's copy wholesale.
     MarkerList(MarkerList),
+    LandmarkList(LandmarkList),
     /// What one visible resident is called and what they do. Decoded and validated here;
     /// no ECS system consumes it until the resident issue, exactly as `MineProgress` was
     /// decoded from V2 and drawn later.
@@ -3166,6 +3195,8 @@ pub enum DecodeError {
     MapExploredTooManyColumns(usize),
     /// A `MarkerList` carries more marks than one character may hold.
     TooManyMarkers(usize),
+    /// Invalid V32 scope, count, kind, identity or membership.
+    InvalidLandmarks(&'static str),
     /// A `Marker` carries the reserved id 0.
     MarkerWithoutIdentity,
     /// One `marker_id` names two marks of the same list.
@@ -3721,6 +3752,7 @@ impl fmt::Display for DecodeError {
                 f,
                 "LeaveCancelResult accepted={accepted} carries remaining_ms={remaining_ms}"
             ),
+            Self::InvalidLandmarks(reason) => write!(f, "invalid landmark list: {reason}"),
             Self::MapTileScale(value) => write!(f, "map scale {value} is not 1, 4 or 16"),
             Self::MapTileOffGrid {
                 origin_x,
@@ -4379,8 +4411,12 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::VoiceHeard(voice_heard(&payload)?))
         }
-        // The contract ships before #961's landmark decoder and map consumer.
-        fb::Payload::LandmarkList => Ok(Message::Deferred(name)),
+        fb::Payload::LandmarkList => {
+            let payload = envelope
+                .payload_as_landmark_list()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::LandmarkList(landmark_list(&payload)?))
+        }
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -4472,6 +4508,44 @@ fn map_tile(tile: &fb::MapTile<'_>) -> Result<MapTile, DecodeError> {
         surface: surfaces,
         explored: explored.iter().collect(),
     })
+}
+
+/// Validates one V32 scope before allocating its bounded contents.
+fn landmark_list(list: &fb::LandmarkList<'_>) -> Result<LandmarkList, DecodeError> {
+    let invalid = DecodeError::InvalidLandmarks;
+    let span = map_tile_span(list.scale()).ok_or(invalid("scale"))?;
+    if list.origin_x().rem_euclid(span) != 0 || list.origin_z().rem_euclid(span) != 0 {
+        return Err(invalid("origin"));
+    }
+    let entries = list.landmarks().ok_or(invalid("missing entries"))?;
+    if entries.len() > 1 {
+        return Err(invalid("count"));
+    }
+    let mut result = LandmarkList {
+        origin_x: list.origin_x(),
+        origin_z: list.origin_z(),
+        scale: list.scale(),
+        landmarks: Vec::new(),
+    };
+    // At most one entry: no identity set, and no allocation before every field validates.
+    if let Some(entry) = entries.iter().next() {
+        if entry.landmark_id() == 0 {
+            return Err(invalid("identity"));
+        }
+        if entry.kind() != fb::LandmarkKind::Portal {
+            return Err(invalid("kind"));
+        }
+        if !result.contains(entry.x(), entry.z()) {
+            return Err(invalid("outside scope"));
+        }
+        result.landmarks.push(Landmark {
+            landmark_id: entry.landmark_id(),
+            x: entry.x(),
+            z: entry.z(),
+            discovered: entry.discovered(),
+        });
+    }
+    Ok(result)
 }
 
 /// Copies and validates the complete list of marks one character holds.
@@ -6658,6 +6732,45 @@ pub(super) mod server_side {
     /// not about identity never has to name it.
     pub const DEFAULT_TOKEN: [u8; super::PLAYER_TOKEN_LEN] = [0x5a; super::PLAYER_TOKEN_LEN];
 
+    pub type LandmarkWire = (u64, i32, i32, u8, bool);
+
+    pub fn encode_landmarks(
+        origin_x: i32,
+        origin_z: i32,
+        scale: u8,
+        entries: Option<&[LandmarkWire]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let landmarks = entries.map(|entries| {
+            let rows: Vec<_> = entries
+                .iter()
+                .map(|&(landmark_id, x, z, kind, discovered)| {
+                    fb::Landmark::create(
+                        &mut builder,
+                        &fb::LandmarkArgs {
+                            landmark_id,
+                            x,
+                            z,
+                            kind: fb::LandmarkKind(kind),
+                            discovered,
+                        },
+                    )
+                })
+                .collect();
+            builder.create_vector(&rows)
+        });
+        let payload = fb::LandmarkList::create(
+            &mut builder,
+            &fb::LandmarkListArgs {
+                landmarks,
+                origin_x,
+                origin_z,
+                scale,
+            },
+        );
+        finish_envelope(builder, fb::Payload::LandmarkList, payload.as_union_value())
+    }
+
     /// Test-server offered stack, including invalid combinations.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct PlayerTradeSlotWire {
@@ -8553,6 +8666,73 @@ pub(super) mod server_side {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn landmark_scopes_validate_before_copying() {
+        use server_side::encode_landmarks;
+        for scale in [1, 4, 16] {
+            let span = i32::from(scale) * 64;
+            for origin in [i32::MIN, -span, 0, i32::MAX - span + 1] {
+                for discovered in [false, true] {
+                    let frame = encode_landmarks(
+                        origin,
+                        origin,
+                        scale,
+                        Some(&[(u64::MAX, origin + (span - 1), origin, 1, discovered)]),
+                    );
+                    let Ok(Message::LandmarkList(list)) = decode(&frame) else {
+                        panic!("valid scope");
+                    };
+                    assert_eq!(
+                        list.landmarks,
+                        [Landmark {
+                            landmark_id: u64::MAX,
+                            x: origin + (span - 1),
+                            z: origin,
+                            discovered
+                        }]
+                    );
+                    assert!(!list.contains(origin, origin.saturating_sub(1)) || origin == i32::MIN);
+                }
+                assert!(
+                    matches!(decode(&encode_landmarks(origin, origin, scale, Some(&[]))),
+                    Ok(Message::LandmarkList(LandmarkList { landmarks, .. })) if landmarks.is_empty())
+                );
+            }
+        }
+        for (x, z, scale, entries, reason) in [
+            (0, 0, 0, Some(vec![]), "scale"),
+            (0, 0, 3, Some(vec![]), "scale"),
+            (1, 0, 1, Some(vec![]), "origin"),
+            (0, -1, 4, Some(vec![]), "origin"),
+            (0, 0, 1, None, "missing entries"),
+            (0, 0, 1, Some(vec![(1, 0, 0, 1, false); 2]), "count"),
+            (0, 0, 1, Some(vec![(0, 0, 0, 1, false)]), "identity"),
+            (0, 0, 1, Some(vec![(1, 0, 0, 0, false)]), "kind"),
+            (0, 0, 1, Some(vec![(1, 0, 0, 255, false)]), "kind"),
+            (0, 0, 1, Some(vec![(1, -1, 0, 1, false)]), "outside scope"),
+            (0, 0, 1, Some(vec![(1, 64, 0, 1, false)]), "outside scope"),
+            (0, 0, 1, Some(vec![(1, 0, 64, 1, false)]), "outside scope"),
+        ] {
+            assert_eq!(
+                decode(&encode_landmarks(x, z, scale, entries.as_deref())),
+                Err(DecodeError::InvalidLandmarks(reason))
+            );
+        }
+    }
+
+    #[test]
+    fn landmark_truncations_and_corruptions_never_panic() {
+        let frame = server_side::encode_landmarks(-1024, 0, 16, Some(&[(7, -1, 1023, 1, true)]));
+        for len in 0..frame.len() {
+            assert!(decode(&frame[..len]).is_err());
+        }
+        for index in 0..frame.len() {
+            let mut corrupted = frame.clone();
+            corrupted[index] ^= 0xff;
+            let _ = decode(&corrupted);
+        }
+    }
+
     use super::server_side;
     use super::server_side::{
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
@@ -8946,7 +9126,7 @@ mod tests {
         // about a consumer, which is what `MapTile` meant before the map window existed.
         (fb::Payload::VoiceFrame, Handling::ClientOnly),
         (fb::Payload::VoiceHeard, Handling::Consumed),
-        (fb::Payload::LandmarkList, Handling::Deferred),
+        (fb::Payload::LandmarkList, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.

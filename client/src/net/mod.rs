@@ -61,10 +61,10 @@ pub use codec::{
     ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CHUNK_COLUMN_BLOCKS,
     CharacterSummary, ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest,
     DropItemRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
-    InventoryStack, InventoryState, ItemDropState, LifeState, LootClosed, LootEntry,
-    LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS, MAP_TILE_EDGE,
-    MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface,
-    MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
+    InventoryStack, InventoryState, ItemDropState, Landmark, LandmarkList, LifeState, LootClosed,
+    LootEntry, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS,
+    MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored,
+    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
     MarkerRemoveRequest, MineProgress, MineRequest, MobAction, MobHit, MobKind, MobState,
     PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
     PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
@@ -633,7 +633,7 @@ impl PlayerTradeInbox {
 /// reads, and that is where the session rule belongs, because a tile is drawn for one
 /// character in one world.
 #[derive(Resource, Debug, Default)]
-pub struct MapInbox(Vec<MapEvent>);
+pub struct MapInbox(Vec<MapEvent>, bool);
 
 /// The server-owned things the map screen receives.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -644,6 +644,10 @@ pub enum MapEvent {
     Explored(MapExplored),
     /// Every mark this character holds, **replacing** the screen's copy wholesale.
     Markers(MarkerList),
+    /// Complete portal membership in one tile, independent of terrain fog.
+    Landmarks(LandmarkList),
+    /// A bounded-inbox overflow requires fresh paired tile/landmark answers.
+    RefreshLandmarks,
 }
 
 /// Enough room for a full screen of tiles and the ledger pages a join sends, while an
@@ -654,6 +658,7 @@ const MAP_INBOX_CAPACITY: usize = 256;
 impl MapInbox {
     fn push_bounded(&mut self, event: MapEvent) {
         if self.0.len() == MAP_INBOX_CAPACITY {
+            self.1 = true;
             self.0.remove(0);
         }
         self.0.push(event);
@@ -661,7 +666,12 @@ impl MapInbox {
 
     /// Takes every queued payload in wire order, leaving the inbox empty.
     pub fn take(&mut self) -> Vec<MapEvent> {
-        std::mem::take(&mut self.0)
+        let mut events = std::mem::take(&mut self.0);
+        if std::mem::take(&mut self.1) {
+            // Last: surviving old replies must not certify the state whose update was lost.
+            events.push(MapEvent::RefreshLandmarks);
+        }
+        events
     }
 
     #[cfg(test)]
@@ -2152,6 +2162,11 @@ fn drain_session_events(
             // line. It is queued silently anyway, because the marks on the screen are the
             // signal a player reads and a second one in the log would only be a place for
             // the two to disagree.
+            Ok(SessionEvent::LandmarkList(list)) => {
+                if let Some(map) = inboxes.map.as_deref_mut() {
+                    map.push_bounded(MapEvent::Landmarks(list));
+                }
+            }
             Ok(SessionEvent::MarkerList(list)) => {
                 if let Some(map) = inboxes.map.as_deref_mut() {
                     map.push_bounded(MapEvent::Markers(list));
@@ -4980,6 +4995,39 @@ mod tests {
     /// notices: the payload decoded, the session stayed up, and a villager simply never got
     /// a name. Driven through a real socket rather than by pushing at the inbox, because
     /// what is under test is the router arm and not the queue.
+    #[test]
+    fn landmarks_cross_the_socket_and_reach_the_map_in_wire_order() {
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
+            encode_server_welcome(&WelcomeWire::default()),
+            codec::server_side::encode_landmarks(0, 0, 1, Some(&[(7, 12, 9, 1, false)])),
+            codec::server_side::encode_landmarks(0, 0, 1, Some(&[(7, 12, 9, 1, true)])),
+            codec::server_side::encode_landmarks(64, 0, 1, Some(&[])),
+        ]));
+        let (mut app, _scratch) = headless(&addr);
+        pump_until(&mut app, "landmark responses", |app| {
+            app.world().resource::<MapInbox>().0.len() == 3
+        });
+        let arrived = app.world_mut().resource_mut::<MapInbox>().take();
+        let expected = [false, true];
+        for (event, discovered) in arrived[..2].iter().zip(expected) {
+            let MapEvent::Landmarks(list) = event else {
+                panic!("landmarks");
+            };
+            assert_eq!(
+                list.landmarks,
+                [Landmark {
+                    landmark_id: 7,
+                    x: 12,
+                    z: 9,
+                    discovered
+                }]
+            );
+        }
+        assert!(
+            matches!(&arrived[2], MapEvent::Landmarks(list) if list.origin_x == 64 && list.landmarks.is_empty())
+        );
+    }
+
     #[test]
     fn a_resident_appearance_after_the_welcome_reaches_the_resident_inbox() {
         let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
