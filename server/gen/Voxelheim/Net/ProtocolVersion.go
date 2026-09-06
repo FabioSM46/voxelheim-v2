@@ -224,6 +224,15 @@ import "strconv"
 // / nothing alone: a V29 server leaves that scalar at zero, and zero is the honest
 // / statement that this server relays no voice. See `schemas/player.fbs` for both tables
 // / and `docs/adr/0001-voice-transport.md` for why the frames ride this connection at all.
+// /
+// / **V31 belongs to the complete `LandmarkList` and its 2 MiB frame bound.** The
+// / server -> client union addition alone would owe nothing: an older client drops
+// / an unknown whole payload, and an older server sends no discovered landmarks.
+// / But 65,536 landmark tables exceed the older 1 MiB transport limit. That receiver
+// / rejects the frame length before reaching its droppable union tag. Keeping every
+// / discovered portal therefore raises the transport bound to 2 MiB on both peers
+// / and bumps the version so the incompatibility is refused during the handshake,
+// / never on a later exploration update. No client landmark request is introduced.
 type ProtocolVersion uint16
 
 const (
@@ -232,7 +241,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 30
+	ProtocolVersionCurrent ProtocolVersion = 31
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

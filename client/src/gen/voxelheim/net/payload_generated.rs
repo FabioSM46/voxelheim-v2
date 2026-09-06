@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 62;
+pub const ENUM_MAX_PAYLOAD: u8 = 63;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 63] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 64] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -81,6 +81,7 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 63] = [
     Payload::PlayerTradeClosed,
     Payload::VoiceFrame,
     Payload::VoiceHeard,
+    Payload::LandmarkList,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -170,9 +171,10 @@ impl Payload {
     pub const PlayerTradeClosed: Self = Self(60);
     pub const VoiceFrame: Self = Self(61);
     pub const VoiceHeard: Self = Self(62);
+    pub const LandmarkList: Self = Self(63);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 62;
+    pub const ENUM_MAX: u8 = 63;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -237,6 +239,7 @@ impl Payload {
         Self::PlayerTradeClosed,
         Self::VoiceFrame,
         Self::VoiceHeard,
+        Self::LandmarkList,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -304,6 +307,7 @@ impl Payload {
             Self::PlayerTradeClosed => Some("PlayerTradeClosed"),
             Self::VoiceFrame => Some("VoiceFrame"),
             Self::VoiceHeard => Some("VoiceHeard"),
+            Self::LandmarkList => Some("LandmarkList"),
             _ => None,
         }
     }

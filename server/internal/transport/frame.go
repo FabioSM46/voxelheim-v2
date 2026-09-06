@@ -14,10 +14,9 @@ import (
 //
 // The limit exists so that it can be checked *before* allocating. The length
 // prefix arrives from the network, so an unchecked prefix is an attacker-chosen
-// allocation: four bytes asking for four gigabytes. 1 MiB leaves ample headroom
-// for the largest message the contract can produce — an RLE-encoded 32³ chunk is
-// a few kilobytes — while keeping a hostile prefix free to refuse.
-const MaxFrameSize = 1 << 20
+// allocation: four bytes asking for four gigabytes. 2 MiB fits the complete V31
+// landmark list (65,536 entries) while keeping a hostile prefix free to refuse.
+const MaxFrameSize = 2 << 20
 
 // frameHeaderSize is the width of the big-endian length prefix.
 const frameHeaderSize = 4

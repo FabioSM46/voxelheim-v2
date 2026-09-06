@@ -293,11 +293,14 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // an older client; ServerWelcome.voice_range_blocks would have read as zero on one, which
 // is the honest statement that the server relays no voice. Both ride the same bump
 // because a relay with one half of its pair is not a relay.
-func TestProtocolV30AddsTheAuthoritativeVoiceRelay(t *testing.T) {
+//
+// V31 appends the complete landmark list. Its 2 MiB frame requirement, rather than
+// its server-only union tag, owes the bump; all earlier tags keep their numbers.
+func TestProtocolV31AddsCompleteDiscoveredLandmarks(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 30 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 30", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 31 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 31", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -370,6 +373,7 @@ func TestProtocolV30AddsTheAuthoritativeVoiceRelay(t *testing.T) {
 		// hear. The intent is what carries the bump; the answer would have been dropped.
 		vnet.PayloadVoiceFrame,
 		vnet.PayloadVoiceHeard,
+		vnet.PayloadLandmarkList,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {

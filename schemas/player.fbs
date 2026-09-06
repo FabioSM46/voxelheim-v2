@@ -772,6 +772,49 @@ table MarkerList {
   markers: [Marker];
 }
 
+/// A server-discovered place, separate from the character's own MarkerKind budget.
+/// Members are appended, never inserted. Unknown is the fail-closed absent-field zero.
+enum LandmarkKind : ubyte {
+  Unknown = 0,
+  Portal = 1
+}
+
+/// One discovered place on the map. Server -> client, never player-authored.
+/// No note, owner or y: this is a place on a two-dimensional map.
+/// Decoder invariants: landmark_id is non-zero; kind is known and not Unknown.
+/// Identity is stable within the world seed across connections and ledger reloads.
+/// Coordinates name the portal arch in block units, not the centre of its ruin.
+table Landmark {
+  landmark_id: ulong;
+  x: int;
+  z: int;
+  kind: LandmarkKind;
+}
+
+/// The complete set of this character's discovered landmarks. Server -> client.
+/// REPLACES the client's copy wholesale; no delta, pagination or merge with old entries.
+/// An empty list is legal and ordinary, including on a fresh character's welcome.
+/// No place, remove or edit request exists: discovery is the server's intersection of
+/// seed-derived ruin sites and this character's explored chunk-column ledger. An arch
+/// whose column is unexplored must never appear, regardless of any client request.
+/// Sent after welcome and after new exploration reveals another portal.
+///
+/// Decoder invariants:
+///   - landmarks is present; empty is legal
+///   - at most 65,536 entries, checked before allocation or iteration
+///   - every entry satisfies Landmark, and landmark ids are unique within the list
+///
+/// The bound covers the entire exploration ledger (at most one portal per column),
+/// with no truncation or player-marker budget involved. V31 raises the frame limit to
+/// 2 MiB to fit this complete list; receivers must still reject oversized lists.
+///
+/// Both this list and the existing ledger are implicitly scoped to the one open world.
+/// The arc that adds party instances must scope both per world; no unused world id or
+/// new persistence is introduced here. Discovery is rebuilt from the ledger and seed.
+table LandmarkList {
+  landmarks: [Landmark];
+}
+
 /// Which action a server refused, in an `ActionRefused`.
 ///
 /// **Declared for every action that refuses in silence, not only the one that is

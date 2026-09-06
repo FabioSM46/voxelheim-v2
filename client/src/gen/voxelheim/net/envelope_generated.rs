@@ -998,6 +998,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_landmark_list(&self) -> Option<LandmarkList<'a>> {
+        if self.payload_type() == Payload::LandmarkList {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { LandmarkList::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1071,6 +1086,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::PlayerTradeClosed => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PlayerTradeClosed>>("Payload::PlayerTradeClosed", pos),
           Payload::VoiceFrame => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceFrame>>("Payload::VoiceFrame", pos),
           Payload::VoiceHeard => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceHeard>>("Payload::VoiceHeard", pos),
+          Payload::LandmarkList => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LandmarkList>>("Payload::LandmarkList", pos),
           _ => Ok(()),
         }
      })?
@@ -1744,6 +1760,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::VoiceHeard => {
                 if let Some(x) = self.payload_as_voice_heard() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::LandmarkList => {
+                if let Some(x) = self.payload_as_landmark_list() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

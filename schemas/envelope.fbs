@@ -248,7 +248,14 @@ union Payload {
   //    See `player.fbs` for both tables and `docs/adr/0001-voice-transport.md` for why
   //    voice rides this connection rather than a second one.
   VoiceFrame,              // 61  client -> server
-  VoiceHeard               // 62  server -> client
+  VoiceHeard,              // 62  server -> client
+
+  // -- V31. Appended; tags 1..62 retain their values.
+  //    This travels only server -> client. An older client's unknown-tag arm would
+  //    drop it safely, but its 1 MiB frame reader rejects a maximum-size list before
+  //    that arm runs. The 2 MiB frame bound therefore owes the version bump; see
+  //    ProtocolVersion. A client sending this authoritative payload is refused.
+  LandmarkList             // 63  server -> client
 }
 
 table Envelope {

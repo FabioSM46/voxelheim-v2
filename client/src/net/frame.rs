@@ -16,9 +16,9 @@ use std::io::{self, Write};
 /// Identical to `transport.MaxFrameSize` on the server, and load-bearing for the
 /// same reason: the length prefix arrives from the network, so an unchecked
 /// prefix is a peer-chosen allocation — four bytes asking for four gigabytes.
-/// 1 MiB leaves ample headroom for the largest message the contract can produce
+/// 2 MiB fits the complete V31 landmark list, including all 65,536 entries
 /// while keeping a hostile prefix free to refuse.
-pub const MAX_FRAME_SIZE: usize = 1 << 20;
+pub const MAX_FRAME_SIZE: usize = 2 << 20;
 
 /// Width of the big-endian length prefix.
 pub const FRAME_HEADER_SIZE: usize = 4;
@@ -158,7 +158,7 @@ mod tests {
     /// before anything reaches the wire.
     #[test]
     fn limits_match_the_server() {
-        assert_eq!(MAX_FRAME_SIZE, 1 << 20);
+        assert_eq!(MAX_FRAME_SIZE, 2 << 20);
         assert_eq!(FRAME_HEADER_SIZE, 4);
     }
 

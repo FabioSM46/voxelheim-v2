@@ -282,6 +282,9 @@ type Streamer struct {
 	// afterwards that knows the pass is over.
 	explored *Exploration
 
+	// Derived from the ledger and seed; owned by the streaming goroutine.
+	landmarks *landmarks
+
 	// entering is told about every chunk that newly enters this view, or nil when nobody
 	// is listening. It is the simulation's one chance to learn a piece of the world became
 	// visible, which is when the settlement stations standing in it are created —
@@ -525,6 +528,9 @@ func (s *Streamer) sendExplored() error {
 	}
 	if err := sendExplored(s.send, batch); err != nil {
 		return fmt.Errorf("session: send %d newly explored columns: %w", len(batch), err)
+	}
+	if s.landmarks.reveal(batch) {
+		return s.sendLandmarks()
 	}
 	return nil
 }

@@ -22,6 +22,8 @@ pub mod voxelheim {
         pub use self::party_action_generated::*;
         mod marker_kind_generated;
         pub use self::marker_kind_generated::*;
+        mod landmark_kind_generated;
+        pub use self::landmark_kind_generated::*;
         mod refused_action_generated;
         pub use self::refused_action_generated::*;
         mod refusal_reason_generated;
@@ -160,6 +162,10 @@ pub mod voxelheim {
         pub use self::marker_generated::*;
         mod marker_list_generated;
         pub use self::marker_list_generated::*;
+        mod landmark_generated;
+        pub use self::landmark_generated::*;
+        mod landmark_list_generated;
+        pub use self::landmark_list_generated::*;
         mod action_refused_generated;
         pub use self::action_refused_generated::*;
         mod entity_state_generated;
