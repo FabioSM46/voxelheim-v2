@@ -18,102 +18,18 @@ import (
 
 func landmarkFixture(t *testing.T, x, z int64) world.Ruin {
 	t.Helper()
-	ruin, ok := world.RuinAt(mapTileSeed, x, z)
+	r, ok := world.RuinAt(mapTileSeed, x, z)
 	if !ok {
-		t.Fatal("pinned ruin no longer exists")
+		t.Fatal("pinned ruin missing")
 	}
-	return ruin
+	return r
 }
-
-func TestLandmarksRequireTheActualArchColumnAndSurviveReload(t *testing.T) {
-	dir := t.TempDir()
-	storedWorld, err := world.OpenStore(dir, mapTileSeed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chunks := world.NewPersistentCache(storedWorld, 1, 8)
-	store, character := exploringCharacter(t, dir)
-	explored := newExploration(store, character.ID, nil, false, nil)
-	ruin := landmarkFixture(t, -6, 6)
-	arch := world.ChunkOf(ruin.Arch.X, 0, ruin.Arch.Z).Column()
-	neighbour := world.Column{CX: arch.CX + 1, CZ: arch.CZ}
-	explored.Reveal(neighbour)
-	l := newLandmarks(chunks.Seed(), explored)
-	if len(l.list().Landmarks) != 0 {
-		t.Fatal("neighbour revealed a portal")
-	}
-	if len(l.cells) != 1 {
-		t.Fatal("columns not deduplicated by ruin cell")
-	}
-	explored.Reveal(arch)
-	if !l.reveal(explored.TakeRevealed()) {
-		t.Fatal("actual column failed to reveal portal")
-	}
-	want := l.list()
-	if len(want.Landmarks) != 1 {
-		t.Fatal("no portal after exploration")
-	}
-	got := want.Landmarks[0]
-	if got.LandmarkID == 0 || got.X != int32(ruin.Arch.X) || got.Z != int32(ruin.Arch.Z) || got.Kind != vnet.LandmarkKindPortal {
-		t.Fatalf("wrong landmark: %+v", got)
-	}
-	// Idempotent exploration and a fresh character never inherit this discovery.
-	if l.reveal([]world.Column{arch, arch}) || len(newLandmarks(mapTileSeed, mapTileLedger()).list().Landmarks) != 0 {
-		t.Fatal("duplicate or cross-character discovery")
-	}
-	if err := explored.Save(); err != nil {
-		t.Fatal(err)
-	}
-	// Drop live derivation and reopen the existing ledger directory. No landmark
-	// file is involved, so a process restart has exactly the same inputs.
-	storedWorld, err = world.OpenStore(dir, mapTileSeed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	chunks = world.NewPersistentCache(storedWorld, 1, 8)
-	reopened, err := persist.OpenExplorationStore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored, found, err := reopened.Load(character.ID)
-	if err != nil || !found {
-		t.Fatalf("reload: %v,%v", found, err)
-	}
-	again := newLandmarks(chunks.Seed(), newExploration(reopened, character.ID, stored, false, nil)).list()
-	if !reflect.DeepEqual(again, want) {
-		t.Fatalf("restart moved discovery: %+v want %+v", again, want)
-	}
+func portalRequest(r world.Ruin, scale uint8) protocol.MapTileRequest {
+	span := protocol.MapTileSpan(scale)
+	floor := func(v int32) int32 { return v - (v%span+span)%span }
+	return protocol.MapTileRequest{OriginX: floor(int32(r.Arch.X)), OriginZ: floor(int32(r.Arch.Z)), Scale: scale}
 }
-
-func TestLandmarkListsAreCompleteStableAndBoundedByExploration(t *testing.T) {
-	first, second := landmarkFixture(t, -6, 6), landmarkFixture(t, 0, -12)
-	cols := []world.Column{world.ChunkOf(first.Arch.X, 0, first.Arch.Z).Column(), world.ChunkOf(second.Arch.X, 0, second.Arch.Z).Column()}
-	a := newLandmarks(mapTileSeed, mapTileLedger(cols...)).list()
-	b := newLandmarks(mapTileSeed, mapTileLedger(cols[1], cols[0])).list()
-	if len(a.Landmarks) != 2 || !reflect.DeepEqual(a, b) || a.Landmarks[0].LandmarkID == a.Landmarks[1].LandmarkID {
-		t.Fatal("order-dependent or colliding identities")
-	}
-	a.Landmarks[0].X = 0
-	if reflect.DeepEqual(a, b) {
-		t.Fatal("lists share mutable storage")
-	}
-	extreme := mapTileLedger(world.Column{CX: math.MaxInt32, CZ: math.MinInt32}, world.Column{CX: math.MinInt32, CZ: math.MaxInt32})
-	if len(newLandmarks(mapTileSeed, extreme).list().Landmarks) != 0 {
-		t.Fatal("out-of-world ledger produced a portal")
-	}
-}
-
-func landmarkStreamer(t *testing.T, explored *Exploration, send func([]byte) error) *Streamer {
-	t.Helper()
-	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, send, func() {}, time.Now, slog.New(slog.DiscardHandler))
-	s.RecordExploration(explored)
-	if err := s.SendLandmarks(); err != nil {
-		t.Fatal(err)
-	}
-	return s
-}
-
-func landmarkEntries(t *testing.T, frame []byte) []protocol.Landmark {
+func landmarkEntries(t *testing.T, frame []byte) protocol.LandmarkList {
 	t.Helper()
 	env := vnet.GetRootAsEnvelope(frame, 0)
 	if env.PayloadType() != vnet.PayloadLandmarkList {
@@ -121,42 +37,192 @@ func landmarkEntries(t *testing.T, frame []byte) []protocol.Landmark {
 	}
 	var tab flatbuffers.Table
 	if !env.Payload(&tab) {
-		t.Fatal("absent list")
+		t.Fatal("missing list")
 	}
 	var list vnet.LandmarkList
 	list.Init(tab.Bytes, tab.Pos)
-	out := make([]protocol.Landmark, list.LandmarksLength())
-	for i := range out {
+	out := protocol.LandmarkList{OriginX: list.OriginX(), OriginZ: list.OriginZ(), Scale: list.Scale(), Landmarks: make([]protocol.Landmark, list.LandmarksLength())}
+	for i := range out.Landmarks {
 		var l vnet.Landmark
 		if !list.Landmarks(&l, i) {
-			t.Fatal("absent landmark")
+			t.Fatal("missing entry")
 		}
-		out[i] = protocol.Landmark{LandmarkID: l.LandmarkId(), X: l.X(), Z: l.Z(), Kind: l.Kind()}
+		out.Landmarks[i] = protocol.Landmark{LandmarkID: l.LandmarkId(), X: l.X(), Z: l.Z(), Kind: l.Kind(), Discovered: l.Discovered()}
 	}
 	return out
 }
 
-func TestStreamingSendsWholeLandmarkListAfterExploration(t *testing.T) {
-	explored := mapTileLedger()
-	var frames [][]byte
-	s := landmarkStreamer(t, explored, func(f []byte) error { frames = append(frames, f); return nil })
-	if len(frames) != 1 || len(landmarkEntries(t, frames[0])) != 0 {
-		t.Fatal("join must send an empty list")
+func TestPortalKnowledgePrecedesDiscoveryAndSurvivesWorldReload(t *testing.T) {
+	dir := t.TempDir()
+	storedWorld, err := world.OpenStore(dir, mapTileSeed)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, ruin := range []world.Ruin{landmarkFixture(t, -6, 6), landmarkFixture(t, 0, -12)} {
+	cache := world.NewPersistentCache(storedWorld, 1, 8)
+	store, character := exploringCharacter(t, dir)
+	e := newExploration(store, character.ID, nil, false, nil)
+	r := landmarkFixture(t, -6, 6)
+	request := portalRequest(r, 1)
+	before := landmarksForTile(cache.Seed(), request, e)
+	if len(before.Landmarks) != 1 || before.Landmarks[0].Discovered {
+		t.Fatal("unexplored portal must be supplied as undiscovered")
+	}
+	arch := world.ChunkOf(r.Arch.X, 0, r.Arch.Z).Column()
+	neighbour := world.Column{CX: arch.CX + 1, CZ: arch.CZ}
+	e.Reveal(neighbour)
+	if landmarksForTile(cache.Seed(), request, e).Landmarks[0].Discovered {
+		t.Fatal("neighbour discovered portal")
+	}
+	e.Reveal(arch)
+	want := landmarksForTile(cache.Seed(), request, e)
+	if !want.Landmarks[0].Discovered || want.Landmarks[0].LandmarkID != before.Landmarks[0].LandmarkID {
+		t.Fatal("discovery moved or renamed portal")
+	}
+	if err := e.Save(); err != nil {
+		t.Fatal(err)
+	}
+	storedWorld, err = world.OpenStore(dir, mapTileSeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache = world.NewPersistentCache(storedWorld, 1, 8)
+	reopened, err := persist.OpenExplorationStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols, found, err := reopened.Load(character.ID)
+	if err != nil || !found {
+		t.Fatalf("reload: %v %v", found, err)
+	}
+	got := landmarksForTile(cache.Seed(), request, newExploration(reopened, character.ID, cols, false, nil))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reloaded %+v want %+v", got, want)
+	}
+	if landmarksForTile(cache.Seed(), request, mapTileLedger()).Landmarks[0].Discovered {
+		t.Fatal("discovery crossed character boundary")
+	}
+}
+
+func TestPortalTileLookupIsBoundedAndStableAcrossScales(t *testing.T) {
+	r := landmarkFixture(t, -6, 6)
+	var id uint64
+	for _, scale := range protocol.MapTileScales {
+		span := protocol.MapTileSpan(scale)
+		if world.RuinCellBlocks%int(span) != 0 {
+			t.Fatal("tile may span multiple ruin cells")
+		}
+		req := portalRequest(r, scale)
+		list := landmarksForTile(mapTileSeed, req, nil)
+		if len(list.Landmarks) != 1 {
+			t.Fatalf("scale %d lost portal", scale)
+		}
+		l := list.Landmarks[0]
+		if id != 0 && id != l.LandmarkID {
+			t.Fatal("zoom renamed portal")
+		}
+		id = l.LandmarkID
+		if l.X != int32(r.Arch.X) || l.Z != int32(r.Arch.Z) {
+			t.Fatal("site is not arch")
+		}
+		req.OriginX += span
+		if len(landmarksForTile(mapTileSeed, req, nil).Landmarks) != 0 {
+			t.Fatal("neighbour tile includes another scope's portal")
+		}
+		for _, origin := range []int32{math.MinInt32, -span, 0, math.MaxInt32 - (span - 1)} {
+			first := world.RuinCellOf(int64(origin))
+			last := world.RuinCellOf(int64(origin) + int64(span) - 1)
+			if first != last {
+				t.Fatal("valid tile crosses ruin cell")
+			}
+			extreme := landmarksForTile(mapTileSeed, protocol.MapTileRequest{OriginX: origin, OriginZ: math.MinInt32, Scale: scale}, nil)
+			if len(extreme.Landmarks) != 0 {
+				t.Fatal("out-of-world request returned a site")
+			}
+		}
+	}
+}
+
+func TestMapRequestSendsUndiscoveredPortalWhileTerrainStaysFogged(t *testing.T) {
+	e := mapTileLedger()
+	var frames [][]byte
+	send := func(f []byte) error { frames = append(frames, f); return nil }
+	log := slog.New(slog.DiscardHandler)
+	clock := &stoppedClock{}
+	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, send, func() {}, clock.now, log)
+	s.RecordExploration(e)
+	r := landmarkFixture(t, -6, 6)
+	req := portalRequest(r, 1)
+	msg, err := protocol.Decode(protocol.EncodeMapTileRequest(req))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < mapTileBurst; i++ {
+		if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(frames) != 2*mapTileBurst {
+		t.Fatalf("request did not return exactly terrain+landmark pair: %d", len(frames))
+	}
+	for i := 0; i < len(frames); i += 2 {
+		env := vnet.GetRootAsEnvelope(frames[i], 0)
+		if env.PayloadType() != vnet.PayloadMapTile {
+			t.Fatal("terrain response missing")
+		}
+		var tab flatbuffers.Table
+		if !env.Payload(&tab) {
+			t.Fatal("terrain missing")
+		}
+		var tile vnet.MapTile
+		tile.Init(tab.Bytes, tab.Pos)
+		for j := 0; j < tile.HeightLength(); j++ {
+			if tile.Height(j) != 0 || tile.Surface(j) != 0 {
+				t.Fatal("terrain fog leaked")
+			}
+		}
+		for j := 0; j < tile.ExploredLength(); j++ {
+			if tile.Explored(j) != 0 {
+				t.Fatal("request explored terrain")
+			}
+		}
+		list := landmarkEntries(t, frames[i+1])
+		if len(list.Landmarks) != 1 || list.Landmarks[0].Discovered || list.OriginX != req.OriginX || list.OriginZ != req.OriginZ || list.Scale != req.Scale {
+			t.Fatal("incorrect portal knowledge")
+		}
+	}
+	frames = nil
+	if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 0 {
+		t.Fatal("landmark bypassed tile limiter")
+	}
+	if e.Count() != 0 || len(s.landmarks.cells) != 0 || len(s.landmarks.found) != 0 {
+		t.Fatal("requests mutated exploration or discovery cache")
+	}
+}
+
+func TestStreamingPushesCanonicalDiscoveryWithoutMapRequest(t *testing.T) {
+	e := mapTileLedger()
+	var frames [][]byte
+	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, func(f []byte) error { frames = append(frames, f); return nil }, func() {}, time.Now, slog.New(slog.DiscardHandler))
+	s.RecordExploration(e)
+	if len(frames) != 0 {
+		t.Fatal("initial global list is forbidden")
+	}
+	for _, r := range []world.Ruin{landmarkFixture(t, -6, 6), landmarkFixture(t, 0, -12)} {
 		frames = nil
-		coord := world.ChunkOf(ruin.Arch.X, ruin.Arch.Y, ruin.Arch.Z)
+		coord := world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z)
 		if err := s.MoveTo(context.Background(), coord); err != nil {
 			t.Fatal(err)
 		}
-		if len(frames) < 3 {
-			t.Fatal("missing streamed discovery")
+		if len(frames) < 3 || vnet.GetRootAsEnvelope(frames[len(frames)-2], 0).PayloadType() != vnet.PayloadMapExplored {
+			t.Fatal("discovery must follow exploration")
 		}
-		if vnet.GetRootAsEnvelope(frames[len(frames)-2], 0).PayloadType() != vnet.PayloadMapExplored {
-			t.Fatal("landmarks must follow MapExplored")
-		}
-		if got := landmarkEntries(t, frames[len(frames)-1]); len(got) != i+1 {
-			t.Fatalf("replacement holds %d, want %d", len(got), i+1)
+		list := landmarkEntries(t, frames[len(frames)-1])
+		want := portalRequest(r, 1)
+		if list.OriginX != want.OriginX || list.OriginZ != want.OriginZ || list.Scale != 1 || len(list.Landmarks) != 1 || !list.Landmarks[0].Discovered {
+			t.Fatal("discovery is not one canonical tile")
 		}
 		frames = nil
 		if err := s.MoveTo(context.Background(), coord); err != nil {
@@ -168,53 +234,29 @@ func TestStreamingSendsWholeLandmarkListAfterExploration(t *testing.T) {
 	}
 }
 
-func TestFailedChunkSendNeverRevealsALandmark(t *testing.T) {
-	explored := mapTileLedger()
+func TestFailedChunkSendNeverDiscoversALandmark(t *testing.T) {
+	e := mapTileLedger()
 	blocked := errors.New("test send failed")
-	s := landmarkStreamer(t, explored, func([]byte) error { return nil })
-	s.send = func([]byte) error { return blocked }
+	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, func([]byte) error { return blocked }, func() {}, time.Now, slog.New(slog.DiscardHandler))
+	s.RecordExploration(e)
 	r := landmarkFixture(t, -6, 6)
 	if err := s.MoveTo(context.Background(), world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z)); !errors.Is(err, blocked) {
-		t.Fatalf("send: %v", err)
+		t.Fatal(err)
 	}
-	if explored.Count() != 0 || len(s.landmarks.list().Landmarks) != 0 {
-		t.Fatal("unsent chunk revealed arch")
+	if e.Count() != 0 || len(s.landmarks.found) != 0 {
+		t.Fatal("unsent chunk discovered portal")
 	}
 }
 
-func TestClientRequestSurfaceCannotForgeLandmarkDiscovery(t *testing.T) {
-	explored := mapTileLedger()
-	var frames [][]byte
-	send := func(f []byte) error { frames = append(frames, f); return nil }
-	s := landmarkStreamer(t, explored, send)
-	frames = nil
-	log := slog.New(slog.DiscardHandler)
-	// Sweep every named tag through the actual decoder and post-handshake router.
-	// Absent mandatory fields are refused at decode; valid empty requests and
-	// server-only/unknown messages still cannot write the ledger or emit landmarks.
-	for tag := range vnet.EnumNamesPayload {
-		b := flatbuffers.NewBuilder(64)
-		b.StartObject(0)
-		empty := b.EndObject()
-		vnet.EnvelopeStart(b)
-		vnet.EnvelopeAddPayloadType(b, tag)
-		vnet.EnvelopeAddPayload(b, empty)
-		b.FinishWithFileIdentifier(vnet.EnvelopeEnd(b), []byte("VXLH"))
-		msg, err := protocol.Decode(b.FinishedBytes())
-		if err == nil {
-			_ = handlePostHandshake(context.Background(), msg, nil, s, nil, NewRegistry(DefaultConcurrentSessions), send, log)
-		}
+func BenchmarkPortalTileLookup(b *testing.B) {
+	r, ok := world.RuinAt(mapTileSeed, -6, 6)
+	if !ok {
+		b.Fatal("fixture missing")
 	}
-	// A request naming the actual remote arch is still a request, not exploration.
-	r := landmarkFixture(t, -6, 6)
-	_ = s.Resend(world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z))
-	_, _ = s.DrawMapTile(protocol.MapTileRequest{OriginX: int32(r.Arch.X / 64 * 64), OriginZ: int32(r.Arch.Z / 64 * 64), Scale: 1})
-	for _, f := range frames {
-		if vnet.GetRootAsEnvelope(f, 0).PayloadType() == vnet.PayloadLandmarkList {
-			t.Fatal("request emitted landmarks")
+	req := portalRequest(r, 1)
+	for b.Loop() {
+		if len(landmarksForTile(mapTileSeed, req, nil).Landmarks) != 1 {
+			b.Fatal("portal lost")
 		}
-	}
-	if explored.Count() != 0 || len(s.landmarks.list().Landmarks) != 0 {
-		t.Fatal("request changed discovery")
 	}
 }

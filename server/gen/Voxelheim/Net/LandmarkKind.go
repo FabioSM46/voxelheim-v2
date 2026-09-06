@@ -4,8 +4,9 @@ package Net
 
 import "strconv"
 
-// / A server-discovered place, separate from the character's own MarkerKind budget.
-// / Members are appended, never inserted. Unknown is the fail-closed absent-field zero.
+// / What a server-supplied landmark is, independent of whether it is discovered.
+// / Members are appended, never inserted. Unknown is the invalid absent-field zero;
+// / an undiscovered portal is still Portal, with discovered=false, never Unknown.
 type LandmarkKind byte
 
 const (

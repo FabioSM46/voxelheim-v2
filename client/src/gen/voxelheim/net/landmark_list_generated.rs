@@ -5,26 +5,36 @@ use super::*;
 pub enum LandmarkListOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// The complete set of this character's discovered landmarks. Server -> client.
-/// REPLACES the client's copy wholesale; no delta, pagination or merge with old entries.
-/// An empty list is legal and ordinary, including on a fresh character's welcome.
-/// No place, remove or edit request exists: discovery is the server's intersection of
-/// seed-derived ruin sites and this character's explored chunk-column ledger. An arch
-/// whose column is unexplored must never appear, regardless of any client request.
-/// Sent after welcome and after new exploration reveals another portal.
+/// V32: all landmarks in ONE map-tile rectangle, server -> client.
+/// Replaces membership only inside that half-open rectangle; never clears another
+/// tile or the entire map. Empty means no landmark in this rectangle. There is no
+/// initial whole-world or whole-character list, and no global scan or persistence.
+///
+/// Every accepted MapTileRequest earns this response beside its terrain MapTile,
+/// even when every terrain pixel is fogged. New exploration discovering an arch
+/// also pushes the containing scale-1 tile without requiring a request or map reopen.
+/// There is no landmark place, remove or edit request; requests never discover sites.
 ///
 /// Decoder invariants:
-///   - landmarks is present; empty is legal
-///   - at most 65,536 entries, checked before allocation or iteration
-///   - every entry satisfies Landmark, and landmark ids are unique within the list
+///   - landmarks is present; empty is legal; at most ONE entry
+///   - scale is exactly 1, 4 or 16, never the absent-field zero
+///   - origins are multiples of 64*scale, exactly as in MapTileRequest
+///   - every entry satisfies Landmark and lies in
+///     [origin_x, origin_x+64*scale) x [origin_z, origin_z+64*scale)
+///   - calculate the upper bounds in wide arithmetic, before coordinate comparisons
 ///
-/// The bound covers the entire exploration ledger (at most one portal per column),
-/// with no truncation or player-marker budget involved. V31 raises the frame limit to
-/// 2 MiB to fit this complete list; receivers must still reject oversized lists.
+/// Every tile fits inside one 8192-block ruin cell (64,256,1024 divide 8192),
+/// so one deterministic site lookup suffices and at most one portal can appear.
+/// No list truncation is permitted. Rate limiting is the existing tile request bucket.
 ///
-/// Both this list and the existing ledger are implicitly scoped to the one open world.
-/// The arc that adds party instances must scope both per world; no unused world id or
-/// new persistence is introduced here. Discovery is rebuilt from the ledger and seed.
+/// Across scales, identify and draw each landmark once by its stable id. Scoped
+/// replacement removes previous entries only in the named rectangle, including when
+/// empty. For an id retained in a response, previously received discovered=true
+/// remains true: exploration is additive, and the request and discovery senders can
+/// race. On disconnect discard all cached positions and discovery evidence.
+///
+/// Both this state and exploration belong to the current open world; the future
+/// party-instance arc must scope both per world. No unused world identifier is added.
 pub struct LandmarkList<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -41,6 +51,9 @@ impl<'a> ::flatbuffers::Follow<'a> for LandmarkList<'a> {
 
 impl<'a> LandmarkList<'a> {
     pub const VT_LANDMARKS: ::flatbuffers::VOffsetT = 4;
+    pub const VT_ORIGIN_X: ::flatbuffers::VOffsetT = 6;
+    pub const VT_ORIGIN_Z: ::flatbuffers::VOffsetT = 8;
+    pub const VT_SCALE: ::flatbuffers::VOffsetT = 10;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -57,9 +70,12 @@ impl<'a> LandmarkList<'a> {
         args: &'args LandmarkListArgs<'args>,
     ) -> ::flatbuffers::WIPOffset<LandmarkList<'bldr>> {
         let mut builder = LandmarkListBuilder::new(_fbb);
+        builder.add_origin_z(args.origin_z);
+        builder.add_origin_x(args.origin_x);
         if let Some(x) = args.landmarks {
             builder.add_landmarks(x);
         }
+        builder.add_scale(args.scale);
         builder.finish()
     }
 
@@ -76,6 +92,39 @@ impl<'a> LandmarkList<'a> {
             >>(LandmarkList::VT_LANDMARKS, None)
         }
     }
+    #[inline]
+    pub fn origin_x(&self) -> i32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<i32>(LandmarkList::VT_ORIGIN_X, Some(0))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn origin_z(&self) -> i32 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<i32>(LandmarkList::VT_ORIGIN_Z, Some(0))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn scale(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u8>(LandmarkList::VT_SCALE, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for LandmarkList<'_> {
@@ -88,6 +137,9 @@ impl ::flatbuffers::Verifiable for LandmarkList<'_> {
             .visit_field::<::flatbuffers::ForwardsUOffset<
                 ::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<Landmark>>,
             >>("landmarks", Self::VT_LANDMARKS, false)?
+            .visit_field::<i32>("origin_x", Self::VT_ORIGIN_X, false)?
+            .visit_field::<i32>("origin_z", Self::VT_ORIGIN_Z, false)?
+            .visit_field::<u8>("scale", Self::VT_SCALE, false)?
             .finish();
         Ok(())
     }
@@ -98,11 +150,19 @@ pub struct LandmarkListArgs<'a> {
             ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<Landmark<'a>>>,
         >,
     >,
+    pub origin_x: i32,
+    pub origin_z: i32,
+    pub scale: u8,
 }
 impl<'a> Default for LandmarkListArgs<'a> {
     #[inline]
     fn default() -> Self {
-        LandmarkListArgs { landmarks: None }
+        LandmarkListArgs {
+            landmarks: None,
+            origin_x: 0,
+            origin_z: 0,
+            scale: 0,
+        }
     }
 }
 
@@ -120,6 +180,20 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LandmarkListBuilder<'a, 'b, A
     ) {
         self.fbb_
             .push_slot_always::<::flatbuffers::WIPOffset<_>>(LandmarkList::VT_LANDMARKS, landmarks);
+    }
+    #[inline]
+    pub fn add_origin_x(&mut self, origin_x: i32) {
+        self.fbb_
+            .push_slot::<i32>(LandmarkList::VT_ORIGIN_X, origin_x, 0);
+    }
+    #[inline]
+    pub fn add_origin_z(&mut self, origin_z: i32) {
+        self.fbb_
+            .push_slot::<i32>(LandmarkList::VT_ORIGIN_Z, origin_z, 0);
+    }
+    #[inline]
+    pub fn add_scale(&mut self, scale: u8) {
+        self.fbb_.push_slot::<u8>(LandmarkList::VT_SCALE, scale, 0);
     }
     #[inline]
     pub fn new(
@@ -142,6 +216,9 @@ impl ::core::fmt::Debug for LandmarkList<'_> {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         let mut ds = f.debug_struct("LandmarkList");
         ds.field("landmarks", &self.landmarks());
+        ds.field("origin_x", &self.origin_x());
+        ds.field("origin_z", &self.origin_z());
+        ds.field("scale", &self.scale());
         ds.finish()
     }
 }

@@ -233,6 +233,14 @@ import "strconv"
 // / discovered portal therefore raises the transport bound to 2 MiB on both peers
 // / and bumps the version so the incompatibility is refused during the handshake,
 // / never on a later exploration update. No client landmark request is introduced.
+// /
+// / **V32 gives `LandmarkList` one tile-scoped meaning.** V31 sent a complete
+// / character list without a scope; reading that as one tile (or replacing a whole
+// / map with a tile) silently loses positions. The new scale's absent zero is invalid,
+// / and discovery now has an explicit false/true state rather than absence/presence.
+// / This semantic change owes a clean handshake refusal even though the table fields
+// / are appended and V31's staged client deferred this payload. The 2 MiB transport
+// / ceiling remains unchanged. Existing MapTileRequest carries the bounded query.
 type ProtocolVersion uint16
 
 const (
@@ -241,7 +249,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 31
+	ProtocolVersionCurrent ProtocolVersion = 32
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

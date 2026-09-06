@@ -296,11 +296,13 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 //
 // V31 appends the complete landmark list. Its 2 MiB frame requirement, rather than
 // its server-only union tag, owes the bump; all earlier tags keep their numbers.
-func TestProtocolV31AddsCompleteDiscoveredLandmarks(t *testing.T) {
+// V32 changes landmark replacement from a global list to one tile rectangle and
+// adds discovery state. The semantic break needs a bump even with the same tag.
+func TestProtocolV32ScopesPortalKnowledgeToMapTiles(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 31 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 31", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 32 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 32", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,

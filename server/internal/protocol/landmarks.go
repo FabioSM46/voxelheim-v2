@@ -7,23 +7,33 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-// MaxLandmarks is the complete-list bound from schemas/player.fbs. It covers the
-// exploration ledger without truncation and fits the V31 2 MiB frame limit.
-const MaxLandmarks = 65536
+// MaxLandmarks is the per-tile V32 bound from schemas/player.fbs. Every supported
+// map tile fits in one ruin lattice cell, which contains at most one portal.
+const MaxLandmarks = 1
 
-// Landmark is a server-discovered place, with stable identity within one world.
+// Landmark is a server-supplied place, with identity and discovery scoped to one world.
 type Landmark struct {
 	LandmarkID uint64
 	X, Z       int32
 	Kind       vnet.LandmarkKind
+	Discovered bool
 }
 
-// LandmarkList replaces the recipient's entire copy, including when empty.
-type LandmarkList struct{ Landmarks []Landmark }
+// LandmarkList replaces membership only within its half-open map-tile rectangle.
+// Empty is legal. Discovery=true remains authoritative across raced false replies.
+type LandmarkList struct {
+	Landmarks        []Landmark
+	OriginX, OriginZ int32
+	Scale            uint8
+}
 
 // EncodeLandmarkList validates the complete list before constructing the frame.
 // A producer exceeding the contract is an error, never a silently shortened list.
 func EncodeLandmarkList(list LandmarkList) ([]byte, error) {
+	span := MapTileSpan(list.Scale)
+	if span == 0 || list.OriginX%span != 0 || list.OriginZ%span != 0 {
+		return nil, fmt.Errorf("protocol: invalid landmark tile scope")
+	}
 	if len(list.Landmarks) > MaxLandmarks {
 		return nil, fmt.Errorf("protocol: landmark count exceeds %d", MaxLandmarks)
 	}
@@ -35,6 +45,9 @@ func EncodeLandmarkList(list LandmarkList) ([]byte, error) {
 		if _, duplicate := seen[landmark.LandmarkID]; duplicate {
 			return nil, fmt.Errorf("protocol: duplicate landmark identity")
 		}
+		if int64(landmark.X) < int64(list.OriginX) || int64(landmark.X) >= int64(list.OriginX)+int64(span) || int64(landmark.Z) < int64(list.OriginZ) || int64(landmark.Z) >= int64(list.OriginZ)+int64(span) {
+			return nil, fmt.Errorf("protocol: landmark outside tile scope")
+		}
 		seen[landmark.LandmarkID] = struct{}{}
 	}
 	b := flatbuffers.NewBuilder(len(list.Landmarks)*32 + 128)
@@ -45,6 +58,7 @@ func EncodeLandmarkList(list LandmarkList) ([]byte, error) {
 		vnet.LandmarkAddX(b, landmark.X)
 		vnet.LandmarkAddZ(b, landmark.Z)
 		vnet.LandmarkAddKind(b, landmark.Kind)
+		vnet.LandmarkAddDiscovered(b, landmark.Discovered)
 		offsets[i] = vnet.LandmarkEnd(b)
 	}
 	vnet.LandmarkListStartLandmarksVector(b, len(offsets))
@@ -54,5 +68,8 @@ func EncodeLandmarkList(list LandmarkList) ([]byte, error) {
 	entries := b.EndVector(len(offsets))
 	vnet.LandmarkListStart(b)
 	vnet.LandmarkListAddLandmarks(b, entries)
+	vnet.LandmarkListAddOriginX(b, list.OriginX)
+	vnet.LandmarkListAddOriginZ(b, list.OriginZ)
+	vnet.LandmarkListAddScale(b, list.Scale)
 	return finishEnvelope(b, vnet.PayloadLandmarkList, vnet.LandmarkListEnd(b)), nil
 }

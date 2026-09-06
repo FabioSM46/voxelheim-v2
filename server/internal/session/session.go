@@ -1014,9 +1014,6 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// own. From here every chunk that reaches this client adds its column to the
 			// ledger, and every view diff that revealed one says so.
 			streamer.RecordExploration(self.Explored)
-			if lErr := streamer.SendLandmarks(); lErr != nil {
-				return lErr
-			}
 
 			// And the other direction over the same list: what the *world* has in a
 			// chunk this session is about to be shown. A settlement's forge and fire are
@@ -1968,6 +1965,11 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		// the player looking at a square of map that never arrives.
 		if sErr := send(protocol.EncodeMapTile(tile)); sErr != nil {
 			return fmt.Errorf("session: send map tile: %w", sErr)
+		}
+		// Site knowledge is not terrain exploration. The same validated and metered
+		// request earns a complete portal answer for this tile, even through fog.
+		if lErr := sendLandmarkList(send, landmarksForTile(streamer.cache.Seed(), request, streamer.explored)); lErr != nil {
+			return lErr
 		}
 		log.Debug("map tile drawn",
 			"origin_x", request.OriginX, "origin_z", request.OriginZ, "scale", request.Scale,

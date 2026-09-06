@@ -772,47 +772,66 @@ table MarkerList {
   markers: [Marker];
 }
 
-/// A server-discovered place, separate from the character's own MarkerKind budget.
-/// Members are appended, never inserted. Unknown is the fail-closed absent-field zero.
+/// What a server-supplied landmark is, independent of whether it is discovered.
+/// Members are appended, never inserted. Unknown is the invalid absent-field zero;
+/// an undiscovered portal is still Portal, with discovered=false, never Unknown.
 enum LandmarkKind : ubyte {
   Unknown = 0,
   Portal = 1
 }
 
-/// One discovered place on the map. Server -> client, never player-authored.
-/// No note, owner or y: this is a place on a two-dimensional map.
-/// Decoder invariants: landmark_id is non-zero; kind is known and not Unknown.
-/// Identity is stable within the world seed across connections and ledger reloads.
-/// Coordinates name the portal arch in block units, not the centre of its ruin.
+/// One server-supplied place on the map. No note, owner or y.
+/// landmark_id is non-zero and stable within the world seed across reconnects.
+/// kind is known and not Unknown. x/z name the arch in block units.
 table Landmark {
   landmark_id: ulong;
   x: int;
   z: int;
   kind: LandmarkKind;
+
+  /// V32: true only when the arch's actual chunk column is in this character's
+  /// exploration ledger. false draws a question mark; true draws a portal spiral.
+  /// A missing field is false. Knowing this position reveals no surrounding terrain.
+  /// Discovery is monotonic within the session/world: once a server frame says true,
+  /// an older false response racing that update must never turn it back into a question.
+  discovered: bool;
 }
 
-/// The complete set of this character's discovered landmarks. Server -> client.
-/// REPLACES the client's copy wholesale; no delta, pagination or merge with old entries.
-/// An empty list is legal and ordinary, including on a fresh character's welcome.
-/// No place, remove or edit request exists: discovery is the server's intersection of
-/// seed-derived ruin sites and this character's explored chunk-column ledger. An arch
-/// whose column is unexplored must never appear, regardless of any client request.
-/// Sent after welcome and after new exploration reveals another portal.
+/// V32: all landmarks in ONE map-tile rectangle, server -> client.
+/// Replaces membership only inside that half-open rectangle; never clears another
+/// tile or the entire map. Empty means no landmark in this rectangle. There is no
+/// initial whole-world or whole-character list, and no global scan or persistence.
+///
+/// Every accepted MapTileRequest earns this response beside its terrain MapTile,
+/// even when every terrain pixel is fogged. New exploration discovering an arch
+/// also pushes the containing scale-1 tile without requiring a request or map reopen.
+/// There is no landmark place, remove or edit request; requests never discover sites.
 ///
 /// Decoder invariants:
-///   - landmarks is present; empty is legal
-///   - at most 65,536 entries, checked before allocation or iteration
-///   - every entry satisfies Landmark, and landmark ids are unique within the list
+///   - landmarks is present; empty is legal; at most ONE entry
+///   - scale is exactly 1, 4 or 16, never the absent-field zero
+///   - origins are multiples of 64*scale, exactly as in MapTileRequest
+///   - every entry satisfies Landmark and lies in
+///     [origin_x, origin_x+64*scale) x [origin_z, origin_z+64*scale)
+///   - calculate the upper bounds in wide arithmetic, before coordinate comparisons
 ///
-/// The bound covers the entire exploration ledger (at most one portal per column),
-/// with no truncation or player-marker budget involved. V31 raises the frame limit to
-/// 2 MiB to fit this complete list; receivers must still reject oversized lists.
+/// Every tile fits inside one 8192-block ruin cell (64,256,1024 divide 8192),
+/// so one deterministic site lookup suffices and at most one portal can appear.
+/// No list truncation is permitted. Rate limiting is the existing tile request bucket.
 ///
-/// Both this list and the existing ledger are implicitly scoped to the one open world.
-/// The arc that adds party instances must scope both per world; no unused world id or
-/// new persistence is introduced here. Discovery is rebuilt from the ledger and seed.
+/// Across scales, identify and draw each landmark once by its stable id. Scoped
+/// replacement removes previous entries only in the named rectangle, including when
+/// empty. For an id retained in a response, previously received discovered=true
+/// remains true: exploration is additive, and the request and discovery senders can
+/// race. On disconnect discard all cached positions and discovery evidence.
+///
+/// Both this state and exploration belong to the current open world; the future
+/// party-instance arc must scope both per world. No unused world identifier is added.
 table LandmarkList {
   landmarks: [Landmark];
+  origin_x: int;
+  origin_z: int;
+  scale: ubyte;
 }
 
 /// Which action a server refused, in an `ActionRefused`.
