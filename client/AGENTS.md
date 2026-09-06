@@ -1745,35 +1745,55 @@ them existed.** `MAX_SOURCES` carries it in full; these are the three rules it m
 each enforced by `Mixer::claim` rather than asked of its callers:
 
 - **Only `Voice` and `Master` may take the last slot.** `VOICE_RESERVE` is eight of the sixteen
-  and `Music`, `Sfx` and `Ambience` may not spend it, so a busy scene can never starve a
-  conversation. `Master` is exempt with voice because its two claims — the tone test and the
-  loopback monitor — are each made once at startup, before anything exists to be starved.
+  and `Music`, `Sfx` and `Ambience` may hold at most the other eight between them, so a busy
+  scene can never starve a conversation. `Master` is exempt with voice because its two claims —
+  the tone test and the loopback monitor — are each made once at startup, before anything
+  exists to be starved. **The budget counts what the world holds, in one atomic location, not
+  how many slots happen to be free.** The review on #996 found the first version doing the
+  latter: counting free slots and then winning one is two steps, and two claims that both read
+  one over the reserve both succeeded. A per-slot compare-exchange cannot enforce a pool-wide
+  rule.
 - **Ambience is stolen first, then music, then effects, and only ever by a bus above the
   victim.** `Bus::steal_order` is the ranking and the two protected buses answer `None` to it,
   so no arrangement of the other three can reach a slot somebody is being heard through. That
   is the acceptance criterion, and it is asserted by filling the pool with voice and finding
   that nothing beneath it can take a slot.
-- **The sound that triggers a steal does not get the slot.** A stolen slot goes to `Dirty` and
-  comes back through the callback like every released one, because the only thread that may
-  reset a ring's read index is the one that owns it. So the claim is refused, its one-shot is
-  dropped rather than queued, and the slot is there for whoever asks a few milliseconds later.
-  **A loop that claims until it is told no has therefore already taken a bed by the time it
-  stops** — every caller in this client claims once for one sound, which is the shape the
-  policy is written for.
+- **The sound that triggers a steal does not get the slot.** The claim is refused and its
+  one-shot is dropped rather than queued. **A loop that claims until it is told no has
+  therefore already taken a bed by the time it stops** — every caller in this client claims
+  once for one sound, which is the shape the policy is written for.
+- **A stolen slot is `Revoked`, not freed, and the review on #996 is why.** Marking it `Dirty`
+  made it reusable as soon as the callback had cleared it, while its previous owner still held
+  a `SourceHandle` it might be part-way through pushing into — `live()` is one load and `push`
+  is another, so a producer could pass the check and then write into the ring of whoever had
+  since been given the slot. Two producers on a ring whose ordering assumes one. A revoked slot
+  is silent immediately and stays its owner's until that owner's `Drop`, so **no second owner
+  can exist for a ring the first may still be writing into** and `live()` stops being a safety
+  check: it is how a producer is told to let go. The cost is real and stated — a revocation
+  reclaims a slot a frame later rather than a block later, and only from a producer that is
+  still running — and **the contract that comes with a `SourceHandle` is to drop it when
+  `live()` goes false.**
 
-**A slot can now be taken away, so `SlotState` grew a generation and #948's lesson applied a
-second time.** A stolen slot's previous owner still holds a `SourceHandle`, and that owner's
-`Drop` must not mark `Dirty` a slot somebody else has since been given. Two locations would be
-two loads for a claim to land between, exactly as the two booleans were — so the state and its
-generation are packed into **one** `AtomicU32` and every transition is a compare-exchange over
-the whole word. A handle whose generation has moved is *inert*: it pushes nothing, places
-nothing and drops nothing, so a caller that never checks writes into a void rather than into
-somebody else's audio.
+**A slot can now be taken away, so the slot word carries the state, the bus and a generation
+together, and #948's lesson has now been applied three times.** A stolen slot's previous owner
+still holds a `SourceHandle`, and that owner's `Drop` must not mark `Dirty` a slot somebody
+else has since been given — two locations would be two loads for a claim to land between,
+exactly as the two booleans were. So all three live in **one** `AtomicU32` and every transition
+is a compare-exchange over the whole word. **The bus joined them on the review of #996**: it
+had been an `AtomicU8` written *after* the compare-exchange that won the slot, so a revocation
+walking the slots could read a bus from the previous owner and take a slot away from whoever
+had just been given it — reading a stale `Ambience` off a slot that had just become `Voice`
+would have broken the one rule the whole policy exists for.
 
 **A bus can be switched off, and off means no source rather than a gain of zero.** `Music` is
-the only bus that will have that control. `Mixer::set_enabled` refuses new claims *and*
-releases what the bus is holding, because a generator running into a ring that is multiplied by
-nothing still spends one of sixteen slots.
+the only bus that will have that control. `Mixer::set_enabled` refuses new claims *and* revokes
+what the bus is holding, because a generator running into a ring that is multiplied by nothing
+still spends one of sixteen slots. **The store comes before the sweep and a claim re-reads the
+flag after winning its slot, both `SeqCst`** — the third finding on #996 was that those were two
+steps with no ordering between them, so a claim could pass the check while the sweep ran and
+land a live source on a bus that is off. With a total order over the four operations, either the
+claim sees the flag and gives the slot back or the sweep sees the slot and revokes it; there is
+no interleaving in which a live source survives on a disabled bus.
 
 **Which side of the seam a slot is decided on, and when.** Once, when the speaker is first
 heard, and never mid-sentence: moving somebody from the shared sum onto a source of their own
