@@ -96,6 +96,7 @@ type InstanceManager struct {
 	sessions               map[uint64]*instanceSession
 	inside                 map[InstanceCharacter]uint64
 	visits                 map[instanceVisit]uint64
+	partyVisits            map[portalPartyVisit]uint64
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -115,7 +116,7 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		tickRate: tickRate, viewDistance: viewDistance, maxSessions: maxSessions,
 		mintEntityID: mintEntityID, log: log, options: append([]SimOption(nil), options...),
 		graceTicks: ticksFor(InstanceEmptyGrace, tickRate),
-		sessions:   make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), visits: make(map[instanceVisit]uint64),
+		sessions:   make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
 
@@ -273,6 +274,11 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	for visit, sessionID := range m.visits {
 		if sessionID == id {
 			delete(m.visits, visit)
+		}
+	}
+	for visit, sessionID := range m.partyVisits {
+		if sessionID == id {
+			delete(m.partyVisits, visit)
 		}
 	}
 	delete(m.sessions, id)

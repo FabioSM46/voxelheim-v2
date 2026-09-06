@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 32;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 33;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -257,6 +257,10 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// This semantic change owes a clean handshake refusal even though the table fields
 /// are appended and V31's staged client deferred this payload. The 2 MiB transport
 /// ceiling remains unchanged. Existing MapTileRequest carries the bounded query.
+/// **V33 crosses portals.** PortalRequest is client -> server and an older server
+/// rejects its unknown tag. WorldChange also independently owes this bump: ignoring
+/// it leaves an older client rendering its old world while the server has moved it.
+/// A successful transition invalidates all world state, not just its arrival position.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -267,10 +271,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(32);
+    pub const Current: Self = Self(33);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 32;
+    pub const ENUM_MAX: u16 = 33;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

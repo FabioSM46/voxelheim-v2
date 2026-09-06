@@ -77,6 +77,7 @@ func TestEveryReachDecisionUsesTheWeatherAwareReach(t *testing.T) {
 		"loot.go:canOpenCorpseLocked":     1,
 		"mining.go:Mine":                  1,
 		"mining.go:advanceMining":         1,
+		"portal.go:portalReachLocked":     1,
 		"resident.go:InteractNPC":         1,
 		"structure.go:PlaceStructure":     1,
 		"structure.go:removeOwnStructure": 1,

@@ -420,6 +420,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("invalid instance manager: %w", err)
 	}
 	defer instances.Close()
+	cfg.Instances = instances
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ForWorld(chunks).ResendChunk); err != nil {
 		return fmt.Errorf("configure chunk regeneration: %w", err)
 	}

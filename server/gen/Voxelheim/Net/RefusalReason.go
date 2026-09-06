@@ -156,6 +156,12 @@ const (
 	RefusalReasonTradeSlotTaken              RefusalReason = 45
 	RefusalReasonNothingToOffer              RefusalReason = 46
 	RefusalReasonTradeCooldown               RefusalReason = 47
+	/// Missing, invented, distant or unusable arch; no distinction reveals a session.
+	RefusalReasonNotAtPortal RefusalReason = 48
+	/// This server cannot allocate another concurrent instance. No occupancy is sent.
+	RefusalReasonInstanceLimit RefusalReason = 49
+	/// Creation or entry failed. No destination, identity or binding details are sent.
+	RefusalReasonInstanceUnavailable RefusalReason = 50
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -219,6 +225,9 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonTradeSlotTaken:              "TradeSlotTaken",
 	RefusalReasonNothingToOffer:              "NothingToOffer",
 	RefusalReasonTradeCooldown:               "TradeCooldown",
+	RefusalReasonNotAtPortal:                 "NotAtPortal",
+	RefusalReasonInstanceLimit:               "InstanceLimit",
+	RefusalReasonInstanceUnavailable:         "InstanceUnavailable",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -274,6 +283,9 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"TradeSlotTaken":              RefusalReasonTradeSlotTaken,
 	"NothingToOffer":              RefusalReasonNothingToOffer,
 	"TradeCooldown":               RefusalReasonTradeCooldown,
+	"NotAtPortal":                 RefusalReasonNotAtPortal,
+	"InstanceLimit":               RefusalReasonInstanceLimit,
+	"InstanceUnavailable":         RefusalReasonInstanceUnavailable,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,

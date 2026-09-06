@@ -298,11 +298,12 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // its server-only union tag, owes the bump; all earlier tags keep their numbers.
 // V32 changes landmark replacement from a global list to one tile rectangle and
 // adds discovery state. The semantic break needs a bump even with the same tag.
-func TestProtocolV32ScopesPortalKnowledgeToMapTiles(t *testing.T) {
+// V33 appends intent and authoritative world invalidation; neither is safely ignored.
+func TestProtocolV33CrossesPortals(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 32 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 32", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 33 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 33", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -376,6 +377,8 @@ func TestProtocolV32ScopesPortalKnowledgeToMapTiles(t *testing.T) {
 		vnet.PayloadVoiceFrame,
 		vnet.PayloadVoiceHeard,
 		vnet.PayloadLandmarkList,
+		vnet.PayloadPortalRequest,
+		vnet.PayloadWorldChange,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2771,6 +2774,7 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.Mine":        {byte(vnet.RefusedActionMine), 18},
 		"RefusedAction.Mount":       {byte(vnet.RefusedActionMount), 19},
 		"RefusedAction.PlayerTrade": {byte(vnet.RefusedActionPlayerTrade), 20},
+		"RefusedAction.CrossPortal": {byte(vnet.RefusedActionCrossPortal), 21},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2785,8 +2789,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 21 {
-		t.Errorf("RefusedAction has %d members, want 21 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 22 {
+		t.Errorf("RefusedAction has %d members, want 22 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2844,6 +2848,9 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"TradeSlotTaken":              {byte(vnet.RefusalReasonTradeSlotTaken), 45},
 		"NothingToOffer":              {byte(vnet.RefusalReasonNothingToOffer), 46},
 		"TradeCooldown":               {byte(vnet.RefusalReasonTradeCooldown), 47},
+		"NotAtPortal":                 {byte(vnet.RefusalReasonNotAtPortal), 48},
+		"InstanceLimit":               {byte(vnet.RefusalReasonInstanceLimit), 49},
+		"InstanceUnavailable":         {byte(vnet.RefusalReasonInstanceUnavailable), 50},
 		"MalformedNoAnchor":           {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":             {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":               {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2853,8 +2860,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 52 {
-		t.Errorf("RefusalReason has %d members, want 52 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 55 {
+		t.Errorf("RefusalReason has %d members, want 55 — a new one needs a decision, not a test edit", got)
 	}
 }
 

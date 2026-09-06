@@ -236,6 +236,10 @@ pub mod voxelheim {
         pub use self::voice_frame_generated::*;
         mod voice_heard_generated;
         pub use self::voice_heard_generated::*;
+        mod portal_request_generated;
+        pub use self::portal_request_generated::*;
+        mod world_change_generated;
+        pub use self::world_change_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

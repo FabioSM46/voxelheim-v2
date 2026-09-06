@@ -1394,6 +1394,8 @@ pub enum RefusedAction {
     Mount,
     /// A player trade refusal, distinct from vendor [`Self::Trade`].
     PlayerTrade,
+    /// Portal crossing; the answering surface is supplied by #974.
+    CrossPortal,
 }
 
 impl RefusedAction {
@@ -1420,6 +1422,7 @@ impl RefusedAction {
             fb::RefusedAction::Mine => Self::Mine,
             fb::RefusedAction::Mount => Self::Mount,
             fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
+            fb::RefusedAction::CrossPortal => Self::CrossPortal,
             _ => Self::Unknown,
         }
     }
@@ -1495,6 +1498,9 @@ pub enum RefusalReason {
     TradeSlotTaken,
     NothingToOffer,
     TradeCooldown,
+    NotAtPortal,
+    InstanceLimit,
+    InstanceUnavailable,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1555,6 +1561,9 @@ impl RefusalReason {
             fb::RefusalReason::TradeSlotTaken => Self::TradeSlotTaken,
             fb::RefusalReason::NothingToOffer => Self::NothingToOffer,
             fb::RefusalReason::TradeCooldown => Self::TradeCooldown,
+            fb::RefusalReason::NotAtPortal => Self::NotAtPortal,
+            fb::RefusalReason::InstanceLimit => Self::InstanceLimit,
+            fb::RefusalReason::InstanceUnavailable => Self::InstanceUnavailable,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -4382,6 +4391,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::DismountRequest
         | fb::Payload::PlayerTradeRequest
         | fb::Payload::VoiceFrame
+        | fb::Payload::PortalRequest
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -4420,6 +4430,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
+        // V33 names the transition now; #974 supplies its decoder and world reset.
+        fb::Payload::WorldChange => Ok(Message::Deferred(name)),
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -8938,9 +8950,10 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v32_scopes_portal_knowledge_to_map_tiles() {
+    fn protocol_v33_appends_authoritative_portal_crossings() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 32);
+        // V33 cannot be ignored: the two peers must agree which world is live.
+        assert_eq!(fb::ProtocolVersion::Current.0, 33);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -9005,6 +9018,8 @@ mod tests {
             (fb::Payload::VoiceFrame, 61),
             (fb::Payload::VoiceHeard, 62),
             (fb::Payload::LandmarkList, 63),
+            (fb::Payload::PortalRequest, 64),
+            (fb::Payload::WorldChange, 65),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -9020,7 +9035,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            64,
+            66,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9050,7 +9065,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 64] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 66] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -9127,6 +9142,8 @@ mod tests {
         (fb::Payload::VoiceFrame, Handling::ClientOnly),
         (fb::Payload::VoiceHeard, Handling::Consumed),
         (fb::Payload::LandmarkList, Handling::Consumed),
+        (fb::Payload::PortalRequest, Handling::ClientOnly),
+        (fb::Payload::WorldChange, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -9310,6 +9327,36 @@ mod tests {
                 })),
                 "action {action:?}, reason {reason:?}"
             );
+        }
+    }
+
+    /// V33's coarse portal refusals are known before their #974 answering surface.
+    #[test]
+    fn portal_refusals_decode_without_inventing_destination_state() {
+        for (wire, want) in [
+            (fb::RefusalReason::NotAtPortal, RefusalReason::NotAtPortal),
+            (
+                fb::RefusalReason::InstanceLimit,
+                RefusalReason::InstanceLimit,
+            ),
+            (
+                fb::RefusalReason::InstanceUnavailable,
+                RefusalReason::InstanceUnavailable,
+            ),
+        ] {
+            assert_eq!(
+                decode(&encode_action_refused(
+                    fb::RefusedAction::CrossPortal,
+                    wire,
+                    None
+                )),
+                Ok(Message::ActionRefused(ActionRefused {
+                    action: RefusedAction::CrossPortal,
+                    reason: want,
+                    anchor: None,
+                }))
+            );
+            assert!(!want.is_client_defect());
         }
     }
 
@@ -10891,6 +10938,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::Mine.0, 18);
         assert_eq!(fb::RefusedAction::Mount.0, 19);
         assert_eq!(fb::RefusedAction::PlayerTrade.0, 20);
+        assert_eq!(fb::RefusedAction::CrossPortal.0, 21);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -10901,7 +10949,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            21,
+            22,
             "a removal is refused in silence by design"
         );
 
@@ -10958,6 +11006,9 @@ mod tests {
             (fb::RefusalReason::TradeSlotTaken, 45),
             (fb::RefusalReason::NothingToOffer, 46),
             (fb::RefusalReason::TradeCooldown, 47),
+            (fb::RefusalReason::NotAtPortal, 48),
+            (fb::RefusalReason::InstanceLimit, 49),
+            (fb::RefusalReason::InstanceUnavailable, 50),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -10967,7 +11018,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            52,
+            55,
             "a new reason needs a sentence here, not a test edit"
         );
 
