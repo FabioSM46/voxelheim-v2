@@ -18,7 +18,7 @@ package world
 // room. A later issue that wants a cellar dug into the plateau will need exactly that
 // difference, and re-deriving it from a picture that never made it is not possible.
 
-// AnchorKind names what a slot in a building is for.
+// AnchorKind names an entity slot or a scenic landmark in a building.
 //
 // **Anchors are the only thing this package says about entities, and it says it
 // without knowing what one is.** internal/world places no forge, no villager and no
@@ -56,6 +56,10 @@ const (
 	// where the scenic horses stand. The world package still places neither.
 	AnchorStablemaster
 	AnchorPaddock
+
+	// Scenic landmarks: the sealed arch names a solid cell, not an entity slot.
+	AnchorRuinArch
+	AnchorRuinStair
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -81,6 +85,10 @@ func (a AnchorKind) String() string {
 		return "stablemaster"
 	case AnchorPaddock:
 		return "paddock"
+	case AnchorRuinArch:
+		return "ruin arch"
+	case AnchorRuinStair:
+		return "ruin stair"
 	default:
 		return "no anchor"
 	}
@@ -127,7 +135,7 @@ func (s *Schematic) At(x, y, z int) Block {
 	return s.Voxels[(y*s.D+z)*s.W+x]
 }
 
-// BuildingKind names one of the five settlement drawings.
+// BuildingKind names a settlement building or a wilderness ruin.
 type BuildingKind uint8
 
 // The buildings. A hut is where somebody lives, a smithy is where the forge is, a
@@ -139,6 +147,7 @@ const (
 	BuildingHall
 	BuildingKeep
 	BuildingStable
+	BuildingRuin
 )
 
 // String names a building for test failures and diagnostics.
@@ -154,6 +163,8 @@ func (k BuildingKind) String() string {
 		return "keep"
 	case BuildingStable:
 		return "stable"
+	case BuildingRuin:
+		return "ruin"
 	default:
 		return "unknown building"
 	}
@@ -179,7 +190,7 @@ const (
 // SchematicFor returns the drawing for a building kind.
 //
 // The returned pointer addresses package state and must be treated as read-only: the
-// five schematics are built once at init and are shared by every settlement in every
+// schematics are built once at init and are shared by every settlement in every
 // world this process serves.
 func SchematicFor(kind BuildingKind) *Schematic {
 	switch kind {
@@ -191,6 +202,8 @@ func SchematicFor(kind BuildingKind) *Schematic {
 		return keepSchematic
 	case BuildingStable:
 		return stableSchematic
+	case BuildingRuin:
+		return RuinSchematicFor(0)
 	default:
 		return hutSchematic
 	}
@@ -271,6 +284,14 @@ func mustSchematic(anchors []Anchor, layers ...[]string) *Schematic {
 		if a.X < 0 || a.X >= w || a.Y < 0 || a.Y >= h || a.Z < 0 || a.Z >= d {
 			panic("schematic anchor outside the drawing")
 		}
+		if a.Kind == AnchorRuinArch {
+			// The arch centre is scenery, sealed with a full smooth-stone cube.
+			// All entity slots and the stair mouth still require explicit air.
+			if s.At(a.X, a.Y, a.Z) != SmoothBlackStone {
+				panic("ruin arch anchor is not sealed with smooth stone")
+			}
+			continue
+		}
 		if s.At(a.X, a.Y, a.Z) != Air {
 			panic("schematic anchor in a cell that is not air")
 		}
@@ -321,10 +342,11 @@ type PlacedAnchor struct {
 // Building is one placed schematic.
 //
 // Origin is the world coordinate of the *rotated* footprint's minimum corner, and
-// OriginY is the first air voxel above the ground, so a building stands on what it is
-// built on rather than in it.
+// OriginY is the schematic bottom: the first air voxel above ground for settlement
+// buildings, or seven blocks below the hall standing level for a ruin.
 type Building struct {
 	Kind                      BuildingKind
+	Variant                   uint8 // ruin drawing; ignored for settlement buildings
 	OriginX, OriginY, OriginZ int64
 	Facing                    Facing
 	Anchors                   []PlacedAnchor
@@ -337,13 +359,18 @@ type Building struct {
 // turned with the walls, which is the whole reason a caller never rotates an anchor
 // itself.
 func centredBuilding(kind BuildingKind, plotX, plotZ, floorY int64, facing Facing) Building {
-	schematic := SchematicFor(kind)
+	return centreSchematic(kind, 0, SchematicFor(kind), plotX, plotZ, floorY, facing)
+}
+
+// centreSchematic keeps a caller-selected drawing and its anchors in the same frame.
+func centreSchematic(kind BuildingKind, variant uint8, schematic *Schematic, plotX, plotZ, originY int64, facing Facing) Building {
 	w, d := rotatedFootprint(schematic, facing)
 
 	b := Building{
 		Kind:    kind,
+		Variant: variant,
 		OriginX: plotX - int64(w/2),
-		OriginY: floorY,
+		OriginY: originY,
 		OriginZ: plotZ - int64(d/2),
 		Facing:  facing,
 	}
@@ -370,6 +397,9 @@ func centredBuilding(kind BuildingKind, plotX, plotZ, floorY int64, facing Facin
 // and how it is turned is this file's business; where it stands is settlement.go's.
 func visitSchematic(b Building, visit func(x, y, z int64, block Block)) {
 	s := SchematicFor(b.Kind)
+	if b.Kind == BuildingRuin {
+		s = RuinSchematicFor(b.Variant)
+	}
 	for y := range s.H {
 		for z := range s.D {
 			for x := range s.W {
