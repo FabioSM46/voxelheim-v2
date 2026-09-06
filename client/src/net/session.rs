@@ -214,7 +214,10 @@ pub(super) enum SessionEvent {
     /// frame that consumes it. Interpolation divides by the gap between two arrivals, so
     /// a frame's worth of scheduling jitter in that number is a frame's worth of jitter
     /// in every position on screen.
-    Snapshot { snapshot: Snapshot, at: Instant },
+    Snapshot {
+        snapshot: Snapshot,
+        at: Instant,
+    },
     /// The player's complete authoritative inventory.
     Inventory(InventoryState),
     /// The complete authoritative learned-mount set.
@@ -253,6 +256,7 @@ pub(super) enum SessionEvent {
     MapExplored(codec::MapExplored),
     /// Every mark this character holds, **replacing** the client's copy wholesale.
     MarkerList(codec::MarkerList),
+    LandmarkList(codec::LandmarkList),
     /// What one visible resident is called and what they do, sent once as the entity
     /// enters view. Validated at the decode boundary; no ECS system reads it until #458,
     /// exactly as `MapTile` was carried here before the map window existed.
@@ -1758,6 +1762,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::MapExplored(explored)) => {
                     events.send(SessionEvent::MapExplored(explored)).ok()?;
+                }
+                Ok(Transition::LandmarkList(list)) => {
+                    events.send(SessionEvent::LandmarkList(list)).ok()?;
                 }
                 Ok(Transition::MarkerList(list)) => {
                     events.send(SessionEvent::MarkerList(list)).ok()?;

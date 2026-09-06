@@ -29,11 +29,11 @@
 use std::fmt;
 
 use super::codec::{
-    ActionRefused, CharacterList, ChatMessage, InventoryState, LearnedMounts, LeaveCancelResult,
-    LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message,
-    MineProgress, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed, PlayerTradeState,
-    Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning, VendorClosed, VendorState,
-    VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
+    ActionRefused, CharacterList, ChatMessage, InventoryState, LandmarkList, LearnedMounts,
+    LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile,
+    MarkerList, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed,
+    PlayerTradeState, Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning,
+    VendorClosed, VendorState, VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -126,6 +126,7 @@ pub enum Transition {
     /// properties of the list, held at the decode boundary, and a list is complete by
     /// definition so there is no earlier one for the welcome to check it against.
     MarkerList(MarkerList),
+    LandmarkList(LandmarkList),
     /// What one resident is called and what they do, admitted because a session exists.
     ///
     /// Nothing is checked here that the codec has not: the name's bound and the role's
@@ -572,6 +573,7 @@ impl Handshake {
                 Ok(Transition::MapExplored(explored))
             }
             (Phase::Established, Message::MarkerList(list)) => Ok(Transition::MarkerList(list)),
+            (Phase::Established, Message::LandmarkList(list)) => Ok(Transition::LandmarkList(list)),
             // V25's three server payloads, carried by name for the same reason: each is
             // fully validated at the decode boundary, and nothing about a session changes
             // what any of them means.
@@ -626,6 +628,7 @@ impl Handshake {
             (_, Message::MapTile(_)) => Err(HandshakeError::Premature("MapTile")),
             (_, Message::MapExplored(_)) => Err(HandshakeError::Premature("MapExplored")),
             (_, Message::MarkerList(_)) => Err(HandshakeError::Premature("MarkerList")),
+            (_, Message::LandmarkList(_)) => Err(HandshakeError::Premature("LandmarkList")),
             (_, Message::ResidentAppearance(_)) => {
                 Err(HandshakeError::Premature("ResidentAppearance"))
             }
@@ -1769,6 +1772,21 @@ mod tests {
     /// neither is admitted before there is a session to draw a map for.
     #[test]
     fn the_map_payloads_only_belong_to_an_established_session() {
+        let list = LandmarkList {
+            origin_x: 0,
+            origin_z: 0,
+            scale: 1,
+            landmarks: vec![],
+        };
+        assert_eq!(
+            Handshake::new().apply(Message::LandmarkList(list.clone())),
+            Err(HandshakeError::Premature("LandmarkList"))
+        );
+        assert_eq!(
+            established().apply(Message::LandmarkList(list.clone())),
+            Ok(Transition::LandmarkList(list))
+        );
+
         let tile = MapTile {
             origin_x: 0,
             origin_z: -256,

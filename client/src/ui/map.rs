@@ -33,11 +33,12 @@
 //! array a headless test can read one pixel out of. [`compose`] is that rewrite, and it is
 //! pure: a viewport, a cache, and the bytes that fall out.
 //!
-//! There is a second image, and it is the whole of the exception: the player's arrowhead is
+//! The player's arrowhead is
 //! a coverage mask a few dozen texels on a side, minted once, because `bevy_ui` draws
 //! rectangles and a heading wants a triangle. Everything else drawn over the picture --
-//! every mark, every icon inside one -- is still `bevy_ui` nodes, from the same vocabulary
-//! `ui/icon.rs` owns. See [`arrowhead_image`] for why that one shape earned an asset.
+//! every player mark, every icon inside one -- is still `bevy_ui` nodes, from the same vocabulary
+//! `ui/icon.rs` owns. Portal spirals likewise use a small generated coverage mask;
+//! undiscovered places use an ASCII question mark. Both are nodes above the terrain fog.
 //!
 //! **Fog answers two different questions and deliberately looks like one.** A pixel whose
 //! chunk column is clear in its tile's own mask is somewhere this character has not been;
@@ -61,7 +62,7 @@
 //! be a guess the player could not tell from a measurement, so it gets a colour of its own
 //! that belongs to nothing in the world.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bevy::asset::RenderAssetUsages;
@@ -77,9 +78,9 @@ use super::compass::coordinates_reading;
 use super::text_input::{TextEdit, apply_key};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
-    CHUNK_COLUMN_BLOCKS, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn, MapEvent, MapInbox,
-    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerPlaceRequest,
-    MarkerRemoveRequest, Outbound, Sent, Session, encode_map_tile_request,
+    CHUNK_COLUMN_BLOCKS, Landmark, LandmarkList, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn,
+    MapEvent, MapInbox, MapSurface, MapTile, MapTileRequest, Marker, MarkerKind,
+    MarkerPlaceRequest, MarkerRemoveRequest, Outbound, Sent, Session, encode_map_tile_request,
     encode_marker_place_request, encode_marker_remove_request, map_tile_span,
 };
 use crate::player::{InputMode, LookState, PlayerStats};
@@ -1060,6 +1061,8 @@ impl Plugin for MapUiPlugin {
             .init_resource::<MapTiles>()
             .init_resource::<MapInbox>()
             .init_resource::<Markers>()
+            .init_resource::<Landmarks>()
+            .init_resource::<SpiralPicture>()
             .init_resource::<MarkerForm>()
             .init_resource::<MapPress>()
             .init_resource::<MarkerTick>()
@@ -1117,6 +1120,7 @@ impl Plugin for MapUiPlugin {
                     // After the dot, because both are children of the picture and the
                     // picture is sized by the composition above them.
                     draw_the_marks,
+                    draw_the_landmarks,
                     // After the marks it may name, and after `press_the_form` at the head of
                     // this chain, which is what closes the form: the tooltip a frame raises
                     // must be about the form that frame ended with rather than the one it
@@ -1501,6 +1505,7 @@ fn drag_the_map(
     pointer: Res<MapPointer>,
     form: Res<MarkerForm>,
     mut drag: ResMut<MapDrag>,
+    landmarks: Query<&Interaction, With<LandmarkPin>>,
     mut screen: ResMut<MapScreen>,
 ) {
     let held = buttons
@@ -1509,7 +1514,10 @@ fn drag_the_map(
     // **The view is still while the form is up**, and it has to be: the form is anchored
     // where the click landed and the block it names was read from a picture that must not
     // move under it.
-    let grabbing = held && screen.is_open() && !form.is_open();
+    let grabbing = held
+        && screen.is_open()
+        && !form.is_open()
+        && !landmarks.iter().any(|hit| *hit != Interaction::None);
     let Some(point) = pointer.0.filter(|_| grabbing) else {
         if drag.0.is_some() {
             drag.0 = None;
@@ -1637,6 +1645,184 @@ fn place_the_player_dot(
 /// one's ground.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct Markers(Vec<Marker>);
+
+/// One entry per stable server identity, regardless of the scale that supplied it.
+/// Positions survive closing the map. Discovery evidence survives scoped empty responses,
+/// so a late false reply can never undo a true received earlier in this session.
+#[derive(Resource, Default)]
+struct Landmarks {
+    places: HashMap<u64, Landmark>,
+    discovered: HashSet<u64>,
+    // A tile is complete only once both halves arrived. Inbox overflow advances the
+    // generation: replies to earlier requests cannot suppress a fresh request.
+    generation: u64,
+    received: HashMap<(i32, i32, u8), u64>,
+    pending: HashMap<(i32, i32, u8), (Duration, u64)>,
+}
+
+impl Landmarks {
+    fn replace(&mut self, list: LandmarkList) {
+        let key = (list.origin_x, list.origin_z, list.scale);
+        if let Some((_, generation)) = self.pending.remove(&key) {
+            self.received.insert(key, generation);
+        } else if self.generation == 0 {
+            self.received.insert(key, 0);
+        }
+        self.places
+            .retain(|_, place| !list.contains(place.x, place.z));
+        for mut place in list.landmarks {
+            if place.discovered {
+                self.discovered.insert(place.landmark_id);
+            }
+            place.discovered |= self.discovered.contains(&place.landmark_id);
+            self.places.insert(place.landmark_id, place);
+        }
+    }
+}
+
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct LandmarkPin {
+    id: u64,
+    discovered: bool,
+}
+
+const fn landmark_label(discovered: bool) -> &'static str {
+    if discovered {
+        "Portal"
+    } else {
+        "Unknown place"
+    }
+}
+
+/// A small coverage mask, like the arrowhead: the font cannot draw a spiral.
+fn spiral_image() -> Image {
+    const EDGE: u32 = 64;
+    let points: Vec<Vec2> = (0..=512)
+        .map(|step| {
+            let t = step as f32 / 512.0;
+            let angle = t * std::f32::consts::TAU * 1.75;
+            Vec2::splat(32.0) + Vec2::new(angle.cos(), angle.sin()) * (3.0 + 23.0 * t)
+        })
+        .collect();
+    let mut data = Vec::with_capacity((EDGE * EDGE * 4) as usize);
+    for y in 0..EDGE {
+        for x in 0..EDGE {
+            let pixel = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
+            let distance = points
+                .iter()
+                .map(|p| pixel.distance(*p))
+                .fold(f32::INFINITY, f32::min);
+            let alpha = ((3.0 - distance).clamp(0.0, 1.0) * 255.0) as u8;
+            data.extend_from_slice(&[255, 255, 255, alpha]);
+        }
+    }
+    let mut image = Image::new(
+        Extent3d {
+            width: EDGE,
+            height: EDGE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::linear();
+    image
+}
+
+#[derive(Resource)]
+struct SpiralPicture(Handle<Image>);
+impl FromWorld for SpiralPicture {
+    fn from_world(world: &mut World) -> Self {
+        Self(world.resource_mut::<Assets<Image>>().add(spiral_image()))
+    }
+}
+
+fn draw_the_landmarks(
+    mut commands: Commands,
+    screen: Res<MapScreen>,
+    landmarks: Res<Landmarks>,
+    spiral: Res<SpiralPicture>,
+    canvases: Query<Entity, With<MapCanvas>>,
+    mut pins: Query<(Entity, &LandmarkPin, &mut Node)>,
+) {
+    if !screen.is_changed() && !landmarks.is_changed() {
+        return;
+    }
+    let Some(canvas) = canvases.iter().next() else {
+        return;
+    };
+    let mut wanted = HashMap::new();
+    if screen.is_open() {
+        for place in landmarks.places.values() {
+            let point = screen.point_of(Vec2::new(place.x as f32 + 0.5, place.z as f32 + 0.5));
+            if screen.shows(point) {
+                wanted.insert(place.landmark_id, (place.discovered, point));
+            }
+        }
+    }
+    for (entity, pin, mut node) in &mut pins {
+        match wanted.remove(&pin.id) {
+            Some((discovered, point)) if discovered == pin.discovered => {
+                *node = landmark_node(point);
+            }
+            Some(again) => {
+                wanted.insert(pin.id, again);
+                commands.entity(entity).despawn();
+            }
+            None => commands.entity(entity).despawn(),
+        }
+    }
+    for (id, (discovered, point)) in wanted {
+        // Children of the fog-composed image: neither icon consults or changes its pixels.
+        // A distinct component keeps every marker edit/removal query away from these pins.
+        commands
+            .spawn((
+                LandmarkPin { id, discovered },
+                ChildOf(canvas),
+                landmark_node(point),
+                Interaction::None,
+                FocusPolicy::Block,
+                ZIndex(1),
+            ))
+            .with_children(|pin| {
+                if discovered {
+                    pin.spawn((
+                        ImageNode {
+                            image: spiral.0.clone(),
+                            color: Color::srgb(0.8, 0.65, 1.0),
+                            ..default()
+                        },
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        FocusPolicy::Pass,
+                    ));
+                } else {
+                    pin.spawn((
+                        Text::new("?"),
+                        TextFont {
+                            font_size: FontSize::Px(26.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.95, 0.88, 0.65)),
+                        FocusPolicy::Pass,
+                    ));
+                }
+            });
+    }
+}
+
+fn landmark_node(point: Vec2) -> Node {
+    Node {
+        align_items: AlignItems::Center,
+        justify_content: JustifyContent::Center,
+        ..pin_node(point)
+    }
+}
 
 /// One mark drawn over the picture.
 ///
@@ -1814,6 +2000,7 @@ fn draw_the_marks(
 /// placed cannot come apart. A mark's text comes from [`Markers`] rather than from the pin,
 /// because the note does: a pin carries what it needs to be drawn, and the list is the
 /// state.
+#[allow(clippy::too_many_arguments)] // One tooltip writer arbitrates all map hover sources.
 fn name_what_the_pointer_rests_on(
     screen: Res<MapScreen>,
     form: Res<MarkerForm>,
@@ -1821,6 +2008,7 @@ fn name_what_the_pointer_rests_on(
     windows: Query<&Window, With<PrimaryWindow>>,
     kinds: Query<(&Interaction, &MarkerKindButton)>,
     pins: Query<(&Interaction, &MarkerPin)>,
+    landmarks: Query<(&Interaction, &LandmarkPin)>,
     mut tooltips: Query<(&mut Node, &mut Text, &mut Visibility), With<MarkerTooltip>>,
 ) {
     // The form's own state and not the buttons' visibility: a closed form leaves seven
@@ -1853,7 +2041,15 @@ fn name_what_the_pointer_rests_on(
         })
         .map(marker_reading);
 
-    let hovered = on_a_button.or(on_a_mark);
+    let on_a_landmark = (screen.is_open() && !form.is_open())
+        .then(|| {
+            landmarks
+                .iter()
+                .find(|(interaction, _)| **interaction != Interaction::None)
+                .map(|(_, pin)| landmark_label(pin.discovered).to_owned())
+        })
+        .flatten();
+    let hovered = on_a_button.or(on_a_landmark).or(on_a_mark);
 
     let pointer = super::pointer_in_window(&windows);
     for (mut node, mut text, mut visibility) in &mut tooltips {
@@ -2096,12 +2292,13 @@ fn click_the_map(
     pointer: Res<MapPointer>,
     screen: Res<MapScreen>,
     mut press: ResMut<MapPress>,
+    landmarks: Query<&Interaction, With<LandmarkPin>>,
     mut form: ResMut<MarkerForm>,
 ) {
     let Some(buttons) = buttons else {
         return;
     };
-    if !screen.is_open() {
+    if !screen.is_open() || landmarks.iter().any(|hit| *hit != Interaction::None) {
         if press.0.is_some() {
             press.0 = None;
         }
@@ -2248,18 +2445,21 @@ fn ask_to_place(
 /// to a mark is a removal and a placement, and the mark stays on the screen until the server's
 /// next `MarkerList` leaves it out -- the same rule the placement follows, in the other
 /// direction.
+#[allow(clippy::too_many_arguments)] // The landmark guard prevents removing an overlapping mark.
 fn remove_a_mark(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     screen: Res<MapScreen>,
     form: Res<MarkerForm>,
     pins: Query<(&Interaction, &MarkerPin)>,
+    landmarks: Query<&Interaction, With<LandmarkPin>>,
     mut ticks: ResMut<MarkerTick>,
     mut outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
     // Suspended while the form is up, so the two gestures cannot be in flight at once -- and
     // because the form is what the pointer is over.
-    if !screen.is_open() || form.is_open() {
+    if !screen.is_open() || form.is_open() || landmarks.iter().any(|hit| *hit != Interaction::None)
+    {
         return;
     }
     if !buttons
@@ -2374,6 +2574,7 @@ fn refresh_the_form(
 /// The mode is the single owner of *whether* the map is up — `ui/mod.rs` already refuses
 /// the key while dead and forces the mode closed on death, so this system has no life
 /// rule of its own and deliberately does not grow one.
+#[allow(clippy::too_many_arguments)] // All per-session map state resets at one boundary.
 fn follow_input_mode(
     mode: Res<InputMode>,
     session: Option<Res<Session>>,
@@ -2381,6 +2582,7 @@ fn follow_input_mode(
     mut screen: ResMut<MapScreen>,
     mut tiles: ResMut<MapTiles>,
     mut markers: ResMut<Markers>,
+    mut landmarks: ResMut<Landmarks>,
     mut form: ResMut<MarkerForm>,
 ) {
     // A half-typed note belongs to the window it was opened over. The mode closing the map
@@ -2401,6 +2603,14 @@ fn follow_input_mode(
         // ground anybody could have walked over, and a mark is somebody's own note.
         if !markers.0.is_empty() {
             markers.0.clear();
+        }
+        if !landmarks.places.is_empty()
+            || !landmarks.discovered.is_empty()
+            || !landmarks.received.is_empty()
+            || !landmarks.pending.is_empty()
+            || landmarks.generation != 0
+        {
+            *landmarks = Landmarks::default();
         }
         // The rung outlives a close on purpose and must not outlive the session: it is the
         // same per-session rule as the two above, at the same one event.
@@ -2439,12 +2649,21 @@ fn block_of(value: f32) -> i32 {
 /// Files every drawn square, applies every ledger page and takes every mark list, in wire
 /// order.
 fn ingest_map_payloads(
+    session: Option<Res<Session>>,
+    mut landmarks: ResMut<Landmarks>,
     mut inbox: ResMut<MapInbox>,
     mut tiles: ResMut<MapTiles>,
     mut markers: ResMut<Markers>,
 ) {
     for event in inbox.take() {
+        if session.is_none() {
+            continue;
+        }
         match event {
+            MapEvent::Landmarks(list) => landmarks.replace(list),
+            MapEvent::RefreshLandmarks => {
+                landmarks.generation = landmarks.generation.wrapping_add(1);
+            }
             MapEvent::Tile(tile) => tiles.insert(tile),
             MapEvent::Explored(explored) => {
                 for column in explored.columns {
@@ -2469,12 +2688,17 @@ fn request_map_tiles(
     screen: Res<MapScreen>,
     session: Option<Res<Session>>,
     mut tiles: ResMut<MapTiles>,
+    mut landmarks: ResMut<Landmarks>,
     mut outbound: Option<ResMut<Outbound>>,
 ) {
+    // Retry bookkeeping does not change a pin. Keep change detection for server
+    // replacements and session resets, rather than reconciling every pin every frame.
+    let landmarks = landmarks.bypass_change_detection();
     let now = time.elapsed();
     // An expired note is a request the server never answered — a spent token bucket says
     // nothing, so this is the only thing that ever makes the square askable again.
     tiles.in_flight.retain(|_, note| note.expires > now);
+    landmarks.pending.retain(|_, (expires, _)| *expires > now);
 
     if !screen.is_open() || session.is_none() {
         return;
@@ -2484,12 +2708,31 @@ fn request_map_tiles(
     };
 
     for key in screen.tiles_in_view() {
-        if tiles.in_flight.len() >= MAX_IN_FLIGHT {
+        let outstanding = tiles.in_flight.len()
+            + landmarks
+                .pending
+                .keys()
+                .filter(|&&(x, z, scale)| {
+                    !tiles
+                        .in_flight
+                        .keys()
+                        .any(|key| (key.origin_x, key.origin_z, key.scale.wire()) == (x, z, scale))
+                })
+                .count();
+        if outstanding >= MAX_IN_FLIGHT {
             return;
         }
-        if tiles.tiles.contains_key(&key) || tiles.in_flight.contains_key(&key) {
+        let scope = (key.origin_x, key.origin_z, key.scale.wire());
+        let complete = tiles.tiles.contains_key(&key)
+            && landmarks.received.get(&scope) == Some(&landmarks.generation);
+        if complete || tiles.in_flight.contains_key(&key) || landmarks.pending.contains_key(&scope)
+        {
             continue;
         }
+        let generation = landmarks.generation;
+        landmarks
+            .pending
+            .insert(scope, (now + REQUEST_RETRY, generation));
         let client_tick = tiles.next_tick;
         tiles.next_tick = tiles.next_tick.wrapping_add(1);
         outbound.send(encode_map_tile_request(&MapTileRequest {
@@ -2525,6 +2768,315 @@ mod tests {
     use crate::net::{
         ANY_TOKEN, MAP_TILE_CELLS, MapExplored, MarkerList, SessionParams, map_tile_explored_bytes,
     };
+
+    fn portal(id: u64, x: i32, z: i32, discovered: bool) -> Landmark {
+        Landmark {
+            landmark_id: id,
+            x,
+            z,
+            discovered,
+        }
+    }
+
+    fn scoped(x: i32, z: i32, scale: u8, landmarks: Vec<Landmark>) -> LandmarkList {
+        LandmarkList {
+            origin_x: x,
+            origin_z: z,
+            scale,
+            landmarks,
+        }
+    }
+
+    fn portals(app: &mut App, list: LandmarkList) {
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Landmarks(list));
+        app.update();
+    }
+
+    fn drawn_portals(app: &mut App) -> Vec<(Entity, LandmarkPin, Node)> {
+        app.world_mut()
+            .query::<(Entity, &LandmarkPin, &Node)>()
+            .iter(app.world())
+            .map(|(entity, pin, node)| (entity, *pin, node.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn missing_pair_and_overflow_retry_until_discovery_is_restored() {
+        let (mut app, frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        *app.world_mut().resource_mut::<MapTiles>() = MapTiles::default();
+        *app.world_mut().resource_mut::<Landmarks>() = Landmarks::default();
+        *app.world_mut().resource_mut::<MapScreen>() = MapScreen {
+            open: true,
+            centre: IVec2::splat(32),
+            scale: MapScale::S1,
+            zoom: 1,
+            viewport: UVec2::splat(32),
+        };
+        requested(&frames);
+        app.update();
+        assert_eq!(requested(&frames), 1);
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(tile(0, 0, 1)));
+        app.update();
+        assert_eq!(
+            requested(&frames),
+            0,
+            "the missing half waits for its deadline"
+        );
+        for (expires, _) in app
+            .world_mut()
+            .resource_mut::<Landmarks>()
+            .pending
+            .values_mut()
+        {
+            *expires = Duration::ZERO;
+        }
+        app.update();
+        assert_eq!(
+            requested(&frames),
+            1,
+            "a terrain-only response cannot finish the pair"
+        );
+        portals(&mut app, scoped(0, 0, 1, vec![portal(7, 32, 32, false)]));
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(tile(0, 0, 1)));
+        app.update();
+        assert_eq!(requested(&frames), 0);
+        assert!(!drawn_portals(&mut app)[0].1.discovered);
+
+        // Lose a discovery push, then retain an old false response in the same burst.
+        // Invalidating before the burst (instead of after it) would wrongly certify false.
+        let mut inbox = app.world_mut().resource_mut::<MapInbox>();
+        inbox.push(MapEvent::Landmarks(scoped(
+            0,
+            0,
+            1,
+            vec![portal(7, 32, 32, true)],
+        )));
+        for _ in 0..1024 {
+            inbox.push(MapEvent::Markers(MarkerList { markers: vec![] }));
+        }
+        inbox.push(MapEvent::Landmarks(scoped(
+            0,
+            0,
+            1,
+            vec![portal(7, 32, 32, false)],
+        )));
+        app.update();
+        assert_eq!(
+            requested(&frames),
+            1,
+            "overflow asks again even with a cached false and terrain"
+        );
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Tile(tile(0, 0, 1)));
+        portals(&mut app, scoped(0, 0, 1, vec![portal(7, 32, 32, true)]));
+        assert!(drawn_portals(&mut app)[0].1.discovered);
+        assert_eq!(requested(&frames), 0, "the fresh complete pair is cached");
+    }
+
+    #[test]
+    fn scoped_replacement_preserves_neighbors_and_deduplicates_zoom_with_monotonic_discovery() {
+        let mut held = Landmarks::default();
+        held.replace(scoped(0, 0, 16, vec![portal(1, 12, 9, false)]));
+        held.replace(scoped(-1024, 0, 16, vec![portal(2, -1, 10, false)]));
+        held.replace(scoped(0, 0, 1, vec![portal(1, 12, 9, true)]));
+        held.replace(scoped(0, 0, 4, vec![portal(1, 12, 9, false)]));
+        assert_eq!(held.places.len(), 2);
+        assert!(
+            held.places[&1].discovered,
+            "racing false cannot undo discovery"
+        );
+        held.replace(scoped(64, 0, 1, vec![]));
+        assert_eq!(
+            held.places.len(),
+            2,
+            "empty neighboring scope removes nothing"
+        );
+        held.replace(scoped(0, 0, 1, vec![]));
+        assert_eq!(held.places.len(), 1);
+        assert!(held.places.contains_key(&2));
+        held.replace(scoped(0, 0, 16, vec![portal(1, 12, 9, false)]));
+        assert!(
+            held.places[&1].discovered,
+            "even an intervening empty retains true evidence"
+        );
+        held.replace(scoped(0, 0, 4, vec![portal(3, 30, 30, false)]));
+        assert!(
+            !held.places.contains_key(&1),
+            "replacement removes omitted identity"
+        );
+        assert_eq!(held.places.len(), 2);
+    }
+
+    #[test]
+    fn question_and_spiral_are_above_unchanged_fog_at_every_pan_scale_and_zoom() {
+        let (mut app, _frames) = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        for (x, z) in [(-17_i32, -9_i32), (12, 9)] {
+            for discovered in [false, true] {
+                portals(
+                    &mut app,
+                    scoped(
+                        x.div_euclid(64) * 64,
+                        z.div_euclid(64) * 64,
+                        1,
+                        vec![portal(7, x, z, discovered)],
+                    ),
+                );
+                for (scale, zoom) in ZOOM_LADDER {
+                    let screen = MapScreen {
+                        open: true,
+                        centre: IVec2::new(x - 4, z + 3),
+                        scale,
+                        zoom,
+                        viewport: UVec2::new(256, 256),
+                    };
+                    *app.world_mut().resource_mut::<MapScreen>() = screen;
+                    let before = compose(&screen, app.world().resource::<MapTiles>());
+                    app.update();
+                    let drawn = drawn_portals(&mut app);
+                    assert_eq!(drawn.len(), 1);
+                    let (entity, pin, node) = &drawn[0];
+                    let expected =
+                        pin_node(screen.point_of(Vec2::new(x as f32 + 0.5, z as f32 + 0.5)));
+                    assert_eq!((node.left, node.top), (expected.left, expected.top));
+                    assert_eq!(app.world().get::<ZIndex>(*entity), Some(&ZIndex(1)));
+                    let parent = app.world().get::<ChildOf>(*entity).unwrap().parent();
+                    assert!(app.world().get::<MapCanvas>(parent).is_some());
+                    assert!(app.world().get::<MarkerPin>(*entity).is_none());
+                    let children = app.world().get::<Children>(*entity).unwrap();
+                    if pin.discovered {
+                        let image = app.world().get::<ImageNode>(children[0]).unwrap();
+                        assert_eq!(image.image, app.world().resource::<SpiralPicture>().0);
+                    } else {
+                        assert_eq!(app.world().get::<Text>(children[0]).unwrap().0, "?");
+                    }
+                    assert_eq!(
+                        before.data,
+                        compose(&screen, app.world().resource::<MapTiles>()).data,
+                        "landmark rendering never edits terrain or exploration"
+                    );
+                }
+            }
+            // Same ID at a different position is still one authoritative location; clear
+            // discovery only at the real session boundary before testing the next sign.
+            *app.world_mut().resource_mut::<Landmarks>() = Landmarks::default();
+        }
+    }
+
+    #[test]
+    fn late_portals_reopen_and_disconnect_without_leaking_between_sessions() {
+        let (mut app, _frames) = app();
+        app.update();
+        portals(&mut app, scoped(0, 0, 1, vec![portal(7, 12, 9, true)]));
+        assert!(
+            drawn_portals(&mut app).is_empty(),
+            "late response while closed is cached"
+        );
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(drawn_portals(&mut app).len(), 1);
+        app.world_mut().resource_mut::<MapScreen>().centre = IVec2::splat(100_000);
+        app.update();
+        assert!(drawn_portals(&mut app).is_empty());
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Map;
+        app.update();
+        assert_eq!(
+            drawn_portals(&mut app).len(),
+            1,
+            "reopen reprojects cached pins"
+        );
+        app.world_mut().remove_resource::<Session>();
+        // A final payload queued on the disconnect frame may not repopulate reset state.
+        portals(&mut app, scoped(0, 0, 1, vec![portal(7, 12, 9, true)]));
+        assert!(drawn_portals(&mut app).is_empty());
+        let held = app.world().resource::<Landmarks>();
+        assert!(held.places.is_empty() && held.discovered.is_empty());
+        app.insert_resource(session());
+        portals(&mut app, scoped(0, 0, 1, vec![portal(7, 12, 9, false)]));
+        assert!(!drawn_portals(&mut app)[0].1.discovered);
+        portals(&mut app, scoped(0, 0, 1, vec![]));
+        assert!(drawn_portals(&mut app).is_empty());
+    }
+
+    #[test]
+    fn portals_use_the_tooltip_but_never_the_markers_edit_or_drag_paths() {
+        let (mut app, frames) = app_with_a_window();
+        list(
+            &mut app,
+            (1..=64)
+                .map(|id| mark(id, 12, 9, MarkerKind::Note, ""))
+                .collect(),
+        );
+        for discovered in [false, true] {
+            portals(
+                &mut app,
+                scoped(0, 0, 1, vec![portal(7, 12, 9, discovered)]),
+            );
+            assert_eq!(drawn_marks(&mut app).len(), 64);
+            let pins = drawn_portals(&mut app);
+            assert_eq!(pins.len(), 1);
+            let entity = pins[0].0;
+            *app.world_mut().get_mut::<Interaction>(entity).unwrap() = Interaction::Hovered;
+            // Simulate an overlapping mark whose last-frame hover has not cleared yet.
+            let mark = app
+                .world_mut()
+                .query_filtered::<Entity, With<MarkerPin>>()
+                .iter(app.world())
+                .next()
+                .unwrap();
+            *app.world_mut().get_mut::<Interaction>(mark).unwrap() = Interaction::Hovered;
+            app.update();
+            assert_eq!(tooltip(&mut app).0, landmark_label(discovered));
+            let before = screen_of(&mut app);
+            click_pointer(&mut app, Vec2::new(300.0, 200.0));
+            assert_eq!(draft(&mut app), None);
+            drag_pointer(&mut app, Vec2::new(300.0, 200.0), Vec2::new(500.0, 400.0));
+            assert_eq!(screen_of(&mut app), before);
+            let mut buttons = ButtonInput::<MouseButton>::default();
+            buttons.press(MouseButton::Right);
+            app.insert_resource(buttons);
+            app.update();
+            assert_eq!(
+                marker_frames(&frames),
+                0,
+                "no place or removal request names a portal"
+            );
+            assert_eq!(app.world().resource::<Markers>().0.len(), 64);
+        }
+    }
+
+    #[test]
+    fn spiral_mask_has_a_transparent_margin_and_a_separated_winding() {
+        let image = spiral_image();
+        let bytes = image.data.as_ref().unwrap();
+        let alpha = |x: usize, y: usize| bytes[(y * 64 + x) * 4 + 3];
+        for edge in 0..64 {
+            assert_eq!(alpha(edge, 0), 0);
+            assert_eq!(alpha(edge, 63), 0);
+            assert_eq!(alpha(0, edge), 0);
+            assert_eq!(alpha(63, edge), 0);
+        }
+        assert!(alpha(32, 32) < 128, "the centre is open");
+        let runs = (32..64)
+            .map(|x| alpha(x, 32) > 127)
+            .fold((0, false), |(runs, last), ink| {
+                (runs + usize::from(ink && !last), ink)
+            })
+            .0;
+        assert_eq!(runs, 2, "two separated turns cross the right radius");
+    }
 
     fn session() -> Session {
         Session(SessionParams {
@@ -2822,6 +3374,9 @@ mod tests {
         app.world_mut()
             .resource_mut::<MapInbox>()
             .push(MapEvent::Tile(overtaken));
+        app.world_mut()
+            .resource_mut::<MapInbox>()
+            .push(MapEvent::Landmarks(scoped(0, 0, 4, vec![])));
         app.update();
         assert!(
             !app.world().resource::<MapTiles>().tiles.contains_key(&key),
@@ -2942,6 +3497,14 @@ mod tests {
             .values_mut()
         {
             note.expires = Duration::ZERO;
+        }
+        for (expires, _) in app
+            .world_mut()
+            .resource_mut::<Landmarks>()
+            .pending
+            .values_mut()
+        {
+            *expires = Duration::ZERO;
         }
         app.update();
         assert_eq!(
