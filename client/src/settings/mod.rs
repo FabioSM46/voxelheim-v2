@@ -560,6 +560,10 @@ pub enum Knob {
     MasterVolume,
     OutputDevice,
     InputDevice,
+    MusicVolume,
+    SfxVolume,
+    AmbienceVolume,
+    VoiceDucking,
     VoiceVolume,
     VoiceMode,
     VoiceActivationThreshold,
@@ -567,7 +571,7 @@ pub enum Knob {
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 15] = [
+pub const KNOBS: [Knob; 19] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -579,6 +583,13 @@ pub const KNOBS: [Knob; 15] = [
     Knob::MasterVolume,
     Knob::OutputDevice,
     Knob::InputDevice,
+    // The three world buses go between the device rows above and the voice rows below,
+    // because a player setting them against one another wants them adjacent — and
+    // `VoiceDucking` sits at that seam, being the one control that is about both halves.
+    Knob::MusicVolume,
+    Knob::SfxVolume,
+    Knob::AmbienceVolume,
+    Knob::VoiceDucking,
     Knob::VoiceVolume,
     Knob::VoiceMode,
     Knob::VoiceActivationThreshold,
@@ -600,6 +611,10 @@ impl Knob {
             Self::MasterVolume => "Master volume",
             Self::OutputDevice => "Output device",
             Self::InputDevice => "Microphone",
+            Self::MusicVolume => "Music volume",
+            Self::SfxVolume => "Effects volume",
+            Self::AmbienceVolume => "Ambience volume",
+            Self::VoiceDucking => "Duck under voice",
             Self::VoiceVolume => "Voice volume",
             Self::VoiceMode => "Voice",
             Self::VoiceActivationThreshold => "Voice threshold",
@@ -609,7 +624,7 @@ impl Knob {
 
     /// Which tab this knob is listed on, and which reset therefore puts it back.
     ///
-    /// No wildcard arm, so a sixteenth knob has to say where it belongs before it builds —
+    /// No wildcard arm, so a twentieth knob has to say where it belongs before it builds —
     /// which is the same thing as saying which reset owns it.
     pub const fn tab(self) -> Tab {
         match self {
@@ -624,6 +639,10 @@ impl Knob {
             Self::MasterVolume
             | Self::OutputDevice
             | Self::InputDevice
+            | Self::MusicVolume
+            | Self::SfxVolume
+            | Self::AmbienceVolume
+            | Self::VoiceDucking
             | Self::VoiceVolume
             | Self::VoiceMode
             | Self::VoiceActivationThreshold
@@ -1319,6 +1338,105 @@ const MASTER_VOLUME_STEP: u8 = 5;
 /// What the game starts at: audible, with room above it for a quiet recording.
 const DEFAULT_MASTER_VOLUME: u8 = 80;
 
+/// Silence, and a real value for [`MIN_MASTER_VOLUME`]'s reason: a player who wants no music
+/// at all must be able to say so here. It is **not** the same statement as
+/// [`Settings::music_on`] being off — this leaves a generator running into a gain of zero,
+/// that stops it being generated at all — which is why both exist and why the tab draws
+/// both.
+const MIN_MUSIC_VOLUME: u8 = 0;
+/// Unity, and the top, for [`MAX_MASTER_VOLUME`]'s reason: nothing amplifies past what the
+/// mixer was handed.
+const MAX_MUSIC_VOLUME: u8 = 100;
+/// One press of the music volume control.
+const MUSIC_VOLUME_STEP: u8 = 5;
+/// Where music starts, and it is not the master's 80 or voice's 100.
+///
+/// **60, because music is the one bus whose job is to be underneath the others.** A score
+/// that arrives at the same level as the world it is scoring is a score a player's first act
+/// is turning down, and the number a player picks after doing that is roughly this one. It is
+/// the lowest default on the tab deliberately: the bus is empty in this client, so nobody can
+/// yet hear whether it is right, and the cheaper mistake is the quiet one.
+const DEFAULT_MUSIC_VOLUME: u8 = 60;
+
+/// Silence, and a real value: a player who wants the world's one-shots off has to be able to
+/// say so.
+const MIN_SFX_VOLUME: u8 = 0;
+/// Unity, and the top, for [`MAX_MASTER_VOLUME`]'s reason.
+const MAX_SFX_VOLUME: u8 = 100;
+/// One press of the effects volume control.
+const SFX_VOLUME_STEP: u8 = 5;
+/// Where effects start: **unity, like voice and unlike the master.**
+///
+/// The one-shots are what the master volume is *for*. They are the world telling a player
+/// what just happened to them, so a default under unity would mean somebody who has turned
+/// the master to the top still cannot hear a hit — and the headroom the master reserves is
+/// reserved once, above all of this, rather than again on each bus under it.
+const DEFAULT_SFX_VOLUME: u8 = 100;
+
+/// Silence, and a real value: a bed is exactly the thing some players want none of.
+const MIN_AMBIENCE_VOLUME: u8 = 0;
+/// Unity, and the top, for [`MAX_MASTER_VOLUME`]'s reason.
+const MAX_AMBIENCE_VOLUME: u8 = 100;
+/// One press of the ambience volume control.
+const AMBIENCE_VOLUME_STEP: u8 = 5;
+/// Where ambience starts.
+///
+/// **70: under the effects it sits behind, over the music it is more informative than.**
+/// Rain and a forge are the world telling a player where they are, which is worth more than a
+/// score and less than a blow landing — so it sits between [`DEFAULT_SFX_VOLUME`] and
+/// [`DEFAULT_MUSIC_VOLUME`], and the ordering of those three is the statement rather than the
+/// exact number.
+const DEFAULT_AMBIENCE_VOLUME: u8 = 70;
+
+/// No ducking at all, and a real value: a player who wants their music to keep playing at
+/// full while people talk must be able to say so, and this is where they say it.
+const MIN_VOICE_DUCKING: u8 = 0;
+/// Total ducking — music and ambience silent while somebody is speaking.
+///
+/// A real value too, and the top: somebody who cannot follow speech over a bed is entitled to
+/// remove the bed rather than to turn it down twice.
+const MAX_VOICE_DUCKING: u8 = 100;
+/// One press of the ducking control.
+const VOICE_DUCKING_STEP: u8 = 5;
+/// How far the beds drop under a voice by default.
+///
+/// **60, which is a little over half.** Under about a third and speech is still competing;
+/// at the top the world disappears every time anybody says anything, which is its own kind of
+/// disorienting. Sixty leaves the bed plainly present and plainly out of the way, and it is a
+/// starting point rather than a measurement — the knob exists because the right answer
+/// depends on the music, which does not exist yet.
+const DEFAULT_VOICE_DUCKING: u8 = 60;
+
+const _: () = {
+    // **The three world defaults are an ordering, and this is where that is enforced.**
+    // Effects over ambience over music: the one-shots are what the master volume is for,
+    // ambience sits under the effects it stands behind, and a score arriving at the level of
+    // the world it is scoring is a score a player's first act is turning down.
+    //
+    // A `const` block rather than a test, because the review on #997 asked for an assertion
+    // and this is the stronger one available: reordering the three stops the client
+    // compiling rather than reddening a suite. The gap it found was real — the sweep over the
+    // three knobs compares each default against its own constant, which is a comparison of a
+    // thing with itself, so it would have stayed green through any reordering while this
+    // file and the pull request both claimed the ordering was pinned.
+    assert!(
+        DEFAULT_SFX_VOLUME > DEFAULT_AMBIENCE_VOLUME,
+        "effects must start louder than ambience"
+    );
+    assert!(
+        DEFAULT_AMBIENCE_VOLUME > DEFAULT_MUSIC_VOLUME,
+        "ambience must start louder than music"
+    );
+};
+
+/// Whether music is generated at all, by default. On: a player who does not want it has a
+/// switch, and one who does should not have to find it.
+const DEFAULT_MUSIC_ON: bool = true;
+
+/// Whether the stereo image is folded, by default. Off: a stereo card gets stereo, and the
+/// fold is there for the player who needs it rather than the other way round.
+const DEFAULT_MONO_AUDIO: bool = false;
+
 /// Silence, for the same reason [`MIN_MASTER_VOLUME`] is a real value: a player who wants
 /// voice muted has to be able to say so with this knob. It is not the same as
 /// [`VoiceMode::Off`] two rows down — that closes the microphone, this only stops the
@@ -1361,6 +1479,12 @@ pub struct Settings {
     master_volume: u8,
     output_device: DeviceChoice,
     input_device: DeviceChoice,
+    music_volume: u8,
+    music_on: bool,
+    sfx_volume: u8,
+    ambience_volume: u8,
+    voice_ducking: u8,
+    mono_audio: bool,
     voice_volume: u8,
     voice_mode: VoiceMode,
     voice_activation_threshold: f32,
@@ -1386,6 +1510,12 @@ impl Default for Settings {
             master_volume: DEFAULT_MASTER_VOLUME,
             output_device: DeviceChoice::SystemDefault,
             input_device: DeviceChoice::SystemDefault,
+            music_volume: DEFAULT_MUSIC_VOLUME,
+            music_on: DEFAULT_MUSIC_ON,
+            sfx_volume: DEFAULT_SFX_VOLUME,
+            ambience_volume: DEFAULT_AMBIENCE_VOLUME,
+            voice_ducking: DEFAULT_VOICE_DUCKING,
+            mono_audio: DEFAULT_MONO_AUDIO,
             voice_volume: DEFAULT_VOICE_VOLUME,
             voice_mode: DEFAULT_VOICE_MODE,
             voice_activation_threshold: DEFAULT_VOICE_ACTIVATION_THRESHOLD,
@@ -1499,6 +1629,68 @@ impl Settings {
     /// in again is used again without anybody reopening this tab.
     pub const fn input_device(&self) -> &DeviceChoice {
         &self.input_device
+    }
+
+    /// How loud the music bus is, from 0 to 100.
+    pub const fn music_volume(&self) -> u8 {
+        self.music_volume
+    }
+
+    /// The gain the music bus is set to, `0.0` silent to `1.0` unity.
+    ///
+    /// [`Self::master_gain`]'s arithmetic one bus down, linear for its reason.
+    pub fn music_gain(&self) -> f32 {
+        f32::from(self.music_volume()) / f32::from(MAX_MUSIC_VOLUME)
+    }
+
+    /// Whether music is generated at all.
+    ///
+    /// **A different question from [`Self::music_gain`] being zero**, and the audio module is
+    /// where the difference is enforced: off means no mixer source is claimed, so nothing is
+    /// generated and no slot is spent.
+    pub const fn music_on(&self) -> bool {
+        self.music_on
+    }
+
+    /// How loud the effects bus is, from 0 to 100.
+    pub const fn sfx_volume(&self) -> u8 {
+        self.sfx_volume
+    }
+
+    /// The gain the effects bus is set to, `0.0` silent to `1.0` unity.
+    pub fn sfx_gain(&self) -> f32 {
+        f32::from(self.sfx_volume()) / f32::from(MAX_SFX_VOLUME)
+    }
+
+    /// How loud the ambience bus is, from 0 to 100.
+    pub const fn ambience_volume(&self) -> u8 {
+        self.ambience_volume
+    }
+
+    /// The gain the ambience bus is set to, `0.0` silent to `1.0` unity.
+    pub fn ambience_gain(&self) -> f32 {
+        f32::from(self.ambience_volume()) / f32::from(MAX_AMBIENCE_VOLUME)
+    }
+
+    /// How far the ducked buses drop under a nearby voice, from 0 to 100.
+    pub const fn voice_ducking(&self) -> u8 {
+        self.voice_ducking
+    }
+
+    /// What the ducked buses are multiplied by while somebody is speaking nearby, `1.0` for
+    /// no ducking at all and `0.0` for silence.
+    ///
+    /// **The complement of the percentage, and the one place that subtraction happens.** A
+    /// player reads a depth — "how far does the music get out of the way" — and the mixer
+    /// multiplies by a gain, so exactly one of the two has to be turned into the other and
+    /// this is where, for [`Self::master_gain`]'s reason.
+    pub fn duck_gain(&self) -> f32 {
+        1.0 - f32::from(self.voice_ducking()) / f32::from(MAX_VOICE_DUCKING)
+    }
+
+    /// Whether the stereo image is folded to one.
+    pub const fn mono_audio(&self) -> bool {
+        self.mono_audio
     }
 
     /// How loud the voice bus is, from 0 to 100.
@@ -1639,6 +1831,38 @@ impl Settings {
             Knob::InputDevice => {
                 self.input_device = choices.devices.inputs().moved(&self.input_device, steps);
             }
+            Knob::MusicVolume => {
+                self.music_volume = step_u8(
+                    self.music_volume,
+                    steps.saturating_mul(i32::from(MUSIC_VOLUME_STEP)),
+                    MIN_MUSIC_VOLUME,
+                    MAX_MUSIC_VOLUME,
+                );
+            }
+            Knob::SfxVolume => {
+                self.sfx_volume = step_u8(
+                    self.sfx_volume,
+                    steps.saturating_mul(i32::from(SFX_VOLUME_STEP)),
+                    MIN_SFX_VOLUME,
+                    MAX_SFX_VOLUME,
+                );
+            }
+            Knob::AmbienceVolume => {
+                self.ambience_volume = step_u8(
+                    self.ambience_volume,
+                    steps.saturating_mul(i32::from(AMBIENCE_VOLUME_STEP)),
+                    MIN_AMBIENCE_VOLUME,
+                    MAX_AMBIENCE_VOLUME,
+                );
+            }
+            Knob::VoiceDucking => {
+                self.voice_ducking = step_u8(
+                    self.voice_ducking,
+                    steps.saturating_mul(i32::from(VOICE_DUCKING_STEP)),
+                    MIN_VOICE_DUCKING,
+                    MAX_VOICE_DUCKING,
+                );
+            }
             Knob::VoiceVolume => {
                 self.voice_volume = step_u8(
                     self.voice_volume,
@@ -1712,6 +1936,10 @@ impl Settings {
             Knob::MasterVolume => format!("{}%", self.master_volume),
             Knob::OutputDevice => choices.devices.outputs().label(&self.output_device),
             Knob::InputDevice => choices.devices.inputs().label(&self.input_device),
+            Knob::MusicVolume => format!("{}%", self.music_volume),
+            Knob::SfxVolume => format!("{}%", self.sfx_volume),
+            Knob::AmbienceVolume => format!("{}%", self.ambience_volume),
+            Knob::VoiceDucking => format!("{}%", self.voice_ducking),
             Knob::VoiceVolume => format!("{}%", self.voice_volume),
             Knob::VoiceMode => self.voice_mode.label().to_owned(),
             Knob::VoiceActivationThreshold => {
@@ -1724,6 +1952,17 @@ impl Settings {
     /// Turns the vertical sync on or off.
     pub const fn toggle_vsync(&mut self) {
         self.vsync = !self.vsync;
+    }
+
+    /// Turns music generation on or off. See [`Self::music_on`] for why this is not the
+    /// music volume reaching zero.
+    pub const fn toggle_music(&mut self) {
+        self.music_on = !self.music_on;
+    }
+
+    /// Folds the stereo image to one, or stops folding it.
+    pub const fn toggle_mono_audio(&mut self) {
+        self.mono_audio = !self.mono_audio;
     }
 
     /// Shows or hides the frame-rate readout.
@@ -1781,6 +2020,12 @@ impl Settings {
                 self.master_volume = defaults.master_volume;
                 self.output_device = defaults.output_device.clone();
                 self.input_device = defaults.input_device.clone();
+                self.music_volume = defaults.music_volume;
+                self.music_on = defaults.music_on;
+                self.sfx_volume = defaults.sfx_volume;
+                self.ambience_volume = defaults.ambience_volume;
+                self.voice_ducking = defaults.voice_ducking;
+                self.mono_audio = defaults.mono_audio;
                 self.voice_volume = defaults.voice_volume;
                 self.voice_mode = defaults.voice_mode;
                 self.voice_activation_threshold = defaults.voice_activation_threshold;
@@ -1811,6 +2056,14 @@ impl Settings {
         self.master_volume = self
             .master_volume
             .clamp(MIN_MASTER_VOLUME, MAX_MASTER_VOLUME);
+        self.music_volume = self.music_volume.clamp(MIN_MUSIC_VOLUME, MAX_MUSIC_VOLUME);
+        self.sfx_volume = self.sfx_volume.clamp(MIN_SFX_VOLUME, MAX_SFX_VOLUME);
+        self.ambience_volume = self
+            .ambience_volume
+            .clamp(MIN_AMBIENCE_VOLUME, MAX_AMBIENCE_VOLUME);
+        self.voice_ducking = self
+            .voice_ducking
+            .clamp(MIN_VOICE_DUCKING, MAX_VOICE_DUCKING);
         self.voice_volume = self.voice_volume.clamp(MIN_VOICE_VOLUME, MAX_VOICE_VOLUME);
         // `NaN` compares false against both ends, so `clamp` would pass it through
         // untouched — the rule `client/AGENTS.md` states about non-finite floats. A
@@ -2274,6 +2527,189 @@ mod tests {
         assert_eq!(settings.voice_volume(), DEFAULT_VOICE_VOLUME);
     }
 
+    /// **The three world volumes reach both ends of their own range and nothing else's.**
+    ///
+    /// One sweep rather than three copies of one test: what differs between them is the
+    /// field, and a copy per bus is three places for the next bound to be forgotten.
+    #[test]
+    fn each_world_volume_reaches_silence_and_unity_and_stops_there() {
+        for (knob, read, gain, default) in [
+            (
+                Knob::MusicVolume,
+                Settings::music_volume as fn(&Settings) -> u8,
+                Settings::music_gain as fn(&Settings) -> f32,
+                DEFAULT_MUSIC_VOLUME,
+            ),
+            (
+                Knob::SfxVolume,
+                Settings::sfx_volume as fn(&Settings) -> u8,
+                Settings::sfx_gain as fn(&Settings) -> f32,
+                DEFAULT_SFX_VOLUME,
+            ),
+            (
+                Knob::AmbienceVolume,
+                Settings::ambience_volume as fn(&Settings) -> u8,
+                Settings::ambience_gain as fn(&Settings) -> f32,
+                DEFAULT_AMBIENCE_VOLUME,
+            ),
+        ] {
+            let mut settings = Settings::default();
+            assert_eq!(read(&settings), default, "{knob:?} does not start at rest");
+            assert_eq!(settings.reading(knob), format!("{default}%"));
+
+            settings.adjust(knob, -1_000);
+            assert_eq!(read(&settings), 0, "{knob:?} does not reach silence");
+            assert!(gain(&settings).abs() < f32::EPSILON);
+            assert_eq!(settings.reading(knob), "0%");
+
+            settings.adjust(knob, 1_000);
+            assert_eq!(read(&settings), 100, "{knob:?} does not reach unity");
+            assert!((gain(&settings) - 1.0).abs() < f32::EPSILON);
+            assert_eq!(settings.reading(knob), "100%");
+
+            // One press is one step, in both directions, and it is reversible — the property
+            // the whole `adjust` shape exists for.
+            settings.adjust(knob, -1);
+            let stepped = read(&settings);
+            assert!(
+                (90..100).contains(&stepped),
+                "{knob:?} stepped to {stepped}"
+            );
+            settings.adjust(knob, 1);
+            assert_eq!(read(&settings), 100, "{knob:?} did not step back");
+
+            settings.reset(Tab::Audio);
+            assert_eq!(read(&settings), default);
+        }
+    }
+
+    /// **The ordering survives the conversion**, which is the half of it a `const` block
+    /// cannot reach.
+    ///
+    /// The constants are pinned where they are declared, at compile time. What a listener
+    /// actually gets is the *gain* each one converts to, and three correct constants read
+    /// through a wrong conversion would be three wrong levels — so the order is asserted
+    /// again on the values `audio/` reads. The review on #997 is why either exists: the sweep
+    /// over the three knobs compares each default against its own constant, which is a
+    /// comparison of a thing with itself and would have stayed green through any reordering
+    /// while this file and the pull request both claimed the ordering was pinned.
+    #[test]
+    fn the_world_defaults_keep_their_ordering_once_they_are_gains() {
+        // The constants themselves are pinned at compile time beside their declarations —
+        // clippy rightly refuses a runtime assertion over two constants, and a build error is
+        // the stronger answer anyway. What is left to check here is the half that is not
+        // constant-folded: the gains a reader actually takes, which is what `audio/` reaches
+        // for and where a broken conversion would show up.
+        let settings = Settings::default();
+        assert!(settings.sfx_gain() > settings.ambience_gain());
+        assert!(settings.ambience_gain() > settings.music_gain());
+    }
+
+    /// **The ducking knob is a depth and the mixer wants a gain, so one of the two has to be
+    /// the complement of the other.** Both ends, because the identity is at the bottom and
+    /// silence is at the top — the direction a reader is most likely to assume backwards.
+    #[test]
+    fn the_ducking_knob_reads_as_a_depth_and_converts_to_a_gain() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.voice_ducking(), DEFAULT_VOICE_DUCKING);
+        assert!(
+            (settings.duck_gain() - 0.4).abs() < f32::EPSILON,
+            "60% down"
+        );
+
+        settings.adjust(Knob::VoiceDucking, -1_000);
+        assert_eq!(settings.voice_ducking(), MIN_VOICE_DUCKING);
+        assert_eq!(settings.reading(Knob::VoiceDucking), "0%");
+        assert!(
+            (settings.duck_gain() - 1.0).abs() < f32::EPSILON,
+            "no ducking has to be exactly unity, not nearly"
+        );
+
+        settings.adjust(Knob::VoiceDucking, 1_000);
+        assert_eq!(settings.voice_ducking(), MAX_VOICE_DUCKING);
+        assert_eq!(settings.reading(Knob::VoiceDucking), "100%");
+        assert!(
+            settings.duck_gain().abs() < f32::EPSILON,
+            "ducking all the way is silence"
+        );
+
+        settings.reset(Tab::Audio);
+        assert_eq!(settings.voice_ducking(), DEFAULT_VOICE_DUCKING);
+    }
+
+    /// **The music switch and the music volume are two settings, and this is what says so.**
+    ///
+    /// Turning the switch off leaves the volume exactly where a player left it, so switching
+    /// back on restores the level rather than a default — which is the behaviour that makes
+    /// a switch worth having beside a knob that already reaches zero.
+    #[test]
+    fn the_music_switch_is_not_the_music_volume() {
+        let mut settings = Settings::default();
+        assert!(settings.music_on());
+        settings.adjust(Knob::MusicVolume, -4);
+        let chosen = settings.music_volume();
+        assert_ne!(chosen, DEFAULT_MUSIC_VOLUME);
+
+        settings.toggle_music();
+        assert!(!settings.music_on());
+        assert_eq!(
+            settings.music_volume(),
+            chosen,
+            "the switch moved the volume"
+        );
+
+        settings.toggle_music();
+        assert!(settings.music_on(), "the switch does not switch back");
+        assert_eq!(settings.music_volume(), chosen);
+
+        // And the mirror: the volume at zero leaves the switch on.
+        settings.adjust(Knob::MusicVolume, -1_000);
+        assert_eq!(settings.music_volume(), 0);
+        assert!(settings.music_on(), "silence turned the generator off");
+    }
+
+    /// The fold is off until a player asks for it, and it is its own setting.
+    #[test]
+    fn the_mono_fold_is_off_until_it_is_asked_for() {
+        let mut settings = Settings::default();
+        assert!(!settings.mono_audio());
+        settings.toggle_mono_audio();
+        assert!(settings.mono_audio());
+        settings.reset(Tab::Audio);
+        assert!(!settings.mono_audio(), "the audio reset left the fold on");
+    }
+
+    /// **A hand-edited file cannot put a new volume outside the bound this module promises.**
+    ///
+    /// `store` hands whatever it read to `clamp`, so the four values that arrive as numbers
+    /// are checked here rather than at every reader — the rule the module doc states about
+    /// values reaching it from elsewhere.
+    #[test]
+    fn a_volume_from_outside_this_module_is_clamped_into_its_bound() {
+        let mut settings = Settings {
+            music_volume: 200,
+            sfx_volume: 201,
+            ambience_volume: 202,
+            voice_ducking: 203,
+            ..Settings::default()
+        };
+        settings.clamp();
+        assert_eq!(settings.music_volume(), MAX_MUSIC_VOLUME);
+        assert_eq!(settings.sfx_volume(), MAX_SFX_VOLUME);
+        assert_eq!(settings.ambience_volume(), MAX_AMBIENCE_VOLUME);
+        assert_eq!(settings.voice_ducking(), MAX_VOICE_DUCKING);
+        // Every gain a reader takes from a clamped value is therefore inside `0..=1`, which
+        // is what `audio/` relies on rather than checking.
+        for gain in [
+            settings.music_gain(),
+            settings.sfx_gain(),
+            settings.ambience_gain(),
+            settings.duck_gain(),
+        ] {
+            assert!((0.0..=1.0).contains(&gain), "{gain} is outside the range");
+        }
+    }
+
     /// **The audience is a request, and the knob holds both of its values.**
     ///
     /// Widest first, so one press narrows. Nothing here asks whether the player *has* a
@@ -2499,6 +2935,12 @@ mod tests {
             settings.adjust(Knob::MasterVolume, -3);
             settings.adjust_with_choices(Knob::OutputDevice, 2, bounds);
             settings.adjust_with_choices(Knob::InputDevice, 2, bounds);
+            settings.adjust(Knob::MusicVolume, -3);
+            settings.adjust(Knob::SfxVolume, -2);
+            settings.adjust(Knob::AmbienceVolume, -4);
+            settings.adjust(Knob::VoiceDucking, 2);
+            settings.toggle_music();
+            settings.toggle_mono_audio();
             settings.adjust(Knob::VoiceVolume, -3);
             settings.adjust(Knob::VoiceMode, 1);
             settings.adjust(Knob::VoiceActivationThreshold, -2);
@@ -2548,19 +2990,33 @@ mod tests {
             before.voice_mode(),
             "resetting graphics moved the voice mode"
         );
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() != Tab::Graphics) {
+            assert_eq!(
+                after.reading(knob),
+                before.reading(knob),
+                "resetting graphics moved {knob:?}"
+            );
+        }
+        assert_eq!(after.music_on(), before.music_on());
+        assert_eq!(after.mono_audio(), before.mono_audio());
 
         // And the mirror: controls back, graphics untouched.
         let mut after = moved();
         after.reset(Tab::Controls);
         assert_eq!(*after.bindings(), Bindings::default());
         assert!((after.look_sensitivity() - DEFAULT_LOOK_SENSITIVITY).abs() < f32::EPSILON);
-        for knob in KNOBS.into_iter().filter(|knob| knob.tab() == Tab::Graphics) {
+        // Every knob on a tab this reset does not own, rather than the Graphics ones alone:
+        // the Audio tab grew four knobs at #982 and a filter naming one tab would not have
+        // covered any of them.
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() != Tab::Controls) {
             assert_eq!(
                 after.reading(knob),
                 before.reading(knob),
                 "resetting controls moved {knob:?}"
             );
         }
+        assert_eq!(after.music_on(), before.music_on());
+        assert_eq!(after.mono_audio(), before.mono_audio());
         assert_eq!(after.vsync(), before.vsync());
         assert_eq!(after.readout_shown(), before.readout_shown());
         assert_eq!(after.readout_corner(), before.readout_corner());
@@ -2580,6 +3036,12 @@ mod tests {
         assert_eq!(after.master_volume(), DEFAULT_MASTER_VOLUME);
         assert_eq!(after.output_device(), &DeviceChoice::SystemDefault);
         assert_eq!(after.input_device(), &DeviceChoice::SystemDefault);
+        assert_eq!(after.music_volume(), DEFAULT_MUSIC_VOLUME);
+        assert_eq!(after.sfx_volume(), DEFAULT_SFX_VOLUME);
+        assert_eq!(after.ambience_volume(), DEFAULT_AMBIENCE_VOLUME);
+        assert_eq!(after.voice_ducking(), DEFAULT_VOICE_DUCKING);
+        assert_eq!(after.music_on(), DEFAULT_MUSIC_ON, "the music switch");
+        assert_eq!(after.mono_audio(), DEFAULT_MONO_AUDIO, "the mono fold");
         assert_eq!(after.voice_volume(), DEFAULT_VOICE_VOLUME);
         assert_eq!(after.voice_mode(), DEFAULT_VOICE_MODE);
         assert_eq!(after.voice_audience(), DEFAULT_VOICE_AUDIENCE);
@@ -2592,7 +3054,7 @@ mod tests {
             before.bindings(),
             "resetting audio cleared a key binding"
         );
-        for knob in KNOBS.into_iter().filter(|knob| knob.tab() == Tab::Graphics) {
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() != Tab::Audio) {
             assert_eq!(
                 after.reading(knob),
                 before.reading(knob),

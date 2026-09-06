@@ -210,6 +210,12 @@ fn render(settings: &Settings) -> String {
         "input-device {}\n",
         device_field(&settings.input_device)
     ));
+    out.push_str(&format!("music-volume {}\n", settings.music_volume));
+    out.push_str(&format!("music {}\n", on_or_off(settings.music_on)));
+    out.push_str(&format!("sfx-volume {}\n", settings.sfx_volume));
+    out.push_str(&format!("ambience-volume {}\n", settings.ambience_volume));
+    out.push_str(&format!("voice-ducking {}\n", settings.voice_ducking));
+    out.push_str(&format!("mono-audio {}\n", on_or_off(settings.mono_audio)));
     out.push_str(&format!("voice-volume {}\n", settings.voice_volume));
     out.push_str(&format!("voice-mode {}\n", settings.voice_mode.name()));
     out.push_str(&format!(
@@ -325,6 +331,30 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             "input-device" => match device_from_field(value) {
                 Some(parsed) => settings.input_device = parsed,
                 None => refuse("the system default microphone or a saved device"),
+            },
+            "music-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.music_volume = parsed,
+                Err(_) => refuse("a music volume"),
+            },
+            "music" => match flag(value) {
+                Some(parsed) => settings.music_on = parsed,
+                None => refuse("on or off"),
+            },
+            "sfx-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.sfx_volume = parsed,
+                Err(_) => refuse("an effects volume"),
+            },
+            "ambience-volume" => match value.parse::<u8>() {
+                Ok(parsed) => settings.ambience_volume = parsed,
+                Err(_) => refuse("an ambience volume"),
+            },
+            "voice-ducking" => match value.parse::<u8>() {
+                Ok(parsed) => settings.voice_ducking = parsed,
+                Err(_) => refuse("a ducking amount"),
+            },
+            "mono-audio" => match flag(value) {
+                Some(parsed) => settings.mono_audio = parsed,
+                None => refuse("on or off"),
             },
             "voice-volume" => match value.parse::<u8>() {
                 Ok(parsed) => settings.voice_volume = parsed,
@@ -500,6 +530,12 @@ mod tests {
         settings.adjust(Knob::FogStart, 2);
         settings.adjust(Knob::FrameCap, 3);
         settings.adjust(Knob::MasterVolume, -2);
+        settings.adjust(Knob::MusicVolume, -2);
+        settings.adjust(Knob::SfxVolume, -3);
+        settings.adjust(Knob::AmbienceVolume, 2);
+        settings.adjust(Knob::VoiceDucking, -4);
+        settings.toggle_music();
+        settings.toggle_mono_audio();
         settings.adjust(Knob::VoiceVolume, -3);
         settings.adjust(Knob::VoiceMode, -1);
         settings.adjust(Knob::VoiceActivationThreshold, 3);
@@ -544,6 +580,79 @@ mod tests {
             .filter(|name| name.ends_with(".tmp"))
             .collect();
         assert!(strays.is_empty(), "{strays:?}");
+    }
+
+    /// **The fixture above is a hand-kept list, and this is what stops it falling behind.**
+    ///
+    /// `every_setting_survives_a_restart` can only prove that what it *moved* comes back, so
+    /// a setting nobody added to `every_field_moved` is a setting the round trip silently
+    /// stops covering — the shape of drift `client/AGENTS.md` names in three other places,
+    /// and the one a new knob is most likely to walk into. This compares every knob's
+    /// reading in the fixture against its reading at rest, so a knob that is not moved fails
+    /// here by name rather than going quietly uncovered.
+    #[test]
+    fn the_round_trip_fixture_moves_every_knob_the_model_offers() {
+        let moved = every_field_moved();
+        let untouched = Settings::default();
+        let monitors = super::super::MonitorChoices::named(&["Main display", "Side display"]);
+        let devices = super::super::AudioDevices::named(
+            &["HDA Intel PCH: ALC295 Analog"],
+            &["HDA Intel PCH: ALC295 Analog Mic"],
+        );
+        let bounds = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        for knob in super::super::KNOBS {
+            assert_ne!(
+                moved.reading_with_choices(knob, bounds),
+                untouched.reading_with_choices(knob, bounds),
+                "{knob:?} is not moved by the round-trip fixture, so nothing round-trips it"
+            );
+        }
+        // The flags, which are not knobs and are therefore not in that list.
+        assert_ne!(moved.vsync(), untouched.vsync());
+        assert_ne!(moved.readout_shown(), untouched.readout_shown());
+        assert_ne!(moved.readout_corner(), untouched.readout_corner());
+        assert_ne!(moved.music_on(), untouched.music_on());
+        assert_ne!(moved.mono_audio(), untouched.mono_audio());
+        assert_ne!(moved.default_mount(), untouched.default_mount());
+        assert_ne!(moved.bindings(), untouched.bindings());
+    }
+
+    /// One unreadable line among the new audio settings costs that one setting and no other,
+    /// and a switch that is not `on` or `off` is refused rather than read as either.
+    #[test]
+    fn a_bad_audio_line_costs_one_setting_and_leaves_the_rest() {
+        let scratch = Scratch::new("settings-bad-audio-line");
+        let path = scratch.join("settings");
+        fs::write(
+            &path,
+            "music-volume loud\nsfx-volume 30\nmusic perhaps\nmono-audio on\n\
+             ambience-volume 15\nvoice-ducking 25\n",
+        )
+        .expect("a scratch file");
+
+        let (settings, complaints) = load(&path);
+        assert_eq!(
+            settings.music_volume(),
+            Settings::default().music_volume(),
+            "a bad music volume did not fall back to the default"
+        );
+        assert_eq!(
+            settings.music_on(),
+            Settings::default().music_on(),
+            "a switch that says neither was read as one of them"
+        );
+        assert_eq!(
+            settings.sfx_volume(),
+            30,
+            "a bad line took the next with it"
+        );
+        assert_eq!(settings.ambience_volume(), 15);
+        assert_eq!(settings.voice_ducking(), 25);
+        assert!(settings.mono_audio());
+        assert_eq!(complaints.len(), 2, "{complaints:?}");
     }
 
     #[test]

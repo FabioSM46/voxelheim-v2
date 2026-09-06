@@ -1457,15 +1457,17 @@ a knob that cannot be tested, and an SFX or music bus would arrive with the feat
 it. What that argument leaves out is the *policy*: `MAX_SOURCES` is one pool of sixteen shared
 with voice, and "who gets the last slot" is cheap to answer while nothing is feeding the new
 buses and expensive once an ambience bed and a conversation are competing for one in front of
-a player. So the buses, their gains and their allocation policy landed first, and the sounds
-arrive after them. The knobs are still tested: a bus with a source on it is testable through
-`mixer::Sink` whether or not anything in the shipped client claims one, and every assertion
-about the new gains renders a source rather than reading a field back.
+a player. So the buses, their gains, their persistence and their allocation policy landed
+first, and the sounds arrive after them. The knobs are still tested: a bus with a source on it
+is testable through `mixer::Sink` whether or not anything in the shipped client claims one, and
+every assertion about the new gains renders a source rather than reading a field back.
 
-**`duck` is one multiplier on two buses and it is exactly `1.0` when nobody is speaking.** A
-Bevy system writes the target; the render path advances towards it by one block's worth of
-time, the arrangement the occlusion ramp already has, because a gain that moved with the frame
-rate of whatever was looking at the world would step audibly on a long frame. At a target of
+**`duck` is one multiplier on two buses and it is exactly `1.0` when nobody is speaking.** It
+is driven from `Speaking` — the resource `audio/heard.rs` writes when it *plays* a frame of
+somebody's voice — and never from a level detector of the mixer's own, so the trigger is audio
+the listener is actually hearing and it inherits `SPEAKING_FOR`'s one-second tail rather than
+pumping between two words. A Bevy system writes the target; the render path advances towards it
+by one block's worth of time, the arrangement the occlusion ramp already has. At a target of
 `1.0` the multiply is the identity, for the same reason the occlusion filter is transparent at
 zero: a stage in front of every source has to be provably doing nothing when it is turned off.
 
@@ -1514,6 +1516,21 @@ a sample is multiplied by, and it crosses **one way**: `follow_the_settings` rea
 setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
+
+**The four bus volumes below it are the same statement again, and their defaults are an
+ordering rather than four numbers.** `Knob::MusicVolume`, `Knob::SfxVolume` and
+`Knob::AmbienceVolume` each carry a bound, a step and a default here and cross the seam as a
+gain, exactly as the master does. Effects start at **unity**, because the one-shots are what
+the master volume is *for* and a player who has turned the master to the top must not still be
+unable to hear a hit; ambience at **70**, under the effects it sits behind; music at **60**,
+lowest, because a score arriving at the level of the world it is scoring is a score a player's
+first act is turning down. The ordering is the statement — effects over ambience over music —
+and it is asserted as such, because the bus is empty in this client and nobody can yet hear
+whether the exact numbers are right. `Knob::VoiceDucking` is a **depth** where the others are
+levels: a player reads "how far do the beds get out of the way" and the mixer multiplies by a
+gain, so `Settings::duck_gain` is the one place that complement is taken. `settings/` names no
+type from `audio/` for any of this — which bus a knob reaches is decided in `ui/settings.rs`,
+by `bus_of`, because a knob is a number with a bound and `settings/` is a leaf.
 
 **`Knob::VoiceVolume` is the same statement one bus down, and its default is not the
 master's.** `Settings::voice_gain()` is `master_gain()`'s arithmetic and reaches `Bus::Voice`,
@@ -1786,9 +1803,10 @@ had just been given it — reading a stale `Ambience` off a slot that had just b
 would have broken the one rule the whole policy exists for.
 
 **A bus can be switched off, and off means no source rather than a gain of zero.** `Music` is
-the only bus that will have that control. `Mixer::set_enabled` refuses new claims *and* revokes
+the only bus with that control today. `Mixer::set_enabled` refuses new claims *and* revokes
 what the bus is holding, because a generator running into a ring that is multiplied by nothing
-still spends one of sixteen slots. **The store comes before the sweep and a claim re-reads the
+still spends one of sixteen slots. The music volume reaching zero is deliberately the other
+thing, and the Audio tab draws both. **The store comes before the sweep and a claim re-reads the
 flag after winning its slot, both `SeqCst`** — the third finding on #996 was that those were two
 steps with no ordering between them, so a claim could pass the check while the sweep ran and
 land a live source on a bus that is off. With a total order over the four operations, either the
@@ -2738,8 +2756,11 @@ Recorded here so the next reader does not mistake them for oversights:
   readout, the two tabs and one reset per tab — and #851 added the third tab, the master volume,
   the output device and the speaker test, so what remains outside is deliberate: *cursor
   capture*, which belongs to the camera-control issue this file has named for a while and that
-  still does not exist; *voice*, whose knobs are #853's and not this issue's; and *shadows, ambient occlusion and texture quality*, which have no shadow map, no AO
-  pass and no texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
+  still does not exist; and *shadows, ambient occlusion and texture quality*, which have no
+  shadow map, no AO pass and no texture behind them. Voice was on that list until #853 and the
+  four bus levels, the music switch, the ducking depth and the mono fold until #982 — the last
+  of which is the one entry whose *sounds* still do not exist, deliberately, because its
+  allocation policy was the part worth settling early. Nor the pitch limit, which `player/constants.rs` explains is an
   invariant rather than a preference.
 - **A reset is scoped by a tab, and the obvious implementation is the bug.** `Settings::reset`
   names one tab's fields; writing `Settings::default()` back would look right on the tab
@@ -2755,7 +2776,10 @@ Recorded here so the next reader does not mistake them for oversights:
   This one gives the area below the strip `CONTENT_HEIGHT` whichever tab is up, and
   `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails when a row is added past what
   that height was sized for — rather than the panel quietly growing and taking the strip
-  with it.
+  with it. #982 moved `CONTENT_ROWS` to sixteen and made **Audio** the tallest tab for the
+  first time; the four tone tests cost no row each because each is drawn as a fourth control
+  inside the knob it proves (`Row::BusKnob`), where four rows of their own would have taken
+  the panel past the smallest window this client supports.
 - **A module that names a file under the data directory carries #230's guard, and this is
   the second one.** `Environment::read` is `#[cfg(not(test))]` in `settings/store.rs` for
   the same reason it is in `net/session.rs`: a test build that can ask what
