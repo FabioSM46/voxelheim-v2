@@ -820,3 +820,62 @@ func TestACreationWithAForbiddenAppearanceIsRefusedBeforeItIsStored(t *testing.T
 		t.Error("a refused creation took the name anyway")
 	}
 }
+
+func TestWorldAutosaveCannotWriteAnotherCharacterOrUndoFinalRecord(t *testing.T) {
+	store, err := persist.OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identities, _ := internalIdentities(t, store)
+	id := identity.IDOf(identity.Account{77})
+	first, err := store.Create(id, "Traveller", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create(id, "Keeper", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !identities.claim(id) {
+		t.Fatal("claim failed")
+	}
+	self := identities.playing(Admitted{ID: id}, second, false, nil)
+	stale := game.Life{Pos: [3]float64{1, 64, 1}, Health: 40, Hunger: 12, Experience: 50}
+	current := game.Life{Pos: [3]float64{9, 70, 9}, Health: 100, Hunger: 83, Experience: 725}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{{PlayerID: id, CharacterID: uint64(first.ID)}: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := store.Load(second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Unplayed() {
+		t.Fatal("old character's life written to newly selected character")
+	}
+	key := game.InstanceCharacter{PlayerID: id, CharacterID: uint64(second.ID)}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: current}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("correct character autosave lost", err)
+	}
+	if err := identities.Remember(self, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("stale autosave replaced teardown", err)
+	}
+	identities.Release(id)
+	if err := identities.RememberCharacters(map[game.InstanceCharacter]game.Life{key: stale}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err = store.Load(second.ID)
+	if err != nil || rec.Pos != current.Pos {
+		t.Fatal("released claim accepted stale autosave", err)
+	}
+}

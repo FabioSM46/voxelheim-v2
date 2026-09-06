@@ -980,6 +980,25 @@ func (i *Identities) RememberAll(lives map[identity.PlayerID]game.Life) error {
 	return errors.Join(errs...)
 }
 
+// RememberCharacters is the world-manager autosave. It carries the character as
+// well as its account, so a captured life cannot be written to a different character
+// selected between capture and write. Teardown still wins under the same write lock.
+func (i *Identities) RememberCharacters(lives map[game.InstanceCharacter]game.Life) error {
+	i.writeMu.Lock()
+	defer i.writeMu.Unlock()
+	var errs []error
+	for key, life := range lives {
+		character, explored, marks, playing := i.stillPlaying(key.PlayerID)
+		if !playing || uint64(character) != key.CharacterID {
+			continue
+		}
+		if err := i.write(character, life, explored, marks); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // write puts everything one session owns about a character on disk: the life, the map of
 // where it has been, and the marks put on that map. The caller holds writeMu.
 //

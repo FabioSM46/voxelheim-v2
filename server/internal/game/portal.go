@@ -78,7 +78,9 @@ func (m *InstanceManager) EnterPortal(p *Player, request protocol.PortalRequest)
 	if partyID != 0 {
 		m.partyVisits[key] = selected.id
 	}
-	return PortalEntry{Session: selected.snapshot(), Character: character, Return: pos, respawn: respawn}, vnet.RefusalReasonUnknown
+	entry := PortalEntry{Session: selected.snapshot(), Character: character, Return: pos, respawn: respawn}
+	m.portalEntries[character] = entry
+	return entry, vnet.RefusalReasonUnknown
 }
 
 // AtPortal validates exit intent against the selected instance's own anchor.

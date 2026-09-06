@@ -595,9 +595,6 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			stopWorldLifetime()
 		}
 		sim.Leave(player)
-		if portalVisit != nil {
-			cfg.Instances.Leave(portalVisit.Session.ID, portalVisit.Character)
-		}
 		peers.Unsubscribe(entityID)
 		stopStreaming()
 		streaming.Wait()
@@ -645,11 +642,17 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// which is what makes an idle session save its life and give its identity back
 		// rather than hold both until the process restarts.
 		if claimed {
-			if current == phaseInWorld && player != nil {
+			if portalVisit != nil && player == nil && self.Life != nil {
+				cfg.Instances.DisconnectPortal(*portalVisit, *self.Life)
+			}
+			// An external world binding without a portal visit has no known return
+			// point. Keep its previous disk life rather than write foreign coordinates.
+			if current == phaseInWorld && player != nil && (portalVisit != nil || chunks == openBinding.Chunks) {
 				life := player.Record()
 				if portalVisit != nil {
-					// Until reconnect lifecycle restores a retained instance, never
-					// persist an instance coordinate as an open-world position.
+					cfg.Instances.DisconnectPortal(*portalVisit, life)
+					// Disk always contains the open-world return point, including
+					// on graceful shutdown. The instance life stays in memory only.
 					for i, value := range portalVisit.Return {
 						life.Pos[i] = float64(value)
 					}
@@ -1176,11 +1179,59 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return refuse(cErr)
 			}
 			self = resolved
+			if cfg.Instances != nil {
+				life, entry, resumeErr := cfg.Instances.ResumePortal(game.InstanceCharacter{PlayerID: self.ID, CharacterID: uint64(self.Character)})
+				if resumeErr != nil {
+					return fmt.Errorf("session: resume instance: %w", resumeErr)
+				}
+				if life != nil {
+					if self.Life != nil {
+						life.Experience = max(life.Experience, self.Life.Experience)
+					}
+					self.Life = life
+				}
+				portalVisit = entry
+			}
 
 			// The welcome answers the choice rather than the hello, and it is the first
 			// moment every field in it is true: the spawn is this character's, because
 			// there is finally a character to have one.
-			out <- Welcome(cfg, entityID, self)
+			welcomeSelf := self
+			joinSpawn := cfg.Spawn
+			if portalVisit != nil {
+				fallback := *self.Life
+				for axis, value := range portalVisit.Return {
+					fallback.Pos[axis] = float64(value)
+				}
+				welcomeSelf.Life = &fallback
+			}
+			if portalVisit == nil {
+				out <- Welcome(cfg, entityID, welcomeSelf)
+			} else {
+				ack := make(chan struct{})
+				flushWriter <- writerBarrier{frame: Welcome(cfg, entityID, welcomeSelf), done: ack}
+				<-ack
+			}
+			if portalVisit != nil {
+				instance := portalVisit.Session
+				arrival, exit := world.InstanceAnchors(instance.Seed)
+				joinSpawn = [3]float32{float32(arrival.X) + .5, float32(arrival.Y), float32(arrival.Z) + .5}
+				position := [3]float32{float32(self.Life.Pos[0]), float32(self.Life.Pos[1]), float32(self.Life.Pos[2])}
+				frame, encodeErr := protocol.EncodeWorldChange(protocol.WorldChange{WorldID: instance.ID, WorldSeed: instance.Seed, Arrival: position, HasExitArch: true, ExitArch: [3]int32{int32(exit.X), int32(exit.Y), int32(exit.Z)}})
+				if encodeErr != nil {
+					return encodeErr
+				}
+				ack := make(chan struct{})
+				flushWriter <- writerBarrier{frame: frame, done: ack}
+				<-ack
+				// No player or world worker exists yet. Bind before joining so no
+				// open-world tick can read the restored instance coordinates.
+				sim, chunks = instance.Sim, instance.Chunks
+				releaseWorld()
+				peers, releaseWorld = rootPeers.acquireWorld(chunks)
+				cancelWorld := stopStreaming
+				stopWorldLifetime = context.AfterFunc(instance.Context, func() { cancelWorld(); _ = conn.Close() })
+			}
 			current = phaseInWorld
 			// **The character's name, not the hello's.** The hello carries a display name
 			// and this server no longer reads it: what a player is called here is the name
@@ -1210,7 +1261,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// stored character. Nothing the client said at any point in this handshake
 			// reaches it, and a creation's appearance reaches it only by having been
 			// written down first.
-			admitted, jErr := sim.JoinCharacterWithDelivery(entityID, self.ID, uint64(self.Character), self.Name, cfg.Spawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot, offerVoice)
+			admitted, jErr := sim.JoinCharacterWithDelivery(entityID, self.ID, uint64(self.Character), self.Name, joinSpawn, self.Appearance, self.Life, trySend, deliverLatestSnapshot, offerVoice)
 			if jErr != nil {
 				return fmt.Errorf("session: join the simulation: %w", jErr)
 			}
@@ -1247,20 +1298,22 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// then the batches this session reveals. Reversed, a client would receive a
 			// batch and then a page that contains it, which is harmless — the ledger is a
 			// union — and needlessly hard to read in a capture.
-			if eErr := sendExplored(enqueue, self.Explored.Snapshot()); eErr != nil {
-				return fmt.Errorf("session: send the explored ledger on join: %w", eErr)
-			}
+			if portalVisit == nil {
+				if eErr := sendExplored(enqueue, self.Explored.Snapshot()); eErr != nil {
+					return fmt.Errorf("session: send the explored ledger on join: %w", eErr)
+				}
 
-			// The character's own marks, once, **empty list included** — which is the one
-			// place this differs from the ledger above it. A MarkerList replaces the
-			// client's copy wholesale, so an empty one is a statement rather than the
-			// absence of one: a character who removed their last mark on another machine
-			// must see it gone here, and silence would leave the previous session's list
-			// standing. MapExplored is additive and therefore has the opposite rule.
-			if mErr := enqueue(protocol.EncodeMarkerList(self.Marks.List())); mErr != nil {
-				return fmt.Errorf("session: send the character's marks on join: %w", mErr)
-			}
+				// The character's own marks, once, **empty list included** — which is the one
+				// place this differs from the ledger above it. A MarkerList replaces the
+				// client's copy wholesale, so an empty one is a statement rather than the
+				// absence of one: a character who removed their last mark on another machine
+				// must see it gone here, and silence would leave the previous session's list
+				// standing. MapExplored is additive and therefore has the opposite rule.
+				if mErr := enqueue(protocol.EncodeMarkerList(self.Marks.List())); mErr != nil {
+					return fmt.Errorf("session: send the character's marks on join: %w", mErr)
+				}
 
+			}
 			startWorld()
 			rootPeers.mu.Lock()
 			rootPeers.controls[entityID] = control
