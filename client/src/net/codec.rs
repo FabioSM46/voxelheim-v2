@@ -4379,6 +4379,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::VoiceHeard(voice_heard(&payload)?))
         }
+        // The contract ships before #961's landmark decoder and map consumer.
+        fb::Payload::LandmarkList => Ok(Message::Deferred(name)),
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
@@ -8756,9 +8758,9 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v30_adds_the_authoritative_voice_relay() {
+    fn protocol_v31_adds_complete_discovered_landmarks() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 30);
+        assert_eq!(fb::ProtocolVersion::Current.0, 31);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -8822,6 +8824,7 @@ mod tests {
             (fb::Payload::PlayerTradeClosed, 60),
             (fb::Payload::VoiceFrame, 61),
             (fb::Payload::VoiceHeard, 62),
+            (fb::Payload::LandmarkList, 63),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -8837,7 +8840,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            63,
+            64,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -8867,7 +8870,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 63] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 64] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -8943,6 +8946,7 @@ mod tests {
         // about a consumer, which is what `MapTile` meant before the map window existed.
         (fb::Payload::VoiceFrame, Handling::ClientOnly),
         (fb::Payload::VoiceHeard, Handling::Consumed),
+        (fb::Payload::LandmarkList, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.

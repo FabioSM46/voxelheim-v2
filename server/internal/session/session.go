@@ -1014,6 +1014,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// own. From here every chunk that reaches this client adds its column to the
 			// ledger, and every view diff that revealed one says so.
 			streamer.RecordExploration(self.Explored)
+			if lErr := streamer.SendLandmarks(); lErr != nil {
+				return lErr
+			}
 
 			// And the other direction over the same list: what the *world* has in a
 			// chunk this session is about to be shown. A settlement's forge and fire are
