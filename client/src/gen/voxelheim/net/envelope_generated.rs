@@ -1013,6 +1013,36 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_portal_request(&self) -> Option<PortalRequest<'a>> {
+        if self.payload_type() == Payload::PortalRequest {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { PortalRequest::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_world_change(&self) -> Option<WorldChange<'a>> {
+        if self.payload_type() == Payload::WorldChange {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { WorldChange::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1087,6 +1117,8 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::VoiceFrame => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceFrame>>("Payload::VoiceFrame", pos),
           Payload::VoiceHeard => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<VoiceHeard>>("Payload::VoiceHeard", pos),
           Payload::LandmarkList => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<LandmarkList>>("Payload::LandmarkList", pos),
+          Payload::PortalRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PortalRequest>>("Payload::PortalRequest", pos),
+          Payload::WorldChange => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WorldChange>>("Payload::WorldChange", pos),
           _ => Ok(()),
         }
      })?
@@ -1770,6 +1802,26 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::LandmarkList => {
                 if let Some(x) = self.payload_as_landmark_list() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::PortalRequest => {
+                if let Some(x) = self.payload_as_portal_request() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::WorldChange => {
+                if let Some(x) = self.payload_as_world_change() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

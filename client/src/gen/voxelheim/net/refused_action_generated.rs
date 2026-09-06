@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 20;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 21;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 21] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 22] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -39,6 +39,7 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 21] = [
     RefusedAction::Mine,
     RefusedAction::Mount,
     RefusedAction::PlayerTrade,
+    RefusedAction::CrossPortal,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -109,9 +110,11 @@ impl RefusedAction {
     pub const Mount: Self = Self(19);
     /// A `PlayerTradeRequest` that did not change or complete a player trade.
     pub const PlayerTrade: Self = Self(20);
+    /// PortalRequest refused without a destination, session id or remote world state.
+    pub const CrossPortal: Self = Self(21);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 20;
+    pub const ENUM_MAX: u8 = 21;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -134,6 +137,7 @@ impl RefusedAction {
         Self::Mine,
         Self::Mount,
         Self::PlayerTrade,
+        Self::CrossPortal,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -159,6 +163,7 @@ impl RefusedAction {
             Self::Mine => Some("Mine"),
             Self::Mount => Some("Mount"),
             Self::PlayerTrade => Some("PlayerTrade"),
+            Self::CrossPortal => Some("CrossPortal"),
             _ => None,
         }
     }

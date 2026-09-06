@@ -43,6 +43,8 @@ const (
 // Config carries the authoritative session parameters announced in
 // ServerWelcome. Every field is the server's decision.
 type Config struct {
+	// Instances is the shared authoritative portal admission service; nil disables entry.
+	Instances    *game.InstanceManager
 	WorldSeed    int64
 	TickRate     uint8
 	ChunkSize    uint16
@@ -397,6 +399,8 @@ func placementSpawn(cfg Config, self Resolved) [3]float32 {
 // noticed, which is how a warning stops being read.
 func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeouts, chunks *world.Cache, sim *game.Sim, peers *Registry, identities *Identities, entityID uint64, log *slog.Logger) (err error) {
 
+	openBinding := WorldBinding{Chunks: chunks, Sim: sim, Context: ctx, Spawn: cfg.Spawn}
+	var portalVisit *game.PortalEntry
 	rootPeers := peers
 	peers, releaseWorld := rootPeers.acquireWorld(chunks)
 	control := &worldControl{changes: make(chan worldChange), done: make(chan struct{})}
@@ -591,6 +595,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			stopWorldLifetime()
 		}
 		sim.Leave(player)
+		if portalVisit != nil {
+			cfg.Instances.Leave(portalVisit.Session.ID, portalVisit.Character)
+		}
 		peers.Unsubscribe(entityID)
 		stopStreaming()
 		streaming.Wait()
@@ -639,7 +646,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// rather than hold both until the process restarts.
 		if claimed {
 			if current == phaseInWorld && player != nil {
-				if rErr := identities.Remember(self, player.Record()); rErr != nil {
+				life := player.Record()
+				if portalVisit != nil {
+					// Until reconnect lifecycle restores a retained instance, never
+					// persist an instance coordinate as an open-world position.
+					for i, value := range portalVisit.Return {
+						life.Pos[i] = float64(value)
+					}
+				}
+				if rErr := identities.Remember(self, life); rErr != nil {
 					// Logged rather than returned: the session is over and the connection
 					// was fine, so failing it would report the wrong thing. Loud, because
 					// this is the line that says a player's record did not survive.
@@ -1254,6 +1269,96 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			continue
 		}
 
+		if msg.Kind == vnet.PayloadPortalRequest {
+			if msg.Portal == nil {
+				return fmt.Errorf("session: %w: absent portal payload", protocol.ErrMalformed)
+			}
+			refusal := func(reason vnet.RefusalReason) error {
+				return enqueue(protocol.EncodeActionRefused(protocol.ActionRefused{Action: vnet.RefusedActionCrossPortal, Reason: reason}))
+			}
+			if portalVisit != nil {
+				_, exit := world.InstanceAnchors(portalVisit.Session.Seed)
+				if !player.AtPortal(*msg.Portal, exit) {
+					if err := refusal(vnet.RefusalReasonNotAtPortal); err != nil {
+						return err
+					}
+					continue
+				}
+				binding := openBinding
+				binding.Spawn = portalVisit.Return
+				binding.Arrival, err = protocol.EncodeWorldChange(protocol.WorldChange{WorldSeed: cfg.WorldSeed, Arrival: binding.Spawn})
+				if err != nil {
+					return err
+				}
+				transitionErr := changeWorld(binding)
+				if chunks == openBinding.Chunks {
+					portalVisit.RestoreRespawn(player)
+					cfg.Instances.Leave(portalVisit.Session.ID, portalVisit.Character)
+					portalVisit = nil
+					// WorldChange discarded the client's open-world map knowledge.
+					// Streaming rediscovers nearby columns only, so restore the full
+					// durable ledger and personal marks on returning too.
+					if transitionErr == nil {
+						if e := sendExplored(enqueue, self.Explored.Snapshot()); e != nil {
+							return e
+						}
+						if e := enqueue(protocol.EncodeMarkerList(self.Marks.List())); e != nil {
+							return e
+						}
+						if warning, active := sim.StormWarning(); active {
+							if e := enqueue(protocol.EncodeStormWarning(warning)); e != nil {
+								return e
+							}
+						}
+					}
+				}
+				if transitionErr != nil {
+					// Failure after switching means the socket failed; membership
+					// follows the actual binding even when output cannot complete.
+					if portalVisit == nil {
+						return transitionErr
+					}
+					if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if cfg.Instances == nil || chunks != openBinding.Chunks {
+				if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
+					return err
+				}
+				continue
+			}
+			entry, reason := cfg.Instances.EnterPortal(player, *msg.Portal)
+			if reason != vnet.RefusalReasonUnknown {
+				if err := refusal(reason); err != nil {
+					return err
+				}
+				continue
+			}
+			arrival, exit := world.InstanceAnchors(entry.Session.Seed)
+			spawn := [3]float32{float32(arrival.X) + .5, float32(arrival.Y), float32(arrival.Z) + .5}
+			transition, encodeErr := protocol.EncodeWorldChange(protocol.WorldChange{WorldID: entry.Session.ID, WorldSeed: entry.Session.Seed, Arrival: spawn, HasExitArch: true, ExitArch: [3]int32{int32(exit.X), int32(exit.Y), int32(exit.Z)}})
+			if encodeErr != nil {
+				cfg.Instances.Leave(entry.Session.ID, entry.Character)
+				return encodeErr
+			}
+			transitionErr := changeWorld(WorldBinding{Chunks: entry.Session.Chunks, Sim: entry.Session.Sim, Context: entry.Session.Context, Spawn: spawn, Arrival: transition})
+			if chunks == entry.Session.Chunks {
+				portalVisit = &entry
+				if transitionErr != nil {
+					return transitionErr
+				}
+			} else {
+				cfg.Instances.Leave(entry.Session.ID, entry.Character)
+				if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
 		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log); hErr != nil {
 			if errors.Is(hErr, errLeaveRequested) {
 				// Inert before the acknowledgement is queued: once the server accepts the
@@ -1282,7 +1387,8 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 // violations: leaving changes agency, not the direction or phase rules of the wire.
 func inertWhileLeaving(kind vnet.Payload) bool {
 	switch kind {
-	case vnet.PayloadPlayerInput,
+	case vnet.PayloadPortalRequest,
+		vnet.PayloadPlayerInput,
 		vnet.PayloadMountRequest,
 		vnet.PayloadDismountRequest,
 		vnet.PayloadBlockEditRequest,
@@ -2160,6 +2266,11 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		return nil
 
 	case vnet.PayloadMarkerPlaceRequest:
+		// Personal marks belong to the open world. A new world cannot name or
+		// mutate that durable ledger, even when a modified client keeps old ids.
+		if streamer != nil && streamer.cache.Finite() {
+			return nil
+		}
 		if msg.MarkerPlace == nil {
 			// Unreachable for the reason the cases above are: Decode sets the payload for
 			// this kind or fails the frame. No player check, deliberately — a mark is not
@@ -2209,6 +2320,9 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		return nil
 
 	case vnet.PayloadMarkerRemoveRequest:
+		if streamer != nil && streamer.cache.Finite() {
+			return nil
+		}
 		if msg.MarkerRemove == nil {
 			log.Debug("marker removal arrived with no intent; discarding")
 			return nil

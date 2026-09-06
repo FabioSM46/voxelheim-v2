@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 52] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 55] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -66,6 +66,9 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 52] = [
     RefusalReason::TradeSlotTaken,
     RefusalReason::NothingToOffer,
     RefusalReason::TradeCooldown,
+    RefusalReason::NotAtPortal,
+    RefusalReason::InstanceLimit,
+    RefusalReason::InstanceUnavailable,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -226,6 +229,12 @@ impl RefusalReason {
     pub const TradeSlotTaken: Self = Self(45);
     pub const NothingToOffer: Self = Self(46);
     pub const TradeCooldown: Self = Self(47);
+    /// Missing, invented, distant or unusable arch; no distinction reveals a session.
+    pub const NotAtPortal: Self = Self(48);
+    /// This server cannot allocate another concurrent instance. No occupancy is sent.
+    pub const InstanceLimit: Self = Self(49);
+    /// Creation or entry failed. No destination, identity or binding details are sent.
+    pub const InstanceUnavailable: Self = Self(50);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -290,6 +299,9 @@ impl RefusalReason {
         Self::TradeSlotTaken,
         Self::NothingToOffer,
         Self::TradeCooldown,
+        Self::NotAtPortal,
+        Self::InstanceLimit,
+        Self::InstanceUnavailable,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -346,6 +358,9 @@ impl RefusalReason {
             Self::TradeSlotTaken => Some("TradeSlotTaken"),
             Self::NothingToOffer => Some("NothingToOffer"),
             Self::TradeCooldown => Some("TradeCooldown"),
+            Self::NotAtPortal => Some("NotAtPortal"),
+            Self::InstanceLimit => Some("InstanceLimit"),
+            Self::InstanceUnavailable => Some("InstanceUnavailable"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

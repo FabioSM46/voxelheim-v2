@@ -237,6 +237,7 @@ type Message struct {
 	MountRequest       *MountRequest
 	DismountRequest    *DismountRequest
 	Voice              *VoiceFrame
+	Portal             *PortalRequest
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -1780,6 +1781,19 @@ func Decode(frame []byte) (msg Message, err error) {
 		var request vnet.LeaveCancelRequest
 		request.Init(table.Bytes, table.Pos)
 		msg.LeaveCancelRequest = &LeaveCancelRequest{}
+
+	case vnet.PayloadPortalRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.PortalRequest
+		request.Init(table.Bytes, table.Pos)
+		msg.Portal = &PortalRequest{}
+		if arch := request.Arch(nil); arch != nil {
+			msg.Portal.Arch = [3]int32{arch.X(), arch.Y(), arch.Z()}
+			msg.Portal.HasArch = true
+		}
 
 	case vnet.PayloadMountRequest:
 		table, tErr := unionPayload(env, msg.Kind)

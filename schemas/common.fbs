@@ -245,6 +245,10 @@ namespace Voxelheim.Net;
 /// This semantic change owes a clean handshake refusal even though the table fields
 /// are appended and V31's staged client deferred this payload. The 2 MiB transport
 /// ceiling remains unchanged. Existing MapTileRequest carries the bounded query.
+/// **V33 crosses portals.** PortalRequest is client -> server and an older server
+/// rejects its unknown tag. WorldChange also independently owes this bump: ignoring
+/// it leaves an older client rendering its old world while the server has moved it.
+/// A successful transition invalidates all world state, not just its arrival position.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -252,7 +256,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 32
+  Current = 33
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

@@ -257,7 +257,11 @@ union Payload {
   //    ProtocolVersion. A client sending this authoritative payload is refused.
   //    V32 keeps tag 63 and gives the table a tile scope and discovery flag.
   //    No new request is needed: the existing MapTileRequest asks for these sites.
-  LandmarkList             // 63  server -> client
+  LandmarkList,            // 63  server -> client
+
+  // V33: appended; an ignored world change would leave peers in different worlds.
+  PortalRequest,           // 64  client -> server
+  WorldChange              // 65  server -> client
 }
 
 table Envelope {

@@ -241,6 +241,10 @@ import "strconv"
 // / This semantic change owes a clean handshake refusal even though the table fields
 // / are appended and V31's staged client deferred this payload. The 2 MiB transport
 // / ceiling remains unchanged. Existing MapTileRequest carries the bounded query.
+// / **V33 crosses portals.** PortalRequest is client -> server and an older server
+// / rejects its unknown tag. WorldChange also independently owes this bump: ignoring
+// / it leaves an older client rendering its old world while the server has moved it.
+// / A successful transition invalidates all world state, not just its arrival position.
 type ProtocolVersion uint16
 
 const (
@@ -249,7 +253,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 32
+	ProtocolVersionCurrent ProtocolVersion = 33
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

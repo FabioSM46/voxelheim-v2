@@ -73,7 +73,8 @@ type collector struct {
 	// kinds is every payload this session received, in arrival order, by type alone.
 	// Types rather than frames because the question it exists to answer is an ordering
 	// one — which outbound lane a frame took is visible only in what it overtook.
-	kinds []vnet.Payload
+	kinds        []vnet.Payload
+	worldChanges []protocol.WorldChange
 }
 
 // collect starts draining conn until the test ends.
@@ -123,6 +124,17 @@ func (c *collector) absorb(frame []byte) {
 	c.kinds = append(c.kinds, env.PayloadType())
 
 	switch env.PayloadType() {
+	case vnet.PayloadWorldChange:
+		var change vnet.WorldChange
+		change.Init(table.Bytes, table.Pos)
+		arrival := change.Arrival(nil)
+		record := protocol.WorldChange{WorldID: change.WorldId(), WorldSeed: change.WorldSeed(), Arrival: [3]float32{arrival.X(), arrival.Y(), arrival.Z()}}
+		if arch := change.ExitArch(nil); arch != nil {
+			record.HasExitArch = true
+			record.ExitArch = [3]int32{arch.X(), arch.Y(), arch.Z()}
+		}
+		c.worldChanges = append(c.worldChanges, record)
+
 	case vnet.PayloadEntitySnapshot:
 		c.snapshots++
 		snapshot := new(vnet.EntitySnapshot)

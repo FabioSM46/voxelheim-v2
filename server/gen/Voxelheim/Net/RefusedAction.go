@@ -70,6 +70,8 @@ const (
 	RefusedActionMount RefusedAction = 19
 	/// A `PlayerTradeRequest` that did not change or complete a player trade.
 	RefusedActionPlayerTrade RefusedAction = 20
+	/// PortalRequest refused without a destination, session id or remote world state.
+	RefusedActionCrossPortal RefusedAction = 21
 )
 
 var EnumNamesRefusedAction = map[RefusedAction]string{
@@ -94,6 +96,7 @@ var EnumNamesRefusedAction = map[RefusedAction]string{
 	RefusedActionMine:           "Mine",
 	RefusedActionMount:          "Mount",
 	RefusedActionPlayerTrade:    "PlayerTrade",
+	RefusedActionCrossPortal:    "CrossPortal",
 }
 
 var EnumValuesRefusedAction = map[string]RefusedAction{
@@ -118,6 +121,7 @@ var EnumValuesRefusedAction = map[string]RefusedAction{
 	"Mine":           RefusedActionMine,
 	"Mount":          RefusedActionMount,
 	"PlayerTrade":    RefusedActionPlayerTrade,
+	"CrossPortal":    RefusedActionCrossPortal,
 }
 
 func (v RefusedAction) String() string {

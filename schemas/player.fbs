@@ -926,7 +926,10 @@ enum RefusedAction : ubyte {
   //    number and remains distinct from the vendor `TradeRequest` vocabulary.
 
   /// A `PlayerTradeRequest` that did not change or complete a player trade.
-  PlayerTrade = 20
+  PlayerTrade = 20,
+
+  /// PortalRequest refused without a destination, session id or remote world state.
+  CrossPortal = 21
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1117,6 +1120,13 @@ enum RefusalReason : ubyte {
   TradeSlotTaken = 45,
   NothingToOffer = 46,
   TradeCooldown = 47,
+
+  /// Missing, invented, distant or unusable arch; no distinction reveals a session.
+  NotAtPortal = 48,
+  /// This server cannot allocate another concurrent instance. No occupancy is sent.
+  InstanceLimit = 49,
+  /// Creation or entry failed. No destination, identity or binding details are sent.
+  InstanceUnavailable = 50,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -2716,4 +2726,37 @@ table VoiceHeard {
   speaker_entity_id: ulong;
   sequence: uint;
   opus: [ubyte];
+}
+
+
+/// Client -> server intent naming only an arch in the CURRENT world. The server
+/// derives the ruin/exit and checks reach from its own player state. No destination,
+/// session id, world identity, player position or outcome is supplied by the client.
+/// An absent arch is NotAtPortal, as are invented and distant anchors. Coordinates
+/// are integer block cells within the playable world; invalid ones get the same refusal.
+/// Entry and exit both use this request and WorldChange as their successful answer.
+table PortalRequest {
+  arch: BlockCoord;
+}
+
+/// Server -> client authoritative world replacement, ordered after all old-world
+/// output and before ANY destination output. Invalidate every world-derived cache:
+/// chunks, meshes, entities (including interpolation/prediction), map tiles,
+/// exploration, markers, landmarks, wards, weather and open world-interaction UI.
+/// Keep the character's identity, inventory and learned mounts. Absence of this frame
+/// is never acceptance. A client sending this payload is a protocol error.
+///
+/// world_id is scoped to this server connection: 0 is the open world announced by
+/// ServerWelcome, nonzero is an ephemeral instance. Together with world_seed it
+/// distinguishes worlds; a seed alone is not identity. Never treat this id as entry
+/// permission or send it back. No other group's identity is ever announced.
+/// arrival is required and all components must be finite and within world bounds.
+/// exit_arch is required exactly when world_id != 0 and names the current instance's
+/// exit interaction cell (not a destination). It is absent in the open world.
+/// The client rejects malformed identity/position/anchor combinations, not clamps.
+table WorldChange {
+  world_id: ulong;
+  world_seed: long;
+  arrival: Vec3;
+  exit_arch: BlockCoord;
 }
