@@ -6,11 +6,9 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-// / One discovered place on the map. Server -> client, never player-authored.
-// / No note, owner or y: this is a place on a two-dimensional map.
-// / Decoder invariants: landmark_id is non-zero; kind is known and not Unknown.
-// / Identity is stable within the world seed across connections and ledger reloads.
-// / Coordinates name the portal arch in block units, not the centre of its ruin.
+// / One server-supplied place on the map. No note, owner or y.
+// / landmark_id is non-zero and stable within the world seed across reconnects.
+// / kind is known and not Unknown. x/z name the arch in block units.
 type Landmark struct {
 	_tab flatbuffers.Table
 }
@@ -94,8 +92,30 @@ func (rcv *Landmark) MutateKind(n LandmarkKind) bool {
 	return rcv._tab.MutateByteSlot(10, byte(n))
 }
 
+// / V32: true only when the arch's actual chunk column is in this character's
+// / exploration ledger. false draws a question mark; true draws a portal spiral.
+// / A missing field is false. Knowing this position reveals no surrounding terrain.
+// / Discovery is monotonic within the session/world: once a server frame says true,
+// / an older false response racing that update must never turn it back into a question.
+func (rcv *Landmark) Discovered() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+// / V32: true only when the arch's actual chunk column is in this character's
+// / exploration ledger. false draws a question mark; true draws a portal spiral.
+// / A missing field is false. Knowing this position reveals no surrounding terrain.
+// / Discovery is monotonic within the session/world: once a server frame says true,
+// / an older false response racing that update must never turn it back into a question.
+func (rcv *Landmark) MutateDiscovered(n bool) bool {
+	return rcv._tab.MutateBoolSlot(12, n)
+}
+
 func LandmarkStart(builder *flatbuffers.Builder) {
-	builder.StartObject(4)
+	builder.StartObject(5)
 }
 func LandmarkAddLandmarkId(builder *flatbuffers.Builder, landmarkId uint64) {
 	builder.PrependUint64Slot(0, landmarkId, 0)
@@ -108,6 +128,9 @@ func LandmarkAddZ(builder *flatbuffers.Builder, z int32) {
 }
 func LandmarkAddKind(builder *flatbuffers.Builder, kind LandmarkKind) {
 	builder.PrependByteSlot(3, byte(kind), 0)
+}
+func LandmarkAddDiscovered(builder *flatbuffers.Builder, discovered bool) {
+	builder.PrependBoolSlot(4, discovered, false)
 }
 func LandmarkEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

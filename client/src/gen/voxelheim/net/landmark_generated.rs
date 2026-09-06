@@ -5,11 +5,9 @@ use super::*;
 pub enum LandmarkOffset {}
 #[derive(Copy, Clone, PartialEq)]
 
-/// One discovered place on the map. Server -> client, never player-authored.
-/// No note, owner or y: this is a place on a two-dimensional map.
-/// Decoder invariants: landmark_id is non-zero; kind is known and not Unknown.
-/// Identity is stable within the world seed across connections and ledger reloads.
-/// Coordinates name the portal arch in block units, not the centre of its ruin.
+/// One server-supplied place on the map. No note, owner or y.
+/// landmark_id is non-zero and stable within the world seed across reconnects.
+/// kind is known and not Unknown. x/z name the arch in block units.
 pub struct Landmark<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -29,6 +27,7 @@ impl<'a> Landmark<'a> {
     pub const VT_X: ::flatbuffers::VOffsetT = 6;
     pub const VT_Z: ::flatbuffers::VOffsetT = 8;
     pub const VT_KIND: ::flatbuffers::VOffsetT = 10;
+    pub const VT_DISCOVERED: ::flatbuffers::VOffsetT = 12;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -48,6 +47,7 @@ impl<'a> Landmark<'a> {
         builder.add_landmark_id(args.landmark_id);
         builder.add_z(args.z);
         builder.add_x(args.x);
+        builder.add_discovered(args.discovered);
         builder.add_kind(args.kind);
         builder.finish()
     }
@@ -88,6 +88,22 @@ impl<'a> Landmark<'a> {
                 .unwrap()
         }
     }
+    /// V32: true only when the arch's actual chunk column is in this character's
+    /// exploration ledger. false draws a question mark; true draws a portal spiral.
+    /// A missing field is false. Knowing this position reveals no surrounding terrain.
+    /// Discovery is monotonic within the session/world: once a server frame says true,
+    /// an older false response racing that update must never turn it back into a question.
+    #[inline]
+    pub fn discovered(&self) -> bool {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<bool>(Landmark::VT_DISCOVERED, Some(false))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Landmark<'_> {
@@ -101,6 +117,7 @@ impl ::flatbuffers::Verifiable for Landmark<'_> {
             .visit_field::<i32>("x", Self::VT_X, false)?
             .visit_field::<i32>("z", Self::VT_Z, false)?
             .visit_field::<LandmarkKind>("kind", Self::VT_KIND, false)?
+            .visit_field::<bool>("discovered", Self::VT_DISCOVERED, false)?
             .finish();
         Ok(())
     }
@@ -110,6 +127,7 @@ pub struct LandmarkArgs {
     pub x: i32,
     pub z: i32,
     pub kind: LandmarkKind,
+    pub discovered: bool,
 }
 impl<'a> Default for LandmarkArgs {
     #[inline]
@@ -119,6 +137,7 @@ impl<'a> Default for LandmarkArgs {
             x: 0,
             z: 0,
             kind: LandmarkKind::Unknown,
+            discovered: false,
         }
     }
 }
@@ -147,6 +166,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> LandmarkBuilder<'a, 'b, A> {
             .push_slot::<LandmarkKind>(Landmark::VT_KIND, kind, LandmarkKind::Unknown);
     }
     #[inline]
+    pub fn add_discovered(&mut self, discovered: bool) {
+        self.fbb_
+            .push_slot::<bool>(Landmark::VT_DISCOVERED, discovered, false);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> LandmarkBuilder<'a, 'b, A> {
@@ -170,6 +194,7 @@ impl ::core::fmt::Debug for Landmark<'_> {
         ds.field("x", &self.x());
         ds.field("z", &self.z());
         ds.field("kind", &self.kind());
+        ds.field("discovered", &self.discovered());
         ds.finish()
     }
 }

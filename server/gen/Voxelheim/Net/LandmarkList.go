@@ -6,26 +6,36 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-// / The complete set of this character's discovered landmarks. Server -> client.
-// / REPLACES the client's copy wholesale; no delta, pagination or merge with old entries.
-// / An empty list is legal and ordinary, including on a fresh character's welcome.
-// / No place, remove or edit request exists: discovery is the server's intersection of
-// / seed-derived ruin sites and this character's explored chunk-column ledger. An arch
-// / whose column is unexplored must never appear, regardless of any client request.
-// / Sent after welcome and after new exploration reveals another portal.
+// / V32: all landmarks in ONE map-tile rectangle, server -> client.
+// / Replaces membership only inside that half-open rectangle; never clears another
+// / tile or the entire map. Empty means no landmark in this rectangle. There is no
+// / initial whole-world or whole-character list, and no global scan or persistence.
+// /
+// / Every accepted MapTileRequest earns this response beside its terrain MapTile,
+// / even when every terrain pixel is fogged. New exploration discovering an arch
+// / also pushes the containing scale-1 tile without requiring a request or map reopen.
+// / There is no landmark place, remove or edit request; requests never discover sites.
 // /
 // / Decoder invariants:
-// /   - landmarks is present; empty is legal
-// /   - at most 65,536 entries, checked before allocation or iteration
-// /   - every entry satisfies Landmark, and landmark ids are unique within the list
+// /   - landmarks is present; empty is legal; at most ONE entry
+// /   - scale is exactly 1, 4 or 16, never the absent-field zero
+// /   - origins are multiples of 64*scale, exactly as in MapTileRequest
+// /   - every entry satisfies Landmark and lies in
+// /     [origin_x, origin_x+64*scale) x [origin_z, origin_z+64*scale)
+// /   - calculate the upper bounds in wide arithmetic, before coordinate comparisons
 // /
-// / The bound covers the entire exploration ledger (at most one portal per column),
-// / with no truncation or player-marker budget involved. V31 raises the frame limit to
-// / 2 MiB to fit this complete list; receivers must still reject oversized lists.
+// / Every tile fits inside one 8192-block ruin cell (64,256,1024 divide 8192),
+// / so one deterministic site lookup suffices and at most one portal can appear.
+// / No list truncation is permitted. Rate limiting is the existing tile request bucket.
 // /
-// / Both this list and the existing ledger are implicitly scoped to the one open world.
-// / The arc that adds party instances must scope both per world; no unused world id or
-// / new persistence is introduced here. Discovery is rebuilt from the ledger and seed.
+// / Across scales, identify and draw each landmark once by its stable id. Scoped
+// / replacement removes previous entries only in the named rectangle, including when
+// / empty. For an id retained in a response, previously received discovered=true
+// / remains true: exploration is additive, and the request and discovery senders can
+// / race. On disconnect discard all cached positions and discovery evidence.
+// /
+// / Both this state and exploration belong to the current open world; the future
+// / party-instance arc must scope both per world. No unused world identifier is added.
 type LandmarkList struct {
 	_tab flatbuffers.Table
 }
@@ -81,14 +91,59 @@ func (rcv *LandmarkList) LandmarksLength() int {
 	return 0
 }
 
+func (rcv *LandmarkList) OriginX() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *LandmarkList) MutateOriginX(n int32) bool {
+	return rcv._tab.MutateInt32Slot(6, n)
+}
+
+func (rcv *LandmarkList) OriginZ() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *LandmarkList) MutateOriginZ(n int32) bool {
+	return rcv._tab.MutateInt32Slot(8, n)
+}
+
+func (rcv *LandmarkList) Scale() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *LandmarkList) MutateScale(n byte) bool {
+	return rcv._tab.MutateByteSlot(10, n)
+}
+
 func LandmarkListStart(builder *flatbuffers.Builder) {
-	builder.StartObject(1)
+	builder.StartObject(4)
 }
 func LandmarkListAddLandmarks(builder *flatbuffers.Builder, landmarks flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(landmarks), 0)
 }
 func LandmarkListStartLandmarksVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func LandmarkListAddOriginX(builder *flatbuffers.Builder, originX int32) {
+	builder.PrependInt32Slot(1, originX, 0)
+}
+func LandmarkListAddOriginZ(builder *flatbuffers.Builder, originZ int32) {
+	builder.PrependInt32Slot(2, originZ, 0)
+}
+func LandmarkListAddScale(builder *flatbuffers.Builder, scale byte) {
+	builder.PrependByteSlot(3, scale, 0)
 }
 func LandmarkListEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

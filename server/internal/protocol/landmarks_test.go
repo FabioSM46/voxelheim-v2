@@ -11,7 +11,7 @@ import (
 	flatbuffers "github.com/google/flatbuffers/go"
 )
 
-func readLandmarks(t *testing.T, frame []byte) []Landmark {
+func readLandmarks(t *testing.T, frame []byte) LandmarkList {
 	t.Helper()
 	env := vnet.GetRootAsEnvelope(frame, 0)
 	if env.PayloadType() != vnet.PayloadLandmarkList {
@@ -27,84 +27,89 @@ func readLandmarks(t *testing.T, frame []byte) []Landmark {
 	if vectorTable.Offset(4) == 0 {
 		t.Fatal("absent vector, even empty must be present")
 	}
-	out := make([]Landmark, list.LandmarksLength())
-	for i := range out {
+	out := LandmarkList{OriginX: list.OriginX(), OriginZ: list.OriginZ(), Scale: list.Scale(), Landmarks: make([]Landmark, list.LandmarksLength())}
+	for i := range out.Landmarks {
 		var l vnet.Landmark
 		if !list.Landmarks(&l, i) {
-			t.Fatalf("absent landmark %d", i)
+			t.Fatal("absent landmark")
 		}
-		out[i] = Landmark{LandmarkID: l.LandmarkId(), X: l.X(), Z: l.Z(), Kind: l.Kind()}
+		out.Landmarks[i] = Landmark{LandmarkID: l.LandmarkId(), X: l.X(), Z: l.Z(), Kind: l.Kind(), Discovered: l.Discovered()}
 	}
 	return out
 }
 
 func TestLandmarkListRoundTripPreservesEveryEntry(t *testing.T) {
-	want := []Landmark{{LandmarkID: 1, X: -46757, Z: 54922, Kind: vnet.LandmarkKindPortal}, {LandmarkID: math.MaxUint64, X: 7091, Z: -93680, Kind: vnet.LandmarkKindPortal}}
-	frame, err := EncodeLandmarkList(LandmarkList{Landmarks: want})
+	for _, discovered := range []bool{false, true} {
+		want := LandmarkList{OriginX: -46784, OriginZ: 54912, Scale: 1, Landmarks: []Landmark{{LandmarkID: math.MaxUint64, X: -46757, Z: 54922, Kind: vnet.LandmarkKindPortal, Discovered: discovered}}}
+		frame, err := EncodeLandmarkList(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Nonempty independently supplied values make an empty-encoder mutation fail.
+		if got := readLandmarks(t, frame); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v want %+v", got, want)
+		}
+	}
+	empty := LandmarkList{OriginX: 1024, OriginZ: -1024, Scale: 16, Landmarks: []Landmark{}}
+	frame, err := EncodeLandmarkList(empty)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Compare against a nonempty independently supplied value: replacing the encoder
-	// with an empty-list implementation must fail, even if empty frames remain legal.
-	if got := readLandmarks(t, frame); !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v want %+v", got, want)
+	if got := readLandmarks(t, frame); !reflect.DeepEqual(got, empty) {
+		t.Fatalf("empty scope: %+v", got)
 	}
-	empty, err := EncodeLandmarkList(LandmarkList{})
-	if err != nil || len(readLandmarks(t, empty)) != 0 {
-		t.Fatalf("empty list: %v", err)
-	}
-	// An absent scalar remains the explicit fail-closed enum zero.
 	b := flatbuffers.NewBuilder(32)
 	vnet.LandmarkStart(b)
 	l := vnet.LandmarkEnd(b)
 	b.Finish(l)
-	if got := vnet.GetRootAsLandmark(b.FinishedBytes(), 0).Kind(); got != vnet.LandmarkKindUnknown {
-		t.Fatalf("absent kind: %v", got)
+	absent := vnet.GetRootAsLandmark(b.FinishedBytes(), 0)
+	if absent.Kind() != vnet.LandmarkKindUnknown || absent.Discovered() {
+		t.Fatal("absent fields must not claim known kind or discovery")
 	}
 }
 
-func TestLandmarkEncoderRefusesInvalidWholeLists(t *testing.T) {
-	valid := Landmark{LandmarkID: 1, Kind: vnet.LandmarkKindPortal}
-	for name, list := range map[string][]Landmark{
-		"too many":     make([]Landmark, MaxLandmarks+1),
-		"zero id":      {{Kind: vnet.LandmarkKindPortal}},
-		"absent kind":  {{LandmarkID: 1}},
-		"unknown kind": {{LandmarkID: 1, Kind: vnet.LandmarkKind(255)}},
-		"duplicate":    {valid, valid},
+func TestLandmarkEncoderRefusesInvalidWholeScopes(t *testing.T) {
+	valid := Landmark{LandmarkID: 1, X: 1, Z: 1, Kind: vnet.LandmarkKindPortal}
+	for name, list := range map[string]LandmarkList{
+		"absent scope": {}, "bad scale": {Scale: 3}, "off grid x": {Scale: 1, OriginX: 1}, "off grid z": {Scale: 4, OriginZ: -1},
+		"too many":     {Scale: 1, Landmarks: []Landmark{valid, valid}},
+		"zero id":      {Scale: 1, Landmarks: []Landmark{{Kind: vnet.LandmarkKindPortal}}},
+		"absent kind":  {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1}}},
+		"unknown kind": {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, Kind: vnet.LandmarkKind(255)}}},
+		"below x":      {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, X: -1, Kind: vnet.LandmarkKindPortal}}},
+		"past x":       {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, X: 64, Kind: vnet.LandmarkKindPortal}}},
+		"below z":      {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, Z: -1, Kind: vnet.LandmarkKindPortal}}},
+		"past z":       {Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, Z: 64, Kind: vnet.LandmarkKindPortal}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if frame, err := EncodeLandmarkList(LandmarkList{Landmarks: list}); err == nil || frame != nil {
-				t.Fatal("invalid list produced a frame")
+			if frame, err := EncodeLandmarkList(list); err == nil || frame != nil {
+				t.Fatal("invalid scope produced a frame")
 			}
 		})
 	}
 }
 
-func TestMaximumLandmarkListFitsV31FrameWithoutTruncation(t *testing.T) {
-	if MaxLandmarks != 65536 || transport.MaxFrameSize != 2<<20 {
-		t.Fatal("contract limits changed")
+func TestScopedLandmarkBoundsUseWideArithmeticAndRetainV31TransportLimit(t *testing.T) {
+	if MaxLandmarks != 1 || transport.MaxFrameSize != 2<<20 {
+		t.Fatal("contract bounds changed")
 	}
-	entries := make([]Landmark, MaxLandmarks)
-	for i := range entries {
-		entries[i] = Landmark{LandmarkID: uint64(i + 1), X: int32(i + 1), Z: -int32(i + 1), Kind: vnet.LandmarkKindPortal}
+	for _, x := range []int32{math.MinInt32, math.MaxInt32} {
+		origin := x - (x%64+64)%64
+		want := LandmarkList{OriginX: origin, Scale: 1, Landmarks: []Landmark{{LandmarkID: 1, X: x, Kind: vnet.LandmarkKindPortal}}}
+		frame, err := EncodeLandmarkList(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire bytes.Buffer
+		if err := transport.WriteFrame(&wire, frame); err != nil {
+			t.Fatal(err)
+		}
+		received, err := transport.ReadFrame(&wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := readLandmarks(t, received); !reflect.DeepEqual(got, want) {
+			t.Fatal("scope changed on transport")
+		}
 	}
-	frame, err := EncodeLandmarkList(LandmarkList{Landmarks: entries})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(frame) <= 1<<20 || len(frame) > transport.MaxFrameSize {
-		t.Fatalf("maximum frame: %d bytes", len(frame))
-	}
-	var wire bytes.Buffer
-	if err := transport.WriteFrame(&wire, frame); err != nil {
-		t.Fatal(err)
-	}
-	received, err := transport.ReadFrame(&wire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := readLandmarks(t, received); !reflect.DeepEqual(got, entries) {
-		t.Fatal("maximum list was truncated or changed")
-	}
-	t.Logf("full list: %d bytes", len(frame))
 }

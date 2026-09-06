@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 31;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 32;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -249,6 +249,14 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// discovered portal therefore raises the transport bound to 2 MiB on both peers
 /// and bumps the version so the incompatibility is refused during the handshake,
 /// never on a later exploration update. No client landmark request is introduced.
+///
+/// **V32 gives `LandmarkList` one tile-scoped meaning.** V31 sent a complete
+/// character list without a scope; reading that as one tile (or replacing a whole
+/// map with a tile) silently loses positions. The new scale's absent zero is invalid,
+/// and discovery now has an explicit false/true state rather than absence/presence.
+/// This semantic change owes a clean handshake refusal even though the table fields
+/// are appended and V31's staged client deferred this payload. The 2 MiB transport
+/// ceiling remains unchanged. Existing MapTileRequest carries the bounded query.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -259,10 +267,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(31);
+    pub const Current: Self = Self(32);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 31;
+    pub const ENUM_MAX: u16 = 32;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

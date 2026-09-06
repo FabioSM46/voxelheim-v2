@@ -20,8 +20,9 @@ pub const ENUM_MAX_LANDMARK_KIND: u8 = 1;
 pub const ENUM_VALUES_LANDMARK_KIND: [LandmarkKind; 2] =
     [LandmarkKind::Unknown, LandmarkKind::Portal];
 
-/// A server-discovered place, separate from the character's own MarkerKind budget.
-/// Members are appended, never inserted. Unknown is the fail-closed absent-field zero.
+/// What a server-supplied landmark is, independent of whether it is discovered.
+/// Members are appended, never inserted. Unknown is the invalid absent-field zero;
+/// an undiscovered portal is still Portal, with discovered=false, never Unknown.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct LandmarkKind(pub u8);

@@ -8758,9 +8758,9 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v31_adds_complete_discovered_landmarks() {
+    fn protocol_v32_scopes_portal_knowledge_to_map_tiles() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        assert_eq!(fb::ProtocolVersion::Current.0, 31);
+        assert_eq!(fb::ProtocolVersion::Current.0, 32);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),

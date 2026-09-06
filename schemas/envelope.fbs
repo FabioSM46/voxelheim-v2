@@ -255,6 +255,8 @@ union Payload {
   //    drop it safely, but its 1 MiB frame reader rejects a maximum-size list before
   //    that arm runs. The 2 MiB frame bound therefore owes the version bump; see
   //    ProtocolVersion. A client sending this authoritative payload is refused.
+  //    V32 keeps tag 63 and gives the table a tile scope and discovery flag.
+  //    No new request is needed: the existing MapTileRequest asks for these sites.
   LandmarkList             // 63  server -> client
 }
 

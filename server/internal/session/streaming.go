@@ -500,6 +500,7 @@ func (s *Streamer) sendChunk(ctx context.Context, coord world.Coord, repairing b
 // a lock of the streamer's own.
 func (s *Streamer) RecordExploration(explored *Exploration) {
 	s.explored = explored
+	s.landmarks = newLandmarks(s.cache.Seed(), explored)
 	s.view.RecordExploration(explored.Reveal)
 }
 
@@ -529,8 +530,10 @@ func (s *Streamer) sendExplored() error {
 	if err := sendExplored(s.send, batch); err != nil {
 		return fmt.Errorf("session: send %d newly explored columns: %w", len(batch), err)
 	}
-	if s.landmarks.reveal(batch) {
-		return s.sendLandmarks()
+	for _, landmark := range s.landmarks.reveal(batch) {
+		if err := sendLandmarkList(s.send, discoveryTile(landmark)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
