@@ -41,6 +41,7 @@
 mod mesher;
 pub(crate) mod palette;
 mod render;
+pub(crate) mod transition;
 mod water_material;
 
 use std::collections::{HashMap, VecDeque};
@@ -78,7 +79,7 @@ impl Plugin for WorldPlugin {
             // other finds it, so neither depends on the order in `main.rs`.
             .init_resource::<WorldInbox>()
             .add_systems(Update, ingest_world_updates.after(crate::net::DrainNetwork))
-            .add_plugins(render::ChunkRenderPlugin);
+            .add_plugins((render::ChunkRenderPlugin, transition::TransitionPlugin));
     }
 }
 

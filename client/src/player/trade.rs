@@ -327,6 +327,10 @@ fn set_mode(mode: &mut ResMut<'_, InputMode>, next: InputMode) {
     }
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<PendingPlayerTradePrompt>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

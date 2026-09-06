@@ -6233,3 +6233,77 @@ fn a_mining_intent_along_a_bird_sends_exactly_what_an_empty_sky_would() {
         "a bird on the aim line changed what the client sent"
     );
 }
+
+#[test]
+fn world_replacement_drops_bodies_snapshots_and_open_entity_panels() {
+    let mut app = headless_player();
+    deliver(
+        &mut app,
+        100,
+        vec![
+            state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0),
+            state(99, [2.5, 64.0, 0.5], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+    assert!(app.world_mut().query::<&Body>().iter(app.world()).count() > 0);
+    app.world_mut().insert_resource(InputMode::TradePrompt);
+    app.world_mut()
+        .resource_mut::<ConfirmationPrompt>()
+        .open("Trade with old body?".to_owned(), InputMode::Playing);
+    app.world_mut().resource_mut::<MoveIntent>().x = 1.0;
+    let identity = app.world().resource::<Session>().0.entity_id;
+    crate::world::transition::replace(
+        app.world_mut(),
+        crate::net::WorldChange {
+            world_id: 1,
+            world_seed: 9,
+            arrival: [4.5, 8.0, 4.5],
+            exit_arch: Some(BlockCoord { x: 4, y: 8, z: 4 }),
+        },
+        vec![],
+    );
+    assert_eq!(
+        app.world_mut().query::<&Body>().iter(app.world()).count(),
+        0
+    );
+    assert_eq!(
+        app.world_mut()
+            .query::<&NamePlate>()
+            .iter(app.world())
+            .count(),
+        0
+    );
+    assert!(
+        app.world()
+            .resource::<SnapshotBuffer>()
+            .latest_tick()
+            .is_none()
+    );
+    assert!(app.world().resource::<Appearances>().0.is_empty());
+    assert!(
+        app.world()
+            .resource::<ConfirmationPrompt>()
+            .current()
+            .is_none()
+    );
+    assert_eq!(*app.world().resource::<MoveIntent>(), MoveIntent::default());
+    assert_eq!(*app.world().resource::<InputMode>(), InputMode::Menu);
+    assert_eq!(app.world().resource::<Session>().0.entity_id, identity);
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [4.5, 8.0, 4.5], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+    assert_eq!(
+        app.world().resource::<SnapshotBuffer>().latest_tick(),
+        Some(1)
+    );
+    assert_eq!(
+        app.world_mut().query::<&Body>().iter(app.world()).count(),
+        1
+    );
+}

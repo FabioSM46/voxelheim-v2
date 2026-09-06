@@ -952,6 +952,11 @@ fn respawn_line(respawn_ticks: u32, tick_rate: u8) -> String {
     format!("RESPAWNING IN {seconds:.1}s")
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<HitPulse>(world);
+    crate::world::transition::reset::<DeathTransition>(world);
+}
+
 #[cfg(test)]
 mod tests {
     //! No window, no display and no GPU — `MinimalPlugins` and this plugin are the whole
