@@ -291,7 +291,25 @@ impl Speaking {
             .collect()
     }
 
-    fn heard(&mut self, entity_id: u64, at: Instant) {
+    /// Whether anybody at all was heard within [`SPEAKING_FOR`] of `now`.
+    ///
+    /// [`Self::recent`]'s question without its answer, and a second method rather than
+    /// `!recent(now).is_empty()` for one reason: the ducking system asks it every frame, and
+    /// that spelling would allocate a `Vec` sixty times a second to find out whether it is
+    /// empty. The two cannot disagree — both read the same window off the same list — which
+    /// is what makes this a spelling rather than a second source of truth.
+    pub fn anyone(&self, now: Instant) -> bool {
+        self.0
+            .iter()
+            .any(|(_, at)| now.duration_since(*at) < SPEAKING_FOR)
+    }
+
+    /// Notes that `entity_id` was heard at `at`.
+    ///
+    /// `pub(super)` since #982, so that the ducking test in `audio/mod.rs` can put a speaker
+    /// into this resource rather than stand up a second one of its own. Nothing outside
+    /// `audio/` can reach it, which is the fence that matters.
+    pub(super) fn heard(&mut self, entity_id: u64, at: Instant) {
         match self.0.iter_mut().find(|(held, _)| *held == entity_id) {
             Some((_, when)) => *when = at,
             None => self.0.push((entity_id, at)),

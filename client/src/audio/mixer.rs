@@ -836,9 +836,6 @@ impl Mixer {
     /// go on filling a ring nobody would ever hear, and go on holding a slot the policy at
     /// [`MAX_SOURCES`] has other uses for. Turning a bus back on restores nothing — whatever
     /// was playing is gone, and the next thing to ask gets a slot.
-    // #982 part 1 establishes the mechanism; part 3 is where `AudioControls::music_on` calls
-    // it, so between the two this has only its tests below.
-    #[allow(dead_code)]
     pub fn set_enabled(&self, bus: Bus, on: bool) {
         self.enabled[bus.index()].store(on, Ordering::Relaxed);
         if on {
@@ -864,9 +861,6 @@ impl Mixer {
     ///
     /// A target and not a value: [`Mixer::render`] advances towards it by one block's worth
     /// of time, so a Bevy system may call this every frame and it costs one atomic store.
-    // See `set_enabled` above for why this carries the allowance: `duck_under_speech` is
-    // part 3's.
-    #[allow(dead_code)]
     pub fn set_duck(&self, gain: f32) {
         let gain = if gain.is_finite() {
             gain.clamp(0.0, 1.0)
@@ -877,9 +871,6 @@ impl Mixer {
     }
 
     /// Folds the stereo image, or stops folding it.
-    // See `set_enabled` above for why this carries the allowance: the setting that calls it
-    // is part 2's and the wiring is part 3's.
-    #[allow(dead_code)]
     pub fn set_mono(&self, mono: bool) {
         self.mono.store(mono, Ordering::Relaxed);
     }
