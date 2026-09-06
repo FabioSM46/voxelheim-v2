@@ -219,6 +219,25 @@ rather than 90,000, because the cap is a truncation point and not a target. That
 fraction of the cap the 40,000 of the 45,000 era was, kept deliberately rather than re-chosen: what
 changed on #925 is the cap, and nothing measured says the safe distance from it changed with it.
 
+**The issue body's estimate is an input, not an answer — and treating it as an answer is a
+measured failure, not a hypothetical one.** #982 arrived carrying `M — roughly 40,000-55,000
+characters. **One pull request.**` It measured **167,203** and became three. The author had read
+the *module plus its tests* row when the issue named a mixer **and** a settings surface, which is
+the row below it and says two parts. The agent implementing it did not re-derive the count: the
+body had already stated one, so this step's estimate was inherited rather than made, and the split
+happened at Step 7 — the most expensive moment, with every seam cut back out of finished work.
+
+So when the body states a count, **re-derive it anyway before writing code**, and treat what the
+body says as a floor:
+
+- Count the **workspaces**, and the **kinds of surface** the issue names — a mechanism, a data
+  model, a control surface, a wire payload, a persistence store. Two kinds is two parts even when
+  the stated band says one, because the band is what was misread.
+- Count the **acceptance criteria**. More than six or seven, and the clusters they fall into are
+  already the seams. #982 had nine and they mapped almost one for one onto the three parts.
+- When your derivation and the body disagree, **say so in the pull request body and follow your
+  own**. You are the one who has read the code the issue points at.
+
 **Two multipliers the file count hides.** Test-heavy changes run about two-thirds tests in this
 repository, so a module with real coverage is roughly three times its production code. And a field
 added to a type that is constructed by literal costs every construction site: `SessionParams` has
