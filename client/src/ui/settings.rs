@@ -2952,8 +2952,9 @@ mod tests {
     /// two tabs claim.
     ///
     /// **The order is the assertion, not just the membership.** The two devices sit under
-    /// the volume they feed, and the voice rows read as one sentence downwards: what the
-    /// microphone is for, what opens it, and who hears the result.
+    /// the volume they feed; the three world buses and the ducking depth that is about both
+    /// halves sit between them and voice; and the voice rows read as one sentence downwards:
+    /// what the microphone is for, what opens it, and who hears the result.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -2965,6 +2966,10 @@ mod tests {
                 "Master volume",
                 "Output device",
                 "Microphone",
+                "Music volume",
+                "Effects volume",
+                "Ambience volume",
+                "Duck under voice",
                 "Voice volume",
                 "Voice",
                 "Voice threshold",

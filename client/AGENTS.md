@@ -1515,6 +1515,23 @@ setting and writes `AudioControls`, and nothing under `audio/` ever writes a set
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
 
+**The four bus volumes below it are the same statement again, and their defaults are an
+ordering rather than four numbers.** `Knob::MusicVolume`, `Knob::SfxVolume` and
+`Knob::AmbienceVolume` each carry a bound, a step and a default here and cross the seam as a
+gain, exactly as the master does. Effects start at **unity**, because the one-shots are what
+the master volume is *for* and a player who has turned the master to the top must not still be
+unable to hear a hit; ambience at **70**, under the effects it sits behind; music at **60**,
+lowest, because a score arriving at the level of the world it is scoring is a score a player's
+first act is turning down. The ordering is the statement — effects over ambience over music —
+and it is asserted as such, because those buses are empty in this client and nobody can yet
+hear whether the exact numbers are right. `Knob::VoiceDucking` is a **depth** where the others
+are levels: a player reads "how far do the beds get out of the way" and the mixer multiplies by
+a gain, so `Settings::duck_gain` is the one place that complement is taken. **The music switch
+is not the music volume**, and both are drawn: a volume of zero is a generator running into a
+gain of nothing, and the switch is what stops it being generated at all. `settings/` names no
+type from `audio/` for any of this — which bus a knob reaches is decided in `ui/settings.rs`,
+because a knob is a number with a bound and `settings/` is a leaf.
+
 **`Knob::VoiceVolume` is the same statement one bus down, and its default is not the
 master's.** `Settings::voice_gain()` is `master_gain()`'s arithmetic and reaches `Bus::Voice`,
 so the bus line above applies unchanged: a listener who turns the game down takes voice with
