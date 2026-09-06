@@ -231,6 +231,10 @@ var ErrOutsideWorld = errors.New("world: chunk outside finite world")
 // ErrImmutableShell refuses edits outside an instance chamber's interior.
 var ErrImmutableShell = errors.New("world: instance shell is immutable")
 
+// Finite reports whether this world has a bounded chunk envelope. It lets
+// consumers avoid applying open-world map and settlement generators to instances.
+func (c *Cache) Finite() bool { return c.contains != nil }
+
 // Contains reports whether a coordinate belongs to this world's finite streaming
 // envelope. Open worlds accept every coordinate as before. Streamers may skip
 // refused coordinates; Get enforces the same bound before reserving an entry.

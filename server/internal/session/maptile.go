@@ -65,6 +65,9 @@ func (s *Streamer) DrawMapTile(request protocol.MapTileRequest) (protocol.MapTil
 		return protocol.MapTile{}, errMapTileThrottled
 	}
 
+	if s.cache.Finite() {
+		return drawMapTile(s.cache.Seed(), request, nil), nil
+	}
 	return drawMapTile(s.cache.Seed(), request, s.explored), nil
 }
 

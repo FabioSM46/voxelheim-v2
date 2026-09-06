@@ -396,6 +396,15 @@ func placementSpawn(cfg Config, self Resolved) [3]float32 {
 // "session ended with an error" for the most ordinary way a dead connection is
 // noticed, which is how a warning stops being read.
 func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeouts, chunks *world.Cache, sim *game.Sim, peers *Registry, identities *Identities, entityID uint64, log *slog.Logger) (err error) {
+
+	rootPeers := peers
+	peers, releaseWorld := rootPeers.acquireWorld(chunks)
+	control := &worldControl{changes: make(chan worldChange), done: make(chan struct{})}
+	defer close(control.done)
+	defer func() { rootPeers.mu.Lock(); delete(rootPeers.controls, entityID); rootPeers.mu.Unlock() }()
+	var accepting atomic.Bool
+	accepting.Store(true)
+	flushWriter := make(chan writerBarrier)
 	out := make(chan []byte, outboundQueue)
 	// The fast lane, and the whole of #668. A snapshot is small and is worthless a tick
 	// later; a chunk payload is large and is worth exactly as much whenever it lands.
@@ -418,7 +427,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 
 	// A session-scoped context, so teardown can stop the streamer without waiting
 	// for the server to shut down.
-	sctx, stopStreaming := context.WithCancel(ctx)
+	sctx, stopSession := context.WithCancel(ctx)
+	defer stopSession()
+	worldCtx, stopStreaming := context.WithCancel(sctx)
+	var stopWorldLifetime func() bool
+	defer func() { releaseWorld() }()
 
 	var (
 		wg           sync.WaitGroup
@@ -464,7 +477,38 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// closures below still hold the originals. Sharing the variables would be a
 		// data race on a channel every producer sends to.
 		fast, bulk := priority, out
+
+		flush := func(barrier writerBarrier) {
+			if barrier.discard {
+				for {
+					select {
+					case <-priority:
+						continue
+					default:
+					}
+					break
+				}
+				for {
+					select {
+					case <-out:
+						continue
+					default:
+					}
+					break
+				}
+			}
+			if len(barrier.frame) > 0 {
+				write(barrier.frame)
+			}
+			close(barrier.done)
+		}
 		for fast != nil || bulk != nil {
+			select {
+			case ack := <-flushWriter:
+				flush(ack)
+				continue
+			default:
+			}
 			// The fast lane first, and unconditionally: this is the ordering the whole
 			// issue is about. A non-blocking check ahead of the blocking select is what
 			// makes it a priority rather than a coin toss — Go's select chooses
@@ -483,6 +527,8 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				}
 			}
 			select {
+			case ack := <-flushWriter:
+				flush(ack)
 			case frame, ok := <-fast:
 				if !ok {
 					fast = nil
@@ -513,7 +559,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				timer := time.NewTimer(remaining)
 				select {
 				case <-timer.C:
-				case <-ctx.Done():
+				case <-worldCtx.Done():
 					// The world itself is stopping, so there is no simulation for a body
 					// to remain visible in. Persistence still runs below before release.
 					if !timer.Stop() {
@@ -541,6 +587,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		//
 		// Then stop the session-scoped workers (streaming and mining), wait for both to
 		// stop producing, and only then close the channel.
+		if stopWorldLifetime != nil {
+			stopWorldLifetime()
+		}
 		sim.Leave(player)
 		peers.Unsubscribe(entityID)
 		stopStreaming()
@@ -641,6 +690,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// mask the exact reordering that TestSnapshotsStopBeforeTheOutboundQueueIsClosed
 	// exists to catch, turning a panic into a test that passes.
 	trySend := func(frame []byte) bool {
+		if !accepting.Load() {
+			return false
+		}
 		select {
 		case out <- frame:
 			return true
@@ -652,6 +704,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// One tick goroutine is the sole producer. Replacing the buffered value is therefore
 	// non-blocking and bounded, while retaining the only frame still worth sending.
 	deliverLatestSnapshot := func(frame []byte, center world.Column) bool {
+		if !accepting.Load() {
+			return false
+		}
 		return offerLatestSnapshot(snapshots, snapshotAt{frame: frame, center: center})
 	}
 
@@ -693,6 +748,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// entity in every speaker's audible set, so once it has returned no later frame can
 	// choose this session again.
 	offerVoice := func(frame []byte) bool {
+		if !accepting.Load() {
+			return false
+		}
 		select {
 		case priority <- frame:
 			return true
@@ -752,6 +810,170 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		return nil
 	}
 
+	startWorld := func() {
+		admitted, sim, chunks, peers, boundCtx := player, sim, chunks, peers, worldCtx
+		worldSend := func(frame []byte) error {
+			if err := boundCtx.Err(); err != nil {
+				return err
+			}
+			select {
+			case out <- frame:
+				return nil
+			case <-boundCtx.Done():
+				return boundCtx.Err()
+			}
+		}
+		// Built here rather than beside worldSend because it needs the player: a repair
+		// has to be able to ask for a view diff, and the only thing that can ask is
+		// the doorbell the tick loop rings — game.Player.WakeStreaming. Assigned to
+		// the outer variable, once, before the goroutine below starts reading it and
+		// before any post-handshake frame can reach the handler that uses it.
+		if streamer == nil {
+			streamer = NewStreamer(chunks, cfg.ViewDistance, worldSend, admitted.WakeStreaming, time.Now, log)
+		} else {
+			streamer.send = worldSend
+		}
+
+		// Wired before the streaming goroutine reads either of them, which is the
+		// ordering that makes the hook safe to set with no lock of the streamer's
+		// own. From here every chunk that reaches this client adds its column to the
+		// ledger, and every view diff that revealed one says so.
+		if !chunks.Finite() {
+			streamer.RecordExploration(self.Explored)
+		}
+
+		// And the other direction over the same list: what the *world* has in a
+		// chunk this session is about to be shown. A settlement's forge and fire are
+		// not written down anywhere, so the first time anybody looks at the ground
+		// they stand on is when the simulation creates them — see game/station.go.
+		if !chunks.Finite() {
+			streamer.ReportEntering(admitted.MaterialiseSettlements)
+		}
+
+		// One worker owns both ward replacements and snapshot forwarding. The first
+		// centre arrives only after MoveTo has materialised every settlement structure
+		// entering the initial view, so the first WardsNearby is ordered after those
+		// authoritative facts and before the first snapshot this worker releases.
+		wardCenters := make(chan world.Column)
+		streaming.Add(1)
+		go func() {
+			defer streaming.Done()
+			followSnapshots(boundCtx, snapshots, offerSnapshot, log)
+		}()
+
+		// The wards, from a goroutine of their own since #669: nothing that blocks on
+		// the bulk lane may share a loop with the player's position. See [followWards].
+		streaming.Add(1)
+		go func() {
+			defer streaming.Done()
+			followWards(boundCtx, admitted.PlayerID(), sim, int32(cfg.ViewDistance), wardCenters, worldSend, log)
+		}()
+
+		// Follow the player from its own goroutine. Two reasons, and the second is
+		// structural: the initial view is hundreds of frames, and producing them
+		// from the read loop would leave the session unable to notice a disconnect
+		// until the last chunk had been written — the client gone and the server
+		// still busy talking to it. And Streamer.MoveTo calls Cache.Get, which
+		// generates on a miss, so it can never run on the tick goroutine.
+		streaming.Add(1)
+		go func() {
+			defer streaming.Done()
+			followPlayer(boundCtx, admitted, streamer, wardCenters, log)
+		}()
+
+		// Registered as a broadcast target only now, and with the streamer's own view:
+		// what this session holds is exactly what the streamer has managed to send, so
+		// there is one copy of that set and no second one to fall out of step. Before
+		// this point the session holds nothing, so there is nothing to send it.
+		peers.Subscribe(entityID, streamer.View(), admitted.WakeStreaming, trySend)
+
+		// Mining completion may wait on Editor and therefore cannot run on Step. One
+		// session-scoped worker consumes the tick's bounded handoff, applies the shared
+		// break path, and delivers the resulting world/inventory state. It starts only
+		// after subscription so the mining session receives its own BlockUpdate by the
+		// same broadcast rule as every observer.
+		streaming.Add(1)
+		go func() {
+			defer streaming.Done()
+			followMining(boundCtx, admitted, peers, worldSend, log)
+		}()
+	}
+
+	worldEpoch := uint64(0)
+
+	// This is the single transition implementation. An inbound portal handler
+	// added to this owner loop calls it directly after resolving entry policy;
+	// Registry.ChangeWorld is only for callers on other goroutines.
+	changeWorld := func(binding WorldBinding) error {
+		if player == nil || !leavingAt.IsZero() {
+			return errors.New("session: character cannot change world")
+		}
+		if err := binding.Context.Err(); err != nil {
+			return err
+		}
+		accepting.Store(false)
+		peers.Unsubscribe(entityID)
+		stopStreaming()
+		streaming.Wait()
+		if err := sim.Transfer(player, binding.Sim, binding.Spawn); err != nil {
+			worldCtx, stopStreaming = context.WithCancel(sctx)
+			accepting.Store(true)
+			player.WakeStreaming()
+			startWorld()
+			return err
+		}
+		if stopWorldLifetime != nil {
+			stopWorldLifetime()
+		}
+		oldChunks := streamer.View().clear()
+		ack := make(chan struct{})
+		flushWriter <- writerBarrier{discard: true, done: ack}
+		<-ack
+		for {
+			select {
+			case <-snapshots:
+				continue
+			default:
+			}
+			break
+		}
+		sim, chunks = binding.Sim, binding.Chunks
+		worldEpoch++
+		releaseWorld()
+		peers, releaseWorld = rootPeers.acquireWorld(chunks)
+		worldCtx, stopStreaming = context.WithCancel(sctx)
+		cancelWorld := stopStreaming
+		stopWorldLifetime = context.AfterFunc(binding.Context, func() { cancelWorld(); _ = conn.Close() })
+		if len(binding.Arrival) > 0 {
+			ack = make(chan struct{})
+			flushWriter <- writerBarrier{frame: binding.Arrival, done: ack}
+			<-ack
+		}
+		for _, coord := range oldChunks {
+			if err := enqueue(protocol.EncodeChunkUnload(toProtocolCoord(coord))); err != nil {
+				return err
+			}
+		}
+
+		streamer = nil
+		accepting.Store(true)
+		startWorld()
+		return nil
+	}
+
+	// The owner authorizes one read at a time, retaining phase deadline semantics.
+	// One persistent reader also services world changes while the socket is quiet.
+	readRequests := make(chan uint64)
+	reads := make(chan sessionRead, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for epoch := range readRequests {
+			frame, err := conn.ReadFrame()
+			reads <- sessionRead{frame: frame, err: err, epoch: epoch}
+		}
+	}()
+	defer func() { close(readRequests); <-readerDone }()
 	lastFrame := time.Now()
 	for {
 		// Armed before every read, which is the same thing as re-armed after every
@@ -779,7 +1001,29 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			return aErr
 		}
 
-		frame, rErr := conn.ReadFrame()
+		readRequests <- worldEpoch
+		var incoming sessionRead
+	readNext:
+		for {
+			select {
+			case incoming = <-reads:
+				// The owner stamps each read when issuing it. A result already
+				// buffered or still inside ReadFrame keeps the source epoch even
+				// if a control request installed another world in the meantime.
+				// Drop stale actions before decoding; preserve the existing idle
+				// deadline by issuing the replacement inside this same read loop.
+				// Errors still terminate normally, and refusals keep their epoch.
+				if incoming.err == nil && incoming.epoch != worldEpoch {
+					readRequests <- worldEpoch
+					continue
+				}
+				break readNext
+			case request := <-control.changes:
+				request.result <- changeWorld(request.binding)
+			}
+		}
+
+		frame, rErr := incoming.frame, incoming.err
 		if rErr != nil {
 			// Asked before IsDisconnect, which also answers for a deadline: both end the
 			// session the same way, and only this branch knows which sentence to log.
@@ -1002,72 +1246,11 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				return fmt.Errorf("session: send the character's marks on join: %w", mErr)
 			}
 
-			// Built here rather than beside enqueue because it needs the player: a repair
-			// has to be able to ask for a view diff, and the only thing that can ask is
-			// the doorbell the tick loop rings — game.Player.WakeStreaming. Assigned to
-			// the outer variable, once, before the goroutine below starts reading it and
-			// before any post-handshake frame can reach the handler that uses it.
-			streamer = NewStreamer(chunks, cfg.ViewDistance, enqueue, admitted.WakeStreaming, time.Now, log)
+			startWorld()
+			rootPeers.mu.Lock()
+			rootPeers.controls[entityID] = control
+			rootPeers.mu.Unlock()
 
-			// Wired before the streaming goroutine reads either of them, which is the
-			// ordering that makes the hook safe to set with no lock of the streamer's
-			// own. From here every chunk that reaches this client adds its column to the
-			// ledger, and every view diff that revealed one says so.
-			streamer.RecordExploration(self.Explored)
-
-			// And the other direction over the same list: what the *world* has in a
-			// chunk this session is about to be shown. A settlement's forge and fire are
-			// not written down anywhere, so the first time anybody looks at the ground
-			// they stand on is when the simulation creates them — see game/station.go.
-			streamer.ReportEntering(admitted.MaterialiseSettlements)
-
-			// One worker owns both ward replacements and snapshot forwarding. The first
-			// centre arrives only after MoveTo has materialised every settlement structure
-			// entering the initial view, so the first WardsNearby is ordered after those
-			// authoritative facts and before the first snapshot this worker releases.
-			wardCenters := make(chan world.Column)
-			streaming.Add(1)
-			go func() {
-				defer streaming.Done()
-				followSnapshots(sctx, snapshots, offerSnapshot, log)
-			}()
-
-			// The wards, from a goroutine of their own since #669: nothing that blocks on
-			// the bulk lane may share a loop with the player's position. See [followWards].
-			streaming.Add(1)
-			go func() {
-				defer streaming.Done()
-				followWards(sctx, admitted.PlayerID(), sim, int32(cfg.ViewDistance), wardCenters, enqueue, log)
-			}()
-
-			// Follow the player from its own goroutine. Two reasons, and the second is
-			// structural: the initial view is hundreds of frames, and producing them
-			// from the read loop would leave the session unable to notice a disconnect
-			// until the last chunk had been written — the client gone and the server
-			// still busy talking to it. And Streamer.MoveTo calls Cache.Get, which
-			// generates on a miss, so it can never run on the tick goroutine.
-			streaming.Add(1)
-			go func() {
-				defer streaming.Done()
-				followPlayer(sctx, admitted, streamer, wardCenters, log)
-			}()
-
-			// Registered as a broadcast target only now, and with the streamer's own view:
-			// what this session holds is exactly what the streamer has managed to send, so
-			// there is one copy of that set and no second one to fall out of step. Before
-			// this point the session holds nothing, so there is nothing to send it.
-			peers.Subscribe(entityID, streamer.View(), admitted.WakeStreaming, trySend)
-
-			// Mining completion may wait on Editor and therefore cannot run on Step. One
-			// session-scoped worker consumes the tick's bounded handoff, applies the shared
-			// break path, and delivers the resulting world/inventory state. It starts only
-			// after subscription so the mining session receives its own BlockUpdate by the
-			// same broadcast rule as every observer.
-			streaming.Add(1)
-			go func() {
-				defer streaming.Done()
-				followMining(sctx, admitted, peers, enqueue, log)
-			}()
 			continue
 		}
 
@@ -2190,12 +2373,16 @@ var errLeaveRequested = errors.New("session: leave requested")
 // The answer therefore lives beside the connections rather than inside the simulation,
 // and the tick loop stays out of it.
 type Registry struct {
+	root   *Registry
 	nextID atomic.Uint64
 	limit  int
 
-	mu    sync.Mutex
-	conns map[uint64]transport.Conn
-	peers map[uint64]peer
+	mu         sync.Mutex
+	conns      map[uint64]transport.Conn
+	peers      map[uint64]peer
+	worlds     map[*world.Cache]*Registry
+	controls   map[uint64]*worldControl
+	worldUsers map[*world.Cache]int
 }
 
 // peer is an admitted session as a broadcast sees it: what it holds, and how to reach it.
@@ -2211,9 +2398,10 @@ type peer struct {
 // connections.
 func NewRegistry(limit int) *Registry {
 	return &Registry{
-		limit: limit,
-		conns: make(map[uint64]transport.Conn),
-		peers: make(map[uint64]peer),
+		limit:    limit,
+		conns:    make(map[uint64]transport.Conn),
+		peers:    make(map[uint64]peer),
+		controls: make(map[uint64]*worldControl),
 	}
 }
 
@@ -2225,7 +2413,12 @@ func NewRegistry(limit int) *Registry {
 // names one thing" a fact rather than a coincidence, so game.Sim is handed this method
 // instead of counting for itself. The direction is the usual one: session depends on
 // game, and game is handed a function.
-func (r *Registry) NextID() uint64 { return r.nextID.Add(1) }
+func (r *Registry) NextID() uint64 {
+	if r.root != nil {
+		return r.root.NextID()
+	}
+	return r.nextID.Add(1)
+}
 
 // Add registers conn and returns the entity id the server assigns it. The boolean is
 // false when the registry is full; the connection was not registered and zero is
