@@ -899,6 +899,8 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}()
 	}
 
+	worldEpoch := uint64(0)
+
 	// This is the single transition implementation. An inbound portal handler
 	// added to this owner loop calls it directly after resolving entry policy;
 	// Registry.ChangeWorld is only for callers on other goroutines.
@@ -936,6 +938,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			break
 		}
 		sim, chunks = binding.Sim, binding.Chunks
+		worldEpoch++
 		releaseWorld()
 		peers, releaseWorld = rootPeers.acquireWorld(chunks)
 		worldCtx, stopStreaming = context.WithCancel(sctx)
@@ -960,14 +963,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 
 	// The owner authorizes one read at a time, retaining phase deadline semantics.
 	// One persistent reader also services world changes while the socket is quiet.
-	readRequests := make(chan struct{})
+	readRequests := make(chan uint64)
 	reads := make(chan sessionRead, 1)
 	readerDone := make(chan struct{})
 	go func() {
 		defer close(readerDone)
-		for range readRequests {
+		for epoch := range readRequests {
 			frame, err := conn.ReadFrame()
-			reads <- sessionRead{frame, err}
+			reads <- sessionRead{frame: frame, err: err, epoch: epoch}
 		}
 	}()
 	defer func() { close(readRequests); <-readerDone }()
@@ -998,17 +1001,28 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			return aErr
 		}
 
-		readRequests <- struct{}{}
+		readRequests <- worldEpoch
 		var incoming sessionRead
 	readNext:
 		for {
 			select {
 			case incoming = <-reads:
+				// The owner stamps each read when issuing it. A result already
+				// buffered or still inside ReadFrame keeps the source epoch even
+				// if a control request installed another world in the meantime.
+				// Drop stale actions before decoding; preserve the existing idle
+				// deadline by issuing the replacement inside this same read loop.
+				// Errors still terminate normally, and refusals keep their epoch.
+				if incoming.err == nil && incoming.epoch != worldEpoch {
+					readRequests <- worldEpoch
+					continue
+				}
 				break readNext
 			case request := <-control.changes:
 				request.result <- changeWorld(request.binding)
 			}
 		}
+
 		frame, rErr := incoming.frame, incoming.err
 		if rErr != nil {
 			// Asked before IsDisconnect, which also answers for a deadline: both end the

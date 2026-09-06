@@ -217,3 +217,141 @@ func (c *bindingBarrierConn) WriteFrame(frame []byte) error {
 	}
 	return err
 }
+
+// The reader has already received an old-world action but cannot hand it to the
+// owner until after the transfer. A failed transfer must still preserve it.
+func TestWorldChangeRejectsAnOutstandingOldWorldRead(t *testing.T) {
+	for _, succeeds := range []bool{true, false} {
+		t.Run(map[bool]string{true: "successful transfer", false: "refused transfer"}[succeeds], func(t *testing.T) {
+			cfg := editConfig()
+			group := game.NewWorldGroup()
+			chunks, open, peers := editDeps(t, cfg, game.WithWorldGroup(group))
+			peers.NextID()
+			manager, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, 1, peers.NextID, discard(), game.WithWorldGroup(group))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(manager.Close)
+			instance, err := manager.Create(game.InstanceRuin{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := newFakeConn()
+			conn := &bindingReadConn{fakeConn: base, entered: make(chan struct{}), release: make(chan struct{})}
+			frames := collect(t, base)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- session.Serve(ctx, conn, cfg, noTimeouts(), chunks, open, peers, ephemeralIdentities(), 1, discard())
+			}()
+			t.Cleanup(func() {
+				conn.unblock()
+				cancel()
+				_ = conn.Close()
+				if err := <-done; err != nil {
+					t.Error(err)
+				}
+			})
+			base.in <- hello(1)
+			createCharacter(base, "Reader")
+			waitUntil(t, "initial world view", func() bool { return len(frames.chunkCoords()) >= 27 })
+			conn.hold.Store(true)
+			base.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "old world action"})
+			select {
+			case <-conn.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("old read did not enter gate")
+			}
+			binding := session.WorldBinding{Chunks: instance.Chunks, Sim: instance.Sim, Context: instance.Context, Spawn: [3]float32{.5, 1, .5}}
+			if !succeeds {
+				binding.Chunks, binding.Sim = chunks, open
+			}
+			changeErr := peers.ChangeWorld(ctx, 1, binding)
+			if (changeErr == nil) != succeeds {
+				t.Fatalf("transfer result: %v", changeErr)
+			}
+			conn.unblock()
+			base.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "fresh action"})
+			waitUntil(t, "fresh action after read barrier", func() bool {
+				for _, m := range frames.chatMessages() {
+					if m.Text == "fresh action" {
+						return true
+					}
+				}
+				return false
+			})
+			oldSeen := false
+			for _, m := range frames.chatMessages() {
+				if m.Text == "old world action" {
+					oldSeen = true
+				}
+			}
+			if oldSeen == succeeds {
+				t.Fatalf("old action delivered=%v after successful transfer=%v", oldSeen, succeeds)
+			}
+		})
+	}
+}
+
+type bindingReadConn struct {
+	*fakeConn
+	hold    atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (c *bindingReadConn) unblock() { c.once.Do(func() { close(c.release) }) }
+func (c *bindingReadConn) ReadFrame() ([]byte, error) {
+	frame, err := c.fakeConn.ReadFrame()
+	if c.hold.CompareAndSwap(true, false) {
+		close(c.entered)
+		<-c.release
+	}
+	return frame, err
+}
+
+func TestFiniteStreamerNeverInventsResidentChunksOrUnloads(t *testing.T) {
+	cache := world.NewInstanceCache(41, 2, 512)
+	held := make(map[world.Coord]bool)
+	sent, unloaded := 0, 0
+	streamer := session.NewStreamer(cache, 3, func(frame []byte) error {
+		kind, coord := classify(t, frame)
+		switch kind {
+		case vnet.PayloadChunkData:
+			if !cache.Contains(coord) {
+				t.Fatalf("sent outside finite world: %+v", coord)
+			}
+			held[coord] = true
+			sent++
+		case vnet.PayloadChunkUnload:
+			if !held[coord] {
+				t.Fatalf("unloaded chunk never delivered: %+v", coord)
+			}
+			delete(held, coord)
+			unloaded++
+		}
+		return nil
+	}, func() {}, time.Now, discard())
+	for _, center := range []world.Coord{{}, {}, {X: 100}, {}} {
+		if err := streamer.MoveTo(context.Background(), center); err != nil {
+			t.Fatal(err)
+		}
+		if streamer.View().Loaded() != len(held) {
+			t.Fatalf("ledger=%d delivered=%d", streamer.View().Loaded(), len(held))
+		}
+		for x := int32(-3); x <= 3; x++ {
+			for y := int32(-3); y <= 3; y++ {
+				for z := int32(-3); z <= 3; z++ {
+					coord := world.Coord{X: x, Y: y, Z: z}
+					if !cache.Contains(coord) && streamer.View().Holds(coord) {
+						t.Fatalf("phantom resident: %+v", coord)
+					}
+				}
+			}
+		}
+	}
+	if sent == 0 || unloaded == 0 {
+		t.Fatal("test did not exercise delivery and unloading")
+	}
+}

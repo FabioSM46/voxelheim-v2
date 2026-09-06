@@ -151,6 +151,7 @@ type writerBarrier struct {
 }
 
 type sessionRead struct {
+	epoch uint64
 	frame []byte
 	err   error
 }
