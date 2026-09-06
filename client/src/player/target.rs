@@ -1114,6 +1114,13 @@ fn send_mining(
     }
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<BlockTarget>(world);
+    crate::world::transition::reset::<HealTargetHint>(world);
+    crate::world::transition::reset::<MiningInput>(world);
+    crate::world::transition::reset::<MiningFeedback>(world);
+}
+
 #[cfg(test)]
 mod tests {
     //! Tests for block targeting.

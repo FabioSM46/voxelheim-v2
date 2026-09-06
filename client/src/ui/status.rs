@@ -532,20 +532,28 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
 /// stall on screen, and a refused trade is answered beside it.
 ///
-/// The V33 portal reasons join this list until #974 provides their answering surface.
 /// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
-        RefusalReason::TileMisaligned
-            | RefusalReason::TradeNotOpen
-            | RefusalReason::NotAtPortal
-            | RefusalReason::InstanceLimit
-            | RefusalReason::InstanceUnavailable
+        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
     )
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
+    if refused.action == RefusedAction::CrossPortal {
+        return match refused.reason {
+            RefusalReason::NotAtPortal => Some("Cannot cross: stand near a portal arch".to_owned()),
+            RefusalReason::InstanceLimit => {
+                Some("Cannot cross: too many instances are open; try again later".to_owned())
+            }
+            RefusalReason::InstanceUnavailable => {
+                Some("Cannot cross: that instance is unavailable".to_owned())
+            }
+            _ => None,
+        };
+    }
+
     if refused.reason.is_client_defect() {
         return None;
     }

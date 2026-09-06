@@ -28,6 +28,8 @@
 
 use std::fmt;
 
+use super::codec::WorldChange;
+
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LandmarkList, LearnedMounts,
     LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile,
@@ -127,6 +129,7 @@ pub enum Transition {
     /// definition so there is no earlier one for the welcome to check it against.
     MarkerList(MarkerList),
     LandmarkList(LandmarkList),
+    WorldChange(WorldChange),
     /// What one resident is called and what they do, admitted because a session exists.
     ///
     /// Nothing is checked here that the codec has not: the name's bound and the role's
@@ -573,6 +576,9 @@ impl Handshake {
                 Ok(Transition::MapExplored(explored))
             }
             (Phase::Established, Message::MarkerList(list)) => Ok(Transition::MarkerList(list)),
+            (Phase::Established, Message::WorldChange(change)) => {
+                Ok(Transition::WorldChange(change))
+            }
             (Phase::Established, Message::LandmarkList(list)) => Ok(Transition::LandmarkList(list)),
             // V25's three server payloads, carried by name for the same reason: each is
             // fully validated at the decode boundary, and nothing about a session changes
@@ -628,6 +634,7 @@ impl Handshake {
             (_, Message::MapTile(_)) => Err(HandshakeError::Premature("MapTile")),
             (_, Message::MapExplored(_)) => Err(HandshakeError::Premature("MapExplored")),
             (_, Message::MarkerList(_)) => Err(HandshakeError::Premature("MarkerList")),
+            (_, Message::WorldChange(_)) => Err(HandshakeError::Premature("WorldChange")),
             (_, Message::LandmarkList(_)) => Err(HandshakeError::Premature("LandmarkList")),
             (_, Message::ResidentAppearance(_)) => {
                 Err(HandshakeError::Premature("ResidentAppearance"))
@@ -707,6 +714,24 @@ mod tests {
         let welcomed = handshake.apply(Message::Welcome(params()));
         assert_eq!(welcomed, Ok(Transition::Established(params())));
         handshake
+    }
+
+    #[test]
+    fn world_change_requires_an_established_session() {
+        let change = WorldChange {
+            world_id: 1,
+            world_seed: 7,
+            arrival: [0.0; 3],
+            exit_arch: Some(super::super::codec::BlockCoord { x: 0, y: 0, z: 0 }),
+        };
+        assert_eq!(
+            Handshake::new().apply(Message::WorldChange(change)),
+            Err(HandshakeError::Premature("WorldChange"))
+        );
+        assert_eq!(
+            established().apply(Message::WorldChange(change)),
+            Ok(Transition::WorldChange(change))
+        );
     }
 
     #[test]

@@ -359,13 +359,15 @@ struct Overlays<'w> {
     choice: Option<Res<'w, CharacterChoice>>,
     state: Option<Res<'w, ConnectionState>>,
     cancellation: Option<Res<'w, LeaveCancellation>>,
+    world: Option<Res<'w, crate::world::transition::CurrentWorld>>,
 }
 
 impl Overlays<'_> {
     /// Whether any full-screen overlay is up. While one is, this frame's input is not
     /// for the world.
     fn any_is_up(&self) -> bool {
-        login::login_is_up(self.sign_in.as_deref())
+        self.world.as_deref().is_some_and(|world| world.loading)
+            || login::login_is_up(self.sign_in.as_deref())
             || character::character_is_up(self.choice.as_deref())
             || servers::server_list_is_up(
                 self.list.as_deref(),
@@ -2180,4 +2182,23 @@ mod tests {
         assert_eq!(cursor.grab_mode, CursorGrabMode::Locked);
         assert!(!cursor.visible);
     }
+}
+
+/// World-anchored panels and drafts cannot survive the entities they address.
+pub(crate) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<storm::Storm>(world);
+    health::reset_world(world);
+    trade::reset_world(world);
+}
+
+pub(crate) fn replace_world_map(
+    world: &mut World,
+    change: crate::net::WorldChange,
+    pending: Vec<crate::net::MapEvent>,
+) {
+    map::replace_world(world, change, pending);
+}
+
+pub(crate) fn reset_world_maps(world: &mut World) {
+    map::reset_session(world);
 }

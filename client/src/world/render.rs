@@ -299,6 +299,71 @@ struct MeshJobs {
     meshed: HashMap<ChunkCoord, MeshedChunk>,
 }
 
+/// Dropping Task handles cancels outstanding work; no old completion remains pollable.
+pub(super) fn reset_world(world: &mut World) {
+    super::transition::despawn::<ChunkMeshEntity>(world);
+    super::transition::reset::<MeshJobs>(world);
+    super::transition::reset::<MeshStats>(world);
+}
+
+/// Require a resident body neighbourhood and a drawn supporting chunk. This is
+/// presentation readiness only; the server already chose and validated arrival.
+pub(super) fn arrival_ready(world: &World, position: Vec3, size: usize) -> bool {
+    let (Some(store), Some(jobs)) = (
+        world.get_resource::<ChunkStore>(),
+        world.get_resource::<MeshJobs>(),
+    ) else {
+        return false;
+    };
+    let block = position.floor().as_ivec3();
+    let coordinate = |p: IVec3| ChunkCoord {
+        cx: p.x.div_euclid(size as i32),
+        cy: p.y.div_euclid(size as i32),
+        cz: p.z.div_euclid(size as i32),
+    };
+    for y in -1..=2 {
+        for z in -1..=1 {
+            for x in -1..=1 {
+                let coord = coordinate(block + IVec3::new(x, y, z));
+                if store.get(coord).is_none()
+                    || jobs.pending.contains(&coord)
+                    || jobs.in_flight.contains_key(&coord)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    let half = crate::player::arrival_body_width(world) * 0.5;
+    // Slabs/stairs may support fractional feet, and a body can stand with its
+    // centre over air. Read the existing collision boxes across the footprint;
+    // do not invent a full-cube or centre-cell collision rule for loading.
+    for y in [block.y - 1, block.y] {
+        for z in (position.z - half).floor() as i32..=(position.z + half).floor() as i32 {
+            for x in (position.x - half).floor() as i32..=(position.x + half).floor() as i32 {
+                let cell = crate::net::BlockCoord { x, y, z };
+                let (bounds, count) = super::palette::collision_bounds(store.block_at(cell, size));
+                for bound in &bounds[..count] {
+                    let min = Vec3::new(x as f32, y as f32, z as f32)
+                        + Vec3::from_array(bound.min.map(|v| f32::from(v) * 0.5));
+                    let max = Vec3::new(x as f32, y as f32, z as f32)
+                        + Vec3::from_array(bound.max.map(|v| f32::from(v) * 0.5));
+                    if (position.y - max.y).abs() < 0.04
+                        && position.x + half > min.x
+                        && position.x - half < max.x
+                        && position.z + half > min.z
+                        && position.z - half < max.z
+                        && jobs.meshed.contains_key(&coordinate(IVec3::new(x, y, z)))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn create_materials(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -862,6 +927,153 @@ mod tests {
         let world = app.world_mut();
         let mut query = world.query::<&ChunkMeshEntity>();
         query.iter(world).count()
+    }
+
+    #[test]
+    fn world_replacement_cancels_old_jobs_and_reloads_the_same_coordinate() {
+        let mut app = headless_world();
+        let coord = coord(0, 0, 0);
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord,
+                runs: solid_chunk(palette::STONE),
+            },
+        );
+        pump_until(&mut app, "old terrain", |app| stats(app).meshed_chunks == 1);
+        let old_entity = app.world().resource::<MeshJobs>().meshed[&coord].entity;
+        let source = Arc::clone(app.world().resource::<ChunkStore>().get(coord).unwrap());
+        // A completion that is already ready is just as stale as a task still running.
+        let task = AsyncComputeTaskPool::get().spawn(async {
+            MeshOutcome {
+                mesh: ChunkMesh::default(),
+                elapsed: Duration::ZERO,
+            }
+        });
+        app.world_mut()
+            .resource_mut::<MeshJobs>()
+            .in_flight
+            .insert(coord, MeshJob { task, source });
+        app.world_mut()
+            .resource_mut::<MeshJobs>()
+            .pending
+            .insert(coord);
+        crate::world::transition::replace(
+            app.world_mut(),
+            crate::net::WorldChange {
+                world_id: 1,
+                world_seed: 9,
+                arrival: [16.5, 16.0, 16.5],
+                exit_arch: Some(BlockCoord {
+                    x: 16,
+                    y: 16,
+                    z: 16,
+                }),
+            },
+            vec![],
+        );
+        assert!(app.world().get_entity(old_entity).is_err());
+        assert!(app.world().resource::<ChunkStore>().get(coord).is_none());
+        assert!(app.world().resource::<MeshJobs>().in_flight.is_empty());
+        assert!(app.world().resource::<MeshJobs>().pending.is_empty());
+        assert!(app.world().resource::<MeshJobs>().meshed.is_empty());
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            chunk_entity_count(&mut app),
+            0,
+            "an old completion repopulated terrain"
+        );
+        push(
+            &mut app,
+            WorldUpdate::Chunk {
+                coord,
+                runs: layered_chunk(),
+            },
+        );
+        pump_until(&mut app, "new terrain", |app| stats(app).meshed_chunks == 1);
+        assert_ne!(
+            app.world().resource::<MeshJobs>().meshed[&coord].entity,
+            old_entity
+        );
+        assert_eq!(stats(&app).total_quads, LAYERED_QUADS);
+    }
+
+    #[test]
+    fn arrival_needs_resident_meshes_and_supports_slabs_stairs_and_edges() {
+        for (block, position) in [
+            (palette::STONE, Vec3::new(16.5, 17.0, 16.5)),
+            (palette::SLATE_SLAB_BOTTOM, Vec3::new(16.5, 16.5, 16.5)),
+            (
+                palette::SLATE_STAIR_NORTH_BOTTOM,
+                Vec3::new(16.5, 16.5, 16.9),
+            ),
+            (palette::STONE, Vec3::new(17.1, 17.0, 16.5)),
+        ] {
+            let mut app = headless_world();
+            let coord = coord(0, 0, 0);
+            app.init_resource::<crate::player::PlayerStats>();
+            crate::world::transition::replace(
+                app.world_mut(),
+                crate::net::WorldChange {
+                    world_id: 1,
+                    world_seed: 9,
+                    arrival: position.to_array(),
+                    exit_arch: Some(BlockCoord {
+                        x: 16,
+                        y: 16,
+                        z: 16,
+                    }),
+                },
+                vec![],
+            );
+            assert!(
+                app.world()
+                    .resource::<crate::world::transition::CurrentWorld>()
+                    .loading
+            );
+            app.world_mut()
+                .resource_mut::<crate::player::PlayerStats>()
+                .position = Some(position);
+            let mut chunk = VoxelChunk::all_air(32);
+            chunk.set(16, 16, 16, block);
+            app.world_mut()
+                .resource_mut::<ChunkStore>()
+                .insert(coord, chunk);
+            assert!(
+                !arrival_ready(app.world(), position, 32),
+                "voxels without a mesh must remain covered"
+            );
+            pump_until(&mut app, "support mesh", |app| {
+                stats(app).meshed_chunks == 1
+            });
+            assert!(
+                !app.world()
+                    .resource::<crate::world::transition::CurrentWorld>()
+                    .loading
+            );
+            assert!(
+                arrival_ready(app.world(), position, 32),
+                "valid support for {block} at {position:?}"
+            );
+            assert!(
+                !arrival_ready(app.world(), position + Vec3::Y, 32),
+                "a body still falling is not ready"
+            );
+            assert!(
+                !arrival_ready(app.world(), Vec3::new(0.1, 17.0, 16.5), 32),
+                "missing adjacent chunk is not ready"
+            );
+            app.world_mut()
+                .resource_mut::<MeshJobs>()
+                .pending
+                .insert(coord);
+            assert!(
+                !arrival_ready(app.world(), position, 32),
+                "a stale mesh cannot complete loading"
+            );
+        }
     }
 
     #[test]

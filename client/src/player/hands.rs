@@ -2862,6 +2862,10 @@ fn mine_punch(elapsed: Duration) -> f32 {
     (1.0 - phase.cos()) * 0.5
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<HandAnimation>(world);
+}
+
 #[cfg(test)]
 mod tests {
     use bevy::asset::AssetPlugin;

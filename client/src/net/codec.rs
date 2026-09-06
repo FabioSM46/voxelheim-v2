@@ -2130,6 +2130,15 @@ pub struct Landmark {
     pub discovered: bool,
 }
 
+/// A validated replacement declared by the server; never constructed from input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorldChange {
+    pub world_id: u64,
+    pub world_seed: i64,
+    pub arrival: [f32; 3],
+    pub exit_arch: Option<BlockCoord>,
+}
+
 /// Complete membership of one validated half-open map-tile rectangle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandmarkList {
@@ -2770,6 +2779,7 @@ pub enum Message {
     /// Every mark this character holds, replacing the client's copy wholesale.
     MarkerList(MarkerList),
     LandmarkList(LandmarkList),
+    WorldChange(WorldChange),
     /// What one visible resident is called and what they do. Decoded and validated here;
     /// no ECS system consumes it until the resident issue, exactly as `MineProgress` was
     /// decoded from V2 and drawn later.
@@ -2826,6 +2836,8 @@ pub enum DecodeError {
     MissingPayload(&'static str),
     /// `ServerWelcome.spawn` is absent. The server always sends it.
     MissingSpawn,
+    /// A V33 replacement violates its position or instance/exit pairing.
+    InvalidWorldChange,
     /// A `spawn` component is NaN or infinite.
     NonFiniteSpawn { axis: usize, value: f32 },
     /// `tick_rate` violates `>= 1`.
@@ -3355,6 +3367,7 @@ impl fmt::Display for DecodeError {
             }
             Self::Malformed(detail) => write!(f, "malformed envelope: {detail}"),
             Self::MissingPayload(kind) => write!(f, "{kind} payload is absent"),
+            Self::InvalidWorldChange => write!(f, "invalid world change position or exit anchor"),
             Self::MissingSpawn => write!(f, "server welcome carries no spawn"),
             Self::NonFiniteSpawn { axis, value } => {
                 write!(f, "spawn axis {axis} must be finite, got {value}")
@@ -4430,8 +4443,39 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // An envelope with no payload is not a message this client can act on, and the
         // handshake refuses it. Named rather than left to the fallback, so that the
         // fallback is reachable for nothing this build can put a name to.
-        // V33 names the transition now; #974 supplies its decoder and world reset.
-        fb::Payload::WorldChange => Ok(Message::Deferred(name)),
+        fb::Payload::WorldChange => {
+            let payload = envelope
+                .payload_as_world_change()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let arrival = payload.arrival().ok_or(DecodeError::InvalidWorldChange)?;
+            let arrival = [arrival.x(), arrival.y(), arrival.z()];
+            const EXTENT: i32 = 1 << 24;
+            if arrival
+                .iter()
+                .any(|v| !v.is_finite() || v.abs() > EXTENT as f32)
+                || (payload.world_id() != 0) != payload.exit_arch().is_some()
+            {
+                return Err(DecodeError::InvalidWorldChange);
+            }
+            let exit_arch = payload.exit_arch().map(|p| BlockCoord {
+                x: p.x(),
+                y: p.y(),
+                z: p.z(),
+            });
+            if exit_arch.is_some_and(|p| {
+                [p.x, p.y, p.z]
+                    .iter()
+                    .any(|v| !(-EXTENT..=EXTENT).contains(v))
+            }) {
+                return Err(DecodeError::InvalidWorldChange);
+            }
+            Ok(Message::WorldChange(WorldChange {
+                world_id: payload.world_id(),
+                world_seed: payload.world_seed(),
+                arrival,
+                exit_arch,
+            }))
+        }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -6743,6 +6787,27 @@ pub(super) mod server_side {
     /// The token [`WelcomeWire::default`] carries: a legal one, so a test that is
     /// not about identity never has to name it.
     pub const DEFAULT_TOKEN: [u8; super::PLAYER_TOKEN_LEN] = [0x5a; super::PLAYER_TOKEN_LEN];
+
+    pub fn encode_world_change(
+        id: u64,
+        seed: i64,
+        arrival: Option<[f32; 3]>,
+        exit: Option<[i32; 3]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let arrival = arrival.map(|p| fb::Vec3::new(p[0], p[1], p[2]));
+        let exit = exit.map(|p| fb::BlockCoord::new(p[0], p[1], p[2]));
+        let payload = fb::WorldChange::create(
+            &mut builder,
+            &fb::WorldChangeArgs {
+                world_id: id,
+                world_seed: seed,
+                arrival: arrival.as_ref(),
+                exit_arch: exit.as_ref(),
+            },
+        );
+        finish_envelope(builder, fb::Payload::WorldChange, payload.as_union_value())
+    }
 
     pub type LandmarkWire = (u64, i32, i32, u8, bool);
 
@@ -9143,7 +9208,7 @@ mod tests {
         (fb::Payload::VoiceHeard, Handling::Consumed),
         (fb::Payload::LandmarkList, Handling::Consumed),
         (fb::Payload::PortalRequest, Handling::ClientOnly),
-        (fb::Payload::WorldChange, Handling::Deferred),
+        (fb::Payload::WorldChange, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -15677,6 +15742,64 @@ mod tests {
                 Err(want),
                 "{name}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod world_change_tests {
+    use super::server_side::encode_world_change;
+    use super::*;
+
+    #[test]
+    fn world_change_validates_every_axis_and_the_exact_exit_pairing() {
+        for id in [0, 1, u64::MAX] {
+            let exit = (id != 0).then_some([-16_777_216, 0, 16_777_216]);
+            let bytes =
+                encode_world_change(id, i64::MIN, Some([-16_777_216.0, 0.5, 16_777_216.0]), exit);
+            let Ok(Message::WorldChange(change)) = decode(&bytes) else {
+                panic!("valid world replacement rejected")
+            };
+            assert_eq!(change.world_id, id);
+            assert_eq!(change.world_seed, i64::MIN);
+            assert_eq!(change.arrival, [-16_777_216.0, 0.5, 16_777_216.0]);
+            for end in 0..bytes.len() {
+                assert!(decode(&bytes[..end]).is_err());
+            }
+        }
+        for (id, exit) in [(0, Some([0, 0, 0])), (1, None)] {
+            assert_eq!(
+                decode(&encode_world_change(id, 7, Some([0.0; 3]), exit)),
+                Err(DecodeError::InvalidWorldChange)
+            );
+        }
+        assert_eq!(
+            decode(&encode_world_change(0, 7, None, None)),
+            Err(DecodeError::InvalidWorldChange)
+        );
+        for axis in 0..3 {
+            for value in [
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                16_777_218.0,
+                -16_777_218.0,
+            ] {
+                let mut pos = [0.0; 3];
+                pos[axis] = value;
+                assert_eq!(
+                    decode(&encode_world_change(0, 7, Some(pos), None)),
+                    Err(DecodeError::InvalidWorldChange)
+                );
+            }
+            for value in [i32::MIN, i32::MAX, 16_777_217, -16_777_217] {
+                let mut exit = [0; 3];
+                exit[axis] = value;
+                assert_eq!(
+                    decode(&encode_world_change(1, 7, Some([0.0; 3]), Some(exit))),
+                    Err(DecodeError::InvalidWorldChange)
+                );
+            }
         }
     }
 }

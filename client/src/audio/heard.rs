@@ -374,7 +374,8 @@ impl Plugin for HeardPlugin {
                     release_speakers,
                     forget_stale_voices,
                 )
-                    .chain(),
+                    .chain()
+                    .after(crate::net::DrainNetwork),
             );
     }
 }
@@ -391,6 +392,12 @@ fn hear(
     mut listening: ResMut<Listening>,
     mixer: Option<Res<super::AudioMixer>>,
 ) {
+    // A world replacement releases the shared source as well as spatial sources,
+    // so the callback discards their queued samples. Reclaim without ever waiting
+    // for that callback; a temporarily full mixer is retried on the next frame.
+    if listening.source.is_none() {
+        listening.source = mixer.as_deref().and_then(|mixer| mixer.claim(Bus::Voice));
+    }
     let heard = inbox.take();
     if heard.is_empty() {
         return;
@@ -711,6 +718,16 @@ fn release_speakers(
     speaking.forget_stale(now);
 }
 
+pub(super) fn reset_world(world: &mut World) {
+    if let Some(mut listening) = world.get_resource_mut::<Listening>() {
+        *listening = Listening::new(None);
+    }
+    crate::world::transition::reset::<Speaking>(world);
+    if let Some(mut voices) = world.get_resource_mut::<Voices>() {
+        voices.forget_world();
+    }
+}
+
 /// **No test here opens a device or a socket.** The wire side is `VoiceInbox::push_for_test`,
 /// the mixer side is a `Mixer` rendering into a `Vec`, and the codec is real libopus.
 #[cfg(test)]
@@ -985,6 +1002,52 @@ mod tests {
         let mut sink = VecSink(vec![0.0; FRAME_SAMPLES * QUEUED_FRAMES]);
         mixer.0.render(&mut sink);
         crate::audio::dsp::level_db(&sink.0)
+    }
+
+    #[test]
+    fn world_reset_discards_jitter_spatial_sources_and_queued_audio() {
+        let mut app = listening_app();
+        let opus = frames();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 7, sequence as u32, frame.clone());
+        }
+        app.update();
+        assert!(
+            !app.world()
+                .resource::<Speaking>()
+                .recent(Instant::now())
+                .is_empty()
+        );
+        reset_world(app.world_mut());
+        assert!(
+            app.world()
+                .resource::<Speaking>()
+                .recent(Instant::now())
+                .is_empty()
+        );
+        assert!(
+            app.world()
+                .resource::<Voices>()
+                .recent(Instant::now())
+                .is_empty()
+        );
+        assert!(
+            heard_level(&app) < -80.0,
+            "old samples survived source release"
+        );
+        app.update();
+        for (sequence, frame) in opus.iter().enumerate().take(6) {
+            say(&mut app, 8, sequence as u32, frame.clone());
+        }
+        app.update();
+        assert!(
+            heard_level(&app) > -30.0,
+            "destination audio did not reacquire a source"
+        );
+        assert_eq!(
+            app.world().resource::<Speaking>().recent(Instant::now()),
+            vec![8]
+        );
     }
 
     #[test]

@@ -53,6 +53,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub use codec::WorldChange;
+
 use bevy::prelude::*;
 
 pub use codec::BlockRequest;
@@ -2105,6 +2107,9 @@ fn drain_session_events(
                     },
                 );
                 commands.insert_resource(Session(params));
+                commands.queue(move |world: &mut World| {
+                    crate::world::transition::new_session(world, params.world_seed)
+                });
                 commands.insert_resource(identity);
                 // The exchange is over: this session has a character. Removing it is
                 // what takes the screen down, the same way inserting it put one up.
@@ -2119,6 +2124,39 @@ fn drain_session_events(
             // Queued, not logged: the server sends hundreds of these on join, and
             // a line each would bury everything else in the log. The world
             // module's counters are the visible signal that they are arriving.
+            Ok(SessionEvent::WorldChange(change)) => {
+                // Frames before the boundary belong to the discarded world. Keep only
+                // personal state (inventory and learned mounts). Capture map replies so
+                // even a last exploration page in this drain reaches its old-world cache.
+                let map = inboxes
+                    .map
+                    .as_deref_mut()
+                    .map_or_else(Vec::new, MapInbox::take);
+                inboxes.world.0.clear();
+                inboxes.snapshots.0.clear();
+                inboxes.mining.0.clear();
+                inboxes.appearances.0.clear();
+                inboxes.residents.0.clear();
+                inboxes.refusals.0.clear();
+                inboxes.storms.0.clear();
+                inboxes.wards.0.clear();
+                inboxes.voice.0.clear();
+                if let Some(inbox) = inboxes.loot.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.mob_hits.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.vendor.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.player_trade.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                commands.queue(move |world: &mut World| {
+                    crate::world::transition::replace(world, change, map)
+                });
+            }
             Ok(SessionEvent::World(update)) => inboxes.world.0.push(update),
 
             // Queued, not logged, for the same reason as a chunk: there are twenty of
@@ -5385,6 +5423,134 @@ mod tests {
             .add_systems(Update, drain_session_events);
 
         (app, event_tx)
+    }
+
+    #[test]
+    fn world_changes_flush_before_consumers_and_keep_only_destination_queues() {
+        use crate::world::transition::CurrentWorld;
+        let (mut app, tx) = app_with_manual_link(ConnectionState::Connected);
+        app.init_resource::<crate::world::ChunkStore>()
+            .init_resource::<crate::player::SnapshotBuffer>()
+            .init_resource::<MapInbox>();
+        app.world_mut()
+            .resource_mut::<crate::world::ChunkStore>()
+            .insert(
+                ChunkCoord {
+                    cx: 0,
+                    cy: 0,
+                    cz: 0,
+                },
+                crate::world::VoxelChunk::all_air(32),
+            );
+        tx.send(SessionEvent::Established {
+            params: params(),
+            returning: None,
+        })
+        .unwrap();
+        // Welcome and replacement can be adjacent, as reconnect-to-instance sends them.
+        for id in [1, 2] {
+            tx.send(SessionEvent::World(WorldUpdate::Unload {
+                coord: ChunkCoord {
+                    cx: id as i32,
+                    cy: 0,
+                    cz: 0,
+                },
+            }))
+            .unwrap();
+            tx.send(SessionEvent::Snapshot {
+                snapshot: Snapshot {
+                    server_tick: id as u32,
+                    ..default()
+                },
+                at: Instant::now(),
+            })
+            .unwrap();
+            tx.send(SessionEvent::WorldChange(WorldChange {
+                world_id: id,
+                world_seed: id as i64,
+                arrival: [4.5, 64.0, 4.5],
+                exit_arch: Some(BlockCoord { x: 4, y: 64, z: 4 }),
+            }))
+            .unwrap();
+        }
+        tx.send(SessionEvent::World(WorldUpdate::Unload {
+            coord: ChunkCoord {
+                cx: 9,
+                cy: 0,
+                cz: 0,
+            },
+        }))
+        .unwrap();
+        tx.send(SessionEvent::Snapshot {
+            snapshot: Snapshot {
+                server_tick: 9,
+                ..default()
+            },
+            at: Instant::now(),
+        })
+        .unwrap();
+        app.add_systems(
+            Update,
+            (|current: Res<CurrentWorld>,
+              store: Res<crate::world::ChunkStore>,
+              session: Res<Session>,
+              snapshots: Res<SnapshotInbox>,
+              updates: Res<WorldInbox>| {
+                assert_eq!(current.id, 2);
+                assert!(current.loading);
+                assert_eq!(session.0.spawn, [4.5, 64.0, 4.5]);
+                assert_eq!(session.0.world_seed, 2);
+                assert!(
+                    store
+                        .get(ChunkCoord {
+                            cx: 0,
+                            cy: 0,
+                            cz: 0
+                        })
+                        .is_none()
+                );
+                assert_eq!(snapshots.0.len(), 1);
+                assert_eq!(snapshots.0[0].0.server_tick, 9);
+                assert_eq!(
+                    updates.0,
+                    vec![WorldUpdate::Unload {
+                        coord: ChunkCoord {
+                            cx: 9,
+                            cy: 0,
+                            cz: 0
+                        }
+                    }]
+                );
+            })
+            .after(drain_session_events),
+        );
+        app.update();
+    }
+
+    #[test]
+    fn a_disconnect_after_world_change_in_the_same_drain_cancels_loading() {
+        let (mut app, tx) = app_with_manual_link(ConnectionState::Connected);
+        app.add_plugins(crate::world::transition::TransitionPlugin);
+        tx.send(SessionEvent::Established {
+            params: params(),
+            returning: None,
+        })
+        .unwrap();
+        tx.send(SessionEvent::WorldChange(WorldChange {
+            world_id: 7,
+            world_seed: 3,
+            arrival: [0.0; 3],
+            exit_arch: Some(BlockCoord { x: 0, y: 0, z: 0 }),
+        }))
+        .unwrap();
+        tx.send(SessionEvent::Ended(None)).unwrap();
+        app.update();
+        let current = app
+            .world()
+            .resource::<crate::world::transition::CurrentWorld>();
+        assert!(!current.loading);
+        assert_eq!(current.id, 0);
+        assert!(!app.world().contains_resource::<Session>());
     }
 
     #[test]

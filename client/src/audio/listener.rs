@@ -87,6 +87,10 @@ pub struct Voices {
 }
 
 impl Voices {
+    pub(super) fn forget_world(&mut self) {
+        self.heard.clear();
+    }
+
     /// Records a speaker as having been heard, which is what puts them on the panel.
     ///
     /// Called from the playback path when a frame of theirs was actually decoded, never when

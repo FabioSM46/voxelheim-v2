@@ -386,6 +386,10 @@ fn play_the_speaker_test(mut controls: ResMut<AudioControls>, mut test: ResMut<S
     }
 }
 
+pub(crate) fn reset_world(world: &mut World) {
+    heard::reset_world(world);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
