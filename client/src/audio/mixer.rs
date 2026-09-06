@@ -55,7 +55,7 @@
 //! an answer rather than being a race between whoever asks first.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use super::spatial::{self, BANDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, PanGains, Placement};
 
@@ -80,10 +80,16 @@ use super::spatial::{self, BANDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, PanGains,
 /// callers:
 ///
 /// 1. **Which bus may take the last slot: `Voice` and `Master`, and nothing else.**
-///    [`VOICE_RESERVE`] slots are held back from `Music`, `Sfx` and `Ambience` — a claim on
-///    one of those is refused while granting it would leave fewer free — so the world's own
-///    sounds can occupy at most `MAX_SOURCES - VOICE_RESERVE` of the pool however many of
-///    them there are. `Voice` is exempt because it is what the reserve is for.
+///    `Music`, `Sfx` and `Ambience` may hold at most `MAX_SOURCES - `[`VOICE_RESERVE`]
+///    between them, so voice can always obtain [`VOICE_RESERVE`] slots however busy the world
+///    is. `Voice` is exempt because it is what the reserve is for.
+///
+///    **That is a count of what the world *holds*, not of what happens to be free, and the
+///    review on #996 is why.** The first version counted free slots and then won one, which
+///    is two steps: two claims that both read one more than the reserve as free both
+///    succeeded, and voice was left short of the reserve that exists to stop exactly that. A
+///    per-slot compare-exchange cannot enforce a pool-wide rule, so the budget is one atomic
+///    location — [`Mixer::world_sources`] — moved by a single `fetch_update`.
 ///    [`Bus::may_take_the_last_slot`] is the predicate, and `Master` is exempt with it: the
 ///    two claims ever made on it are the tone test and the loopback monitor, each taken once
 ///    at startup, before anything else exists to be starved.
@@ -97,14 +103,20 @@ use super::spatial::{self, BANDS, HIGH_CROSSOVER_HZ, LOW_CROSSOVER_HZ, PanGains,
 ///    being heard through. That is the acceptance criterion this policy exists for.
 ///
 /// **The sound that triggers a steal does not get the slot, and is dropped rather than
-/// queued.** A stolen slot goes to [`SlotState::Dirty`] and is handed out again only after
-/// the callback has cleared it, exactly as a released one is — the one place a ring's read
-/// index and filter state may be reset is the thread that owns them, and a claimant resetting
-/// them would be the second writer of what [`Ring`]'s ordering assumes has one. So the steal
-/// frees the slot for whoever asks next, a few milliseconds later, and the one-shot that
-/// asked first is simply not heard. That is the cheaper half of the trade: a one-shot nobody
-/// hears costs one sound, and a queue of them costs a sound arriving after the thing that
-/// caused it.
+/// queued.** The one-shot that asked first is simply not heard; that is the cheaper half of
+/// the trade, because a one-shot nobody hears costs one sound and a queue of them costs a
+/// sound arriving after the thing that caused it.
+///
+/// **What a steal does is [`SlotState::Revoked`], and the review on #996 is why.** Taking a
+/// slot away used to mark it `Dirty`, which made it reusable as soon as the callback had
+/// cleared it — while the previous owner still held a [`SourceHandle`] it might be part-way
+/// through pushing into. `live()` is one load and `push` is another, so a producer could pass
+/// the check and then write into the ring of whoever had since been given the slot: two
+/// producers on a ring whose whole memory ordering assumes one. A revoked slot is instead
+/// silent immediately and **still its owner's**, and only that owner's `Drop` moves it on. So
+/// a revocation is heard at once and the slot comes back a frame later rather than a block
+/// later, from a producer that noticed. The cost is stated at [`SlotState::Revoked`]: a
+/// producer that never runs again never returns its slot.
 pub const MAX_SOURCES: usize = 16;
 
 /// How many of the [`MAX_SOURCES`] slots are held back from the world's own sounds.
@@ -428,20 +440,29 @@ impl Ring {
 /// | State | Who may move it | To |
 /// | --- | --- | --- |
 /// | [`Self::Free`] | [`Mixer::claim`], by compare-exchange | `Live` |
-/// | [`Self::Live`] | the one [`SourceHandle`]'s `Drop`, or [`Mixer::claim`] stealing it | `Dirty` |
+/// | [`Self::Live`] | the one [`SourceHandle`]'s `Drop` | `Dirty` |
+/// | [`Self::Live`] | a claim above it revoking it, or its bus being switched off | `Revoked` |
+/// | [`Self::Revoked`] | the one [`SourceHandle`]'s `Drop` | `Dirty` |
 /// | [`Self::Dirty`] | the output callback, after clearing the slot | `Free` |
 ///
 /// A slot is claimable only while `Free`, and `Free` is written only by the thread that has
 /// just finished clearing it. There is no state a second reader can catch half-written,
 /// because there is nothing to read twice.
 ///
-/// **#982 added a second party who may leave `Live`, and the same lesson applied twice.** A
-/// stolen slot has an owner still holding a [`SourceHandle`], and that owner's `Drop` must not
-/// mark `Dirty` a slot somebody else has since been given: the two events are a load and a
-/// store, and a claim can land between them exactly as it could between the two booleans. So
-/// the location grew a **generation** instead of gaining a second location — see
-/// [`Source::slot`] — and every transition is a compare-exchange over the packed word, which
-/// fails harmlessly when the generation has moved underneath it.
+/// **#982 added a generation, and the review on #996 showed why that was not enough.** The
+/// generation makes `Drop` safe: a handle whose slot has moved on fails its compare-exchange
+/// instead of marking `Dirty` a slot somebody else was given. What it does *not* do is make an
+/// already-entered `push` inert. A producer that reads `live()` as true and is then preempted
+/// while its slot is revoked, recycled and handed to a new owner goes on to write into that
+/// owner's ring — the same check-then-act shape #948 was about, moved to the producer side,
+/// and a second writer of the very index [`Ring`]'s ordering assumes has one.
+///
+/// **[`Self::Revoked`] fixes it structurally rather than by widening the check.** Taking a slot
+/// away no longer makes it available; it makes it *unrenderable*, and only the owner's own
+/// `Drop` moves it onward. So while a handle exists its slot is in `Live` or `Revoked` and can
+/// never belong to anybody else, and there is no interleaving in which two producers hold one
+/// ring. `live()` stops being a safety check and becomes what it always read as: the way a
+/// producer is told to let go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum SlotState {
@@ -457,6 +478,20 @@ enum SlotState {
     /// working output device therefore never recycles a slot, which costs nothing: nothing is
     /// audible there either way.
     Dirty = 2,
+    /// The slot has been taken away, and its handle has not noticed yet.
+    ///
+    /// **Silent immediately, reusable only once the owner lets go.** The callback renders a
+    /// revoked slot as nothing, so a bed that loses its slot to a voice stops being heard on
+    /// the next block — which is what "stolen" has to mean. The slot itself stays the old
+    /// owner's until its `Drop`, which is what makes the theft safe: no second owner can exist
+    /// for the ring that owner may still be writing into.
+    ///
+    /// **The cost is stated rather than hidden.** A producer that never runs again holds its
+    /// slot forever, so a revocation reclaims a slot on the order of one frame rather than one
+    /// audio block, and only from a producer that is still running. Every producer in this
+    /// client pushes each frame and can therefore see `live()` go false; the contract that
+    /// comes with a [`SourceHandle`] is to drop it when it does.
+    Revoked = 3,
 }
 
 /// How many low bits of a slot word [`SlotState`] occupies.
@@ -465,33 +500,76 @@ const STATE_BITS: u32 = 2;
 /// The mask those bits make.
 const STATE_MASK: u32 = (1 << STATE_BITS) - 1;
 
-/// One slot word: the generation above, the state below.
-const fn pack(generation: u32, state: SlotState) -> u32 {
-    (generation << STATE_BITS) | state as u32
+/// How many bits above the state hold the [`Bus`], and where they start.
+const BUS_SHIFT: u32 = STATE_BITS;
+const BUS_BITS: u32 = 3;
+const BUS_MASK: u32 = (1 << BUS_BITS) - 1;
+
+/// Where the generation starts, and the mask that keeps it inside its own field.
+const GENERATION_SHIFT: u32 = BUS_SHIFT + BUS_BITS;
+const GENERATION_MASK: u32 = u32::MAX >> GENERATION_SHIFT;
+
+const _: () = {
+    // Three bits is exactly enough for `Bus::ALL`, and one bus more needs a fourth. Stated
+    // here because the failure is silent: a sixth bus would alias a fifth's bits and the
+    // callback would render it on the wrong gain.
+    assert!(
+        Bus::ALL.len() <= (BUS_MASK as usize) + 1,
+        "a bus does not fit the slot word's bus field"
+    );
+    assert!(
+        SlotState::Revoked as u32 <= STATE_MASK,
+        "a state does not fit"
+    );
+};
+
+/// One slot word: the generation above, then the bus, then the state.
+///
+/// **The bus lives in the word since the review on #996, and that is a fix rather than a
+/// tidy-up.** It used to be an `AtomicU8` beside it, written *after* the compare-exchange that
+/// won the slot — so a revocation walking the slots could read a bus from the previous owner
+/// and take a slot away from whoever had just been given it. Reading a stale `Ambience` off a
+/// slot that had just become `Voice` would have broken the one rule this whole policy exists
+/// for. One word means the state, the bus and the generation are published by the single
+/// compare-exchange that wins the slot, and read by the single load that inspects it.
+const fn pack(generation: u32, bus: Bus, state: SlotState) -> u32 {
+    ((generation & GENERATION_MASK) << GENERATION_SHIFT)
+        | ((bus.index() as u32) << BUS_SHIFT)
+        | state as u32
 }
 
 /// The state a slot word holds.
 ///
-/// Total, for [`Bus::from_index`]'s reason: the only writer is [`pack`], `3` is unreachable,
-/// and the callback is no place to answer an unreachable state with a panic. `Dirty` is the
-/// safe fallback — a slot the callback clears once more is a slot nobody was using.
+/// Total, for [`Bus::from_index`]'s reason: the only writer is [`pack`] and the callback is no
+/// place to answer an unreachable state with a panic.
 const fn state_of(word: u32) -> SlotState {
     match word & STATE_MASK {
         0 => SlotState::Free,
         1 => SlotState::Live,
-        _ => SlotState::Dirty,
+        2 => SlotState::Dirty,
+        _ => SlotState::Revoked,
     }
+}
+
+/// The bus a slot word names.
+const fn bus_of(word: u32) -> Bus {
+    Bus::from_index(((word >> BUS_SHIFT) & BUS_MASK) as u8)
 }
 
 /// The generation a slot word holds.
 ///
-/// Thirty bits, and it wraps. A generation is only ever compared for equality against one a
-/// [`SourceHandle`] captured, so what it has to be is *different from the last few*, not
+/// Twenty-seven bits, and it wraps. A generation is only ever compared for equality against one
+/// a [`SourceHandle`] captured, so what it has to be is *different from the last few*, not
 /// unique for the life of the process — and a slot would have to be claimed and released a
-/// thousand million times inside the life of one handle for a wrap to make a stale handle look
+/// hundred million times inside the life of one handle for a wrap to make a stale handle look
 /// live.
 const fn generation_of(word: u32) -> u32 {
-    word >> STATE_BITS
+    word >> GENERATION_SHIFT
+}
+
+/// The generation after `generation`, kept inside its field.
+const fn next_generation(generation: u32) -> u32 {
+    generation.wrapping_add(1) & GENERATION_MASK
 }
 
 /// One slot in the mixer: a ring, the bus it is mixed on, and where it is heard from.
@@ -503,10 +581,9 @@ const fn generation_of(word: u32) -> u32 {
 #[derive(Debug)]
 struct Source {
     ring: Ring,
-    /// A [`Bus::index`]. Written by [`Mixer::claim`], read by the callback.
-    bus: AtomicU8,
-    /// A [`SlotState`] and the generation it belongs to, packed by [`pack`]. The one thing
-    /// that decides who may touch the rest — and, since #982, which owner it decides for.
+    /// A [`SlotState`], the [`Bus`] and the generation, packed by [`pack`]. The one thing that
+    /// decides who may touch the rest — which owner it decides for, and, since the review on
+    /// #996, which bus it decides about.
     slot: AtomicU32,
     /// Distance attenuation, as `f32` bits. Kept apart from the pan rather than folded into
     /// it, because a mono device applies this and skips the pan — and recovering one from
@@ -531,10 +608,9 @@ impl Source {
     fn new() -> Self {
         Self {
             ring: Ring::new(SOURCE_CAPACITY),
-            bus: AtomicU8::new(Bus::Master.index() as u8),
             // A slot nobody has used needs no clearing, which is what makes the first
             // `MAX_SOURCES` claims of a fresh mixer succeed with no callback anywhere.
-            slot: AtomicU32::new(pack(0, SlotState::Free)),
+            slot: AtomicU32::new(pack(0, Bus::Master, SlotState::Free)),
             gain: AtomicU32::new(1.0f32.to_bits()),
             pan_left: AtomicU32::new(1.0f32.to_bits()),
             pan_right: AtomicU32::new(1.0f32.to_bits()),
@@ -586,18 +662,23 @@ impl Source {
     /// `word` is what the caller read when it decided this slot was dirty, so the exchange is
     /// against that exact generation: a slot whose word has moved since is not this thread's
     /// to free.
-    fn recycle(&self, word: u32) {
+    ///
+    /// Answers whether it actually freed the slot, which is what [`Mixer::render`] needs in
+    /// order to give the world-bus budget back exactly once per slot it was spent on.
+    fn recycle(&self, word: u32) -> bool {
         self.ring.skip();
         self.low_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.mid_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.occlusion.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.place(Placement::UNPOSITIONED);
-        let _ = self.slot.compare_exchange(
-            word,
-            pack(generation_of(word), SlotState::Free),
-            Ordering::Release,
-            Ordering::Relaxed,
-        );
+        self.slot
+            .compare_exchange(
+                word,
+                pack(generation_of(word), bus_of(word), SlotState::Free),
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_ok()
     }
 }
 
@@ -620,6 +701,16 @@ pub struct Mixer {
     /// `Music` is the only bus a player can turn off today; the mechanism is per-bus because
     /// "off" has to be enforced where slots are handed out, which is a property of the slot.
     enabled: [AtomicBool; Bus::ALL.len()],
+    /// How many slots the buses a world feeds are holding between them.
+    ///
+    /// **One counter, because the reserve is one pool-wide fact and a per-slot
+    /// compare-exchange cannot enforce a pool-wide anything.** The review on #996 found the
+    /// original: it counted free slots and then won a slot, and two claims that both read
+    /// `VOICE_RESERVE + 1` free both succeeded, leaving voice a slot short of the reserve that
+    /// exists to stop exactly that. This is decremented by [`Mixer::render`] when a slot is
+    /// recycled, so a claim spends budget for as long as it holds a slot and not one moment
+    /// longer.
+    world_sources: AtomicUsize,
     /// Where the duck is being asked to go, as `f32` bits. Written by a Bevy system; `1.0` is
     /// no duck at all.
     duck_target: AtomicU32,
@@ -661,6 +752,7 @@ impl Mixer {
             sources: (0..MAX_SOURCES).map(|_| Source::new()).collect(),
             gains: Bus::ALL.map(|_| AtomicU32::new(1.0f32.to_bits())),
             enabled: Bus::ALL.map(|_| AtomicBool::new(true)),
+            world_sources: AtomicUsize::new(0),
             // `1.0` on both, so a mixer nobody has spoken to ducks nothing at all rather
             // than ramping up from silence on the first block it renders.
             duck_target: AtomicU32::new(1.0f32.to_bits()),
@@ -701,11 +793,18 @@ impl Mixer {
     /// callback like every other released one. The caller drops the sound it wanted to play
     /// rather than queueing it; the slot is there for whoever asks next.
     pub fn claim(self: &Arc<Self>, bus: Bus) -> Option<SourceHandle> {
-        if !self.enabled[bus.index()].load(Ordering::Relaxed) {
+        if !self.enabled[bus.index()].load(Ordering::SeqCst) {
             return None;
         }
         if let Some(handle) = self.take_a_free_slot(bus) {
             return Some(handle);
+        }
+        // Re-read before revoking anything. `take_a_free_slot` also answers `None` when the
+        // bus was switched off while this claim was landing, and a bus that is off must not
+        // take a slot away from one that is on — a refusal that costs somebody else their
+        // ambience bed for a sound that will never be generated is worse than the refusal.
+        if !self.enabled[bus.index()].load(Ordering::SeqCst) {
+            return None;
         }
         self.steal_for(bus);
         None
@@ -713,54 +812,105 @@ impl Mixer {
 
     /// Wins a `Free` slot for `bus`, honouring the reserve, or answers `None`.
     fn take_a_free_slot(self: &Arc<Self>, bus: Bus) -> Option<SourceHandle> {
-        // Counted before anything is taken, and `Free` only: a `Dirty` slot is on its way
-        // back but is not available now, and counting it would let the world's sounds spend
-        // a reserve that is not there yet.
-        if !bus.may_take_the_last_slot() && self.free_slots() <= VOICE_RESERVE {
+        // **The budget is taken before the slot, and it is one atomic step.** The review on
+        // #996 found the original doing this the other way round — counting free slots and
+        // then winning one — so two claims that both read `VOICE_RESERVE + 1` free both
+        // succeeded and voice was left a slot short of the reserve that exists to stop
+        // precisely that. A per-slot compare-exchange cannot enforce a pool-wide rule; only a
+        // pool-wide location can.
+        let budgeted = !bus.may_take_the_last_slot();
+        if budgeted && !self.take_world_budget() {
             return None;
         }
         for (index, source) in self.sources.iter().enumerate() {
             // **One compare-exchange, and it is the whole decision.** Only a `Free` slot can
             // be won, and a slot is `Free` only after the callback has cleared it — a
             // released one still holding the previous owner's audio is `Dirty` and this
-            // fails on it, as it does on one somebody else is using. The acquire pairs with
-            // `recycle`'s release, so the winner sees the cleared ring and the reset
-            // placement rather than whatever was there before.
+            // fails on it, as it does on one somebody else is using or one that has been
+            // revoked and not yet let go. The acquire pairs with `recycle`'s release, so the
+            // winner sees the cleared ring and the reset placement rather than whatever was
+            // there before.
             //
-            // The generation moves with the claim, which is what makes a handle to the
-            // previous owner's slot inert the instant this one wins it.
+            // The generation and the bus move with the claim, in the same word, so there is
+            // no window in which this slot is live and reads as somebody else's bus.
             let word = source.slot.load(Ordering::Acquire);
             if state_of(word) != SlotState::Free {
                 continue;
             }
-            let generation = generation_of(word).wrapping_add(1);
+            let generation = next_generation(generation_of(word));
             if source
                 .slot
                 .compare_exchange(
                     word,
-                    pack(generation, SlotState::Live),
-                    Ordering::AcqRel,
+                    pack(generation, bus, SlotState::Live),
+                    Ordering::SeqCst,
                     Ordering::Relaxed,
                 )
                 .is_err()
             {
                 continue;
             }
-            // After the slot is won, and safely: the callback may render it for one block
-            // before this store lands, and renders `0.0` whichever bus it reads — `recycle`
-            // emptied the ring and pushing needs the handle this has not returned yet, which
-            // the type system enforces rather than a comment.
-            source.bus.store(bus.index() as u8, Ordering::Relaxed);
+            // **The bus is re-read after the slot is won, and that is what makes "off means no
+            // source" true rather than nearly true.** `set_enabled(false)` stores the flag and
+            // *then* sweeps for live sources; this wins the slot and *then* reads the flag.
+            // Both operations are `SeqCst`, so the four have one total order and the two
+            // interleavings are the only ones there are: if this load reads `true` the store
+            // is later than it, so the sweep that follows the store sees this slot already
+            // live and revokes it; if it reads `false`, this gives the slot back here. There
+            // is no order in which a live source survives on a bus that is off.
+            if !self.enabled[bus.index()].load(Ordering::SeqCst) {
+                // Straight to `Dirty`: this slot has no handle to drop it, and its ring is
+                // the consumer's to clear like any other released one. The budget goes back
+                // with the recycle rather than here, so it is given back exactly once.
+                let _ = source.slot.compare_exchange(
+                    pack(generation, bus, SlotState::Live),
+                    pack(generation, bus, SlotState::Dirty),
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                );
+                return None;
+            }
             return Some(SourceHandle {
                 mixer: Arc::clone(self),
                 index,
                 generation,
             });
         }
+        // Budget taken and no slot to spend it on. Give it straight back: it is only ever a
+        // claim on a slot somebody holds, and this claim holds none.
+        if budgeted {
+            self.give_world_budget_back();
+        }
         None
     }
 
-    /// How many slots are free right now.
+    /// Takes one unit of the world buses' share of the pool, or answers `false`.
+    ///
+    /// One `fetch_update`, so the read and the increment are one step and the ceiling cannot
+    /// be crossed by two claims that both looked before either wrote.
+    fn take_world_budget(&self) -> bool {
+        self.world_sources
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                (held < MAX_SOURCES - VOICE_RESERVE).then_some(held + 1)
+            })
+            .is_ok()
+    }
+
+    /// Gives one unit back.
+    fn give_world_budget_back(&self) {
+        // Saturating rather than wrapping: an underflow here would be a bookkeeping bug
+        // handing the world buses the whole pool, which is the one outcome the reserve exists
+        // to prevent, and a saturating floor keeps that failure at "no worse than now".
+        let _ = self
+            .world_sources
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                Some(held.saturating_sub(1))
+            });
+    }
+
+    /// How many slots are free right now. Test-only: the run-time budget is
+    /// [`Self::world_sources`], which is a count of what is *held* rather than of what is left.
+    #[cfg(test)]
     fn free_slots(&self) -> usize {
         self.sources
             .iter()
@@ -782,16 +932,19 @@ impl Mixer {
         self.steal_beneath(claimant)
     }
 
-    /// Releases the live source with the lowest steal order strictly below `claimant`.
+    /// Revokes the live source with the lowest steal order strictly below `claimant`.
     fn steal_beneath(&self, claimant: u8) -> bool {
         let mut victim: Option<(u8, usize, u32)> = None;
         for (index, source) in self.sources.iter().enumerate() {
+            // **One load, and it answers both halves of the question.** The state and the bus
+            // are one word since the review on #996, so there is no interleaving in which
+            // this reads `Live` from a slot that has just been claimed and `Ambience` from
+            // the owner before it — which would have taken a slot away from a voice.
             let word = source.slot.load(Ordering::Acquire);
             if state_of(word) != SlotState::Live {
                 continue;
             }
-            let Some(order) = Bus::from_index(source.bus.load(Ordering::Relaxed)).steal_order()
-            else {
+            let Some(order) = bus_of(word).steal_order() else {
                 continue;
             };
             if order >= claimant {
@@ -804,16 +957,23 @@ impl Mixer {
         let Some((_, index, word)) = victim else {
             return false;
         };
-        // The generation moves, so the owner's handle is inert from here — its pushes are
-        // refused and its `Drop` is a compare-exchange that will fail. The state moves to
-        // `Dirty` rather than `Free` because what is left in the slot is the consumer's
-        // memory to clear, exactly as it is for a slot whose handle was dropped.
+        self.revoke(index, word)
+    }
+
+    /// Moves one live slot to [`SlotState::Revoked`], and says whether it did.
+    ///
+    /// **Not to `Dirty`, and the difference is the whole of what the review on #996 bought.**
+    /// A revoked slot is silent from the next block and is still its owner's: only that
+    /// owner's `Drop` moves it on, so no second owner can ever exist for a ring the first may
+    /// still be writing into. The generation is left alone, because the handle is not being
+    /// invalidated — it is being told to let go, and `SourceHandle::live` is how it hears that.
+    fn revoke(&self, index: usize, word: u32) -> bool {
         self.sources[index]
             .slot
             .compare_exchange(
                 word,
-                pack(generation_of(word).wrapping_add(1), SlotState::Dirty),
-                Ordering::AcqRel,
+                pack(generation_of(word), bus_of(word), SlotState::Revoked),
+                Ordering::SeqCst,
                 Ordering::Relaxed,
             )
             .is_ok()
@@ -831,32 +991,31 @@ impl Mixer {
 
     /// Turns one bus on or off.
     ///
-    /// **Off means no source at all**, which is why this releases what the bus is holding
+    /// **Off means no source at all**, which is why this revokes what the bus is holding
     /// rather than only refusing the next claim: a generator already running would otherwise
     /// go on filling a ring nobody would ever hear, and go on holding a slot the policy at
     /// [`MAX_SOURCES`] has other uses for. Turning a bus back on restores nothing — whatever
     /// was playing is gone, and the next thing to ask gets a slot.
+    ///
+    /// **The store comes before the sweep, and [`Mixer::claim`] reads the flag after winning
+    /// its slot.** That ordering is the whole of why a claim racing this cannot leave a live
+    /// source on a bus that is off; the argument is written out at the re-read in
+    /// `take_a_free_slot`, and both sides are `SeqCst` so that there is a total order for it
+    /// to be an argument about.
     // #982 part 1 establishes the mechanism; part 3 is where `AudioControls::music_on` calls
     // it, so between the two this has only its tests below.
     #[allow(dead_code)]
     pub fn set_enabled(&self, bus: Bus, on: bool) {
-        self.enabled[bus.index()].store(on, Ordering::Relaxed);
+        self.enabled[bus.index()].store(on, Ordering::SeqCst);
         if on {
             return;
         }
-        for source in &self.sources {
-            let word = source.slot.load(Ordering::Acquire);
-            if state_of(word) != SlotState::Live
-                || Bus::from_index(source.bus.load(Ordering::Relaxed)) != bus
-            {
+        for (index, source) in self.sources.iter().enumerate() {
+            let word = source.slot.load(Ordering::SeqCst);
+            if state_of(word) != SlotState::Live || bus_of(word) != bus {
                 continue;
             }
-            let _ = source.slot.compare_exchange(
-                word,
-                pack(generation_of(word).wrapping_add(1), SlotState::Dirty),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
+            self.revoke(index, word);
         }
     }
 
@@ -905,7 +1064,7 @@ impl Mixer {
     /// chose — the run-time answer is only ever read by the callback that acts on it.
     #[cfg(test)]
     fn slot_bus(&self, index: usize) -> Bus {
-        Bus::from_index(self.sources[index].bus.load(Ordering::Relaxed))
+        bus_of(self.sources[index].slot.load(Ordering::Acquire))
     }
 
     /// Where the duck has actually got to, for the tests that watch it ramp.
@@ -1004,10 +1163,18 @@ impl Mixer {
             let word = source.slot.load(Ordering::Acquire);
             match state_of(word) {
                 SlotState::Dirty => {
-                    source.recycle(word);
+                    // Clearing a `Dirty` slot is this thread's job because nothing else may
+                    // leave that state — and freeing it is where a world bus's budget goes
+                    // back, exactly once, on the one transition every released slot makes.
+                    if source.recycle(word) && !bus_of(word).may_take_the_last_slot() {
+                        self.give_world_budget_back();
+                    }
                     continue;
                 }
-                SlotState::Free => continue,
+                // A revoked slot is silent from this block on, and is still its owner's: only
+                // that owner's `Drop` moves it onward, which is what stops a second owner
+                // existing for a ring the first may still be writing into.
+                SlotState::Free | SlotState::Revoked => continue,
                 SlotState::Live => {}
             }
             live[index] = true;
@@ -1029,7 +1196,7 @@ impl Mixer {
             // The bus gain, and the duck on the two buses that take one. A bus nobody is
             // ducking multiplies by exactly `1.0`, so music with ducking turned off is the
             // samples that were pushed rather than an approximate restoration of them.
-            let bus = Bus::from_index(source.bus.load(Ordering::Relaxed));
+            let bus = bus_of(word);
             let bus = if bus.ducks() {
                 bus_gains[bus.index()] * duck
             } else {
@@ -1171,6 +1338,18 @@ impl SourceHandle {
         generation_of(word) == self.generation && state_of(word) == SlotState::Live
     }
 
+    /// Whether this handle's slot has been taken away.
+    ///
+    /// **The one thing a producer owes the pool.** A revoked slot is silent already; what it
+    /// is waiting for is its owner to drop the handle, which is the only move that returns it.
+    /// A producer that goes on holding one is not unsafe — nobody else can have the slot while
+    /// it does, which is the point — it is simply keeping a slot the policy has given away.
+    #[cfg(test)]
+    fn revoked(&self) -> bool {
+        let word = self.mixer.sources[self.index].slot.load(Ordering::Acquire);
+        generation_of(word) == self.generation && state_of(word) == SlotState::Revoked
+    }
+
     /// Appends as much of `samples` as fits, and answers how much that was.
     ///
     /// A handle whose slot was taken accepts nothing, which is the same answer a full ring
@@ -1230,21 +1409,33 @@ impl Drop for SourceHandle {
     /// [`SlotState::Dirty`] — silent to the callback, refused by [`Mixer::claim`] — and the
     /// callback does the clearing and the freeing together.
     ///
-    /// **A compare-exchange rather than a store, and #982 is why.** `Live` used to be this
-    /// handle's state to leave and nobody else's; a steal is a second party who may leave it,
-    /// so a plain store here could land after the callback had cleared the stolen slot and a
-    /// new owner had won it — killing a source this handle has nothing to do with. The
-    /// exchange is against the exact word this handle owns, so a slot whose generation has
-    /// moved is left alone. The release is what makes the last samples this owner pushed
-    /// visible to the callback that discards them.
+    /// **A read-modify-write rather than a store, and two reviews are why.** `Live` used to be
+    /// this handle's state to leave and nobody else's; #982 added a second party who may leave
+    /// it, so a plain store could land after the slot had been cleared and handed on, killing
+    /// a source this handle has nothing to do with. The review on #996 added a fourth state,
+    /// so there are now two states a live handle may be dropped from — `Live` if nothing has
+    /// happened to it, `Revoked` if its slot was taken — and exactly one party, this `Drop`,
+    /// may leave either.
+    ///
+    /// The update is conditional on the generation, so a slot whose generation has moved is
+    /// left alone; the release is what makes the last samples this owner pushed visible to the
+    /// callback that discards them.
     fn drop(&mut self) {
-        let source = &self.mixer.sources[self.index];
-        let word = pack(self.generation, SlotState::Live);
-        let _ = source.slot.compare_exchange(
-            word,
-            pack(self.generation, SlotState::Dirty),
+        let generation = self.generation;
+        let _ = self.mixer.sources[self.index].slot.fetch_update(
             Ordering::Release,
             Ordering::Relaxed,
+            |word| {
+                if generation_of(word) != generation {
+                    return None;
+                }
+                match state_of(word) {
+                    SlotState::Live | SlotState::Revoked => {
+                        Some(pack(generation, bus_of(word), SlotState::Dirty))
+                    }
+                    SlotState::Free | SlotState::Dirty => None,
+                }
+            },
         );
     }
 }
@@ -2099,9 +2290,9 @@ mod tests {
     fn a_voice_claim_takes_the_ambience_bed_and_leaves_the_stolen_handle_inert() {
         let mixer = mono_mixer();
         // Exact counts rather than filling until refused, and that is a property worth
-        // naming: **the refusal is what performs the steal**, so a loop that claims until it
-        // is told no has already taken a bed by the time it stops. Every caller in this
-        // client claims once for one sound, which is the shape the policy is written for.
+        // naming: **the refusal is what performs the revocation**, so a loop that claims
+        // until it is told no has already taken a bed by the time it stops. Every caller in
+        // this client claims once for one sound, which is the shape the policy is written for.
         let beds: Vec<SourceHandle> = (0..MAX_SOURCES - VOICE_RESERVE)
             .map(|_| mixer.claim(Bus::Ambience).expect("a free slot"))
             .collect();
@@ -2111,31 +2302,72 @@ mod tests {
         assert_eq!(beds.len() + voices.len(), MAX_SOURCES, "the pool is full");
         assert_eq!(mixer.free_slots(), 0);
 
-        // The claim that finds nothing free: refused, and the slot it freed is not this
-        // caller's — a one-shot that cannot claim is dropped rather than queued.
+        // The claim that finds nothing free: refused, and the slot it took is not this
+        // caller's. A one-shot that cannot claim is dropped rather than queued.
         assert!(mixer.claim(Bus::Voice).is_none());
-        let stolen = beds.iter().filter(|bed| !bed.live()).count();
-        assert_eq!(stolen, 1, "{stolen} beds were taken for one claim");
+        let taken: Vec<&SourceHandle> = beds.iter().filter(|bed| bed.revoked()).collect();
+        assert_eq!(
+            taken.len(),
+            1,
+            "{} beds were taken for one claim",
+            taken.len()
+        );
         assert!(
             voices.iter().all(|held| held.live()),
-            "the steal reached a voice slot"
+            "the revocation reached a voice slot"
         );
 
-        // The stolen owner writes into nothing at all, which is the property that makes a
-        // steal safe: it cannot reach the audio of whoever gets the slot next.
-        let ghost = beds.iter().find(|bed| !bed.live()).expect("one was taken");
-        assert_eq!(ghost.push(&[1.0; 8]), 0, "a stolen handle still pushes");
+        // The revoked owner writes into nothing at all, and, the property the review on #996
+        // asked for, **nobody else can be given the slot while that owner still holds it**,
+        // however many blocks the callback runs. So there is no interleaving in which a stale
+        // push reaches a new owner's ring.
+        let ghost = taken[0];
+        assert!(!ghost.live());
+        assert_eq!(ghost.push(&[1.0; 8]), 0, "a revoked handle still pushes");
         assert_eq!(ghost.free(), 0);
+        for _ in 0..8 {
+            let _ = rendered(&mixer, 64);
+            assert!(
+                mixer.claim(Bus::Voice).is_none(),
+                "a slot was handed out from under a handle that still holds it"
+            );
+        }
 
-        // One block later the callback has cleared it and the next claim gets it.
+        // It comes back when, and only when, the owner lets go, which is the whole of what a
+        // producer owes the pool.
+        drop(beds);
         let _ = rendered(&mixer, 8);
         let replacement = mixer.claim(Bus::Voice).expect("the freed slot");
         assert!(replacement.live());
         // And it comes back empty, like every other recycled slot.
         assert_eq!(rendered(&mixer, 8), vec![0.0; 8]);
-        drop(beds);
         drop(voices);
         drop(replacement);
+    }
+
+    /// **A revoked slot is silent from the next block**, which is what "stolen" has to mean
+    /// even though the slot itself is not reusable yet. The two halves are separable, and
+    /// this is the one a listener hears.
+    #[test]
+    fn a_revoked_source_goes_quiet_immediately_even_though_its_slot_has_not_come_back() {
+        let mixer = mono_mixer();
+        let bed = mixer.claim(Bus::Ambience).expect("a free slot");
+        bed.push(&[0.5; 64]);
+        assert_eq!(rendered(&mixer, 4), vec![0.5; 4], "the bed is audible");
+
+        assert!(mixer.revoke(0, mixer.sources[0].slot.load(Ordering::Acquire)));
+        assert!(bed.revoked());
+        assert_eq!(
+            rendered(&mixer, 8),
+            vec![0.0; 8],
+            "a revoked bed was still heard"
+        );
+        assert_eq!(
+            mixer.slot_state(0),
+            SlotState::Revoked,
+            "and it is not free"
+        );
+        drop(bed);
     }
 
     /// **Music off is no source at all, not a source at zero.** Both halves: a claim is
@@ -2157,6 +2389,16 @@ mod tests {
         // and the half above is the one it would not.
         let _ = rendered(&mixer, 8);
         assert_eq!(rendered(&mixer, 8), vec![0.0; 8]);
+        assert_eq!(
+            playing.push(&[1.0; 8]),
+            0,
+            "a revoked generator still pushes"
+        );
+
+        // The slot comes back when its owner lets go, not before: the contract every
+        // revocation carries.
+        drop(playing);
+        let _ = rendered(&mixer, 8);
         assert_eq!(mixer.slot_state(0), SlotState::Free, "the slot came back");
 
         // The negative control: with the bus back on, the same call is answered.
@@ -2164,7 +2406,263 @@ mod tests {
         let again = mixer.claim(Bus::Music).expect("music is on again");
         again.push(&[0.5; 4]);
         assert_eq!(rendered(&mixer, 4), vec![0.5; 4]);
-        drop(playing);
+    }
+
+    /// **The reserve holds against concurrent claims, which is what the review on #996 found
+    /// it did not.** Sixteen threads all asking for a world bus at once: the pool-wide ceiling
+    /// is one atomic location, so however they interleave, the number granted cannot exceed
+    /// what the world buses are allowed to hold.
+    ///
+    /// **This assertion cannot fail spuriously, and that is deliberate.** It is an upper bound
+    /// that the fixed implementation can never cross, so a flaky machine makes it slower and
+    /// never redder. What it cannot promise is to catch the old defect on every run — a race
+    /// has to be lost for that — which is why the property below it is asserted too: whatever
+    /// the threads did, `VOICE_RESERVE` slots are still there for voice afterwards.
+    #[test]
+    fn a_crowd_of_concurrent_world_claims_cannot_cross_the_reserve() {
+        let mixer = mono_mixer();
+        let granted: Vec<SourceHandle> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..MAX_SOURCES)
+                .map(|n| {
+                    let mixer = Arc::clone(&mixer);
+                    scope.spawn(move || {
+                        let bus = match n % 3 {
+                            0 => Bus::Ambience,
+                            1 => Bus::Music,
+                            _ => Bus::Sfx,
+                        };
+                        mixer.claim(bus)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|handle| handle.join().expect("no claim panics"))
+                .collect()
+        });
+
+        assert!(
+            granted.len() <= MAX_SOURCES - VOICE_RESERVE,
+            "{} world sources were granted out of a budget of {}",
+            granted.len(),
+            MAX_SOURCES - VOICE_RESERVE
+        );
+        // The property the whole reserve exists for, asserted rather than inferred from the
+        // count: voice can still be heard by as many people as it was promised.
+        let voices: Vec<SourceHandle> = (0..VOICE_RESERVE)
+            .map(|_| mixer.claim(Bus::Voice).expect("the reserve is still there"))
+            .collect();
+        assert_eq!(voices.len(), VOICE_RESERVE);
+        drop(granted);
+        drop(voices);
+    }
+
+    /// **The reserve bounds what the world buses *hold*, not what happens to be free — and
+    /// that difference is what makes this test discriminate.**
+    ///
+    /// Counting free slots and counting held ones agree from an empty pool, so the obvious
+    /// test passes against either. They disagree the moment voice is holding most of the
+    /// pool: with ten voices out, six slots are free, and a rule that refuses below
+    /// `VOICE_RESERVE` free would refuse the world entirely — silencing the whole world to
+    /// protect a reserve voice has already exceeded. The pool-wide counter allows it, because
+    /// the promise is "voice may always obtain `VOICE_RESERVE`", and voice has ten.
+    ///
+    /// This is the deterministic half of the review finding on #996. The threaded test above
+    /// bounds the outcome under real concurrency; this one fails outright against the
+    /// free-slot rule that finding was about.
+    #[test]
+    fn the_reserve_counts_what_the_world_holds_rather_than_what_is_free() {
+        let mixer = mono_mixer();
+        let voices: Vec<SourceHandle> = (0..10)
+            .map(|_| mixer.claim(Bus::Voice).expect("voice may fill the pool"))
+            .collect();
+        assert_eq!(mixer.free_slots(), MAX_SOURCES - 10);
+        assert!(
+            mixer.free_slots() < VOICE_RESERVE,
+            "the case only discriminates while fewer than the reserve are free"
+        );
+
+        let bed = mixer.claim(Bus::Ambience);
+        assert!(
+            bed.is_some(),
+            "the world was refused a slot to protect a reserve voice already exceeds"
+        );
+
+        // And the ceiling still holds from here: the world may reach its share and no more.
+        let rest: Vec<SourceHandle> = std::iter::from_fn(|| mixer.claim(Bus::Music))
+            .take(MAX_SOURCES)
+            .collect();
+        assert_eq!(
+            rest.len() + 1,
+            MAX_SOURCES - 10,
+            "the world took {} of the six slots that were free",
+            rest.len() + 1
+        );
+        drop(voices);
+        drop(bed);
+        drop(rest);
+    }
+
+    /// **The budget is given back exactly once per slot, on the one transition every released
+    /// slot makes.** Spend the whole world budget, let it go, and spend it again — a leak
+    /// shows up as the second round coming back short, and a double refund as a third round
+    /// that should not exist.
+    #[test]
+    fn the_world_budget_comes_back_with_the_slot_and_only_once() {
+        let mixer = mono_mixer();
+        for round in 0..3 {
+            let held: Vec<SourceHandle> = std::iter::from_fn(|| mixer.claim(Bus::Ambience))
+                .take(MAX_SOURCES)
+                .collect();
+            assert_eq!(
+                held.len(),
+                MAX_SOURCES - VOICE_RESERVE,
+                "round {round} was granted {} slots",
+                held.len()
+            );
+            drop(held);
+            // The callback is what frees a released slot, and freeing is what returns the
+            // budget. Several blocks, because a released slot needs one and the loop above
+            // released many.
+            for _ in 0..4 {
+                let _ = rendered(&mixer, 8);
+            }
+            assert_eq!(
+                mixer.free_slots(),
+                MAX_SOURCES,
+                "round {round} leaked a slot"
+            );
+        }
+    }
+
+    /// **The half of the claim that answers the review finding, tested on its own.**
+    ///
+    /// `claim` refuses a disabled bus at its first line, so no single-threaded call can reach
+    /// the interleaving the review on #996 named — the one where a claim passes that check,
+    /// the bus is switched off and swept, and the claim's slot lands afterwards. What *is*
+    /// reachable directly is `take_a_free_slot`, which carries the second half of the pair:
+    /// it wins the slot and only keeps it if the bus is still on. Calling it against a bus
+    /// that is already off puts it in exactly the state that interleaving leaves it in, and
+    /// it must come back empty-handed having given the slot and the budget back.
+    ///
+    /// **This is the discriminating test.** The threaded one below asserts the invariant under
+    /// real concurrency and is worth having, but it passes against an implementation with no
+    /// re-check at all — the window is too narrow to lose reliably — so it is not evidence on
+    /// its own, and is not presented as any.
+    #[test]
+    fn a_slot_won_on_a_bus_that_is_off_is_given_straight_back() {
+        let mixer = mono_mixer();
+        mixer.set_enabled(Bus::Music, false);
+
+        assert!(
+            mixer.take_a_free_slot(Bus::Music).is_none(),
+            "a slot was kept on a bus that is switched off"
+        );
+
+        // Neither the slot nor the budget leaked: the slot goes back through the callback
+        // like any other released one, and the budget goes with it.
+        let _ = rendered(&mixer, 8);
+        assert_eq!(mixer.free_slots(), MAX_SOURCES, "the slot leaked");
+        mixer.set_enabled(Bus::Music, true);
+        let world: Vec<SourceHandle> = std::iter::from_fn(|| mixer.claim(Bus::Music))
+            .take(MAX_SOURCES)
+            .collect();
+        assert_eq!(
+            world.len(),
+            MAX_SOURCES - VOICE_RESERVE,
+            "the budget leaked: {} of {} available",
+            world.len(),
+            MAX_SOURCES - VOICE_RESERVE
+        );
+        drop(world);
+    }
+
+    /// The same invariant under two threads actually racing. See the note above: this is a
+    /// belt-and-braces check on the assembled pair, not the evidence for either half.
+    #[test]
+    fn a_bus_switched_off_under_a_claim_is_left_holding_no_live_source() {
+        for _ in 0..64 {
+            let mixer = mono_mixer();
+            let claimed = std::thread::scope(|scope| {
+                let claimer = {
+                    let mixer = Arc::clone(&mixer);
+                    scope.spawn(move || {
+                        let mut held = Vec::new();
+                        for _ in 0..MAX_SOURCES {
+                            if let Some(source) = mixer.claim(Bus::Music) {
+                                held.push(source);
+                            }
+                        }
+                        held
+                    })
+                };
+                let switcher = {
+                    let mixer = Arc::clone(&mixer);
+                    scope.spawn(move || mixer.set_enabled(Bus::Music, false))
+                };
+                switcher.join().expect("the switch does not panic");
+                claimer.join().expect("no claim panics")
+            });
+
+            // Whatever the interleaving, music is off and nothing is live on it. A handle may
+            // still exist — a revoked slot is its owner's until it drops — but no slot is in
+            // a state the callback would render on a bus that is switched off.
+            assert!(
+                claimed.iter().all(|held| !held.live()),
+                "a live music source survived music being switched off"
+            );
+            for index in 0..MAX_SOURCES {
+                assert!(
+                    mixer.slot_state(index) != SlotState::Live
+                        || mixer.slot_bus(index) != Bus::Music,
+                    "slot {index} is live on a bus that is off"
+                );
+            }
+        }
+    }
+
+    /// **A producer that keeps pushing through a revoked handle cannot reach anybody else.**
+    ///
+    /// The finding on `SourceHandle::live` was that the check and the write are two steps, so
+    /// a producer could pass the check and then write into a ring that had since been handed
+    /// on. The fix is structural rather than a wider check: the slot cannot be handed on at
+    /// all while this handle exists. This is that property under a thread that never stops
+    /// pushing, with the pool exhausted and claims running against it throughout.
+    #[test]
+    fn a_stale_producer_cannot_write_into_a_slot_somebody_else_was_given() {
+        let mixer = mono_mixer();
+        let bed = mixer.claim(Bus::Ambience).expect("a free slot");
+        let bed_index = 0;
+        let _rest: Vec<SourceHandle> = (0..MAX_SOURCES - 1)
+            .map(|_| mixer.claim(Bus::Voice).expect("a free slot"))
+            .collect();
+
+        // Revoke the bed, then keep pushing through it while claims and the callback run.
+        assert!(mixer.claim(Bus::Voice).is_none(), "the pool is full");
+        assert!(bed.revoked(), "the bed was not the one taken");
+
+        std::thread::scope(|scope| {
+            let mixer = Arc::clone(&mixer);
+            let bed = &bed;
+            scope.spawn(move || {
+                for _ in 0..512 {
+                    // Every one of these is refused, and even were it not, the slot is still
+                    // this handle's — which is the property under test.
+                    let _ = bed.push(&[1.0; 16]);
+                    let _ = mixer.claim(Bus::Voice);
+                    let mut sink = VecSink(vec![0.0; 32]);
+                    mixer.render(&mut sink);
+                }
+            });
+        });
+
+        // The slot never left this handle, so nothing else was ever given it.
+        assert!(
+            bed.revoked(),
+            "the revoked slot changed hands under its owner"
+        );
+        assert_eq!(mixer.slot_bus(bed_index), Bus::Ambience);
+        drop(bed);
     }
 
     /// **The mono fold uses the pan the render path already skips, so both ears carry the
