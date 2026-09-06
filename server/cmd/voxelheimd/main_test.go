@@ -1303,3 +1303,46 @@ func TestTheStartupLogNamesTheFingerprintAndNeverTheKey(t *testing.T) {
 		}
 	}
 }
+
+func TestServerTicksAndShutsDownEveryInstance(t *testing.T) {
+	srv := testServer(t, newLateTransport(newBlockingConn()))
+	var err error
+	srv.instances, err = game.NewInstanceManager(srv.cfg.TickRate, srv.cfg.ViewDistance, 2, srv.registry.NextID, discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.instances.Close()
+	instance, err := srv.instances.Create(game.InstanceRuin{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := instance.Chunks.Get(instance.Context, world.Coord{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); srv.run(ctx) }()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for instance.Sim.WorldTick() == 0 {
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatal("server never ticked its instance")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server shutdown leaked")
+	}
+	if instance.Context.Err() != context.Canceled || srv.instances.Count() != 0 {
+		t.Fatal("server retained its instance")
+	}
+	if _, err := srv.instances.Create(game.InstanceRuin{}); !errors.Is(err, game.ErrInstanceClosed) {
+		t.Fatal("server left manager open", err)
+	}
+}
