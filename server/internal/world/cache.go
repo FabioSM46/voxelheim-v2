@@ -141,6 +141,9 @@ const DefaultWorkers = 4
 //	dirtyMu    guards the set of chunks awaiting a write, and is never held across one.
 type Cache struct {
 	seed     int64
+	generate Generator
+	contains func(Coord) bool
+	editable func(x, y, z int64) bool
 	capacity int
 	slots    chan struct{}
 
@@ -197,8 +200,42 @@ type cacheEntry struct {
 
 // NewCache returns an ephemeral cache for one world seed: edits live for as long as the
 // process does. Zero or negative arguments fall back to the defaults.
-func NewCache(seed int64, workers, capacity int) *Cache {
-	return newCache(seed, nil, workers, capacity)
+func NewCache(seed int64, workers, capacity int, options ...CacheOption) *Cache {
+	c := newCache(seed, nil, workers, capacity)
+	for _, option := range options {
+		if option.generator != nil {
+			c.generate = option.generator
+		}
+	}
+	return c
+}
+
+// Generator produces a fresh chunk deterministically from its arguments. It must
+// be safe for concurrent calls and must never return nil or a shared mutable chunk.
+type Generator func(seed int64, coord Coord) *Chunk
+
+// CacheOption configures an ephemeral cache before any caller can use it.
+type CacheOption struct {
+	generator Generator
+}
+
+// WithGenerator replaces the ephemeral cache's terrain function. A nil generator
+// keeps Generate. Persistent caches deliberately retain their versioned generator.
+func WithGenerator(generator Generator) CacheOption {
+	return CacheOption{generator: generator}
+}
+
+// ErrOutsideWorld refuses generation beyond a finite world's streaming envelope.
+var ErrOutsideWorld = errors.New("world: chunk outside finite world")
+
+// ErrImmutableShell refuses edits outside an instance chamber's interior.
+var ErrImmutableShell = errors.New("world: instance shell is immutable")
+
+// Contains reports whether a coordinate belongs to this world's finite streaming
+// envelope. Open worlds accept every coordinate as before. Streamers may skip
+// refused coordinates; Get enforces the same bound before reserving an entry.
+func (c *Cache) Contains(coord Coord) bool {
+	return c.contains == nil || c.contains(coord)
 }
 
 // NewPersistentCache returns a cache whose edits are loaded from store as chunks are
@@ -223,6 +260,7 @@ func newCache(seed int64, store *Store, workers, capacity int) *Cache {
 
 	return &Cache{
 		seed:         seed,
+		generate:     Generate,
 		capacity:     capacity,
 		slots:        make(chan struct{}, workers),
 		deltas:       NewDeltas(),
@@ -299,6 +337,9 @@ func (c *Cache) Revision() uint64 { return c.revision.Load() }
 // Generation runs outside the lock and inside a bounded semaphore, so a slow chunk
 // never blocks the whole cache and a burst never oversubscribes the machine.
 func (c *Cache) Get(ctx context.Context, coord Coord) (*Chunk, []uint16, error) {
+	if !c.Contains(coord) {
+		return nil, nil, ErrOutsideWorld
+	}
 	entry, mine := c.claim(coord)
 	if !mine {
 		select {
@@ -338,7 +379,7 @@ func (c *Cache) Get(ctx context.Context, coord Coord) (*Chunk, []uint16, error) 
 	// Generation next and outside every lock — it is the millisecond-scale part — then
 	// composition under composeMu. Publishing before ready closes is what lets Apply
 	// treat "the composition is not there yet" as "the generator will compose my delta".
-	composed := c.compose(entry, Generate(c.seed, coord))
+	composed := c.compose(entry, c.generate(c.seed, coord))
 	close(entry.ready)
 	c.markWaterComposition(coord)
 
@@ -616,6 +657,9 @@ func (c *Cache) apply(ctx context.Context, x, y, z int64, block Block, guard fun
 }
 
 func (c *Cache) applyResidentGuarded(x, y, z int64, block Block, allow func(current Block) error) error {
+	if c.editable != nil && !c.editable(x, y, z) {
+		return ErrImmutableShell
+	}
 	coord := ChunkOf(x, y, z)
 	index := Index(Local(x), Local(y), Local(z))
 
@@ -713,13 +757,16 @@ func (c *Cache) applyResidentGuarded(x, y, z int64, block Block, allow func(curr
 // nothing is corrupted in between. Closing it properly would mean holding composeMu across
 // a file read, which is the one thing this file's locking rule forbids.
 func (c *Cache) Regenerate(coord Coord) error {
+	if !c.Contains(coord) {
+		return ErrOutsideWorld
+	}
 	// Before saveMu rather than inside it, so a save never waits on a generation. The
 	// probe is a hint either way — it is not composeMu, so the entry can be evicted or
 	// replaced before the publish — and the read under composeMu below is what decides.
 	entry := c.resident(coord)
 	var regenerated *composition
 	if entry != nil {
-		base := Generate(c.seed, coord)
+		base := c.generate(c.seed, coord)
 		regenerated = &composition{chunk: base, encoded: Encode(base)}
 	}
 
