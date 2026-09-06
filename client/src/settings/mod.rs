@@ -1632,12 +1632,6 @@ impl Settings {
     }
 
     /// How loud the music bus is, from 0 to 100.
-    // #982 part 2 lands the bound, the step, the default and the file line for each of
-    // the new audio settings; part 3 is where `audio/mod.rs` reads them and
-    // `ui/settings.rs` draws the two switches. Between the two, this and the accessors
-    // under it have only the tests below — which is what the allowance is for, and it
-    // goes away with the part that consumes them.
-    #[allow(dead_code)]
     pub const fn music_volume(&self) -> u8 {
         self.music_volume
     }
@@ -1645,8 +1639,6 @@ impl Settings {
     /// The gain the music bus is set to, `0.0` silent to `1.0` unity.
     ///
     /// [`Self::master_gain`]'s arithmetic one bus down, linear for its reason.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub fn music_gain(&self) -> f32 {
         f32::from(self.music_volume()) / f32::from(MAX_MUSIC_VOLUME)
     }
@@ -1656,43 +1648,31 @@ impl Settings {
     /// **A different question from [`Self::music_gain`] being zero**, and the audio module is
     /// where the difference is enforced: off means no mixer source is claimed, so nothing is
     /// generated and no slot is spent.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn music_on(&self) -> bool {
         self.music_on
     }
 
     /// How loud the effects bus is, from 0 to 100.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn sfx_volume(&self) -> u8 {
         self.sfx_volume
     }
 
     /// The gain the effects bus is set to, `0.0` silent to `1.0` unity.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub fn sfx_gain(&self) -> f32 {
         f32::from(self.sfx_volume()) / f32::from(MAX_SFX_VOLUME)
     }
 
     /// How loud the ambience bus is, from 0 to 100.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn ambience_volume(&self) -> u8 {
         self.ambience_volume
     }
 
     /// The gain the ambience bus is set to, `0.0` silent to `1.0` unity.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub fn ambience_gain(&self) -> f32 {
         f32::from(self.ambience_volume()) / f32::from(MAX_AMBIENCE_VOLUME)
     }
 
     /// How far the ducked buses drop under a nearby voice, from 0 to 100.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn voice_ducking(&self) -> u8 {
         self.voice_ducking
     }
@@ -1704,15 +1684,11 @@ impl Settings {
     /// player reads a depth — "how far does the music get out of the way" — and the mixer
     /// multiplies by a gain, so exactly one of the two has to be turned into the other and
     /// this is where, for [`Self::master_gain`]'s reason.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub fn duck_gain(&self) -> f32 {
         1.0 - f32::from(self.voice_ducking()) / f32::from(MAX_VOICE_DUCKING)
     }
 
     /// Whether the stereo image is folded to one.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn mono_audio(&self) -> bool {
         self.mono_audio
     }
@@ -1980,15 +1956,11 @@ impl Settings {
 
     /// Turns music generation on or off. See [`Self::music_on`] for why this is not the
     /// music volume reaching zero.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn toggle_music(&mut self) {
         self.music_on = !self.music_on;
     }
 
     /// Folds the stereo image to one, or stops folding it.
-    // See `music_volume` above for why this carries the allowance.
-    #[allow(dead_code)]
     pub const fn toggle_mono_audio(&mut self) {
         self.mono_audio = !self.mono_audio;
     }
