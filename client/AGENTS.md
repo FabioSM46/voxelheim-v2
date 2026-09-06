@@ -1446,11 +1446,35 @@ both safe and lock-free, so the sample buffers are `Box<[AtomicU32]>` holding `f
 and the indices are `AtomicUsize`. It costs one atomic load per sample and buys a real-time
 path a reviewer can read without checking an invariant by hand.
 
-**The bus arithmetic, in one line.** `out = master_gain * (voice_gain * voice_sources +
-master_sources)`. `Voice` has a gain of its own; `Master` *is* the output stage, so a source
-claimed onto it is scaled once and never squared. Two buses and deliberately only two — an SFX
-or music bus arrives with the feature that feeds it, because a gain nobody can hear moving is
-a knob that cannot be tested.
+**The bus arithmetic, in one line.** `out = master_gain * (voice_gain * voice_sources + duck *
+music_gain * music_sources + sfx_gain * sfx_sources + duck * ambience_gain * ambience_sources +
+master_sources)`. Each bus has a gain of its own; `Master` *is* the output stage, so a source
+claimed onto it is scaled once and never squared.
+
+**Five buses since #982, and three of them arrived empty — which reverses what this paragraph
+used to say.** It said two and deliberately only two, because a gain nobody can hear moving is
+a knob that cannot be tested, and an SFX or music bus would arrive with the feature that feeds
+it. What that argument leaves out is the *policy*: `MAX_SOURCES` is one pool of sixteen shared
+with voice, and "who gets the last slot" is cheap to answer while nothing is feeding the new
+buses and expensive once an ambience bed and a conversation are competing for one in front of
+a player. So the buses, their gains, their persistence and their allocation policy landed
+first, and the sounds arrive after them. The knobs are still tested: a bus with a source on it
+is testable through `mixer::Sink` whether or not anything in the shipped client claims one, and
+every assertion about the new gains renders a source rather than reading a field back.
+
+**`duck` is one multiplier on two buses and it is exactly `1.0` when nobody is speaking.** It
+is driven from `Speaking` — the resource `audio/heard.rs` writes when it *plays* a frame of
+somebody's voice — and never from a level detector of the mixer's own, so the trigger is audio
+the listener is actually hearing and it inherits `SPEAKING_FOR`'s one-second tail rather than
+pumping between two words. A Bevy system writes the target; the render path advances towards it
+by one block's worth of time, the arrangement the occlusion ramp already has. At a target of
+`1.0` the multiply is the identity, for the same reason the occlusion filter is transparent at
+zero: a stage in front of every source has to be provably doing nothing when it is turned off.
+
+**A player's mono fold reuses the branch a mono device already takes.** `Mixer::set_mono` makes
+the render path choose `PanGains::UNPOSITIONED` exactly as one loudspeaker does, so both ears
+carry the identical sum and there is no second downmix to keep in step with the first. It is
+deliberately not the average of the pair, for the 3 dB reason the device case gives.
 
 **The device has exactly one owner and it is not a resource.** A `cpal::Stream` is not
 `Send` on every platform, so `audio/device.rs` puts it on a supervisor thread of its own —
@@ -1492,6 +1516,21 @@ a sample is multiplied by, and it crosses **one way**: `follow_the_settings` rea
 setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
 "Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
 the frame it starts the tone, so the screen never has to remember to clear it.
+
+**The four bus volumes below it are the same statement again, and their defaults are an
+ordering rather than four numbers.** `Knob::MusicVolume`, `Knob::SfxVolume` and
+`Knob::AmbienceVolume` each carry a bound, a step and a default here and cross the seam as a
+gain, exactly as the master does. Effects start at **unity**, because the one-shots are what
+the master volume is *for* and a player who has turned the master to the top must not still be
+unable to hear a hit; ambience at **70**, under the effects it sits behind; music at **60**,
+lowest, because a score arriving at the level of the world it is scoring is a score a player's
+first act is turning down. The ordering is the statement — effects over ambience over music —
+and it is asserted as such, because the bus is empty in this client and nobody can yet hear
+whether the exact numbers are right. `Knob::VoiceDucking` is a **depth** where the others are
+levels: a player reads "how far do the beds get out of the way" and the mixer multiplies by a
+gain, so `Settings::duck_gain` is the one place that complement is taken. `settings/` names no
+type from `audio/` for any of this — which bus a knob reaches is decided in `ui/settings.rs`,
+by `bus_of`, because a knob is a number with a bound and `settings/` is a leaf.
 
 **`Knob::VoiceVolume` is the same statement one bus down, and its default is not the
 master's.** `Settings::voice_gain()` is `master_gain()`'s arithmetic and reaches `Bus::Voice`,
@@ -1717,6 +1756,62 @@ are heard from where they are standing. **A fourteenth is heard unpositioned rat
 at all** — summed into the source this module has always held, which is exactly what everybody
 sounded like before. Being in the wrong place beats being inaudible, and it is the same answer
 the snapshot-has-not-placed-them case gets.
+
+**The pool is shared with the world's own sounds, and #982 wrote the policy down before any of
+them existed.** `MAX_SOURCES` carries it in full; these are the three rules it must not lose,
+each enforced by `Mixer::claim` rather than asked of its callers:
+
+- **Only `Voice` and `Master` may take the last slot.** `VOICE_RESERVE` is eight of the sixteen
+  and `Music`, `Sfx` and `Ambience` may hold at most the other eight between them, so a busy
+  scene can never starve a conversation. `Master` is exempt with voice because its two claims —
+  the tone test and the loopback monitor — are each made once at startup, before anything
+  exists to be starved. **The budget counts what the world holds, in one atomic location, not
+  how many slots happen to be free.** The review on #996 found the first version doing the
+  latter: counting free slots and then winning one is two steps, and two claims that both read
+  one over the reserve both succeeded. A per-slot compare-exchange cannot enforce a pool-wide
+  rule.
+- **Ambience is stolen first, then music, then effects, and only ever by a bus above the
+  victim.** `Bus::steal_order` is the ranking and the two protected buses answer `None` to it,
+  so no arrangement of the other three can reach a slot somebody is being heard through. That
+  is the acceptance criterion, and it is asserted by filling the pool with voice and finding
+  that nothing beneath it can take a slot.
+- **The sound that triggers a steal does not get the slot.** The claim is refused and its
+  one-shot is dropped rather than queued. **A loop that claims until it is told no has
+  therefore already taken a bed by the time it stops** — every caller in this client claims
+  once for one sound, which is the shape the policy is written for.
+- **A stolen slot is `Revoked`, not freed, and the review on #996 is why.** Marking it `Dirty`
+  made it reusable as soon as the callback had cleared it, while its previous owner still held
+  a `SourceHandle` it might be part-way through pushing into — `live()` is one load and `push`
+  is another, so a producer could pass the check and then write into the ring of whoever had
+  since been given the slot. Two producers on a ring whose ordering assumes one. A revoked slot
+  is silent immediately and stays its owner's until that owner's `Drop`, so **no second owner
+  can exist for a ring the first may still be writing into** and `live()` stops being a safety
+  check: it is how a producer is told to let go. The cost is real and stated — a revocation
+  reclaims a slot a frame later rather than a block later, and only from a producer that is
+  still running — and **the contract that comes with a `SourceHandle` is to drop it when
+  `live()` goes false.**
+
+**A slot can now be taken away, so the slot word carries the state, the bus and a generation
+together, and #948's lesson has now been applied three times.** A stolen slot's previous owner
+still holds a `SourceHandle`, and that owner's `Drop` must not mark `Dirty` a slot somebody
+else has since been given — two locations would be two loads for a claim to land between,
+exactly as the two booleans were. So all three live in **one** `AtomicU32` and every transition
+is a compare-exchange over the whole word. **The bus joined them on the review of #996**: it
+had been an `AtomicU8` written *after* the compare-exchange that won the slot, so a revocation
+walking the slots could read a bus from the previous owner and take a slot away from whoever
+had just been given it — reading a stale `Ambience` off a slot that had just become `Voice`
+would have broken the one rule the whole policy exists for.
+
+**A bus can be switched off, and off means no source rather than a gain of zero.** `Music` is
+the only bus with that control today. `Mixer::set_enabled` refuses new claims *and* revokes
+what the bus is holding, because a generator running into a ring that is multiplied by nothing
+still spends one of sixteen slots. The music volume reaching zero is deliberately the other
+thing, and the Audio tab draws both. **The store comes before the sweep and a claim re-reads the
+flag after winning its slot, both `SeqCst`** — the third finding on #996 was that those were two
+steps with no ordering between them, so a claim could pass the check while the sweep ran and
+land a live source on a bus that is off. With a total order over the four operations, either the
+claim sees the flag and gives the slot back or the sweep sees the slot and revokes it; there is
+no interleaving in which a live source survives on a disabled bus.
 
 **Which side of the seam a slot is decided on, and when.** Once, when the speaker is first
 heard, and never mid-sentence: moving somebody from the shared sum onto a source of their own
@@ -2661,8 +2756,11 @@ Recorded here so the next reader does not mistake them for oversights:
   readout, the two tabs and one reset per tab — and #851 added the third tab, the master volume,
   the output device and the speaker test, so what remains outside is deliberate: *cursor
   capture*, which belongs to the camera-control issue this file has named for a while and that
-  still does not exist; *voice*, whose knobs are #853's and not this issue's; and *shadows, ambient occlusion and texture quality*, which have no shadow map, no AO
-  pass and no texture behind them. Nor the pitch limit, which `player/constants.rs` explains is an
+  still does not exist; and *shadows, ambient occlusion and texture quality*, which have no
+  shadow map, no AO pass and no texture behind them. Voice was on that list until #853 and the
+  four bus levels, the music switch, the ducking depth and the mono fold until #982 — the last
+  of which is the one entry whose *sounds* still do not exist, deliberately, because its
+  allocation policy was the part worth settling early. Nor the pitch limit, which `player/constants.rs` explains is an
   invariant rather than a preference.
 - **A reset is scoped by a tab, and the obvious implementation is the bug.** `Settings::reset`
   names one tab's fields; writing `Settings::default()` back would look right on the tab
@@ -2678,7 +2776,10 @@ Recorded here so the next reader does not mistake them for oversights:
   This one gives the area below the strip `CONTENT_HEIGHT` whichever tab is up, and
   `no_tab_needs_more_rows_than_the_area_it_is_drawn_in` fails when a row is added past what
   that height was sized for — rather than the panel quietly growing and taking the strip
-  with it.
+  with it. #982 moved `CONTENT_ROWS` to sixteen and made **Audio** the tallest tab for the
+  first time; the four tone tests cost no row each because each is drawn as a fourth control
+  inside the knob it proves (`Row::BusKnob`), where four rows of their own would have taken
+  the panel past the smallest window this client supports.
 - **A module that names a file under the data directory carries #230's guard, and this is
   the second one.** `Environment::read` is `#[cfg(not(test))]` in `settings/store.rs` for
   the same reason it is in `net/session.rs`: a test build that can ask what

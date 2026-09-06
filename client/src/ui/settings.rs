@@ -19,7 +19,7 @@
 use bevy::prelude::*;
 
 use super::{BUTTON, CELL_EDGE, TAB_SELECTED, button_colour};
-use crate::audio::{AudioControls, MicTest, Voices};
+use crate::audio::{AudioControls, Bus, MicTest, Voices};
 use crate::player::{Appearances, InputMode};
 use crate::settings::{
     AudioDevices, CONTROLS, Choices, Control, KNOBS, Knob, MonitorChoices, Settings, Tab, key_name,
@@ -221,12 +221,20 @@ enum SettingsAction {
     ToggleVsync,
     ToggleReadout,
     CycleCorner,
+    /// Turn music generation on or off. Not the music volume: see `Settings::music_on`.
+    ToggleMusic,
+    /// Fold the stereo image to one, or stop folding it.
+    ToggleMono,
     /// Wait for the next key press and give it to this control.
     Capture(Control),
     /// Put one tab's settings back to their defaults — **and only that tab's**.
     Reset(Tab),
-    /// Play a second of tone through the master bus at whatever the volume is now.
-    TestSpeakers,
+    /// Play a second of tone through one bus at whatever its volume is now.
+    ///
+    /// Carries a `Bus` since #982, where "Test speakers" stopped being the only row that
+    /// plays one: each bus knob has its own, so a level can be set by ear against the others
+    /// rather than by going to find something in the world that makes that noise.
+    TestBus(Bus),
     /// Show or hide the Voices panel.
     ToggleVoices,
     /// Open or close the microphone test, which holds the input device and plays it back.
@@ -242,6 +250,10 @@ enum Reading {
     Vsync,
     Readout,
     ReadoutCorner,
+    /// Whether music is generated at all, as the word on its own button.
+    Music,
+    /// Whether the stereo image is folded, as the word on its own button.
+    MonoAudio,
     Binding(Control),
     /// The Monitor row's closed control: the current monitor plus the open indicator, as
     /// one centred string. Distinct from `Knob(Knob::Monitor)`, which nothing spawns a
@@ -373,7 +385,13 @@ const MONITOR_DROPDOWN_LAYER: i32 = 46;
 /// eleven rows, so this number moved with it rather than the area silently overflowing.
 /// #452 moved it again, to twelve, for `Control::Map`; #711 moves it to thirteen for the
 /// rebindable default-mount call; #852 moves it to fourteen for `Control::Talk`.
-const CONTENT_ROWS: usize = 14;
+///
+/// **#982 moves it to sixteen, and Audio is the taller tab for the first time.** Four bus
+/// volumes, a ducking amount and two switches arrived; the tone tests did not cost a row
+/// each, because each one is drawn inside the knob it proves — see [`Row::BusKnob`]. Adding
+/// them as rows of their own would have made this twenty and the panel taller than the
+/// smallest window this client supports.
+const CONTENT_ROWS: usize = 16;
 
 /// The height of the area a tab's contents are drawn in, in logical pixels.
 const CONTENT_HEIGHT: f32 = CONTENT_ROWS as f32 * (ROW_HEIGHT + ROW_GAP) + WIDE_BUTTON;
@@ -572,6 +590,14 @@ enum Row {
     /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
     /// this is the shape for a press with no state behind it at all.
     Action(&'static str, SettingsAction, &'static str),
+    /// A volume knob with the tone test for its bus beside it: `-`, the reading, `+`, `TEST`.
+    ///
+    /// **A fourth control in the row rather than a row of its own**, and the reason is the
+    /// panel's height rather than tidiness: four buses each needing a test would have been
+    /// four more rows on the tallest tab, and [`CONTENT_ROWS`] sizes every tab from the
+    /// tallest. It reads better besides — the button that proves a level sits in the row that
+    /// sets it, which is where the "Test speakers" row's own comment says a test belongs.
+    BusKnob(Knob, Bus),
 }
 
 impl Row {
@@ -585,7 +611,42 @@ impl Row {
             Self::VoicesToggle => "Voices",
             Self::MicTest => "Test microphone",
             Self::Action(label, _, _) => label,
+            Self::BusKnob(knob, _) => knob.label(),
         }
+    }
+}
+
+/// Which bus a knob sets the level of, for the rows that carry a tone test.
+///
+/// **The mapping lives here and not in `settings/`**, which is a leaf and may not name a type
+/// from `audio/` — a knob is a number with a bound, and which bus it happens to reach is this
+/// screen's business. `Knob::MasterVolume` is deliberately `None`: the master's test is the
+/// "Test speakers" row, which is a question about the device as much as about a level and
+/// keeps its own row and its own wording.
+///
+/// No wildcard arm, for [`Knob::tab`]'s reason — a twentieth knob has to say whether a tone
+/// test belongs beside it before this compiles.
+const fn bus_of(knob: Knob) -> Option<Bus> {
+    match knob {
+        Knob::MusicVolume => Some(Bus::Music),
+        Knob::SfxVolume => Some(Bus::Sfx),
+        Knob::AmbienceVolume => Some(Bus::Ambience),
+        Knob::VoiceVolume => Some(Bus::Voice),
+        Knob::LookSensitivity
+        | Knob::WindowMode
+        | Knob::Monitor
+        | Knob::RenderDistance
+        | Knob::FieldOfView
+        | Knob::Brightness
+        | Knob::FogStart
+        | Knob::FrameCap
+        | Knob::MasterVolume
+        | Knob::OutputDevice
+        | Knob::InputDevice
+        | Knob::VoiceDucking
+        | Knob::VoiceMode
+        | Knob::VoiceActivationThreshold
+        | Knob::VoiceAudience => None,
     }
 }
 
@@ -602,12 +663,10 @@ fn rows_of(tab: Tab) -> Vec<Row> {
     let mut rows: Vec<Row> = KNOBS
         .into_iter()
         .filter(|knob| knob.tab() == tab)
-        .map(|knob| {
-            if knob == Knob::Monitor {
-                Row::MonitorSelect
-            } else {
-                Row::Knob(knob)
-            }
+        .map(|knob| match (knob, bus_of(knob)) {
+            (Knob::Monitor, _) => Row::MonitorSelect,
+            (_, Some(bus)) => Row::BusKnob(knob, bus),
+            (_, None) => Row::Knob(knob),
         })
         .collect();
     match tab {
@@ -626,9 +685,22 @@ fn rows_of(tab: Tab) -> Vec<Row> {
             ),
         ]),
         Tab::Audio => rows.extend([
+            // Above the tests below it and below the levels above it: a switch that decides
+            // whether anything is generated at all belongs with the bus it governs, and its
+            // volume row is the one directly over it.
+            Row::Toggle("Music", SettingsAction::ToggleMusic, Reading::Music),
+            // Beside it because they are the two Audio settings that are not a level, and it
+            // is the one that changes what every other row on the tab sounds like.
+            Row::Toggle("Mono audio", SettingsAction::ToggleMono, Reading::MonoAudio),
             // Under the knob it proves, because that is the order a player uses them in: set
-            // the volume, then find out whether anything comes out.
-            Row::Action("Test speakers", SettingsAction::TestSpeakers, "PLAY A TONE"),
+            // the volume, then find out whether anything comes out. The other four buses
+            // carry their test inside their own row — see `Row::BusKnob` — but this one is a
+            // question about the device as much as about a level, and it keeps its wording.
+            Row::Action(
+                "Test speakers",
+                SettingsAction::TestBus(Bus::Master),
+                "PLAY A TONE",
+            ),
             // Beside the speaker test, because they are the same errand pointed the two ways,
             // and above Voices, which is about other people rather than about this machine.
             Row::MicTest,
@@ -673,6 +745,27 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                     SettingsAction::Capture(control),
                     Val::Px(STEP_BUTTON * 4.0),
                     Face::Value(Reading::Binding(control)),
+                );
+            }
+            Row::BusKnob(knob, bus) => {
+                spawn_button(
+                    controls,
+                    SettingsAction::Nudge(knob, -1),
+                    Val::Px(STEP_BUTTON),
+                    Face::Fixed("-"),
+                );
+                spawn_reading(controls, Reading::Knob(knob));
+                spawn_button(
+                    controls,
+                    SettingsAction::Nudge(knob, 1),
+                    Val::Px(STEP_BUTTON),
+                    Face::Fixed("+"),
+                );
+                spawn_button(
+                    controls,
+                    SettingsAction::TestBus(bus),
+                    Val::Px(STEP_BUTTON * 3.0),
+                    Face::Fixed("TEST"),
                 );
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
@@ -1336,6 +1429,8 @@ fn settings_actions(
             SettingsAction::ToggleVsync => settings.toggle_vsync(),
             SettingsAction::ToggleReadout => settings.toggle_readout(),
             SettingsAction::CycleCorner => settings.cycle_readout_corner(),
+            SettingsAction::ToggleMusic => settings.toggle_music(),
+            SettingsAction::ToggleMono => settings.toggle_mono_audio(),
             SettingsAction::Reset(tab) => {
                 settings.reset(tab);
                 // A capture is taken back by the reset, and has to be: it was armed over a
@@ -1370,12 +1465,14 @@ fn settings_actions(
                 screen.voices_open = !screen.voices_open;
                 continue;
             }
-            SettingsAction::TestSpeakers => {
+            SettingsAction::TestBus(bus) => {
                 // The whole of the row: a request, taken back by `audio/mod.rs` on the
-                // frame it starts the tone. This screen owns no sample, no bus and no
+                // frame it starts the tone. This screen owns no sample, no source and no
                 // device, and it sets no volume either — the tone plays at the gain
-                // `follow_the_settings` has already applied from the row above.
-                audio.speaker_test = true;
+                // `follow_the_settings` has already applied from the row it sits in. Which
+                // bus is the only thing this press carries, and even that is a name the
+                // mixer resolves rather than a slot this screen picked.
+                audio.tone_test = Some(bus);
                 continue;
             }
             SettingsAction::Back => {
@@ -1810,6 +1907,8 @@ fn describe(
         Reading::Knob(knob) => settings.reading_with_choices(knob, choices),
         Reading::Vsync => on_or_off(settings.vsync()),
         Reading::Readout => on_or_off(settings.readout_shown()),
+        Reading::Music => on_or_off(settings.music_on()),
+        Reading::MonoAudio => on_or_off(settings.mono_audio()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
         // "v" stands in for a down chevron: `ascii_guard` in `ui/mod.rs` holds every
         // string here to the 95 codepoints Bevy's embedded font can draw.
@@ -2848,9 +2947,15 @@ mod tests {
             if knob == Knob::Monitor {
                 continue;
             }
+            // A bus level is drawn as `Row::BusKnob`, which is the same stepper with the
+            // tone test for its bus beside it. Both shapes count here, because what this
+            // loop is about is whether a knob is reachable at all.
             let drawn = all
                 .iter()
-                .filter(|row| matches!(row, Row::Knob(drawn) if *drawn == knob))
+                .filter(|row| match row {
+                    Row::Knob(drawn) | Row::BusKnob(drawn, _) => *drawn == knob,
+                    _ => false,
+                })
                 .count();
             assert_eq!(drawn, 1, "{knob:?} has {drawn} rows");
         }
@@ -2873,7 +2978,13 @@ mod tests {
         // covered by nothing — `the_graphics_flags_read_back_what_pressing_them_did` presses
         // the actions directly, so a row could have been deleted from the screen with every
         // test still green.
-        for reading in [Reading::Vsync, Reading::Readout, Reading::ReadoutCorner] {
+        for reading in [
+            Reading::Vsync,
+            Reading::Readout,
+            Reading::ReadoutCorner,
+            Reading::Music,
+            Reading::MonoAudio,
+        ] {
             let drawn = all
                 .iter()
                 .filter(|row| matches!(row, Row::Toggle(_, _, shown) if *shown == reading))
@@ -2887,7 +2998,7 @@ mod tests {
             .filter(|row| matches!(row, Row::Toggle(..)))
             .count();
         assert_eq!(
-            toggles, 3,
+            toggles, 5,
             "the screen draws {toggles} toggles; name the new one above rather than widening \
              this number"
         );
@@ -2900,8 +3011,23 @@ mod tests {
         assert_eq!(actions.len(), 1, "{actions:?}");
         assert!(matches!(
             actions[0],
-            Row::Action(_, SettingsAction::TestSpeakers, _)
+            Row::Action(_, SettingsAction::TestBus(Bus::Master), _)
         ));
+
+        // And the bus rows, which are the third thing `rows_of` decides by hand — through
+        // `bus_of`, so a knob that stopped being a bus level would silently lose its test.
+        let tested: Vec<Bus> = all
+            .iter()
+            .filter_map(|row| match row {
+                Row::BusKnob(_, bus) => Some(*bus),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tested,
+            vec![Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice],
+            "every bus but the master carries its own tone test, in the order the tab lists them"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2952,8 +3078,11 @@ mod tests {
     /// two tabs claim.
     ///
     /// **The order is the assertion, not just the membership.** The two devices sit under
-    /// the volume they feed, and the voice rows read as one sentence downwards: what the
-    /// microphone is for, what opens it, and who hears the result.
+    /// the volume they feed; the three world buses and the ducking amount that is about both
+    /// halves sit between them and voice; and the voice rows read as one sentence downwards:
+    /// what the microphone is for, what opens it, and who hears the result. The two switches
+    /// and the three tests come last, in that order, because they are what a player reaches
+    /// for after the levels rather than while setting them.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -2965,10 +3094,16 @@ mod tests {
                 "Master volume",
                 "Output device",
                 "Microphone",
+                "Music volume",
+                "Effects volume",
+                "Ambience volume",
+                "Duck under voice",
                 "Voice volume",
                 "Voice",
                 "Voice threshold",
                 "Heard by",
+                "Music",
+                "Mono audio",
                 "Test speakers",
                 "Test microphone",
                 "Voices"
@@ -3065,26 +3200,40 @@ mod tests {
         );
     }
 
-    /// **The row is a request and nothing else.** It sets the flag `audio/mod.rs` takes
-    /// back when it starts the tone; this screen owns no sample, no bus and no device, and
+    /// **The row is a request and nothing else.** It names the bus `audio/mod.rs` takes back
+    /// when it starts the tone; this screen owns no sample, no source and no device, and
     /// pressing it changes not one setting.
+    ///
+    /// Every bus, not only the master's row: the four bus knobs each carry a test of their
+    /// own since #982, and a press on one of those has to name *its* bus rather than whatever
+    /// the row above it named.
     #[test]
-    fn the_test_speakers_row_asks_the_audio_module_for_a_tone() {
+    fn every_tone_test_row_asks_the_audio_module_for_that_bus() {
         let mut app = screen_app();
         press_tab(&mut app, Tab::Audio);
-        assert!(
-            !app.world().resource::<AudioControls>().speaker_test,
-            "something asked for a tone before the row was pressed"
+        assert_eq!(
+            app.world().resource::<AudioControls>().tone_test,
+            None,
+            "something asked for a tone before a row was pressed"
         );
         let before = app.world().resource::<Settings>().clone();
 
-        press(&mut app, SettingsAction::TestSpeakers);
+        for bus in [Bus::Master, Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice] {
+            press(&mut app, SettingsAction::TestBus(bus));
+            assert_eq!(
+                app.world().resource::<AudioControls>().tone_test,
+                Some(bus),
+                "the {bus:?} row asked for the wrong bus"
+            );
+            // Cleared by hand, because `audio/mod.rs` is what takes it back in an assembled
+            // client and this app holds no audio systems at all.
+            app.world_mut().resource_mut::<AudioControls>().tone_test = None;
+        }
 
-        assert!(app.world().resource::<AudioControls>().speaker_test);
         assert_eq!(
             *app.world().resource::<Settings>(),
             before,
-            "the speaker test moved a setting"
+            "a tone test moved a setting"
         );
     }
 
@@ -3214,6 +3363,46 @@ mod tests {
                 .readout_corner()
                 .name()
                 .to_owned()
+        );
+    }
+
+    /// The two Audio switches read back what pressing them did, and each moves its own
+    /// setting and not the other's.
+    ///
+    /// **The button's face *is* the state**, which is the reason both are `Row::Toggle`
+    /// rather than `Row::Action`: a player has to be able to tell a muted music bus from a
+    /// playing one without pressing anything.
+    #[test]
+    fn the_audio_switches_read_back_what_pressing_them_did() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+
+        assert_eq!(reading_of(&mut app, Reading::Music), "on");
+        assert_eq!(reading_of(&mut app, Reading::MonoAudio), "off");
+
+        press(&mut app, SettingsAction::ToggleMusic);
+        assert_eq!(reading_of(&mut app, Reading::Music), "off");
+        assert!(!app.world().resource::<Settings>().music_on());
+        assert_eq!(
+            reading_of(&mut app, Reading::MonoAudio),
+            "off",
+            "the music switch moved the fold"
+        );
+
+        press(&mut app, SettingsAction::ToggleMono);
+        assert_eq!(reading_of(&mut app, Reading::MonoAudio), "on");
+        assert!(app.world().resource::<Settings>().mono_audio());
+        assert_eq!(
+            reading_of(&mut app, Reading::Music),
+            "off",
+            "the fold moved the music switch"
+        );
+
+        // And the music *volume* is untouched by either, which is the distinction the tab
+        // draws two controls for.
+        assert_eq!(
+            reading_of(&mut app, Reading::Knob(Knob::MusicVolume)),
+            format!("{}%", Settings::default().music_volume())
         );
     }
 
