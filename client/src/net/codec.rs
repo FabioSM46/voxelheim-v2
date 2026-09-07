@@ -4476,6 +4476,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 exit_arch,
             }))
         }
+        // Presentation consumption belongs to #999; this build recognizes the contract.
+        fb::Payload::BlowLanded => Ok(Message::Deferred(name)),
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -9085,13 +9087,14 @@ mod tests {
             (fb::Payload::LandmarkList, 63),
             (fb::Payload::PortalRequest, 64),
             (fb::Payload::WorldChange, 65),
+            (fb::Payload::BlowLanded, 66),
         ] {
             assert_eq!(tag.0, value);
         }
 
-        // Membership, not just ordering. A swing is still answered by the next snapshot
-        // and nothing else, and so is a craft and a repair; a *refused* placement is now
-        // answered by `ActionRefused`, and an accepted one is not. V12's `LeaveStarted`
+        // Membership, not just ordering. A landed swing additionally reports BlowLanded;
+        // a craft and a repair are still answered by the next snapshot. A *refused*
+        // placement is answered by `ActionRefused`, and an accepted one is not. V12's `LeaveStarted`
         // is the deliberate exception: an acknowledgement carrying the server's timer,
         // never a client-owned outcome. The size of the union is the only place that
         // membership can be checked. V8's one does not break that run: a
@@ -9100,7 +9103,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            66,
+            67,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9130,7 +9133,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 66] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 67] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -9209,6 +9212,7 @@ mod tests {
         (fb::Payload::LandmarkList, Handling::Consumed),
         (fb::Payload::PortalRequest, Handling::ClientOnly),
         (fb::Payload::WorldChange, Handling::Consumed),
+        (fb::Payload::BlowLanded, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
