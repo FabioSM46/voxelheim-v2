@@ -1812,7 +1812,7 @@ pub(super) fn submerged_at(store: Option<&ChunkStore>, eye: Vec3, chunk_size: us
 
 /// How much of the night has arrived right now, or `None` for a world with no night.
 ///
-/// **Read by `player/birds.rs` and by nothing else.** The flock roosts on the same curve the
+/// **Read by the ambient birds and their sound bed.** The flock roosts on the same curve the
 /// sky is tinted from rather than on a second reading of the clock, so "it is night" has one
 /// answer in this client — the same reason [`submerged_at`] is shared with
 /// `player/precipitation.rs`.
