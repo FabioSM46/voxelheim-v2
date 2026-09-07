@@ -474,7 +474,7 @@ const COIN_THICKNESS: f32 = 0.008;
 /// hand punches says nothing about how fast the block is coming apart: a punch takes the
 /// same time on dirt as on stone, and the loop simply repeats for as long as
 /// [`HandIntent::mining`] — the server's own answer — stays true.
-const MINE_PUNCHES_PER_SECOND: f32 = 2.4;
+pub(super) const MINE_PUNCHES_PER_SECOND: f32 = 2.4;
 const MINE_PUNCH_RADIANS: f32 = 0.42;
 
 /// How far the fist reaches away from the camera at full extension.
