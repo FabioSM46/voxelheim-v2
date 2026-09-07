@@ -1,6 +1,4 @@
 //! Sample-timed city sounds. Random events advance with generated samples, never frames.
-// Part 2 wires these producers to the city's bounded spatial source pool.
-#![allow(dead_code)]
 
 use crate::audio::synth::{
     Baked, Continuous, Envelope, Error, Exciter, Filter, FilterKind, Layer, Noise, Sound, Wave,
