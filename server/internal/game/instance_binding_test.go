@@ -336,8 +336,9 @@ func TestNoClientMessageBindsACharacter(t *testing.T) {
 	}
 }
 
-// A binding names a session, so it cannot outlive one. Close is the only thing in this
-// lifecycle that ends a saved session; the reset that will is #977's.
+// A binding names a session, so it cannot outlive one. Close is one of the two things
+// that end a saved session; the midnight reset is the other, and is pinned by
+// instance_reset_test.go.
 func TestClosingReleasesEveryBinding(t *testing.T) {
 	m, ruin, character := instanceBindingSetup(t, 4)
 
