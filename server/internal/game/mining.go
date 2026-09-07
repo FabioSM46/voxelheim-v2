@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -18,12 +20,15 @@ var ErrMiningTargetChanged = errors.New("the mining target changed before comple
 // miningState is one player's progress between ticks. Every field is guarded by
 // Sim.mu; requests replace or refresh it and Step is its only clock.
 type miningState struct {
-	pos       [3]int32
-	block     world.Block
-	cost      int
-	progress  int
-	idleTicks int
-	invalid   bool
+	activityID   uint64
+	tool         vnet.MiningTool
+	advancedTick uint64
+	pos          [3]int32
+	block        world.Block
+	cost         int
+	progress     int
+	idleTicks    int
+	invalid      bool
 }
 
 // miningReset is a server-caused state transition that has not reached the
@@ -40,10 +45,12 @@ type miningReset struct {
 // the owning session's mining worker. Its fields are deliberately private: only the
 // simulation may decide that a target has paid its hardness cost.
 type MiningCompletion struct {
-	pos    [3]int32
-	block  world.Block
-	serial uint64
-	tick   uint64
+	activityID uint64
+	tool       vnet.MiningTool
+	pos        [3]int32
+	block      world.Block
+	serial     uint64
+	tick       uint64
 }
 
 // Pos reports the voxel this completion names, for delivery and diagnostics.
@@ -385,8 +392,10 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 		// one, which is the honest answer for somebody who has already paid more than the
 		// tool asks — and switching away from it leaves them owing more. Nothing is
 		// refunded and nothing is charged twice.
-		if cost, breakable := p.sim.hardnessTicks(p.mining.block, p.heldItemLocked(req.Slot)); breakable {
+		held := p.heldItemLocked(req.Slot)
+		if cost, breakable := p.sim.hardnessTicks(p.mining.block, held); breakable {
 			p.mining.cost = cost
+			p.mining.tool = miningTool(held)
 		}
 		return nil
 	}
@@ -428,12 +437,17 @@ func (p *Player) Mine(req protocol.MineRequest, targetVisible bool) error {
 	}
 	// What the player is mining with, read from this server's own inventory rather than
 	// from the request: the request named a slot and nothing else.
-	cost, breakable := p.sim.hardnessTicks(block, p.heldItemLocked(req.Slot))
+	held := p.heldItemLocked(req.Slot)
+	cost, breakable := p.sim.hardnessTicks(block, held)
 	if !breakable {
 		return fmt.Errorf("block %d at the target is not breakable", uint16(block))
 	}
 
-	p.setMiningLocked(&miningState{pos: req.Pos, block: block, cost: cost})
+	p.mineActivitySerial++
+	if p.mineActivitySerial == 0 {
+		p.mineActivitySerial++
+	}
+	p.setMiningLocked(&miningState{pos: req.Pos, block: block, cost: cost, activityID: p.mineActivitySerial, tool: miningTool(held)})
 	return nil
 }
 
@@ -514,9 +528,10 @@ func (p *Player) advanceMining(tick uint64, terrain Terrain) {
 	}
 
 	state.progress++
+	state.advancedTick = tick
 	if state.progress >= state.cost {
 		p.mineSerial++
-		completion := MiningCompletion{pos: state.pos, block: state.block, serial: p.mineSerial, tick: tick}
+		completion := MiningCompletion{pos: state.pos, block: state.block, serial: p.mineSerial, tick: tick, activityID: state.activityID, tool: state.tool}
 		p.setMiningLocked(nil)
 		p.mineCompleting = true
 
@@ -625,6 +640,10 @@ func (p *Player) CompleteMining(ctx context.Context, completion MiningCompletion
 	result, err := p.breakMined(ctx, completion.pos, completion.block)
 	p.sim.mu.Lock()
 	if p.mineCompleting && completion.serial == p.mineSerial {
+		if err == nil {
+			observation := protocol.MiningActivity{ActorEntityID: p.entityID, ActivityID: completion.activityID, Pos: completion.pos, BlockID: uint16(completion.block), Tool: completion.tool, Phase: vnet.MiningPhaseCompleted}
+			p.miningCompleted = &observation
+		}
 		if errors.Is(err, ErrMiningTargetChanged) {
 			// Queue and offer the reset before clearing mineCompleting. If the queue is
 			// full, mineReset remains the guard that keeps later progress behind it.

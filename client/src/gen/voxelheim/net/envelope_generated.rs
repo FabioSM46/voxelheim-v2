@@ -1058,6 +1058,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_mining_activity(&self) -> Option<MiningActivity<'a>> {
+        if self.payload_type() == Payload::MiningActivity {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { MiningActivity::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1135,6 +1150,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::PortalRequest => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PortalRequest>>("Payload::PortalRequest", pos),
           Payload::WorldChange => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WorldChange>>("Payload::WorldChange", pos),
           Payload::BlowLanded => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlowLanded>>("Payload::BlowLanded", pos),
+          Payload::MiningActivity => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MiningActivity>>("Payload::MiningActivity", pos),
           _ => Ok(()),
         }
      })?
@@ -1848,6 +1864,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::BlowLanded => {
                 if let Some(x) = self.payload_as_blow_landed() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::MiningActivity => {
+                if let Some(x) = self.payload_as_mining_activity() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

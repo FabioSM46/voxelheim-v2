@@ -64,6 +64,10 @@ pub mod voxelheim {
         pub use self::blow_kind_generated::*;
         mod blow_target_generated;
         pub use self::blow_target_generated::*;
+        mod mining_tool_generated;
+        pub use self::mining_tool_generated::*;
+        mod mining_phase_generated;
+        pub use self::mining_phase_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -246,6 +250,8 @@ pub mod voxelheim {
         pub use self::world_change_generated::*;
         mod blow_landed_generated;
         pub use self::blow_landed_generated::*;
+        mod mining_activity_generated;
+        pub use self::mining_activity_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

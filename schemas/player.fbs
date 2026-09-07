@@ -2812,3 +2812,38 @@ table BlowLanded {
   target: BlowTarget;
   target_mob_kind: MobKind;
 }
+
+
+/// Presentation categories only: no item, inventory slot or durability is disclosed.
+enum MiningTool: ubyte { Unknown = 0, Hand, Shovel, Pickaxe, Axe }
+enum MiningPhase: ubyte { Unknown = 0, Active, Completed }
+
+/// Server-only observation following EntitySnapshot with the same tick. Actor must
+/// be alive in that snapshot; both actor and target lie in the recipient's world and
+/// three-dimensional interest volume. Original block_id survives removal/BlockUpdate.
+/// Active renews a 500ms lease measured from decode time, never from queue drain time.
+/// Stop immediately on actor disappearance/death, world/session change, or a newer
+/// activity_id for the actor; otherwise expire the lease even if no more frames arrive.
+/// Cancellation, invalidation and disconnect cease renewal; no reliable stop is owed.
+/// Consumers discard observations not matching their latest snapshot tick, and expire
+/// queued observations before presentation: a delayed burst cannot extend an old lease.
+/// Completed is offered once after successful removal, never at progress completion.
+/// It ends only the matching activity_id; deduplicate by (actor_entity_id, activity_id)
+/// within the session/world. A monotonically increasing per-actor nonzero activity_id
+/// distinguishes successive attempts, including repeated breaks at the same coordinate.
+/// Retain only each visible actor's newest id; clear on actor removal and world change.
+/// Best-effort snapshot mailbox replacement or queue pressure may drop any frame.
+/// There is no retry/replay; activity recovers on renewal and completion may be missed.
+/// V33 stays: older clients safely ignore this appended server-only tag; newer clients
+/// on older servers lack only a presentation cue. Existing gameplay rules do not change.
+/// Invariants: actor_entity_id/activity_id and block_id are nonzero, pos is present,
+/// tool and phase are known nonzero values. tick wraps as EntitySnapshot.tick does.
+table MiningActivity {
+  tick: uint;
+  actor_entity_id: ulong;
+  activity_id: ulong;
+  pos: BlockCoord;
+  block_id: ushort;
+  tool: MiningTool;
+  phase: MiningPhase;
+}

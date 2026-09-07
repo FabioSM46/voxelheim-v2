@@ -1355,6 +1355,31 @@ pub struct MineProgress {
     pub progress: u8,
 }
 
+/// Authoritative presentation category; no inventory contents cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiningTool {
+    Hand,
+    Shovel,
+    Pickaxe,
+    Axe,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiningPhase {
+    Active,
+    Completed,
+}
+/// Lease and deduplication semantics live beside MiningActivity in player.fbs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MiningActivity {
+    pub tick: u32,
+    pub actor_entity_id: u64,
+    pub activity_id: u64,
+    pub pos: BlockCoord,
+    pub block_id: u16,
+    pub tool: MiningTool,
+    pub phase: MiningPhase,
+}
+
 /// Which action a server refused, in an [`ActionRefused`].
 ///
 /// **An `Unknown` variant, unlike [`Facing`] and [`RecipeId`], and the direction is
@@ -2742,6 +2767,7 @@ pub enum Message {
     /// Authoritative mining progress. No ECS system consumes it until the
     /// mining issue, but decoding and validation belong to Protocol V2 now.
     MineProgress(MineProgress),
+    MiningActivity(MiningActivity),
     /// The server refused an action, and this is the reason a player reads.
     ///
     /// Named apart from [`Self::Reject`], which is the *connection* being refused and
@@ -2826,7 +2852,9 @@ pub enum Message {
 pub enum DecodeError {
     /// Too small to hold a root offset and the file identifier, so there is
     /// nothing that can be safely inspected at all.
-    TooShort { len: usize },
+    TooShort {
+        len: usize,
+    },
     /// The four-byte tag says this is not a Voxelheim message.
     NotVoxelheim,
     /// The verifier refused the buffer: an offset, vtable or string in it does
@@ -2839,7 +2867,10 @@ pub enum DecodeError {
     /// A V33 replacement violates its position or instance/exit pairing.
     InvalidWorldChange,
     /// A `spawn` component is NaN or infinite.
-    NonFiniteSpawn { axis: usize, value: f32 },
+    NonFiniteSpawn {
+        axis: usize,
+        value: f32,
+    },
     /// `tick_rate` violates `>= 1`.
     TickRate(u8),
     /// `chunk_size` violates `1..=MAX_CHUNK_SIZE`.
@@ -2900,6 +2931,9 @@ pub enum DecodeError {
     MissingBlockPos(&'static str),
     /// A `MineProgress` carries no `pos`; the origin is never a default.
     MissingMinePos,
+    /// A MiningActivity carries no target position.
+    MissingMiningPos,
+    InvalidMiningActivity,
     /// `ChunkData` carries no `runs` at all, which is not the same as a chunk full
     /// of air: air is a run like any other.
     MissingRuns,
@@ -2927,7 +2961,10 @@ pub enum DecodeError {
         value: f32,
     },
     /// Projectile kind zero, or a member this renderer does not know.
-    UnknownProjectileKind { entity_id: u64, value: u8 },
+    UnknownProjectileKind {
+        entity_id: u64,
+        value: u8,
+    },
     /// One id names two projectiles in the same complete vector.
     DuplicateProjectile(u64),
     /// Item id 0 is reserved for no item and cannot name a drop.
@@ -2982,10 +3019,16 @@ pub enum DecodeError {
     UnknownLifeState,
     /// `max_health` is zero, or `health` exceeds it. The first is the division a health
     /// bar performs, and an honestly buggy server reaches it as easily as a hostile one.
-    VitalsHealth { health: u16, max_health: u16 },
+    VitalsHealth {
+        health: u16,
+        max_health: u16,
+    },
     /// `max_hunger` is zero, or `hunger` exceeds it. A zero reserve is legal; a zero
     /// denominator is not.
-    VitalsHunger { hunger: u16, max_hunger: u16 },
+    VitalsHunger {
+        hunger: u16,
+        max_hunger: u16,
+    },
     /// Progression carries no level, no denominator, or more experience than that
     /// denominator. At the level cap equality remains legal.
     VitalsExperience {
@@ -2998,7 +3041,9 @@ pub enum DecodeError {
     /// own players.
     AliveWithoutHealth,
     /// Only a dead player counts down to a respawn.
-    RespawnWhileAlive { respawn_ticks: u32 },
+    RespawnWhileAlive {
+        respawn_ticks: u32,
+    },
     /// A mob carries the reserved identity 0.
     MobWithoutIdentity,
     /// A hit notification carries the reserved attacker identity 0.
@@ -3015,7 +3060,10 @@ pub enum DecodeError {
     MobEntityConflict(u64),
     /// A mob's `pos` or `vel` struct is absent. Refused rather than read as the origin,
     /// for the reason a `BlockUpdate` without a position is: the origin is a real place.
-    MissingMobTransform { entity_id: u64, field: &'static str },
+    MissingMobTransform {
+        entity_id: u64,
+        field: &'static str,
+    },
     /// A mob carries a NaN or infinite component, which would pass through
     /// interpolation into a `Transform` and never leave.
     NonFiniteMob {
@@ -3046,7 +3094,10 @@ pub enum DecodeError {
     /// Sparse mount state names one player more than once.
     DuplicateMountState(u64),
     /// Mount state carries the absent zero or a member this build cannot name.
-    UnknownMountKind { entity_id: u64, value: u8 },
+    UnknownMountKind {
+        entity_id: u64,
+        value: u8,
+    },
     /// The recipient's cast carries the absent zero or an unknown kind.
     UnknownCastKind(u8),
     /// A completed cast must leave the snapshot instead of remaining at 255.
@@ -3119,7 +3170,10 @@ pub enum DecodeError {
     /// A roster member omitted its display name. Empty remains legal.
     PartyRosterWithoutName(u64),
     /// The legacy live leader projection disagrees with the first stable roster entry.
-    PartyLeaderRosterMismatch { expected: u64, actual: u64 },
+    PartyLeaderRosterMismatch {
+        expected: u64,
+        actual: u64,
+    },
     /// An online combat member is absent or offline in the stable roster.
     PartyMemberMissingFromRoster(u64),
     /// The accessible-corpse vector carries reserved identity zero.
@@ -3137,7 +3191,10 @@ pub enum DecodeError {
     /// A loot entry has no stable identity.
     LootEntryWithoutIdentity(u64),
     /// A stable entry id appears twice in one container.
-    DuplicateLootEntry { corpse_id: u64, entry_id: u64 },
+    DuplicateLootEntry {
+        corpse_id: u64,
+        entry_id: u64,
+    },
     /// A loot stack is empty or carries an impossible durability pair.
     InvalidLootEntry {
         corpse_id: u64,
@@ -3152,14 +3209,19 @@ pub enum DecodeError {
     /// Refused rather than filled in with [`PLACEHOLDER_APPEARANCE`]: the placeholder
     /// answers "the message has not arrived yet", and this message *did* arrive. `where`
     /// names the payload so the log says which half of the contract to look at.
-    MissingAppearance { at: &'static str },
+    MissingAppearance {
+        at: &'static str,
+    },
     /// A colour's reserved top eight bits are not zero.
     ///
     /// Refused rather than masked. A set high byte means the peer is encoding something
     /// this build does not know about, and masking it would draw a colour nobody chose
     /// while hiding the disagreement — the reasoning [`Self::WorldClock`] records, where
     /// a repair a decoder invents is a different answer from the server's.
-    AppearanceColorReserved { field: &'static str, value: u32 },
+    AppearanceColorReserved {
+        field: &'static str,
+        value: u32,
+    },
     /// An `Appearance` carries `HairModel::Unknown` — the absent-field case — or a
     /// member this build has no name for. Never guessed at: `schemas/common.fbs` says
     /// the client renders what the player chose and invents no default.
@@ -3174,7 +3236,10 @@ pub enum DecodeError {
     /// A `ServerCharacterList` says it allows no characters at all, or fewer than it
     /// just listed. A server disagreeing with itself about its own limit; taking the
     /// larger of the two would be inventing a limit nobody set.
-    CharacterLimit { listed: usize, max: u8 },
+    CharacterLimit {
+        listed: usize,
+        max: u8,
+    },
     /// A `PlayerAppearance` carries the reserved entity id 0.
     ///
     /// Distinct from having no matching entity, which is **not** an error: the two
@@ -3189,7 +3254,10 @@ pub enum DecodeError {
     /// `LeaveStarted.remaining_ms` is zero, which describes a countdown already over.
     LeaveWithoutTime,
     /// A cancellation answer disagrees with the shape the contract assigns its outcome.
-    LeaveCancelResultShape { accepted: bool, remaining_ms: u32 },
+    LeaveCancelResultShape {
+        accepted: bool,
+        remaining_ms: u32,
+    },
     /// A `MapTile` names a blocks-per-pixel value this contract has no member for. The
     /// absent-field zero is one of them.
     MapTileScale(u8),
@@ -3208,7 +3276,10 @@ pub enum DecodeError {
         want: usize,
     },
     /// A `MapTile` carries a surface byte this build has no member for.
-    UnknownMapSurface { index: usize, value: u8 },
+    UnknownMapSurface {
+        index: usize,
+        value: u8,
+    },
     /// A `MapExplored` page carries no columns. An empty page states nothing, and
     /// reading one as "the ledger is empty" would erase the client's map.
     MapExploredWithoutColumns,
@@ -3223,19 +3294,31 @@ pub enum DecodeError {
     /// One `marker_id` names two marks of the same list.
     DuplicateMarker(u64),
     /// A `Marker` carries a kind this build has no member for, `Unknown` included.
-    UnknownMarkerKind { marker_id: u64, value: u8 },
+    UnknownMarkerKind {
+        marker_id: u64,
+        value: u8,
+    },
     /// A `Marker` note is longer than the contract allows, measured in bytes.
-    MarkerNoteTooLong { marker_id: u64, len: usize },
+    MarkerNoteTooLong {
+        marker_id: u64,
+        len: usize,
+    },
     /// A `ResidentAppearance` carries the reserved entity id 0.
     ResidentWithoutEntity,
     /// A `ResidentAppearance` omitted its server-owned name. Absence is refused; so is
     /// empty, because a resident the server placed always has one.
     ResidentWithoutName(u64),
     /// A resident's name is longer than the contract allows, measured in bytes.
-    ResidentNameTooLong { entity_id: u64, len: usize },
+    ResidentNameTooLong {
+        entity_id: u64,
+        len: usize,
+    },
     /// A `ResidentAppearance` carries a role this build has no member for, the
     /// absent-field `Unknown` included.
-    UnknownResidentRole { entity_id: u64, value: u8 },
+    UnknownResidentRole {
+        entity_id: u64,
+        value: u8,
+    },
     /// LearnedMounts carries the absent zero or an unknown mount.
     UnknownLearnedMount(u8),
     /// LearnedMounts names one mount more than once.
@@ -3247,12 +3330,18 @@ pub enum DecodeError {
     /// A `VendorState` omitted one of its two price vectors. Empty is legal — a vendor
     /// that only buys, or only sells — and absent is a message shape this contract does
     /// not have.
-    VendorWithoutPrices { entity_id: u64, field: &'static str },
+    VendorWithoutPrices {
+        entity_id: u64,
+        field: &'static str,
+    },
     /// Both of a `VendorState`'s vectors are empty. A vendor with nothing to say is
     /// `VendorClosed`, not a stall that opens onto nothing.
     VendorWithNothingToTrade(u64),
     /// A `VendorEntry` names item 0, which the registry never mints.
-    VendorEntryWithoutItem { entity_id: u64, field: &'static str },
+    VendorEntryWithoutItem {
+        entity_id: u64,
+        field: &'static str,
+    },
     /// A `VendorEntry` carries price 0. Free is not a price, in either direction.
     VendorEntryWithoutPrice {
         entity_id: u64,
@@ -3275,7 +3364,10 @@ pub enum DecodeError {
     /// A required complete offer vector is absent.
     PlayerTradeWithoutOffer(&'static str),
     /// An offer exceeds the contract's five positions.
-    PlayerTradeOfferTooLarge { field: &'static str, len: usize },
+    PlayerTradeOfferTooLarge {
+        field: &'static str,
+        len: usize,
+    },
     /// An offer index is outside `0..PLAYER_TRADE_SLOTS`.
     PlayerTradeSlotOutOfRange {
         field: &'static str,
@@ -3283,9 +3375,15 @@ pub enum DecodeError {
         trade_slot: u8,
     },
     /// One offer repeats a trade position.
-    DuplicatePlayerTradeSlot { field: &'static str, trade_slot: u8 },
+    DuplicatePlayerTradeSlot {
+        field: &'static str,
+        trade_slot: u8,
+    },
     /// An offered stack has count 0.
-    EmptyPlayerTradeSlot { field: &'static str, index: usize },
+    EmptyPlayerTradeSlot {
+        field: &'static str,
+        index: usize,
+    },
     /// Durability is present without a maximum.
     PlayerTradeDurabilityWithoutMaximum {
         field: &'static str,
@@ -3306,26 +3404,37 @@ pub enum DecodeError {
         count: u16,
     },
     /// The partner's private pack position was exposed.
-    PlayerTradePartnerPackSlot { index: usize, pack_slot: u8 },
+    PlayerTradePartnerPackSlot {
+        index: usize,
+        pack_slot: u8,
+    },
     /// A present `WeatherState` names a kind this build has no member for, the
     /// absent-field `Unknown` included.
     ///
     /// Absence of the whole struct is the legal "this server keeps no weather" and never
     /// reaches here: it is `Snapshot::weather == None`. This is a struct that arrived and
     /// then said nothing.
-    UnknownWeatherKind { value: u8 },
+    UnknownWeatherKind {
+        value: u8,
+    },
     /// A `WeatherState` says `Clear` and carries a non-zero intensity.
     ///
     /// Refused rather than clamped to either half, for the reason a broken world clock is
     /// refused rather than repaired: the two fields are describing different skies and
     /// nothing here can tell which one the server is simulating.
-    ClearWeatherWithIntensity { intensity: u8 },
+    ClearWeatherWithIntensity {
+        intensity: u8,
+    },
     /// A `StormWarning` carries a phase this build has no member for, the absent-field
     /// `Unknown` included. There is no phase to read `seconds_until` against.
-    UnknownStormPhase { value: u8 },
+    UnknownStormPhase {
+        value: u8,
+    },
     /// A `StormWarning` says the storm has passed and still carries a countdown. The two
     /// statements are about different storms.
-    StormPassedWithCountdown { seconds_until: u32 },
+    StormPassedWithCountdown {
+        seconds_until: u32,
+    },
     /// A `WardsNearby` carries more columns than the contract's bound.
     ///
     /// Refused rather than truncated: a receiver that dropped the tail would shade the
@@ -3333,10 +3442,17 @@ pub enum DecodeError {
     TooManyWardedColumns(usize),
     /// A `WardedColumn` carries a ward kind this build has no member for, the
     /// absent-field `Unknown` included.
-    UnknownWardKind { cx: i32, cz: i32, value: u8 },
+    UnknownWardKind {
+        cx: i32,
+        cz: i32,
+        value: u8,
+    },
     /// One `(cx, cz)` appears twice in the same `WardsNearby`. Two rows for one column
     /// are two answers about the same ground with no way to tell which is meant.
-    DuplicateWardedColumn { cx: i32, cz: i32 },
+    DuplicateWardedColumn {
+        cx: i32,
+        cz: i32,
+    },
     /// `ServerWelcome.voice_range_blocks` is negative or non-finite.
     ///
     /// **Zero is deliberately not in this refusal**: it is the legal announcement of a
@@ -3349,13 +3465,18 @@ pub enum DecodeError {
     VoiceWithoutSpeaker,
     /// A `VoiceHeard` carries no audio: an absent or empty `opus` vector. A frame with
     /// nothing in it is one the server should not have relayed.
-    VoiceWithoutAudio { speaker_entity_id: u64 },
+    VoiceWithoutAudio {
+        speaker_entity_id: u64,
+    },
     /// A `VoiceHeard` carries more Opus bytes than `VoiceBound.MaxOpusBytes`.
     ///
     /// Refused rather than truncated: half a frame is not a frame, and this side
     /// allocates from a length the peer chose. The length is named and the bytes are
     /// not, which is the rule for every diagnostic that touches this payload.
-    OversizedVoiceFrame { speaker_entity_id: u64, len: usize },
+    OversizedVoiceFrame {
+        speaker_entity_id: u64,
+        len: usize,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -3421,6 +3542,10 @@ impl fmt::Display for DecodeError {
             ),
             Self::MissingCoord(kind) => write!(f, "{kind} carries no chunk coordinate"),
             Self::MissingBlockPos(kind) => write!(f, "{kind} carries no block position"),
+            Self::MissingMiningPos => write!(f, "MiningActivity carries no block position"),
+            Self::InvalidMiningActivity => {
+                write!(f, "invalid MiningActivity identity, tool or phase")
+            }
             Self::MissingMinePos => write!(f, "MineProgress carries no block position"),
             Self::MissingRuns => write!(f, "chunk data carries no runs"),
             Self::NonFiniteEntity {
@@ -4053,6 +4178,40 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .payload_as_inventory_state()
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::Inventory(inventory_state(&inventory)?))
+        }
+        fb::Payload::MiningActivity => {
+            let a = envelope
+                .payload_as_mining_activity()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let pos = a.pos().ok_or(DecodeError::MissingMiningPos)?;
+            if a.actor_entity_id() == 0 || a.activity_id() == 0 || a.block_id() == 0 {
+                return Err(DecodeError::InvalidMiningActivity);
+            }
+            let tool = match a.tool() {
+                fb::MiningTool::Hand => MiningTool::Hand,
+                fb::MiningTool::Shovel => MiningTool::Shovel,
+                fb::MiningTool::Pickaxe => MiningTool::Pickaxe,
+                fb::MiningTool::Axe => MiningTool::Axe,
+                _ => return Err(DecodeError::InvalidMiningActivity),
+            };
+            let phase = match a.phase() {
+                fb::MiningPhase::Active => MiningPhase::Active,
+                fb::MiningPhase::Completed => MiningPhase::Completed,
+                _ => return Err(DecodeError::InvalidMiningActivity),
+            };
+            Ok(Message::MiningActivity(MiningActivity {
+                tick: a.tick(),
+                actor_entity_id: a.actor_entity_id(),
+                activity_id: a.activity_id(),
+                pos: BlockCoord {
+                    x: pos.x(),
+                    y: pos.y(),
+                    z: pos.z(),
+                },
+                block_id: a.block_id(),
+                tool,
+                phase,
+            }))
         }
         fb::Payload::MineProgress => {
             let progress = envelope
@@ -9088,6 +9247,7 @@ mod tests {
             (fb::Payload::PortalRequest, 64),
             (fb::Payload::WorldChange, 65),
             (fb::Payload::BlowLanded, 66),
+            (fb::Payload::MiningActivity, 67),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -9103,7 +9263,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            67,
+            68,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9133,7 +9293,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 67] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 68] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -9213,6 +9373,7 @@ mod tests {
         (fb::Payload::PortalRequest, Handling::ClientOnly),
         (fb::Payload::WorldChange, Handling::Consumed),
         (fb::Payload::BlowLanded, Handling::Deferred),
+        (fb::Payload::MiningActivity, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -15805,5 +15966,92 @@ mod world_change_tests {
                 );
             }
         }
+    }
+    #[test]
+    fn mining_observation_decodes_categories_and_rejects_absent_identity() {
+        for tool in [
+            fb::MiningTool::Hand,
+            fb::MiningTool::Shovel,
+            fb::MiningTool::Pickaxe,
+            fb::MiningTool::Axe,
+        ] {
+            for phase in [fb::MiningPhase::Active, fb::MiningPhase::Completed] {
+                for actor in [0, 42] {
+                    let mut builder = FlatBufferBuilder::new();
+                    let pos = fb::BlockCoord::new(-33, 64, 12);
+                    let a = fb::MiningActivity::create(
+                        &mut builder,
+                        &fb::MiningActivityArgs {
+                            tick: u32::MAX,
+                            actor_entity_id: actor,
+                            activity_id: 17,
+                            pos: Some(&pos),
+                            block_id: 7,
+                            tool,
+                            phase,
+                        },
+                    );
+                    let frame =
+                        finish_envelope(builder, fb::Payload::MiningActivity, a.as_union_value());
+                    let result = decode(&frame);
+                    if actor == 0 {
+                        assert!(matches!(result, Err(DecodeError::InvalidMiningActivity)));
+                    } else {
+                        let Message::MiningActivity(got) = result.unwrap() else {
+                            panic!("not mining");
+                        };
+                        assert_eq!(
+                            (got.tick, got.actor_entity_id, got.activity_id, got.block_id),
+                            (u32::MAX, 42, 17, 7)
+                        );
+                        assert_eq!(
+                            got.pos,
+                            BlockCoord {
+                                x: -33,
+                                y: 64,
+                                z: 12
+                            }
+                        );
+                        assert_eq!(
+                            got.phase == MiningPhase::Completed,
+                            phase == fb::MiningPhase::Completed
+                        );
+                        assert_eq!(
+                            got.tool,
+                            match tool {
+                                fb::MiningTool::Hand => MiningTool::Hand,
+                                fb::MiningTool::Shovel => MiningTool::Shovel,
+                                fb::MiningTool::Pickaxe => MiningTool::Pickaxe,
+                                _ => MiningTool::Axe,
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn missing_mining_activity_position_names_its_own_payload() {
+        let mut builder = FlatBufferBuilder::new();
+        let a = fb::MiningActivity::create(
+            &mut builder,
+            &fb::MiningActivityArgs {
+                tick: 1,
+                actor_entity_id: 42,
+                activity_id: 17,
+                pos: None,
+                block_id: 7,
+                tool: fb::MiningTool::Hand,
+                phase: fb::MiningPhase::Active,
+            },
+        );
+        let frame = finish_envelope(builder, fb::Payload::MiningActivity, a.as_union_value());
+        let err = decode(&frame).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingMiningPos));
+        assert_eq!(err.to_string(), "MiningActivity carries no block position");
+        assert_eq!(
+            DecodeError::MissingMinePos.to_string(),
+            "MineProgress carries no block position"
+        );
     }
 }
