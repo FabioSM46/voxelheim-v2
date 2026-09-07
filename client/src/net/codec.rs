@@ -2931,6 +2931,8 @@ pub enum DecodeError {
     MissingBlockPos(&'static str),
     /// A `MineProgress` carries no `pos`; the origin is never a default.
     MissingMinePos,
+    /// A MiningActivity carries no target position.
+    MissingMiningPos,
     InvalidMiningActivity,
     /// `ChunkData` carries no `runs` at all, which is not the same as a chunk full
     /// of air: air is a run like any other.
@@ -3540,6 +3542,7 @@ impl fmt::Display for DecodeError {
             ),
             Self::MissingCoord(kind) => write!(f, "{kind} carries no chunk coordinate"),
             Self::MissingBlockPos(kind) => write!(f, "{kind} carries no block position"),
+            Self::MissingMiningPos => write!(f, "MiningActivity carries no block position"),
             Self::InvalidMiningActivity => {
                 write!(f, "invalid MiningActivity identity, tool or phase")
             }
@@ -4180,7 +4183,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             let a = envelope
                 .payload_as_mining_activity()
                 .ok_or(DecodeError::MissingPayload(name))?;
-            let pos = a.pos().ok_or(DecodeError::MissingMinePos)?;
+            let pos = a.pos().ok_or(DecodeError::MissingMiningPos)?;
             if a.actor_entity_id() == 0 || a.activity_id() == 0 || a.block_id() == 0 {
                 return Err(DecodeError::InvalidMiningActivity);
             }
@@ -16026,5 +16029,29 @@ mod world_change_tests {
                 }
             }
         }
+    }
+    #[test]
+    fn missing_mining_activity_position_names_its_own_payload() {
+        let mut builder = FlatBufferBuilder::new();
+        let a = fb::MiningActivity::create(
+            &mut builder,
+            &fb::MiningActivityArgs {
+                tick: 1,
+                actor_entity_id: 42,
+                activity_id: 17,
+                pos: None,
+                block_id: 7,
+                tool: fb::MiningTool::Hand,
+                phase: fb::MiningPhase::Active,
+            },
+        );
+        let frame = finish_envelope(builder, fb::Payload::MiningActivity, a.as_union_value());
+        let err = decode(&frame).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingMiningPos));
+        assert_eq!(err.to_string(), "MiningActivity carries no block position");
+        assert_eq!(
+            DecodeError::MissingMinePos.to_string(),
+            "MineProgress carries no block position"
+        );
     }
 }
