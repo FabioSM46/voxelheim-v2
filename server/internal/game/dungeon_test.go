@@ -154,3 +154,20 @@ func TestDungeonGateUpdatesRetryOnlyTheUnsentSuffix(t *testing.T) {
 	}
 	delete(s.players, p.entityID)
 }
+
+// Deliberately non-parallel: temporarily remove a registry row to exercise the
+// refused-spawn path. Parallel tests start only after this test has restored it.
+func TestDungeonRefusesConstructionWhenAnEncounterCannotBePlaced(t *testing.T) {
+	for _, kind := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
+		t.Run(kind.String(), func(t *testing.T) {
+			manager := instanceTestManager(t, 20, 1)
+			def := mobRegistry[kind]
+			delete(mobRegistry, kind)
+			t.Cleanup(func() { mobRegistry[kind] = def })
+			session, err := manager.Create(InstanceRuin{})
+			if err == nil || session.ID != 0 || manager.Count() != 0 {
+				t.Fatal("unplaceable encounter published an incomplete session")
+			}
+		})
+	}
+}

@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"slices"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -32,20 +33,31 @@ type dungeonEncounters struct {
 // Construction only, before the manager publishes this session. Both live
 // encounters use the ordinary spawn path exactly once; the open-world director
 // never owns this simulation, and no missing mob is interpreted as a respawn.
-func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progress dungeonProgress) {
+func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progress dungeonProgress) error {
 	d := &dungeonEncounters{gate: gate, progress: progress, pending: make(map[*Player]int)}
-	s.dungeon = d
 	guardian, king, _ := world.InstanceEncounterAnchors(seed)
-	place := func(kind vnet.MobKind, a world.PlacedAnchor) uint64 {
-		id, _ := s.spawnMobLocked(kind, [3]float64{float64(a.X) + .5, float64(a.Y), float64(a.Z) + .5})
-		return id
+	place := func(kind vnet.MobKind, a world.PlacedAnchor) (uint64, error) {
+		id, made := s.spawnMobLocked(kind, [3]float64{float64(a.X) + .5, float64(a.Y), float64(a.Z) + .5})
+		if !made {
+			return 0, fmt.Errorf("game: could not place dungeon encounter %s", kind)
+		}
+		return id, nil
 	}
+	var err error
 	if !progress.guardian {
-		d.guardianID = place(vnet.MobKindVargrGuardian, guardian)
+		d.guardianID, err = place(vnet.MobKindVargrGuardian, guardian)
+		if err != nil {
+			return err
+		}
 	}
 	if !progress.king {
-		d.kingID = place(vnet.MobKindDraugrKing, king)
+		d.kingID, err = place(vnet.MobKindDraugrKing, king)
+		if err != nil {
+			return err
+		}
 	}
+	s.dungeon = d
+	return nil
 }
 
 func (s *Sim) dungeonBossLocked(m *mob) bool {

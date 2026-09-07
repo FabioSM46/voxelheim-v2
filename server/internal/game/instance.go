@@ -219,7 +219,9 @@ func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceR
 	if err != nil {
 		return nil, err
 	}
-	sim.placeDungeonEncounters(seed, gate, progress)
+	if err := sim.placeDungeonEncounters(seed, gate, progress); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &instanceSession{id: id, seed: seed, ruin: ruin, members: make(map[InstanceCharacter]struct{}), sim: sim, chunks: chunks, ctx: ctx, cancel: cancel}
 	m.sessions[id] = s
