@@ -1,6 +1,5 @@
 //! Excitation describes the implement; the struck material adds its own response.
 //! No asset files, pitch-only variants, or second block-id classification.
-#![allow(dead_code)] // Part 2 of #984 consumes this catalogue in the playback controller.
 use crate::{
     audio::synth::{Envelope, Exciter, Filter, FilterKind, Layer, Noise, Sound, Wave},
     net::MiningTool,
