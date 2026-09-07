@@ -154,6 +154,14 @@ func TestInstancePrivateCopiesShareOneEntityCounter(t *testing.T) {
 		t.Fatal("copies share identity or world")
 	}
 	seen := map[uint64]bool{a.ID: true, b.ID: true}
+	for _, sim := range []*Sim{a.Sim, b.Sim} {
+		for id := range sim.mobs {
+			if seen[id] {
+				t.Fatal("boss reused an identity")
+			}
+			seen[id] = true
+		}
+	}
 	for _, sim := range []*Sim{open, a.Sim, b.Sim, open, a.Sim, b.Sim} {
 		id, ok := sim.spawnDrop(ItemStone, 1, [3]int64{0, 2, 0})
 		if !ok || seen[id] {
@@ -161,7 +169,7 @@ func TestInstancePrivateCopiesShareOneEntityCounter(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	if len(seen) != 8 || ids.Load() != 8 {
+	if len(seen) != 12 || ids.Load() != 12 {
 		t.Fatal("counter not singular")
 	}
 	one, two := instanceTestCharacter(1), instanceTestCharacter(2)
@@ -248,7 +256,7 @@ func TestInstanceLimitRefusesBeforeMintingOrAllocating(t *testing.T) {
 			t.Fatal("reentry bypassed cap", err)
 		}
 	}
-	if ids.Load() != 1 || m.Count() != 1 || len(m.visits) != 1 {
+	if ids.Load() != 3 || m.Count() != 1 || len(m.visits) != 1 {
 		t.Fatal("refusal changed resources")
 	}
 	m.Leave(s.ID, instanceTestCharacter(1))

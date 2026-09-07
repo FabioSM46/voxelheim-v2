@@ -233,6 +233,9 @@ func (s *Sim) sortedMobsLocked() []*mob {
 func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 	mobs := s.sortedMobsLocked()
 	for _, m := range mobs {
+		if s.dungeonBossLocked(m) {
+			continue
+		}
 		m.step(s, players)
 		m.advanceThreatLocked(s)
 	}
@@ -883,7 +886,7 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 //
 // The caller holds Sim.mu.
 func (s *Sim) damageMobLocked(m *mob, amount uint16) bool {
-	if amount == 0 || m.health == 0 {
+	if amount == 0 || m.health == 0 || s.dungeonBossLocked(m) {
 		return false
 	}
 

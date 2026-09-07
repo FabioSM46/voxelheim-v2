@@ -17,12 +17,21 @@ import (
 // and would be measuring the balance rather than the rule under test. The rule under
 // test is what a *death* does, and this is the transition a death goes through.
 //
-// It also stands in for the placement #1022 owns: nothing here says where a boss stands,
-// only that one died in this session's world.
+// Prefer an accessible placed encounter. Tests of generic binding idempotency may
+// still inject another species instance; dungeon progression tests use only the
+// two placed identities and exercise the closed king directly.
 func killMobInSession(t *testing.T, session InstanceSession, kind vnet.MobKind) uint64 {
 	t.Helper()
 	session.Sim.mu.Lock()
 	defer session.Sim.mu.Unlock()
+	for id, m := range session.Sim.mobs {
+		if m.kind == kind && !session.Sim.dungeonBossLocked(m) {
+			if !session.Sim.damageMobLocked(m, m.health) {
+				t.Fatal("placed boss survived killing blow")
+			}
+			return id
+		}
+	}
 	id, made := session.Sim.spawnMobLocked(kind, [3]float64{0.5, 64, 0.5})
 	if !made {
 		t.Fatalf("the instance simulation refused to place a %s", kind)
