@@ -40,6 +40,7 @@
 
 mod mesher;
 pub(crate) mod palette;
+pub(crate) mod portal;
 mod render;
 pub(crate) mod transition;
 mod water_material;
@@ -79,7 +80,11 @@ impl Plugin for WorldPlugin {
             // other finds it, so neither depends on the order in `main.rs`.
             .init_resource::<WorldInbox>()
             .add_systems(Update, ingest_world_updates.after(crate::net::DrainNetwork))
-            .add_plugins((render::ChunkRenderPlugin, transition::TransitionPlugin));
+            .add_plugins((
+                render::ChunkRenderPlugin,
+                transition::TransitionPlugin,
+                portal::PortalPlugin,
+            ));
     }
 }
 

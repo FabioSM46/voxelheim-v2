@@ -67,8 +67,8 @@ func TestRuinVariantsAtEveryFacing(t *testing.T) {
 						t.Errorf("anchor %+v, want %+v", a, want)
 					}
 				}
-				// Probe the entire five-wide, three-high sealed opening after placement.
-				// Along X for +/-Z facings, along Z for +/-X facings; all are full cubes.
+				// Probe the five-wide threshold and its inset stone shoulders.
+				// Along X for +/-Z facings, along Z for +/-X facings.
 				for across := -2; across <= 2; across++ {
 					for y := 64; y <= 66; y++ {
 						x, z := arch[facing][0], arch[facing][2]

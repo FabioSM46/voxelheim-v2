@@ -57,7 +57,7 @@ const (
 	AnchorStablemaster
 	AnchorPaddock
 
-	// Scenic landmarks: the sealed arch names a solid cell, not an entity slot.
+	// Crossing landmarks: the arch names its portal heart, not an entity slot.
 	AnchorRuinArch
 	AnchorRuinStair
 

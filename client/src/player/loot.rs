@@ -160,6 +160,7 @@ struct LootIntent<'w> {
     cadence: Res<'w, InputCadence>,
     outbound: Option<ResMut<'w, Outbound>>,
     trade_prompts: MessageWriter<'w, PlayerTradePromptRequest>,
+    portal: Option<Res<'w, super::portal::PortalFocus>>,
 }
 
 fn send_loot_intents(
@@ -177,6 +178,7 @@ fn send_loot_intents(
         cadence,
         mut outbound,
         mut trade_prompts,
+        portal,
     } = intent;
     if window.current.is_some() && gate.mode() != InputMode::Loot {
         window.dismiss_current();
@@ -228,6 +230,15 @@ fn send_loot_intents(
     let Some(session) = session else {
         return;
     };
+    // A deliberate crossing has priority at the threshold, including when a party
+    // member stands beside it. This remains the sole Interact dispatcher.
+    if let Some(arch) = portal.as_deref().and_then(|focus| focus.0) {
+        if let Some(outbound) = outbound.as_deref_mut() {
+            outbound.send(crate::net::encode_portal_request(arch));
+        }
+        return;
+    }
+
     if let Some(corpse_id) = buffer.nearest_accessible_corpse(session.0.entity_id, MAX_REACH) {
         let Some(outbound) = outbound.as_deref_mut() else {
             return;
@@ -957,5 +968,41 @@ mod tests {
         app.insert_resource(SelfVitals::from_server(dead));
         app.update();
         assert!(app.world().resource::<LootWindow>().state().is_none());
+    }
+    #[test]
+    fn a_portal_crossing_uses_one_interact_intent_and_never_opens_a_corpse() {
+        let (mut app, frames) = held_key_app();
+        let arch = crate::net::BlockCoord {
+            x: -32,
+            y: 64,
+            z: 1,
+        };
+        app.insert_resource(super::super::portal::PortalFocus(Some(arch)));
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert_eq!(sent, vec![crate::net::encode_portal_request(arch)]);
+        let root = crate::wire::voxelheim::net::root_as_envelope(&sent[0]).unwrap();
+        let request = root.payload_as_portal_request().unwrap();
+        let got = request.arch().unwrap();
+        assert_eq!((got.x(), got.y(), got.z()), (arch.x, arch.y, arch.z));
+        assert!(
+            keyboard_frame(&mut app, &frames, []).is_empty(),
+            "holding Interact cannot spam crossings"
+        );
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+        assert!(
+            keyboard_frame(
+                &mut app,
+                &frames,
+                [
+                    key_event(KeyCode::KeyF, ButtonState::Released, false),
+                    key_event(KeyCode::KeyF, ButtonState::Pressed, false)
+                ]
+            )
+            .is_empty()
+        );
     }
 }
