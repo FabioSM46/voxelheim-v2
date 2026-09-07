@@ -1945,6 +1945,15 @@ pub const MAX_EXPLORED_COLUMNS: usize = 4096;
 /// The most marks one character may hold.
 pub const MAX_MARKERS: usize = 64;
 
+/// How far from the origin a block coordinate may lie, on any axis.
+///
+/// The server's `world.MaxWorldCoordinate`, mirrored here because it is what a decoder
+/// checks a coordinate *against*: a position outside it is not a place, so a payload
+/// carrying one is refused rather than drawn somewhere approximate. Nothing is decided
+/// from it — the server owns where anything is — and what it buys locally is that the
+/// arithmetic downstream of a decoded coordinate cannot leave `i32`.
+const BLOCK_DOMAIN: i32 = 1 << 24;
+
 /// The most bytes a mark's note may carry. Bytes rather than characters, because a byte
 /// is what the wire carries and what both decoders can count without agreeing on an
 /// encoding of characters.
@@ -2212,6 +2221,53 @@ impl LandmarkList {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkerList {
     pub markers: Vec<Marker>,
+}
+
+/// One saved run this character owes, as the server states it.
+///
+/// **It names a place, not a session.** [`Self::arch`] is the ruin's own anchor in the open
+/// world, which is the identity this client already uses to ask to cross, and the session's
+/// `world_id` is deliberately absent from the contract — `schemas/player.fbs` says why. So
+/// two bindings are the same binding exactly when they name the same arch, which is what
+/// makes the uniqueness check in [`instance_bindings`] meaningful.
+///
+/// **The two counts are read, never computed.** `bosses_defeated` counts boss *species* the
+/// server has recorded as beaten, and `bosses_total` is the dungeon's boss-rank encounter
+/// count at that same granularity. Neither is derivable on this side — the client has no
+/// roster of a dungeon's bosses and never sees the corpses of a run it is not in — so a
+/// consumer renders these two numbers and nothing else.
+///
+/// **`resets_at_unix` is wall-clock, on the server's calendar.** It is not the in-game
+/// clock and it is not a duration: a binding lasts until the server's next midnight. A
+/// client that has been open across that second must expect the whole list to be replaced
+/// rather than expire an entry itself, because expiring one locally would be this side
+/// deciding a lockout had ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionBinding {
+    /// The ruin's arch in the **open world**, which is this binding's identity.
+    pub arch: BlockCoord,
+    /// Boss species already beaten in this saved run. Never greater than
+    /// [`Self::bosses_total`].
+    pub bosses_defeated: u8,
+    /// Boss-rank encounters this dungeon holds. Non-zero.
+    pub bosses_total: u8,
+    /// The Unix second the run resets at. Never zero in a binding.
+    pub resets_at_unix: i64,
+}
+
+/// Every saved run this character owes, **replacing** the client's copy wholesale.
+///
+/// An empty list is a *statement*, not an absence: it says this character owes nothing
+/// anywhere. A recipient that kept a previous list on receiving one would be showing a
+/// lockout that has already reset, which is the whole reason the contract sends the list
+/// entire on each of the three events that can change it — entering the world, binding,
+/// and a run's reset.
+///
+/// The wire order is stable across two sends of unchanged state and carries no other
+/// meaning; what a window draws, and in what order, is the window's decision.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InstanceBindings {
+    pub bindings: Vec<SessionBinding>,
 }
 
 /// What a resident does in their settlement.
@@ -2895,6 +2951,12 @@ pub enum Message {
     /// here; nothing plays it until the client's audio path (#851), exactly as
     /// `MapTile` was carried this far before the map window existed.
     VoiceHeard(VoiceHeard),
+    /// Every saved run this character owes, replacing the client's copy wholesale.
+    ///
+    /// Sibling of [`Self::MarkerList`] and [`Self::WardsNearby`] rather than of the
+    /// event-shaped payloads around it: the message *is* the state, so an empty one is a
+    /// statement and there is no earlier list for it to be checked against.
+    InstanceBindings(InstanceBindings),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -3002,6 +3064,37 @@ pub enum DecodeError {
     InvalidMiningActivity,
     MissingBlowPosition,
     InvalidBlowLanded,
+    /// A `SessionBinding` carries no `arch`, or one outside the block domain.
+    ///
+    /// The arch is the binding's identity, so an absent one is not a binding with a
+    /// missing decoration — it is a row nothing can tell apart from another row.
+    InvalidBindingArch {
+        index: usize,
+    },
+    /// A `SessionBinding` reports a boss count no dungeon has: a zero total, or more
+    /// species defeated than the dungeon holds.
+    ///
+    /// Refused rather than clamped, because the pair is the whole of what a window shows
+    /// and a clamp would invent a reading the server never sent.
+    InvalidBindingProgress {
+        index: usize,
+        defeated: u8,
+        total: u8,
+    },
+    /// A `SessionBinding` carries no reset second. Zero is never a reset — it is the
+    /// absent field — and reading it as one would show a lockout that ends in 1970.
+    MissingBindingReset {
+        index: usize,
+    },
+    /// Two entries of one `InstanceBindings` name the same arch.
+    ///
+    /// A binding is per character and per dungeon, so one place appearing twice is a
+    /// frame no correct server sends; the two rows are indistinguishable and nothing
+    /// downstream could say which is meant. Same refusal, and the same reason, as
+    /// [`Self::DuplicateMarker`].
+    DuplicateBinding {
+        index: usize,
+    },
     /// `ChunkData` carries no `runs` at all, which is not the same as a chunk full
     /// of air: air is a run like any other.
     MissingRuns,
@@ -3613,6 +3706,23 @@ impl fmt::Display for DecodeError {
             Self::MissingBlowPosition => write!(f, "BlowLanded carries no position"),
             Self::InvalidBlowLanded => {
                 write!(f, "invalid BlowLanded identity, kind, target or position")
+            }
+            Self::InvalidBindingArch { index } => {
+                write!(f, "session binding {index} has no arch inside the world")
+            }
+            Self::InvalidBindingProgress {
+                index,
+                defeated,
+                total,
+            } => write!(
+                f,
+                "session binding {index} reports {defeated} of {total} bosses"
+            ),
+            Self::MissingBindingReset { index } => {
+                write!(f, "session binding {index} has no reset")
+            }
+            Self::DuplicateBinding { index } => {
+                write!(f, "session binding {index} names a dungeon already listed")
             }
             Self::MissingMiningPos => write!(f, "MiningActivity carries no block position"),
             Self::InvalidMiningActivity => {
@@ -4681,7 +4791,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             let arrival = payload.arrival().ok_or(DecodeError::InvalidWorldChange)?;
             let arrival = [arrival.x(), arrival.y(), arrival.z()];
-            const EXTENT: i32 = 1 << 24;
+            const EXTENT: i32 = BLOCK_DOMAIN;
             if arrival
                 .iter()
                 .any(|v| !v.is_finite() || v.abs() > EXTENT as f32)
@@ -4745,14 +4855,21 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }))
         }
         // V35's entry prompt, carried by name and read by nobody yet. The dialog that
-        // shows a player what they are about to accept is #1030 and the sessions window
-        // that lists what they already owe is #979; the contract those two consume is
-        // settled here so that neither of them has to invent a message. It is deferred
+        // shows a player what they are about to accept is #1030; the contract it consumes
+        // is settled here so that it does not have to invent a message. It is deferred
         // rather than consumed for the reason `MapTile` was before the map window
         // existed — there is no value for a decoded offer to become — and the arm that
         // reads it belongs with the first consumer that needs one.
-        fb::Payload::InstanceEntryOffer | fb::Payload::InstanceBindings => {
-            Ok(Message::Deferred(name))
+        fb::Payload::InstanceEntryOffer => Ok(Message::Deferred(name)),
+        // V35's list of what this character already owes, read by an arm of its own since
+        // the payload half of #979. It was `Deferred` beside the offer above, which is
+        // the staged shape V24's map payloads and V25's stall each had, and `Deferred`
+        // meant "this build has no arm yet" rather than "this contract has no member".
+        fb::Payload::InstanceBindings => {
+            let payload = envelope
+                .payload_as_instance_bindings()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::InstanceBindings(instance_bindings(&payload)?))
         }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
@@ -4926,6 +5043,66 @@ fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
         });
     }
     Ok(MarkerList { markers: decoded })
+}
+
+/// Copies and validates the complete list of saved runs one character owes.
+///
+/// **An empty list is accepted and is not the same thing as an absent field.** Both arrive
+/// here as an empty vector, and both mean the same thing — this character owes nothing —
+/// which is why absence is not refused the way [`MapExplored`]'s is. A `MapExplored` page
+/// with no columns states nothing about the ledger it adds to; a bindings list with no
+/// entries states everything about the list it replaces.
+///
+/// **There is no length bound, deliberately.** `schemas/player.fbs` states three decoder
+/// invariants and a count is not among them: a character may owe as many runs as there are
+/// dungeons, and a ceiling invented here would refuse a legal frame the day a world grew
+/// past it. What bounds the allocation is the verified vector the frame already carries.
+///
+/// Uniqueness is checked because this list *replaces* the client's copy: a binding is per
+/// character and per dungeon, so two rows naming one arch are two lockouts with one
+/// address and nothing downstream could tell them apart.
+fn instance_bindings(list: &fb::InstanceBindings<'_>) -> Result<InstanceBindings, DecodeError> {
+    let bindings = list.bindings().unwrap_or_default();
+    let mut decoded = Vec::with_capacity(bindings.len());
+    let mut places = HashSet::new();
+    for (index, binding) in bindings.iter().enumerate() {
+        let arch = binding
+            .arch()
+            .ok_or(DecodeError::InvalidBindingArch { index })?;
+        let arch = BlockCoord {
+            x: arch.x(),
+            y: arch.y(),
+            z: arch.z(),
+        };
+        if [arch.x, arch.y, arch.z]
+            .iter()
+            .any(|coordinate| !(-BLOCK_DOMAIN..=BLOCK_DOMAIN).contains(coordinate))
+        {
+            return Err(DecodeError::InvalidBindingArch { index });
+        }
+        let (defeated, total) = (binding.bosses_defeated(), binding.bosses_total());
+        if total == 0 || defeated > total {
+            return Err(DecodeError::InvalidBindingProgress {
+                index,
+                defeated,
+                total,
+            });
+        }
+        let resets_at_unix = binding.resets_at_unix();
+        if resets_at_unix == 0 {
+            return Err(DecodeError::MissingBindingReset { index });
+        }
+        if !places.insert((arch.x, arch.y, arch.z)) {
+            return Err(DecodeError::DuplicateBinding { index });
+        }
+        decoded.push(SessionBinding {
+            arch,
+            bosses_defeated: defeated,
+            bosses_total: total,
+            resets_at_unix,
+        });
+    }
+    Ok(InstanceBindings { bindings: decoded })
 }
 
 /// Copies and validates one storm warning.
@@ -8913,6 +9090,69 @@ pub(super) mod server_side {
         finish_envelope(builder, fb::Payload::WardsNearby, payload.as_union_value())
     }
 
+    /// One saved run as raw wire parts, so a test can build a binding a correct server
+    /// never sends: an absent arch, a zero total, more species dead than the dungeon
+    /// holds, a missing reset, or one arch named twice.
+    #[derive(Debug, Clone, Copy)]
+    pub struct SessionBindingWire {
+        /// `None` omits the struct field entirely, which is how an absent arch — the
+        /// binding's own identity — reaches the decoder.
+        pub arch: Option<[i32; 3]>,
+        pub bosses_defeated: u8,
+        pub bosses_total: u8,
+        pub resets_at_unix: i64,
+    }
+
+    impl SessionBindingWire {
+        /// A binding a correct server would send. Every invalid case below is written as
+        /// a deviation from this, so a test states only what makes its frame wrong.
+        pub const SOUND: Self = Self {
+            arch: Some([0, 61, 0]),
+            bosses_defeated: 1,
+            bosses_total: 2,
+            resets_at_unix: 1_893_456_000,
+        };
+    }
+
+    /// An `InstanceBindings` whose vector can be absent, present-and-empty, or anything
+    /// else.
+    ///
+    /// The first two are the same message by contract — a character who owes nothing —
+    /// and this helper keeps them distinguishable on the wire so that a test can say so
+    /// rather than assume it.
+    pub fn encode_instance_bindings(bindings: Option<&[SessionBindingWire]>) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(
+            bindings.map_or(0, |bindings| bindings.len() * 32) + super::BUILDER_CAPACITY,
+        );
+        let bindings = bindings.map(|bindings| {
+            // Every binding table is built before the vector that points at them: a
+            // vector may not be under construction while a table is.
+            let laid_out: Vec<_> = bindings
+                .iter()
+                .map(|binding| {
+                    let arch = binding.arch.map(|[x, y, z]| fb::BlockCoord::new(x, y, z));
+                    fb::SessionBinding::create(
+                        &mut builder,
+                        &fb::SessionBindingArgs {
+                            arch: arch.as_ref(),
+                            bosses_defeated: binding.bosses_defeated,
+                            bosses_total: binding.bosses_total,
+                            resets_at_unix: binding.resets_at_unix,
+                        },
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload =
+            fb::InstanceBindings::create(&mut builder, &fb::InstanceBindingsArgs { bindings });
+        finish_envelope(
+            builder,
+            fb::Payload::InstanceBindings,
+            payload.as_union_value(),
+        )
+    }
+
     /// Encodes a `VoiceHeard` envelope. `None` omits the vector entirely, which is how
     /// an absent field reaches the decoder; an empty slice is the other shape of no
     /// audio, and the decoder owes both the same answer.
@@ -9110,15 +9350,16 @@ mod tests {
         AppearanceWire, CharacterSummaryWire, DEFAULT_TOKEN, EntityStateWire,
         ItemDropDurabilityWire, ItemDropStateWire, MarkerWire, MobStateWire, PartyMemberStateWire,
         PartyRosterMemberWire, PlayerTradeSlotWire, PlayerVitalsWire, ProjectileStateWire,
-        StructureStateWire, WardedColumnWire, WelcomeWire, encode_action_refused,
-        encode_bare_block_update, encode_bare_chunk_data, encode_bare_chunk_unload,
-        encode_bare_entity_snapshot, encode_block_update, encode_chat_message, encode_chunk_data,
-        encode_chunk_unload, encode_empty_inventory_with_silver, encode_empty_loot_with_silver,
-        encode_entity_snapshot, encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
+        SessionBindingWire, StructureStateWire, WardedColumnWire, WelcomeWire,
+        encode_action_refused, encode_bare_block_update, encode_bare_chunk_data,
+        encode_bare_chunk_unload, encode_bare_entity_snapshot, encode_block_update,
+        encode_chat_message, encode_chunk_data, encode_chunk_unload,
+        encode_empty_inventory_with_silver, encode_empty_loot_with_silver, encode_entity_snapshot,
+        encode_entity_snapshot_with, encode_entity_snapshot_with_dead,
         encode_entity_snapshot_with_drop_durabilities, encode_entity_snapshot_with_drops,
         encode_entity_snapshot_with_party, encode_entity_snapshot_with_projectiles,
         encode_entity_snapshot_with_roster, encode_entity_snapshot_with_weather_and_bare_structure,
-        encode_entity_snapshot_without_vitals, encode_inventory_state,
+        encode_entity_snapshot_without_vitals, encode_instance_bindings, encode_inventory_state,
         encode_inventory_state_with_durability, encode_learned_mounts, encode_leave_cancel_result,
         encode_leave_started, encode_loot_closed, encode_loot_state, encode_map_explored,
         encode_map_tile, encode_marker_list, encode_mine_progress, encode_mob_hit,
@@ -9529,7 +9770,11 @@ mod tests {
         (fb::Payload::MiningActivity, Handling::Consumed),
         (fb::Payload::InstanceEntryOffer, Handling::Deferred),
         (fb::Payload::InstanceEntryAnswer, Handling::ClientOnly),
-        (fb::Payload::InstanceBindings, Handling::Deferred),
+        // Read by an arm of its own since the payload half of #979. `Consumed` is about
+        // the decode boundary rather than about a consumer, exactly as it was for
+        // `MapTile` before the map window existed: the sessions window that draws these
+        // is the other half of that issue.
+        (fb::Payload::InstanceBindings, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -10977,6 +11222,190 @@ mod tests {
             Err(DecodeError::DuplicateWardedColumn { cx: 2, cz: -5 }),
             "two rows for one column are two answers about the same ground"
         );
+    }
+    /// The list is complete, and the empty one is the answer a character gets before their
+    /// first boss kill rather than the absence of an answer.
+    ///
+    /// Both spellings of "nothing is owed" — an absent vector and a present empty one —
+    /// reach the decoder as the same message on purpose: a recipient replaces its copy
+    /// wholesale, so either one has to be able to *clear* a list that is already shown.
+    #[test]
+    fn saved_runs_are_a_complete_list_and_an_empty_one_is_a_statement() {
+        let bindings = [
+            SessionBindingWire {
+                arch: Some([-4096, 61, 8192]),
+                bosses_defeated: 0,
+                bosses_total: 2,
+                resets_at_unix: 1_893_456_000,
+            },
+            SessionBindingWire {
+                arch: Some([512, 70, -64]),
+                bosses_defeated: 2,
+                bosses_total: 2,
+                resets_at_unix: 1_893_542_400,
+            },
+        ];
+        assert_eq!(
+            decode(&encode_instance_bindings(Some(&bindings))),
+            Ok(Message::InstanceBindings(InstanceBindings {
+                bindings: vec![
+                    SessionBinding {
+                        arch: BlockCoord {
+                            x: -4096,
+                            y: 61,
+                            z: 8192,
+                        },
+                        bosses_defeated: 0,
+                        bosses_total: 2,
+                        resets_at_unix: 1_893_456_000,
+                    },
+                    SessionBinding {
+                        arch: BlockCoord {
+                            x: 512,
+                            y: 70,
+                            z: -64,
+                        },
+                        bosses_defeated: 2,
+                        bosses_total: 2,
+                        resets_at_unix: 1_893_542_400,
+                    },
+                ],
+            })),
+            "the wire order is preserved and neither count is recomputed on this side"
+        );
+
+        for (name, frame) in [
+            ("an absent vector", encode_instance_bindings(None)),
+            (
+                "a present empty vector",
+                encode_instance_bindings(Some(&[])),
+            ),
+        ] {
+            assert_eq!(
+                decode(&frame),
+                Ok(Message::InstanceBindings(InstanceBindings {
+                    bindings: vec![]
+                })),
+                "{name} is how a client learns this character owes nothing anywhere"
+            );
+        }
+    }
+
+    /// Every decoder invariant `schemas/player.fbs` states for a `SessionBinding`, each
+    /// written as one deviation from a binding a correct server would send.
+    ///
+    /// The boundary cases at the end are the point of the second half: an arch exactly on
+    /// the edge of the block domain and a run whose bosses are all dead are both *legal*,
+    /// and a check written one comparison out would refuse a frame the server is entitled
+    /// to send — which on this payload means ending a live session over a lockout that was
+    /// correctly reported.
+    #[test]
+    fn a_binding_the_server_could_not_have_sent_ends_the_session() {
+        for (name, wire, want) in [
+            (
+                "no arch at all, which is the binding's own identity",
+                SessionBindingWire {
+                    arch: None,
+                    ..SessionBindingWire::SOUND
+                },
+                DecodeError::InvalidBindingArch { index: 0 },
+            ),
+            (
+                "an arch one block outside the world",
+                SessionBindingWire {
+                    arch: Some([BLOCK_DOMAIN + 1, 61, 0]),
+                    ..SessionBindingWire::SOUND
+                },
+                DecodeError::InvalidBindingArch { index: 0 },
+            ),
+            (
+                "a dungeon with no bosses in it",
+                SessionBindingWire {
+                    bosses_defeated: 0,
+                    bosses_total: 0,
+                    ..SessionBindingWire::SOUND
+                },
+                DecodeError::InvalidBindingProgress {
+                    index: 0,
+                    defeated: 0,
+                    total: 0,
+                },
+            ),
+            (
+                "more species dead than the dungeon holds",
+                SessionBindingWire {
+                    bosses_defeated: 3,
+                    bosses_total: 2,
+                    ..SessionBindingWire::SOUND
+                },
+                DecodeError::InvalidBindingProgress {
+                    index: 0,
+                    defeated: 3,
+                    total: 2,
+                },
+            ),
+            (
+                "a reset of zero, which is the absent field and never a time",
+                SessionBindingWire {
+                    resets_at_unix: 0,
+                    ..SessionBindingWire::SOUND
+                },
+                DecodeError::MissingBindingReset { index: 0 },
+            ),
+        ] {
+            assert_eq!(
+                decode(&encode_instance_bindings(Some(&[wire]))),
+                Err(want),
+                "{name} is a frame no correct server sends"
+            );
+        }
+
+        // Two rows naming one dungeon. The index is the *second* of them, which is the
+        // one that could not be admitted.
+        assert_eq!(
+            decode(&encode_instance_bindings(Some(&[
+                SessionBindingWire::SOUND,
+                SessionBindingWire {
+                    bosses_defeated: 2,
+                    ..SessionBindingWire::SOUND
+                },
+            ]))),
+            Err(DecodeError::DuplicateBinding { index: 1 }),
+            "one arch twice is two lockouts with one address"
+        );
+
+        // The boundaries, at the value that is legal rather than the one past it.
+        for (name, wire) in [
+            (
+                "an arch exactly on the edge of the block domain",
+                SessionBindingWire {
+                    arch: Some([-BLOCK_DOMAIN, 0, BLOCK_DOMAIN]),
+                    ..SessionBindingWire::SOUND
+                },
+            ),
+            (
+                "a run whose every boss species is already dead",
+                SessionBindingWire {
+                    bosses_defeated: 2,
+                    bosses_total: 2,
+                    ..SessionBindingWire::SOUND
+                },
+            ),
+            (
+                "a negative reset second, which is a time before 1970 and not an absence",
+                SessionBindingWire {
+                    resets_at_unix: -1,
+                    ..SessionBindingWire::SOUND
+                },
+            ),
+        ] {
+            let decoded = decode(&encode_instance_bindings(Some(&[wire])));
+            assert!(
+                matches!(decoded, Ok(Message::InstanceBindings(_))),
+                "{name} is legal, and refusing it would end a session over a correct frame: \
+                 {decoded:?}"
+            );
+        }
     }
 
     /// The weather is a struct, so "this server keeps none" is the field being absent —
