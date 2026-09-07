@@ -10,7 +10,7 @@ func disconnectedPortal(t *testing.T) (*InstanceManager, *Sim, PortalEntry, Life
 	t.Helper()
 	m, open, request, join := portalHarness(t, 2)
 	p := join()
-	entry, reason := m.EnterPortal(p, request)
+	entry, reason := m.enterPortal(p, request)
 	if reason != 0 {
 		t.Fatal(reason)
 	}
@@ -97,7 +97,7 @@ func TestPortalReconnectIsScopedToBothAccountAndCharacterAndClearedOnRestart(t *
 func TestPortalAutosaveCapturesAllWorldsWithSafePositionsDuringTransfers(t *testing.T) {
 	m, open, request, join := portalHarness(t, 2)
 	p, other := join(), join()
-	entry, reason := m.EnterPortal(p, request)
+	entry, reason := m.enterPortal(p, request)
 	if reason != 0 {
 		t.Fatal(reason)
 	}

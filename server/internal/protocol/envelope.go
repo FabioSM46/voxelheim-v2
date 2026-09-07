@@ -238,6 +238,7 @@ type Message struct {
 	DismountRequest    *DismountRequest
 	Voice              *VoiceFrame
 	Portal             *PortalRequest
+	EntryAnswer        *InstanceEntryAnswer
 }
 
 // LeaveRequest is an intentionally empty leave intent. The absence of a duration
@@ -1794,6 +1795,19 @@ func Decode(frame []byte) (msg Message, err error) {
 			msg.Portal.Arch = [3]int32{arch.X(), arch.Y(), arch.Z()}
 			msg.Portal.HasArch = true
 		}
+
+	case vnet.PayloadInstanceEntryAnswer:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var answer vnet.InstanceEntryAnswer
+		answer.Init(table.Bytes, table.Pos)
+		// Copied straight through, the zero id included. Whether the id names an offer
+		// this server is still holding is an authoritative decision made against state
+		// this package cannot see, and a forged id must reach that decision looking
+		// exactly like a stale one.
+		msg.EntryAnswer = &InstanceEntryAnswer{OfferID: answer.OfferId(), Accept: answer.Accept()}
 
 	case vnet.PayloadMountRequest:
 		table, tErr := unionPayload(env, msg.Kind)

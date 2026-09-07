@@ -36,8 +36,8 @@ pub(super) fn guardian_body() -> Mesh {
     // Broken, uneven tufts form the shoulder silhouette; all merge into one draw.
     for (x, height) in [(-0.45, 0.25), (-0.2, 0.38), (0.08, 0.30), (0.34, 0.34)] {
         parts.push((
-            Vec3::new(0.20, height, 0.43),
-            Vec3::new(x, 1.42 + height / 2.0, -0.02),
+            Vec3::new(0.20, height - 0.045, 0.43),
+            Vec3::new(x, 1.42 + (height - 0.045) / 2.0, -0.02),
             FUR,
         ));
         parts.push((
@@ -71,12 +71,12 @@ pub(super) fn guardian_head() -> Mesh {
         ),
         (
             Vec3::new(0.05, 0.15, 0.06),
-            Vec3::new(-0.20, 0.73, -0.73),
+            Vec3::new(-0.20, 0.73, -0.765),
             BONE,
         ),
         (
             Vec3::new(0.06, 0.11, 0.06),
-            Vec3::new(0.20, 0.75, -0.73),
+            Vec3::new(0.20, 0.75, -0.765),
             BONE,
         ),
         (
@@ -271,6 +271,68 @@ mod tests {
             svg,
         )
         .unwrap();
+    }
+
+    // The authoring primitive has 24 vertices per opaque cuboid. Cast a ray
+    // outward from each decorative face centre and reject it if another box
+    // covers that sightline. Bounds alone cannot detect buried ornament.
+    fn visible_caps(mesh: Mesh, colour: Color, axis: usize, positive: bool) -> usize {
+        use bevy::mesh::VertexAttributeValues;
+        let VertexAttributeValues::Float32x3(positions) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
+        else {
+            panic!("positions")
+        };
+        let VertexAttributeValues::Float32x4(colours) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap()
+        else {
+            panic!("colours")
+        };
+        let boxes: Vec<_> = positions
+            .chunks_exact(24)
+            .enumerate()
+            .map(|(i, vertices)| {
+                let mut lo = Vec3::splat(f32::INFINITY);
+                let mut hi = Vec3::splat(f32::NEG_INFINITY);
+                for &v in vertices {
+                    lo = lo.min(Vec3::from_array(v));
+                    hi = hi.max(Vec3::from_array(v));
+                }
+                (lo, hi, colours[i * 24])
+            })
+            .collect();
+        let wanted = colour.to_linear().to_f32_array();
+        boxes
+            .iter()
+            .enumerate()
+            .filter(|(i, (lo, hi, c))| {
+                if *c != wanted {
+                    return false;
+                }
+                let mut face = (*lo + *hi) / 2.0;
+                face[axis] = if positive { hi[axis] } else { lo[axis] };
+                !boxes
+                    .iter()
+                    .enumerate()
+                    .any(|(j, (other_lo, other_hi, _))| {
+                        j != *i
+                            && (0..3)
+                                .filter(|&a| a != axis)
+                                .all(|a| face[a] > other_lo[a] && face[a] < other_hi[a])
+                            && if positive {
+                                other_hi[axis] > face[axis] + 1e-5
+                            } else {
+                                other_lo[axis] < face[axis] - 1e-5
+                            }
+                    })
+            })
+            .count()
+    }
+
+    #[test]
+    fn guardian_frost_and_fangs_have_unoccluded_outer_faces() {
+        assert_eq!(visible_caps(guardian_body(), FROST, 1, true), 4);
+        assert_eq!(visible_caps(guardian_head(), BONE, 2, false), 2);
     }
 
     #[test]

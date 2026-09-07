@@ -271,6 +271,14 @@ namespace Voxelheim.Net;
 /// carries which creature the server placed, never how much of it there is. See
 /// `MobKind` in `schemas/player.fbs`, where each is argued beside the member it
 /// appends after.
+/// **V35 decides who may cross.** InstanceEntryAnswer is client -> server and an
+/// older server rejects its unknown tag rather than dropping it, which is the whole
+/// of the bump: a V35 client would handshake cleanly and lose the connection the
+/// first time somebody accepted a dungeon entry prompt. InstanceEntryOffer travels
+/// back and an older client would drop it safely; it rides the same bump because an
+/// offer nobody can answer is not one. The two appended RefusalReason members owe
+/// nothing on their own — that enum is read through its zero member and never fails
+/// a frame — and no existing tag, table field or frame bound changes.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -278,7 +286,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 34
+  Current = 35
 }
 
 /// A position, velocity or direction in world space, measured in blocks.
