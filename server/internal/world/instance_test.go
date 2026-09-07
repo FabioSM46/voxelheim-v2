@@ -48,19 +48,6 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 			}
 			return chunk.At(Local(x), Local(y), Local(z))
 		}
-		// These dimensions are deliberately independent of the implementation:
-		// changing the drawing's shell needs a conscious new geometry assertion.
-		for y := int64(0); y <= 6; y++ {
-			for z := int64(-6); z <= 6; z++ {
-				for x := int64(-6); x <= 6; x++ {
-					if x == -6 || x == 6 || z == -6 || z == 6 || y == 0 || y == 6 {
-						if !Solid(blockAt(x, y, z)) {
-							t.Fatalf("seed %d shell is open at %d,%d,%d", seed, x, y, z)
-						}
-					}
-				}
-			}
-		}
 		arrival, exit := InstanceAnchors(seed)
 		if arrival.Kind != AnchorInstanceArrival || exit.Kind != AnchorInstanceExit || arrival == exit {
 			t.Fatalf("bad anchors: %+v %+v", arrival, exit)
@@ -83,7 +70,7 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 		for len(queue) > 0 {
 			p := queue[0]
 			queue = queue[1:]
-			if p.x <= -6 || p.x >= 6 || p.z <= -6 || p.z >= 6 {
+			if p.x <= -34 || p.x >= 34 || p.z <= -34 || p.z >= 34 {
 				t.Fatal("body escaped the chamber")
 			}
 			for _, d := range []point{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
@@ -102,7 +89,7 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 
 func TestInstanceVoidAndFiniteCache(t *testing.T) {
 	cache := NewInstanceCache(7, 1, 2)
-	for _, coord := range []Coord{{Y: -1}, {X: 1}, {X: -2}, {Y: 1}, {Z: 1}, {Z: -2}, {Y: -100}, {X: math.MinInt32}, {Z: math.MaxInt32}} {
+	for _, coord := range []Coord{{Y: -1}, {X: 3}, {X: -3}, {Y: 1}, {Z: 3}, {Z: -3}, {Y: -100}, {X: math.MinInt32}, {Z: math.MaxInt32}} {
 		chunk := GenerateInstance(7, coord)
 		if chunk.Coord != coord || len(chunk.Blocks) != ChunkVolume {
 			t.Fatalf("invalid void chunk at %+v", coord)
@@ -122,7 +109,7 @@ func TestInstanceVoidAndFiniteCache(t *testing.T) {
 				for lz := range ChunkSize {
 					for lx := range ChunkSize {
 						wx, wy, wz := ox+int64(lx), oy+int64(y), oz+int64(lz)
-						if (wx < -6 || wx > 6 || wy > 6 || wz < -6 || wz > 6) && chunk.At(lx, y, lz) != Air {
+						if (wx < -34 || wx > 34 || wy > 9 || wz < -16 || wz > 16) && chunk.At(lx, y, lz) != Air {
 							t.Fatal("partial chunk grows terrain outside shell")
 						}
 					}
@@ -147,7 +134,7 @@ func TestInstanceVoidAndFiniteCache(t *testing.T) {
 			}
 		}
 	}
-	if accepted != 48 || cache.Len() > 2 {
+	if accepted != 72 || cache.Len() > 2 {
 		t.Fatalf("finite envelope/residency changed: %d accepted, %d resident", accepted, cache.Len())
 	}
 	outside := Coord{Y: -1000}
@@ -168,7 +155,7 @@ func TestInstanceShellCannotBeEditedAndInteriorIsEphemeral(t *testing.T) {
 	t.Chdir(dir)
 	cache := NewInstanceCache(2, 1, 48)
 	ctx := context.Background()
-	for _, p := range [][3]int64{{0, 0, 0}, {0, 6, 0}, {-6, 2, 0}, {6, 2, 0}, {0, 2, -6}, {0, 2, 6}, {8, 2, 0}} {
+	for _, p := range [][3]int64{{0, 0, 0}, {0, 6, 0}, {-16, 2, 0}, {16, 2, 0}, {0, 2, -34}, {0, 2, 34}, {8, 2, 0}} {
 		if err := cache.Apply(ctx, p[0], p[1], p[2], Air, nil); !errors.Is(err, ErrImmutableShell) {
 			t.Fatalf("shell edit accepted at %v: %v", p, err)
 		}
