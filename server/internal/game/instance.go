@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -37,11 +38,17 @@ type InstanceCharacter struct {
 type InstanceState uint8
 
 const (
-	InstanceFree  InstanceState = iota
-	InstanceSaved               // Reserved vocabulary; no API in this lifecycle can save a session.
+	InstanceFree InstanceState = iota
+	// InstanceSaved is what killing the first boss of a session makes it, and the only
+	// thing that ever does. It means exactly two things and no third: every character
+	// inside at that moment is bound to this copy of this ruin, and the empty grace no
+	// longer applies — a saved session lives until its reset, which is #977's. See
+	// instance_binding.go.
+	InstanceSaved
 )
 
-// InstanceSession is a snapshot. Members is copied; editing it changes no state.
+// InstanceSession is a snapshot. Members and DefeatedBosses are copied; editing them
+// changes no state.
 // Sim and Chunks belong to the manager. Consumers must finish using them when
 // Context ends, and must not keep them alive after leaving and the empty grace.
 // Active membership prevents expiry. Check Lookup or Context before routing a
@@ -53,15 +60,21 @@ type InstanceSession struct {
 	Ruin    InstanceRuin
 	State   InstanceState
 	Members []InstanceCharacter
-	Sim     *Sim
-	Chunks  *world.Cache
-	Context context.Context
+	// DefeatedBosses names every boss encounter this session has already put down, in
+	// the order they died, by the species that identifies it. It is what a "1 / 3" is
+	// counted from, and what tells a restore which encounters to leave out.
+	DefeatedBosses []vnet.MobKind
+	Sim            *Sim
+	Chunks         *world.Cache
+	Context        context.Context
 }
 
 type instanceSession struct {
 	id         uint64
 	seed       int64
 	ruin       InstanceRuin
+	state      InstanceState
+	defeated   []vnet.MobKind
 	members    map[InstanceCharacter]struct{}
 	sim        *Sim
 	chunks     *world.Cache
@@ -95,10 +108,14 @@ type InstanceManager struct {
 	closed                 bool
 	sessions               map[uint64]*instanceSession
 	inside                 map[InstanceCharacter]uint64
-	visits                 map[instanceVisit]uint64
-	partyVisits            map[portalPartyVisit]uint64
-	portalEntries          map[InstanceCharacter]PortalEntry
-	disconnected           map[InstanceCharacter]portalReconnect
+	// bound is which saved session a character owes a ruin. Keyed like visits — by ruin
+	// and character — because that is what makes a binding per dungeon; unlike visits it
+	// survives leaving, and is released only when its session ends.
+	bound         map[instanceVisit]uint64
+	visits        map[instanceVisit]uint64
+	partyVisits   map[portalPartyVisit]uint64
+	portalEntries map[InstanceCharacter]PortalEntry
+	disconnected  map[InstanceCharacter]portalReconnect
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -119,7 +136,7 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		mintEntityID: mintEntityID, log: log, options: append([]SimOption(nil), options...),
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
-		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
+		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
 
@@ -183,6 +200,13 @@ func (m *InstanceManager) joinLocked(s *instanceSession, character InstanceChara
 	s.emptyTicks = 0
 	m.inside[character] = s.id
 	m.visits[instanceVisit{s.ruin, character}] = s.id
+	// Joining a run whose first boss is already dead binds on entry. Whether such an
+	// entry is offered, warned about or refused at all is the entry-rules issue's; what
+	// this owes it is that a character who does get in is bound by the same rule as the
+	// party that was standing there when the boss fell.
+	if s.state == InstanceSaved {
+		m.bindLocked(s, character)
+	}
 	return nil
 }
 
@@ -260,7 +284,17 @@ func (m *InstanceManager) Step() {
 	for id, s := range m.sessions {
 		s.tick++
 		s.sim.Step(s.tick)
+		// Collected on the same tick the simulation is stepped, under this mutex, so the
+		// membership a save binds is exactly the membership at the blow.
+		m.collectBossDefeatsLocked(s)
 		if len(s.members) != 0 {
+			continue
+		}
+		// A saved run does not expire while nobody is in it. It is theirs until its
+		// reset, which is why emptyTicks stops meaning anything here rather than being
+		// allowed to run on and mislead a later reader.
+		if s.state == InstanceSaved {
+			s.emptyTicks = 0
 			continue
 		}
 		s.emptyTicks++
@@ -286,6 +320,13 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	for visit, sessionID := range m.visits {
 		if sessionID == id {
 			delete(m.visits, visit)
+		}
+	}
+	// A binding names a session, so it cannot outlive one. Nothing in this lifecycle
+	// removes a saved session except Close; the reset that will is #977's.
+	for visit, sessionID := range m.bound {
+		if sessionID == id {
+			delete(m.bound, visit)
 		}
 	}
 	for visit, sessionID := range m.partyVisits {
@@ -315,5 +356,7 @@ func (s *instanceSession) snapshot() InstanceSession {
 	for character := range s.members {
 		members = append(members, character)
 	}
-	return InstanceSession{ID: s.id, Seed: s.seed, Ruin: s.ruin, State: InstanceFree, Members: members, Sim: s.sim, Chunks: s.chunks, Context: s.ctx}
+	return InstanceSession{ID: s.id, Seed: s.seed, Ruin: s.ruin, State: s.state,
+		Members: members, DefeatedBosses: append([]vnet.MobKind(nil), s.defeated...),
+		Sim: s.sim, Chunks: s.chunks, Context: s.ctx}
 }

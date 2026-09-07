@@ -262,6 +262,14 @@ type Sim struct {
 	// order.
 	corpses map[uint64]*corpse
 
+	// defeatedBosses is every boss-rank species this simulation has killed and not yet
+	// handed to whoever owns it. instance_binding.go is the whole of what it is for, and
+	// the reason it is a list here rather than a callback: a kill happens under this
+	// lock, and the rule it triggers belongs to a manager whose mutex is taken *before*
+	// this one. A simulation nobody drains — the open world — simply accumulates a slice
+	// bounded by the number of boss rows in mobRegistry.
+	defeatedBosses []vnet.MobKind
+
 	// spawns is the director's random source: seeded from the world seed at
 	// construction and advanced only here, under this lock, inside Step.
 	//
