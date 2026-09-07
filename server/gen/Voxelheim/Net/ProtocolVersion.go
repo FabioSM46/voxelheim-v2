@@ -245,6 +245,28 @@ import "strconv"
 // / rejects its unknown tag. WorldChange also independently owes this bump: ignoring
 // / it leaves an older client rendering its old world while the server has moved it.
 // / A successful transition invalidates all world state, not just its arrival position.
+// /
+// / **V34 appends `MobKind.VargrGuardian` and `MobKind.DraugrKing`.** This is the
+// / argument `MobKind.Villager` moved V25 on and `MobKind.Horse` rode V27 for, and it
+// / is written out rather than assumed because the rule above is what decides it: ask
+// / what the receiver does with the value it does not recognise. Both members travel
+// / server -> client inside `MobState.kind`, and that field's decoder **refuses** an
+// / unknown member instead of dropping it — a creature the server said was there
+// / cannot be silently left out of the world, and drawing a default enemy in its place
+// / would be worse. So a V33 client would handshake cleanly and end the session the
+// / first time a boss entered view: exactly the mid-session failure a version exists
+// / to turn into a handshake refusal.
+// /
+// / **Two members, one bump, and that is a decision rather than an economy.** A
+// / receiver that could name the Vargr guardian and not the Draugr king would cross
+// / the first arena and lose the session in the second, which is a worse failure than
+// / not entering at all. The pair is one contract and nothing consumes half of it.
+// /
+// / Neither member renames or rescales the `Draugr` and `Vargr` that came before it.
+// / They are distinct species with their own bodies, numbers and loot; the wire
+// / carries which creature the server placed, never how much of it there is. See
+// / `MobKind` in `schemas/player.fbs`, where each is argued beside the member it
+// / appends after.
 type ProtocolVersion uint16
 
 const (
@@ -253,7 +275,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 33
+	ProtocolVersionCurrent ProtocolVersion = 34
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

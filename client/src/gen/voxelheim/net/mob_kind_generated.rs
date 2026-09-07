@@ -11,19 +11,21 @@ pub const ENUM_MIN_MOB_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_MOB_KIND: u8 = 5;
+pub const ENUM_MAX_MOB_KIND: u8 = 7;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_MOB_KIND: [MobKind; 6] = [
+pub const ENUM_VALUES_MOB_KIND: [MobKind; 8] = [
     MobKind::Unknown,
     MobKind::Draugr,
     MobKind::Vargr,
     MobKind::Deer,
     MobKind::Villager,
     MobKind::Horse,
+    MobKind::VargrGuardian,
+    MobKind::DraugrKing,
 ];
 
 /// What kind of creature a `MobState` describes.
@@ -58,9 +60,34 @@ impl MobKind {
     /// A horse, whether standing in a stable or named by a player's mount state.
     /// Appended rather than inserted: an older receiver refuses this unknown kind.
     pub const Horse: Self = Self(5);
+    /// The Vargr that guarded the tomb: the first boss-rank species this contract can
+    /// name, and a **different species from `Vargr`** rather than a bigger one. The two
+    /// share a silhouette family and nothing else — the wire says which creature the
+    /// server placed, and a receiver that read a guardian as an oversized `Vargr` would
+    /// draw the wrong body, play the wrong voice and price the wrong fight.
+    ///
+    /// Appended rather than inserted, for the reason every member above is: a
+    /// renumbering would draw one creature where the server said another, and no
+    /// compiler would object.
+    ///
+    /// It moves `ProtocolVersion.Current`, and the argument is `Villager`'s and
+    /// `Horse`'s verbatim: `MobState.kind` is **refused** when it names a member the
+    /// receiver cannot speak, never dropped, so a V33 client meeting one would end the
+    /// session rather than the value. Refusing it is a bump owed. See `common.fbs`,
+    /// where V34 is written out.
+    pub const VargrGuardian: Self = Self(6);
+    /// The Draugr king at the far end of the tomb, and the second boss-rank species.
+    /// A different species from `Draugr` on the same terms `VargrGuardian` is a
+    /// different species from `Vargr`: what crosses the wire is which creature the
+    /// server placed, not how much of it there is.
+    ///
+    /// Appended, never inserted, and it rides the same V34 bump as the member above —
+    /// one bump for the pair, because a receiver that can name one boss and not the
+    /// other is a receiver that ends the session halfway through the dungeon.
+    pub const DraugrKing: Self = Self(7);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 5;
+    pub const ENUM_MAX: u8 = 7;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Draugr,
@@ -68,6 +95,8 @@ impl MobKind {
         Self::Deer,
         Self::Villager,
         Self::Horse,
+        Self::VargrGuardian,
+        Self::DraugrKing,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -78,6 +107,8 @@ impl MobKind {
             Self::Deer => Some("Deer"),
             Self::Villager => Some("Villager"),
             Self::Horse => Some("Horse"),
+            Self::VargrGuardian => Some("VargrGuardian"),
+            Self::DraugrKing => Some("DraugrKing"),
             _ => None,
         }
     }

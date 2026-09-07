@@ -249,6 +249,28 @@ namespace Voxelheim.Net;
 /// rejects its unknown tag. WorldChange also independently owes this bump: ignoring
 /// it leaves an older client rendering its old world while the server has moved it.
 /// A successful transition invalidates all world state, not just its arrival position.
+///
+/// **V34 appends `MobKind.VargrGuardian` and `MobKind.DraugrKing`.** This is the
+/// argument `MobKind.Villager` moved V25 on and `MobKind.Horse` rode V27 for, and it
+/// is written out rather than assumed because the rule above is what decides it: ask
+/// what the receiver does with the value it does not recognise. Both members travel
+/// server -> client inside `MobState.kind`, and that field's decoder **refuses** an
+/// unknown member instead of dropping it — a creature the server said was there
+/// cannot be silently left out of the world, and drawing a default enemy in its place
+/// would be worse. So a V33 client would handshake cleanly and end the session the
+/// first time a boss entered view: exactly the mid-session failure a version exists
+/// to turn into a handshake refusal.
+///
+/// **Two members, one bump, and that is a decision rather than an economy.** A
+/// receiver that could name the Vargr guardian and not the Draugr king would cross
+/// the first arena and lose the session in the second, which is a worse failure than
+/// not entering at all. The pair is one contract and nothing consumes half of it.
+///
+/// Neither member renames or rescales the `Draugr` and `Vargr` that came before it.
+/// They are distinct species with their own bodies, numbers and loot; the wire
+/// carries which creature the server placed, never how much of it there is. See
+/// `MobKind` in `schemas/player.fbs`, where each is argued beside the member it
+/// appends after.
 enum ProtocolVersion : ushort {
   /// Never sent deliberately. A FlatBuffers table field that is absent decodes
   /// as its type's zero value, so this member exists to make that case fail
@@ -256,7 +278,7 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 33
+  Current = 34
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

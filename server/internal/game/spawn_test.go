@@ -315,9 +315,15 @@ func TestOnlyTheSpeciesTheHourAllowsArrivesInDaylight(t *testing.T) {
 	}
 }
 
-// And the night brings both, which is what makes the daylight rule a rule about the
-// species rather than a rule about spawning at all.
-func TestTheNightBringsEverySpecies(t *testing.T) {
+// And the night brings every species the director may place, which is what makes the
+// daylight rule a rule about the species rather than a rule about spawning at all.
+//
+// **Boss-rank rows are excluded, and the exclusion is the point of a companion test
+// rather than a hole in this one.** A boss is not a creature the dark sends after
+// somebody; it is a fixed encounter placed once into an instance session's own
+// simulation. TestTheOpenWorldDirectorNeverOffersABoss asserts the other half — that
+// neither hour offers one — so between them every registered row is accounted for.
+func TestTheNightBringsEveryDirectorPlaceableSpecies(t *testing.T) {
 	t.Parallel()
 
 	h := newVitalsHarness(t, DefaultTickRate, spawnGround{groundTop: 63})
@@ -325,7 +331,13 @@ func TestTheNightBringsEverySpecies(t *testing.T) {
 	h.join(1, [3]float32{0.5, 64, 0.5})
 
 	seen := h.speciesOverPasses(200)
-	for kind := range mobRegistry {
+	for kind, def := range mobRegistry {
+		if def.isBoss() {
+			if seen[kind] != 0 {
+				t.Errorf("two hundred passes of night produced %d %s, and the director places no boss", seen[kind], kind)
+			}
+			continue
+		}
 		if seen[kind] == 0 {
 			t.Errorf("two hundred passes of night produced no %s", kind)
 		}

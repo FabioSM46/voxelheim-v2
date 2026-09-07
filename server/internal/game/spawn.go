@@ -182,6 +182,24 @@ func (s *Sim) removeSpentMobsLocked(players []*Player, mobs []*mob) bool {
 	// before the caller of this ever assembles the slice, so there is no window left to
 	// guard.
 	for _, m := range mobs {
+		// **A boss-rank creature is not this loop's to take, and the exemption is a
+		// statement about the species rather than about where it is standing.** All
+		// three rules below are the same sentence in three shapes: this creature is no
+		// longer worth simulating, so give the budget back. A fixed encounter is worth
+		// simulating for as long as its session exists — a party that wipes and walks
+		// out has *not* finished with it, and the distance rule would delete it five
+		// seconds after they left, silently, with the door still shut behind them.
+		//
+		// It is `isBoss()` and not "is this an instance", deliberately. This file must
+		// not learn what an instance is: the director refills the dark around a moving
+		// player, and teaching it about a sealed room would make the open world aware of
+		// somewhere it can never reach. The rank is already the registry's answer to
+		// "what kind of encounter is this", and [spawnableSpecies] holds the other half
+		// of the same sentence — the director never places one either.
+		if m.species().isBoss() {
+			continue
+		}
+
 		if s.wardBarsLocked(m.kind, m.pos) {
 			s.discardMobLocked(m)
 			s.log.Debug("mob crossed into a ward", "entity_id", m.entityID, "kind", m.kind,

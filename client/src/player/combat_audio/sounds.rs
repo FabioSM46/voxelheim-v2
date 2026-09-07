@@ -31,8 +31,14 @@ pub(super) fn impact(target: BlowTarget) -> Cue {
     match target {
         BlowTarget::Player => Cue::ClothImpact,
         BlowTarget::Mob(kind) => match kind {
-            MobKind::Draugr => Cue::DryImpact,
-            MobKind::Vargr => Cue::BeastImpact,
+            // The bosses take the impact material of the species they share a name with,
+            // and that is a fact about what a blade meets rather than a placeholder: a
+            // Draugr king is armoured bone and a Vargr guardian is a beast, whatever
+            // either turns out to look like. This is the one row of the three this
+            // module owns that is *not* deferred to #1019, because an impact plays for
+            // a creature nobody has drawn yet — the blow is authoritative and it lands.
+            MobKind::Draugr | MobKind::DraugrKing => Cue::DryImpact,
+            MobKind::Vargr | MobKind::VargrGuardian => Cue::BeastImpact,
             MobKind::Villager => Cue::ClothImpact,
             MobKind::Deer | MobKind::Horse => Cue::SoftImpact,
         },
@@ -48,6 +54,13 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         // These species have no combat telegraph voice: civilians and mounts do not
         // belong to this hostile voice catalogue. Their physical impacts still play.
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
+        // The two bosses answer `None` for a different reason, and it is worth keeping
+        // the two reasons apart: a villager has no hostile voice and never will, while a
+        // boss has one this build has not been given. Borrowing the field draugr's or
+        // the field vargr's would make the wrong creature audible — a king announcing
+        // itself with a common corpse's growl is worse than announcing itself with
+        // nothing — so the arm is `None` until #1019 synthesises its own cues.
+        (MobKind::VargrGuardian | MobKind::DraugrKing, _) => None,
     }
 }
 
@@ -160,6 +173,36 @@ mod tests {
         assert_ne!(
             impact(BlowTarget::Player),
             impact(BlowTarget::Mob(MobKind::Vargr))
+        );
+    }
+
+    /// A boss is audible when it is hit and silent when it winds up, and the two halves
+    /// are different decisions rather than one.
+    ///
+    /// The impact is a fact about what the blade meets, so it plays now: a blow lands on
+    /// something armoured or something furred whatever the creature turns out to look
+    /// like, and the material is the field species' for that reason. The voice is a
+    /// creature announcing *itself*, and lending a king the growl of a common corpse
+    /// would make the wrong thing audible — worse than making nothing audible — so it
+    /// stays `None` until #1019 synthesises cues of its own.
+    #[test]
+    fn the_bosses_have_impacts_and_no_voice_yet() {
+        for (boss, field) in [
+            (MobKind::VargrGuardian, MobKind::Vargr),
+            (MobKind::DraugrKing, MobKind::Draugr),
+        ] {
+            assert_eq!(voice(boss, false), None);
+            assert_eq!(voice(boss, true), None);
+            assert_eq!(
+                impact(BlowTarget::Mob(boss)),
+                impact(BlowTarget::Mob(field)),
+                "a boss meets a blade like the species it shares a name with"
+            );
+        }
+        // And the two bosses are not one material: a beast and a suit of grave-iron.
+        assert_ne!(
+            impact(BlowTarget::Mob(MobKind::VargrGuardian)),
+            impact(BlowTarget::Mob(MobKind::DraugrKing))
         );
     }
 }

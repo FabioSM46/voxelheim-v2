@@ -88,6 +88,28 @@ const HORSE_BODY: Body = Body {
     height: super::horse::HORSE_HEIGHT,
 };
 
+/// The two boss bodies, mirrored from `mobRegistry` in `server/internal/game/species.go`
+/// exactly as the three above are.
+///
+/// **They are here and drawn by nobody, which is the villager's precedent stated once
+/// more.** The box is a fact about the world — it is what the server collides, what a
+/// swing is measured against and what the marker sits over — and it belongs beside the
+/// rows it has to stay in step with, not in whichever later issue happens to build the
+/// rig. #1019 owns the mesh; this owns the number.
+///
+/// The proportions carry the readability the approved design asks for: the guardian is
+/// low and wide where the king is narrow and tall, so neither can be mistaken for the
+/// other, and neither can be mistaken for the field vargr (0.9 by 1.0) or the field
+/// draugr (0.6 by 1.8) it shares a name with.
+const VARGR_GUARDIAN_BODY: Body = Body {
+    width: 1.6,
+    height: 1.8,
+};
+const DRAUGR_KING_BODY: Body = Body {
+    width: 1.0,
+    height: 2.8,
+};
+
 /// The body envelope for one kind. It is the box the server collides for creatures and
 /// people; Horse is the explicit presentation-only exception above. Total over
 /// [`MobKind`], with no wildcard arm, so a new species does not compile until it has been
@@ -104,6 +126,8 @@ pub(super) const fn body(kind: MobKind) -> Body {
         MobKind::Deer => DEER_BODY,
         MobKind::Villager => VILLAGER_BODY,
         MobKind::Horse => HORSE_BODY,
+        MobKind::VargrGuardian => VARGR_GUARDIAN_BODY,
+        MobKind::DraugrKing => DRAUGR_KING_BODY,
     }
 }
 
@@ -328,6 +352,12 @@ impl MobVisuals {
             MobKind::Deer => Some(&self.deer),
             MobKind::Villager => None,
             MobKind::Horse => None,
+            // Decoded, boxed, and drawn by nobody yet. `None` is the same routing the
+            // villager takes and it has the same consequence: no `Mob` entity is
+            // spawned, so no aggro marker, no lootable tint and no fall pose can reach
+            // one. What differs is only where the drawing goes afterwards — a villager's
+            // is in `player/mod.rs` today, and a boss's is #1019's to write.
+            MobKind::VargrGuardian | MobKind::DraugrKing => None,
         }
     }
 }
@@ -1155,7 +1185,16 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
     };
     match kind {
         MobKind::Draugr => lean * DRAUGR_LEAN_FRACTION,
-        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
+        // The two bosses take the whole-body lean with everything that has no separately
+        // posed limb, and it is unreachable for them today: no `Mob` is spawned for
+        // either, so nothing is posed. Their telegraphs are announced on the wire by
+        // #1023 and read by #1019; this arm exists so the match stays total.
+        MobKind::Vargr
+        | MobKind::Deer
+        | MobKind::Villager
+        | MobKind::Horse
+        | MobKind::VargrGuardian
+        | MobKind::DraugrKing => lean,
     }
 }
 
@@ -1245,6 +1284,13 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
+        // The two bosses keep the match total and answer the identity, which is the
+        // honest value rather than a borrowed one: this module spawns no `Mob` for
+        // either (see [`MobVisuals::of`]), so there is no group to turn. **A boss's
+        // collapse is a real decision and it is #1019's** — the approved design gives
+        // each one its own, and lending it the vargr's roll here would put a made-up
+        // answer where that issue has to write a considered one.
+        MobKind::VargrGuardian | MobKind::DraugrKing => Quat::IDENTITY,
     }
 }
 
@@ -1258,7 +1304,13 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        MobKind::Draugr | MobKind::Villager | MobKind::Horse => Vec3::ONE,
+        // The bosses answer the neutral scale for [`collapse`]'s reason: no group of
+        // theirs is drawn, so there are no legs to slide.
+        MobKind::Draugr
+        | MobKind::Villager
+        | MobKind::Horse
+        | MobKind::VargrGuardian
+        | MobKind::DraugrKing => Vec3::ONE,
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)
@@ -2718,16 +2770,21 @@ mod tests {
         // pinned to the contract's own count, the way `EVERY_REASON` and the codec's
         // `CLASSIFICATION` are.
         //
-        // **Three members have no row, for separate reasons.** `Unknown` is never drawn at
+        // **Five members have no row, for separate reasons.** `Unknown` is never drawn at
         // all: `MobKind::from_wire` answers `None` for it. `Villager` *is* drawn, by the
         // humanoid rig in `player/mod.rs` rather than by any mesh here, so its box is
         // checked in [`a_villagers_box_is_the_one_the_server_collides_for_a_person`].
         // `Horse` is drawn through the shared ridden-horse rig in `player/horse.rs`; that
         // module pins horse, tack and rider to the mounted body the server collides. It
         // has no server collision box of its own because paddock horses are not mobs.
+        // `VargrGuardian` and `DraugrKing` are drawn by **nobody** yet — #1019 owns their
+        // rigs — so this sweep, which measures meshes, has nothing to measure for them.
+        // Their boxes are checked against the server's rows in
+        // [`the_boss_boxes_mirror_the_rows_the_server_collides`] instead, exactly as the
+        // villager's are.
         assert_eq!(
             drawn.len(),
-            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 3,
+            crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 5,
             "a species the contract names is drawn by nobody here, so its box is unchecked"
         );
         for (seen, (kind, _)) in drawn.iter().enumerate() {
@@ -2830,10 +2887,62 @@ mod tests {
             visuals.of(MobKind::Horse).is_none(),
             "paddock horses must use the shared horse rig rather than generic mob meshes"
         );
+        // **The same `None`, and deliberately not for the same reason.** A villager and a
+        // horse answer `None` because another module draws them; these two answer `None`
+        // because *nothing* draws them yet. Both are the villager's precedent as
+        // `MobVisuals::of` states it — the box is a fact about the world and belongs
+        // beside the rows it has to stay in step with, and the rig is a separate
+        // decision. This client decodes a boss, knows how big it is, and draws it as
+        // nothing at all until #1019.
+        for boss in [MobKind::VargrGuardian, MobKind::DraugrKing] {
+            assert!(
+                visuals.of(boss).is_none(),
+                "{boss:?} acquired meshes here; #1018 owes the wire and the box, and #1019 owes the rig"
+            );
+        }
         for creature in [MobKind::Draugr, MobKind::Vargr, MobKind::Deer] {
             assert!(
                 visuals.of(creature).is_some(),
                 "{creature:?} has no visuals, so nothing draws it"
+            );
+        }
+    }
+
+    /// The two boss boxes are the rows the server collides, mirrored the villager's way.
+    ///
+    /// [`the_drawn_body_is_the_box_the_server_collides`] cannot carry them: that sweep
+    /// measures meshes and nothing here draws a boss. What is left is the mirror itself —
+    /// `mobRegistry` in `server/internal/game/species.go` holds
+    /// `{width: 1.6, height: 1.8}` for the Vargr guardian and `{width: 1.0, height: 2.8}`
+    /// for the Draugr king, and this side's copy has to be those numbers rather than a
+    /// pair that happens to look plausible.
+    ///
+    /// The two relations below are the readability the approved design asks for, and they
+    /// are asserted rather than described because they are what a player uses to tell one
+    /// silhouette from the other across a room: the guardian is wider than it is tall on
+    /// the plan of a beast, the king is the opposite, and neither is the size of the field
+    /// species it shares a name with.
+    #[test]
+    fn the_boss_boxes_mirror_the_rows_the_server_collides() {
+        let guardian = body(MobKind::VargrGuardian);
+        assert_eq!(guardian.width, 1.6);
+        assert_eq!(guardian.height, 1.8);
+
+        let king = body(MobKind::DraugrKing);
+        assert_eq!(king.width, 1.0);
+        assert_eq!(king.height, 2.8);
+
+        assert!(
+            guardian.width > king.width && king.height > guardian.height,
+            "the two bosses stopped being a low silhouette and a tall one"
+        );
+        for (boss, field) in [
+            (guardian, body(MobKind::Vargr)),
+            (king, body(MobKind::Draugr)),
+        ] {
+            assert!(
+                boss.width > field.width && boss.height > field.height,
+                "a boss is no larger than the field species it shares a name with: {boss:?} against {field:?}"
             );
         }
     }
