@@ -65,6 +65,7 @@ mod heard;
 mod listener;
 mod mixer;
 mod spatial;
+pub mod synth;
 mod voice;
 
 use std::f32::consts::TAU;
