@@ -735,9 +735,8 @@ impl BlowInbox {
         }
         self.0.push((blow, at));
     }
-    /// Part 2 consumes only current-tick visible targets; expired or unmatched contacts
+    /// Consume only current-tick visible targets; expired or unmatched contacts
     /// are discarded, never saved until a later snapshot happens to contain the same id.
-    #[allow(dead_code)] // Sound consumer follows in #999 part 2.
     pub fn take(&mut self, snapshot: Option<&Snapshot>, now: Instant) -> Vec<BlowLanded> {
         std::mem::take(&mut self.0)
             .into_iter()
