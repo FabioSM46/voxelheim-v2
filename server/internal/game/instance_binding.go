@@ -89,6 +89,10 @@ func (m *InstanceManager) collectBossDefeatsLocked(s *instanceSession) {
 		return
 	}
 	s.state = InstanceSaved
+	// The reset is set here and nowhere else, on the same event as the state and the
+	// bindings: a saved session with no expiry, or an expiry on a session nothing saved,
+	// is not a state this can produce. See instance_reset.go for which midnight it is.
+	s.expiresUnix = nextResetUnix(m.now())
 	for character := range s.members {
 		m.bindLocked(s, character)
 	}

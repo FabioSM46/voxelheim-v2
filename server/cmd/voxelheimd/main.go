@@ -360,6 +360,11 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return err
 	}
 
+	runs, err := openSessions(opts, log)
+	if err != nil {
+		return err
+	}
+
 	explored, err := openExploration(opts, log)
 	if err != nil {
 		return err
@@ -437,6 +442,14 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// player's *first* snapshot should carry the evening they logged off in, not the
 	// dawn a default would have handed them for one tick.
 	restoreClock(sim, clock, log)
+
+	// The saved dungeon runs, in the same window and for a stricter version of the same
+	// reason: a bound character must be bound *before* anyone can knock on a portal, or
+	// the first entry after a restart would hand out a fresh copy of a dungeon that
+	// player already cleared. It is also the last moment the manager is empty, which is
+	// what game.InstanceManager.RestoreSessions requires.
+	restoreSessions(instances, runs, log)
+
 	stormDeadlineChanged := false
 	if opts.stormPeriod == 0 {
 		stormDeadlineChanged = sim.NextStorm() != 0
@@ -466,6 +479,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		chunks:      chunks,
 		structures:  camp,
 		clock:       clock,
+		runs:        runs,
 		sim:         sim,
 		saveEvery:   world.DefaultSaveInterval,
 		stormPeriod: opts.stormPeriod,
@@ -759,6 +773,91 @@ func restoreStructures(sim *game.Sim, store *persist.StructureStore, log *slog.L
 // openStructures above all use. An ephemeral world still has a day and a night, and
 // they still arrive on time; what it does not do is remember where in the day it was,
 // which is exactly the difference the operator chose.
+// openSessions opens the saved dungeon runs under the same -world-dir, or answers nil
+// for an ephemeral world.
+//
+// Nil rather than a store that writes nowhere, the shape openWorld, openPlayers,
+// openStructures and openClock above all use. An ephemeral world's parties still save a
+// run when its first boss falls and still lose it at midnight; what it does not do is
+// remember either after the process ends, which is exactly the difference the operator
+// chose.
+func openSessions(opts options, log *slog.Logger) (*persist.SessionStore, error) {
+	if opts.worldDir == "" {
+		// openWorld has already warned that this world is ephemeral.
+		return nil, nil
+	}
+
+	store, err := persist.OpenSessionStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the saved-session store: %w", err)
+	}
+	log.Info("saved session store opened", "sessions_file", store.Path(),
+		"format_version", persist.SessionsVersion, "max_saved_sessions", persist.MaxSavedSessions)
+
+	return store, nil
+}
+
+// restoreSessions puts the saved dungeon runs back, or starts the world with none.
+//
+// **restoreStructures' discipline, bindings instead of a camp**, and the same three
+// answers. A file that is not there is a world in which nobody has cleared a dungeon,
+// and that is silence rather than a log line. A file that cannot be read, and a list the
+// manager refuses, are both logged at error and both survived: every ruin starts free and
+// everything else about the world still works. Refusing to start over a lockout file
+// would take the terrain, every player record and the ability to log in at all hostage to
+// a few hundred bytes.
+//
+// **An expired run is dropped rather than restored**, which is the cold-start cleanup: a
+// server switched off across one midnight or ten comes back with the runs whose day has
+// not ended and none of the ones whose has. Nothing is deleted here — the shorter file is
+// written by the next autosave pass, which is also what keeps a failed read's evidence on
+// disk exactly as long as it is useful.
+//
+// **The unreadable file is left where it is** and, unlike the structures file, not for
+// long: the sessions file is rewritten on the next autosave pass, because there is no
+// dirty flag to hold it back. That is the trade a lockout forces — a corrupt file costs
+// its world one night's dungeon lockouts, which is a strictly smaller loss than refusing
+// to start.
+func restoreSessions(instances *game.InstanceManager, store *persist.SessionStore, log *slog.Logger) {
+	stored, found, err := store.Load()
+	if err != nil {
+		log.Error("the saved dungeon runs could not be read; every ruin starts free, and the file is kept",
+			"sessions_file", store.Path(), "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+
+	saved := make([]game.SavedSession, len(stored))
+	for i, rec := range stored {
+		// The six fields, one at a time. game and persist do not import each other, so
+		// this loop is the mapping — the same job restoreStructures does between
+		// persist.StructureRecord and game.Structure, and here for the same reason.
+		bound := make([]game.InstanceCharacter, len(rec.Bound))
+		for k, who := range rec.Bound {
+			bound[k] = game.InstanceCharacter{PlayerID: who.PlayerID, CharacterID: who.CharacterID}
+		}
+		saved[i] = game.SavedSession{
+			ID:             rec.ID,
+			Seed:           rec.Seed,
+			Ruin:           game.InstanceRuin{CellX: rec.Ruin[0], CellZ: rec.Ruin[1]},
+			ExpiresUnix:    rec.ExpiresUnix,
+			DefeatedBosses: rec.DefeatedBosses,
+			Bound:          bound,
+		}
+	}
+
+	restored, expired, err := instances.RestoreSessions(saved)
+	if err != nil {
+		log.Error("the saved dungeon runs were refused whole; every ruin starts free, and the file is kept",
+			"sessions_file", store.Path(), "sessions", len(saved), "error", err)
+		return
+	}
+	log.Info("saved dungeon runs restored", "sessions_file", store.Path(),
+		"restored", restored, "expired", expired)
+}
+
 func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {
 	if opts.worldDir == "" {
 		// openWorld has already warned that this world is ephemeral.
@@ -837,8 +936,11 @@ type server struct {
 	chunks     *world.Cache
 	structures *persist.StructureStore
 	clock      *persist.ClockStore
-	sim        *game.Sim
-	clockMu    sync.Mutex
+	// runs is the saved dungeon runs. Named for what it holds rather than for the type,
+	// because "sessions" in this file already means connected players.
+	runs    *persist.SessionStore
+	sim     *game.Sim
+	clockMu sync.Mutex
 
 	// saveEvery is the autosave interval. Zero means world.DefaultSaveInterval; tests
 	// shorten it so the loop can be observed without waiting on the real one.
@@ -975,6 +1077,19 @@ func (s *server) run(ctx context.Context) {
 		defer workers.Done()
 		if err := s.saveClockLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Error("the clock autosave loop stopped", "error", err)
+		}
+	}()
+
+	// The saved dungeon runs, on the same interval and a worker for the same reason.
+	// Its final flush in shutdown runs *before* the instance manager is closed, which is
+	// the one ordering constraint this loop has and the one comment worth reading twice:
+	// Close tears every session down, so a flush after it would write an empty file over
+	// every lockout in the world.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.saveSessionsLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the saved-session autosave loop stopped", "error", err)
 		}
 	}()
 
@@ -1188,6 +1303,79 @@ func (s *server) flushClock() {
 	}
 }
 
+// saveSessionsLoop writes the saved dungeon runs, every interval, until ctx ends.
+//
+// The clock's loop and the camp's, on the same interval, with the same answer to
+// failure: a full disk is a reason to shout, not a reason for a server to stop saving
+// for the rest of its life. It returns ctx.Err() on cancellation.
+//
+// **There is no dirty flag here**, for the reason saveClockLoop gives and one of its own.
+// The manager keeps no such bit — a run is saved by a kill inside a simulation and reset
+// by a wall clock, neither of which is a place to notice a file needs writing — and what
+// an unchanged pass costs is a few hundred bytes and a rename. Adding the flag would mean
+// a second record of "has this changed" alongside the one that already exists, which is
+// the state this file's clock and camp comments both warn about.
+//
+// **A failed write is not re-marked either**, again for saveClockLoop's reason: the next
+// pass reads the live manager, which is newer than the snapshot that failed, so nothing is
+// lost by dropping the failure. What it costs is the runs saved between it and the next
+// success, which is what the interval already bounds.
+func (s *server) saveSessionsLoop(ctx context.Context) error {
+	every := s.saveEvery
+	if every <= 0 {
+		every = world.DefaultSaveInterval
+	}
+
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s.flushSessions()
+		}
+	}
+}
+
+// flushSessions writes every saved dungeon run: which run, which seed, which ruin, when
+// it resets, what it has put down and who owes it.
+//
+// The capture and the write are separate here as everywhere else in this file:
+// InstanceManager.SavedSessions takes the manager's lock, copies, and releases it; every
+// byte reaches the disk out here with nothing held.
+//
+// **The binding and never the world.** What crosses to persist is a handful of scalars
+// per run, and the instance's chunks are not among them: an instance cache is built by
+// world.NewInstanceCache and holds no store at all, so there is no path from here to a
+// chunk on disk even by accident.
+func (s *server) flushSessions() {
+	if s.instances == nil {
+		return
+	}
+	saved := s.instances.SavedSessions()
+	records := make([]persist.SessionRecord, len(saved))
+	for i, run := range saved {
+		bound := make([]persist.SessionCharacter, len(run.Bound))
+		for k, who := range run.Bound {
+			bound[k] = persist.SessionCharacter{PlayerID: who.PlayerID, CharacterID: who.CharacterID}
+		}
+		records[i] = persist.SessionRecord{
+			ID:             run.ID,
+			Seed:           run.Seed,
+			Ruin:           [2]int64{run.Ruin.CellX, run.Ruin.CellZ},
+			ExpiresUnix:    run.ExpiresUnix,
+			DefeatedBosses: run.DefeatedBosses,
+			Bound:          bound,
+		}
+	}
+	if err := s.runs.Save(records); err != nil {
+		s.log.Error("saving the dungeon runs failed; they will be retried",
+			"sessions_file", s.runs.Path(), "sessions", len(records), "error", err)
+	}
+}
+
 // shutdown stops the server in the only order that terminates.
 //
 // Closing the listener unblocks Accept, but an accept-loop iteration can already
@@ -1216,6 +1404,11 @@ func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 	accepting.Wait()
 	s.registry.CloseAll()
 	workers.Wait()
+	// Before Close and not after, which is the whole of the ordering: Close tears every
+	// session down, so the same flush one line later would write an empty file over every
+	// lockout in the world. workers.Wait() above is the first moment the tick loop has
+	// stopped saving and resetting runs, so this is the last word on what is owed.
+	s.flushSessions()
 	if s.instances != nil {
 		s.instances.Close()
 	}
