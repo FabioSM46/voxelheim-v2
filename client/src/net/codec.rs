@@ -2740,6 +2740,49 @@ impl Reject {
     }
 }
 
+/// One damaging contact copied from a same-tick visible target by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlowKind {
+    Melee,
+    Arrow,
+    EnergyOrb,
+    MobMelee,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlowTarget {
+    Player,
+    Mob(MobKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlowLanded {
+    pub tick: u32,
+    pub attacker_entity_id: u64,
+    pub target_entity_id: u64,
+    pub position: [f32; 3],
+    pub kind: BlowKind,
+    pub target: BlowTarget,
+}
+
+impl BlowLanded {
+    /// Exact snapshot binding, not interpolation or proximity. A roster member or stale
+    /// target is not evidence of visibility. Multiple identical contacts stay separate.
+    pub fn matches_snapshot(&self, snapshot: &Snapshot) -> bool {
+        self.tick == snapshot.server_tick
+            && match self.target {
+                BlowTarget::Player => snapshot.entities.iter().any(|entity| {
+                    entity.entity_id == self.target_entity_id && entity.pos == self.position
+                }),
+                BlowTarget::Mob(kind) => snapshot.mobs.iter().any(|mob| {
+                    mob.entity_id == self.target_entity_id
+                        && mob.pos == self.position
+                        && mob.kind == kind
+                }),
+            }
+    }
+}
+
 /// One decoded envelope.
 ///
 /// The variants are shaped by what the *client* does with a payload, not by the
@@ -2768,6 +2811,7 @@ pub enum Message {
     /// mining issue, but decoding and validation belong to Protocol V2 now.
     MineProgress(MineProgress),
     MiningActivity(MiningActivity),
+    BlowLanded(BlowLanded),
     /// The server refused an action, and this is the reason a player reads.
     ///
     /// Named apart from [`Self::Reject`], which is the *connection* being refused and
@@ -2934,6 +2978,8 @@ pub enum DecodeError {
     /// A MiningActivity carries no target position.
     MissingMiningPos,
     InvalidMiningActivity,
+    MissingBlowPosition,
+    InvalidBlowLanded,
     /// `ChunkData` carries no `runs` at all, which is not the same as a chunk full
     /// of air: air is a run like any other.
     MissingRuns,
@@ -3542,6 +3588,10 @@ impl fmt::Display for DecodeError {
             ),
             Self::MissingCoord(kind) => write!(f, "{kind} carries no chunk coordinate"),
             Self::MissingBlockPos(kind) => write!(f, "{kind} carries no block position"),
+            Self::MissingBlowPosition => write!(f, "BlowLanded carries no position"),
+            Self::InvalidBlowLanded => {
+                write!(f, "invalid BlowLanded identity, kind, target or position")
+            }
             Self::MissingMiningPos => write!(f, "MiningActivity carries no block position"),
             Self::InvalidMiningActivity => {
                 write!(f, "invalid MiningActivity identity, tool or phase")
@@ -4636,7 +4686,41 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
             }))
         }
         // Presentation consumption belongs to #999; this build recognizes the contract.
-        fb::Payload::BlowLanded => Ok(Message::Deferred(name)),
+        fb::Payload::BlowLanded => {
+            let event = envelope
+                .payload_as_blow_landed()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            let position = event.position().ok_or(DecodeError::MissingBlowPosition)?;
+            let position = [position.x(), position.y(), position.z()];
+            if event.target_entity_id() == 0 || position.iter().any(|v| !v.is_finite()) {
+                return Err(DecodeError::InvalidBlowLanded);
+            }
+            let kind = match event.kind() {
+                fb::BlowKind::Melee => BlowKind::Melee,
+                fb::BlowKind::Arrow => BlowKind::Arrow,
+                fb::BlowKind::EnergyOrb => BlowKind::EnergyOrb,
+                fb::BlowKind::MobMelee => BlowKind::MobMelee,
+                _ => return Err(DecodeError::InvalidBlowLanded),
+            };
+            let target = match event.target() {
+                fb::BlowTarget::Player if event.target_mob_kind() == fb::MobKind::Unknown => {
+                    BlowTarget::Player
+                }
+                fb::BlowTarget::Mob => BlowTarget::Mob(
+                    MobKind::from_wire(event.target_mob_kind())
+                        .ok_or(DecodeError::InvalidBlowLanded)?,
+                ),
+                _ => return Err(DecodeError::InvalidBlowLanded),
+            };
+            Ok(Message::BlowLanded(BlowLanded {
+                tick: event.tick(),
+                attacker_entity_id: event.attacker_entity_id(),
+                target_entity_id: event.target_entity_id(),
+                position,
+                kind,
+                target,
+            }))
+        }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -6948,6 +7032,23 @@ pub(super) mod server_side {
     /// The token [`WelcomeWire::default`] carries: a legal one, so a test that is
     /// not about identity never has to name it.
     pub const DEFAULT_TOKEN: [u8; super::PLAYER_TOKEN_LEN] = [0x5a; super::PLAYER_TOKEN_LEN];
+
+    pub fn encode_player_blow(tick: u32, target: u64, position: [f32; 3]) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let position = fb::Vec3::new(position[0], position[1], position[2]);
+        let payload = fb::BlowLanded::create(
+            &mut builder,
+            &fb::BlowLandedArgs {
+                tick,
+                target_entity_id: target,
+                position: Some(&position),
+                kind: fb::BlowKind::Melee,
+                target: fb::BlowTarget::Player,
+                ..Default::default()
+            },
+        );
+        finish_envelope(builder, fb::Payload::BlowLanded, payload.as_union_value())
+    }
 
     pub fn encode_world_change(
         id: u64,
@@ -9372,7 +9473,7 @@ mod tests {
         (fb::Payload::LandmarkList, Handling::Consumed),
         (fb::Payload::PortalRequest, Handling::ClientOnly),
         (fb::Payload::WorldChange, Handling::Consumed),
-        (fb::Payload::BlowLanded, Handling::Deferred),
+        (fb::Payload::BlowLanded, Handling::Consumed),
         (fb::Payload::MiningActivity, Handling::Consumed),
     ];
 
@@ -16055,3 +16156,6 @@ mod world_change_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod blow_tests;

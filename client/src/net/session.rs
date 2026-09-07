@@ -57,9 +57,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::codec::WorldChange;
 
 use super::codec::{
-    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress, MiningActivity,
-    MobHit, PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
-    SessionTicket, Snapshot, WorldUpdate,
+    self, ActionRefused, BlowLanded, CharacterList, ChatMessage, InventoryState, MineProgress,
+    MiningActivity, MobHit, PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject,
+    SessionParams, SessionTicket, Snapshot, WorldUpdate,
 };
 
 use super::frame::{self, FrameDecoder};
@@ -228,6 +228,7 @@ pub(super) enum SessionEvent {
     /// Authoritative progress for one mined voxel.
     MineProgress(MineProgress),
     MiningActivity(MiningActivity, Instant),
+    BlowLanded(BlowLanded, Instant),
     /// What one visible player looks like.
     ///
     /// Unordered with respect to the snapshot that first carries the entity it names, and
@@ -1742,6 +1743,11 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                         leave_sent = false;
                     }
                     events.send(SessionEvent::LeaveCancellation(result)).ok()?;
+                }
+                Ok(Transition::BlowLanded(blow)) => {
+                    events
+                        .send(SessionEvent::BlowLanded(blow, Instant::now()))
+                        .ok()?;
                 }
                 Ok(Transition::MiningActivity(a)) => {
                     events
