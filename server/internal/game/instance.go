@@ -128,6 +128,11 @@ type InstanceManager struct {
 	partyVisits   map[portalPartyVisit]uint64
 	portalEntries map[InstanceCharacter]PortalEntry
 	disconnected  map[InstanceCharacter]portalReconnect
+	// offers is the one entry offer a character may have outstanding, and holding at
+	// most one per character is what "an offer is scoped to the crossing that produced
+	// it" is made of: a later crossing overwrites the earlier offer rather than banking
+	// it. See instance_entry.go.
+	offers map[InstanceCharacter]pendingOffer
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -148,6 +153,7 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		mintEntityID: mintEntityID, now: time.Now, log: log, options: append([]SimOption(nil), options...),
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
+		offers:   make(map[InstanceCharacter]pendingOffer),
 		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
@@ -291,6 +297,9 @@ func (m *InstanceManager) Leave(id uint64, character InstanceCharacter) bool {
 	delete(s.members, character)
 	delete(m.inside, character)
 	delete(m.portalEntries, character)
+	// A crossing this character was still being offered belonged to the world they have
+	// just left. Nothing about it is true from where they are standing now.
+	m.forgetOfferLocked(character)
 	if len(s.members) == 0 {
 		s.emptyTicks = 0
 	}
@@ -381,6 +390,14 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 			delete(m.partyVisits, visit)
 		}
 	}
+	// An offer names a run, so it cannot outlive one either: the reset that releases
+	// every binding to this session also withdraws every prompt about it, and an
+	// acceptance arriving afterwards is refused as the unknown offer it now is.
+	for character, offer := range m.offers {
+		if offer.session == id {
+			delete(m.offers, character)
+		}
+	}
 	delete(m.sessions, id)
 	s.sim, s.chunks, s.members = nil, nil, nil
 }
@@ -393,6 +410,7 @@ func (m *InstanceManager) Close() {
 	m.closed = true
 	clear(m.disconnected)
 	clear(m.portalEntries)
+	clear(m.offers)
 	for id, s := range m.sessions {
 		m.removeLocked(id, s)
 	}

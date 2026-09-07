@@ -252,6 +252,12 @@ pub mod voxelheim {
         pub use self::blow_landed_generated::*;
         mod mining_activity_generated;
         pub use self::mining_activity_generated::*;
+        mod session_binding_generated;
+        pub use self::session_binding_generated::*;
+        mod instance_entry_offer_generated;
+        pub use self::instance_entry_offer_generated::*;
+        mod instance_entry_answer_generated;
+        pub use self::instance_entry_answer_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

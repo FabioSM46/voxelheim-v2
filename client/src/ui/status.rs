@@ -550,6 +550,15 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
             RefusalReason::InstanceUnavailable => {
                 Some("Cannot cross: that instance is unavailable".to_owned())
             }
+            // V35's two. The mismatch already arrives as a chat line saying what the
+            // server means by it; this is the same fact in the place a refused action is
+            // shown, and it names no other run for the reason the warning does not.
+            RefusalReason::SessionMismatch => {
+                Some("Cannot cross: this is not the run you are bound to".to_owned())
+            }
+            RefusalReason::EntryOfferUnknown => {
+                Some("Cannot cross: that entry prompt is no longer open".to_owned())
+            }
             _ => None,
         };
     }
@@ -620,6 +629,8 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::NotAtPortal
         | RefusalReason::InstanceLimit
         | RefusalReason::InstanceUnavailable
+        | RefusalReason::SessionMismatch
+        | RefusalReason::EntryOfferUnknown
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1317,7 +1328,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 55] = [
+    const EVERY_REASON: [RefusalReason; 57] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1374,6 +1385,8 @@ mod tests {
         RefusalReason::NotAtPortal,
         RefusalReason::InstanceLimit,
         RefusalReason::InstanceUnavailable,
+        RefusalReason::SessionMismatch,
+        RefusalReason::EntryOfferUnknown,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1384,7 +1397,9 @@ mod tests {
         let action = match reason {
             RefusalReason::NotAtPortal
             | RefusalReason::InstanceLimit
-            | RefusalReason::InstanceUnavailable => RefusedAction::CrossPortal,
+            | RefusalReason::InstanceUnavailable
+            | RefusalReason::SessionMismatch
+            | RefusalReason::EntryOfferUnknown => RefusedAction::CrossPortal,
             RefusalReason::TooFast => RefusedAction::Chat,
             RefusalReason::PartyFull
             | RefusalReason::NoSuchPlayer

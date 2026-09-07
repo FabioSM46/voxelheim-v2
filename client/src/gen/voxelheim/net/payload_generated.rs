@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 67;
+pub const ENUM_MAX_PAYLOAD: u8 = 69;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 68] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 70] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -86,6 +86,8 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 68] = [
     Payload::WorldChange,
     Payload::BlowLanded,
     Payload::MiningActivity,
+    Payload::InstanceEntryOffer,
+    Payload::InstanceEntryAnswer,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -180,9 +182,11 @@ impl Payload {
     pub const WorldChange: Self = Self(65);
     pub const BlowLanded: Self = Self(66);
     pub const MiningActivity: Self = Self(67);
+    pub const InstanceEntryOffer: Self = Self(68);
+    pub const InstanceEntryAnswer: Self = Self(69);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 67;
+    pub const ENUM_MAX: u8 = 69;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -252,6 +256,8 @@ impl Payload {
         Self::WorldChange,
         Self::BlowLanded,
         Self::MiningActivity,
+        Self::InstanceEntryOffer,
+        Self::InstanceEntryAnswer,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -324,6 +330,8 @@ impl Payload {
             Self::WorldChange => Some("WorldChange"),
             Self::BlowLanded => Some("BlowLanded"),
             Self::MiningActivity => Some("MiningActivity"),
+            Self::InstanceEntryOffer => Some("InstanceEntryOffer"),
+            Self::InstanceEntryAnswer => Some("InstanceEntryAnswer"),
             _ => None,
         }
     }

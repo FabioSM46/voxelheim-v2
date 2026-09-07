@@ -267,6 +267,14 @@ import "strconv"
 // / carries which creature the server placed, never how much of it there is. See
 // / `MobKind` in `schemas/player.fbs`, where each is argued beside the member it
 // / appends after.
+// / **V35 decides who may cross.** InstanceEntryAnswer is client -> server and an
+// / older server rejects its unknown tag rather than dropping it, which is the whole
+// / of the bump: a V35 client would handshake cleanly and lose the connection the
+// / first time somebody accepted a dungeon entry prompt. InstanceEntryOffer travels
+// / back and an older client would drop it safely; it rides the same bump because an
+// / offer nobody can answer is not one. The two appended RefusalReason members owe
+// / nothing on their own — that enum is read through its zero member and never fails
+// / a frame — and no existing tag, table field or frame bound changes.
 type ProtocolVersion uint16
 
 const (
@@ -275,7 +283,7 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 34
+	ProtocolVersionCurrent ProtocolVersion = 35
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

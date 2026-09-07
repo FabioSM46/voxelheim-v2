@@ -977,6 +977,85 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		return nil
 	}
 
+	// refusePortal answers a crossing that did not happen. Every one of them is the same
+	// action — a client has at most one crossing in flight — so the reason is the whole of
+	// what varies.
+	refusePortal := func(reason vnet.RefusalReason) error {
+		return enqueue(protocol.EncodeActionRefused(protocol.ActionRefused{Action: vnet.RefusedActionCrossPortal, Reason: reason}))
+	}
+
+	// settleCrossing turns one authoritative entry decision into frames.
+	//
+	// **Shared by the request and by the acceptance deliberately.** An acceptance is a
+	// second crossing rather than a confirmation of the first one — the server re-decides
+	// it from scratch — so it earns exactly the same world change, the same membership
+	// bookkeeping and the same refusals. Two copies of this would be two chances to make
+	// the accepted path subtly unlike the ordinary one.
+	settleCrossing := func(decision game.PortalDecision) error {
+		switch decision.Outcome {
+		case game.PortalDeclined:
+			// Nothing crossed and nothing is owed. The character asked to be left where
+			// they already were, and the server has already forgotten the offer.
+			return nil
+
+		case game.PortalMismatch:
+			// Two frames, and they are two different kinds of statement. The refusal is
+			// the machine-routable half — a client can end its own pending crossing on it
+			// without reading prose — and the chat line is the half addressed to a person.
+			// Keeping the sentence out of the refusal vocabulary is schemas/player.fbs's
+			// rule, not a formatting preference: a reason is a token every client turns
+			// into its own words, and this warning is words.
+			if err := refusePortal(decision.Reason); err != nil {
+				return err
+			}
+			return enqueue(protocol.EncodeChatMessage(protocol.ChatMessage{
+				SenderEntityID: player.EntityID(),
+				SenderName:     game.CommandSenderName,
+				Text:           game.SessionMismatchWarning,
+			}))
+
+		case game.PortalOffered:
+			frame, encodeErr := protocol.EncodeInstanceEntryOffer(protocol.InstanceEntryOffer{
+				OfferID: decision.Offer.ID,
+				Terms: protocol.SessionBinding{
+					Arch:           decision.Offer.Arch,
+					BossesDefeated: uint8(min(decision.Offer.BossesDefeated, 255)),
+					BossesTotal:    uint8(min(decision.Offer.BossesTotal, 255)),
+					ResetsAtUnix:   decision.Offer.ExpiresUnix,
+				},
+			})
+			if encodeErr != nil {
+				// The offer is already held by the manager and will be superseded by the
+				// character's next crossing or discarded with its run. Refusing the
+				// crossing here is the honest answer: nothing has been offered, because
+				// nothing was sent.
+				log.Debug("cannot state the entry offer's terms", "reason", encodeErr.Error())
+				return refusePortal(vnet.RefusalReasonInstanceUnavailable)
+			}
+			return enqueue(frame)
+
+		case game.PortalAdmitted:
+			entry := decision.Entry
+			arrival, exit := world.InstanceAnchors(entry.Session.Seed)
+			spawn := [3]float32{float32(arrival.X) + .5, float32(arrival.Y), float32(arrival.Z) + .5}
+			transition, encodeErr := protocol.EncodeWorldChange(protocol.WorldChange{WorldID: entry.Session.ID, WorldSeed: entry.Session.Seed, Arrival: spawn, HasExitArch: true, ExitArch: [3]int32{int32(exit.X), int32(exit.Y), int32(exit.Z)}})
+			if encodeErr != nil {
+				cfg.Instances.Leave(entry.Session.ID, entry.Character)
+				return encodeErr
+			}
+			transitionErr := changeWorld(WorldBinding{Chunks: entry.Session.Chunks, Sim: entry.Session.Sim, Context: entry.Session.Context, Spawn: spawn, Arrival: transition})
+			if chunks == entry.Session.Chunks {
+				portalVisit = &entry
+				return transitionErr
+			}
+			cfg.Instances.Leave(entry.Session.ID, entry.Character)
+			return refusePortal(vnet.RefusalReasonInstanceUnavailable)
+
+		default:
+			return refusePortal(decision.Reason)
+		}
+	}
+
 	// The owner authorizes one read at a time, retaining phase deadline semantics.
 	// One persistent reader also services world changes while the socket is quiet.
 	readRequests := make(chan uint64)
@@ -1341,13 +1420,10 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			if msg.Portal == nil {
 				return fmt.Errorf("session: %w: absent portal payload", protocol.ErrMalformed)
 			}
-			refusal := func(reason vnet.RefusalReason) error {
-				return enqueue(protocol.EncodeActionRefused(protocol.ActionRefused{Action: vnet.RefusedActionCrossPortal, Reason: reason}))
-			}
 			if portalVisit != nil {
 				_, exit := world.InstanceAnchors(portalVisit.Session.Seed)
 				if !player.AtPortal(*msg.Portal, exit) {
-					if err := refusal(vnet.RefusalReasonNotAtPortal); err != nil {
+					if err := refusePortal(vnet.RefusalReasonNotAtPortal); err != nil {
 						return err
 					}
 					continue
@@ -1386,43 +1462,44 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 					if portalVisit == nil {
 						return transitionErr
 					}
-					if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
+					if err := refusePortal(vnet.RefusalReasonInstanceUnavailable); err != nil {
 						return err
 					}
 				}
 				continue
 			}
 			if cfg.Instances == nil || chunks != openBinding.Chunks {
-				if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
+				if err := refusePortal(vnet.RefusalReasonInstanceUnavailable); err != nil {
 					return err
 				}
 				continue
 			}
-			entry, reason := cfg.Instances.EnterPortal(player, *msg.Portal)
-			if reason != vnet.RefusalReasonUnknown {
-				if err := refusal(reason); err != nil {
+			if err := settleCrossing(cfg.Instances.EnterPortal(player, *msg.Portal)); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// An answer to an offer, which is a crossing rather than a confirmation of one.
+		//
+		// **It is refused from anywhere an entry could not have been requested**, and for
+		// the same reasons: an answer sent from inside an instance, or with no instance
+		// manager at all, names an offer that could not have been made from where the
+		// character is standing. The manager decides the rest, including whether the id
+		// names an offer it is still holding — an id it never minted and one it has
+		// already spent are the same answer there, deliberately.
+		if msg.Kind == vnet.PayloadInstanceEntryAnswer {
+			if msg.EntryAnswer == nil {
+				return fmt.Errorf("session: %w: absent entry answer payload", protocol.ErrMalformed)
+			}
+			if cfg.Instances == nil || portalVisit != nil || chunks != openBinding.Chunks {
+				if err := refusePortal(vnet.RefusalReasonEntryOfferUnknown); err != nil {
 					return err
 				}
 				continue
 			}
-			arrival, exit := world.InstanceAnchors(entry.Session.Seed)
-			spawn := [3]float32{float32(arrival.X) + .5, float32(arrival.Y), float32(arrival.Z) + .5}
-			transition, encodeErr := protocol.EncodeWorldChange(protocol.WorldChange{WorldID: entry.Session.ID, WorldSeed: entry.Session.Seed, Arrival: spawn, HasExitArch: true, ExitArch: [3]int32{int32(exit.X), int32(exit.Y), int32(exit.Z)}})
-			if encodeErr != nil {
-				cfg.Instances.Leave(entry.Session.ID, entry.Character)
-				return encodeErr
-			}
-			transitionErr := changeWorld(WorldBinding{Chunks: entry.Session.Chunks, Sim: entry.Session.Sim, Context: entry.Session.Context, Spawn: spawn, Arrival: transition})
-			if chunks == entry.Session.Chunks {
-				portalVisit = &entry
-				if transitionErr != nil {
-					return transitionErr
-				}
-			} else {
-				cfg.Instances.Leave(entry.Session.ID, entry.Character)
-				if err := refusal(vnet.RefusalReasonInstanceUnavailable); err != nil {
-					return err
-				}
+			if err := settleCrossing(cfg.Instances.AnswerEntryOffer(player, *msg.EntryAnswer)); err != nil {
+				return err
 			}
 			continue
 		}
@@ -1456,6 +1533,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 func inertWhileLeaving(kind vnet.Payload) bool {
 	switch kind {
 	case vnet.PayloadPortalRequest,
+		vnet.PayloadInstanceEntryAnswer,
 		vnet.PayloadPlayerInput,
 		vnet.PayloadMountRequest,
 		vnet.PayloadDismountRequest,

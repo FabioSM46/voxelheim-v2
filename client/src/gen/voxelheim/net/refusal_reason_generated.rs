@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 55] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 57] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -69,6 +69,8 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 55] = [
     RefusalReason::NotAtPortal,
     RefusalReason::InstanceLimit,
     RefusalReason::InstanceUnavailable,
+    RefusalReason::SessionMismatch,
+    RefusalReason::EntryOfferUnknown,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -235,6 +237,21 @@ impl RefusalReason {
     pub const InstanceLimit: Self = Self(49);
     /// Creation or entry failed. No destination, identity or binding details are sent.
     pub const InstanceUnavailable: Self = Self(50);
+    /// The character owes a different run of this dungeon than the one behind this arch,
+    /// and does not cross. Deliberately one code for both directions of the mismatch —
+    /// the instance is running another party's saved run, or it is a fresh copy the
+    /// character may not start while their own run is alive — because the two differ only
+    /// in a fact about somebody else's session, and this refusal discloses nothing about
+    /// one. The human half of the answer is a chat line; see `InstanceEntryOffer` for why
+    /// the prose is never carried here.
+    pub const SessionMismatch: Self = Self(51);
+    /// An `InstanceEntryAnswer` naming no offer this server is still holding for this
+    /// character. **One code for four situations on purpose**: an id the server never
+    /// minted, one already answered, one superseded by a later crossing, and one whose
+    /// run reset or ended between the offer and the answer. A forged id and a stale one
+    /// are the same sentence, which is what keeps a guess from learning anything — the
+    /// same call `MarkerUnknown` makes for a mark that belongs to somebody else.
+    pub const EntryOfferUnknown: Self = Self(52);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -302,6 +319,8 @@ impl RefusalReason {
         Self::NotAtPortal,
         Self::InstanceLimit,
         Self::InstanceUnavailable,
+        Self::SessionMismatch,
+        Self::EntryOfferUnknown,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -361,6 +380,8 @@ impl RefusalReason {
             Self::NotAtPortal => Some("NotAtPortal"),
             Self::InstanceLimit => Some("InstanceLimit"),
             Self::InstanceUnavailable => Some("InstanceUnavailable"),
+            Self::SessionMismatch => Some("SessionMismatch"),
+            Self::EntryOfferUnknown => Some("EntryOfferUnknown"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),

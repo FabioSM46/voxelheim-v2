@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 34;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 35;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -283,6 +283,14 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// carries which creature the server placed, never how much of it there is. See
 /// `MobKind` in `schemas/player.fbs`, where each is argued beside the member it
 /// appends after.
+/// **V35 decides who may cross.** InstanceEntryAnswer is client -> server and an
+/// older server rejects its unknown tag rather than dropping it, which is the whole
+/// of the bump: a V35 client would handshake cleanly and lose the connection the
+/// first time somebody accepted a dungeon entry prompt. InstanceEntryOffer travels
+/// back and an older client would drop it safely; it rides the same bump because an
+/// offer nobody can answer is not one. The two appended RefusalReason members owe
+/// nothing on their own — that enum is read through its zero member and never fails
+/// a frame — and no existing tag, table field or frame bound changes.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -293,10 +301,10 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    pub const Current: Self = Self(34);
+    pub const Current: Self = Self(35);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 34;
+    pub const ENUM_MAX: u16 = 35;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
