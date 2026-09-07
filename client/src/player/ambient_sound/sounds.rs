@@ -7,6 +7,8 @@ pub(super) enum Bed {
     Rain,
     DrivingRain,
     Snowfall,
+    Sandstorm,
+    Blizzard,
 }
 
 fn noise(noise: Noise, gain: f32, kind: FilterKind, hz: f32, q: f32) -> Layer {
@@ -33,6 +35,15 @@ impl Bed {
             Self::DrivingRain => vec![noise(Noise::White, 0.3, FilterKind::Low, 950.0, 0.7)],
             // A soft granular hush, not the bright white-noise streaks of rainfall.
             Self::Snowfall => vec![noise(Noise::Brown, 0.12, FilterKind::Band, 380.0, 0.7)],
+            // Sandy grit over a low wind; the blizzard is colder, narrower and higher.
+            Self::Sandstorm => vec![
+                noise(Noise::Brown, 0.6, FilterKind::Low, 550.0, 0.7),
+                noise(Noise::White, 0.16, FilterKind::Band, 1300.0, 0.8),
+            ],
+            Self::Blizzard => vec![
+                noise(Noise::White, 0.23, FilterKind::Band, 750.0, 2.8),
+                noise(Noise::Brown, 0.32, FilterKind::Low, 230.0, 0.7),
+            ],
         };
         Sound { layers }
     }
@@ -72,6 +83,139 @@ pub(super) fn parrot(seed: u64) -> Sound {
     }
 }
 
+/// Off-screen presentation, never a creature. Snow's daytime bird is the eagle
+/// already selected by birds::species_for; these descriptions spawn no entities.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Call {
+    Rattlesnake,
+    Crow,
+    Eagle,
+    Wolf,
+}
+
+pub(super) const CALLS: [Call; 4] = [Call::Rattlesnake, Call::Crow, Call::Eagle, Call::Wolf];
+
+/// Content parameters for the existing Calls lane. Intervals exceed each sound's
+/// duration by a wide margin; even dusk leaves the desert mostly silent.
+pub(super) struct CallProfile {
+    pub interval: [f32; 2],
+    pub radius: f32,
+    pub height: f32,
+    pub seconds: f32,
+    pub range: f32,
+}
+
+impl Call {
+    pub(super) fn profile(self) -> CallProfile {
+        let (interval, radius, height, seconds, range) = match self {
+            Self::Rattlesnake => ([12.0, 31.0], 5.0, -1.3, 0.8, 24.0),
+            Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
+            Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
+            Self::Wolf => ([35.0, 79.0], 26.0, 0.0, 3.8, 96.0),
+        };
+        CallProfile {
+            interval,
+            radius,
+            height,
+            seconds,
+            range,
+        }
+    }
+
+    pub(super) fn description(self, seed: u64) -> Sound {
+        let variation = (seed % 101) as f32 / 100.0;
+        let tone = |hz, gain, envelope| Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz,
+            },
+            gain,
+            envelope,
+            filter: None,
+        };
+        let (attack, decay, sustain, release) = match self {
+            Self::Rattlesnake => (0.025, 0.2, 0.7, 0.2),
+            Self::Crow => (0.025, 0.28, 0.05, 0.12),
+            Self::Eagle => (0.015, 0.4, 0.0, 0.1),
+            Self::Wolf => (0.8, 1.8, 0.35, 1.2),
+        };
+        let envelope = Envelope {
+            attack,
+            decay,
+            sustain,
+            release,
+        };
+        let layers = match self {
+            // Close partials beat at rattle speed, under a dry band of noise.
+            Self::Rattlesnake => {
+                let hz = 2300.0 + variation * 250.0;
+                vec![
+                    tone(hz, 0.08, envelope),
+                    tone(hz + 29.0, 0.08, envelope),
+                    Layer {
+                        envelope,
+                        ..noise(Noise::White, 0.24, FilterKind::Band, 2700.0, 2.0)
+                    },
+                ]
+            }
+            Self::Crow => {
+                let hz = 560.0 + variation * 100.0;
+                vec![
+                    tone(hz, 0.28, envelope),
+                    tone(hz * 2.05, 0.14, envelope),
+                    Layer {
+                        envelope,
+                        ..noise(Noise::White, 0.19, FilterKind::Band, 1200.0, 1.8)
+                    },
+                ]
+            }
+            Self::Eagle => {
+                let hz = 2100.0 + variation * 300.0;
+                vec![
+                    tone(hz, 0.36, envelope),
+                    tone(
+                        hz * 1.35,
+                        0.12,
+                        Envelope {
+                            attack: 0.08,
+                            ..envelope
+                        },
+                    ),
+                ]
+            }
+            // A slowly opening harmonic vowel with a soft breath. Staggered partial
+            // envelopes change the colour across the howl without a new synth primitive.
+            Self::Wolf => {
+                let hz = 310.0 + variation * 55.0;
+                vec![
+                    tone(hz, 0.44, envelope),
+                    tone(
+                        hz * 2.0,
+                        0.22,
+                        Envelope {
+                            attack: 1.3,
+                            ..envelope
+                        },
+                    ),
+                    tone(
+                        hz * 3.01,
+                        0.08,
+                        Envelope {
+                            attack: 1.8,
+                            ..envelope
+                        },
+                    ),
+                    Layer {
+                        envelope,
+                        ..noise(Noise::White, 0.06, FilterKind::Band, 650.0, 1.0)
+                    },
+                ]
+            }
+        };
+        Sound { layers }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,7 +227,7 @@ mod tests {
     }
     #[test]
     fn every_bed_is_finite_audible_and_fresh_at_supported_rates() {
-        for bed in [Bed::Crickets, Bed::Rain, Bed::DrivingRain, Bed::Snowfall] {
+        for bed in super::super::BEDS {
             for rate in [8000, 44100, 48000, 192000] {
                 let samples = stream(bed, rate, 17);
                 assert!(samples.iter().all(|v| v.is_finite() && v.abs() <= 1.0));

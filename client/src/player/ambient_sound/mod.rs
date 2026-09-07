@@ -20,13 +20,22 @@ use crate::{
 };
 use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
-use sounds::Bed;
+use sounds::{Bed, CALLS};
 
-const BEDS: [Bed; 4] = [Bed::Crickets, Bed::Rain, Bed::DrivingRain, Bed::Snowfall];
+const BEDS: [Bed; 6] = [
+    Bed::Crickets,
+    Bed::Rain,
+    Bed::DrivingRain,
+    Bed::Snowfall,
+    Bed::Sandstorm,
+    Bed::Blizzard,
+];
 
 #[derive(Resource, Default)]
 struct Country {
-    beds: [BedVoice; 4],
+    beds: [BedVoice; 6],
+    wildlife: [Calls; 4],
+    wildlife_gains: [f32; 4],
     calls: Calls,
     day_gain: f32,
     elapsed: f64,
@@ -44,12 +53,15 @@ pub(super) fn register(app: &mut App) {
 
 #[derive(Debug, PartialEq)]
 struct Targets {
-    beds: [f32; 4],
+    beds: [f32; 6],
+    wildlife: [f32; 4],
     day: f32,
 }
 
 fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Targets {
     let green = f32::from(u8::from(ambience.ground == GroundLook::Grass));
+    let sand = f32::from(u8::from(ambience.ground == GroundLook::Sand));
+    let snow_country = f32::from(u8::from(ambience.ground == GroundLook::Snow));
     let night = night.clamp(0.0, 1.0);
     let (rain, snow) = weather.map_or((0.0, 0.0), |weather| {
         let strength = f32::from(weather.intensity) / 255.0;
@@ -62,8 +74,22 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
     // The existing grassy species is the macaw. No visible flock on a treeless plain
     // means it may be heard off-screen, not that we invent another species there.
     let parrot = birds::species_for(ambience).is_none_or(|species| species == 0);
+    let (sand_wind, ice_wind) = weather.map_or((0.0, 0.0), |weather| {
+        let strength = f32::from(weather.intensity) / 255.0;
+        match weather.kind {
+            WeatherKind::Sandstorm => (strength, 0.0),
+            WeatherKind::Blizzard => (0.0, strength),
+            _ => (0.0, 0.0),
+        }
+    });
     Targets {
-        beds: [green * night, rain, rain * rain, snow],
+        beds: [green * night, rain, rain * rain, snow, sand_wind, ice_wind],
+        wildlife: [
+            sand * (1.0 - night),
+            sand * night,
+            snow_country * (1.0 - night),
+            snow_country * night,
+        ],
         day: green * (1.0 - night) * f32::from(u8::from(parrot)),
     }
 }
@@ -163,6 +189,37 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         },
         sounds::parrot,
     );
+    for (index, call) in CALLS.into_iter().enumerate() {
+        country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
+            * (1.0 - (-dt / controller::FADE_SECONDS).exp());
+        let gain = country.wildlife_gains[index];
+        let profile = call.profile();
+        country.wildlife[index].update(
+            mixer,
+            CallFrame {
+                dt,
+                // Distinct streams keep simultaneous dusk calls from sharing their bearings.
+                seed: seed.wrapping_add(0x9860 + index as u64),
+                interval: profile.interval,
+                radius: profile.radius,
+                height: profile.height,
+                seconds: profile.seconds,
+                origin: eye_position,
+                gain,
+            },
+            |source| {
+                let cover = spatial::occlusion(store, size, eye_position, source).max(cover);
+                spatial::place(
+                    eye_position,
+                    spatial::listener_yaw(eye.rotation),
+                    source,
+                    profile.range,
+                    cover,
+                )
+            },
+            |seed| call.description(seed),
+        );
+    }
 }
 
 #[cfg(test)]
