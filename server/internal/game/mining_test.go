@@ -1305,3 +1305,22 @@ func TestTheCastleMaterialsCarryTheirHandTimesAndOneImplement(t *testing.T) {
 		t.Error("a slate roof comes off no slower than a thatched one")
 	}
 }
+
+func TestPortalMasonryAndVeilNeverStartMining(t *testing.T) {
+	for _, block := range []world.Block{world.RuneStone, world.PortalVeil, world.PortalHeart} {
+		target := [3]int32{2, 200, 0}
+		sim, player, terrain, _ := newMiningPlayer(t, map[[3]int64]world.Block{{2, 200, 0}: block})
+		if err := player.Mine(activeMine(target, 1), true); err == nil {
+			t.Fatalf("mining block %d accepted", block)
+		}
+		for tick := uint64(1); tick < 200; tick++ {
+			sim.Step(tick)
+		}
+		if player.mining != nil {
+			t.Fatal("mining progress on indestructible block")
+		}
+		if got, _ := terrain.Block(2, 200, 0); got != block {
+			t.Fatal("portal destroyed")
+		}
+	}
+}

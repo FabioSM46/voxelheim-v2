@@ -241,6 +241,9 @@ func SchematicFor(kind BuildingKind) *Schematic {
 var schematicLegend = map[rune]Block{
 	'.': keepTerrain,
 	'_': Air,
+	'U': RuneStone,
+	'v': PortalVeil,
+	'O': PortalHeart,
 	'#': Cobblestone,
 	'P': Planks,
 	'T': Thatch,
@@ -301,11 +304,10 @@ func mustSchematic(anchors []Anchor, layers ...[]string) *Schematic {
 		if a.X < 0 || a.X >= w || a.Y < 0 || a.Y >= h || a.Z < 0 || a.Z >= d {
 			panic("schematic anchor outside the drawing")
 		}
-		if a.Kind == AnchorRuinArch {
-			// The arch centre is scenery, sealed with a full smooth-stone cube.
-			// All entity slots and the stair mouth still require explicit air.
-			if s.At(a.X, a.Y, a.Z) != SmoothBlackStone {
-				panic("ruin arch anchor is not sealed with smooth stone")
+		if a.Kind == AnchorRuinArch || a.Kind == AnchorInstanceExit {
+			// A unique, non-solid heart carries the crossing coordinate.
+			if s.At(a.X, a.Y, a.Z) != PortalHeart {
+				panic("portal anchor is not a portal heart")
 			}
 			continue
 		}

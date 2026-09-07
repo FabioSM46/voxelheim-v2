@@ -28,7 +28,7 @@ func TestDungeonDrawingHasTwoArenasAndOneWalkableGallery(t *testing.T) {
 				t.Fatalf("unsupported anchor %+v", a)
 			}
 			for y := int64(1); y <= 3; y++ {
-				if at(a.X, y, a.Z) != Air {
+				if Solid(at(a.X, y, a.Z)) {
 					t.Fatalf("king-height route obstructed at %+v", a)
 				}
 			}
@@ -47,7 +47,7 @@ func TestDungeonDrawingHasTwoArenasAndOneWalkableGallery(t *testing.T) {
 			}
 			for _, d := range []cell{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}} {
 				next := cell{p.x + d.x, p.y + d.y, p.z + d.z}
-				if !seen[next] && at(next.x, next.y, next.z) == Air {
+				if !seen[next] && !Solid(at(next.x, next.y, next.z)) {
 					seen[next] = true
 					queue = append(queue, next)
 				}

@@ -342,8 +342,8 @@ func assertRuinEmitted(t *testing.T, seed int64, r Ruin) {
 			t.Fatalf("seed %d site (%d,%d) voxel (%d,%d,%d): %v want %v", seed, r.CellX, r.CellZ, x, y, z, got, want)
 		}
 	})
-	if blockAt(r.Arch.X, r.Arch.Y, r.Arch.Z) != SmoothBlackStone {
-		t.Fatal("lookup arch is not sealed masonry")
+	if blockAt(r.Arch.X, r.Arch.Y, r.Arch.Z) != PortalHeart {
+		t.Fatal("lookup arch is not the portal heart")
 	}
 	near, ok := RuinNear(seed, r.CentreX, r.CentreZ, 0)
 	if !ok || near.Arch != r.Arch {
@@ -502,7 +502,7 @@ func TestRuinNearAgreesWithWideScanAtCellEdges(t *testing.T) {
 
 func TestRuinGoldenActuallyContainsTheArch(t *testing.T) {
 	c := Generate(goldenSeed, Coord{X: 55, Y: 2, Z: 55})
-	if got := c.At(16, 7, 31); got != SmoothBlackStone {
+	if got := c.At(16, 7, 31); got != PortalHeart {
 		t.Fatalf("golden no longer contains arch: %v", got)
 	}
 }

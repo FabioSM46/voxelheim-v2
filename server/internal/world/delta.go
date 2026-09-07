@@ -77,7 +77,10 @@ func (d *Deltas) ApplyTo(c *Chunk) {
 	defer d.mu.RUnlock()
 
 	for index, block := range d.chunks[c.Coord] {
-		c.Blocks[index] = block
+		// Persisted edits never erase an authored portal or obstruct its veil.
+		if !ImmutablePortal(c.Blocks[index]) {
+			c.Blocks[index] = block
+		}
 	}
 }
 

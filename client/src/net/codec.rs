@@ -9785,7 +9785,7 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 35);
+        assert_eq!(fb::ProtocolVersion::Current.0, 36);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
