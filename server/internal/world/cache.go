@@ -140,12 +140,13 @@ const DefaultWorkers = 4
 //	           the tick loop's and the streamer's paths. See store.go.
 //	dirtyMu    guards the set of chunks awaiting a write, and is never held across one.
 type Cache struct {
-	seed     int64
-	generate Generator
-	contains func(Coord) bool
-	editable func(x, y, z int64) bool
-	capacity int
-	slots    chan struct{}
+	seed         int64
+	generate     Generator
+	contains     func(Coord) bool
+	editable     func(x, y, z int64) bool
+	instanceGate *InstanceGate
+	capacity     int
+	slots        chan struct{}
 
 	// deltas outlives every entry deliberately: a chunk evicted and regenerated has to
 	// come back *with* its edits, which only works while the record of them is not part
@@ -445,6 +446,7 @@ func (c *Cache) compose(entry *cacheEntry, base *Chunk) *composition {
 	defer c.composeMu.Unlock()
 
 	c.deltas.ApplyTo(base)
+	c.instanceGate.patch(base)
 	composed := &composition{chunk: base, encoded: Encode(base)}
 	entry.composed.Store(composed)
 	return composed
@@ -787,6 +789,10 @@ func (c *Cache) Regenerate(coord Coord) error {
 		// lock and will find the delta layer already empty, which produces the same
 		// pristine chunk without a second generation.
 		if live := c.resident(coord); live == entry && entry.composed.Load() != nil {
+			if c.instanceGate != nil {
+				c.instanceGate.patch(regenerated.chunk)
+				regenerated.encoded = Encode(regenerated.chunk)
+			}
 			entry.composed.Store(regenerated)
 			c.revision.Add(1)
 			c.markWaterComposition(coord)

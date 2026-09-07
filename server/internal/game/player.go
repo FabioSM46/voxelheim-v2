@@ -30,6 +30,7 @@ import (
 // deliberate rather than lazy: see Leave for the guarantee it buys, and Step for why
 // nothing under the lock is allowed to block.
 type Sim struct {
+	dungeon *dungeonEncounters
 	// Tick-local contacts, projected only after this tick resolves all outcomes.
 	blows []landedBlow
 
@@ -1352,6 +1353,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	s.currentTick = tick
 	s.blows = s.blows[:0]
 	s.advancePartyInvitesLocked(tick)
+	s.flushDungeonGateLocked()
 	s.expireCorpsesLocked(tick)
 	s.advanceChunkRegenerationLocked()
 

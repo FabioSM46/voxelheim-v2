@@ -64,6 +64,9 @@ const (
 	// Instance entry and return slots, both standing in air.
 	AnchorInstanceArrival
 	AnchorInstanceExit
+	AnchorInstanceGuardian
+	AnchorInstanceKing
+	AnchorInstanceGate
 )
 
 // String names an anchor for test failures and diagnostics.
@@ -97,6 +100,12 @@ func (a AnchorKind) String() string {
 		return "instance arrival"
 	case AnchorInstanceExit:
 		return "instance exit"
+	case AnchorInstanceGuardian:
+		return "instance guardian"
+	case AnchorInstanceKing:
+		return "instance king"
+	case AnchorInstanceGate:
+		return "instance gate"
 	default:
 		return "no anchor"
 	}

@@ -158,7 +158,7 @@ func TestTransferredPlayersSeeOnlyTheirWorldsMobsAndDrops(t *testing.T) {
 		}
 	}
 	// All worlds are populated before any snapshot. Each delivery sees exactly
-	// one player, one mob, and one drop despite identical spatial coordinates.
+	// one player, its own mobs (including placed dungeon bosses), and one drop.
 	for _, sim := range worlds {
 		sim.Step(1)
 		for _, p := range sim.players {
@@ -167,7 +167,7 @@ func TestTransferredPlayersSeeOnlyTheirWorldsMobsAndDrops(t *testing.T) {
 			sim.Step(2)
 			sink := &dropSink{frames: [][]byte{frame}}
 			snap := newestSnapshot(t, sink)
-			if snap.EntitiesLength() != 1 || snap.MobsLength() != 1 || snap.DropsLength() != 1 {
+			if snap.EntitiesLength() != 1 || snap.MobsLength() != len(sim.mobs) || snap.DropsLength() != 1 {
 				t.Fatalf("foreign entities: players=%d mobs=%d drops=%d", snap.EntitiesLength(), snap.MobsLength(), snap.DropsLength())
 			}
 			var entity vnet.EntityState
@@ -175,8 +175,10 @@ func TestTransferredPlayersSeeOnlyTheirWorldsMobsAndDrops(t *testing.T) {
 				t.Fatal("foreign position or health")
 			}
 			var mob vnet.MobState
-			if !snap.Mobs(&mob, 0) || sim.mobs[mob.EntityId()] == nil {
-				t.Fatal("foreign mob")
+			for i := 0; i < snap.MobsLength(); i++ {
+				if !snap.Mobs(&mob, i) || sim.mobs[mob.EntityId()] == nil {
+					t.Fatal("foreign mob")
+				}
 			}
 			var drop vnet.ItemDropState
 			if !snap.Drops(&drop, 0) || sim.drops[drop.EntityId()] == nil {

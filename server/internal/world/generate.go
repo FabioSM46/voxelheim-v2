@@ -521,7 +521,8 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // different base, so the precondition advances even though most of the world does not
 // move at all.
 // 28 → 29: rare ruins, their narrow ground blend and excavated antechambers.
-const WorldgenVersion uint32 = 29
+// Version 30 replaces the first dungeon chamber with two connected arenas.
+const WorldgenVersion uint32 = 30
 
 // Generate builds the chunk at coord for seed.
 //

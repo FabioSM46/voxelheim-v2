@@ -36,6 +36,9 @@ use super::interpolate::{InterpolatedMob, SnapshotBuffer};
 use super::{InputMode, merge_all};
 use crate::net::{MobAction, MobKind, Session};
 
+mod bosses;
+mod king;
+
 /// The box one species occupies, in blocks: square in plan, `height` tall, standing on
 /// the point the snapshot puts it at.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,8 +94,7 @@ const HORSE_BODY: Body = Body {
 /// The two boss bodies, mirrored from `mobRegistry` in `server/internal/game/species.go`
 /// exactly as the three above are.
 ///
-/// **They are here and drawn by nobody, which is the villager's precedent stated once
-/// more.** The box is a fact about the world — it is what the server collides, what a
+/// The box is a fact about the world — it is what the server collides, what a
 /// swing is measured against and what the marker sits over — and it belongs beside the
 /// rows it has to stay in step with, not in whichever later issue happens to build the
 /// rig. #1019 owns the mesh; this owns the number.
@@ -302,6 +304,7 @@ struct SpeciesVisuals {
     eyes: Option<EyeVisuals>,
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
+    king_parts: Option<Vec<(king::Segment, Handle<Mesh>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +327,8 @@ pub(super) struct MobVisuals {
     draugr: SpeciesVisuals,
     vargr: SpeciesVisuals,
     deer: SpeciesVisuals,
+    guardian: SpeciesVisuals,
+    king: SpeciesVisuals,
     /// One flash for every kind: an impact reads the same whatever was hit.
     flash_material: Handle<StandardMaterial>,
     lootable_material: Handle<StandardMaterial>,
@@ -352,12 +357,8 @@ impl MobVisuals {
             MobKind::Deer => Some(&self.deer),
             MobKind::Villager => None,
             MobKind::Horse => None,
-            // Decoded, boxed, and drawn by nobody yet. `None` is the same routing the
-            // villager takes and it has the same consequence: no `Mob` entity is
-            // spawned, so no aggro marker, no lootable tint and no fall pose can reach
-            // one. What differs is only where the drawing goes afterwards — a villager's
-            // is in `player/mod.rs` today, and a boss's is #1019's to write.
-            MobKind::VargrGuardian | MobKind::DraugrKing => None,
+            MobKind::VargrGuardian => Some(&self.guardian),
+            MobKind::DraugrKing => Some(&self.king),
         }
     }
 }
@@ -438,6 +439,7 @@ pub(super) struct Mob {
 /// draugr primitive remains covered by the same one material swap per child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MobPart {
+    King(king::Segment),
     Body,
     Head,
     Legs,
@@ -477,6 +479,7 @@ pub(super) fn create_visuals(
     let vargr_material = materials.add(StandardMaterial::from_color(Color::WHITE));
     commands.insert_resource(MobVisuals {
         draugr: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
@@ -486,6 +489,7 @@ pub(super) fn create_visuals(
             head_material: draugr_material,
         },
         vargr: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
@@ -503,6 +507,7 @@ pub(super) fn create_visuals(
             head_material: vargr_material,
         },
         deer: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
@@ -511,6 +516,8 @@ pub(super) fn create_visuals(
             body_material: materials.add(StandardMaterial::from_color(DEER_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
+        guardian: bosses::guardian_visuals(&mut meshes, &mut materials),
+        king: king::visuals(&mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
         aggro_marker: meshes.add(aggro_marker_mesh()),
@@ -1045,6 +1052,21 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
+        if let Some(parts) = species.king_parts {
+            for (segment, mesh) in parts {
+                parent.spawn((
+                    MobVisual {
+                        owner,
+                        part: MobPart::King(segment),
+                    },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(species.body_material.clone()),
+                    king::transform(segment, state.action, Duration::ZERO, Quat::IDENTITY),
+                ));
+            }
+            return;
+        }
+
         // Body, head and legs are authored from the feet. Arms are the deliberate second
         // exception after the independently moving legs: their origin is the shoulder
         // line, so their child carries that one translation and a swing needs no matching
@@ -1086,7 +1108,7 @@ fn spawn_mob(
                 },
                 Mesh3d(arms),
                 MeshMaterial3d(species.body_material),
-                Transform::from_translation(Vec3::Y * DRAUGR_SHOULDER_HEIGHT),
+                Transform::from_translation(Vec3::Y * shoulder_height(state.kind)),
             ));
         }
         if let Some(eyes) = species.eyes {
@@ -1185,16 +1207,10 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
     };
     match kind {
         MobKind::Draugr => lean * DRAUGR_LEAN_FRACTION,
-        // The two bosses take the whole-body lean with everything that has no separately
-        // posed limb, and it is unreachable for them today: no `Mob` is spawned for
-        // either, so nothing is posed. Their telegraphs are announced on the wire by
-        // #1023 and read by #1019; this arm exists so the match stays total.
-        MobKind::Vargr
-        | MobKind::Deer
-        | MobKind::Villager
-        | MobKind::Horse
-        | MobKind::VargrGuardian
-        | MobKind::DraugrKing => lean,
+        // Articulated torso and arms carry the king's weight; planted feet keep the root upright.
+        MobKind::DraugrKing => 0.0,
+        MobKind::VargrGuardian => lean * 0.65,
+        MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
     }
 }
 
@@ -1213,6 +1229,14 @@ fn pose_progress(elapsed: Duration) -> f32 {
 /// Recovery follows a windup that already landed, so a body first streamed into view in
 /// recovery starts raised. Every other first sight starts neutral; the wire carries no
 /// earlier pose to recover.
+fn shoulder_height(kind: MobKind) -> f32 {
+    if kind == MobKind::DraugrKing {
+        2.25
+    } else {
+        DRAUGR_SHOULDER_HEIGHT
+    }
+}
+
 fn draugr_arm_initial_angle(action: MobAction) -> f32 {
     match action {
         MobAction::Recovery => DRAUGR_ARM_RAISED,
@@ -1284,13 +1308,10 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
         }
         MobKind::Vargr => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
         MobKind::Deer => Quat::from_rotation_z(VARGR_COLLAPSE_ROLL * fallen),
-        // The two bosses keep the match total and answer the identity, which is the
-        // honest value rather than a borrowed one: this module spawns no `Mob` for
-        // either (see [`MobVisuals::of`]), so there is no group to turn. **A boss's
-        // collapse is a real decision and it is #1019's** — the approved design gives
-        // each one its own, and lending it the vargr's roll here would put a made-up
-        // answer where that issue has to write a considered one.
-        MobKind::VargrGuardian | MobKind::DraugrKing => Quat::IDENTITY,
+        // The guardian loses its heavy shoulder; the king folds forward rather
+        // than sharing the common draugr's backward fall. Cosmetic snapshot poses.
+        MobKind::VargrGuardian => Quat::from_rotation_z(1.05 * fallen),
+        MobKind::DraugrKing => Quat::from_rotation_x(-1.35 * fallen),
     }
 }
 
@@ -1304,13 +1325,8 @@ fn collapse(kind: MobKind, fallen: f32) -> Quat {
 /// fight happens at, what reads is the splay.
 fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
     match kind {
-        // The bosses answer the neutral scale for [`collapse`]'s reason: no group of
-        // theirs is drawn, so there are no legs to slide.
-        MobKind::Draugr
-        | MobKind::Villager
-        | MobKind::Horse
-        | MobKind::VargrGuardian
-        | MobKind::DraugrKing => Vec3::ONE,
+        MobKind::Draugr | MobKind::Villager | MobKind::Horse | MobKind::DraugrKing => Vec3::ONE,
+        MobKind::VargrGuardian => Vec3::new(1.0 + 0.35 * fallen, 1.0, 1.0 + 0.35 * fallen),
         MobKind::Vargr => {
             let out = 1.0 + (VARGR_LEG_SPLAY - 1.0) * fallen;
             Vec3::new(out, 1.0, out)
@@ -1356,7 +1372,8 @@ pub(super) fn animate(
     // Everything a child needs: species and fall pose select its ordinary transforms,
     // the server's action plus local elapsed time poses the draugr's arms, and lootable
     // chooses the authoritative presentation wash.
-    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat)> = HashMap::new();
+    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat, MobAction, Duration)> =
+        HashMap::new();
     let mut flashing = HashSet::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
@@ -1398,11 +1415,23 @@ pub(super) fn animate(
         } else {
             Quat::IDENTITY
         };
-        poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
+        poses.insert(
+            entity,
+            (
+                mob.kind,
+                down,
+                mob.lootable,
+                arm_swing,
+                mob.action,
+                mob.action_elapsed,
+            ),
+        );
     }
 
     for (part, mut material, mut transform) in &mut parts {
-        let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
+        let Some((kind, down, lootable, arm_swing, action, elapsed)) =
+            poses.get(&part.owner).copied()
+        else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
             continue;
@@ -1448,6 +1477,9 @@ pub(super) fn animate(
         }
         if part.part == MobPart::Arms {
             transform.rotation = arm_swing;
+        }
+        if let MobPart::King(segment) = part.part {
+            *transform = king::transform(segment, action, elapsed, arm_swing);
         }
     }
 }
@@ -2777,11 +2809,9 @@ mod tests {
         // `Horse` is drawn through the shared ridden-horse rig in `player/horse.rs`; that
         // module pins horse, tack and rider to the mounted body the server collides. It
         // has no server collision box of its own because paddock horses are not mobs.
-        // `VargrGuardian` and `DraugrKing` are drawn by **nobody** yet — #1019 owns their
-        // rigs — so this sweep, which measures meshes, has nothing to measure for them.
-        // Their boxes are checked against the server's rows in
-        // [`the_boss_boxes_mirror_the_rows_the_server_collides`] instead, exactly as the
-        // villager's are.
+        // Boss rigs have their own mesh containment test in `bosses`: unlike
+        // these older primitives, their silhouettes deliberately leave room inside
+        // the collision envelope. The server-mirror test below still pins their boxes.
         assert_eq!(
             drawn.len(),
             crate::wire::voxelheim::net::MobKind::ENUM_VALUES.len() - 5,
@@ -2872,6 +2902,45 @@ mod tests {
     /// and still be spawned as two grey cuboids. It used to be — until #458 `of` answered
     /// `&self.draugr`, the honest placeholder while no server sent a villager.
     #[test]
+    fn boss_rigs_follow_snapshot_actions_and_disappear_with_the_snapshot() {
+        for kind in [MobKind::VargrGuardian, MobKind::DraugrKing] {
+            let mut app = headless();
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(ONE_FRAME));
+            // Zero health alone is not a death announcement.
+            let mut state = MobState {
+                kind,
+                ..draugr(900, 0.0, 0, MobAction::Idle)
+            };
+            deliver(&mut app, 1, vec![state]);
+            app.update();
+            assert_eq!(kinds(&mut app), vec![(900, kind)]);
+            assert!(falling(&mut app).is_none());
+            assert!(!parts(&mut app).is_empty());
+            for (tick, action) in [
+                (2, MobAction::Chase),
+                (3, MobAction::Windup),
+                (4, MobAction::Recovery),
+                (5, MobAction::Chase),
+            ] {
+                state.action = action;
+                deliver(&mut app, tick, vec![state]);
+                app.update();
+                assert_eq!(bodies(&mut app), vec![(900, 0, action)]);
+                assert!(falling(&mut app).is_none());
+            }
+            state.action = MobAction::Dying;
+            deliver(&mut app, 6, vec![state]);
+            app.update();
+            let_the_body_land(&mut app);
+            assert!(drawn_rotation(&mut app).angle_between(collapse(kind, 1.0)) < 0.01);
+            deliver(&mut app, 7, vec![]);
+            app.update();
+            assert!(bodies(&mut app).is_empty());
+            assert!(parts(&mut app).is_empty());
+        }
+    }
+
+    #[test]
     fn a_villager_is_drawn_by_the_humanoid_rig_and_not_by_this_module() {
         let mut app = headless();
         app.update();
@@ -2887,18 +2956,8 @@ mod tests {
             visuals.of(MobKind::Horse).is_none(),
             "paddock horses must use the shared horse rig rather than generic mob meshes"
         );
-        // **The same `None`, and deliberately not for the same reason.** A villager and a
-        // horse answer `None` because another module draws them; these two answer `None`
-        // because *nothing* draws them yet. Both are the villager's precedent as
-        // `MobVisuals::of` states it — the box is a fact about the world and belongs
-        // beside the rows it has to stay in step with, and the rig is a separate
-        // decision. This client decodes a boss, knows how big it is, and draws it as
-        // nothing at all until #1019.
         for boss in [MobKind::VargrGuardian, MobKind::DraugrKing] {
-            assert!(
-                visuals.of(boss).is_none(),
-                "{boss:?} acquired meshes here; #1018 owes the wire and the box, and #1019 owes the rig"
-            );
+            assert!(visuals.of(boss).is_some(), "{boss:?} must be drawn");
         }
         for creature in [MobKind::Draugr, MobKind::Vargr, MobKind::Deer] {
             assert!(
