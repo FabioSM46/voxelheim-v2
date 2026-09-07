@@ -30,9 +30,9 @@ func centredRuinBuilding(variant uint8, plotX, plotZ, floorY int64, facing Facin
 // (7,1,10). The chamber occupies x=2..12, z=1..10 and y=0..5, enclosed by basalt
 // walls, floor and ceiling except for that stair. There is no corridor beyond it.
 //
-// The arch stands centrally at z=5: smooth stone seals its five-wide opening,
-// worn brick forms the jambs and lintel, and contrasting slate marks the runes.
-// Its centre (7,2,5) deliberately names masonry, not an entity standing position.
+// The arch stands centrally at z=5: a spectral threshold fills its five-wide opening.
+// RuneStone forms indestructible jambs, shoulders and a crown.
+// Its centre (7,2,5) is the sole PortalHeart, retaining the original anchor.
 //
 // Upper walls stop at different courses, with collapsed masonry scattered across
 // the open floor. Underscores clear the hall and broken wall tops; dots preserve
@@ -50,7 +50,7 @@ var brokenHallRuin = mustSchematic(
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
-		"..bbbbbbbbbbb..",
+		"..bbUUUUUUUbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
@@ -71,7 +71,7 @@ var brokenHallRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kSSSSSk_b..",
+		"..b_UvvvvvU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -92,7 +92,7 @@ var brokenHallRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_RSSSSSk_b..",
+		"..b_UvvOvvU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -113,7 +113,7 @@ var brokenHallRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kSSSSSR_b..",
+		"..b_UUvvvUU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -134,7 +134,7 @@ var brokenHallRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kkkRkkk_b..",
+		"..b_UUUUUUU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -309,7 +309,7 @@ var brokenGableRuin = mustSchematic(
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
-		"..bbbbbbbbbbb..",
+		"..bbUUUUUUUbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
 		"..bbbbbbbbbbb..",
@@ -330,7 +330,7 @@ var brokenGableRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kSSSSSk_b..",
+		"..b_UvvvvvU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -351,7 +351,7 @@ var brokenGableRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kSSSSSR_b..",
+		"..b_UvvOvvU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -372,7 +372,7 @@ var brokenGableRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_RSSSSSk_b..",
+		"..b_UUvvvUU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
@@ -393,7 +393,7 @@ var brokenGableRuin = mustSchematic(
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",
-		"..b_kkkRkkk_b..",
+		"..b_UUUUUUU_b..",
 		"..b_________b..",
 		"..b_________b..",
 		"..b_________b..",

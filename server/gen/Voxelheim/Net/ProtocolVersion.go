@@ -283,7 +283,8 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	ProtocolVersionCurrent ProtocolVersion = 35
+	/// V36: portal veil/heart blocks are non-solid; older clients treat them as walls.
+	ProtocolVersionCurrent ProtocolVersion = 36
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

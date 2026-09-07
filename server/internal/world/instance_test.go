@@ -62,7 +62,7 @@ func TestInstanceIsClosedAndAnchorsAreReachable(t *testing.T) {
 		queue := []point{start}
 		seen := map[point]bool{start: true}
 		walkable := func(p point) bool {
-			return Solid(blockAt(p.x, 0, p.z)) && blockAt(p.x, 1, p.z) == Air && blockAt(p.x, 2, p.z) == Air
+			return Solid(blockAt(p.x, 0, p.z)) && !Solid(blockAt(p.x, 1, p.z)) && !Solid(blockAt(p.x, 2, p.z))
 		}
 		if !walkable(start) || !walkable(goal) {
 			t.Fatal("an anchor lacks headroom or a floor")

@@ -169,6 +169,17 @@ if server_cover != client_cover:
         f"client-only {sorted(client_cover - server_cover)}"
     )
 
+# --- the non-solid portal family ----------------------------------------------------
+portal_fn = re.search(r"func Portal\(b Block\) bool \{(.*?)\}", chunk, re.S)
+portal_client = re.search(r"pub fn is_portal\(block: BlockId\) -> bool \{(.*?)\}", palette, re.S)
+if not portal_fn or not portal_client:
+    failures.append("could not read portal classifiers")
+else:
+    server_portals = {server_ids[n] for n in re.findall(r"b == (\w+)", portal_fn.group(1)) if n in server_ids}
+    client_portals = {client_ids[n] for n in re.findall(r"\b[A-Z_]+\b", portal_client.group(1)) if n in client_ids}
+    if not server_portals or server_portals != client_portals:
+        failures.append("non-solid portal families differ or are empty")
+
 # --- every id a server sends has a colour -------------------------------------------
 rgba = re.search(r"pub fn linear_rgba\(block: BlockId\) -> \[f32; 4\] \{(.*?)\n\}", palette, re.S)
 if not rgba:

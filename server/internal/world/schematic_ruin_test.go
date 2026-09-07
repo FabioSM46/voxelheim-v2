@@ -13,8 +13,8 @@ import (
 func TestRuinVariantsAtEveryFacing(t *testing.T) {
 	t.Parallel()
 	golden := [2][4]string{
-		{"bff82cf1f83eb6f46a434a294ed0223a01677dba996f1b3620cdf016c7677382", "8e6556a49994d7f340be00b35a704d5f65f9e12b959a8788e7a996053e4ce4a8", "4a36f6937f2bc6416ca961b3b9bef0e05fbb1ee30f197dc97d8e2aa3e9df2ee2", "ddcc7b69d349f255d43970a6e3b676f002b4c6ab57acf4ad984ab2a2355b17aa"},
-		{"a4171453000a0fb517ce60144bd67e1579d4fa40e496b2d1c45ae5b1d3c1aaf0", "5cd8e8b9ff9ec72201a9bfe27da1544aeb9a69c70ab1ef3852cedd3da1a767d9", "7828ec4a6e6cde72e10e7b78affa08b2b73c4e5697953a75f17d03b62d73da5d", "a0d89ddd95a45acd7f76fd0e9f61f13ee777e28f9515c8deef13d9ce5ce879f2"},
+		{"8b3da43205b5e283b57004ddfb71ce33bca56049832319b304cb743582030f30", "f69ec1590707d47d6d8e981c23ae3715a9cd1532d73ea0775a7ac3bc7d2db46d", "bd73224cb44d8239fef32006ad6dcc65eb3ce31a160af0e6761a9266f82bee02", "abe81fa18c5a5643c0e7170131ca6f0bbf6a0479626f3d0dc1fdf078435fb074"},
+		{"b36b2a99ccee11fed858e9307cffd02eb3e0ade098ba07b897200c5584e305dc", "c19a712701f8cbb2b4e697c2f9ce428d4008544e63d16a4f70d325c59b7c56a6", "bd53e29edb058787a2f752dc1a5bf90ee39b3bcb7048e276f3fddb02be30db05", "74c1fb2d040f38332e6588894ea3d17e505efaf312fa1d8e4c0abd5de63412ac"},
 	}
 	// Plot (100,-200), hall standing level 70. Expected positions are written in
 	// world coordinates, independent of rotateCell and the anchor literals.
@@ -67,8 +67,8 @@ func TestRuinVariantsAtEveryFacing(t *testing.T) {
 						t.Errorf("anchor %+v, want %+v", a, want)
 					}
 				}
-				// Probe the entire five-wide, three-high sealed opening after placement.
-				// Along X for +/-Z facings, along Z for +/-X facings; all are full cubes.
+				// Probe the five-wide threshold and its inset stone shoulders.
+				// Along X for +/-Z facings, along Z for +/-X facings.
 				for across := -2; across <= 2; across++ {
 					for y := 64; y <= 66; y++ {
 						x, z := arch[facing][0], arch[facing][2]
@@ -78,7 +78,8 @@ func TestRuinVariantsAtEveryFacing(t *testing.T) {
 							z += int64(across)
 						}
 						block := volume[(int(int64(y)-b.OriginY)*d+int(z-b.OriginZ))*w+int(x-b.OriginX)]
-						if block != SmoothBlackStone {
+						shoulder := y == 66 && (across == -2 || across == 2) && block == RuneStone
+						if !Portal(block) && !shoulder {
 							t.Errorf("arch opening at (%d,%d,%d) is %v", x, y, z, block)
 						}
 					}
@@ -162,7 +163,7 @@ func TestRuinChamberHasOnlyItsStairAndTheStairReturnsToTheHall(t *testing.T) {
 		}
 		for _, block := range s.Voxels {
 			switch block {
-			case keepTerrain, Air, Basalt, BlackBrick, BlackBrickWorn, SmoothBlackStone, SlateTile:
+			case keepTerrain, Air, Basalt, BlackBrick, BlackBrickWorn, SmoothBlackStone, SlateTile, RuneStone, PortalVeil, PortalHeart:
 			default:
 				t.Fatalf("variant %d unexpected material %d", variant, block)
 			}
@@ -183,14 +184,14 @@ func TestRuinDispatchAndAppendOnlyLandmarks(t *testing.T) {
 	}
 }
 
-func TestOnlyTheSealedArchAnchorMayNameMasonry(t *testing.T) {
+func TestOnlyPortalAnchorsMayNameAHeart(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		kind  AnchorKind
 		cell  string
 		valid bool
 	}{
-		{AnchorRuinArch, "S", true}, {AnchorRuinArch, "_", false}, {AnchorRuinArch, ".", false}, {AnchorRuinArch, "G", false},
+		{AnchorRuinArch, "O", true}, {AnchorRuinArch, "S", false}, {AnchorInstanceExit, "O", true}, {AnchorInstanceExit, "_", false}, {AnchorRuinArch, "_", false}, {AnchorRuinArch, ".", false}, {AnchorRuinArch, "G", false},
 		{AnchorRuinStair, "S", false}, {AnchorRuinStair, "_", true}, {AnchorForge, "S", false},
 	} {
 		t.Run(fmt.Sprintf("%d/%s", tc.kind, tc.cell), func(t *testing.T) {

@@ -317,8 +317,8 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 35 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 35", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 36 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 36", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,

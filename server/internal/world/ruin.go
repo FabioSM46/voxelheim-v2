@@ -77,7 +77,7 @@ const (
 var _ = [1]struct{}{}[ruinSearchSpan%ruinSearchStep]
 
 // Ruin identifies a site by its lattice cell within a world seed. Arch is a
-// masonry coordinate, not a spawn position; the closed arch is part of Building.
+// portal-heart coordinate, not a spawn position; the runic arch is part of Building.
 // No chunk, cache, discovery state or instance is needed to obtain these values.
 type Ruin struct {
 	CellX, CellZ     int64

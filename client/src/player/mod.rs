@@ -66,6 +66,7 @@ mod livery;
 mod loot;
 mod mobs;
 mod mounts;
+mod portal;
 mod precipitation;
 mod projectiles;
 mod prompt;
@@ -517,6 +518,7 @@ impl Plugin for PlayerPlugin {
             .add_plugins(mounts::MountsPlugin)
             .add_plugins(trade::PlayerTradePlugin)
             .add_plugins(instance_entry::InstanceEntryPlugin)
+            .add_plugins(portal::PortalInteractionPlugin)
             .add_plugins(vendor::VendorPlugin)
             // After the camera plugin, because the ray starts at the camera and the
             // ordering inside `BlockTargetPlugin` is written against its system set.
@@ -3191,6 +3193,7 @@ mod tests;
 /// Inventory, learned mounts, selected slot and input tick sequence are personal
 /// connection state and deliberately survive.
 pub(crate) fn reset_world(world: &mut World) {
+    crate::world::transition::reset::<portal::PortalFocus>(world);
     use crate::world::transition::{despawn, reset};
     reset::<SnapshotBuffer>(world);
     reset::<Appearances>(world);

@@ -208,6 +208,11 @@ const (
 	// worldgen outcome. It is appended after every persisted and wire-visible id,
 	// has no item or drop, and is [Cover]: a body walks through the sparse canes.
 	WinterBramble Block = 54
+
+	// Authored portal masonry and walk-through threshold. No items or mining cost.
+	RuneStone   Block = 55
+	PortalVeil  Block = 56
+	PortalHeart Block = 57
 )
 
 // ShapeKind is the geometry a block occupies inside its voxel.
@@ -390,7 +395,7 @@ func WaterFeedsToward(b Block, dx, dz int) bool {
 // rule that reads solidity, which is what keeps every one of those rules correct
 // without naming an id.
 func Solid(b Block) bool {
-	return b != Air && !IsWater(b) && !Cover(b)
+	return b != Air && !IsWater(b) && !Cover(b) && !Portal(b)
 }
 
 // Cover reports whether a block is ground cover: a thing that stands in a voxel
@@ -605,3 +610,9 @@ func floorDiv(a, b int64) int64 {
 	}
 	return q
 }
+
+// Portal is a walk-through threshold, not water or replaceable cover.
+func Portal(b Block) bool { return b == PortalVeil || b == PortalHeart }
+
+// ImmutablePortal protects both the frame and its empty-looking doorway.
+func ImmutablePortal(b Block) bool { return b == RuneStone || Portal(b) }

@@ -201,6 +201,18 @@ cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release -- \
   --server 127.0.0.1:7777 --world midgard
 ```
 
+### Entering and leaving the dungeon
+
+The ruin's lower chamber contains an indestructible runic stone arch with a moving teal
+veil. Stand near its centre and press **Interact** (default **F**); the nearby hint shows
+your configured key. The server decides whether to admit you, offer entry into a saved
+run, or refuse. Inside the dungeon, the matching arch in the arrival court returns you
+to the open world without requiring a boss kill. Mining or placing blocks cannot destroy
+or obstruct either threshold.
+
+These portals require protocol 36 and worldgen 31. Updating does not delete or rewrite
+previous world directories; the versioned-directory behavior described below still applies.
+
 ### Two things that surprise people once each
 
 **The world is on disk by default.** `-world-dir` defaults to

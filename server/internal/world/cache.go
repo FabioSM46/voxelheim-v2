@@ -687,6 +687,9 @@ func (c *Cache) applyResidentGuarded(x, y, z int64, block Block, allow func(curr
 		return fmt.Errorf("%w: %+v is being regenerated", ErrNotResident, coord)
 	}
 
+	if ImmutablePortal(current.chunk.Blocks[index]) {
+		return ErrImmutableShell
+	}
 	if allow != nil {
 		if err := allow(current.chunk.Blocks[index]); err != nil {
 			return err

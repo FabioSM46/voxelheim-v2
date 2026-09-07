@@ -130,6 +130,15 @@ pub const SLATE_STAIR_WEST_TOP: BlockId = 53;
 /// draws the canes in [`LOG`]'s bark. Mirrors the server's `world.WinterBramble`.
 pub const WINTER_BRAMBLE: BlockId = 54;
 
+/// World-only indestructible portal frame and non-solid threshold.
+pub const RUNE_STONE: BlockId = 55;
+pub const PORTAL_VEIL: BlockId = 56;
+pub const PORTAL_HEART: BlockId = 57;
+
+pub fn is_portal(block: BlockId) -> bool {
+    matches!(block, PORTAL_VEIL | PORTAL_HEART)
+}
+
 /// Geometry one block occupies inside its voxel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeKind {
@@ -431,7 +440,8 @@ pub fn water_feeds_toward(block: BlockId, x: i8, z: i8) -> bool {
 /// stopping anything either, and the aiming ray is the one caller that wants it
 /// anyway — which is why that ray asks `ChunkStore::targetable_at` instead of this.
 pub fn is_solid(block: BlockId) -> bool {
-    is_architectural_shape(block) || (block != AIR && !is_water(block) && !is_cover(block))
+    is_architectural_shape(block)
+        || (block != AIR && !is_water(block) && !is_cover(block) && !is_portal(block))
 }
 
 /// Whether a block hides what is behind it.
@@ -454,7 +464,7 @@ pub fn is_solid(block: BlockId) -> bool {
 /// this predicate and [`is_solid`] are false for it: a bush is no longer a
 /// rendering-only exception to either.
 pub fn is_opaque(block: BlockId) -> bool {
-    block != AIR && !is_water(block) && !is_cover(block)
+    block != AIR && !is_water(block) && !is_cover(block) && !is_portal(block)
 }
 
 /// What a block is made of.
@@ -525,7 +535,7 @@ pub fn material_class(block: BlockId) -> MaterialClass {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 54] = [
+pub const PALETTE: [BlockId; 57] = [
     STONE,
     DIRT,
     GRASS,
@@ -580,6 +590,9 @@ pub const PALETTE: [BlockId; 54] = [
     SLATE_STAIR_SOUTH_TOP,
     SLATE_STAIR_WEST_TOP,
     WINTER_BRAMBLE,
+    RUNE_STONE,
+    PORTAL_VEIL,
+    PORTAL_HEART,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -684,6 +697,8 @@ const FLOWER_BLUE_LINEAR: [f32; 3] = [0.104_616, 0.181_164, 0.577_580];
 /// A cold, dark crimson berry that stays distinct from nearly white [`SNOW_LINEAR`]
 /// and from the much brighter meadow red above. Saturation carries the only colour
 /// in the leafless winter plant. `#761A3B`.
+const RUNE_STONE_LINEAR: [f32; 3] = [0.038, 0.065, 0.072];
+const PORTAL_LINEAR: [f32; 3] = [0.04, 0.7, 0.52];
 const WINTER_BRAMBLE_LINEAR: [f32; 3] = [0.181_164, 0.010_330, 0.043_735];
 
 /// The darkest thing in the world, and a castle's trim rather than its wall: a line of
@@ -826,6 +841,9 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         FLOWER_YELLOW => FLOWER_YELLOW_LINEAR,
         FLOWER_BLUE => FLOWER_BLUE_LINEAR,
         WINTER_BRAMBLE => WINTER_BRAMBLE_LINEAR,
+        RUNE_STONE => RUNE_STONE_LINEAR,
+        PORTAL_VEIL => PORTAL_LINEAR,
+        PORTAL_HEART => PORTAL_LINEAR,
         SMOOTH_BLACK_STONE => SMOOTH_BLACK_STONE_LINEAR,
         BASALT => BASALT_LINEAR,
         BLACK_BRICK => BLACK_BRICK_LINEAR,
@@ -1030,7 +1048,7 @@ mod tests {
         assert!(!is_solid(AIR));
         assert!(!is_solid(WATER), "water is swum through, not walked into");
         for block in PALETTE {
-            if is_water(block) || is_cover(block) {
+            if is_water(block) || is_cover(block) || is_portal(block) {
                 assert!(!is_solid(block), "block {block} must stop no body");
                 continue;
             }
@@ -1046,7 +1064,7 @@ mod tests {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if is_water(block) || is_cover(block) {
+            if is_water(block) || is_cover(block) || is_portal(block) {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;
             }
@@ -1081,10 +1099,10 @@ mod tests {
     fn every_non_water_material_colour_is_distinct() {
         // Two materials that render the same colour would make the landscape unreadable
         // while every test still passed. Water ids and slate's geometry variants
-        // deliberately share one material each.
+        // deliberately share one material each. Portal cells are drawn by their effect.
         let materials: Vec<(BlockId, [f32; 4])> = PALETTE
             .iter()
-            .filter(|block| !is_water(**block))
+            .filter(|block| !is_water(**block) && !is_portal(**block))
             .map(|block| (shape_of(*block).material, linear_rgba(*block)))
             .collect();
         for (i, (a_material, a_colour)) in materials.iter().enumerate() {
@@ -1101,7 +1119,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=WINTER_BRAMBLE {
+        for block in 1..=PORTAL_HEART {
             assert_ne!(
                 linear_rgba(block),
                 unknown,

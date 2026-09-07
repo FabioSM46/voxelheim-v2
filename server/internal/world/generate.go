@@ -522,7 +522,8 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // move at all.
 // 28 → 29: rare ruins, their narrow ground blend and excavated antechambers.
 // Version 30 replaces the first dungeon chamber with two connected arenas.
-const WorldgenVersion uint32 = 30
+// Version 31 opens the runic thresholds and protects their authored masonry.
+const WorldgenVersion uint32 = 31
 
 // Generate builds the chunk at coord for seed.
 //

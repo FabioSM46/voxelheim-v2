@@ -992,6 +992,7 @@ func TestTheCastleRunesNameTheCastleMaterials(t *testing.T) {
 		'D': DarkTimber,
 		'W': PaleTimber,
 		'G': DarkGlass,
+		'U': RuneStone, 'v': PortalVeil, 'O': PortalHeart,
 	}
 
 	if len(schematicLegend) != len(want) {

@@ -286,7 +286,8 @@ enum ProtocolVersion : ushort {
   /// is rejected, instead of defaulting to "whatever is current".
   Unknown = 0,
 
-  Current = 35
+  /// V36: portal veil/heart blocks are non-solid; older clients treat them as walls.
+  Current = 36
 }
 
 /// A position, velocity or direction in world space, measured in blocks.

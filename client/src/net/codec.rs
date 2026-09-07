@@ -6968,6 +6968,19 @@ pub fn encode_player_trade_request(request: &PlayerTradeRequest) -> Vec<u8> {
     )
 }
 
+/// Requests a crossing at a streamed portal heart. The server chooses the world.
+pub fn encode_portal_request(arch: BlockCoord) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let arch = fb::BlockCoord::new(arch.x, arch.y, arch.z);
+    let payload =
+        fb::PortalRequest::create(&mut builder, &fb::PortalRequestArgs { arch: Some(&arch) });
+    finish_envelope(
+        builder,
+        fb::Payload::PortalRequest,
+        payload.as_union_value(),
+    )
+}
+
 /// Builds one answer to one entry offer. An id the server minted, and a yes or a no.
 ///
 /// **No destination, no position, no binding, and deliberately no way to state one.**
@@ -9785,7 +9798,7 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 35);
+        assert_eq!(fb::ProtocolVersion::Current.0, 36);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
