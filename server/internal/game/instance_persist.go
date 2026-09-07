@@ -228,7 +228,7 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 			expired++
 			continue
 		}
-		s, buildErr := m.newSessionLocked(rec.ID, rec.Seed, rec.Ruin)
+		s, buildErr := m.newSessionLocked(rec.ID, rec.Seed, rec.Ruin, rec.DefeatedBosses)
 		if buildErr != nil {
 			// Unwind rather than leave a half-restored server: every session filed by this
 			// call goes back out through the one path that tears one down, and the manager
