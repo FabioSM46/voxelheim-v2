@@ -1498,6 +1498,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				// is a peer that has stopped reading. A later list is restated by the next
 				// change; this one is not, and a session that silently began without it
 				// would show a lockout it can no longer be corrected about.
+				//
+				// **No test reaches this branch, and that is a property of the numbers rather
+				// than an omission.** `outboundQueue` is 32; admission queues fewer than that
+				// before this point and every one of them blocks until it lands, so the only
+				// way `stated` is false is a peer that stopped reading mid-handshake. The other
+				// half — an encode failure — cannot happen for a state the manager can hold:
+				// `bindingsLocked` clamps the pair the contract bounds, and a restore refuses a
+				// zero expiry. Reaching it would take a connection that completes the handshake
+				// and then stops draining, which is a test about the writer rather than this.
 				if !stated {
 					return fmt.Errorf("session: state the character's saved runs on join")
 				}
@@ -1582,6 +1591,13 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// character is standing. The manager decides the rest, including whether the id
 		// names an offer it is still holding — an id it never minted and one it has
 		// already spent are the same answer there, deliberately.
+		//
+		// **`portalVisit != nil` is belt-and-braces, and that was measured rather than
+		// assumed**: removing it changes no observable answer, because crossing forgets this
+		// character's offer (`forgetOfferLocked` in `joinLocked`) and `crossLocked` refuses
+		// anyone already inside. It is kept because it states this layer's own precondition
+		// beside the `PortalRequest` block's identical one, not because it is what decides —
+		// recorded here so the next reader does not go looking for a test that pins it.
 		if msg.Kind == vnet.PayloadInstanceEntryAnswer {
 			if msg.EntryAnswer == nil {
 				return fmt.Errorf("session: %w: absent entry answer payload", protocol.ErrMalformed)

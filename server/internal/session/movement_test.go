@@ -57,6 +57,10 @@ type collector struct {
 	// meaning: what matters is what the *last* one says, and how many arrived before it.
 	markerLists [][]protocol.Marker
 
+	// entryOffers is every InstanceEntryOffer, whole and in order. An offer is one
+	// crossing's terms, so a test asserts about the frame rather than a running total.
+	entryOffers []protocol.InstanceEntryOffer
+
 	// bindingLists is every InstanceBindings frame, in order and unmerged. The list
 	// replaces the client's copy wholesale, so the order is the whole of the meaning:
 	// what matters is what the last one says and how many arrived before it.
@@ -382,6 +386,22 @@ func (c *collector) absorb(frame []byte) {
 		}
 		c.explored = append(c.explored, columns)
 
+	case vnet.PayloadInstanceEntryOffer:
+		var payload vnet.InstanceEntryOffer
+		payload.Init(table.Bytes, table.Pos)
+		offer := protocol.InstanceEntryOffer{OfferID: payload.OfferId()}
+		if terms := payload.Terms(nil); terms != nil {
+			offer.Terms = protocol.SessionBinding{
+				BossesDefeated: terms.BossesDefeated(),
+				BossesTotal:    terms.BossesTotal(),
+				ResetsAtUnix:   terms.ResetsAtUnix(),
+			}
+			if arch := terms.Arch(nil); arch != nil {
+				offer.Terms.Arch = [3]int32{arch.X(), arch.Y(), arch.Z()}
+			}
+		}
+		c.entryOffers = append(c.entryOffers, offer)
+
 	case vnet.PayloadInstanceBindings:
 		var payload vnet.InstanceBindings
 		payload.Init(table.Bytes, table.Pos)
@@ -473,6 +493,13 @@ func (c *collector) actionRefusals() []protocol.ActionRefused {
 }
 
 // chatMessages is every accepted world-chat line this session received, in order.
+// crossingOffers is every entry prompt this session was sent, in order.
+func (c *collector) crossingOffers() []protocol.InstanceEntryOffer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.entryOffers)
+}
+
 // savedRunLists is every complete saved-run list this session was sent, in order.
 func (c *collector) savedRunLists() [][]protocol.SessionBinding {
 	c.mu.Lock()

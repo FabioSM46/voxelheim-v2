@@ -154,3 +154,37 @@ func TestInstanceBindingsCarriesTheWholeListOrNothing(t *testing.T) {
 		t.Fatal("an unsendable entry was encoded inside a list")
 	}
 }
+
+// The two boundaries of a `SessionBinding`, tested at the value that is legal rather than
+// only at the one past it.
+//
+// **Both directions, because a validator can fail either way and only one of them is
+// loud.** Rejecting a value that is over the line costs a frame nobody should have sent;
+// rejecting one that is exactly on it costs a frame somebody needed, and says nothing
+// about why. A fully-cleared run is the case that matters here and it is not a corner:
+// `bossEncounterTotal` counts two boss species today, so the second kill makes every
+// binding in that dungeon `2 of 2`, and a `>=` in place of the `>` would make the whole
+// list unencodable for exactly the party that finished the dungeon.
+func TestSessionBindingAcceptsItsOwnBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for name, terms := range map[string]SessionBinding{
+		"a fully cleared run":     {Arch: [3]int32{0, 61, 0}, BossesDefeated: 3, BossesTotal: 3, ResetsAtUnix: 1893456000},
+		"one boss, one encounter": {Arch: [3]int32{0, 61, 0}, BossesDefeated: 1, BossesTotal: 1, ResetsAtUnix: 1893456000},
+		"nothing cleared yet":     {Arch: [3]int32{0, 61, 0}, BossesDefeated: 0, BossesTotal: 2, ResetsAtUnix: 1893456000},
+		"the far edge of the world": {
+			Arch: [3]int32{MaxWorldCoordinate, MaxWorldCoordinate, MaxWorldCoordinate}, BossesDefeated: 1, BossesTotal: 2, ResetsAtUnix: 1893456000},
+		"the near edge of the world": {
+			Arch: [3]int32{-MaxWorldCoordinate, -MaxWorldCoordinate, -MaxWorldCoordinate}, BossesDefeated: 1, BossesTotal: 2, ResetsAtUnix: 1893456000},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := EncodeInstanceEntryOffer(InstanceEntryOffer{OfferID: 1, Terms: terms}); err != nil {
+				t.Fatalf("legal terms were refused: %v", err)
+			}
+			if _, err := EncodeInstanceBindings([]SessionBinding{terms}); err != nil {
+				t.Fatalf("a legal binding was refused: %v", err)
+			}
+		})
+	}
+}
