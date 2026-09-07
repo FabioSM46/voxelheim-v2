@@ -180,6 +180,10 @@ func (s *Sim) makeCorpseLocked(m *mob) *corpse {
 		expiresTick: s.currentTick + s.corpseLifetimeTicks,
 	}
 	if m.species().isBoss() {
+		// The one record of a boss defeat, taken here because this is the one killed-mob
+		// transition: a creature the director takes away never reaches it, so a boss
+		// nobody killed can never save a run. See instance_binding.go.
+		s.recordBossDefeatLocked(m.kind)
 		var roster []corpseOwner
 		if m.encounter != nil {
 			roster = m.encounter.roster
