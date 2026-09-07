@@ -581,6 +581,9 @@ const fn next_generation(generation: u32) -> u32 {
 #[derive(Debug)]
 struct Source {
     ring: Ring,
+    /// Zero for rate-flexible producers (voice); otherwise the rate these queued samples
+    /// were synthesized at. The callback silences a mismatch.
+    required_rate: AtomicU32,
     /// A [`SlotState`], the [`Bus`] and the generation, packed by [`pack`]. The one thing that
     /// decides who may touch the rest — which owner it decides for, and, since the review on
     /// #996, which bus it decides about.
@@ -608,6 +611,7 @@ impl Source {
     fn new() -> Self {
         Self {
             ring: Ring::new(SOURCE_CAPACITY),
+            required_rate: AtomicU32::new(0),
             // A slot nobody has used needs no clearing, which is what makes the first
             // `MAX_SOURCES` claims of a fresh mixer succeed with no callback anywhere.
             slot: AtomicU32::new(pack(0, Bus::Master, SlotState::Free)),
@@ -667,6 +671,7 @@ impl Source {
     /// order to give the world-bus budget back exactly once per slot it was spent on.
     fn recycle(&self, word: u32) -> bool {
         self.ring.skip();
+        self.required_rate.store(0, Ordering::Relaxed);
         self.low_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.mid_state.store(0.0f32.to_bits(), Ordering::Relaxed);
         self.occlusion.store(0.0f32.to_bits(), Ordering::Relaxed);
@@ -1168,6 +1173,10 @@ impl Mixer {
                 SlotState::Free | SlotState::Revoked => continue,
                 SlotState::Live => {}
             }
+            let required_rate = source.required_rate.load(Ordering::Acquire);
+            if required_rate != 0 && required_rate != sample_rate {
+                continue;
+            }
             live[index] = true;
 
             let smoothed = spatial::advance(
@@ -1222,6 +1231,13 @@ impl Mixer {
                 // An underrun is silence, never the previous sample and never whatever
                 // happened to be in the buffer.
                 let sample = self.sources[index].ring.pop().unwrap_or(0.0);
+                // Re-read after pop: a first push can race pass 1's rate load. The ring's
+                // acquire sees the binding written before that push, so no first sample
+                // can slip through under the previous zero (unbound) rate.
+                let required_rate = self.sources[index].required_rate.load(Ordering::Acquire);
+                if required_rate != 0 && required_rate != sample_rate {
+                    continue;
+                }
                 low_state[index] += low_crossover * (sample - low_state[index]);
                 mid_state[index] += high_crossover * (sample - mid_state[index]);
                 let low = low_state[index];
@@ -1358,6 +1374,16 @@ impl SourceHandle {
             return 0;
         }
         self.mixer.sources[self.index].ring.free()
+    }
+
+    /// Binds a synthesized source to its render rate before its first push. The ring is
+    /// empty at binding; render rechecks the tag after pop to cover the first-push race.
+    pub(super) fn require_rate(&self, rate: u32) {
+        if self.live() {
+            self.mixer.sources[self.index]
+                .required_rate
+                .store(rate.max(1), Ordering::Release);
+        }
     }
 
     /// The mixer this source feeds, for the sample rate a generator needs.

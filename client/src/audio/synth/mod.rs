@@ -3,13 +3,19 @@
 //! Oscillators are elementary waveforms (saw/square/triangle are not band-limited); authors
 //! should prefer sine/noise for bright transients where aliasing would be objectionable.
 
-// Part 2 of #983 supplies the production consumer; later sound descriptions exercise the
-// rest of the vocabulary. Public items in this binary crate otherwise count as dead code.
+// The arrival chime consumes baked sine layers; #984–#987 and #999 consume the other
+// primitives and continuous/playback APIs. Public items in this binary crate otherwise
+// count as dead code before those callers land.
 #![allow(dead_code)]
 
+mod continuous;
+mod playback;
 mod primitives;
+pub use continuous::Continuous;
+#[allow(unused_imports)]
+pub use playback::{Playback, Rendering, StartError, Status};
 use primitives::{Biquad, Generator};
-// Sound authors in part 2 and the following content issues consume this vocabulary.
+// Following content issues consume the rest of this synthesis vocabulary.
 #[allow(unused_imports)]
 pub use primitives::{Envelope, Exciter, Filter, FilterKind, Noise, Wave};
 use std::sync::Arc;
@@ -39,6 +45,7 @@ pub enum Error {
     Envelope,
     Filter,
     Duration,
+    ContinuousNeedsNoise,
 }
 
 fn bounded(value: f32, low: f32, high: f32) -> bool {
@@ -170,3 +177,6 @@ impl CompiledLayer {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stream_tests;
