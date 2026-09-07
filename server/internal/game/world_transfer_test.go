@@ -161,7 +161,7 @@ func TestTransferredPlayersSeeOnlyTheirWorldsMobsAndDrops(t *testing.T) {
 		sim.Step(1)
 		for _, p := range sim.players {
 			var frame []byte
-			p.deliverSnapshot = func(f []byte, _ world.Column) bool { frame = f; return true }
+			p.deliverSnapshot = func(f []byte, _ world.Column, _ [][]byte) bool { frame = f; return true }
 			sim.Step(2)
 			sink := &dropSink{frames: [][]byte{frame}}
 			snap := newestSnapshot(t, sink)

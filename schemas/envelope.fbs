@@ -261,7 +261,11 @@ union Payload {
 
   // V33: appended; an ignored world change would leave peers in different worlds.
   PortalRequest,           // 64  client -> server
-  WorldChange              // 65  server -> client
+  WorldChange,             // 65  server -> client
+
+  // Appended server-only outcome; V33 is unchanged. See BlowLanded for the
+  // unknown-tag compatibility argument and recipient snapshot disclosure rule.
+  BlowLanded               // 66  server -> client
 }
 
 table Envelope {

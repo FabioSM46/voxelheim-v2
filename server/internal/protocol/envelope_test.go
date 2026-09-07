@@ -379,6 +379,7 @@ func TestProtocolV33CrossesPortals(t *testing.T) {
 		vnet.PayloadLandmarkList,
 		vnet.PayloadPortalRequest,
 		vnet.PayloadWorldChange,
+		vnet.PayloadBlowLanded,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -386,7 +387,8 @@ func TestProtocolV33CrossesPortals(t *testing.T) {
 		}
 	}
 
-	// Membership, not just ordering. A swing is still answered by the next snapshot and
+	// Membership, not just ordering. BlowLanded now reports a resolved contact; the
+	// snapshot remains authoritative. Historically a swing was answered by the next snapshot and
 	// nothing else, and so is a craft and a repair; a *refused* placement is answered by
 	// ActionRefused, and an accepted one is not. V12's LeaveStarted is the deliberately
 	// exceptional acknowledgement: it reports the server's timer, never a client-owned

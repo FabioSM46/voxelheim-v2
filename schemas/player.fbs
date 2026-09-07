@@ -2760,3 +2760,55 @@ table WorldChange {
   arrival: Vec3;
   exit_arch: BlockCoord;
 }
+
+/// The resolved delivery mechanism, not a client-selected sound or damage value.
+enum BlowKind : ubyte {
+  Unknown = 0,
+  Melee = 1,
+  Arrow = 2,
+  EnergyOrb = 3,
+  MobMelee = 4
+}
+
+enum BlowTarget : ubyte {
+  Unknown = 0,
+  Player = 1,
+  Mob = 2
+}
+
+/// Server -> client: one already-resolved damaging contact, including a killing or
+/// shield-softened blow. Misses, terrain collisions, healing and environmental damage
+/// produce none. This reports combat; it cannot decide damage, threat, death or loot.
+///
+/// Disclosure is enforced by the server against the SAME tick's successfully queued
+/// EntitySnapshot, sent before this frame. The target must occur in entities (Player)
+/// or mobs (Mob, including a killed mob's corpse under the same id). position and
+/// target_mob_kind are copied from that snapshot, never from a hidden contact point.
+/// attacker_entity_id is zero unless that snapshot contains the attacker in entities
+/// or mobs. A disconnected projectile owner is therefore anonymous. Party roster
+/// membership alone grants no visibility. An absent target suppresses this recipient's
+/// event entirely. Receivers should likewise ignore an event without that snapshot
+/// tick or target; world changes invalidate the snapshot and every pending event.
+///
+/// Each contact is recorded once, then offered once per eligible recipient. This is
+/// transient presentation: a full outbound queue drops it, without retry or replay to
+/// a later snapshot whose visibility may differ. Multiple contacts in one tick remain
+/// separate events, even against the same target. tick wraps like EntitySnapshot.tick.
+///
+/// ProtocolVersion remains V33. This appended server-only union tag is safely dropped
+/// by older clients; a newer client against an older server simply has no impact cue.
+/// No existing enum, snapshot invariant, frame bound or gameplay meaning changes. A
+/// client sending this payload is a protocol error, never an attack request.
+///
+/// Decoder invariants: target_entity_id is nonzero; kind and target are known nonzero
+/// members; position is present and every coordinate finite. target_mob_kind is a
+/// known nonzero MobKind for Mob, and Unknown for Player. attacker_entity_id may be 0.
+table BlowLanded {
+  tick: uint;
+  attacker_entity_id: ulong;
+  target_entity_id: ulong;
+  position: Vec3;
+  kind: BlowKind;
+  target: BlowTarget;
+  target_mob_kind: MobKind;
+}

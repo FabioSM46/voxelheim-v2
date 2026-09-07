@@ -60,6 +60,10 @@ pub mod voxelheim {
         pub use self::voice_audience_generated::*;
         mod voice_bound_generated;
         pub use self::voice_bound_generated::*;
+        mod blow_kind_generated;
+        pub use self::blow_kind_generated::*;
+        mod blow_target_generated;
+        pub use self::blow_target_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -240,6 +244,8 @@ pub mod voxelheim {
         pub use self::portal_request_generated::*;
         mod world_change_generated;
         pub use self::world_change_generated::*;
+        mod blow_landed_generated;
+        pub use self::blow_landed_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

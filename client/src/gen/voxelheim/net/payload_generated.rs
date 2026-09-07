@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 65;
+pub const ENUM_MAX_PAYLOAD: u8 = 66;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 66] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 67] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -84,6 +84,7 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 66] = [
     Payload::LandmarkList,
     Payload::PortalRequest,
     Payload::WorldChange,
+    Payload::BlowLanded,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -176,9 +177,10 @@ impl Payload {
     pub const LandmarkList: Self = Self(63);
     pub const PortalRequest: Self = Self(64);
     pub const WorldChange: Self = Self(65);
+    pub const BlowLanded: Self = Self(66);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 65;
+    pub const ENUM_MAX: u8 = 66;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -246,6 +248,7 @@ impl Payload {
         Self::LandmarkList,
         Self::PortalRequest,
         Self::WorldChange,
+        Self::BlowLanded,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -316,6 +319,7 @@ impl Payload {
             Self::LandmarkList => Some("LandmarkList"),
             Self::PortalRequest => Some("PortalRequest"),
             Self::WorldChange => Some("WorldChange"),
+            Self::BlowLanded => Some("BlowLanded"),
             _ => None,
         }
     }
