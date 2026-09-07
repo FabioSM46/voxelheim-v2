@@ -42,8 +42,8 @@ const (
 	// InstanceSaved is what killing the first boss of a session makes it, and the only
 	// thing that ever does. It means exactly two things and no third: every character
 	// inside at that moment is bound to this copy of this ruin, and the empty grace no
-	// longer applies — a saved session lives until its reset, which is #977's. See
-	// instance_binding.go.
+	// longer applies — a saved session lives until its reset. See instance_binding.go
+	// for who is bound and instance_reset.go for when it ends.
 	InstanceSaved
 )
 
@@ -64,24 +64,32 @@ type InstanceSession struct {
 	// the order they died, by the species that identifies it. It is what a "1 / 3" is
 	// counted from, and what tells a restore which encounters to leave out.
 	DefeatedBosses []vnet.MobKind
-	Sim            *Sim
-	Chunks         *world.Cache
-	Context        context.Context
+	// ExpiresUnix is the wall-clock second this saved run resets at — the server's next
+	// midnight on the real calendar. Zero on a session that is not saved, because a free
+	// copy ends on the empty grace instead. See instance_reset.go.
+	ExpiresUnix int64
+	Sim         *Sim
+	Chunks      *world.Cache
+	Context     context.Context
 }
 
 type instanceSession struct {
-	id         uint64
-	seed       int64
-	ruin       InstanceRuin
-	state      InstanceState
-	defeated   []vnet.MobKind
-	members    map[InstanceCharacter]struct{}
-	sim        *Sim
-	chunks     *world.Cache
-	ctx        context.Context
-	cancel     context.CancelFunc
-	emptyTicks uint32
-	tick       uint64
+	id       uint64
+	seed     int64
+	ruin     InstanceRuin
+	state    InstanceState
+	defeated []vnet.MobKind
+	// expiresUnix is set once, when the first boss falls, and never moved afterwards: a
+	// run cleared at 23:59 resets sixty seconds later and one cleared at 00:01 lasts the
+	// day, which is what "the day is the unit" means. See instance_reset.go.
+	expiresUnix int64
+	members     map[InstanceCharacter]struct{}
+	sim         *Sim
+	chunks      *world.Cache
+	ctx         context.Context
+	cancel      context.CancelFunc
+	emptyTicks  uint32
+	tick        uint64
 }
 
 type instanceVisit struct {
@@ -102,12 +110,16 @@ type InstanceManager struct {
 	tickRate, viewDistance uint8
 	maxSessions            int
 	mintEntityID           func() uint64
-	log                    *slog.Logger
-	options                []SimOption
-	graceTicks             uint32
-	closed                 bool
-	sessions               map[uint64]*instanceSession
-	inside                 map[InstanceCharacter]uint64
+	// now is the wall clock the midnight reset is measured against, and the one place
+	// this package reads real time. Injectable because a test that has to wait for a
+	// real midnight is a test nobody runs; never nil after NewInstanceManager.
+	now        func() time.Time
+	log        *slog.Logger
+	options    []SimOption
+	graceTicks uint32
+	closed     bool
+	sessions   map[uint64]*instanceSession
+	inside     map[InstanceCharacter]uint64
 	// bound is which saved session a character owes a ruin. Keyed like visits — by ruin
 	// and character — because that is what makes a binding per dungeon; unlike visits it
 	// survives leaving, and is released only when its session ends.
@@ -133,7 +145,7 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 	}
 	return &InstanceManager{
 		tickRate: tickRate, viewDistance: viewDistance, maxSessions: maxSessions,
-		mintEntityID: mintEntityID, log: log, options: append([]SimOption(nil), options...),
+		mintEntityID: mintEntityID, now: time.Now, log: log, options: append([]SimOption(nil), options...),
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
 		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
@@ -160,9 +172,35 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 	if len(m.sessions) >= m.maxSessions {
 		return nil, ErrInstanceLimit
 	}
+	// **The mint is a loop because a restored id is not one this counter has issued.**
+	// Session ids are minted from the entity counter, which starts afresh in every
+	// process, while a session restored from disk carries the id the *previous* process
+	// minted — so the very first Create after a restart can name a run that is already
+	// live and silently replace it in this map. Retrying until the id is free is what
+	// makes "one id names one session" true across a restart without serialising the
+	// counter; it terminates because the counter is monotonic and the map is finite.
+	// See instance_persist.go for why the stored id is kept rather than re-minted.
 	id := m.mintEntityID()
+	for m.sessions[id] != nil {
+		id = m.mintEntityID()
+	}
 	// A bijection of ids provides a fresh seed even for two copies of one ruin.
-	seed := int64(id ^ 0x49a3d758c1e260bf)
+	s, err := m.newSessionLocked(id, int64(id^0x49a3d758c1e260bf), ruin)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// newSessionLocked builds one live session over a given id and seed and files it.
+//
+// Split out of [InstanceManager.createLocked] because a restore needs exactly this and
+// must not derive the seed: a restored run's world has to be the one its party cleared,
+// which is the stored seed and not a function of whatever id it is filed under. Every
+// other property of a live session — its simulation, its chunk cache, its lifetime
+// context — is reconstructed here either way, which is the whole of "the world is never
+// persisted".
+func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin) (*instanceSession, error) {
 	chunks := world.NewInstanceCache(seed, world.DefaultWorkers, 64)
 	sim, err := NewSim(m.tickRate, m.viewDistance, seed, NewCacheTerrain(chunks), chunks, m.mintEntityID, m.log, m.options...)
 	if err != nil {
@@ -281,6 +319,9 @@ func (m *InstanceManager) Count() int {
 func (m *InstanceManager) Step() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// One reading for the whole pass, so two sessions that expire at the same midnight
+	// cannot land on different sides of it because the loop took a moment.
+	now := m.now().Unix()
 	for id, s := range m.sessions {
 		s.tick++
 		s.sim.Step(s.tick)
@@ -290,11 +331,15 @@ func (m *InstanceManager) Step() {
 		if len(s.members) != 0 {
 			continue
 		}
-		// A saved run does not expire while nobody is in it. It is theirs until its
-		// reset, which is why emptyTicks stops meaning anything here rather than being
-		// allowed to run on and mislead a later reader.
+		// A saved run does not expire on the empty grace. It is theirs until its reset,
+		// which is why emptyTicks stops meaning anything here rather than being allowed
+		// to run on and mislead a later reader — and the reset is the wall clock's, not
+		// this loop's. See instance_reset.go for why both halves of that are deliberate.
 		if s.state == InstanceSaved {
 			s.emptyTicks = 0
+			if m.resetDueLocked(s, now) {
+				m.removeLocked(id, s)
+			}
 			continue
 		}
 		s.emptyTicks++
@@ -322,8 +367,10 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 			delete(m.visits, visit)
 		}
 	}
-	// A binding names a session, so it cannot outlive one. Nothing in this lifecycle
-	// removes a saved session except Close; the reset that will is #977's.
+	// A binding names a session, so it cannot outlive one. This is the whole of "expiry
+	// releases every binding to that session": the midnight reset removes the session
+	// through this one path, and a character bound to it is free for that ruin again on
+	// the way out. See instance_reset.go.
 	for visit, sessionID := range m.bound {
 		if sessionID == id {
 			delete(m.bound, visit)
@@ -358,5 +405,6 @@ func (s *instanceSession) snapshot() InstanceSession {
 	}
 	return InstanceSession{ID: s.id, Seed: s.seed, Ruin: s.ruin, State: s.state,
 		Members: members, DefeatedBosses: append([]vnet.MobKind(nil), s.defeated...),
-		Sim: s.sim, Chunks: s.chunks, Context: s.ctx}
+		ExpiresUnix: s.expiresUnix,
+		Sim:         s.sim, Chunks: s.chunks, Context: s.ctx}
 }

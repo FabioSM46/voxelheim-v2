@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
@@ -62,6 +64,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	camp := openStructureStore(t, dir)
 	clock := openClockStore(t, dir)
 	explored := openExplorationStore(t, dir)
+	runs := openSessionStore(t, dir)
 	registry := session.NewRegistry(session.DefaultConcurrentSessions)
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, discard())
 	if err != nil {
@@ -70,10 +73,16 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ResendChunk); err != nil {
 		t.Fatalf("ConfigureChunkRegeneration: %v", err)
 	}
+	instances, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, game.DefaultMaxInstances, registry.NextID, discard())
+	if err != nil {
+		t.Fatalf("NewInstanceManager: %v", err)
+	}
 	restoreStructures(sim, camp, discard())
 	restoreClock(sim, clock, discard())
+	restoreSessions(instances, runs, discard())
 
 	return &server{
+		instances:  instances,
 		tr:         tr,
 		registry:   registry,
 		identities: testIdentities(t, players, explored),
@@ -82,6 +91,7 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 		chunks:     chunks,
 		structures: camp,
 		clock:      clock,
+		runs:       runs,
 		sim:        sim,
 		// Long enough that the autosave cannot fire during a test, so a pass can only
 		// come from the path the test is about. The autosave has its own test.
@@ -393,6 +403,17 @@ func openClockStore(t *testing.T, dir string) *persist.ClockStore {
 	store, err := persist.OpenClockStore(dir)
 	if err != nil {
 		t.Fatalf("persist.OpenClockStore: %v", err)
+	}
+	return store
+}
+
+// openSessionStore is the saved dungeon runs' counterpart to openClockStore.
+func openSessionStore(t *testing.T, dir string) *persist.SessionStore {
+	t.Helper()
+
+	store, err := persist.OpenSessionStore(dir)
+	if err != nil {
+		t.Fatalf("persist.OpenSessionStore: %v", err)
 	}
 	return store
 }
@@ -1028,5 +1049,151 @@ func TestAPreCharacterPlayersDirectoryIsSetAsideOnStart(t *testing.T) {
 	}
 	if !bytes.Equal(kept, old) {
 		t.Error("the old record was changed on the way aside")
+	}
+}
+
+// TestASavedDungeonRunSurvivesARestart is the issue at the level a player experiences it:
+// they clear a dungeon in the evening, the process stops and starts, and the run is still
+// theirs — same seed, same defeated encounters, same lockout — and re-entering returns
+// them to it rather than to a fresh dungeon.
+//
+// Everything crosses the disk. The second server shares nothing with the first but the
+// directory: its own instance manager, its own simulations, its own entity id counter.
+// The only route from the first run to the second is sessions.bin.
+//
+// **The run is seeded through the store rather than by killing a boss, and that is a
+// deliberate limit on what this test claims.** A save is caused by a killing blow inside
+// an instance's own simulation, which is internal/game's authoritative path and not
+// reachable from this package; what a kill does — the state, the bindings, the expiry —
+// is pinned there, beside the midnight reset itself, against a clock a test can move.
+// What is pinned *here* is the part only this package can show: that startup reads the
+// records back and rebinds before anyone is served, that flushSessions writes a live
+// manager back out unchanged, and that a run whose day has ended is cleaned up on a cold
+// start instead of restored.
+func TestASavedDungeonRunSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := testConfig()
+	ruin := game.InstanceRuin{CellX: 11, CellZ: -4}
+	character := game.InstanceCharacter{PlayerID: identity.PlayerID{5, 5, 5}, CharacterID: 3}
+
+	// A week out rather than tonight's real midnight: which midnight it is belongs to
+	// internal/game, and a test pinned to the real one would fail once a day.
+	stored := []persist.SessionRecord{{
+		ID:             4_242,
+		Seed:           -7_712_884_223_119_004_001,
+		Ruin:           [2]int64{ruin.CellX, ruin.CellZ},
+		ExpiresUnix:    time.Now().AddDate(0, 0, 7).Unix(),
+		DefeatedBosses: []vnet.MobKind{vnet.MobKindVargrGuardian},
+		Bound:          []persist.SessionCharacter{{PlayerID: character.PlayerID, CharacterID: character.CharacterID}},
+	}}
+	if err := openSessionStore(t, dir).Save(stored); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	srv, _ := persistentServer(t, newQueueTransport(), dir, cfg)
+	defer srv.instances.Close()
+
+	id, bound := srv.instances.Bound(ruin, character)
+	if !bound || id != stored[0].ID {
+		t.Fatalf("the lockout did not survive the restart: %d %v", id, bound)
+	}
+	restored, live := srv.instances.Lookup(stored[0].ID)
+	if !live {
+		t.Fatal("the run did not survive the restart")
+	}
+	if restored.State != game.InstanceSaved {
+		t.Fatalf("the restored run is %v, want saved", restored.State)
+	}
+	if restored.Seed != stored[0].Seed {
+		t.Fatalf("the rebuilt world's seed is %d, want %d", restored.Seed, stored[0].Seed)
+	}
+	if len(restored.DefeatedBosses) != 1 || restored.DefeatedBosses[0] != vnet.MobKindVargrGuardian {
+		t.Fatalf("the restored progress is %v, want one Vargr guardian", restored.DefeatedBosses)
+	}
+	if len(restored.Members) != 0 {
+		t.Fatalf("the restart put %v back inside", restored.Members)
+	}
+
+	// Re-entering returns them to the run they cleared rather than to a fresh dungeon.
+	again, err := srv.instances.Reenter(ruin, character)
+	if err != nil {
+		t.Fatalf("re-entering after the restart: %v", err)
+	}
+	if again.ID != stored[0].ID {
+		t.Fatalf("re-entry opened run %d, want the one they cleared, %d", again.ID, stored[0].ID)
+	}
+
+	// And the manager writes back exactly what it read, which is the other half of the
+	// mapping this package owns.
+	srv.flushSessions()
+	written, found, err := openSessionStore(t, dir).Load()
+	if err != nil || !found {
+		t.Fatalf("the run was not written back: %v %v", found, err)
+	}
+	if !reflect.DeepEqual(written, stored) {
+		t.Fatalf("flushSessions wrote %#v, want %#v", written, stored)
+	}
+
+	// Nothing of the instance's world is on the disk. A saved run costs a binding, and
+	// the whole of that binding is the file it was read from.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "instance") {
+			t.Fatalf("an instance wrote %s to the world directory", entry.Name())
+		}
+	}
+}
+
+// A cold start over a run whose day has ended cleans it up rather than restoring it, and
+// the character walks into a fresh dungeon — which is the morning half of the same issue.
+func TestAColdStartCleansUpAnExpiredDungeonRun(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ruin := game.InstanceRuin{CellX: 11, CellZ: -4}
+	character := game.InstanceCharacter{PlayerID: identity.PlayerID{5, 5, 5}, CharacterID: 3}
+
+	expired := []persist.SessionRecord{{
+		ID:             4_242,
+		Seed:           99,
+		Ruin:           [2]int64{ruin.CellX, ruin.CellZ},
+		ExpiresUnix:    time.Now().AddDate(0, 0, -1).Unix(),
+		DefeatedBosses: []vnet.MobKind{vnet.MobKindDraugrKing},
+		Bound:          []persist.SessionCharacter{{PlayerID: character.PlayerID, CharacterID: character.CharacterID}},
+	}}
+	if err := openSessionStore(t, dir).Save(expired); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	srv, _ := persistentServer(t, newQueueTransport(), dir, testConfig())
+	defer srv.instances.Close()
+
+	if id, bound := srv.instances.Bound(ruin, character); bound {
+		t.Fatalf("an expired run bound a character to %d", id)
+	}
+	if srv.instances.Count() != 0 {
+		t.Fatalf("the cold start left %d sessions standing", srv.instances.Count())
+	}
+	fresh, err := srv.instances.Reenter(ruin, character)
+	if err != nil {
+		t.Fatalf("entering the dungeon in the morning: %v", err)
+	}
+	if fresh.ID == expired[0].ID || fresh.State != game.InstanceFree || len(fresh.DefeatedBosses) != 0 {
+		t.Fatalf("the morning's copy is %d, %v, holding %v", fresh.ID, fresh.State, fresh.DefeatedBosses)
+	}
+
+	// The cleanup is the shorter file the next pass writes, not a delete here.
+	srv.flushSessions()
+	written, found, err := openSessionStore(t, dir).Load()
+	if err != nil || !found {
+		t.Fatalf("Load after the flush: %v %v", found, err)
+	}
+	if len(written) != 0 {
+		t.Fatalf("the expired run is still on disk: %#v", written)
 	}
 }
