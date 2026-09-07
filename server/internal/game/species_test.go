@@ -355,6 +355,13 @@ func TestTheRegistryDecidesWhichSpeciesMaySpawnWhen(t *testing.T) {
 		}
 	}
 	for kind, def := range mobRegistry {
+		// A boss is offered at no hour at all, and that is a rule about the rank rather
+		// than about the clock — TestTheOpenWorldDirectorNeverOffersABoss asks it
+		// directly. Skipped here so the two rules stay separate: this one is about the
+		// dark, and a fixed encounter in a sealed room has nothing to do with the dark.
+		if def.isBoss() {
+			continue
+		}
 		if !contains(byNight, kind) {
 			t.Errorf("%s may never arrive at night, so nothing can ever make one", kind)
 		}

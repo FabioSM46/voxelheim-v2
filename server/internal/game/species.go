@@ -250,6 +250,125 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		nocturnal:  false,
 		loot:       []lootRoll{{item: ItemRawMeat, min: 1, max: 2}},
 	},
+
+	// The Vargr that guarded the tomb — the first row in this game to carry
+	// [mobRankBoss], and a species of its own rather than a bigger vargr. Everything
+	// below is read against the draugr's 60 health and the two blades in itemRegistry,
+	// which is what every other row here is priced against.
+	//
+	// **720 health is twelve draugr, and eighteen iron swings.** An iron sword does 40
+	// and a rusty one 25, so a draugr is two swings and a field vargr is one; this is
+	// eighteen and twenty-nine. That is what buys the acceptance criterion the row exists
+	// for — a fight a party *has*, rather than a creature one player removes — and it is
+	// deliberately a multiple of a number a player already knows rather than a round
+	// thousand. It is an opening playtest value: #1036 owns balance, and the approved
+	// design says the fight's length must come from the openings its moves leave rather
+	// than from inflating this number.
+	//
+	// **Its 4.0 speed is under [WalkSpeed] of 4.3, and that is the criterion rather than
+	// a coincidence.** The field vargr is 5.4 — *above* a player, which is the whole
+	// point of it: you do not outrun a vargr. A boss standing between a party and the
+	// only door must not have that property, because a party that cannot retreat has no
+	// decision to make. Three tenths of a block per second is a narrow margin on purpose:
+	// leaving is possible, slow, and costs the ground you crossed.
+	//
+	// 22 damage against [PlayerMaxHealth]'s hundred is five blows on an unarmoured
+	// level-one player, against the field vargr's seven and the draugr's ten. The 900 ms
+	// windup is the near end of the approved design's 0.9–1.5 s band and more than twice
+	// the field vargr's 400 ms: a boss blow is *readable*, and what makes it dangerous is
+	// what it costs rather than how little warning it gives.
+	//
+	// Its body is the field vargr's proportions at a size no player mistakes from across
+	// a room — 1.6 wide against 0.9, and 1.8 tall, a draugr's height on a beast's stance.
+	// Its aggro range covers any arena it can be placed in, so entering the room is the
+	// pull; it stays well under [MobSpawnRingInner] like every other row, which the
+	// geometry sweep asks of the whole registry whether or not the director can place it.
+	//
+	// **120 experience is above the field vargr's 20, which the criterion requires, and
+	// it is six times it rather than one more.** Eight draugr at 15 apiece is what one of
+	// these is worth, because a party splits it and a boss is not a thing you grind.
+	//
+	// It is not nocturnal, and there is no other honest answer: a sealed chamber has no
+	// sky, so the field that decides whether the dark brings a creature out has nothing
+	// to say about one that is placed rather than spawned.
+	vnet.MobKindVargrGuardian: {
+		rank:        mobRankBoss,
+		maxHealth:   720,
+		experience:  120,
+		speed:       4.0,
+		aggroRange:  24.0,
+		attackRange: 2.2,
+		damage:      22,
+		windup:      900 * time.Millisecond,
+		recovery:    1300 * time.Millisecond,
+		body:        body{width: 1.6, height: 1.8},
+		nocturnal:   false,
+		// Three to five pelts and a pair of bones. The count is the reward: two pelts
+		// make one leather patch, so a field vargr is half a repair and this is one and
+		// a half to two and a half of them at once. No silver — money in this world
+		// comes off the thing the night sends after you, which is the draugr, and
+		// TestSilverIsReservedCurrencyDroppedOnlyByDraugr is where that is held.
+		loot: []lootRoll{
+			{item: ItemVargrPelt, min: 3, max: 5},
+			{item: ItemBone, min: 2, max: 2},
+		},
+	},
+
+	// The Draugr king at the far end — the second boss-rank row, and the harder half of
+	// the same encounter. Read against the Vargr guardian above as well as against the
+	// draugr, because the design places it second and nothing about it should read as a
+	// repeat of the first fight.
+	//
+	// **1200 health is twenty draugr and thirty iron swings**, against the guardian's
+	// twelve and eighteen. The ratio is the design's: the approved brief wants the second
+	// fight longer than the first, and says in the same breath that the length must not
+	// be *obtained* by inflating health — so this is 1.67 times the guardian rather than
+	// double it, and the rest of the difference belongs to the moves #1023 and the Draugr
+	// issues after it define.
+	//
+	// **Its 3.0 speed is the slowest hostile row in the game**, under the field draugr's
+	// 3.2 and well under [WalkSpeed]. It is armoured and it carries a two-handed blade;
+	// retreating across its hall is a real answer, and the price of taking it is that the
+	// king is still standing when you come back. The criterion asks only for "below
+	// WalkSpeed"; this is further below it than the guardian on purpose, because the two
+	// bosses must not read as one creature at two sizes.
+	//
+	// 28 damage is four blows on an unarmoured level-one player and the heaviest in the
+	// registry — a great funerary sword, swung by something that no longer tires. It pays
+	// for that with the longest telegraph in the game at 1200 ms and an 1800 ms recovery,
+	// both inside the approved design's bands (0.9–1.5 s signals, 1.2–2 s recoveries).
+	// Its 2.4 reach is the longest here and still under [SwordReach]'s 2.5, so holding
+	// the edge of your own reach still buys something — barely, which is what a
+	// two-handed weapon should feel like.
+	//
+	// Its body is a draugr's 0.6 width taken to 1.0 by layered plate, at 2.8 tall: a
+	// vertical silhouette against the guardian's low one, which is the readability the
+	// design asks for and which the client's body row mirrors.
+	//
+	// 200 experience is above the guardian's 120 and ten times the field vargr's 20.
+	// Not nocturnal, for the guardian's reason: a sealed hall has no sky.
+	vnet.MobKindDraugrKing: {
+		rank:        mobRankBoss,
+		maxHealth:   1200,
+		experience:  200,
+		speed:       3.0,
+		aggroRange:  24.0,
+		attackRange: 2.4,
+		damage:      28,
+		windup:      1200 * time.Millisecond,
+		recovery:    1800 * time.Millisecond,
+		body:        body{width: 1.0, height: 2.8},
+		nocturnal:   false,
+		// The king's own iron sword, and the bones of what he was. One blade, fixed:
+		// stackOf gives it full durability, so this is a whole second weapon rather than
+		// a fraction of one, and a fixed count is what keeps a boss's reward a *thing*
+		// the party divides rather than a number they roll. No silver, for the reason
+		// the guardian carries none.
+		loot: []lootRoll{
+			{item: ItemIronSword, min: 1, max: 1},
+			{item: ItemBone, min: 3, max: 5},
+		},
+	},
 }
 
 // mobByKind is one species' row, and whether the kind is one this server knows.
@@ -281,6 +400,19 @@ func (m *mob) species() mobDefinition { return mobRegistry[m.kind] }
 // the two are composed here once instead of being spelled as a branch at the spawn site
 // that a third species would have to be added to.
 //
+// **A boss-rank row is never offered, and this is the only place that has to say so.**
+// spawn.go's four rules are about refilling the dark around a moving player: a ring
+// around somebody who walked somewhere, a per-cube ceiling, a world ceiling, and a sweep
+// that takes back what nobody has been near. Not one of them describes a fixed encounter
+// standing in a sealed room, which is placed once when its session's world is made and
+// is never respawned or reclaimed. The exclusion belongs *here* rather than in the
+// director for the reason the nocturnal one does: the director does not know what a
+// draugr is, and teaching it what an instance is would be the wrong shape twice over —
+// it would make the open world aware of a room it can never reach.
+//
+// It is stated as `def.isBoss()` rather than as a list of kinds, so the next boss is a
+// row in the table above and nothing else.
+//
 // Sorted, because the caller draws from the result with the simulation's own generator
 // and map iteration order is deliberately random: an unsorted slice would make the same
 // world place different creatures on different runs, which is exactly the property
@@ -289,6 +421,9 @@ func spawnableSpecies(night bool) []vnet.MobKind {
 	kinds := make([]vnet.MobKind, 0, len(mobRegistry))
 	for kind, def := range mobRegistry {
 		if !def.rank.valid() {
+			continue
+		}
+		if def.isBoss() {
 			continue
 		}
 		if def.nocturnal && !night {

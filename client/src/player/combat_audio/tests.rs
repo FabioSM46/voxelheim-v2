@@ -186,9 +186,19 @@ fn aggro_repeats_only_after_idle_and_windup_is_one_telegraph_per_transition() {
     }
 }
 
+/// The bosses are in this list for a different reason from the three beside them, and
+/// the difference is worth one sentence: a deer, a villager and a horse have no hostile
+/// voice and never will, while a boss has one this build has not been given. Both are
+/// silent through every action state today, and both are audible when hit.
 #[test]
 fn passive_species_do_not_gain_hostile_voices_from_action_states() {
-    for kind in [MobKind::Deer, MobKind::Villager, MobKind::Horse] {
+    for kind in [
+        MobKind::Deer,
+        MobKind::Villager,
+        MobKind::Horse,
+        MobKind::VargrGuardian,
+        MobKind::DraugrKing,
+    ] {
         let (mut app, mixer) = fixture();
         for action in [MobAction::Idle, MobAction::Chase, MobAction::Windup] {
             snapshot(&mut app, vec![mob(kind, action)]);

@@ -299,11 +299,16 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // V32 changes landmark replacement from a global list to one tile rectangle and
 // adds discovery state. The semantic break needs a bump even with the same tag.
 // V33 appends intent and authoritative world invalidation; neither is safely ignored.
-func TestProtocolV33CrossesPortals(t *testing.T) {
+// V34 appends MobKind.VargrGuardian and MobKind.DraugrKing. The union does not move:
+// what owes the bump is an enum member inside a table field whose decoder refuses an
+// unknown value rather than dropping it, which is Villager's argument at V25 and
+// Horse's at V27. Both members ride one bump because a receiver that can name one boss
+// and not the other crosses the first arena and loses the session in the second.
+func TestProtocolV34AppendsTheBossSpecies(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 33 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 33", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 34 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 34", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -3283,6 +3288,12 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"MobKind.Villager": {byte(vnet.MobKindVillager), 4},
 		// V27 reserves the mountable stable resident; authoritative behavior follows.
 		"MobKind.Horse": {byte(vnet.MobKindHorse), 5},
+		// V34's pair, appended after Horse = 5: the first two boss-rank species. Each
+		// is a species of its own rather than a bigger Draugr or Vargr, so a
+		// renumbering here would draw one creature where the server said another —
+		// which is the whole reason this enum appends.
+		"MobKind.VargrGuardian": {byte(vnet.MobKindVargrGuardian), 6},
+		"MobKind.DraugrKing":    {byte(vnet.MobKindDraugrKing), 7},
 		// Appended after Forge = 2.
 		"StructureKind.Campfire": {byte(vnet.StructureKindCampfire), 3},
 		// Appended after Tent = 4.
@@ -3323,9 +3334,10 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 	// a decision fails here rather than reaching the wire. Each count includes the
 	// zero member every one of these enums carries to fail closed.
 	for name, pair := range map[string][2]int{
-		// Five since V25's Villager, which is the one member of this enum whose arrival
-		// moved ProtocolVersion.Current on its own.
-		"MobKind":       {len(vnet.EnumNamesMobKind), 6},
+		// Six since V25's Villager, which was the one member of this enum whose arrival
+		// moved ProtocolVersion.Current on its own — until V34 appended two more that
+		// did it together.
+		"MobKind":       {len(vnet.EnumNamesMobKind), 8},
 		"StructureKind": {len(vnet.EnumNamesStructureKind), 5},
 		"RecipeID":      {len(vnet.EnumNamesRecipeID), 22},
 	} {

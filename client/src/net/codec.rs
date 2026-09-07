@@ -442,6 +442,14 @@ pub enum MobKind {
     /// A capital paddock resident. It is routed to the shared horse rig and has no
     /// combat body on either side.
     Horse,
+    /// The Vargr that guarded the tomb: a boss-rank species of its own, not a bigger
+    /// [`MobKind::Vargr`]. It arrives over V34 and this build knows its body box and
+    /// nothing else about it — `MobVisuals::of` answers `None`, and the rig, the
+    /// collapse and the voice are #1019's.
+    VargrGuardian,
+    /// The Draugr king at the far end, on the same terms as [`MobKind::VargrGuardian`]:
+    /// a distinct species, decoded and undrawn.
+    DraugrKing,
 }
 
 /// Which learned horse authoritative mount state names.
@@ -497,6 +505,14 @@ impl MobKind {
     /// [`crate::net::session`] turns every decode error into a protocol failure. The two
     /// therefore move in the same commit, and the vargr arrived with the one that drew
     /// it — see [`crate::player::mobs`].
+    ///
+    /// **The two boss members are accepted while nothing draws them, and that is the
+    /// villager's precedent rather than a hole in the sentence above.** `MobVisuals::of`
+    /// answers `None` for a villager and no `Mob` entity is spawned for one, so there is
+    /// no body with no mesh — there is no body. The alternative is worse in exactly the
+    /// direction that paragraph warns about: refusing a member the server really sends
+    /// ends the session, and the server sends these the moment a party crosses into the
+    /// first arena. #1019 gives them their rig.
     fn from_wire(value: fb::MobKind) -> Option<Self> {
         match value {
             fb::MobKind::Draugr => Some(Self::Draugr),
@@ -504,6 +520,8 @@ impl MobKind {
             fb::MobKind::Deer => Some(Self::Deer),
             fb::MobKind::Villager => Some(Self::Villager),
             fb::MobKind::Horse => Some(Self::Horse),
+            fb::MobKind::VargrGuardian => Some(Self::VargrGuardian),
+            fb::MobKind::DraugrKing => Some(Self::DraugrKing),
             _ => None,
         }
     }
@@ -9277,10 +9295,14 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     #[test]
-    fn protocol_v33_appends_authoritative_portal_crossings() {
+    fn protocol_v34_appends_the_boss_species() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
-        // V33 cannot be ignored: the two peers must agree which world is live.
-        assert_eq!(fb::ProtocolVersion::Current.0, 33);
+        // V33 cannot be ignored: the two peers must agree which world is live. V34
+        // appends `MobKind::VargrGuardian` and `MobKind::DraugrKing`, which is
+        // `Villager`'s argument for the third and fourth time: an enum member inside a
+        // table field whose decoder refuses what it cannot name, so an older peer would
+        // handshake cleanly and end the session the first time a boss entered view.
+        assert_eq!(fb::ProtocolVersion::Current.0, 34);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -11423,6 +11445,11 @@ mod tests {
         assert_eq!(fb::MobKind::Deer.0, 3);
         assert_eq!(fb::MobKind::Villager.0, 4);
         assert_eq!(fb::MobKind::Horse.0, 5);
+        // V34's two boss species, appended after Horse. Each is a species of its own
+        // rather than a bigger Draugr or Vargr, so a renumbering here would draw one
+        // creature where the server said another and no compiler would object.
+        assert_eq!(fb::MobKind::VargrGuardian.0, 6);
+        assert_eq!(fb::MobKind::DraugrKing.0, 7);
 
         assert_eq!(fb::MobAction::Unknown.0, 0);
         assert_eq!(fb::MobAction::Idle.0, 1);
@@ -11633,7 +11660,20 @@ mod tests {
         // V27 reserved Horse together with the mount contract. It is accepted now that
         // the paddock renderer exists; the wire member and version do not move.
         assert_eq!(MobKind::from_wire(fb::MobKind::Horse), Some(MobKind::Horse));
-        assert_eq!(MobKind::from_wire(fb::MobKind(6)), None);
+        // V34's pair is accepted while nothing draws either — the villager's precedent,
+        // argued in [`MobKind::from_wire`]. Refusing a member the server really sends
+        // would end the session the moment a party reaches the first arena.
+        assert_eq!(
+            MobKind::from_wire(fb::MobKind::VargrGuardian),
+            Some(MobKind::VargrGuardian)
+        );
+        assert_eq!(
+            MobKind::from_wire(fb::MobKind::DraugrKing),
+            Some(MobKind::DraugrKing)
+        );
+        // One past the contract, which is 8 since V34. The literal moves with the enum;
+        // what this pins is that the door behind the newest member is still shut.
+        assert_eq!(MobKind::from_wire(fb::MobKind(8)), None);
         assert_eq!(MobKind::from_wire(fb::MobKind(200)), None);
 
         assert_eq!(StructureKind::from_wire(fb::StructureKind::Unknown), None);

@@ -8,8 +8,15 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
-// No production row is a boss yet. These focused tests temporarily promote the
-// draugr row while all t.Parallel tests are paused, then restore it before returning.
+// These focused tests temporarily promote the draugr row while all t.Parallel tests are
+// paused, then restore it before returning.
+//
+// **Two production rows are boss-rank since #1018, and this synthetic one stays anyway.**
+// The reason is the fight rather than the classification: a Vargr guardian has 720 health
+// and a Draugr king 1200, so driving these assertions through the authoritative
+// Attack-then-tick path would cost eighteen and thirty swings apiece and would measure
+// the balance rather than the encounter contract. The real species are pinned against
+// that contract in boss_species_test.go, where the killing damage is applied directly.
 func withTestBoss(t *testing.T) {
 	t.Helper()
 	definition := mobRegistry[vnet.MobKindDraugr]
@@ -277,51 +284,38 @@ func TestSoloBossLootSurvivesDeathUntilSharedExpiry(t *testing.T) {
 	}
 }
 
-func TestNonKillBossRemovalDiscardsEncounterWithoutRollingLoot(t *testing.T) {
+// The non-kill exit still drops the encounter and rolls nothing — asked of the boundary
+// directly, because the director no longer reaches a boss to take it there.
+//
+// **This test used to drive that boundary through the dawn and the distance sweep, and
+// #1018 is why it cannot any more.** `removeSpentMobsLocked` now skips every boss-rank
+// row: a fixed encounter in a sealed room is worth simulating for as long as its session
+// exists, and the distance rule would otherwise delete one five seconds after a wiped
+// party walked out of it. What those two sweeps were standing in for is
+// [Sim.discardMobLocked] — the exit a boss *reset* will use — so that is what this calls.
+// The half that moved out of here did not evaporate: TestTheDirectorNeverTakesABossAway
+// asserts that both sweeps leave a real boss standing.
+func TestDiscardingABossDropsItsEncounterWithoutRollingLoot(t *testing.T) {
 	withTestBoss(t)
 
-	for _, tc := range []struct {
-		name   string
-		remove func(*vitalsHarness, *mob)
-	}{
-		{name: "dawn", remove: func(h *vitalsHarness, _ *mob) { h.step() }},
-		{name: "distance", remove: func(h *vitalsHarness, _ *mob) {
-			h.keepNight()
-			h.advance(int(h.sim.mobDespawnTicks) + 2)
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 1)
-			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-			id := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{500.5, 64, 500.5})
-			h.sim.mu.Lock()
-			m := h.sim.mobs[id]
-			h.sim.startBossEncounterLocked(m, player)
-			m.firstHit = newMobTap(player)
-			h.sim.mu.Unlock()
-
-			tc.remove(h, m)
-			h.sim.mu.Lock()
-			_, mobExists := h.sim.mobs[id]
-			_, corpseExists := h.sim.corpses[id]
-			next := h.sim.rollLootLocked(&mob{kind: vnet.MobKindDraugr})
-			h.sim.mu.Unlock()
-			if mobExists || corpseExists || m.encounter != nil || m.firstHit != nil {
-				t.Fatalf("non-kill removal left mob=%v corpse=%v encounter=%v tap=%v", mobExists, corpseExists, m.encounter != nil, m.firstHit != nil)
-			}
-			wantRNG := newLootRNG(testWorldSeed)
-			if got, want := next.entries[0].stack.count, uint16(1+wantRNG.IntN(2)); got != want {
-				t.Fatalf("non-kill removal advanced loot RNG: next=%d want=%d", got, want)
-			}
-		})
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 1)
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	id := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{500.5, 64, 500.5})
+	h.sim.mu.Lock()
+	m := h.sim.mobs[id]
+	h.sim.startBossEncounterLocked(m, player)
+	m.firstHit = newMobTap(player)
+	h.sim.discardMobLocked(m)
+	_, mobExists := h.sim.mobs[id]
+	_, corpseExists := h.sim.corpses[id]
+	next := h.sim.rollLootLocked(&mob{kind: vnet.MobKindDraugr})
+	h.sim.mu.Unlock()
+	if mobExists || corpseExists || m.encounter != nil || m.firstHit != nil {
+		t.Fatalf("non-kill removal left mob=%v corpse=%v encounter=%v tap=%v",
+			mobExists, corpseExists, m.encounter != nil, m.firstHit != nil)
 	}
-}
-
-func TestProductionRegistryContainsNoBossSpeciesYet(t *testing.T) {
-	t.Parallel()
-	for kind, definition := range mobRegistry {
-		if definition.isBoss() {
-			t.Errorf("production species %s is a boss; issue #327 adds only generic classification", kind)
-		}
+	wantRNG := newLootRNG(testWorldSeed)
+	if got, want := next.entries[0].stack.count, uint16(1+wantRNG.IntN(2)); got != want {
+		t.Fatalf("non-kill removal advanced loot RNG: next=%d want=%d", got, want)
 	}
 }
