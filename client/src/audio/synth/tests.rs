@@ -238,3 +238,28 @@ fn invalid_descriptions_fail_before_rendering() {
         );
     }
 }
+
+#[test]
+fn a_release_longer_than_the_bake_is_rejected_instead_of_silencing_the_clip() {
+    let mut described = sound(Exciter::Oscillator {
+        wave: Wave::Square,
+        hz: 100.0,
+    });
+    described.layers[0].envelope.release = 60.0;
+    for duration in [1.0, MAX_BAKED_SECONDS] {
+        assert_eq!(
+            described.bake(duration, 48_000, 0).unwrap_err(),
+            Error::Envelope
+        );
+    }
+    // Equality is a supported full-duration release; a longer release in any later layer
+    // must still be rejected, even when the first layer fits.
+    described.layers[0].envelope.release = 0.1;
+    let baked = described.bake(0.1, 48_000, 0).unwrap();
+    assert!(baked.samples().iter().any(|sample| sample.abs() > 0.25));
+    assert_eq!(*baked.samples().last().unwrap(), 0.0);
+    let mut oversized = described.layers[0].clone();
+    oversized.envelope.release = 0.1001;
+    described.layers.push(oversized);
+    assert_eq!(described.bake(0.1, 48_000, 0).unwrap_err(), Error::Envelope);
+}

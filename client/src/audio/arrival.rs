@@ -21,7 +21,7 @@ struct Arrival {
 
 pub(super) fn register(app: &mut App) {
     app.init_resource::<Arrival>()
-        .add_systems(Update, play_arrival);
+        .add_systems(Update, play_arrival.after(super::apply_the_controls));
 }
 
 fn description() -> Sound {
@@ -64,10 +64,10 @@ fn play_arrival(
         arrival.seen = None;
         arrival.playing = None;
     }
-    let Some(eye) = eyes.iter().next() else {
-        return;
-    };
-    if arrival.seen != Some(session.0.entity_id) {
+    let eye = eyes.iter().next();
+    if arrival.seen != Some(session.0.entity_id)
+        && let Some(eye) = eye
+    {
         arrival.seen = Some(session.0.entity_id);
         arrival.origin = Vec3::from_array(session.0.spawn) + Vec3::Y * EYE_HEIGHT;
         let rate = mixer.0.sample_rate();
@@ -96,13 +96,17 @@ fn play_arrival(
     }
     let origin = arrival.origin;
     if let Some(playing) = arrival.playing.as_mut() {
-        playing.place(spatial::place(
-            eye.translation,
-            spatial::listener_yaw(eye.rotation),
-            origin,
-            16.0,
-            0.0,
-        ));
+        // A disappearing camera changes where we can place a sound, not whether its
+        // already-owned source must be fed, drained and returned to the mixer.
+        if let Some(eye) = eye {
+            playing.place(spatial::place(
+                eye.translation,
+                spatial::listener_yaw(eye.rotation),
+                origin,
+                16.0,
+                0.0,
+            ));
+        }
         if playing.pump() != Status::Playing {
             arrival.playing = None;
         }
@@ -190,5 +194,26 @@ mod tests {
                 .sample_rate(),
             44_100
         );
+    }
+    #[test]
+    fn losing_the_camera_does_not_strand_a_playing_chime_or_its_slot() {
+        let (mut app, mixer) = fixture();
+        app.insert_resource(session());
+        app.update();
+        assert!(app.world().resource::<Arrival>().playing.is_some());
+        let cameras: Vec<_> = app
+            .world_mut()
+            .query_filtered::<Entity, With<WorldCamera>>()
+            .iter(app.world())
+            .collect();
+        for camera in cameras {
+            app.world_mut().despawn(camera);
+        }
+        assert!(hear(&mut app, &mixer) > 1.0);
+        assert!(app.world().resource::<Arrival>().playing.is_none());
+        let held: Vec<_> = (0..crate::audio::mixer::MAX_SOURCES)
+            .filter_map(|_| mixer.claim(Bus::Voice))
+            .collect();
+        assert_eq!(held.len(), crate::audio::mixer::MAX_SOURCES);
     }
 }
