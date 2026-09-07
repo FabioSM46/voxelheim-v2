@@ -975,9 +975,6 @@ impl EntryOfferInbox {
     /// Taking it is what spends it on this side, which mirrors the server: an offer is
     /// answered once and forgotten on either answer, so a consumer that kept the id
     /// would be holding one every later answer is refused with `EntryOfferUnknown`.
-    // The consent dialog that drains it is #1030's second part; this side of the
-    // boundary ships first so that the part which draws an offer has one to draw.
-    #[allow(dead_code)]
     pub fn take(&mut self) -> Option<codec::InstanceEntryOffer> {
         self.0.take()
     }
@@ -985,6 +982,13 @@ impl EntryOfferInbox {
     /// Drops an offer that belonged to a world or a session which is no longer current.
     fn clear(&mut self) {
         self.0 = None;
+    }
+
+    /// Holds one offer as `drain_session_events` would. Test-only, so the consent dialog
+    /// can be driven without a socket — `WorldInbox::push`'s reason.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, offer: codec::InstanceEntryOffer) {
+        self.0 = Some(offer);
     }
 }
 

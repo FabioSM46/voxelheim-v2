@@ -16,6 +16,7 @@ mod hotbar;
 /// puts it in `player`, on the other side of this boundary. Nothing outside the tests calls
 /// into here; the drawing is still reached through `stack_style` and `refresh_cell_contents`.
 pub(crate) mod icon;
+mod instance_entry;
 mod inventory;
 mod leaving;
 mod login;
@@ -49,9 +50,9 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick,
-    ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick, SelfVitals, ViewMode,
-    item_linear_rgba, item_livery, item_shape,
+    ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick, EntryOffer,
+    EntryOfferAnswer, ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick,
+    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -192,6 +193,7 @@ impl Plugin for UiPlugin {
             .add_message::<crate::player::PlayerTradeClick>()
             .add_message::<crate::player::PlayerTradeEnded>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
@@ -239,6 +241,7 @@ impl Plugin for UiPlugin {
                 (
                     loot::LootUiPlugin,
                     map::MapUiPlugin,
+                    instance_entry::EntryOfferUiPlugin,
                     prompt::ConfirmationPromptUiPlugin,
                     trade::PlayerTradeUiPlugin,
                     vendor::VendorUiPlugin,
@@ -262,6 +265,11 @@ impl Plugin for UiPlugin {
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
     app.init_resource::<ConfirmationPrompt>()
+        // `player::instance_entry` owns this pair in the game. Initialising them here
+        // too keeps this narrow bundle installable on its own, which is the reason every
+        // other resource in this list is here.
+        .init_resource::<EntryOffer>()
+        .add_message::<EntryOfferAnswer>()
         .add_message::<CancelLeaveRequest>()
         .add_message::<ConfirmationAnswer>()
         .add_message::<PlayerTradeClick>()
@@ -335,6 +343,27 @@ struct ModalControls<'w> {
     prompt: ResMut<'w, ConfirmationPrompt>,
     prompt_answers: MessageWriter<'w, ConfirmationAnswer>,
     trade_clicks: MessageWriter<'w, PlayerTradeClick>,
+    entry_offer: Res<'w, EntryOffer>,
+    entry_answers: MessageWriter<'w, EntryOfferAnswer>,
+}
+
+impl ModalControls<'_> {
+    /// Refuses the entry offer if one is up, and says whether there was one.
+    ///
+    /// **A refusal, not a dismissal.** The key that closes this dialog is the player
+    /// saying no, so it is worth sending: it costs the character nothing and it lets the
+    /// server forget the offer at once. The id comes from the offer on screen, which is
+    /// what keeps a press from answering a crossing that replaced it.
+    fn refuse_entry_offer(&mut self) -> bool {
+        let Some(offer) = self.entry_offer.current() else {
+            return false;
+        };
+        self.entry_answers.write(EntryOfferAnswer {
+            offer_id: offer.offer_id,
+            accept: false,
+        });
+        true
+    }
 }
 
 impl Controls<'_> {
@@ -539,6 +568,13 @@ fn choose_input_mode(
                     modals.trade_clicks.write(PlayerTradeClick::Cancel);
                     InputMode::Playing
                 }
+                // The dialog's own No. `player::instance_entry` owns what happens next:
+                // it spends the offer and hands the controls back, and this returns to
+                // `Playing` for the frame in between rather than deciding anything.
+                InputMode::EntryOffer => {
+                    modals.refuse_entry_offer();
+                    InputMode::Playing
+                }
                 InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
                     InputMode::Playing
                 }
@@ -564,6 +600,7 @@ fn choose_input_mode(
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
             InputMode::Trade => return,
+            InputMode::EntryOffer => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -590,6 +627,7 @@ fn choose_input_mode(
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
             InputMode::Trade => return,
+            InputMode::EntryOffer => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
         };
@@ -1727,8 +1765,10 @@ mod tests {
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(life_state)))
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1789,8 +1829,10 @@ mod tests {
             .insert_resource(prompt)
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1811,6 +1853,57 @@ mod tests {
         assert!(!answers[0].accepted);
     }
 
+    /// **Escape over the entry dialog is a refusal, not a dismissal.** It costs the
+    /// character nothing, it leaves them outside and unbound, and it is what lets the
+    /// server forget the offer at once rather than hold it. The id is the one on screen,
+    /// which is what keeps the press from answering a crossing that replaced it.
+    #[test]
+    fn escape_refuses_the_entry_offer_and_names_the_one_on_screen() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+        let mut offer = EntryOffer::default();
+        offer.open_for_test(crate::net::InstanceEntryOffer {
+            offer_id: 41,
+            terms: crate::net::SessionBinding {
+                arch: crate::net::BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_800_000_000,
+            },
+        });
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(keys)
+            .insert_resource(InputMode::EntryOffer)
+            .insert_resource(offer)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<ConfirmationPrompt>()
+            .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
+            .add_message::<PlayerTradeClick>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<EntryOfferAnswer>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![EntryOfferAnswer {
+                offer_id: 41,
+                accept: false,
+            }]
+        );
+    }
+
     #[test]
     fn escape_during_leave_asks_but_only_the_server_answer_restores_play() {
         let mut keys = ButtonInput::default();
@@ -1827,8 +1920,10 @@ mod tests {
             })
             .insert_resource(LeaveCancellation::Available)
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1927,8 +2022,10 @@ mod tests {
             .insert_resource(screen)
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
