@@ -25,6 +25,7 @@ mod menu;
 mod party;
 mod prompt;
 mod servers;
+mod sessions;
 mod settings;
 mod status;
 mod storm;
@@ -246,8 +247,14 @@ impl Plugin for UiPlugin {
                 menu::MenuPlugin,
                 party::PartyUiPlugin,
                 servers::ServerListUiPlugin,
-                settings::SettingsScreenPlugin,
-                status::StatusUiPlugin,
+                // Nested for the reason the four groups above are: the tuple is at
+                // `add_plugins`' fifteen-plugin ceiling, and the sessions window is the
+                // entry that reached it.
+                (
+                    sessions::SessionsUiPlugin,
+                    settings::SettingsScreenPlugin,
+                    status::StatusUiPlugin,
+                ),
             ));
 
         add_input_mode_systems(app);
@@ -477,6 +484,7 @@ fn choose_input_mode(
                 | InputMode::TradePrompt
                 | InputMode::Trade
                 | InputMode::Map
+                | InputMode::Sessions
         )
     {
         reject_prompt(&mut modals.prompt, &mut modals.prompt_answers);
@@ -539,9 +547,11 @@ fn choose_input_mode(
                     modals.trade_clicks.write(PlayerTradeClick::Cancel);
                     InputMode::Playing
                 }
-                InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
-                    InputMode::Playing
-                }
+                InputMode::Menu
+                | InputMode::Loot
+                | InputMode::Vendor
+                | InputMode::Map
+                | InputMode::Sessions => InputMode::Playing,
                 InputMode::Playing | InputMode::Chat | InputMode::Inventory => InputMode::Menu,
             };
         set_mode(&mut mode, next);
@@ -567,6 +577,7 @@ fn choose_input_mode(
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
+            InputMode::Sessions => return,
         };
         set_mode(&mut mode, next);
         return;
@@ -592,6 +603,35 @@ fn choose_input_mode(
             InputMode::Trade => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
+            InputMode::Sessions => return,
+        };
+        set_mode(&mut mode, next);
+        return;
+    }
+
+    // The sessions window is the map's rule with a different key, and it is the map's
+    // rule rather than a new one because it is the same kind of surface: a full-screen
+    // reading of server state over a live session, with nothing in it to press. It opens
+    // from play, closes onto play, is ignored while another screen owns the keyboard, and
+    // is forced shut by death — that last one is presentation rather than a decision,
+    // since a lockout is the server's and a corpse owes exactly what it owed standing up.
+    // It does not replace another overlay either: pressing `O` over the pack does nothing,
+    // exactly as pressing `M` there does.
+    if keys.just_pressed(bindings.key(Control::Sessions)) {
+        if vitals.dead() {
+            return;
+        }
+        let next = match *mode {
+            InputMode::Playing => InputMode::Sessions,
+            InputMode::Sessions => InputMode::Playing,
+            InputMode::Inventory => return,
+            InputMode::Loot => return,
+            InputMode::Vendor => return,
+            InputMode::TradePrompt => return,
+            InputMode::Trade => return,
+            InputMode::Chat => return,
+            InputMode::Menu => return,
+            InputMode::Map => return,
         };
         set_mode(&mut mode, next);
     }
@@ -1902,6 +1942,67 @@ mod tests {
         );
         assert_eq!(
             mode_after_key_while(InputMode::Map, KeyCode::KeyM, LifeState::Dead),
+            InputMode::Playing
+        );
+    }
+
+    /// `O` opens and closes the sessions window, and every screen that already owns the
+    /// keyboard keeps it.
+    ///
+    /// The map's test with a different key, and deliberately assertion for assertion: the
+    /// two windows are the same kind of surface, so anything the map does here that the
+    /// sessions window does not is a difference somebody has to justify.
+    #[test]
+    fn the_sessions_key_toggles_the_window_and_is_ignored_by_every_other_screen() {
+        assert_eq!(
+            mode_after_key(InputMode::Playing, KeyCode::KeyO),
+            InputMode::Sessions,
+            "`KeyO` was bound to nothing at all before this control existed"
+        );
+        assert_eq!(
+            mode_after_key(InputMode::Sessions, KeyCode::KeyO),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key(InputMode::Sessions, KeyCode::Escape),
+            InputMode::Playing,
+            "escape closes the window onto play rather than opening the pause menu over it"
+        );
+        for mode in [
+            InputMode::Chat,
+            InputMode::Loot,
+            InputMode::Menu,
+            InputMode::Inventory,
+            InputMode::Map,
+        ] {
+            assert_eq!(
+                mode_after_key(mode, KeyCode::KeyO),
+                mode,
+                "{mode:?} does not give the keyboard up to the sessions window"
+            );
+        }
+        for (name, key) in [("the pack", KeyCode::KeyE), ("the map", KeyCode::KeyM)] {
+            assert_eq!(
+                mode_after_key(InputMode::Sessions, key),
+                InputMode::Sessions,
+                "{name} does not replace an open sessions window"
+            );
+        }
+    }
+
+    /// Death takes the sessions window, exactly as it takes the map and the pack.
+    ///
+    /// Presentation and not a decision: a corpse owes exactly what it owed standing up, and
+    /// the server is the only thing that says otherwise. What death takes is a screen
+    /// nobody can read over a death overlay.
+    #[test]
+    fn a_dead_player_cannot_open_the_sessions_window_and_does_not_keep_one() {
+        assert_eq!(
+            mode_after_key_while(InputMode::Playing, KeyCode::KeyO, LifeState::Dead),
+            InputMode::Playing
+        );
+        assert_eq!(
+            mode_after_key_while(InputMode::Sessions, KeyCode::KeyO, LifeState::Dead),
             InputMode::Playing
         );
     }

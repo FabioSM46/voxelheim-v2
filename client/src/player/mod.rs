@@ -308,6 +308,10 @@ pub enum InputMode {
     /// [`Self::Menu`] and unlike [`Self::Inventory`]: reading a map is not something a
     /// player does while walking, and a drag that panned the map would also be steering.
     Map,
+    /// Pointer visible and confined over the dungeon sessions window. Movement is closed,
+    /// as it is for [`Self::Map`]: the window is a full list of what this character owes,
+    /// read rather than acted in, and there is nothing in it to do while walking.
+    Sessions,
 }
 
 /// Orders gameplay input after UI keys have chosen this frame's [`InputMode`].
