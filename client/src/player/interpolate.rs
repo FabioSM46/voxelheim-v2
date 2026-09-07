@@ -396,6 +396,12 @@ impl SnapshotBuffer {
         })
     }
 
+    /// Current validated state for presentation events that must bind to an exact tick.
+    /// Interpolated positions cannot prove the visibility relation on the wire.
+    pub(super) fn latest_snapshot(&self) -> Option<&Snapshot> {
+        self.latest.as_ref().map(|held| &held.snapshot)
+    }
+
     pub fn latest_tick(&self) -> Option<u32> {
         self.latest.as_ref().map(|held| held.snapshot.server_tick)
     }
