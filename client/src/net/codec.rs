@@ -1544,6 +1544,8 @@ pub enum RefusalReason {
     NotAtPortal,
     InstanceLimit,
     InstanceUnavailable,
+    SessionMismatch,
+    EntryOfferUnknown,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1607,6 +1609,8 @@ impl RefusalReason {
             fb::RefusalReason::NotAtPortal => Self::NotAtPortal,
             fb::RefusalReason::InstanceLimit => Self::InstanceLimit,
             fb::RefusalReason::InstanceUnavailable => Self::InstanceUnavailable,
+            fb::RefusalReason::SessionMismatch => Self::SessionMismatch,
+            fb::RefusalReason::EntryOfferUnknown => Self::EntryOfferUnknown,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -4632,6 +4636,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::PlayerTradeRequest
         | fb::Payload::VoiceFrame
         | fb::Payload::PortalRequest
+        | fb::Payload::InstanceEntryAnswer
         | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
@@ -4738,6 +4743,16 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 kind,
                 target,
             }))
+        }
+        // V35's entry prompt, carried by name and read by nobody yet. The dialog that
+        // shows a player what they are about to accept is #1030 and the sessions window
+        // that lists what they already owe is #979; the contract those two consume is
+        // settled here so that neither of them has to invent a message. It is deferred
+        // rather than consumed for the reason `MapTile` was before the map window
+        // existed — there is no value for a decoded offer to become — and the arm that
+        // reads it belongs with the first consumer that needs one.
+        fb::Payload::InstanceEntryOffer | fb::Payload::InstanceBindings => {
+            Ok(Message::Deferred(name))
         }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
@@ -9294,15 +9309,27 @@ mod tests {
     /// receiver does with the value it does not recognise, not which way it travelled.**
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
+    ///
+    /// `InstanceBindings` is appended without moving the version: it travels
+    /// server -> client, an older client drops the tag, and an older server sends none —
+    /// which reads to a newer client as a character who owes nothing, and a server with
+    /// no saved runs is exactly that.
+    ///
+    /// V35 appends the dungeon entry contract. `InstanceEntryAnswer` travels
+    /// client -> server, so a V34 server closes the session on the unknown tag rather
+    /// than dropping the frame; `InstanceEntryOffer` travels back and rides the same
+    /// bump because an offer nobody can answer is not one. The two appended
+    /// `RefusalReason` members owe nothing on their own: that enum is read through its
+    /// zero member and never fails a frame.
     #[test]
-    fn protocol_v34_appends_the_boss_species() {
+    fn protocol_v35_appends_the_dungeon_entry_contract() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
         // V33 cannot be ignored: the two peers must agree which world is live. V34
         // appends `MobKind::VargrGuardian` and `MobKind::DraugrKing`, which is
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 34);
+        assert_eq!(fb::ProtocolVersion::Current.0, 35);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -9371,6 +9398,9 @@ mod tests {
             (fb::Payload::WorldChange, 65),
             (fb::Payload::BlowLanded, 66),
             (fb::Payload::MiningActivity, 67),
+            (fb::Payload::InstanceEntryOffer, 68),
+            (fb::Payload::InstanceEntryAnswer, 69),
+            (fb::Payload::InstanceBindings, 70),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -9386,7 +9416,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            68,
+            71,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9416,7 +9446,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 68] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 71] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -9497,6 +9527,9 @@ mod tests {
         (fb::Payload::WorldChange, Handling::Consumed),
         (fb::Payload::BlowLanded, Handling::Consumed),
         (fb::Payload::MiningActivity, Handling::Consumed),
+        (fb::Payload::InstanceEntryOffer, Handling::Deferred),
+        (fb::Payload::InstanceEntryAnswer, Handling::ClientOnly),
+        (fb::Payload::InstanceBindings, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -9695,6 +9728,17 @@ mod tests {
             (
                 fb::RefusalReason::InstanceUnavailable,
                 RefusalReason::InstanceUnavailable,
+            ),
+            // V35's two. They are known here before the prompt that produces them is
+            // drawn, for the reason the three above were known before #974: a refusal
+            // this build cannot name costs the player the one sentence they could act on.
+            (
+                fb::RefusalReason::SessionMismatch,
+                RefusalReason::SessionMismatch,
+            ),
+            (
+                fb::RefusalReason::EntryOfferUnknown,
+                RefusalReason::EntryOfferUnknown,
             ),
         ] {
             assert_eq!(
@@ -11362,6 +11406,11 @@ mod tests {
             (fb::RefusalReason::NotAtPortal, 48),
             (fb::RefusalReason::InstanceLimit, 49),
             (fb::RefusalReason::InstanceUnavailable, 50),
+            // V35's two, appended inside the low group: a run somebody else owns and a
+            // prompt that is no longer open are both the world answering a legal
+            // question no, and a player can act on either.
+            (fb::RefusalReason::SessionMismatch, 51),
+            (fb::RefusalReason::EntryOfferUnknown, 52),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -11371,7 +11420,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            55,
+            57,
             "a new reason needs a sentence here, not a test edit"
         );
 

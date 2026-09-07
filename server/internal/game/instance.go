@@ -128,6 +128,16 @@ type InstanceManager struct {
 	partyVisits   map[portalPartyVisit]uint64
 	portalEntries map[InstanceCharacter]PortalEntry
 	disconnected  map[InstanceCharacter]portalReconnect
+	// offers is the one entry offer a character may have outstanding, and holding at
+	// most one per character is what "an offer is scoped to the crossing that produced
+	// it" is made of: a later crossing overwrites the earlier offer rather than banking
+	// it. See instance_entry.go.
+	offers map[InstanceCharacter]pendingOffer
+	// bindingWatchers is one live connection per character, told the whole list whenever
+	// it changes. See instance_bindings.go for what a watcher may and may not do, and for
+	// why an unwatch has to name the registration it is ending.
+	bindingWatchers    map[InstanceCharacter]bindingWatcher
+	nextBindingWatcher uint64
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -148,7 +158,9 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		mintEntityID: mintEntityID, now: time.Now, log: log, options: append([]SimOption(nil), options...),
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
-		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
+		offers:          make(map[InstanceCharacter]pendingOffer),
+		bindingWatchers: make(map[InstanceCharacter]bindingWatcher),
+		sessions:        make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
 
@@ -291,6 +303,9 @@ func (m *InstanceManager) Leave(id uint64, character InstanceCharacter) bool {
 	delete(s.members, character)
 	delete(m.inside, character)
 	delete(m.portalEntries, character)
+	// A crossing this character was still being offered belonged to the world they have
+	// just left. Nothing about it is true from where they are standing now.
+	m.forgetOfferLocked(character)
 	if len(s.members) == 0 {
 		s.emptyTicks = 0
 	}
@@ -371,14 +386,32 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	// releases every binding to that session": the midnight reset removes the session
 	// through this one path, and a character bound to it is free for that ruin again on
 	// the way out. See instance_reset.go.
+	//
+	// **Every deletion is collected before any of them is announced**, because the list a
+	// character is told about is a complete one: announcing inside the loop would send a
+	// list still holding a binding this same pass is about to remove. See
+	// instance_bindings.go.
+	var released []InstanceCharacter
 	for visit, sessionID := range m.bound {
 		if sessionID == id {
 			delete(m.bound, visit)
+			released = append(released, visit.character)
 		}
+	}
+	for _, character := range released {
+		m.announceBindingsLocked(character)
 	}
 	for visit, sessionID := range m.partyVisits {
 		if sessionID == id {
 			delete(m.partyVisits, visit)
+		}
+	}
+	// An offer names a run, so it cannot outlive one either: the reset that releases
+	// every binding to this session also withdraws every prompt about it, and an
+	// acceptance arriving afterwards is refused as the unknown offer it now is.
+	for character, offer := range m.offers {
+		if offer.session == id {
+			delete(m.offers, character)
 		}
 	}
 	delete(m.sessions, id)
@@ -393,6 +426,11 @@ func (m *InstanceManager) Close() {
 	m.closed = true
 	clear(m.disconnected)
 	clear(m.portalEntries)
+	clear(m.offers)
+	// Every watcher goes before the sessions do. A shutdown is not a reset: nobody's
+	// lockout ends because the server stopped, and a connection told its list was empty
+	// on the way down would be told something the next start contradicts.
+	clear(m.bindingWatchers)
 	for id, s := range m.sessions {
 		m.removeLocked(id, s)
 	}

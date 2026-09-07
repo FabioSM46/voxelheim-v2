@@ -304,11 +304,21 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // unknown value rather than dropping it, which is Villager's argument at V25 and
 // Horse's at V27. Both members ride one bump because a receiver that can name one boss
 // and not the other crosses the first arena and loses the session in the second.
-func TestProtocolV34AppendsTheBossSpecies(t *testing.T) {
+// V35 appends the dungeon entry contract. InstanceEntryAnswer owes the bump on the rule
+// this list has followed since V8: it travels client -> server, and direction being a
+// protocol rule means a V34 server closes the session on the unknown tag rather than
+// dropping the frame. InstanceEntryOffer travels back and would have been dropped safely;
+// it rides the same bump because an offer nobody can answer is not one. The two appended
+// RefusalReason members owe nothing on their own — that enum is read through its zero
+// member and never fails a frame. InstanceBindings is appended after it without moving
+// the version: it travels server -> client, an older client drops the tag, and an older
+// server sends none — which reads to a newer client as a character who owes nothing, and
+// a server with no saved runs is exactly that.
+func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 34 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 34", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 35 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 35", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -386,6 +396,9 @@ func TestProtocolV34AppendsTheBossSpecies(t *testing.T) {
 		vnet.PayloadWorldChange,
 		vnet.PayloadBlowLanded,
 		vnet.PayloadMiningActivity,
+		vnet.PayloadInstanceEntryOffer,
+		vnet.PayloadInstanceEntryAnswer,
+		vnet.PayloadInstanceBindings,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2859,6 +2872,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"NotAtPortal":                 {byte(vnet.RefusalReasonNotAtPortal), 48},
 		"InstanceLimit":               {byte(vnet.RefusalReasonInstanceLimit), 49},
 		"InstanceUnavailable":         {byte(vnet.RefusalReasonInstanceUnavailable), 50},
+		"SessionMismatch":             {byte(vnet.RefusalReasonSessionMismatch), 51},
+		"EntryOfferUnknown":           {byte(vnet.RefusalReasonEntryOfferUnknown), 52},
 		"MalformedNoAnchor":           {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":             {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":               {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2868,8 +2883,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 55 {
-		t.Errorf("RefusalReason has %d members, want 55 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 57 {
+		t.Errorf("RefusalReason has %d members, want 57 — a new one needs a decision, not a test edit", got)
 	}
 }
 

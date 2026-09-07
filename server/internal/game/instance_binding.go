@@ -115,6 +115,9 @@ func (m *InstanceManager) bindLocked(s *instanceSession, character InstanceChara
 		return
 	}
 	m.bound[key] = s.id
+	// The binding and the statement of it are one event. See instance_bindings.go for
+	// why the whole list goes rather than the entry that moved.
+	m.announceBindingsLocked(character)
 }
 
 // Bound reports which saved session, if any, this character owes this ruin.

@@ -42,12 +42,23 @@ func portalHarness(t *testing.T, limit int) (*InstanceManager, *Sim, protocol.Po
 	return m, sim, request, join
 }
 
+// enterPortal keeps the two-value shape these admission tests were written against.
+//
+// #978 made a crossing one of five answers rather than an entry or a refusal, and the
+// tests below are about the other four conditions — a forged anchor, a party route, the
+// concurrency limit. Collapsing the decision here keeps them about what they were about;
+// the entry rules have their own tests, which read the outcome.
+func (m *InstanceManager) enterPortal(p *Player, request protocol.PortalRequest) (PortalEntry, vnet.RefusalReason) {
+	decision := m.EnterPortal(p, request)
+	return decision.Entry, decision.Reason
+}
+
 func TestPortalAdmissionRejectsForgedAndUnusableAnchorsBeforeAllocating(t *testing.T) {
 	m, sim, request, join := portalHarness(t, 2)
 	p := join()
 	for name, req := range map[string]protocol.PortalRequest{"missing": {}, "invented": {HasArch: true, Arch: [3]int32{request.Arch[0] + 1, request.Arch[1], request.Arch[2]}}, "overflow": {HasArch: true, Arch: [3]int32{math.MaxInt32, 0, 0}}, "distant": {HasArch: true, Arch: [3]int32{7091, 57, -93680}}} {
 		t.Run(name, func(t *testing.T) {
-			entry, reason := m.EnterPortal(p, req)
+			entry, reason := m.enterPortal(p, req)
 			if reason != vnet.RefusalReasonNotAtPortal || entry.Session.ID != 0 || m.Count() != 0 || sim.Count() != 1 {
 				t.Fatalf("forged request admitted: %+v %v", entry, reason)
 			}
@@ -56,7 +67,7 @@ func TestPortalAdmissionRejectsForgedAndUnusableAnchorsBeforeAllocating(t *testi
 	sim.mu.Lock()
 	p.leaving = true
 	sim.mu.Unlock()
-	if _, reason := m.EnterPortal(p, request); reason != vnet.RefusalReasonNotAtPortal {
+	if _, reason := m.enterPortal(p, request); reason != vnet.RefusalReasonNotAtPortal {
 		t.Fatal("leaving player admitted")
 	}
 	sim.mu.Lock()
@@ -64,7 +75,7 @@ func TestPortalAdmissionRejectsForgedAndUnusableAnchorsBeforeAllocating(t *testi
 	p.health = 0
 	p.lifeState = vnet.LifeStateDead
 	sim.mu.Unlock()
-	if _, reason := m.EnterPortal(p, request); reason != vnet.RefusalReasonNotAtPortal {
+	if _, reason := m.enterPortal(p, request); reason != vnet.RefusalReasonNotAtPortal {
 		t.Fatal("dead player admitted")
 	}
 }
@@ -78,20 +89,20 @@ func TestPortalPartyAdmissionIsSerializedAndPrivate(t *testing.T) {
 	reasons := make([]vnet.RefusalReason, 2)
 	for i, p := range []*Player{first, second} {
 		wg.Add(1)
-		go func() { defer wg.Done(); results[i], reasons[i] = m.EnterPortal(p, request) }()
+		go func() { defer wg.Done(); results[i], reasons[i] = m.enterPortal(p, request) }()
 	}
 	wg.Wait()
 	if reasons[0] != 0 || reasons[1] != 0 || results[0].Session.ID != results[1].Session.ID || m.Count() != 1 {
 		t.Fatalf("party split: %+v %v", results, reasons)
 	}
-	private, reason := m.EnterPortal(outsider, request)
+	private, reason := m.enterPortal(outsider, request)
 	if reason != 0 || private.Session.ID == results[0].Session.ID {
 		t.Fatal("unrelated player joined party copy")
 	}
 	if !m.Leave(private.Session.ID, private.Character) {
 		t.Fatal("leave failed")
 	}
-	again, reason := m.EnterPortal(outsider, request)
+	again, reason := m.enterPortal(outsider, request)
 	if reason != 0 || again.Session.ID != private.Session.ID {
 		t.Fatal("solo reentry lost retained copy")
 	}
@@ -110,19 +121,19 @@ func TestPortalPartyAdmissionIsSerializedAndPrivate(t *testing.T) {
 func TestPortalCapacityAndCreationFailuresReturnNoWorldIdentity(t *testing.T) {
 	m, _, request, join := portalHarness(t, 1)
 	first, second := join(), join()
-	admitted, reason := m.EnterPortal(first, request)
+	admitted, reason := m.enterPortal(first, request)
 	if reason != 0 {
 		t.Fatal(reason)
 	}
 	if admitted.Return != [3]float32{float32(request.Arch[0]) + 1.5, float32(request.Arch[1]) - 1, float32(request.Arch[2]) + .5} {
 		t.Fatal("return is not authoritative standing position")
 	}
-	denied, reason := m.EnterPortal(second, request)
+	denied, reason := m.enterPortal(second, request)
 	if reason != vnet.RefusalReasonInstanceLimit || denied.Session.ID != 0 || denied.Session.Sim != nil || denied.Session.Chunks != nil || denied.Session.Members != nil {
 		t.Fatal("cap refusal leaked world")
 	}
 	m.Close()
-	denied, reason = m.EnterPortal(second, request)
+	denied, reason = m.enterPortal(second, request)
 	if reason != vnet.RefusalReasonInstanceUnavailable || denied.Session.ID != 0 {
 		t.Fatal("creation refusal leaked world")
 	}
@@ -135,7 +146,7 @@ func TestPortalExitRestoresOriginalFallbackRespawn(t *testing.T) {
 	open.mu.Lock()
 	p.spawn = original
 	open.mu.Unlock()
-	entry, reason := m.EnterPortal(p, request)
+	entry, reason := m.enterPortal(p, request)
 	if reason != 0 {
 		t.Fatal(reason)
 	}

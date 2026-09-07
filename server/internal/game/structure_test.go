@@ -1369,6 +1369,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonNotAtPortal,
 		vnet.RefusalReasonInstanceLimit,
 		vnet.RefusalReasonInstanceUnavailable,
+		vnet.RefusalReasonSessionMismatch,
+		vnet.RefusalReasonEntryOfferUnknown,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {
 			t.Errorf("%s is answered by a world that said no, so it belongs in 1..%d", reason, firstMalformed-1)
@@ -1390,8 +1392,8 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
 	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 55 {
-		t.Errorf("RefusalReason has %d members, want 55 — a new one needs a producer and client handling, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 57 {
+		t.Errorf("RefusalReason has %d members, want 57 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 
