@@ -165,6 +165,7 @@ impl Plugin for AudioPlugin {
         let capture = AudioCapture::start();
 
         arrival::register(app);
+        city::register(app);
         app.insert_resource(AudioMixer(mixer))
             .insert_resource(device)
             .insert_resource(capture)
