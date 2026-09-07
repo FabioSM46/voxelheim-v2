@@ -30,6 +30,9 @@ import (
 // deliberate rather than lazy: see Leave for the guarantee it buys, and Step for why
 // nothing under the lock is allowed to block.
 type Sim struct {
+	// Tick-local contacts, projected only after this tick resolves all outcomes.
+	blows []landedBlow
+
 	group *WorldGroup
 	// dt is the physics timestep, derived from the tick rate rather than measured.
 	// The fixed timestep is what makes the simulation reproducible from the same
@@ -598,7 +601,7 @@ type Player struct {
 	playerID identity.PlayerID
 
 	deliver         func(frame []byte) bool
-	deliverSnapshot func(frame []byte, center world.Column) bool
+	deliverSnapshot func(frame []byte, center world.Column, following [][]byte) bool
 	// deliverVoice is the third seam, and it exists because a relayed voice frame is
 	// worth what a snapshot is worth and nothing like what a chunk is worth: twenty
 	// milliseconds of speech that the next frame replaces. The session puts it on the
@@ -906,14 +909,23 @@ func (s *Sim) Join(entityID uint64, playerID identity.PlayerID, name string, spa
 // Join remains a compact helper for game tests whose entity ids stand in for it.
 func (s *Sim) JoinCharacter(entityID uint64, playerID identity.PlayerID, characterID uint64, name string, spawn [3]float32, appearance protocol.Appearance, resume *Life, deliver func(frame []byte) bool) (*Player, error) {
 	return s.joinCharacter(entityID, playerID, characterID, name, spawn, appearance, resume, deliver,
-		func(frame []byte, _ world.Column) bool { return deliver(frame) }, deliver)
+		func(frame []byte, _ world.Column, following [][]byte) bool {
+			if !deliver(frame) {
+				return false
+			}
+			for _, event := range following {
+				deliver(event)
+			}
+			return true
+		}, deliver)
 }
 
 // JoinCharacterWithDelivery admits one stored character across all three of a session's
 // outbound seams.
 //
-// deliverSnapshot preserves the authoritative column beside each snapshot, which the
-// session uses to hold a snapshot until its stream has reached the same centre.
+// deliverSnapshot carries the authoritative column and transient outcome frames beside
+// each snapshot. The session forwards the snapshot first on its FIFO priority lane and
+// only then its outcomes; replacing a queued snapshot discards its outcomes as well.
 // deliverVoice is where a relayed voice frame goes, kept apart from deliver for the
 // reason stated at the field: the session sends it on the lane a snapshot uses, and a
 // voice frame behind a chunk payload has already been superseded when it arrives.
@@ -928,7 +940,7 @@ func (s *Sim) JoinCharacterWithDelivery(
 	appearance protocol.Appearance,
 	resume *Life,
 	deliver func(frame []byte) bool,
-	deliverSnapshot func(frame []byte, center world.Column) bool,
+	deliverSnapshot func(frame []byte, center world.Column, following [][]byte) bool,
 	deliverVoice func(frame []byte) bool,
 ) (*Player, error) {
 	if deliverSnapshot == nil {
@@ -949,7 +961,7 @@ func (s *Sim) joinCharacter(
 	appearance protocol.Appearance,
 	resume *Life,
 	deliver func(frame []byte) bool,
-	deliverSnapshot func(frame []byte, center world.Column) bool,
+	deliverSnapshot func(frame []byte, center world.Column, following [][]byte) bool,
 	deliverVoice func(frame []byte) bool,
 ) (*Player, error) {
 	if characterID == 0 {
@@ -1326,6 +1338,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// tick ran before the day moved.
 	s.advanceClockLocked()
 	s.currentTick = tick
+	s.blows = s.blows[:0]
 	s.advancePartyInvitesLocked(tick)
 	s.expireCorpsesLocked(tick)
 	s.advanceChunkRegenerationLocked()
@@ -1738,7 +1751,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			snapshot.Cast = cast
 			snapshot.HasCast = true
 		}
-		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column()) {
+		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column(), s.blowFramesLocked(snapshot)) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
 			// server, and one line per tick per slow client would bury whatever else
 			// the log was needed for.

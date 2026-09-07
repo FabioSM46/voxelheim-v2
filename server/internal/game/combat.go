@@ -18,9 +18,9 @@ import (
 // where the mobs are. A forged client can send any slot at any rate and gain nothing by
 // it, because none of those answers came from the client.
 //
-// There is no acknowledgement. The next snapshot carries the draugr's health and the
-// next inventory state carries the blade's condition, and between them they are the
-// complete reply.
+// The snapshot carries health and the inventory state carries the blade's condition.
+// BlowLanded reports resolved contact for presentation after that snapshot; it is not
+// an acknowledgement of a request and never changes the verdict.
 
 // swordConeCosine is the cosine of the half-angle of the attack arc.
 //
@@ -200,7 +200,7 @@ func (p *Player) resolveAttackLocked() {
 
 	p.attackCooldown = p.sim.attackCooldown
 	if target := p.sim.swingTargetLocked(p); target != nil {
-		p.sim.creditMobDamageLocked(p, target, armed.meleeDamage)
+		p.sim.creditMobBlowLocked(p, target, armed.meleeDamage, vnet.BlowKindMelee)
 	}
 }
 

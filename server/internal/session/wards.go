@@ -18,6 +18,8 @@ import (
 type snapshotAt struct {
 	frame  []byte
 	center world.Column
+	// Transient outcomes share this snapshot's replacement and world lifetime.
+	following [][]byte
 }
 
 // offerLatestSnapshot replaces an older buffered tick without blocking. The simulation
@@ -41,15 +43,10 @@ func offerLatestSnapshot(snapshots chan snapshotAt, latest snapshotAt) bool {
 	}
 }
 
-// followSnapshotsAndWards is the ordered, session-goroutine boundary between the
-// simulation's bounded snapshot handoff and the connection writer.
-//
-// A centre is published only after Streamer.MoveTo has completed, including every
-// settlement-materialisation hook. Until the first one arrives this worker retains the
-// queued snapshots and sends none. Thereafter a changed centre sends a full WardsNearby
-// immediately, while every snapshot checks the runestone revision before it is offered
-// to the outbound queue. Both roads converge on sendWards, and the tick goroutine uses
-// neither of them.
+// followSnapshots forwards snapshots and their dependent transient outcomes on one
+// FIFO lane. Replacing a mailbox tick drops its whole bundle. Queue pressure never
+// releases an outcome without its snapshot, and cancellation drops remaining outcomes.
+// The world-transfer barrier joins this worker before draining old-world output.
 func followSnapshots(
 	ctx context.Context,
 	snapshots <-chan snapshotAt,
@@ -61,8 +58,24 @@ func followSnapshots(
 		case <-ctx.Done():
 			return
 		case next := <-snapshots:
+			if ctx.Err() != nil {
+				return
+			}
 			if !offerSnapshot(next.frame) {
 				log.Debug("snapshot dropped: the session's outbound queue is full")
+				continue
+			}
+			// Same FIFO lane and sole snapshot producer: every event follows its
+			// own snapshot, before the next snapshot can supersede its visibility.
+			// A full lane drops events without retry; a world transfer cancels and
+			// joins this worker, then drains the lane before sending WorldChange.
+			for _, event := range next.following {
+				if ctx.Err() != nil {
+					return
+				}
+				if !offerSnapshot(event) {
+					log.Debug("blow dropped: the session's outbound queue is full")
+				}
 			}
 		}
 	}

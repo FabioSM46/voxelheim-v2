@@ -365,12 +365,12 @@ func (s *Sim) onProjectileHitLocked(proj *projectile, target any) {
 	switch proj.kind {
 	case vnet.ProjectileKindArrow:
 		if target, ok := target.(*mob); ok {
-			s.creditMobDamageLocked(owner, target, ArrowDamage)
+			s.creditMobBlowLocked(owner, target, ArrowDamage, vnet.BlowKindArrow)
 		}
 	case vnet.ProjectileKindEnergyOrb:
 		switch target := target.(type) {
 		case *mob:
-			s.creditMobDamageLocked(owner, target, OrbDamage)
+			s.creditMobBlowLocked(owner, target, OrbDamage, vnet.BlowKindEnergyOrb)
 		case *Player:
 			restored := target.healLocked(OrbHeal)
 			if s.onlineLocked(owner) {

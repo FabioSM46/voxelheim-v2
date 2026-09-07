@@ -424,9 +424,8 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// not a tuned number: more room ahead of the snapshot is more frames it waits behind.
 	priority := make(chan []byte, outboundQueue)
 	// Snapshots cross a one-entry, newest-wins handoff instead of entering out on the
-	// tick goroutine. The authoritative column travels beside each frame, so the session
-	// can wait for streaming to reach that centre and put WardsNearby immediately before
-	// the snapshot without ever making the tick wait.
+	// tick goroutine. Its authoritative column and transient outcome frames travel
+	// together, so replacing a snapshot cannot orphan a dependent outcome.
 	snapshots := make(chan snapshotAt, 1)
 
 	// A session-scoped context, so teardown can stop the streamer without waiting
@@ -723,18 +722,16 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	// offerLatestSnapshot is the snapshot-only half of the simulation delivery seam.
 	// One tick goroutine is the sole producer. Replacing the buffered value is therefore
 	// non-blocking and bounded, while retaining the only frame still worth sending.
-	deliverLatestSnapshot := func(frame []byte, center world.Column) bool {
+	deliverLatestSnapshot := func(frame []byte, center world.Column, following [][]byte) bool {
 		if !accepting.Load() {
 			return false
 		}
-		return offerLatestSnapshot(snapshots, snapshotAt{frame: frame, center: center})
+		return offerLatestSnapshot(snapshots, snapshotAt{frame: frame, center: center, following: following})
 	}
 
 	// offerSnapshot is the worker-side half of the handoff above. It keeps the old
-	// non-blocking snapshot contract: a full outbound queue drops one stale tick,
-	// while the WardsNearby frame before it uses enqueue because a replacement list
-	// is not superseded until another authoritative trigger occurs.
-	// Onto the fast lane since #668, and it is the only thing on it. What may overtake a
+	// non-blocking contract: a full outbound queue drops a stale tick and its outcomes.
+	// Snapshots and their dependent blows use the FIFO fast lane beside voice. What may overtake a
 	// chunk payload is exactly what a later frame makes worthless, and a player's
 	// position is the whole of that set here: a BlockUpdate, a WardsNearby and a chunk
 	// are each worth the same whenever they land, and reordering them against each other
@@ -870,10 +867,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			streamer.ReportEntering(admitted.MaterialiseSettlements)
 		}
 
-		// One worker owns both ward replacements and snapshot forwarding. The first
-		// centre arrives only after MoveTo has materialised every settlement structure
-		// entering the initial view, so the first WardsNearby is ordered after those
-		// authoritative facts and before the first snapshot this worker releases.
+		// Snapshots and their transient blow outcomes share this one worker, separate
+		// from ward streaming. World transfer cancels and joins it before flushing
+		// old-world output, so no dependent frame can cross the arrival barrier.
 		wardCenters := make(chan world.Column)
 		streaming.Add(1)
 		go func() {
