@@ -21,7 +21,7 @@ func portalSession(t *testing.T, limit int) (session.Config, *world.Cache, *game
 	t.Helper()
 	cfg := editConfig()
 	cfg.WorldSeed = 0x5EED
-	ruin, ok := world.RuinAt(cfg.WorldSeed, -6, 6)
+	ruin, ok := world.RuinAt(cfg.WorldSeed, 0, 0)
 	if !ok {
 		t.Fatal("fixture ruin missing")
 	}

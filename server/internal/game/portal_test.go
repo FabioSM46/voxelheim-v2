@@ -14,7 +14,7 @@ import (
 func portalHarness(t *testing.T, limit int) (*InstanceManager, *Sim, protocol.PortalRequest, func() *Player) {
 	t.Helper()
 	const seed = 0x5EED
-	ruin, ok := world.RuinAt(seed, -6, 6)
+	ruin, ok := world.RuinAt(seed, 0, 0)
 	if !ok {
 		t.Fatal("fixture ruin missing")
 	}
