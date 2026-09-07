@@ -102,6 +102,11 @@ pub use codec::{
     MAX_WARDED_COLUMNS, StormPhase, StormWarning, WardKind, WardedColumn, WardsNearby, WeatherKind,
     WeatherState,
 };
+// V35's saved-run surface. Named here for the reason the blocks above are: the sessions
+// window that draws these should not have to reopen `codec.rs` to find out what it is
+// allowed to spell.
+#[allow(unused_imports)] // The window that reads these is the second half of #979.
+pub use codec::{InstanceBindings, SessionBinding};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
@@ -919,6 +924,45 @@ impl StormInbox {
 #[derive(Resource, Debug, Default)]
 pub struct WardsInbox(Vec<WardsNearby>);
 
+/// Complete saved-run lists the net thread has delivered and the presentation has not read.
+///
+/// [`WardsInbox`]'s shape, for [`WardsInbox`]'s reason: each list replaces the one before it
+/// wholesale, so the queue preserves wire order until the consumer takes the batch and the
+/// consumer keeps the **last** one. An empty list is a real answer — this character owes
+/// nothing anywhere — rather than no answer, which is exactly why "the last one, whatever it
+/// is" is the correct reading and "the last non-empty one" would be a merge.
+///
+/// It is unbounded, and that is the same decision the decoder makes: the server sends one of
+/// these on entering the world, on binding, and on a run's reset — three events a player
+/// causes, none of them per tick — so there is no arrival rate for a ceiling to protect
+/// against, and a dropped list would leave a lockout standing that the next one may not
+/// mention.
+#[derive(Resource, Debug, Default)]
+pub struct InstanceBindingsInbox(Vec<InstanceBindings>);
+
+impl InstanceBindingsInbox {
+    /// Takes every complete list in wire order, leaving the inbox empty.
+    ///
+    /// The caller keeps the last of them and discards the rest: two lists in one frame are
+    /// two successive statements of the same thing, and only the newer is true.
+    #[allow(dead_code)] // The window that reads these is the second half of #979.
+    pub fn take(&mut self) -> Vec<InstanceBindings> {
+        std::mem::take(&mut self.0)
+    }
+
+    /// Drops lists that belonged to a session which is no longer current.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Queues one list as the net thread would. Test-only, so the window can be driven
+    /// without a socket.
+    #[cfg(test)]
+    pub fn push(&mut self, bindings: InstanceBindings) {
+        self.0.push(bindings);
+    }
+}
+
 /// How many relayed voice frames may wait for the audio module in one frame.
 ///
 /// Sixteen 20 ms frames is 320 ms of one speaker, or 80 ms of four. **A bound, because the
@@ -1437,6 +1481,7 @@ impl Plugin for NetPlugin {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<InstanceBindingsInbox>()
             .init_resource::<VoiceInbox>()
             .init_resource::<ChatInbox>()
             .init_resource::<SessionEndingInbox>()
@@ -2044,6 +2089,7 @@ struct Inboxes<'w> {
     refusals: ResMut<'w, RefusalInbox>,
     storms: ResMut<'w, StormInbox>,
     wards: ResMut<'w, WardsInbox>,
+    bindings: ResMut<'w, InstanceBindingsInbox>,
     voice: ResMut<'w, VoiceInbox>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
@@ -2139,6 +2185,7 @@ fn drain_session_events(
                 // from the connection it replaced; answers later in this same ordered
                 // drain belong to the new session and are queued normally.
                 inboxes.wards.clear();
+                inboxes.bindings.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2330,6 +2377,13 @@ fn drain_session_events(
             }
             Ok(SessionEvent::WardsNearby(wards)) => inboxes.wards.0.push(wards),
 
+            // Queued rather than logged, on the reason the map's three are: the window is
+            // the signal a player reads, and a second one in the log would only be a place
+            // for the two to disagree. The whole list is queued whether it is empty or not,
+            // because an empty one says this character owes nothing and dropping it would
+            // leave a reset lockout standing.
+            Ok(SessionEvent::InstanceBindings(bindings)) => inboxes.bindings.0.push(bindings),
+
             // Queued, never logged: a voice frame is personal data, and even a count
             // would be a diagnostic about who spoke. The decoder that consumes these is
             // `audio/heard.rs`.
@@ -2404,6 +2458,7 @@ fn drain_session_events(
                         commands.remove_resource::<SuspendedOutbound>();
                         commands.remove_resource::<Rejoining>();
                         inboxes.wards.clear();
+                        inboxes.bindings.clear();
                         if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                             inbox.0.clear();
                         }
@@ -2467,6 +2522,7 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                inboxes.bindings.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2488,6 +2544,7 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                inboxes.bindings.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2526,6 +2583,7 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                inboxes.bindings.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2595,6 +2653,7 @@ fn drain_session_events(
                 // terminal *state*, and a link with no thread is stale whichever state the
                 // client is in.
                 inboxes.wards.clear();
+                inboxes.bindings.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -5637,6 +5696,7 @@ mod tests {
             .init_resource::<RefusalInbox>()
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
+            .init_resource::<InstanceBindingsInbox>()
             .init_resource::<VoiceInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
@@ -5826,6 +5886,45 @@ mod tests {
         );
     }
 
+    /// Two lists in one frame arrive in wire order and neither is merged into the other.
+    ///
+    /// The second is empty, which is the case a queue that dropped "nothing to say" would
+    /// get wrong: it is a statement that this character now owes nothing, and a consumer
+    /// keeping the last of what this returns has to be handed it to be able to obey it.
+    #[test]
+    fn saved_run_lists_cross_the_net_boundary_whole_and_unmerged() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        let owed = InstanceBindings {
+            bindings: vec![SessionBinding {
+                arch: BlockCoord {
+                    x: -4096,
+                    y: 61,
+                    z: 8192,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_893_456_000,
+            }],
+        };
+        let reset = InstanceBindings::default();
+
+        events
+            .send(SessionEvent::InstanceBindings(owed.clone()))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::InstanceBindings(reset.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<InstanceBindingsInbox>()
+                .take(),
+            vec![owed, reset],
+            "the empty list is the newer answer and must reach the consumer to clear the older"
+        );
+    }
+
     #[test]
     fn player_trade_state_and_close_cross_the_boundary_in_wire_order() {
         let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
@@ -5859,6 +5958,56 @@ mod tests {
                 PlayerTradeEvent::State(state),
                 PlayerTradeEvent::Closed(closed)
             ]
+        );
+    }
+
+    /// A newly established session must not inherit the previous character's lockouts.
+    ///
+    /// The stale list is not merely out of date — it may belong to a different character
+    /// entirely — and the new session's own list arrives later in this same ordered drain,
+    /// so clearing on `Established` cannot lose it.
+    #[test]
+    fn a_new_session_discards_an_unread_saved_run_list_from_the_previous_one() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connecting);
+        let stale = InstanceBindings {
+            bindings: vec![SessionBinding {
+                arch: BlockCoord { x: 1, y: 2, z: 3 },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_893_456_000,
+            }],
+        };
+        let current = InstanceBindings {
+            bindings: vec![SessionBinding {
+                arch: BlockCoord {
+                    x: 512,
+                    y: 70,
+                    z: -64,
+                },
+                bosses_defeated: 0,
+                bosses_total: 3,
+                resets_at_unix: 1_893_542_400,
+            }],
+        };
+        app.world_mut()
+            .resource_mut::<InstanceBindingsInbox>()
+            .push(stale);
+        events
+            .send(SessionEvent::Established {
+                params: params(),
+                returning: Some(false),
+            })
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::InstanceBindings(current.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<InstanceBindingsInbox>()
+                .take(),
+            vec![current]
         );
     }
 

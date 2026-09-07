@@ -31,9 +31,9 @@ use std::fmt;
 use super::codec::WorldChange;
 
 use super::codec::{
-    ActionRefused, BlowLanded, CharacterList, ChatMessage, InventoryState, LandmarkList,
-    LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored,
-    MapTile, MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite,
+    ActionRefused, BlowLanded, CharacterList, ChatMessage, InstanceBindings, InventoryState,
+    LandmarkList, LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState,
+    MapExplored, MapTile, MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite,
     PlayerAppearance, PlayerTradeClosed, PlayerTradeState, Reject, ResidentAppearance,
     SessionParams, Snapshot, StormWarning, VendorClosed, VendorState, VoiceHeard, WardsNearby,
     WorldClock, WorldUpdate,
@@ -169,6 +169,14 @@ pub enum Transition {
     /// speaker's id is a live entity's, but so is a `MobHit`'s attacker, and this layer
     /// has never held a roster to test one against.
     VoiceHeard(VoiceHeard),
+    /// Every saved run this character owes, admitted because a session exists.
+    ///
+    /// Nothing is checked here either, and there is nothing the welcome could add: the
+    /// arches, the boss counts, the resets and the uniqueness of a dungeon are all
+    /// properties of the list, held at the decode boundary. Complete by definition, like
+    /// a `MarkerList`, so there is no earlier list to check it against — and an empty one
+    /// is a statement rather than a frame with nothing in it.
+    InstanceBindings(InstanceBindings),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -609,6 +617,9 @@ impl Handshake {
             }
             (Phase::Established, Message::WardsNearby(wards)) => Ok(Transition::WardsNearby(wards)),
             (Phase::Established, Message::VoiceHeard(heard)) => Ok(Transition::VoiceHeard(heard)),
+            (Phase::Established, Message::InstanceBindings(bindings)) => {
+                Ok(Transition::InstanceBindings(bindings))
+            }
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -655,6 +666,7 @@ impl Handshake {
             (_, Message::StormWarning(_)) => Err(HandshakeError::Premature("StormWarning")),
             (_, Message::WardsNearby(_)) => Err(HandshakeError::Premature("WardsNearby")),
             (_, Message::VoiceHeard(_)) => Err(HandshakeError::Premature("VoiceHeard")),
+            (_, Message::InstanceBindings(_)) => Err(HandshakeError::Premature("InstanceBindings")),
         }
     }
 }
