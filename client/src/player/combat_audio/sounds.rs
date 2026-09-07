@@ -14,9 +14,13 @@ pub(super) enum Cue {
     DraugrAttack,
     VargrNotice,
     VargrAttack,
+    GuardianNotice,
+    GuardianAttack,
+    KingNotice,
+    KingAttack,
 }
 
-pub(super) const CUES: [Cue; 8] = [
+pub(super) const CUES: [Cue; 12] = [
     Cue::DryImpact,
     Cue::BeastImpact,
     Cue::ClothImpact,
@@ -25,6 +29,10 @@ pub(super) const CUES: [Cue; 8] = [
     Cue::DraugrAttack,
     Cue::VargrNotice,
     Cue::VargrAttack,
+    Cue::GuardianNotice,
+    Cue::GuardianAttack,
+    Cue::KingNotice,
+    Cue::KingAttack,
 ];
 
 pub(super) fn impact(target: BlowTarget) -> Cue {
@@ -54,13 +62,10 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         // These species have no combat telegraph voice: civilians and mounts do not
         // belong to this hostile voice catalogue. Their physical impacts still play.
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
-        // The two bosses answer `None` for a different reason, and it is worth keeping
-        // the two reasons apart: a villager has no hostile voice and never will, while a
-        // boss has one this build has not been given. Borrowing the field draugr's or
-        // the field vargr's would make the wrong creature audible — a king announcing
-        // itself with a common corpse's growl is worse than announcing itself with
-        // nothing — so the arm is `None` until #1019 synthesises its own cues.
-        (MobKind::VargrGuardian | MobKind::DraugrKing, _) => None,
+        (MobKind::VargrGuardian, false) => Some(Cue::GuardianNotice),
+        (MobKind::VargrGuardian, true) => Some(Cue::GuardianAttack),
+        (MobKind::DraugrKing, false) => Some(Cue::KingNotice),
+        (MobKind::DraugrKing, true) => Some(Cue::KingAttack),
     }
 }
 
@@ -75,6 +80,10 @@ impl Cue {
             Self::DraugrAttack => 0.27,
             Self::VargrNotice => 0.40,
             Self::VargrAttack => 0.18,
+            Self::GuardianNotice => 0.65,
+            Self::GuardianAttack => 0.31,
+            Self::KingNotice => 0.78,
+            Self::KingAttack => 0.38,
         }
     }
 
@@ -90,6 +99,13 @@ impl Cue {
             Self::DraugrAttack => (103.0, 0.18, 0.42, 1800.0, Wave::Triangle),
             Self::VargrNotice => (157.0, 0.32, 0.22, 650.0, Wave::Triangle),
             Self::VargrAttack => (281.0, 0.30, 0.37, 2200.0, Wave::Triangle),
+            // The guardian has a low chest growl and a shorter, rougher bark.
+            // The king has a hollow sustained groan and a metallic-throated effort.
+            // These describe voices, never cast or encounter state.
+            Self::GuardianNotice => (61.0, 0.34, 0.26, 520.0, Wave::Triangle),
+            Self::GuardianAttack => (127.0, 0.28, 0.43, 1450.0, Wave::Triangle),
+            Self::KingNotice => (47.0, 0.29, 0.32, 730.0, Wave::Triangle),
+            Self::KingAttack => (83.0, 0.25, 0.40, 2400.0, Wave::Triangle),
         };
         let envelope = Envelope {
             attack: 0.004,
@@ -176,23 +192,22 @@ mod tests {
         );
     }
 
-    /// A boss is audible when it is hit and silent when it winds up, and the two halves
-    /// are different decisions rather than one.
-    ///
-    /// The impact is a fact about what the blade meets, so it plays now: a blow lands on
-    /// something armoured or something furred whatever the creature turns out to look
-    /// like, and the material is the field species' for that reason. The voice is a
-    /// creature announcing *itself*, and lending a king the growl of a common corpse
-    /// would make the wrong thing audible — worse than making nothing audible — so it
-    /// stays `None` until #1019 synthesises cues of its own.
+    /// Each boss has its own notice/attack pair; the existing impact stays put.
     #[test]
-    fn the_bosses_have_impacts_and_no_voice_yet() {
+    fn the_bosses_have_distinct_hostile_voices_and_keep_their_impacts() {
         for (boss, field) in [
             (MobKind::VargrGuardian, MobKind::Vargr),
             (MobKind::DraugrKing, MobKind::Draugr),
         ] {
-            assert_eq!(voice(boss, false), None);
-            assert_eq!(voice(boss, true), None);
+            let notice = voice(boss, false).expect("hostile notice");
+            let attack = voice(boss, true).expect("hostile attack");
+            assert_ne!(notice, attack);
+            assert_ne!(Some(notice), voice(field, false));
+            assert_ne!(Some(attack), voice(field, true));
+            for cue in [notice, attack] {
+                assert!(CUES.contains(&cue));
+                assert!(cue.seconds().is_finite() && cue.seconds() > 0.0);
+            }
             assert_eq!(
                 impact(BlowTarget::Mob(boss)),
                 impact(BlowTarget::Mob(field)),
