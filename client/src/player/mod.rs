@@ -47,6 +47,7 @@
 //! | `appearance.rs` | the rig: which box each appearance colour covers, and where it sits |
 
 mod ambience;
+mod ambient_sound;
 mod appearance;
 mod birds;
 mod camera;
