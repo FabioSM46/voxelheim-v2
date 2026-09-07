@@ -47,10 +47,19 @@ fn bounded(value: f32, low: f32, high: f32) -> bool {
 
 impl Sound {
     /// Validation precedes allocation, including the duration-to-sample-count conversion.
+    /// Every release must fit the requested duration; an oversized release is rejected,
+    /// never silently used as a gain reduction across the entire sound.
     pub fn bake(&self, seconds: f32, rate: u32, seed: u64) -> Result<Baked, Error> {
         self.validate(rate)?;
         if !bounded(seconds, 0.002, MAX_BAKED_SECONDS) {
             return Err(Error::Duration);
+        }
+        if self
+            .layers
+            .iter()
+            .any(|layer| layer.envelope.release > seconds)
+        {
+            return Err(Error::Envelope);
         }
         let count = (f64::from(seconds) * f64::from(rate)).round() as usize;
         let mut layers = self.compile(rate, seed);
