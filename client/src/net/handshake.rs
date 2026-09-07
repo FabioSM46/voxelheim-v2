@@ -33,9 +33,9 @@ use super::codec::WorldChange;
 use super::codec::{
     ActionRefused, CharacterList, ChatMessage, InventoryState, LandmarkList, LearnedMounts,
     LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile,
-    MarkerList, Message, MineProgress, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed,
-    PlayerTradeState, Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning,
-    VendorClosed, VendorState, VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
+    MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite, PlayerAppearance,
+    PlayerTradeClosed, PlayerTradeState, Reject, ResidentAppearance, SessionParams, Snapshot,
+    StormWarning, VendorClosed, VendorState, VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -88,6 +88,7 @@ pub enum Transition {
     LearnedMounts(LearnedMounts),
     /// Authoritative progress for the voxel currently being mined.
     MineProgress(MineProgress),
+    MiningActivity(MiningActivity),
     /// What one visible player looks like, admitted because a session exists.
     ///
     /// It names an entity rather than answering about one this session already has, and
@@ -536,6 +537,7 @@ impl Handshake {
                     Ok(Transition::Inventory(inventory))
                 }
             }
+            (Phase::Established, Message::MiningActivity(a)) => Ok(Transition::MiningActivity(a)),
             (Phase::Established, Message::MineProgress(progress)) => {
                 Ok(Transition::MineProgress(progress))
             }
@@ -618,6 +620,7 @@ impl Handshake {
             }
             (_, Message::Snapshot(_)) => Err(HandshakeError::Premature("EntitySnapshot")),
             (_, Message::Inventory(_)) => Err(HandshakeError::Premature("InventoryState")),
+            (_, Message::MiningActivity(_)) => Err(HandshakeError::Premature("MiningActivity")),
             (_, Message::MineProgress(_)) => Err(HandshakeError::Premature("MineProgress")),
             (_, Message::ActionRefused(_)) => Err(HandshakeError::Premature("ActionRefused")),
             (_, Message::PlayerAppearance(_)) => Err(HandshakeError::Premature("PlayerAppearance")),

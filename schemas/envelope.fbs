@@ -265,7 +265,8 @@ union Payload {
 
   // Appended server-only outcome; V33 is unchanged. See BlowLanded for the
   // unknown-tag compatibility argument and recipient snapshot disclosure rule.
-  BlowLanded               // 66  server -> client
+  BlowLanded,              // 66  server -> client
+  MiningActivity          // 67  server -> client
 }
 
 table Envelope {

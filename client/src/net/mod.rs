@@ -67,8 +67,8 @@ pub use codec::{
     LootEntry, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS,
     MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored,
     MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
-    MarkerRemoveRequest, MineProgress, MineRequest, MobAction, MobHit, MobKind, MobState,
-    PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
+    MarkerRemoveRequest, MineProgress, MineRequest, MiningActivity, MobAction, MobHit, MobKind,
+    MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
     PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
     ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
     RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
@@ -719,6 +719,28 @@ impl MobHitInbox {
 /// because every value is a complete server answer for the voxel it names.
 #[derive(Resource, Debug, Default)]
 pub struct MineProgressInbox(Vec<MineProgress>);
+
+/// Bounded observer frames with decode timestamps, so delayed drains cannot renew leases.
+#[derive(Resource, Debug, Default)]
+pub struct MiningActivityInbox(Vec<(MiningActivity, std::time::Instant)>);
+impl MiningActivityInbox {
+    pub const LEASE: std::time::Duration = std::time::Duration::from_millis(500);
+    const CAPACITY: usize = 512;
+    fn push(&mut self, activity: MiningActivity, decoded: std::time::Instant) {
+        if self.0.len() == Self::CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push((activity, decoded));
+    }
+    /// #984 matches snapshot tick/visibility and deduplicates by actor/activity id.
+    #[allow(dead_code)] // Presentation consumer lands in #984.
+    pub fn take(&mut self, now: std::time::Instant) -> Vec<(MiningActivity, std::time::Instant)> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < Self::LEASE)
+            .collect()
+    }
+}
 
 impl MineProgressInbox {
     /// Takes every queued progress report, leaving the inbox empty.
@@ -1375,6 +1397,7 @@ impl Plugin for NetPlugin {
             .init_resource::<MobHitInbox>()
             .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
+            .init_resource::<MiningActivityInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
@@ -1980,6 +2003,7 @@ struct Inboxes<'w> {
     // Optional only for focused boundary tests that install the drain directly.
     map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
+    mining_activity: Option<ResMut<'w, MiningActivityInbox>>,
     appearances: ResMut<'w, AppearanceInbox>,
     residents: ResMut<'w, ResidentInbox>,
     refusals: ResMut<'w, RefusalInbox>,
@@ -2080,6 +2104,9 @@ fn drain_session_events(
                 // from the connection it replaced; answers later in this same ordered
                 // drain belong to the new session and are queued normally.
                 inboxes.wards.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
                 inboxes.learned_mounts.clear();
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
@@ -2135,6 +2162,9 @@ fn drain_session_events(
                 inboxes.world.0.clear();
                 inboxes.snapshots.0.clear();
                 inboxes.mining.0.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
                 inboxes.appearances.0.clear();
                 inboxes.residents.0.clear();
                 inboxes.refusals.0.clear();
@@ -2266,6 +2296,11 @@ fn drain_session_events(
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
+            Ok(SessionEvent::MiningActivity(a, at)) => {
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.push(a, at);
+                }
+            }
 
             // Queued for the player module, which is the only thing that knows whether
             // there is a body to put it on yet. Not logged: one arrives per player per
@@ -2323,6 +2358,9 @@ fn drain_session_events(
                         commands.remove_resource::<SuspendedOutbound>();
                         commands.remove_resource::<Rejoining>();
                         inboxes.wards.clear();
+                        if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                            inbox.0.clear();
+                        }
                         break;
                     };
                     commands.insert_resource(suspended.0.sibling());
@@ -2380,6 +2418,9 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
             }
 
             Ok(SessionEvent::Refused(reason)) => {
@@ -2395,6 +2436,9 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
             }
 
             Ok(SessionEvent::Ended(detail)) => {
@@ -2427,6 +2471,9 @@ fn drain_session_events(
                 commands.remove_resource::<LeaveCancellation>();
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
             }
 
             Err(TryRecvError::Empty) => break,
@@ -2490,6 +2537,9 @@ fn drain_session_events(
                 // terminal *state*, and a link with no thread is stale whichever state the
                 // client is in.
                 inboxes.wards.clear();
+                if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
                 commands.remove_resource::<NetLink>();
                 break;
             }
@@ -5402,6 +5452,7 @@ mod tests {
             .init_resource::<LearnedMountsInbox>()
             .init_resource::<PlayerTradeInbox>()
             .init_resource::<MineProgressInbox>()
+            .init_resource::<MiningActivityInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
@@ -6529,5 +6580,29 @@ mod server_list_tests {
             queued.last().map(|hit| hit.attacker_entity_id),
             Some((MOB_HIT_INBOX_CAPACITY + 2) as u64)
         );
+    }
+    #[test]
+    fn mining_inbox_expires_delayed_bursts_and_bounds_unconsumed_frames() {
+        let now = std::time::Instant::now();
+        let a = MiningActivity {
+            tick: 1,
+            actor_entity_id: 1,
+            activity_id: 1,
+            pos: codec::BlockCoord { x: 0, y: 0, z: 0 },
+            block_id: 1,
+            tool: codec::MiningTool::Hand,
+            phase: codec::MiningPhase::Active,
+        };
+        let mut inbox = MiningActivityInbox::default();
+        inbox.push(a, now);
+        assert!(inbox.take(now + MiningActivityInbox::LEASE).is_empty());
+        for tick in 0..600 {
+            inbox.push(MiningActivity { tick, ..a }, now);
+        }
+        let fresh = inbox.take(now + std::time::Duration::from_millis(499));
+        assert_eq!(fresh.len(), MiningActivityInbox::CAPACITY);
+        assert_eq!(fresh[0].0.tick, 88);
+        assert_eq!(fresh.last().unwrap().0.tick, 599);
+        assert!(inbox.take(now).is_empty());
     }
 }

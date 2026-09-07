@@ -380,6 +380,7 @@ func TestProtocolV33CrossesPortals(t *testing.T) {
 		vnet.PayloadPortalRequest,
 		vnet.PayloadWorldChange,
 		vnet.PayloadBlowLanded,
+		vnet.PayloadMiningActivity,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {

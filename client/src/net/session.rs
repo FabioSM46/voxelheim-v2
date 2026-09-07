@@ -57,8 +57,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::codec::WorldChange;
 
 use super::codec::{
-    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress, MobHit,
-    PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
+    self, ActionRefused, CharacterList, ChatMessage, InventoryState, MineProgress, MiningActivity,
+    MobHit, PLAYER_TOKEN_LEN, PartyInvite, PlayerAppearance, PlayerToken, Reject, SessionParams,
     SessionTicket, Snapshot, WorldUpdate,
 };
 
@@ -227,6 +227,7 @@ pub(super) enum SessionEvent {
     LearnedMounts(codec::LearnedMounts),
     /// Authoritative progress for one mined voxel.
     MineProgress(MineProgress),
+    MiningActivity(MiningActivity, Instant),
     /// What one visible player looks like.
     ///
     /// Unordered with respect to the snapshot that first carries the entity it names, and
@@ -1741,6 +1742,11 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                         leave_sent = false;
                     }
                     events.send(SessionEvent::LeaveCancellation(result)).ok()?;
+                }
+                Ok(Transition::MiningActivity(a)) => {
+                    events
+                        .send(SessionEvent::MiningActivity(a, Instant::now()))
+                        .ok()?;
                 }
                 Ok(Transition::MineProgress(progress)) => {
                     events.send(SessionEvent::MineProgress(progress)).ok()?;
