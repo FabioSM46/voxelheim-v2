@@ -37,34 +37,27 @@
 //! how every assertion here and in `mixer.rs` runs, and how the supervisor loop itself is
 //! tested without a sound card.
 //!
-//! ## Five buses, three of them empty
+//! ## Generated world sounds
 //!
-//! This paragraph used to say there was no bus beyond `Voice` and `Master`, because a bus
-//! nothing feeds is a gain nobody can hear moving. #982 built `Music`, `Sfx` and `Ambience`
-//! anyway, and the reason is the one that argument leaves out: the *policy* around a bus is
-//! cheap to decide while nothing is feeding it and expensive afterwards. Which bus may take
-//! the last of sixteen mixer slots, what is taken away when none is free, and what may never
-//! be taken at all are answers [`mixer::MAX_SOURCES`] now carries, settled before an ambience
-//! bed and a conversation were ever competing for one slot in front of a player.
+//! `synth` owns descriptions, deterministic baked buffers and non-looping continuous
+//! generators. `synth::Playback` feeds them through the same rings and allocation policy as
+//! voice, outside the output callback. `arrival` supplies the first real SFX: a short chime
+//! placed at the announced spawn point when a welcome establishes a session. The remaining
+//! sound catalogues arrive as descriptions in the following issues.
 //!
-//! **So nothing here generates a sound onto those three buses.** What this module does with
-//! them is what a control surface does: it turns four volumes, a music on/off, a ducking
-//! amount and a mono fold into calls on the mixer, and it plays a test tone on whichever bus
-//! a player asks to hear. The sounds arrive in the issues after this one and find their slot
-//! and their knob already built and already persisted.
-//!
-//! Everything else this paragraph used to disclaim has since arrived and it was not
-//! rewritten at the time: `codec.rs` encodes and decodes, `device.rs` opens an input as
-//! well as an output, and `spatial.rs` below is #854 starting. See
-//! `docs/adr/0001-voice-transport.md`.
+//! Five buses share one source pool. The controls below still own their volumes, music
+//! enable, ducking and mono fold; every synthesized sound passes through those same controls.
 
+mod arrival;
+mod city;
 mod codec;
 mod device;
 mod dsp;
 mod heard;
 mod listener;
 mod mixer;
-mod spatial;
+pub(crate) mod spatial;
+pub mod synth;
 mod voice;
 
 use std::f32::consts::TAU;
@@ -86,6 +79,8 @@ pub use device::CaptureFault;
 #[allow(unused_imports)]
 pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
+#[cfg(test)]
+pub(crate) use mixer::{MAX_SOURCES, Sink, VOICE_RESERVE};
 pub use voice::{MicTest, MicrophoneTrouble, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
@@ -171,6 +166,8 @@ impl Plugin for AudioPlugin {
         // is exactly what a player who has not asked for voice expects.
         let capture = AudioCapture::start();
 
+        arrival::register(app);
+        city::register(app);
         app.insert_resource(AudioMixer(mixer))
             .insert_resource(device)
             .insert_resource(capture)
@@ -203,6 +200,21 @@ impl Plugin for AudioPlugin {
 pub struct AudioMixer(Arc<Mixer>);
 
 impl AudioMixer {
+    /// Descriptions outside the audio module compile for the device's current clock.
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.0.sample_rate()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_shared_for_test(mixer: Arc<Mixer>) -> Self {
+        Self(mixer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_for_test(&self) -> Arc<Mixer> {
+        Arc::clone(&self.0)
+    }
+
     /// Takes one of the mixer's source slots for `bus`, or `None` when they are all taken.
     ///
     /// The one way anything outside this file reaches the mixer, so "how many sources are
