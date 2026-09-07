@@ -157,9 +157,12 @@ impl Plugin for InstanceEntryPlugin {
 
 /// Takes whatever the server has offered, and drops a prompt that can no longer be true.
 ///
-/// The order inside is deliberate: an offer that arrived in the same frame as a death or
-/// a disconnect is dropped by the second half rather than left on screen for one frame
-/// over a character who cannot act.
+/// **The order inside is deliberate.** An offer that arrived in the same frame as a death
+/// or a disconnect is dropped before anything asks whether to present it, so a character
+/// who cannot act is never shown the dialog even for the rest of this system's run. The
+/// presentation check comes after that for the same reason, and the recovery that hands
+/// the controls back comes last, when both of the things that can empty the offer have
+/// happened.
 fn reconcile_entry_offer(
     mut inbox: ResMut<EntryOfferInbox>,
     session: Option<Res<Session>>,
@@ -175,6 +178,16 @@ fn reconcile_entry_offer(
 
     if let Some(arrived) = inbox.take() {
         offer.open(arrived);
+    }
+
+    // **Nothing is sent on either of these.** A disconnect has no writer left, and a
+    // death leaves an offer the server will supersede on the next crossing or forget with
+    // the run. Sending an answer for an offer the server may already have released would
+    // come back as `EntryOfferUnknown` — a refusal on screen that the player never caused.
+    // The world change is not asked about here at all: `reset_world` clears this resource
+    // with the world it belonged to.
+    if session.is_none() || vitals.dead() {
+        offer.drop_pending();
     }
 
     // **An offer waits for the controls; it never takes them.** A frame can carry a chat
@@ -197,16 +210,6 @@ fn reconcile_entry_offer(
     // accident of ordering.
     if offer.current().is_some() && *mode == InputMode::Playing {
         set_mode(&mut mode, InputMode::EntryOffer);
-    }
-
-    // **Nothing is sent on either of these.** A disconnect has no writer left, and a
-    // death leaves an offer the server will supersede on the next crossing or forget with
-    // the run. Sending an answer for an offer the server may already have released would
-    // come back as `EntryOfferUnknown` — a refusal on screen that the player never caused.
-    // The world change is not asked about here at all: `reset_world` clears this resource
-    // with the world it belonged to.
-    if session.is_none() || vitals.dead() {
-        offer.drop_pending();
     }
 
     // The dialog is the only thing this mode is for, so it cannot outlive the offer.
