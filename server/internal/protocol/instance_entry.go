@@ -101,3 +101,39 @@ func EncodeInstanceEntryAnswer(answer InstanceEntryAnswer) []byte {
 	vnet.InstanceEntryAnswerAddAccept(b, answer.Accept)
 	return finishEnvelope(b, vnet.PayloadInstanceEntryAnswer, vnet.InstanceEntryAnswerEnd(b))
 }
+
+// EncodeInstanceBindings builds one character's complete list of saved runs.
+//
+// **An empty list is a statement and is encoded as one.** It says this character owes
+// nothing anywhere, which is a different thing from having sent nothing — a recipient
+// replaces its copy wholesale, so silence would leave a reset lockout standing.
+//
+// Every entry is validated, and a duplicate arch is refused: a binding is per character
+// and per dungeon, so one place appearing twice is a list no correct server holds.
+func EncodeInstanceBindings(bindings []SessionBinding) ([]byte, error) {
+	seen := make(map[[3]int32]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if err := binding.validate(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[binding.Arch]; duplicate {
+			return nil, fmt.Errorf("protocol: two bindings name one dungeon")
+		}
+		seen[binding.Arch] = struct{}{}
+	}
+	b := flatbuffers.NewBuilder(128)
+	// Built in reverse, as FlatBuffers vectors require: the offsets have to exist before
+	// the vector that points at them, and the vector is written back to front.
+	offsets := make([]flatbuffers.UOffsetT, len(bindings))
+	for i, binding := range bindings {
+		offsets[i] = addSessionBinding(b, binding)
+	}
+	vnet.InstanceBindingsStartBindingsVector(b, len(offsets))
+	for i := len(offsets) - 1; i >= 0; i-- {
+		b.PrependUOffsetT(offsets[i])
+	}
+	list := b.EndVector(len(offsets))
+	vnet.InstanceBindingsStart(b)
+	vnet.InstanceBindingsAddBindings(b, list)
+	return finishEnvelope(b, vnet.PayloadInstanceBindings, vnet.InstanceBindingsEnd(b)), nil
+}

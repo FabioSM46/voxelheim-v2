@@ -43,3 +43,31 @@ func TestAForgedEntryAnswerCrossesNothing(t *testing.T) {
 		t.Fatalf("a forged answer allocated a world: %d instances, %d in the open world", cfg.Instances.Count(), open.Count())
 	}
 }
+
+// A character is told what they owe on the way in, empty list included.
+//
+// **The empty list is the case worth pinning**, because it is the one silence would be
+// mistaken for: the frame replaces the client's copy wholesale, so a character who owed
+// a run yesterday and nothing today has to be told the difference. What the list says
+// when it is not empty is the manager's, and it is pinned in
+// game/instance_bindings_test.go; what this covers is that the connection states it at
+// all, once, before it starts streaming a world.
+func TestASessionIsToldWhatItOwesOnTheWayIn(t *testing.T) {
+	cfg, chunks, open, peers, _ := portalSession(t, 2)
+	id := peers.NextID()
+	_, frames := admit(t, cfg, chunks, open, peers, id)
+
+	waitUntil(t, "saved-run list", func() bool { return len(frames.savedRunLists()) == 1 })
+	if got := frames.savedRunLists()[0]; len(got) != 0 {
+		t.Fatalf("a character who owes nothing was sent %+v", got)
+	}
+	// Once, not once per tick: the list is sent on entry and on change, and nothing has
+	// changed.
+	for range 5 {
+		cfg.Instances.Step()
+	}
+	conn2 := frames.savedRunLists()
+	if len(conn2) != 1 {
+		t.Fatalf("the list was restated with nothing to restate: %d frames", len(conn2))
+	}
+}

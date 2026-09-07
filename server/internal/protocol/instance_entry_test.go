@@ -98,3 +98,59 @@ func TestInstanceEntryAnswerDecodesIntentAndNothingElse(t *testing.T) {
 		})
 	}
 }
+
+// The complete list, empty included, and every entry checked on the way out.
+func TestInstanceBindingsCarriesTheWholeListOrNothing(t *testing.T) {
+	t.Parallel()
+
+	sound := SessionBinding{Arch: [3]int32{0, 61, 0}, BossesDefeated: 1, BossesTotal: 2, ResetsAtUnix: 1893456000}
+	// An empty list is a statement — a character who owes nothing anywhere — so it
+	// encodes rather than being refused as nothing to say.
+	empty, err := EncodeInstanceBindings(nil)
+	if err != nil {
+		t.Fatalf("an empty list is a statement: %v", err)
+	}
+	msg, err := Decode(empty)
+	if err != nil || msg.Kind != vnet.PayloadInstanceBindings {
+		t.Fatalf("Decode: %v, kind %s", err, msg.Kind)
+	}
+
+	second := sound
+	second.Arch = [3]int32{4096, 70, -4096}
+	second.BossesDefeated = 0
+	frame, err := EncodeInstanceBindings([]SessionBinding{sound, second})
+	if err != nil {
+		t.Fatalf("EncodeInstanceBindings: %v", err)
+	}
+	env := vnet.GetRootAsEnvelope(frame, 0)
+	var payload flatbuffers.Table
+	if !env.Payload(&payload) {
+		t.Fatal("the envelope carries no payload")
+	}
+	var list vnet.InstanceBindings
+	list.Init(payload.Bytes, payload.Pos)
+	if list.BindingsLength() != 2 {
+		t.Fatalf("the list holds %d entries", list.BindingsLength())
+	}
+	var entry vnet.SessionBinding
+	if !list.Bindings(&entry, 0) {
+		t.Fatal("the first entry is missing")
+	}
+	arch := entry.Arch(nil)
+	if arch == nil || [3]int32{arch.X(), arch.Y(), arch.Z()} != sound.Arch ||
+		entry.BossesDefeated() != sound.BossesDefeated || entry.ResetsAtUnix() != sound.ResetsAtUnix {
+		t.Fatalf("the first entry did not round trip: %+v", entry)
+	}
+
+	// A binding is per character and per dungeon, so one place twice is a list no
+	// correct server holds — and a single unsendable entry costs the whole frame rather
+	// than being dropped out of a list that claims to be complete.
+	if _, err := EncodeInstanceBindings([]SessionBinding{sound, sound}); err == nil {
+		t.Fatal("two bindings named one dungeon and were encoded anyway")
+	}
+	broken := sound
+	broken.BossesTotal = 0
+	if _, err := EncodeInstanceBindings([]SessionBinding{second, broken}); err == nil {
+		t.Fatal("an unsendable entry was encoded inside a list")
+	}
+}

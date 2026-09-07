@@ -11,13 +11,13 @@ pub const ENUM_MIN_PAYLOAD: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PAYLOAD: u8 = 69;
+pub const ENUM_MAX_PAYLOAD: u8 = 70;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_PAYLOAD: [Payload; 70] = [
+pub const ENUM_VALUES_PAYLOAD: [Payload; 71] = [
     Payload::NONE,
     Payload::ClientHello,
     Payload::ServerWelcome,
@@ -88,6 +88,7 @@ pub const ENUM_VALUES_PAYLOAD: [Payload; 70] = [
     Payload::MiningActivity,
     Payload::InstanceEntryOffer,
     Payload::InstanceEntryAnswer,
+    Payload::InstanceBindings,
 ];
 
 /// Every message that can cross the wire, in both directions.
@@ -184,9 +185,10 @@ impl Payload {
     pub const MiningActivity: Self = Self(67);
     pub const InstanceEntryOffer: Self = Self(68);
     pub const InstanceEntryAnswer: Self = Self(69);
+    pub const InstanceBindings: Self = Self(70);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 69;
+    pub const ENUM_MAX: u8 = 70;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::NONE,
         Self::ClientHello,
@@ -258,6 +260,7 @@ impl Payload {
         Self::MiningActivity,
         Self::InstanceEntryOffer,
         Self::InstanceEntryAnswer,
+        Self::InstanceBindings,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -332,6 +335,7 @@ impl Payload {
             Self::MiningActivity => Some("MiningActivity"),
             Self::InstanceEntryOffer => Some("InstanceEntryOffer"),
             Self::InstanceEntryAnswer => Some("InstanceEntryAnswer"),
+            Self::InstanceBindings => Some("InstanceBindings"),
             _ => None,
         }
     }
