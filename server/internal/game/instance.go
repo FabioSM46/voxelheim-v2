@@ -197,7 +197,7 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 		id = m.mintEntityID()
 	}
 	// A bijection of ids provides a fresh seed even for two copies of one ruin.
-	s, err := m.newSessionLocked(id, int64(id^0x49a3d758c1e260bf), ruin)
+	s, err := m.newSessionLocked(id, int64(id^0x49a3d758c1e260bf), ruin, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -212,10 +212,14 @@ func (m *InstanceManager) createLocked(ruin InstanceRuin) (*instanceSession, err
 // other property of a live session — its simulation, its chunk cache, its lifetime
 // context — is reconstructed here either way, which is the whole of "the world is never
 // persisted".
-func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin) (*instanceSession, error) {
-	chunks := world.NewInstanceCache(seed, world.DefaultWorkers, 64)
+func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceRuin, defeated []vnet.MobKind) (*instanceSession, error) {
+	progress := dungeonProgressFrom(defeated)
+	chunks, gate := world.NewGatedInstanceCache(seed, world.DefaultWorkers, 72, progress.guardian)
 	sim, err := NewSim(m.tickRate, m.viewDistance, seed, NewCacheTerrain(chunks), chunks, m.mintEntityID, m.log, m.options...)
 	if err != nil {
+		return nil, err
+	}
+	if err := sim.placeDungeonEncounters(seed, gate, progress); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())

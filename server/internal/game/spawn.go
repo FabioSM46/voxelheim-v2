@@ -97,6 +97,9 @@ func newSpawnRNG(worldSeed int64) *rand.Rand {
 // The alternative is re-sorting every mob in the world twenty times a second to
 // discover that nothing happened.
 func (s *Sim) directMobsLocked(tick uint64, players []*Player, mobs []*mob) bool {
+	if s.dungeon != nil {
+		return false
+	}
 	changed := s.removeSpentMobsLocked(players, mobs)
 
 	// The one part of this that is not every tick. See the file comment.

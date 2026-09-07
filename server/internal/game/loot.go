@@ -184,6 +184,7 @@ func (s *Sim) makeCorpseLocked(m *mob) *corpse {
 		// transition: a creature the director takes away never reaches it, so a boss
 		// nobody killed can never save a run. See instance_binding.go.
 		s.recordBossDefeatLocked(m.kind)
+		s.dungeonDefeatLocked(m)
 		var roster []corpseOwner
 		if m.encounter != nil {
 			roster = m.encounter.roster
