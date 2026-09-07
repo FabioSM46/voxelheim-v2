@@ -556,6 +556,7 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		damage = 1
 	}
 	if target.damageLocked(damage) {
+		s.blows = append(s.blows, landedBlow{attacker: m.entityID, target: target.entityID, kind: vnet.BlowKindMobMelee, targetKind: vnet.BlowTargetPlayer})
 		target.recordMobHitLocked(protocol.MobHit{
 			AttackerEntityID: m.entityID,
 			AttackerPos:      toWire(m.pos),
