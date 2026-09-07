@@ -60,19 +60,20 @@ use bevy::prelude::*;
 pub use codec::BlockRequest;
 #[allow(unused_imports)] // V20 protocol surface; ECS consumers land in later issues.
 pub use codec::{
-    ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, CHUNK_COLUMN_BLOCKS,
-    CharacterSummary, ChatMessage, ChatRequest, ChunkCoord, ConsumeRequest, CraftRequest,
-    DropItemRequest, EditAction, EntityState, Facing, HairModel, InventoryMoveRequest,
-    InventoryStack, InventoryState, ItemDropState, Landmark, LandmarkList, LifeState, LootClosed,
-    LootEntry, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS,
-    MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored,
-    MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
-    MarkerRemoveRequest, MineProgress, MineRequest, MiningActivity, MiningPhase, MiningTool,
-    MobAction, MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite,
-    PartyMemberState, PartyRequest, PartyRosterMember, PlaceStructureRequest, PlayerAppearance,
-    PlayerInput, PlayerVitals, ProjectileKind, ProjectileState, RecipeId, RefusalReason,
-    RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams, Snapshot,
-    StructureKind, StructureState, WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
+    ActionRefused, Appearance, AttackRequest, BlockCoord, BlockEditRequest, BlowKind, BlowLanded,
+    BlowTarget, CHUNK_COLUMN_BLOCKS, CharacterSummary, ChatMessage, ChatRequest, ChunkCoord,
+    ConsumeRequest, CraftRequest, DropItemRequest, EditAction, EntityState, Facing, HairModel,
+    InventoryMoveRequest, InventoryStack, InventoryState, ItemDropState, Landmark, LandmarkList,
+    LifeState, LootClosed, LootEntry, LootOpenRequest, LootState, LootTakeAllRequest,
+    LootTakeRequest, MAP_TILE_CELLS, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MAX_MARKERS,
+    MAX_VIEW_DISTANCE, MapColumn, MapExplored, MapSurface, MapTile, MapTileRequest, Marker,
+    MarkerKind, MarkerList, MarkerPlaceRequest, MarkerRemoveRequest, MineProgress, MineRequest,
+    MiningActivity, MiningPhase, MiningTool, MobAction, MobHit, MobKind, MobState,
+    PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
+    PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
+    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
+    WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[cfg(test)]
@@ -719,6 +720,39 @@ impl MobHitInbox {
 /// because every value is a complete server answer for the voxel it names.
 #[derive(Resource, Debug, Default)]
 pub struct MineProgressInbox(Vec<MineProgress>);
+
+/// Bounded transient contacts, oldest dropped under pressure. This does not deduplicate:
+/// two same-tick blows against the same target are two real contacts on the wire.
+#[derive(Resource, Debug, Default)]
+pub struct BlowInbox(Vec<(BlowLanded, Instant)>);
+impl BlowInbox {
+    const CAPACITY: usize = 64;
+    /// A stalled presentation must not replay a fight even if no newer snapshot arrived.
+    const MAX_AGE: Duration = Duration::from_millis(500);
+    fn push(&mut self, blow: BlowLanded, at: Instant) {
+        if self.0.len() == Self::CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push((blow, at));
+    }
+    /// Part 2 consumes only current-tick visible targets; expired or unmatched contacts
+    /// are discarded, never saved until a later snapshot happens to contain the same id.
+    #[allow(dead_code)] // Sound consumer follows in #999 part 2.
+    pub fn take(&mut self, snapshot: Option<&Snapshot>, now: Instant) -> Vec<BlowLanded> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .filter_map(|(blow, at)| {
+                (now.saturating_duration_since(at) < Self::MAX_AGE
+                    && snapshot.is_some_and(|snapshot| blow.matches_snapshot(snapshot)))
+                .then_some(blow)
+            })
+            .collect()
+    }
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, blow: BlowLanded, at: Instant) {
+        self.push(blow, at);
+    }
+}
 
 /// Bounded observer frames with decode timestamps, so delayed drains cannot renew leases.
 #[derive(Resource, Debug, Default)]
@@ -1398,6 +1432,7 @@ impl Plugin for NetPlugin {
             .init_resource::<MapInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<MiningActivityInbox>()
+            .init_resource::<BlowInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()
@@ -2004,6 +2039,7 @@ struct Inboxes<'w> {
     map: Option<ResMut<'w, MapInbox>>,
     mining: ResMut<'w, MineProgressInbox>,
     mining_activity: Option<ResMut<'w, MiningActivityInbox>>,
+    blows: Option<ResMut<'w, BlowInbox>>,
     appearances: ResMut<'w, AppearanceInbox>,
     residents: ResMut<'w, ResidentInbox>,
     refusals: ResMut<'w, RefusalInbox>,
@@ -2107,6 +2143,9 @@ fn drain_session_events(
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
+                    inbox.0.clear();
+                }
                 inboxes.learned_mounts.clear();
                 // Every field but the token, which is never written down. The
                 // newtype refuses to print itself, so this stays true even if a
@@ -2163,6 +2202,9 @@ fn drain_session_events(
                 inboxes.snapshots.0.clear();
                 inboxes.mining.0.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
                     inbox.0.clear();
                 }
                 inboxes.appearances.0.clear();
@@ -2296,6 +2338,11 @@ fn drain_session_events(
 
             // Complete authoritative progress, interpreted only by the player module.
             Ok(SessionEvent::MineProgress(progress)) => inboxes.mining.0.push(progress),
+            Ok(SessionEvent::BlowLanded(blow, at)) => {
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
+                    inbox.push(blow, at);
+                }
+            }
             Ok(SessionEvent::MiningActivity(a, at)) => {
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.push(a, at);
@@ -2361,6 +2408,9 @@ fn drain_session_events(
                         if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                             inbox.0.clear();
                         }
+                        if let Some(inbox) = inboxes.blows.as_deref_mut() {
+                            inbox.0.clear();
+                        }
                         break;
                     };
                     commands.insert_resource(suspended.0.sibling());
@@ -2421,6 +2471,9 @@ fn drain_session_events(
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
+                    inbox.0.clear();
+                }
             }
 
             Ok(SessionEvent::Refused(reason)) => {
@@ -2437,6 +2490,9 @@ fn drain_session_events(
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
                     inbox.0.clear();
                 }
             }
@@ -2472,6 +2528,9 @@ fn drain_session_events(
                 commands.remove_resource::<SuspendedOutbound>();
                 inboxes.wards.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
                     inbox.0.clear();
                 }
             }
@@ -2538,6 +2597,9 @@ fn drain_session_events(
                 // client is in.
                 inboxes.wards.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
+                    inbox.0.clear();
+                }
+                if let Some(inbox) = inboxes.blows.as_deref_mut() {
                     inbox.0.clear();
                 }
                 commands.remove_resource::<NetLink>();
@@ -5117,6 +5179,25 @@ mod tests {
     }
 
     #[test]
+    fn two_identical_blow_frames_cross_the_socket_handshake_and_ecs_drain_separately() {
+        let frame = codec::server_side::encode_player_blow(7, 9, [0.0; 3]);
+        let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
+            encode_server_welcome(&WelcomeWire::default()),
+            frame.clone(),
+            frame,
+        ]));
+        let (mut app, _scratch) = headless(&addr);
+        pump_until(&mut app, "two blows", |app| {
+            app.world().resource::<BlowInbox>().0.len() == 2
+        });
+        let contacts = &app.world().resource::<BlowInbox>().0;
+        assert_eq!(contacts[0].0, contacts[1].0);
+        assert_eq!(contacts[0].0.target_entity_id, 9);
+        assert_eq!(contacts[0].0.tick, 7);
+        assert!(Instant::now().saturating_duration_since(contacts[0].1) < PATIENCE);
+    }
+
+    #[test]
     fn a_resident_appearance_after_the_welcome_reaches_the_resident_inbox() {
         let (addr, _stub) = spawn_stub(Reply::AfterAChoice(vec![
             encode_server_welcome(&WelcomeWire::default()),
@@ -5436,6 +5517,104 @@ mod tests {
         }
     }
 
+    #[test]
+    fn landed_blow_queue_preserves_contacts_bounds_pressure_and_expires_stale_audio() {
+        let now = Instant::now();
+        let blow = BlowLanded {
+            tick: 7,
+            attacker_entity_id: 0,
+            target_entity_id: 9,
+            position: [0.0; 3],
+            kind: BlowKind::Melee,
+            target: BlowTarget::Player,
+        };
+        let snapshot = Snapshot {
+            server_tick: 7,
+            entities: vec![EntityState {
+                entity_id: 9,
+                pos: [0.0; 3],
+                vel: [0.0; 3],
+                yaw: 0.0,
+            }],
+            ..Snapshot::default()
+        };
+        let mut inbox = BlowInbox::default();
+        inbox.push_for_test(blow, now);
+        inbox.push_for_test(blow, now);
+        assert_eq!(inbox.take(Some(&snapshot), now), vec![blow, blow]);
+        for id in 0..100 {
+            inbox.push(
+                BlowLanded {
+                    attacker_entity_id: id,
+                    ..blow
+                },
+                now,
+            );
+        }
+        let contacts = inbox.take(Some(&snapshot), now);
+        assert_eq!(contacts.len(), BlowInbox::CAPACITY);
+        assert_eq!(contacts[0].attacker_entity_id, 36);
+        assert_eq!(contacts.last().unwrap().attacker_entity_id, 99);
+        inbox.push(blow, now);
+        assert!(
+            inbox
+                .take(Some(&snapshot), now + BlowInbox::MAX_AGE)
+                .is_empty()
+        );
+        inbox.push(blow, now);
+        assert!(inbox.take(None, now).is_empty());
+        assert!(
+            inbox.take(Some(&snapshot), now).is_empty(),
+            "no deferred replay"
+        );
+    }
+
+    #[test]
+    fn landed_blow_inbox_is_cleared_on_world_change_and_every_session_ending() {
+        let blow = BlowLanded {
+            tick: 7,
+            attacker_entity_id: 0,
+            target_entity_id: 9,
+            position: [0.0; 3],
+            kind: BlowKind::Melee,
+            target: BlowTarget::Player,
+        };
+        let snapshot = Snapshot {
+            server_tick: 7,
+            entities: vec![EntityState {
+                entity_id: 9,
+                pos: [0.0; 3],
+                vel: [0.0; 3],
+                yaw: 0.0,
+            }],
+            ..Snapshot::default()
+        };
+        for ended in [false, true] {
+            let (mut app, tx) = app_with_manual_link(ConnectionState::Connected);
+            app.insert_resource(Session(params()));
+            tx.send(SessionEvent::BlowLanded(blow, Instant::now()))
+                .unwrap();
+            if ended {
+                tx.send(SessionEvent::Ended(None)).unwrap();
+            } else {
+                tx.send(SessionEvent::WorldChange(WorldChange {
+                    world_id: 0,
+                    world_seed: 8,
+                    arrival: [0.0; 3],
+                    exit_arch: None,
+                }))
+                .unwrap();
+            }
+            app.update();
+            assert!(
+                app.world_mut()
+                    .resource_mut::<BlowInbox>()
+                    .take(Some(&snapshot), Instant::now())
+                    .is_empty()
+            );
+        }
+    }
+
     /// An app running only the drain system, plus the sender the test controls.
     fn app_with_manual_link(initial: ConnectionState) -> (App, Sender<SessionEvent>) {
         let (event_tx, event_rx) = mpsc::channel();
@@ -5453,6 +5632,7 @@ mod tests {
             .init_resource::<PlayerTradeInbox>()
             .init_resource::<MineProgressInbox>()
             .init_resource::<MiningActivityInbox>()
+            .init_resource::<BlowInbox>()
             .init_resource::<AppearanceInbox>()
             .init_resource::<ResidentInbox>()
             .init_resource::<RefusalInbox>()

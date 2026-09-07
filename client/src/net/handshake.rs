@@ -31,11 +31,12 @@ use std::fmt;
 use super::codec::WorldChange;
 
 use super::codec::{
-    ActionRefused, CharacterList, ChatMessage, InventoryState, LandmarkList, LearnedMounts,
-    LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile,
-    MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite, PlayerAppearance,
-    PlayerTradeClosed, PlayerTradeState, Reject, ResidentAppearance, SessionParams, Snapshot,
-    StormWarning, VendorClosed, VendorState, VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
+    ActionRefused, BlowLanded, CharacterList, ChatMessage, InventoryState, LandmarkList,
+    LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState, MapExplored,
+    MapTile, MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite,
+    PlayerAppearance, PlayerTradeClosed, PlayerTradeState, Reject, ResidentAppearance,
+    SessionParams, Snapshot, StormWarning, VendorClosed, VendorState, VoiceHeard, WardsNearby,
+    WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -89,6 +90,7 @@ pub enum Transition {
     /// Authoritative progress for the voxel currently being mined.
     MineProgress(MineProgress),
     MiningActivity(MiningActivity),
+    BlowLanded(BlowLanded),
     /// What one visible player looks like, admitted because a session exists.
     ///
     /// It names an entity rather than answering about one this session already has, and
@@ -537,6 +539,7 @@ impl Handshake {
                     Ok(Transition::Inventory(inventory))
                 }
             }
+            (Phase::Established, Message::BlowLanded(blow)) => Ok(Transition::BlowLanded(blow)),
             (Phase::Established, Message::MiningActivity(a)) => Ok(Transition::MiningActivity(a)),
             (Phase::Established, Message::MineProgress(progress)) => {
                 Ok(Transition::MineProgress(progress))
@@ -620,6 +623,7 @@ impl Handshake {
             }
             (_, Message::Snapshot(_)) => Err(HandshakeError::Premature("EntitySnapshot")),
             (_, Message::Inventory(_)) => Err(HandshakeError::Premature("InventoryState")),
+            (_, Message::BlowLanded(_)) => Err(HandshakeError::Premature("BlowLanded")),
             (_, Message::MiningActivity(_)) => Err(HandshakeError::Premature("MiningActivity")),
             (_, Message::MineProgress(_)) => Err(HandshakeError::Premature("MineProgress")),
             (_, Message::ActionRefused(_)) => Err(HandshakeError::Premature("ActionRefused")),
@@ -1848,6 +1852,26 @@ mod tests {
         assert_eq!(
             admitted.apply(Message::MapExplored(explored.clone())),
             Ok(Transition::MapExplored(explored))
+        );
+    }
+
+    #[test]
+    fn a_landed_blow_only_belongs_to_an_established_session() {
+        let blow = BlowLanded {
+            tick: 0,
+            attacker_entity_id: 0,
+            target_entity_id: 7,
+            position: [0.0; 3],
+            kind: crate::net::BlowKind::Melee,
+            target: crate::net::BlowTarget::Player,
+        };
+        assert_eq!(
+            Handshake::new().apply(Message::BlowLanded(blow)),
+            Err(HandshakeError::Premature("BlowLanded"))
+        );
+        assert_eq!(
+            established().apply(Message::BlowLanded(blow)),
+            Ok(Transition::BlowLanded(blow))
         );
     }
 
