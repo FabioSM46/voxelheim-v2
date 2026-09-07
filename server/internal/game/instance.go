@@ -133,6 +133,9 @@ type InstanceManager struct {
 	// it" is made of: a later crossing overwrites the earlier offer rather than banking
 	// it. See instance_entry.go.
 	offers map[InstanceCharacter]pendingOffer
+	// bindingWatchers is one live connection per character, told the whole list whenever
+	// it changes. See instance_bindings.go for what a watcher may and may not do.
+	bindingWatchers map[InstanceCharacter]func([]CharacterBinding)
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -153,8 +156,9 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		mintEntityID: mintEntityID, now: time.Now, log: log, options: append([]SimOption(nil), options...),
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
-		offers:   make(map[InstanceCharacter]pendingOffer),
-		sessions: make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
+		offers:          make(map[InstanceCharacter]pendingOffer),
+		bindingWatchers: make(map[InstanceCharacter]func([]CharacterBinding)),
+		sessions:        make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }
 
@@ -380,10 +384,20 @@ func (m *InstanceManager) removeLocked(id uint64, s *instanceSession) {
 	// releases every binding to that session": the midnight reset removes the session
 	// through this one path, and a character bound to it is free for that ruin again on
 	// the way out. See instance_reset.go.
+	//
+	// **Every deletion is collected before any of them is announced**, because the list a
+	// character is told about is a complete one: announcing inside the loop would send a
+	// list still holding a binding this same pass is about to remove. See
+	// instance_bindings.go.
+	var released []InstanceCharacter
 	for visit, sessionID := range m.bound {
 		if sessionID == id {
 			delete(m.bound, visit)
+			released = append(released, visit.character)
 		}
+	}
+	for _, character := range released {
+		m.announceBindingsLocked(character)
 	}
 	for visit, sessionID := range m.partyVisits {
 		if sessionID == id {
@@ -411,6 +425,10 @@ func (m *InstanceManager) Close() {
 	clear(m.disconnected)
 	clear(m.portalEntries)
 	clear(m.offers)
+	// Every watcher goes before the sessions do. A shutdown is not a reset: nobody's
+	// lockout ends because the server stopped, and a connection told its list was empty
+	// on the way down would be told something the next start contradicts.
+	clear(m.bindingWatchers)
 	for id, s := range m.sessions {
 		m.removeLocked(id, s)
 	}

@@ -310,7 +310,10 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // dropping the frame. InstanceEntryOffer travels back and would have been dropped safely;
 // it rides the same bump because an offer nobody can answer is not one. The two appended
 // RefusalReason members owe nothing on their own — that enum is read through its zero
-// member and never fails a frame.
+// member and never fails a frame. InstanceBindings is appended after it without moving
+// the version: it travels server -> client, an older client drops the tag, and an older
+// server sends none — which reads to a newer client as a character who owes nothing, and
+// a server with no saved runs is exactly that.
 func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
 	t.Parallel()
 
@@ -395,6 +398,7 @@ func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
 		vnet.PayloadMiningActivity,
 		vnet.PayloadInstanceEntryOffer,
 		vnet.PayloadInstanceEntryAnswer,
+		vnet.PayloadInstanceBindings,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {

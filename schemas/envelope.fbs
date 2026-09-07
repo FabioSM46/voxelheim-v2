@@ -288,7 +288,16 @@ union Payload {
   //
   //    See `player.fbs` for both tables and for `SessionBinding`, the terms they carry.
   InstanceEntryOffer,      // 68  server -> client
-  InstanceEntryAnswer     // 69  client -> server
+  InstanceEntryAnswer,     // 69  client -> server
+
+  //    Appended server-only state; V35 is unchanged. An older client cannot name the
+  //    tag and drops it, which costs it a list of lockouts it has no window for; an
+  //    older server never sends one, which reads to a newer client as a character who
+  //    owes nothing — and a character who owes nothing is exactly what a server with no
+  //    saved runs has. Nothing refuses an unknown value here, so on the rule this file
+  //    states the bump is avoided rather than owed. A client sending this authoritative
+  //    payload is a protocol error. See `player.fbs`.
+  InstanceBindings        // 70  server -> client
 }
 
 table Envelope {

@@ -96,6 +96,7 @@ const (
 	PayloadMiningActivity         Payload = 67
 	PayloadInstanceEntryOffer     Payload = 68
 	PayloadInstanceEntryAnswer    Payload = 69
+	PayloadInstanceBindings       Payload = 70
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -169,6 +170,7 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadMiningActivity:         "MiningActivity",
 	PayloadInstanceEntryOffer:     "InstanceEntryOffer",
 	PayloadInstanceEntryAnswer:    "InstanceEntryAnswer",
+	PayloadInstanceBindings:       "InstanceBindings",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -242,6 +244,7 @@ var EnumValuesPayload = map[string]Payload{
 	"MiningActivity":         PayloadMiningActivity,
 	"InstanceEntryOffer":     PayloadInstanceEntryOffer,
 	"InstanceEntryAnswer":    PayloadInstanceEntryAnswer,
+	"InstanceBindings":       PayloadInstanceBindings,
 }
 
 func (v Payload) String() string {

@@ -57,6 +57,11 @@ type collector struct {
 	// meaning: what matters is what the *last* one says, and how many arrived before it.
 	markerLists [][]protocol.Marker
 
+	// bindingLists is every InstanceBindings frame, in order and unmerged. The list
+	// replaces the client's copy wholesale, so the order is the whole of the meaning:
+	// what matters is what the last one says and how many arrived before it.
+	bindingLists [][]protocol.SessionBinding
+
 	// mapTiles is every MapTile, whole. A tile is the answer to one request, so what a
 	// test asserts about it is the frame rather than a running total.
 	mapTiles []protocol.MapTile
@@ -377,6 +382,27 @@ func (c *collector) absorb(frame []byte) {
 		}
 		c.explored = append(c.explored, columns)
 
+	case vnet.PayloadInstanceBindings:
+		var payload vnet.InstanceBindings
+		payload.Init(table.Bytes, table.Pos)
+		list := make([]protocol.SessionBinding, 0, payload.BindingsLength())
+		for i := range payload.BindingsLength() {
+			var entry vnet.SessionBinding
+			if !payload.Bindings(&entry, i) {
+				continue
+			}
+			binding := protocol.SessionBinding{
+				BossesDefeated: entry.BossesDefeated(),
+				BossesTotal:    entry.BossesTotal(),
+				ResetsAtUnix:   entry.ResetsAtUnix(),
+			}
+			if arch := entry.Arch(nil); arch != nil {
+				binding.Arch = [3]int32{arch.X(), arch.Y(), arch.Z()}
+			}
+			list = append(list, binding)
+		}
+		c.bindingLists = append(c.bindingLists, list)
+
 	case vnet.PayloadMapTile:
 		tile := new(vnet.MapTile)
 		tile.Init(table.Bytes, table.Pos)
@@ -447,6 +473,13 @@ func (c *collector) actionRefusals() []protocol.ActionRefused {
 }
 
 // chatMessages is every accepted world-chat line this session received, in order.
+// savedRunLists is every complete saved-run list this session was sent, in order.
+func (c *collector) savedRunLists() [][]protocol.SessionBinding {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.bindingLists)
+}
+
 func (c *collector) chatMessages() []protocol.ChatMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()

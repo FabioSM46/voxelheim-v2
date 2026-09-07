@@ -258,6 +258,8 @@ pub mod voxelheim {
         pub use self::instance_entry_offer_generated::*;
         mod instance_entry_answer_generated;
         pub use self::instance_entry_answer_generated::*;
+        mod instance_bindings_generated;
+        pub use self::instance_bindings_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net

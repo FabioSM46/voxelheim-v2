@@ -401,6 +401,10 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 
 	openBinding := WorldBinding{Chunks: chunks, Sim: sim, Context: ctx, Spawn: cfg.Spawn}
 	var portalVisit *game.PortalEntry
+	// watchedBindings names the character whose saved-run list this connection is
+	// registered for, and nil until it is. A pointer rather than a flag beside a value,
+	// so that "registered" and "who for" cannot disagree.
+	var watchedBindings *game.InstanceCharacter
 	rootPeers := peers
 	peers, releaseWorld := rootPeers.acquireWorld(chunks)
 	control := &worldControl{changes: make(chan worldChange), done: make(chan struct{})}
@@ -590,6 +594,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		//
 		// Then stop the session-scoped workers (streaming and mining), wait for both to
 		// stop producing, and only then close the channel.
+		//
+		// The saved-run watcher is a fourth producer of exactly that kind and stops the
+		// same way: [game.InstanceManager.UnwatchBindings] takes the mutex the manager
+		// holds for the whole of an announcement, so once it has returned no later change
+		// to this character's bindings can reach this connection's queue.
+		if watchedBindings != nil && cfg.Instances != nil {
+			cfg.Instances.UnwatchBindings(*watchedBindings)
+		}
 		if stopWorldLifetime != nil {
 			stopWorldLifetime()
 		}
@@ -975,6 +987,36 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		accepting.Store(true)
 		startWorld()
 		return nil
+	}
+
+	// sendBindings states this character's whole list of saved runs.
+	//
+	// **The conversion from a lattice cell to an arch happens here rather than in the
+	// manager**, because it needs the open world's seed: [game.InstanceManager] owns
+	// ephemeral worlds and does not know which open world this connection is in. That is
+	// the same seam persistence uses, one field at a time. `RuinAt` composes no terrain.
+	//
+	// A ruin the seed no longer names is dropped rather than sent as a place: an arch is
+	// what the client goes to, and there is nothing honest to put there. It is
+	// unreachable while the world generator is deterministic, and skipping it is the same
+	// call `bindingsLocked` makes for a session that is not there.
+	sendBindings := func(bindings []game.CharacterBinding) ([]byte, error) {
+		terms := make([]protocol.SessionBinding, 0, len(bindings))
+		for _, binding := range bindings {
+			ruin, exists := world.RuinAt(cfg.WorldSeed, binding.Ruin.CellX, binding.Ruin.CellZ)
+			if !exists {
+				log.Warn("a saved run names a ruin this world does not have",
+					"cell_x", binding.Ruin.CellX, "cell_z", binding.Ruin.CellZ)
+				continue
+			}
+			terms = append(terms, protocol.SessionBinding{
+				Arch:           [3]int32{int32(ruin.Arch.X), int32(ruin.Arch.Y), int32(ruin.Arch.Z)},
+				BossesDefeated: uint8(min(binding.BossesDefeated, 255)),
+				BossesTotal:    uint8(min(binding.BossesTotal, 255)),
+				ResetsAtUnix:   binding.ExpiresUnix,
+			})
+		}
+		return protocol.EncodeInstanceBindings(terms)
 	}
 
 	// refusePortal answers a crossing that did not happen. Every one of them is the same
@@ -1407,6 +1449,38 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 					return fmt.Errorf("session: send the character's marks on join: %w", mErr)
 				}
 
+			}
+			// What this character already owes, **empty list included**, for the reason
+			// the marks above are sent empty: the list replaces the client's copy
+			// wholesale, so silence would leave a lockout standing that reset overnight.
+			// Unconditional rather than open-world-only — a reconnect into an instance is
+			// exactly the session most likely to be holding a stale one.
+			if cfg.Instances != nil {
+				character := game.InstanceCharacter{PlayerID: self.ID, CharacterID: uint64(self.Character)}
+				frame, bErr := sendBindings(cfg.Instances.Bindings(character))
+				if bErr != nil {
+					return fmt.Errorf("session: state the character's saved runs: %w", bErr)
+				}
+				if bErr := enqueue(frame); bErr != nil {
+					return fmt.Errorf("session: send the character's saved runs on join: %w", bErr)
+				}
+				// Registered after the first list is queued, so the ordering on the wire
+				// is the ordering of the facts: what this character owed on arrival, and
+				// then every change to it. The delivery runs on the tick goroutine under
+				// the manager's mutex, so it does nothing but encode and offer the frame
+				// to this connection's own queue — no blocking, and nothing that reaches
+				// back into the manager.
+				cfg.Instances.WatchBindings(character, func(bindings []game.CharacterBinding) {
+					frame, wErr := sendBindings(bindings)
+					if wErr != nil {
+						log.Warn("cannot state the character's saved runs", "error", wErr)
+						return
+					}
+					if !trySend(frame) {
+						log.Debug("saved-run list dropped: the session's outbound queue is full")
+					}
+				})
+				watchedBindings = &character
 			}
 			startWorld()
 			rootPeers.mu.Lock()

@@ -2998,3 +2998,32 @@ table InstanceEntryAnswer {
   offer_id: ulong;
   accept: bool;
 }
+
+
+/// Every saved run one character currently owes. Server -> client, and authoritative.
+///
+/// **A complete list, replaced wholesale**, for the reason `MarkerList` and
+/// `InventoryState` are: a partial list has an ordering and a revision to get right, and
+/// a client holding a stale binding shows a player a lockout that may not exist. An empty
+/// list is therefore a statement rather than the absence of one — it says this character
+/// owes nothing anywhere, and a recipient that kept a previous list on receiving it would
+/// be showing a run that has already reset.
+///
+/// It is sent when the character enters the world, when a binding is made, and when one
+/// is released by a run's reset. Those are the only three events that can change it, and
+/// each of them sends the whole list rather than the part that moved.
+///
+/// **It is not a sessions window and must not be read as one.** There is no display
+/// order, no name, no formatted text and no field that exists because a layout wanted it:
+/// what a client draws, and in what order, is the client's decision. The order on the
+/// wire is stable across two sends of unchanged state so that a recipient can tell "the
+/// same list again" from "a different list", and it carries no other meaning.
+///
+/// Decoder invariants:
+///   - `bindings` is present; empty is legal and is a statement
+///   - every entry satisfies `SessionBinding`
+///   - no two entries name the same `arch`. A binding is per character and per dungeon,
+///     so one arch appearing twice is a frame no correct server sends
+table InstanceBindings {
+  bindings: [SessionBinding];
+}

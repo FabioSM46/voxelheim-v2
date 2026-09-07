@@ -4751,7 +4751,9 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         // rather than consumed for the reason `MapTile` was before the map window
         // existed — there is no value for a decoded offer to become — and the arm that
         // reads it belongs with the first consumer that needs one.
-        fb::Payload::InstanceEntryOffer => Ok(Message::Deferred(name)),
+        fb::Payload::InstanceEntryOffer | fb::Payload::InstanceBindings => {
+            Ok(Message::Deferred(name))
+        }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -9308,6 +9310,11 @@ mod tests {
     /// Dropping it is a bump avoided; refusing it is a bump owed. The same words are in
     /// `schemas/common.fbs`, `schemas/AGENTS.md` and the Go half of this pin.
     ///
+    /// `InstanceBindings` is appended without moving the version: it travels
+    /// server -> client, an older client drops the tag, and an older server sends none —
+    /// which reads to a newer client as a character who owes nothing, and a server with
+    /// no saved runs is exactly that.
+    ///
     /// V35 appends the dungeon entry contract. `InstanceEntryAnswer` travels
     /// client -> server, so a V34 server closes the session on the unknown tag rather
     /// than dropping the frame; `InstanceEntryOffer` travels back and rides the same
@@ -9393,6 +9400,7 @@ mod tests {
             (fb::Payload::MiningActivity, 67),
             (fb::Payload::InstanceEntryOffer, 68),
             (fb::Payload::InstanceEntryAnswer, 69),
+            (fb::Payload::InstanceBindings, 70),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -9408,7 +9416,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            70,
+            71,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9438,7 +9446,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 70] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 71] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -9521,6 +9529,7 @@ mod tests {
         (fb::Payload::MiningActivity, Handling::Consumed),
         (fb::Payload::InstanceEntryOffer, Handling::Deferred),
         (fb::Payload::InstanceEntryAnswer, Handling::ClientOnly),
+        (fb::Payload::InstanceBindings, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
