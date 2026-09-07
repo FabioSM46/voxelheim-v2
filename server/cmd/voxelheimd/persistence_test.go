@@ -1197,3 +1197,73 @@ func TestAColdStartCleansUpAnExpiredDungeonRun(t *testing.T) {
 		t.Fatalf("the expired run is still on disk: %#v", written)
 	}
 }
+
+// An ephemeral world keeps its dungeon runs in memory only, and every call site survives
+// the nil store — which is the same claim TestAnEphemeralWorldKeepsItsClockInMemoryOnly
+// makes about the clock, and it is made here because a nil store is a no-op at every call
+// site rather than a branch at each one.
+//
+// **Both halves of the wiring, and the loop between them.** The startup restore, the
+// autosave tick and the shutdown flush all reach a *persist.SessionStore that is nil, and
+// all three are ordinary calls: a method with a pointer receiver on a nil pointer is a
+// legal call in Go, and every SessionStore method opens with its own `if s == nil`. The
+// autosave loop is driven for real rather than reasoned about — a tick is what the claim
+// this test answers was about.
+func TestAnEphemeralWorldKeepsItsDungeonRunsInMemoryOnly(t *testing.T) {
+	t.Parallel()
+
+	log := discard()
+
+	runs, err := openSessions(options{worldDir: ""}, log)
+	if err != nil {
+		t.Fatalf("openSessions: %v", err)
+	}
+	if runs != nil {
+		t.Fatalf("an ephemeral world was given a session store at %q", runs.Path())
+	}
+
+	registry := session.NewRegistry(session.DefaultConcurrentSessions)
+	instances, err := game.NewInstanceManager(game.DefaultTickRate, 1, game.DefaultMaxInstances, registry.NextID, log)
+	if err != nil {
+		t.Fatalf("NewInstanceManager: %v", err)
+	}
+	defer instances.Close()
+
+	// Startup: the restore reads a store that is not there and starts the world with
+	// every ruin free.
+	restoreSessions(instances, runs, log)
+	if instances.Count() != 0 {
+		t.Fatalf("an ephemeral restore built %d sessions", instances.Count())
+	}
+
+	srv := &server{instances: instances, runs: runs, saveEvery: time.Millisecond, log: log}
+
+	// The autosave loop, driven for real: several ticks reach flushSessions with a nil
+	// store, and the loop ends on its context rather than on anything the store did.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := srv.saveSessionsLoop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("saveSessionsLoop = %v, want the context's deadline", err)
+	}
+
+	// And the shutdown flush, with a live run in the manager. **The run is free rather
+	// than saved, and that is a limit worth stating rather than glossing**: a save is
+	// caused by a killing blow inside an instance's own simulation, which is not
+	// reachable from this package, so SavedSessions hands the flush an empty list here.
+	// What that does not weaken is the claim under test — flushSessions reaches
+	// s.runs.Save on a nil store either way, which is the line in question, and the
+	// mapping over a populated list is pinned by TestASavedDungeonRunSurvivesARestart.
+	run, err := instances.Create(game.InstanceRuin{CellX: 2, CellZ: 2})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := instances.Join(run.ID, game.InstanceCharacter{PlayerID: identity.PlayerID{1}, CharacterID: 1}); err != nil {
+		t.Fatalf("Join: %v", err)
+	}
+	srv.flushSessions()
+
+	// An ephemeral world still runs dungeons; what it does not do is remember them.
+	if _, live := instances.Lookup(run.ID); !live {
+		t.Fatal("an ephemeral world lost the run it was holding")
+	}
+}
