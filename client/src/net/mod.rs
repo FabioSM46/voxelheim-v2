@@ -67,12 +67,12 @@ pub use codec::{
     LootEntry, LootOpenRequest, LootState, LootTakeAllRequest, LootTakeRequest, MAP_TILE_CELLS,
     MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MAX_MARKERS, MAX_VIEW_DISTANCE, MapColumn, MapExplored,
     MapSurface, MapTile, MapTileRequest, Marker, MarkerKind, MarkerList, MarkerPlaceRequest,
-    MarkerRemoveRequest, MineProgress, MineRequest, MiningActivity, MobAction, MobHit, MobKind,
-    MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
-    PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
-    ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
-    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
-    WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
+    MarkerRemoveRequest, MineProgress, MineRequest, MiningActivity, MiningPhase, MiningTool,
+    MobAction, MobHit, MobKind, MobState, PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite,
+    PartyMemberState, PartyRequest, PartyRosterMember, PlaceStructureRequest, PlayerAppearance,
+    PlayerInput, PlayerVitals, ProjectileKind, ProjectileState, RecipeId, RefusalReason,
+    RefusedAction, Reject, RemoveStructureRequest, RepairRequest, SessionParams, Snapshot,
+    StructureKind, StructureState, WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
 };
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[cfg(test)]
