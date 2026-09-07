@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -87,6 +88,7 @@ func TestTransferClearsWorldEventsAndRejectsWithoutMutating(t *testing.T) {
 		t.Fatal("refusal changed ownership")
 	}
 	p.leaving = false
+	p.miningCompleted = &protocol.MiningActivity{ActorEntityID: id, ActivityID: 5, BlockID: 1, Tool: vnet.MiningToolHand, Phase: vnet.MiningPhaseCompleted}
 	p.openLootID = 99
 	p.openVendorID = 98
 	p.lootClosures = []uint64{97}
@@ -94,7 +96,7 @@ func TestTransferClearsWorldEventsAndRejectsWithoutMutating(t *testing.T) {
 	if err = a.Transfer(p, b, [3]float32{.5, 1, .5}); err != nil {
 		t.Fatal(err)
 	}
-	if p.openLootID != 0 || p.openVendorID != 0 || len(p.lootClosures) != 0 || len(p.vendorClosures) != 0 {
+	if p.miningCompleted != nil || p.openLootID != 0 || p.openVendorID != 0 || len(p.lootClosures) != 0 || len(p.vendorClosures) != 0 {
 		t.Fatal("old-world event retained")
 	}
 	a.Leave(p)

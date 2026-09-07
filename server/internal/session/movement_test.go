@@ -29,23 +29,24 @@ const patience = 10 * time.Second
 // It has to drain: the fake connection's queue is shallow, and a test that let it fill
 // would be measuring `trySend` dropping snapshots rather than the session sending them.
 type collector struct {
-	mu          sync.Mutex
-	positions   map[uint64][3]float32
-	snapshots   int
-	chunks      map[world.Coord]int
-	unloads     map[world.Coord]int
-	updates     []protocol.BlockUpdate
-	progress    []protocol.MineProgress
-	inventories []protocol.InventoryState
-	refusals    []protocol.ActionRefused
-	chats       []protocol.ChatMessage
-	invites     []protocol.PartyInvite
-	partyLeader uint64
-	party       []protocol.PartyMemberState
-	partyRoster []protocol.PartyRosterMember
-	lootStates  []protocol.LootState
-	lootClosed  []uint64
-	accessible  []uint64
+	mu               sync.Mutex
+	positions        map[uint64][3]float32
+	snapshots        int
+	chunks           map[world.Coord]int
+	unloads          map[world.Coord]int
+	updates          []protocol.BlockUpdate
+	progress         []protocol.MineProgress
+	miningActivities []protocol.MiningActivity
+	inventories      []protocol.InventoryState
+	refusals         []protocol.ActionRefused
+	chats            []protocol.ChatMessage
+	invites          []protocol.PartyInvite
+	partyLeader      uint64
+	party            []protocol.PartyMemberState
+	partyRoster      []protocol.PartyRosterMember
+	lootStates       []protocol.LootState
+	lootClosed       []uint64
+	accessible       []uint64
 
 	// explored is every MapExplored page, in arrival order and never merged: what a
 	// test needs to see is how the ledger was paged, not only what it added up to.
@@ -237,6 +238,13 @@ func (c *collector) absorb(frame []byte) {
 			BlockID: update.BlockId(),
 		})
 
+	case vnet.PayloadMiningActivity:
+		var a vnet.MiningActivity
+		a.Init(table.Bytes, table.Pos)
+		pos := a.Pos(nil)
+		if pos != nil {
+			c.miningActivities = append(c.miningActivities, protocol.MiningActivity{Tick: a.Tick(), ActorEntityID: a.ActorEntityId(), ActivityID: a.ActivityId(), Pos: [3]int32{pos.X(), pos.Y(), pos.Z()}, BlockID: a.BlockId(), Tool: a.Tool(), Phase: a.Phase()})
+		}
 	case vnet.PayloadMineProgress:
 		mining := new(vnet.MineProgress)
 		mining.Init(table.Bytes, table.Pos)

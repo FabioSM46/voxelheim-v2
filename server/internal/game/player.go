@@ -839,12 +839,14 @@ type Player struct {
 	// different message from movement and neither client's cadence may keep the
 	// other alive. The state and flags are guarded by sim.mu; mineReady is the
 	// non-blocking handoff from Step to the session's off-tick worker.
-	mining         *miningState
-	haveMineTick   bool
-	lastMineTick   uint32
-	mineSerial     uint64
-	mineCompleting bool
-	mineReset      *miningReset
+	mining             *miningState
+	haveMineTick       bool
+	lastMineTick       uint32
+	mineSerial         uint64
+	mineCompleting     bool
+	mineActivitySerial uint64
+	miningCompleted    *protocol.MiningActivity
+	mineReset          *miningReset
 }
 
 // body is the collision body this player occupies right now: mountedBody while a
@@ -1110,6 +1112,7 @@ func (s *Sim) Leave(p *Player) {
 		p.closePlayerTradeLocked(vnet.PlayerTradeCloseReasonDisconnected)
 		p.setMiningLocked(nil)
 		p.mineCompleting = false
+		p.miningCompleted = nil
 		p.mineReset = nil
 		p.blocking = false
 		delete(s.players, p.entityID)
@@ -1174,6 +1177,7 @@ func (p *Player) BeginLeaving() {
 	p.setMiningLocked(nil)
 	p.mineReset = nil
 	p.mineCompleting = false
+	p.miningCompleted = nil
 	p.pendingSwing = nil
 	p.blocking = false
 }
@@ -1751,7 +1755,9 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			snapshot.Cast = cast
 			snapshot.HasCast = true
 		}
-		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column(), s.blowFramesLocked(snapshot)) {
+		following := s.blowFramesLocked(snapshot)
+		following = append(following, s.miningFramesLocked(viewer, snapshot)...)
+		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column(), following) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
 			// server, and one line per tick per slow client would bury whatever else
 			// the log was needed for.
@@ -1762,6 +1768,9 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		}
 	}
 
+	for _, player := range players {
+		player.miningCompleted = nil
+	}
 	return waterChanges
 }
 
