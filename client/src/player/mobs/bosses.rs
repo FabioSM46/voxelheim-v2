@@ -6,7 +6,7 @@ const FROST: Color = Color::srgb(0.72, 0.81, 0.84);
 const BONE: Color = Color::srgb(0.72, 0.70, 0.63);
 const FUR: Color = Color::srgb(0.12, 0.14, 0.16);
 
-fn boxes(parts: &[(Vec3, Vec3, Color)]) -> Mesh {
+pub(super) fn boxes(parts: &[(Vec3, Vec3, Color)]) -> Mesh {
     let mut mesh = draugr_box(parts[0].0, parts[0].1, parts[0].2);
     merge_all(
         &mut mesh,
@@ -118,108 +118,17 @@ pub(super) fn guardian_legs() -> Mesh {
     boxes(&parts)
 }
 
-pub(super) fn king_body() -> Mesh {
-    let mut parts = vec![
-        (Vec3::new(0.59, 1.18, 0.48), Vec3::new(0.0, 1.67, 0.0), IRON),
-        (Vec3::new(0.55, 0.30, 0.44), Vec3::new(0.0, 1.02, 0.0), IRON),
-    ];
-    for x in [-0.17, 0.17] {
-        parts.push((Vec3::new(0.27, 0.90, 0.36), Vec3::new(x, 0.55, 0.0), IRON));
-        parts.push((Vec3::new(0.30, 0.20, 0.44), Vec3::new(x, 0.10, -0.03), IRON));
-    }
-    for y in [1.32, 1.55, 1.78, 2.01] {
-        parts.push((
-            Vec3::new(0.63, 0.09, 0.52),
-            Vec3::new(0.0, y, 0.0),
-            Color::srgb(0.40, 0.34, 0.30),
-        ));
-    }
-    for x in [-0.24, 0.0, 0.24] {
-        parts.push((
-            Vec3::new(0.21, 1.70, 0.09),
-            Vec3::new(x, 1.12, 0.34),
-            Color::srgb(0.26, 0.36, 0.42),
-        ));
-    }
-    parts.push((
-        Vec3::new(0.05, 0.40, 0.025),
-        Vec3::new(0.0, 1.85, -0.276),
-        FROST,
-    ));
-    boxes(&parts)
-}
-
-pub(super) fn king_head() -> Mesh {
-    let mut parts = vec![
-        (Vec3::new(0.38, 0.35, 0.38), Vec3::new(0.0, 2.42, 0.0), BONE),
-        (
-            Vec3::new(0.19, 0.31, 0.055),
-            Vec3::new(0.105, 2.42, -0.205),
-            IRON,
-        ),
-        (Vec3::new(0.44, 0.07, 0.44), Vec3::new(0.0, 2.61, 0.0), IRON),
-    ];
-    for (x, height) in [(-0.16, 0.15), (0.0, 0.12), (0.16, 0.09)] {
-        parts.push((
-            Vec3::new(0.06, height, 0.07),
-            Vec3::new(x, 2.65 + height / 2.0, -0.15),
-            IRON,
-        ));
-    }
-    parts.push((
-        Vec3::new(0.06, 0.04, 0.02),
-        Vec3::new(-0.09, 2.45, -0.201),
-        FROST,
-    ));
-    boxes(&parts)
-}
-
-pub(super) fn king_arms() -> Mesh {
-    let mut parts = Vec::new();
-    for x in [-0.39, 0.39] {
-        parts.push((Vec3::new(0.20, 0.82, 0.24), Vec3::new(x, -0.39, 0.0), IRON));
-        parts.push((Vec3::new(0.21, 0.22, 0.33), Vec3::new(x, -0.02, 0.0), IRON));
-    }
-    // Carried blade hangs below the right hand, within the server's rest box.
-    parts.push((
-        Vec3::new(0.09, 0.92, 0.055),
-        Vec3::new(0.39, -1.24, -0.17),
-        BONE,
-    ));
-    parts.push((
-        Vec3::new(0.20, 0.055, 0.09),
-        Vec3::new(0.39, -0.82, -0.17),
-        IRON,
-    ));
-    boxes(&parts)
-}
-
 pub(super) fn guardian_visuals(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> SpeciesVisuals {
     let material = materials.add(StandardMaterial::from_color(Color::WHITE));
     SpeciesVisuals {
+        king_parts: None,
         body: meshes.add(guardian_body()),
         head: meshes.add(guardian_head()),
         legs: Some(meshes.add(guardian_legs())),
         arms: None,
-        eyes: None,
-        body_material: material.clone(),
-        head_material: material,
-    }
-}
-
-pub(super) fn king_visuals(
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) -> SpeciesVisuals {
-    let material = materials.add(StandardMaterial::from_color(Color::WHITE));
-    SpeciesVisuals {
-        body: meshes.add(king_body()),
-        head: meshes.add(king_head()),
-        legs: None,
-        arms: Some(meshes.add(king_arms())),
         eyes: None,
         body_material: material.clone(),
         head_material: material,
@@ -234,13 +143,7 @@ mod tests {
         let mut meshes = if kind == MobKind::VargrGuardian {
             vec![guardian_body(), guardian_head(), guardian_legs()]
         } else {
-            vec![
-                king_body(),
-                king_head(),
-                king_arms()
-                    .rotated_by(draugr_arm_swing(action, 0.0, Duration::from_secs(1)))
-                    .translated_by(Vec3::Y * shoulder_height(kind)),
-            ]
+            king::posed_meshes(action, Duration::from_secs(1))
         };
         let rotation = if action == MobAction::Corpse {
             collapse(kind, 1.0)
@@ -260,12 +163,23 @@ mod tests {
     fn export_boss_review_sheet() {
         use bevy::mesh::VertexAttributeValues;
         let mut svg = String::from(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1600 1000\"><rect width=\"1600\" height=\"1000\" fill=\"#d7d8d6\"/><g font-family=\"sans-serif\" font-size=\"18\" fill=\"#20272b\"><text x=\"25\" y=\"30\">Actual boss meshes: rest views, snapshot poses and gameplay angular size</text>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1800 1000\"><rect width=\"1800\" height=\"1000\" fill=\"#d7d8d6\"/><g font-family=\"sans-serif\" font-size=\"18\" fill=\"#20272b\"><text x=\"25\" y=\"30\">Actual boss meshes: rest views, snapshot poses and gameplay angular size</text>",
         );
         for (row, kind) in [MobKind::VargrGuardian, MobKind::DraugrKing]
             .into_iter()
             .enumerate()
         {
+            let measured = posed_meshes(kind, MobAction::Idle);
+            let triangles: usize = measured
+                .iter()
+                .map(|m| m.indices().unwrap().len() / 3)
+                .sum();
+            let vertices: usize = measured.iter().map(Mesh::count_vertices).sum();
+            println!(
+                "{kind:?}: {} segments, {triangles} triangles, {vertices} vertices, 1 material, 0 effects",
+                measured.len()
+            );
+
             for (col, (label, yaw, action, distance)) in [
                 ("front", 0.0, MobAction::Idle, 0.0),
                 ("side", FRAC_PI_2, MobAction::Idle, 0.0),
@@ -275,6 +189,7 @@ mod tests {
                 ("corpse", 0.5, MobAction::Corpse, 0.0),
                 ("13 blocks", 0.0, MobAction::Idle, 13.0),
                 ("25 blocks", 0.0, MobAction::Idle, 25.0),
+                ("cast key", 0.5, MobAction::Idle, -1.0),
             ]
             .into_iter()
             .enumerate()
@@ -291,7 +206,16 @@ mod tests {
                 let base = 400.0 + row as f32 * 470.0;
                 let rotation = Quat::from_rotation_y(yaw);
                 let mut faces = Vec::new();
-                for mesh in posed_meshes(kind, action) {
+                let meshes = if distance < 0.0 {
+                    if kind == MobKind::DraugrKing {
+                        king::cast_meshes()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    posed_meshes(kind, action)
+                };
+                for mesh in meshes {
                     let VertexAttributeValues::Float32x3(positions) =
                         mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap()
                     else {
@@ -358,11 +282,7 @@ mod tests {
             ),
             (
                 MobKind::DraugrKing,
-                vec![
-                    king_body(),
-                    king_head(),
-                    king_arms().translated_by(Vec3::Y * shoulder_height(MobKind::DraugrKing)),
-                ],
+                king::meshes().into_iter().map(|(_, mesh)| mesh).collect(),
             ),
         ] {
             let envelope = body(kind);
