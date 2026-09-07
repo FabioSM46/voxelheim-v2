@@ -37,6 +37,7 @@ use super::{InputMode, merge_all};
 use crate::net::{MobAction, MobKind, Session};
 
 mod bosses;
+mod king;
 
 /// The box one species occupies, in blocks: square in plan, `height` tall, standing on
 /// the point the snapshot puts it at.
@@ -303,6 +304,7 @@ struct SpeciesVisuals {
     eyes: Option<EyeVisuals>,
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
+    king_parts: Option<Vec<(king::Segment, Handle<Mesh>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +439,7 @@ pub(super) struct Mob {
 /// draugr primitive remains covered by the same one material swap per child.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MobPart {
+    King(king::Segment),
     Body,
     Head,
     Legs,
@@ -476,6 +479,7 @@ pub(super) fn create_visuals(
     let vargr_material = materials.add(StandardMaterial::from_color(Color::WHITE));
     commands.insert_resource(MobVisuals {
         draugr: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
@@ -485,6 +489,7 @@ pub(super) fn create_visuals(
             head_material: draugr_material,
         },
         vargr: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
@@ -502,6 +507,7 @@ pub(super) fn create_visuals(
             head_material: vargr_material,
         },
         deer: SpeciesVisuals {
+            king_parts: None,
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
@@ -511,7 +517,7 @@ pub(super) fn create_visuals(
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
         guardian: bosses::guardian_visuals(&mut meshes, &mut materials),
-        king: bosses::king_visuals(&mut meshes, &mut materials),
+        king: king::visuals(&mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
         aggro_marker: meshes.add(aggro_marker_mesh()),
@@ -1046,6 +1052,21 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
+        if let Some(parts) = species.king_parts {
+            for (segment, mesh) in parts {
+                parent.spawn((
+                    MobVisual {
+                        owner,
+                        part: MobPart::King(segment),
+                    },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(species.body_material.clone()),
+                    king::transform(segment, state.action, Duration::ZERO, Quat::IDENTITY),
+                ));
+            }
+            return;
+        }
+
         // Body, head and legs are authored from the feet. Arms are the deliberate second
         // exception after the independently moving legs: their origin is the shoulder
         // line, so their child carries that one translation and a swing needs no matching
@@ -1186,7 +1207,8 @@ fn lean_for(kind: MobKind, action: MobAction) -> f32 {
     };
     match kind {
         MobKind::Draugr => lean * DRAUGR_LEAN_FRACTION,
-        MobKind::DraugrKing => lean * 0.25,
+        // Articulated torso and arms carry the king's weight; planted feet keep the root upright.
+        MobKind::DraugrKing => 0.0,
         MobKind::VargrGuardian => lean * 0.65,
         MobKind::Vargr | MobKind::Deer | MobKind::Villager | MobKind::Horse => lean,
     }
@@ -1350,7 +1372,8 @@ pub(super) fn animate(
     // Everything a child needs: species and fall pose select its ordinary transforms,
     // the server's action plus local elapsed time poses the draugr's arms, and lootable
     // chooses the authoritative presentation wash.
-    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat)> = HashMap::new();
+    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat, MobAction, Duration)> =
+        HashMap::new();
     let mut flashing = HashSet::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
@@ -1392,11 +1415,23 @@ pub(super) fn animate(
         } else {
             Quat::IDENTITY
         };
-        poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
+        poses.insert(
+            entity,
+            (
+                mob.kind,
+                down,
+                mob.lootable,
+                arm_swing,
+                mob.action,
+                mob.action_elapsed,
+            ),
+        );
     }
 
     for (part, mut material, mut transform) in &mut parts {
-        let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
+        let Some((kind, down, lootable, arm_swing, action, elapsed)) =
+            poses.get(&part.owner).copied()
+        else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
             continue;
@@ -1442,6 +1477,9 @@ pub(super) fn animate(
         }
         if part.part == MobPart::Arms {
             transform.rotation = arm_swing;
+        }
+        if let MobPart::King(segment) = part.part {
+            *transform = king::transform(segment, action, elapsed, arm_swing);
         }
     }
 }
