@@ -55,7 +55,7 @@ mod dsp;
 mod heard;
 mod listener;
 mod mixer;
-mod spatial;
+pub(crate) mod spatial;
 pub mod synth;
 mod voice;
 
@@ -78,6 +78,8 @@ pub use device::CaptureFault;
 #[allow(unused_imports)]
 pub use listener::{HEARD_FOR, MAX_VOICE, Voices};
 pub use mixer::{Bus, Mixer, SOURCE_CAPACITY, SourceHandle};
+#[cfg(test)]
+pub(crate) use mixer::{MAX_SOURCES, Sink, VOICE_RESERVE};
 pub use voice::{MicTest, MicrophoneTrouble, Transmitting, VoiceControls};
 
 /// The pitch of the speaker test, in hertz. Concert A: unmistakably a tone rather than a
@@ -196,6 +198,21 @@ impl Plugin for AudioPlugin {
 pub struct AudioMixer(Arc<Mixer>);
 
 impl AudioMixer {
+    /// Descriptions outside the audio module compile for the device's current clock.
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.0.sample_rate()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_shared_for_test(mixer: Arc<Mixer>) -> Self {
+        Self(mixer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_for_test(&self) -> Arc<Mixer> {
+        Arc::clone(&self.0)
+    }
+
     /// Takes one of the mixer's source slots for `bus`, or `None` when they are all taken.
     ///
     /// The one way anything outside this file reaches the mixer, so "how many sources are
