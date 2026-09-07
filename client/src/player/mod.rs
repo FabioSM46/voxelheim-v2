@@ -52,6 +52,7 @@ mod appearance;
 mod birds;
 mod camera;
 mod combat;
+mod combat_audio;
 mod constants;
 mod crafting;
 mod drops;
@@ -322,6 +323,7 @@ impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         horse::register(app);
         ambient_sound::register(app);
+        combat_audio::register(app);
         // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
         // Bevy panics on a unique plugin added twice.
         if !app.is_plugin_added::<BodyVisualsPlugin>() {
@@ -3205,6 +3207,7 @@ pub(crate) fn reset_world(world: &mut World) {
     camera::reset_world(world);
     hands::reset_world(world);
     combat::reset_world(world);
+    combat_audio::reset_world(world);
     trade::reset_world(world);
     use crate::world::transition::clear_messages;
     clear_messages::<ConfirmationAnswer>(world);
