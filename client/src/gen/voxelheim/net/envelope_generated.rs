@@ -1073,6 +1073,51 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_instance_entry_offer(&self) -> Option<InstanceEntryOffer<'a>> {
+        if self.payload_type() == Payload::InstanceEntryOffer {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { InstanceEntryOffer::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_instance_entry_answer(&self) -> Option<InstanceEntryAnswer<'a>> {
+        if self.payload_type() == Payload::InstanceEntryAnswer {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { InstanceEntryAnswer::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_instance_bindings(&self) -> Option<InstanceBindings<'a>> {
+        if self.payload_type() == Payload::InstanceBindings {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { InstanceBindings::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1151,6 +1196,9 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::WorldChange => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<WorldChange>>("Payload::WorldChange", pos),
           Payload::BlowLanded => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<BlowLanded>>("Payload::BlowLanded", pos),
           Payload::MiningActivity => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<MiningActivity>>("Payload::MiningActivity", pos),
+          Payload::InstanceEntryOffer => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceEntryOffer>>("Payload::InstanceEntryOffer", pos),
+          Payload::InstanceEntryAnswer => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceEntryAnswer>>("Payload::InstanceEntryAnswer", pos),
+          Payload::InstanceBindings => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceBindings>>("Payload::InstanceBindings", pos),
           _ => Ok(()),
         }
      })?
@@ -1874,6 +1922,36 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::MiningActivity => {
                 if let Some(x) = self.payload_as_mining_activity() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::InstanceEntryOffer => {
+                if let Some(x) = self.payload_as_instance_entry_offer() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::InstanceEntryAnswer => {
+                if let Some(x) = self.payload_as_instance_entry_answer() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::InstanceBindings => {
+                if let Some(x) = self.payload_as_instance_bindings() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

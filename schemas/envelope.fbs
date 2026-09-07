@@ -266,7 +266,38 @@ union Payload {
   // Appended server-only outcome; V33 is unchanged. See BlowLanded for the
   // unknown-tag compatibility argument and recipient snapshot disclosure rule.
   BlowLanded,              // 66  server -> client
-  MiningActivity          // 67  server -> client
+  MiningActivity,          // 67  server -> client
+
+  // -- V35. Appended, so the tags of 1..67 are untouched.
+  //
+  //    Who may cross an arch, and what they are accepting when they do.
+  //
+  //    `InstanceEntryAnswer` carries the bump, on the rule this file has stated since
+  //    V8: it travels client -> server, a V34 server cannot name the tag, and direction
+  //    being a protocol rule means that server closes the session rather than dropping
+  //    the frame. A V35 client would otherwise handshake cleanly and lose the connection
+  //    the first time somebody accepted a prompt at a dungeon arch.
+  //
+  //    `InstanceEntryOffer` travels back and would have owed nothing alone — an older
+  //    client drops a tag it cannot name and simply never sees the prompt. It is
+  //    appended in the same bump because an offer with no answer is not an offer, and
+  //    because the entry rules are one contract rather than two halves that can ship
+  //    apart. The two `RefusalReason` members that ride with them owe nothing on their
+  //    own: that enum is explicitly read through its zero member and never fails a
+  //    frame, so an older client shows nothing rather than inventing a sentence.
+  //
+  //    See `player.fbs` for both tables and for `SessionBinding`, the terms they carry.
+  InstanceEntryOffer,      // 68  server -> client
+  InstanceEntryAnswer,     // 69  client -> server
+
+  //    Appended server-only state; V35 is unchanged. An older client cannot name the
+  //    tag and drops it, which costs it a list of lockouts it has no window for; an
+  //    older server never sends one, which reads to a newer client as a character who
+  //    owes nothing — and a character who owes nothing is exactly what a server with no
+  //    saved runs has. Nothing refuses an unknown value here, so on the rule this file
+  //    states the bump is avoided rather than owed. A client sending this authoritative
+  //    payload is a protocol error. See `player.fbs`.
+  InstanceBindings        // 70  server -> client
 }
 
 table Envelope {

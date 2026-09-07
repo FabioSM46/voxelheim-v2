@@ -94,6 +94,9 @@ const (
 	PayloadWorldChange            Payload = 65
 	PayloadBlowLanded             Payload = 66
 	PayloadMiningActivity         Payload = 67
+	PayloadInstanceEntryOffer     Payload = 68
+	PayloadInstanceEntryAnswer    Payload = 69
+	PayloadInstanceBindings       Payload = 70
 )
 
 var EnumNamesPayload = map[Payload]string{
@@ -165,6 +168,9 @@ var EnumNamesPayload = map[Payload]string{
 	PayloadWorldChange:            "WorldChange",
 	PayloadBlowLanded:             "BlowLanded",
 	PayloadMiningActivity:         "MiningActivity",
+	PayloadInstanceEntryOffer:     "InstanceEntryOffer",
+	PayloadInstanceEntryAnswer:    "InstanceEntryAnswer",
+	PayloadInstanceBindings:       "InstanceBindings",
 }
 
 var EnumValuesPayload = map[string]Payload{
@@ -236,6 +242,9 @@ var EnumValuesPayload = map[string]Payload{
 	"WorldChange":            PayloadWorldChange,
 	"BlowLanded":             PayloadBlowLanded,
 	"MiningActivity":         PayloadMiningActivity,
+	"InstanceEntryOffer":     PayloadInstanceEntryOffer,
+	"InstanceEntryAnswer":    PayloadInstanceEntryAnswer,
+	"InstanceBindings":       PayloadInstanceBindings,
 }
 
 func (v Payload) String() string {
