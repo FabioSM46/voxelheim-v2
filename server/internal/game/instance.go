@@ -134,8 +134,10 @@ type InstanceManager struct {
 	// it. See instance_entry.go.
 	offers map[InstanceCharacter]pendingOffer
 	// bindingWatchers is one live connection per character, told the whole list whenever
-	// it changes. See instance_bindings.go for what a watcher may and may not do.
-	bindingWatchers map[InstanceCharacter]func([]CharacterBinding)
+	// it changes. See instance_bindings.go for what a watcher may and may not do, and for
+	// why an unwatch has to name the registration it is ending.
+	bindingWatchers    map[InstanceCharacter]bindingWatcher
+	nextBindingWatcher uint64
 }
 
 // NewInstanceManager requires the very same mintEntityID passed to the open
@@ -157,7 +159,7 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 		graceTicks:    ticksFor(InstanceEmptyGrace, tickRate),
 		portalEntries: make(map[InstanceCharacter]PortalEntry), disconnected: make(map[InstanceCharacter]portalReconnect),
 		offers:          make(map[InstanceCharacter]pendingOffer),
-		bindingWatchers: make(map[InstanceCharacter]func([]CharacterBinding)),
+		bindingWatchers: make(map[InstanceCharacter]bindingWatcher),
 		sessions:        make(map[uint64]*instanceSession), inside: make(map[InstanceCharacter]uint64), bound: make(map[instanceVisit]uint64), visits: make(map[instanceVisit]uint64), partyVisits: make(map[portalPartyVisit]uint64),
 	}, nil
 }

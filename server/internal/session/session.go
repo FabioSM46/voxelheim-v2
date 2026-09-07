@@ -401,10 +401,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 
 	openBinding := WorldBinding{Chunks: chunks, Sim: sim, Context: ctx, Spawn: cfg.Spawn}
 	var portalVisit *game.PortalEntry
-	// watchedBindings names the character whose saved-run list this connection is
-	// registered for, and nil until it is. A pointer rather than a flag beside a value,
-	// so that "registered" and "who for" cannot disagree.
-	var watchedBindings *game.InstanceCharacter
+	// watchedBindings names this connection's saved-run registration — which character,
+	// and which registration — and is nil until there is one. A pointer rather than a flag
+	// beside a value, so that "registered" and "which one" cannot disagree, and the token
+	// travels with the character so a teardown can only end its own registration.
+	var watchedBindings *struct {
+		character game.InstanceCharacter
+		token     uint64
+	}
 	rootPeers := peers
 	peers, releaseWorld := rootPeers.acquireWorld(chunks)
 	control := &worldControl{changes: make(chan worldChange), done: make(chan struct{})}
@@ -600,7 +604,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// holds for the whole of an announcement, so once it has returned no later change
 		// to this character's bindings can reach this connection's queue.
 		if watchedBindings != nil && cfg.Instances != nil {
-			cfg.Instances.UnwatchBindings(*watchedBindings)
+			cfg.Instances.UnwatchBindings(watchedBindings.character, watchedBindings.token)
 		}
 		if stopWorldLifetime != nil {
 			stopWorldLifetime()
@@ -1455,32 +1459,48 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			// wholesale, so silence would leave a lockout standing that reset overnight.
 			// Unconditional rather than open-world-only — a reconnect into an instance is
 			// exactly the session most likely to be holding a stale one.
+			//
+			// **The first list is stated by the registration itself**, rather than read
+			// and sent beside it. Two lock acquisitions have a gap either way round: read
+			// then register loses a change made in between, and register then send lets
+			// the change win the race to this queue and leaves the client on the older
+			// frame. See game/instance_bindings.go. So there is one call, the delivery
+			// below is the only thing that ever sends this payload, and every later
+			// change is ordered behind the first by the manager's own mutex.
+			//
+			// The delivery does nothing but encode and offer the frame to this
+			// connection's own queue — no blocking, and nothing that reaches back into the
+			// manager, because it runs under that mutex and, for every change after the
+			// first, on the goroutine that drives every instance world.
 			if cfg.Instances != nil {
 				character := game.InstanceCharacter{PlayerID: self.ID, CharacterID: uint64(self.Character)}
-				frame, bErr := sendBindings(cfg.Instances.Bindings(character))
-				if bErr != nil {
-					return fmt.Errorf("session: state the character's saved runs: %w", bErr)
-				}
-				if bErr := enqueue(frame); bErr != nil {
-					return fmt.Errorf("session: send the character's saved runs on join: %w", bErr)
-				}
-				// Registered after the first list is queued, so the ordering on the wire
-				// is the ordering of the facts: what this character owed on arrival, and
-				// then every change to it. The delivery runs on the tick goroutine under
-				// the manager's mutex, so it does nothing but encode and offer the frame
-				// to this connection's own queue — no blocking, and nothing that reaches
-				// back into the manager.
-				cfg.Instances.WatchBindings(character, func(bindings []game.CharacterBinding) {
+				deliverBindings := func(bindings []game.CharacterBinding) bool {
 					frame, wErr := sendBindings(bindings)
 					if wErr != nil {
 						log.Warn("cannot state the character's saved runs", "error", wErr)
-						return
+						return false
 					}
 					if !trySend(frame) {
 						log.Debug("saved-run list dropped: the session's outbound queue is full")
+						return false
 					}
-				})
-				watchedBindings = &character
+					return true
+				}
+				token, stated := cfg.Instances.WatchBindings(character, deliverBindings)
+				// Recorded before the delivery is judged, so a registration this teardown
+				// has to end is never left behind by the error path below.
+				watchedBindings = &struct {
+					character game.InstanceCharacter
+					token     uint64
+				}{character: character, token: token}
+				// **Fatal, and deliberately so.** Every frame queued above went through
+				// the blocking enqueue, so a queue with no room for thirty more bytes here
+				// is a peer that has stopped reading. A later list is restated by the next
+				// change; this one is not, and a session that silently began without it
+				// would show a lockout it can no longer be corrected about.
+				if !stated {
+					return fmt.Errorf("session: state the character's saved runs on join")
+				}
 			}
 			startWorld()
 			rootPeers.mu.Lock()

@@ -21,12 +21,22 @@ import (
 // admission. There is deliberately no fourth: nothing else in this manager writes
 // `bound`.
 //
-// **The push runs on the tick goroutine under the manager's mutex**, which is what makes
-// the list it carries exact — no join, leave, save or reset can slip between the change
-// and the statement of it. The price is a rule every watcher must keep: a delivery
-// function must not call back into this manager, and must not block. The one caller in
-// this repository is a non-blocking send onto a connection's own outbound queue, which
-// is the same seam a party invite already uses from another player's goroutine.
+// **The push runs under the manager's mutex**, which is what makes the list it carries
+// exact — no join, leave, save or reset can slip between the change and the statement of
+// it. The price is a rule every watcher must keep: a delivery function must not call back
+// into this manager, and must not block. The one caller in this repository is a
+// non-blocking send onto a connection's own outbound queue, which is the same seam a
+// party invite already uses from another player's goroutine.
+//
+// **The first statement is made by [InstanceManager.WatchBindings] itself, under the same
+// lock as the registration**, and that is a correctness requirement rather than a
+// convenience. Reading the list and then installing a watcher are two lock acquisitions,
+// and a binding made or released between them is announced to nobody — after which a
+// wholesale list that is never restated leaves the client holding a lockout that may have
+// ended. Installing first and enqueueing afterwards has the mirror defect: the callback
+// can win the race to the connection's queue, and the client ends on the older frame. One
+// acquisition that both installs and states has neither, and it is why there is no
+// separate read for a connection to perform on admission.
 
 // CharacterBinding is one saved run a character owes, as the manager records it.
 //
@@ -40,6 +50,21 @@ type CharacterBinding struct {
 	BossesDefeated int
 	BossesTotal    int
 	ExpiresUnix    int64
+}
+
+// bindingWatcher is one connection's registration.
+//
+// **The token is what makes the pairing safe**, and it is not there because the race is
+// reachable — it is not. A second connection for one account is refused admission while
+// the first holds its identity claim (`Identities.claim`), and the first releases that
+// claim strictly after its teardown has unwatched, so a reconnection cannot register
+// before the connection it replaces has unregistered. That is three facts in two
+// packages, one of them a line's *position* inside a hundred-line teardown. The token
+// makes the guarantee local instead: an unwatch that does not name the registration it is
+// ending removes nothing, so a delete can never take a watcher it did not install.
+type bindingWatcher struct {
+	token   uint64
+	deliver func([]CharacterBinding) bool
 }
 
 // Bindings is every saved run this character currently owes, in a stable order.
@@ -89,32 +114,58 @@ func (m *InstanceManager) bindingsLocked(character InstanceCharacter) []Characte
 	return bindings
 }
 
-// WatchBindings asks to be told this character's whole list whenever it changes.
+// WatchBindings installs one connection's delivery, states this character's whole list
+// through it immediately, and reports the registration's token and whether that first
+// statement landed.
+//
+// **The registration and the first statement are one lock acquisition**, which is the
+// whole point of this shape: see the note at the top of this file for the two gaps the
+// two-call version has. A caller therefore never reads [InstanceManager.Bindings] on
+// admission — the first call to `deliver` is that read, and every later announcement is
+// ordered behind it by the same mutex.
 //
 // One watcher per character, replaced rather than added to: a character has one live
 // connection, and a second registration is a reconnection rather than a second audience.
-// The delivery function is called under this manager's mutex, on the goroutine that
-// drives every instance world — so it must not block and must not call back in here.
-// Registering does not deliver: the caller reads [InstanceManager.Bindings] itself, in
-// the order it chooses relative to the rest of the state it is sending.
-func (m *InstanceManager) WatchBindings(character InstanceCharacter, deliver func([]CharacterBinding)) {
+// The token is how a teardown says which registration it is ending; see
+// [InstanceManager.UnwatchBindings].
+//
+// The delivery function is called under this manager's mutex — from the goroutine that
+// drives every instance world for a later change, and from the caller's own goroutine for
+// this first statement — so it must not block and must not call back in here. It returns
+// whether the frame it built reached its connection; a dropped first statement is not
+// self-correcting, because the list is restated only when it changes, and it is the
+// caller's to answer for.
+func (m *InstanceManager) WatchBindings(character InstanceCharacter, deliver func([]CharacterBinding) bool) (token uint64, delivered bool) {
 	if deliver == nil {
-		return
+		return 0, false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.bindingWatchers == nil {
-		m.bindingWatchers = make(map[InstanceCharacter]func([]CharacterBinding))
+		m.bindingWatchers = make(map[InstanceCharacter]bindingWatcher)
 	}
-	m.bindingWatchers[character] = deliver
+	// From one, so that the zero token names no registration and an unwatch carrying it
+	// removes nothing.
+	m.nextBindingWatcher++
+	token = m.nextBindingWatcher
+	m.bindingWatchers[character] = bindingWatcher{token: token, deliver: deliver}
+	return token, deliver(m.bindingsLocked(character))
 }
 
-// UnwatchBindings forgets a connection's delivery. Idempotent, and safe to call for a
-// character that never registered one.
-func (m *InstanceManager) UnwatchBindings(character InstanceCharacter) {
+// UnwatchBindings forgets one registration's delivery.
+//
+// **It names the registration rather than the character**, so a teardown can only remove
+// the watcher it installed. A connection whose registration has already been replaced
+// removes nothing, which is the fail-closed direction: the cost of a stale unwatch that
+// matched would be a live session silently receiving no further list at all.
+//
+// Idempotent, and safe for a character that never registered one.
+func (m *InstanceManager) UnwatchBindings(character InstanceCharacter, token uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.bindingWatchers, character)
+	if watcher, watched := m.bindingWatchers[character]; watched && watcher.token == token {
+		delete(m.bindingWatchers, character)
+	}
 }
 
 // announceBindingsLocked tells one character what they now owe, if anybody is listening.
@@ -123,9 +174,12 @@ func (m *InstanceManager) UnwatchBindings(character InstanceCharacter) {
 // notices afterwards: a change and its announcement are one event, so a binding that is
 // made without being announced is not a state this manager can produce.
 func (m *InstanceManager) announceBindingsLocked(character InstanceCharacter) {
-	deliver := m.bindingWatchers[character]
-	if deliver == nil {
+	watcher, watched := m.bindingWatchers[character]
+	if !watched {
 		return
 	}
-	deliver(m.bindingsLocked(character))
+	// The answer is deliberately discarded here and not at the first statement: a change
+	// that cannot be delivered is followed by the next change, and the connection's own
+	// sender is what notices and logs a full queue.
+	_ = watcher.deliver(m.bindingsLocked(character))
 }
