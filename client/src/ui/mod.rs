@@ -348,21 +348,36 @@ struct ModalControls<'w> {
 }
 
 impl ModalControls<'_> {
-    /// Refuses the entry offer if one is up, and says whether there was one.
+    /// Answers `Escape` over the entry dialog, and returns the mode it leaves behind.
     ///
     /// **A refusal, not a dismissal.** The key that closes this dialog is the player
     /// saying no, so it is worth sending: it costs the character nothing and it lets the
     /// server forget the offer at once. The id comes from the offer on screen, which is
     /// what keeps a press from answering a crossing that replaced it.
-    fn refuse_entry_offer(&mut self) -> bool {
-        let Some(offer) = self.entry_offer.current() else {
-            return false;
+    ///
+    /// **A press made before the dialog existed answers nothing**, and the mode does not
+    /// move either. The offer is drained before this system runs, so the frame that opens
+    /// the dialog can also carry an `Escape` aimed at the pause menu the player was about
+    /// to open — and refusing there would give away a crossing nobody saw, silently,
+    /// since a refusal produces no frame to notice. The press is absorbed instead: the
+    /// dialog stays up and the next press answers it. `EntryOffer::answerable` is the one
+    /// place that rule lives, so the click path is not asked to repeat it — a button
+    /// cannot be pressed before it is drawn.
+    fn answer_entry_offer_with_escape(&mut self) -> InputMode {
+        let Some(offer_id) = self.entry_offer.answerable() else {
+            // Nothing to answer at all is a different case from too early to answer, and
+            // only the first should hand the controls back.
+            return if self.entry_offer.current().is_some() {
+                InputMode::EntryOffer
+            } else {
+                InputMode::Playing
+            };
         };
         self.entry_answers.write(EntryOfferAnswer {
-            offer_id: offer.offer_id,
+            offer_id,
             accept: false,
         });
-        true
+        InputMode::Playing
     }
 }
 
@@ -570,11 +585,9 @@ fn choose_input_mode(
                 }
                 // The dialog's own No. `player::instance_entry` owns what happens next:
                 // it spends the offer and hands the controls back, and this returns to
-                // `Playing` for the frame in between rather than deciding anything.
-                InputMode::EntryOffer => {
-                    modals.refuse_entry_offer();
-                    InputMode::Playing
-                }
+                // `Playing` for the frame in between rather than deciding anything. The
+                // one press it declines to act on is one made before the dialog was up.
+                InputMode::EntryOffer => modals.answer_entry_offer_with_escape(),
                 InputMode::Menu | InputMode::Loot | InputMode::Vendor | InputMode::Map => {
                     InputMode::Playing
                 }
@@ -1875,6 +1888,9 @@ mod tests {
                 resets_at_unix: 1_800_000_000,
             },
         });
+        // A dialog the player has had a frame to read, which is what
+        // `player::instance_entry::reconcile_entry_offer` records every frame it is up.
+        offer.present_for_test();
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
@@ -1901,6 +1917,59 @@ mod tests {
                 offer_id: 41,
                 accept: false,
             }]
+        );
+    }
+
+    /// The other half of the same rule: a press that predates the dialog answers nothing
+    /// and moves nothing. The dialog stays up, and the next press answers it.
+    ///
+    /// Reachable because the offer is drained before `choose_input_mode` runs, so the
+    /// frame that opens the dialog can carry an `Escape` the player aimed at the pause
+    /// menu. A refusal there would give away a crossing nobody saw, and give it away
+    /// silently, since nothing about a refusal reaches the screen.
+    #[test]
+    fn escape_over_a_dialog_that_only_just_appeared_answers_nothing() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+        let mut offer = EntryOffer::default();
+        offer.open_for_test(crate::net::InstanceEntryOffer {
+            offer_id: 41,
+            terms: crate::net::SessionBinding {
+                arch: crate::net::BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_800_000_000,
+            },
+        });
+        // Deliberately not presented: this is the frame the dialog opened on.
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(keys)
+            .insert_resource(InputMode::EntryOffer)
+            .insert_resource(offer)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<ConfirmationPrompt>()
+            .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
+            .add_message::<PlayerTradeClick>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::EntryOffer);
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<EntryOfferAnswer>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a press made before the dialog existed refused the offer"
         );
     }
 

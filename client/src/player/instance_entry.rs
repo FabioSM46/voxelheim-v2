@@ -27,18 +27,53 @@ use crate::net::{
 /// the server has already forgotten it. Keeping the first would leave a button on screen
 /// that answers an id every later answer is refused with `EntryOfferUnknown`.
 #[derive(Resource, Debug, Default)]
-pub struct EntryOffer(Option<InstanceEntryOffer>);
+pub struct EntryOffer {
+    current: Option<InstanceEntryOffer>,
+    /// Whether a frame has already begun with this offer's dialog owning the controls.
+    ///
+    /// **A key press cannot answer a dialog that was not on screen when it was made.**
+    /// The offer is drained before the UI runs, so the frame that opens the dialog can
+    /// also carry an `Escape` the player pressed at something else — the pause menu they
+    /// were about to open. Answering it there would refuse an offer nobody ever saw, and
+    /// silently, since a refusal produces no frame the player can see. See
+    /// [`Self::answerable`].
+    presented: bool,
+}
 
 impl EntryOffer {
     /// The offer the dialog draws, if there is one.
     pub fn current(&self) -> Option<&InstanceEntryOffer> {
-        self.0.as_ref()
+        self.current.as_ref()
+    }
+
+    /// The id a key press may answer, which is not the same question as [`Self::current`].
+    ///
+    /// `None` while the dialog has not yet owned the controls for a whole frame. The
+    /// pointer needs no such guard — a button cannot be clicked before it is drawn — so
+    /// this exists for the keyboard, where the press and the dialog are independent.
+    pub(crate) fn answerable(&self) -> Option<u64> {
+        self.presented
+            .then(|| self.current.map(|offer| offer.offer_id))?
+    }
+
+    /// Records that a frame has begun with this dialog up.
+    ///
+    /// A lower bound on "drawn" rather than a claim about a rendered frame: the mode was
+    /// already `EntryOffer` when this frame started, so the press being read now was made
+    /// against a screen that had the dialog on it.
+    fn mark_presented(&mut self) {
+        self.presented = true;
     }
 
     /// Replaces whatever was pending. The caller is announcing the server's supersession,
     /// not choosing between two live offers.
+    ///
+    /// A replacement is unpresented again, deliberately: the new terms are not the ones
+    /// the player has been reading, and a press in flight belongs to the offer it was
+    /// aimed at rather than to the one that took its place.
     fn open(&mut self, offer: InstanceEntryOffer) {
-        self.0 = Some(offer);
+        self.current = Some(offer);
+        self.presented = false;
     }
 
     /// Spends the pending offer, if it is the one being answered.
@@ -50,15 +85,17 @@ impl EntryOffer {
     /// acceptance this method exists to make impossible: an id answers its own offer once
     /// and never another's.
     fn spend(&mut self, offer_id: u64) -> Option<InstanceEntryOffer> {
-        if self.0.is_some_and(|offer| offer.offer_id == offer_id) {
-            self.0.take()
+        if self.current.is_some_and(|offer| offer.offer_id == offer_id) {
+            self.presented = false;
+            self.current.take()
         } else {
             None
         }
     }
 
     fn drop_pending(&mut self) {
-        self.0 = None;
+        self.current = None;
+        self.presented = false;
     }
 
     /// Puts one offer on screen as `reconcile_entry_offer` would. Test-only, so the
@@ -68,6 +105,17 @@ impl EntryOffer {
     #[cfg(test)]
     pub(crate) fn open_for_test(&mut self, offer: InstanceEntryOffer) {
         self.open(offer);
+    }
+
+    /// Marks the offer as one the player has had a frame to read, which is what
+    /// `reconcile_entry_offer` does on any frame that begins with the dialog up.
+    ///
+    /// Test-only and separate from [`Self::open_for_test`] deliberately: a test about the
+    /// keyboard guard has to be able to build both states, and an arrival that presented
+    /// itself in the same breath could not express the one the guard exists for.
+    #[cfg(test)]
+    pub(crate) fn present_for_test(&mut self) {
+        self.mark_presented();
     }
 
     /// Ends the offer as a death, a disconnect or a world change would.
@@ -119,15 +167,36 @@ fn reconcile_entry_offer(
     mut offer: ResMut<EntryOffer>,
     mut mode: ResMut<InputMode>,
 ) {
+    // Read before anything below can change the mode, so this answers "did the frame
+    // *begin* with the dialog up" rather than "is it up now".
+    if *mode == InputMode::EntryOffer {
+        offer.mark_presented();
+    }
+
     if let Some(arrived) = inbox.take() {
         offer.open(arrived);
-        // Playing is the only mode a crossing can be requested from, so this replaces
-        // nothing a player is in the middle of. It is asked rather than assumed because
-        // a frame can carry a chat line or a pause press alongside the offer, and a
-        // dialog that stole the keyboard from either would be deciding for the player.
-        if *mode == InputMode::Playing {
-            set_mode(&mut mode, InputMode::EntryOffer);
-        }
+    }
+
+    // **An offer waits for the controls; it never takes them.** A frame can carry a chat
+    // line, an open pack or a pause press alongside the offer, and a dialog that stole
+    // the keyboard from any of them would be deciding for the player.
+    //
+    // **It is asked every frame rather than only on the one the offer arrived on**, and
+    // that is the whole of the difference between an offer a player answers and one that
+    // is held for ever. An offer that arrives behind another surface used to be stored
+    // and then never presented: the surface closes, `choose_input_mode` returns to
+    // `Playing`, and nothing looked at the offer again — so the dialog stayed hidden, the
+    // player never saw the crossing they had asked for, and the server went on holding an
+    // offer nobody could answer. Reviewed on #1054 and pinned by
+    // `an_offer_held_behind_a_surface_is_presented_when_the_player_returns_to_play`.
+    //
+    // Running *before* `ApplyInputMode` is what keeps the press that closes the blocking
+    // surface from also answering the dialog: on that frame the mode is still the
+    // surface's, so nothing opens, and the dialog appears on the frame after. The keyboard
+    // guard in `EntryOffer::answerable` is what makes that a property rather than an
+    // accident of ordering.
+    if offer.current().is_some() && *mode == InputMode::Playing {
+        set_mode(&mut mode, InputMode::EntryOffer);
     }
 
     // **Nothing is sent on either of these.** A disconnect has no writer left, and a
@@ -258,8 +327,9 @@ mod tests {
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::EntryOffer);
     }
 
-    /// A player in the middle of a chat line or a pause menu keeps them. The offer is
-    /// still held: the server made it, and nothing here withdraws one.
+    /// A player in the middle of a chat line or a pause menu keeps them, for as long as
+    /// they keep them. The offer is still held: the server made it, and nothing here
+    /// withdraws one.
     #[test]
     fn an_offer_arriving_over_another_surface_does_not_steal_the_keyboard() {
         for occupied in [InputMode::Chat, InputMode::Menu, InputMode::Inventory] {
@@ -267,10 +337,66 @@ mod tests {
             *app.world_mut().resource_mut::<InputMode>() = occupied;
             deliver(&mut app, offer(7));
             app.update();
+            // And it goes on waiting rather than seizing the controls a frame later.
+            app.update();
 
             assert_eq!(*app.world().resource::<InputMode>(), occupied);
             assert!(app.world().resource::<EntryOffer>().current().is_some());
         }
+    }
+
+    /// **A key press cannot answer a dialog that was not on screen when it was made.**
+    /// The offer is drained before the UI runs, so the frame that opens the dialog can
+    /// carry an `Escape` the player aimed at the pause menu. Refusing there would give
+    /// away a crossing nobody saw, and silently.
+    #[test]
+    fn an_offer_is_not_answerable_by_a_key_until_it_has_been_on_screen() {
+        let mut app = app();
+        deliver(&mut app, offer(7));
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::EntryOffer);
+        assert_eq!(app.world().resource::<EntryOffer>().answerable(), None);
+
+        // One frame with the dialog up is what makes the press belong to it.
+        app.update();
+        assert_eq!(app.world().resource::<EntryOffer>().answerable(), Some(7));
+    }
+
+    /// A replacement is unpresented again: the terms are not the ones the player has been
+    /// reading, so a press in flight belongs to the offer it was aimed at.
+    #[test]
+    fn a_replacing_offer_is_not_answerable_by_a_key_either_until_it_has_been_seen() {
+        let mut app = app();
+        deliver(&mut app, offer(7));
+        app.update();
+        app.update();
+        assert_eq!(app.world().resource::<EntryOffer>().answerable(), Some(7));
+
+        deliver(&mut app, offer(8));
+        app.update();
+        assert_eq!(app.world().resource::<EntryOffer>().answerable(), None);
+        app.update();
+        assert_eq!(app.world().resource::<EntryOffer>().answerable(), Some(8));
+    }
+
+    /// The measurement for the review finding on this file, written before the fix.
+    #[test]
+    fn an_offer_held_behind_a_surface_is_presented_when_the_player_returns_to_play() {
+        let mut app = app();
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        deliver(&mut app, offer(7));
+        app.update();
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Chat);
+
+        // The player closes the chat line. Nothing else happens.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::EntryOffer);
+        assert_eq!(
+            app.world().resource::<EntryOffer>().current(),
+            Some(&offer(7))
+        );
     }
 
     #[test]
