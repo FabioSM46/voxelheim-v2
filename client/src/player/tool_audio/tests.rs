@@ -357,3 +357,64 @@ fn real_swing_message_plays_without_any_hit_and_world_or_disconnect_returns_sour
         .collect();
     assert_eq!(held.len(), MAX_SOURCES);
 }
+
+#[test]
+fn completion_renders_its_tail_when_the_next_attempt_starts_in_the_same_batch_or_soon_after() {
+    for (next_at, target_loaded) in [(0, true), (100, true), (0, false)] {
+        let render = |with_completion: bool| {
+            let mut f = Fixture::new();
+            if target_loaded {
+                f.store.insert(
+                    ChunkCoord {
+                        cx: 1,
+                        cy: 0,
+                        cz: 0,
+                    },
+                    VoxelChunk::all_air(32),
+                );
+            }
+            let mut tools = Tools::default();
+            if with_completion {
+                assert!(tools.observe(
+                    event(1, MiningPhase::Completed),
+                    f.now,
+                    f.now,
+                    Some(7),
+                    true
+                ));
+                tools.start(
+                    &f.mixer,
+                    Cue::Break(MiningTool::Pickaxe, MaterialClass::Stone),
+                    2,
+                    Some(1),
+                    &f.frame(0),
+                );
+            }
+            let mut samples = f.hear(&mut tools, 0, next_at / 10);
+            let mut next = event(2, MiningPhase::Active);
+            // Its target is in another chunk: the old completion must retain its own
+            // loaded target rather than borrowing this newer attempt's coordinate.
+            next.pos.x = 33;
+            let now = f.now + Duration::from_millis(next_at);
+            tools.observe(next, now, now, Some(7), true);
+            samples.extend(f.hear(&mut tools, next_at, (400 - next_at) / 10));
+            assert!(tools.playing.iter().all(|voice| !voice.completion));
+            samples
+        };
+        let with_break = render(true);
+        let without_break = render(false);
+        // A strike has ended by 240ms. The collapse still has audible energy later,
+        // even if a next Active immediately replaced the attempt that authorized it.
+        let tail = 26 * 960;
+        assert!(energy(&with_break[tail..]) > 0.01, "next at {next_at}ms");
+        let difference: Vec<_> = with_break[tail..]
+            .iter()
+            .zip(&without_break[tail..])
+            .map(|(a, b)| a - b)
+            .collect();
+        assert!(
+            energy(&difference) > 0.01,
+            "completion disappeared at {next_at}ms, target loaded {target_loaded}"
+        );
+    }
+}

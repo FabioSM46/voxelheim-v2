@@ -50,6 +50,7 @@ struct Voice {
     actor: u64,
     activity: Option<u64>,
     completion: bool,
+    target: Option<BlockCoord>,
     playback: Playback,
     occlusion: f32,
     next_occlusion: Instant,
@@ -136,8 +137,11 @@ impl Tools {
             .get(&event.actor_entity_id)
             .is_none_or(|old| old.event.activity_id != event.activity_id);
         if newer {
-            self.playing
-                .retain(|voice| voice.actor != event.actor_entity_id || voice.activity.is_none());
+            // A new attempt ends the old repeating strike, not the already-authorized
+            // collapse. Completed -> Active can arrive in the same inbox batch.
+            self.playing.retain(|voice| {
+                voice.actor != event.actor_entity_id || voice.activity.is_none() || voice.completion
+            });
         }
         let next_strike = self
             .attempts
@@ -232,6 +236,12 @@ impl Tools {
                 actor,
                 activity,
                 completion: matches!(cue, Cue::Break(..)),
+                target: activity.and_then(|id| {
+                    self.attempts
+                        .get(&actor)
+                        .filter(|attempt| attempt.event.activity_id == id)
+                        .map(|attempt| attempt.event.pos)
+                }),
                 playback,
                 occlusion,
                 next_occlusion: frame.now + OCCLUSION_PERIOD,
@@ -253,14 +263,21 @@ impl Tools {
             if !frame.visible(voice.actor) || frame.eye.is_none() {
                 return false;
             }
-            if let Some(id) = voice.activity {
+            // A completion owns its original target and bounded baked tail even after
+            // the actor starts elsewhere. Visibility/world/device cancellation still applies.
+            if voice
+                .target
+                .is_some_and(|pos| !loaded(frame.store, pos, frame.size))
+            {
+                return false;
+            }
+            if let Some(id) = voice.activity
+                && !voice.completion
+            {
                 let Some(attempt) = self.attempts.get(&voice.actor) else {
                     return false;
                 };
-                if attempt.event.activity_id != id
-                    || (!voice.completion && !attempt.active)
-                    || !loaded(frame.store, attempt.event.pos, frame.size)
-                {
+                if attempt.event.activity_id != id || !attempt.active {
                     return false;
                 }
             }
