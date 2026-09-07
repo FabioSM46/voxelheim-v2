@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -202,39 +203,64 @@ func TestSessionStoreRefusesACorruptFile(t *testing.T) {
 		return rechecksum(append(append([]byte(nil), body...), make([]byte, world.ChecksumSize)...))
 	}
 
+	// **Every case names the check that must refuse it, and that is not decoration.** Six
+	// of these shapes are caught by more than one guard, so an assertion that only asked
+	// for an ErrCorruptStore would pass with the intended check deleted — which is exactly
+	// what a mutation run over this file found: dropping the declared-count cap, the
+	// per-entry list cap and the oversized-file size guard each left every case green,
+	// because a later check refused the same bytes for a different reason. `want` is what
+	// tells those apart.
 	for _, tc := range []struct {
 		name    string
 		corrupt func([]byte) []byte
+		want    string
 	}{
-		{"another store's magic", func(b []byte) []byte { copy(b[0:4], structuresMagic[:]); return rechecksum(b) }},
+		{"another store's magic", func(b []byte) []byte { copy(b[0:4], structuresMagic[:]); return rechecksum(b) }, "magic"},
 		{"a version this build does not speak", func(b []byte) []byte {
 			binary.LittleEndian.PutUint32(b[4:8], SessionsVersion+1)
 			return rechecksum(b)
-		}},
-		{"a flipped byte under the checksum", func(b []byte) []byte { b[sessionsHeaderSize] ^= 0xff; return b }},
-		{"truncated mid-entry", func(b []byte) []byte { return resize(b, -9) }},
-		{"a trailing byte", func(b []byte) []byte { return resize(b, 1) }},
+		}, "version"},
+		{"a flipped byte under the checksum", func(b []byte) []byte { b[sessionsHeaderSize] ^= 0xff; return b }, "checksum"},
+		// Nine bytes off the end lands inside the last entry's fixed head — the entry with
+		// both lists empty — so this is the head check. The fit check over the two
+		// variable-length lists is the "more bound characters than are there" case below.
+		{"truncated mid-entry", func(b []byte) []byte { return resize(b, -9) }, "runs out of bytes in entry"},
+		{"a trailing byte", func(b []byte) []byte { return resize(b, 1) }, "before the checksum"},
 		{"a count past the cap", func(b []byte) []byte {
 			binary.LittleEndian.PutUint32(b[offSessionCount:offSessionCount+4], MaxSavedSessions+1)
 			return rechecksum(b)
-		}},
+		}, "more than the"},
+		{"a count no allocation should be made for", func(b []byte) []byte {
+			// The declared count is what sizes the slice the walk appends into, so this is
+			// the case the cap exists for: refused on the number itself, before a byte of
+			// the entries is looked at. Caught by the walk too, but only after the
+			// allocation this guard is here to prevent.
+			binary.LittleEndian.PutUint32(b[offSessionCount:offSessionCount+4], ^uint32(0))
+			return rechecksum(b)
+		}, "more than the"},
 		{"a count larger than the entries", func(b []byte) []byte {
 			binary.LittleEndian.PutUint32(b[offSessionCount:offSessionCount+4], 9)
 			return rechecksum(b)
-		}},
+		}, "runs out of bytes in entry"},
 		{"a count smaller than the entries", func(b []byte) []byte {
 			binary.LittleEndian.PutUint32(b[offSessionCount:offSessionCount+4], 1)
 			return rechecksum(b)
-		}},
+		}, "before the checksum"},
 		{"an entry claiming more bound characters than are there", func(b []byte) []byte {
+			// Under the per-entry cap and past the end of the file, so this is the fit
+			// check rather than the cap — the pair below is the cap.
 			binary.LittleEndian.PutUint16(b[sessionsHeaderSize+41:sessionsHeaderSize+43], MaxBoundCharacters)
 			return rechecksum(b)
-		}},
+		}, "do not fit in the remaining"},
+		{"an entry claiming more bound characters than one may hold", func(b []byte) []byte {
+			binary.LittleEndian.PutUint16(b[sessionsHeaderSize+41:sessionsHeaderSize+43], MaxBoundCharacters+1)
+			return rechecksum(b)
+		}, "one entry can hold"},
 		{"an entry claiming more defeated encounters than one may hold", func(b []byte) []byte {
 			b[sessionsHeaderSize+40] = MaxDefeatedBosses + 1
 			return rechecksum(b)
-		}},
-		{"shorter than an empty file", func(b []byte) []byte { return b[:sessionsHeaderSize] }},
+		}, "one entry can hold"},
+		{"shorter than an empty file", func(b []byte) []byte { return b[:sessionsHeaderSize] }, "shorter than an empty sessions file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -250,6 +276,9 @@ func TestSessionStoreRefusesACorruptFile(t *testing.T) {
 			}
 			if !errors.Is(err, world.ErrCorruptStore) {
 				t.Fatalf("Load = %v, want an ErrCorruptStore", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load = %v, want the refusal to come from the check naming %q", err, tc.want)
 			}
 			// The evidence stays exactly where it is: nothing here deletes or rewrites the
 			// file it could not read.
@@ -274,6 +303,13 @@ func TestSessionStoreRefusesAnOversizedFileBeforeReadingIt(t *testing.T) {
 	_, _, err := store.Load()
 	if !errors.Is(err, world.ErrCorruptStore) {
 		t.Fatalf("Load = %v, want an ErrCorruptStore", err)
+	}
+	// Named, because the bytes written here are also refused by the header check further
+	// down — so an assertion that stopped at ErrCorruptStore would pass with this guard
+	// deleted, and the guard is the whole point: it refuses on the stat, before the file
+	// is read into memory.
+	if !strings.Contains(err.Error(), "a sessions file can need") {
+		t.Fatalf("Load = %v, want the refusal to come from the size guard", err)
 	}
 }
 

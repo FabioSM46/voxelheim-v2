@@ -50,6 +50,16 @@ var (
 	// expiry. Zero is "no entity" for an id everywhere in this server, and a saved
 	// session with no reset is the one state instance_binding.go cannot produce.
 	ErrInvalidSession = errors.New("game: stored session is not one this server could have written")
+	// ErrRestoreExceedsLimit refuses a stored list holding more live runs than this
+	// server is configured to carry.
+	//
+	// **Distinct from [ErrInstanceLimit] rather than a reuse of it**, because the two say
+	// different things to whoever reads them. `ErrInstanceLimit` is "the server is full
+	// right now", and it is transient: the next empty grace or midnight reset clears it,
+	// and a party that waits gets in. This is a configuration that cannot be satisfied at
+	// all — nothing the server does while running makes the file smaller — so a caller
+	// that treated it as the same condition would wait for something that never arrives.
+	ErrRestoreExceedsLimit = errors.New("game: more saved runs on disk than this server is configured to hold")
 )
 
 // SavedSession is one saved run as it crosses the boundary between the manager and the
@@ -133,6 +143,39 @@ func (m *InstanceManager) SavedSessions() []SavedSession {
 // seed generates the same chambers, and the party's progress rides on the manager's
 // record of what they have killed rather than on anything preserved from the terrain.
 //
+// **The configured instance limit bounds a restore exactly as it bounds a Create**, and
+// that is the whole of why the count below happens before anything is built. A restored
+// run is a live instance world — its own [Sim] and its own chunk cache — filed in the map
+// [InstanceManager.createLocked] caps, and the moment this returns, `Create` is refused
+// against that same map. So a restore that ignored the limit would not merely overspend
+// the operator's memory budget; it would make the limit mean one thing for a run this
+// process opened and another for a run it read, which is not a distinction anything else
+// in this manager draws.
+//
+// The reachable case is ordinary rather than adversarial: **an operator lowering
+// `-max-instances` between two runs of the server.** A file this build writes can never
+// hold more surviving runs than the limit that wrote it, because [SavedSessions] draws
+// from the capped map — but nothing carries that limit forward, `-max-instances` accepts
+// 1..1024 and persist.MaxSavedSessions is 1024, so the two ranges coincide exactly and a
+// file written at the top of that range is a legal input to a server started at the
+// bottom of it.
+//
+// **Refused whole rather than filled to the cap**, because there is no non-arbitrary way
+// to choose which runs survive: map order is not an order, and dropping somebody's
+// lockout by accident of iteration is worse than dropping every lockout on purpose and
+// saying so. The error names both counts and the flag, because the operator's fix is to
+// raise it and start again.
+//
+// **And it is worth knowing what a refusal costs, because it is not free.** The caller
+// logs this and starts the world with no saved runs, so every lockout in that world is
+// gone; the sessions file is then rewritten by the first autosave pass, within one
+// interval. A refusal is therefore recoverable only if the operator acts on the startup
+// error before that pass. That is the same trade the doc on main.restoreSessions already
+// records for an unreadable file, and it is stated here too rather than left for somebody
+// to discover: the alternative — a server silently running past the budget its operator
+// set, refusing every new dungeon entry until sessions drain — is not the quieter failure
+// it looks like.
+//
 // Validate-everything-then-apply, the discipline every store in persist keeps: the whole
 // list is checked before a single session is filed, and a failure part-way through a
 // rebuild unwinds what it made. A manager that refuses a restore is one holding exactly
@@ -149,7 +192,16 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 		return 0, 0, fmt.Errorf("%w: %d are already running", ErrInstancesNotEmpty, len(m.sessions))
 	}
 
+	// **One reading of the clock for both passes below, and that is not a tidiness
+	// preference.** The count decides whether the restore is allowed; the loop decides
+	// what gets built. Reading the clock twice would let a record fall on one side of its
+	// expiry in the count and the other side in the loop — a midnight landing between two
+	// statements — and the number this refusal is made from would then not describe what
+	// the loop went on to file.
+	now := m.now().Unix()
+
 	seen := make(map[uint64]struct{}, len(saved))
+	live := 0
 	for _, rec := range saved {
 		if rec.ID == 0 || rec.ExpiresUnix == 0 {
 			return 0, 0, fmt.Errorf("%w: id %d expiring at %d", ErrInvalidSession, rec.ID, rec.ExpiresUnix)
@@ -158,9 +210,19 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 			return 0, 0, fmt.Errorf("%w: %d", ErrDuplicateSession, rec.ID)
 		}
 		seen[rec.ID] = struct{}{}
+		// Counted against the same expiry test the loop applies, so this is the number of
+		// sessions that will actually be built rather than the number of records in the
+		// file. A file holding two thousand runs that all reset last week restores none,
+		// and must not be refused for a limit it never reaches.
+		if now < rec.ExpiresUnix {
+			live++
+		}
+	}
+	if live > m.maxSessions {
+		return 0, 0, fmt.Errorf("%w: %d saved runs have not reset yet and -max-instances is %d; raise it to at least %d and start again",
+			ErrRestoreExceedsLimit, live, m.maxSessions, live)
 	}
 
-	now := m.now().Unix()
 	for _, rec := range saved {
 		if now >= rec.ExpiresUnix {
 			expired++

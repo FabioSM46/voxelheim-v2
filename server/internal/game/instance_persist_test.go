@@ -299,3 +299,63 @@ func TestARestoredRunWritesNoWorldToDisk(t *testing.T) {
 		t.Fatalf("an instance wrote %v to the world directory", entries)
 	}
 }
+
+// The configured instance limit bounds a restore exactly as it bounds a Create. The
+// reachable case is an operator lowering -max-instances between two runs of the server:
+// nothing carries the old limit forward, and a file written under a larger one is a legal
+// input here.
+func TestRestoreRefusesMoreRunsThanTheServerHolds(t *testing.T) {
+	saved := time.Date(2026, 3, 14, 20, 0, 0, 0, time.UTC)
+	expiry := nextResetUnix(saved)
+	ruinAt := func(i int) InstanceRuin { return InstanceRuin{CellX: int64(i), CellZ: 1} }
+
+	stored := make([]SavedSession, 5)
+	for i := range stored {
+		stored[i] = SavedSession{ID: uint64(i + 1), Seed: int64(i), Ruin: ruinAt(i),
+			ExpiresUnix: expiry, Bound: []InstanceCharacter{instanceTestCharacter(uint64(i + 1))}}
+	}
+
+	// Four slots for five runs: refused whole, before a single session is built.
+	m := instanceTestManager(t, 20, 4)
+	m.now = (&resetClock{at: saved}).now
+	_, _, err := m.RestoreSessions(stored)
+	if !errors.Is(err, ErrRestoreExceedsLimit) {
+		t.Fatalf("RestoreSessions = %v, want ErrRestoreExceedsLimit", err)
+	}
+	// Distinct from ErrInstanceLimit on purpose: that one is transient and this one is not,
+	// so a caller must not be able to confuse them.
+	if errors.Is(err, ErrInstanceLimit) {
+		t.Fatal("the refusal reads as the transient full-server limit")
+	}
+	if m.Count() != 0 {
+		t.Fatalf("a refused restore built %d sessions", m.Count())
+	}
+	for i := range stored {
+		if id, bound := m.Bound(ruinAt(i), instanceTestCharacter(uint64(i+1))); bound {
+			t.Fatalf("a refused restore bound a character to %d", id)
+		}
+	}
+
+	// Exactly at the limit is allowed — the check is a ceiling, not a margin.
+	exact := instanceTestManager(t, 20, 5)
+	exact.now = (&resetClock{at: saved}).now
+	restored, _, err := exact.RestoreSessions(stored)
+	if err != nil {
+		t.Fatalf("a list exactly at the limit was refused: %v", err)
+	}
+	if restored != 5 || exact.Count() != 5 {
+		t.Fatalf("restored %d and holds %d, want 5 and 5", restored, exact.Count())
+	}
+
+	// **Expired records do not count against the limit**, because they are never built.
+	// Five runs and four slots again, but every run's day ended a fortnight ago.
+	stale := instanceTestManager(t, 20, 4)
+	stale.now = (&resetClock{at: saved.AddDate(0, 0, 14)}).now
+	restored, expiredCount, err := stale.RestoreSessions(stored)
+	if err != nil {
+		t.Fatalf("a list of expired runs was refused for a limit it never reaches: %v", err)
+	}
+	if restored != 0 || expiredCount != 5 || stale.Count() != 0 {
+		t.Fatalf("restored %d, dropped %d, holds %d; want 0, 5 and 0", restored, expiredCount, stale.Count())
+	}
+}
