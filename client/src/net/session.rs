@@ -298,6 +298,13 @@ pub(super) enum SessionEvent {
     /// **No log line may ever carry these bytes**, which is why this variant is delivered
     /// and never printed: `Warning` is the one variant on this channel that becomes text.
     VoiceHeard(codec::VoiceHeard),
+    /// One crossing the server is offering this character, with the terms accepting it
+    /// would bind them to.
+    ///
+    /// **Nothing has moved and nothing is bound.** An offer is not durable and the server
+    /// owes no frame withdrawing one, so whatever holds this must drop it on a world
+    /// change, on a disconnect and on a later offer rather than wait to be told.
+    InstanceEntryOffer(codec::InstanceEntryOffer),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1706,6 +1713,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::WorldChange(change)) => {
                     events.send(SessionEvent::WorldChange(change)).ok()?;
+                }
+                Ok(Transition::InstanceEntryOffer(offer)) => {
+                    events.send(SessionEvent::InstanceEntryOffer(offer)).ok()?;
                 }
                 Ok(Transition::World(update)) => {
                     events.send(SessionEvent::World(update)).ok()?;
