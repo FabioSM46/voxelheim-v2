@@ -44,6 +44,14 @@ type ChangedEntryButtons<'w, 's> = Query<
     (Changed<Interaction>, With<Button>),
 >;
 
+/// The three systems that draw the dialog, as one orderable unit.
+///
+/// It exists so the edge to [`ReconcileEntryOffer`] is a relation between two *named*
+/// things rather than an anonymous `.after` on a chain — which is what lets a test observe
+/// that the edge is there at all. See `the_drawing_side_is_ordered_after_the_deciding_side`.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct DrawEntryOffer;
+
 pub(super) struct EntryOfferUiPlugin;
 
 impl Plugin for EntryOfferUiPlugin {
@@ -56,6 +64,16 @@ impl Plugin for EntryOfferUiPlugin {
                 Update,
                 (rebuild_dialog, click_dialog, show_dialog)
                     .chain()
+                    .in_set(DrawEntryOffer)
+                    // **After the offer is decided, not merely before the input mode.**
+                    // Both this chain and `reconcile_entry_offer` ran before
+                    // `ApplyInputMode`, which orders neither against the other: when the
+                    // schedule picked the other order the frame that drained an offer
+                    // rendered nothing, and `mark_presented` then called a dialog "seen"
+                    // that had never been drawn — defeating the keyboard guard in
+                    // `EntryOffer::answerable`. Measured on #1052 by forcing that order:
+                    // the root stayed `Hidden` on the frame the offer opened.
+                    .after(crate::player::ReconcileEntryOffer)
                     .before(ApplyInputMode),
             );
     }
@@ -276,6 +294,15 @@ mod tests {
     use super::*;
     use crate::net::{BlockCoord, InstanceEntryOffer, SessionBinding};
 
+    fn offer_for_test(
+        offer_id: u64,
+        defeated: u8,
+        total: u8,
+        resets_at_unix: i64,
+    ) -> InstanceEntryOffer {
+        offer(offer_id, defeated, total, resets_at_unix)
+    }
+
     fn offer(offer_id: u64, defeated: u8, total: u8, resets_at_unix: i64) -> InstanceEntryOffer {
         InstanceEntryOffer {
             offer_id,
@@ -310,6 +337,94 @@ mod tests {
             .iter(world)
             .map(|text| text.0.clone())
             .collect()
+    }
+
+    /// **The edge itself, observed rather than assumed.**
+    ///
+    /// The test below measures the *consequence* of the right order, but it cannot see
+    /// the constraint disappear: with no edge the scheduler is merely free to pick either
+    /// order, and in this environment it keeps picking the good one — deleting the
+    /// `.after` leaves that test green (measured on #1052, single-threaded and
+    /// multi-threaded alike). So the edge is asserted directly here: adding the opposite
+    /// edge must make the schedule contradictory. If [`DrawEntryOffer`] were not ordered
+    /// after [`ReconcileEntryOffer`], the two constraints below would be satisfiable and
+    /// this would build cleanly.
+    #[test]
+    fn the_drawing_side_is_ordered_after_the_deciding_side() {
+        fn probe() {}
+
+        // The edge under test is the plugin's, never restated here — a test that
+        // configured it itself would assert only that it had configured it.
+        let mut app = App::new();
+        app.add_plugins(EntryOfferUiPlugin);
+        app.add_systems(Update, probe.in_set(crate::player::ReconcileEntryOffer));
+        // The contradiction: the deciding set is *also* asked to follow the drawing set.
+        // Satisfiable unless the plugin already ordered the drawing set after it.
+        app.configure_sets(
+            Update,
+            crate::player::ReconcileEntryOffer.after(DrawEntryOffer),
+        );
+
+        let world = app.world_mut();
+        let mut update = world
+            .resource_mut::<Schedules>()
+            .remove(Update)
+            .expect("the Update schedule");
+        assert!(
+            update.initialize(world).is_err(),
+            "the drawing side is not ordered after the deciding side"
+        );
+    }
+
+    /// The measurement for the ordering finding on #1052, written before the fix.
+    ///
+    /// A stand-in for `reconcile_entry_offer` runs in its set and opens the offer. If the
+    /// UI chain is not ordered after that set, `rebuild_dialog` can run first, and the
+    /// frame that drains an offer renders nothing — which is also the frame after which
+    /// `mark_presented` will call the dialog "seen".
+    #[test]
+    fn the_dialog_is_drawn_on_the_frame_the_offer_is_opened() {
+        fn open_the_offer(mut offer: ResMut<EntryOffer>, mut mode: ResMut<InputMode>) {
+            if offer.current().is_none() {
+                offer.open_for_test(offer_for_test(7, 1, 2, 1_800_000_000));
+                *mode = InputMode::EntryOffer;
+            }
+        }
+
+        // **Single-threaded, and the UI registered first.** An unconstrained schedule is
+        // free to pick either order, so a multi-threaded run can pass by luck and would
+        // then not notice the edge below being deleted. Pinning the executor and
+        // registering the drawing side *before* the opening side makes insertion order
+        // the adverse one, so only a real ordering constraint can save this test.
+        let mut app = App::new();
+        app.add_plugins(EntryOfferUiPlugin);
+        app.edit_schedule(Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+        app.add_systems(
+            Update,
+            open_the_offer.in_set(crate::player::ReconcileEntryOffer),
+        );
+        app.update();
+
+        let world = app.world_mut();
+        let visible = *world
+            .query_filtered::<&Visibility, With<EntryOfferRoot>>()
+            .single(world)
+            .expect("one dialog root");
+        assert_eq!(
+            visible,
+            Visibility::Visible,
+            "the dialog must be drawn on the frame its offer is opened"
+        );
+        assert!(
+            world
+                .query::<&EntryOfferButton>()
+                .iter(world)
+                .next()
+                .is_some(),
+            "the dialog must have been built, not merely made visible"
+        );
     }
 
     /// The three facts the contract discloses, and the consequence of each answer.

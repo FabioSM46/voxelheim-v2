@@ -228,6 +228,8 @@ pub enum Control {
     /// Speak. Held while [`VoiceMode::PushToTalk`] is chosen; unread while
     /// [`VoiceMode::VoiceActivation`] or [`VoiceMode::Off`] is.
     Talk,
+    /// The dungeon sessions window: what this character is currently saved to.
+    Sessions,
 }
 
 /// Every control, in the order the settings screen lists them.
@@ -236,7 +238,7 @@ pub enum Control {
 /// [`Bindings`] indexes its keys by `control as usize` while [`Bindings::default`] builds
 /// that array with `CONTROLS.map`, so a control listed here out of its declaration order
 /// would silently hand every control below it somebody else's key.
-pub const CONTROLS: [Control; 13] = [
+pub const CONTROLS: [Control; 14] = [
     Control::Forward,
     Control::Back,
     Control::Left,
@@ -250,6 +252,7 @@ pub const CONTROLS: [Control; 13] = [
     Control::Map,
     Control::Mount,
     Control::Talk,
+    Control::Sessions,
 ];
 
 impl Control {
@@ -269,6 +272,7 @@ impl Control {
             Self::Map => "map",
             Self::Mount => "mount",
             Self::Talk => "talk",
+            Self::Sessions => "sessions",
         }
     }
 
@@ -288,6 +292,7 @@ impl Control {
             Self::Map => "World map",
             Self::Mount => "Call mount",
             Self::Talk => "Push to talk",
+            Self::Sessions => "Dungeon sessions",
         }
     }
 
@@ -321,6 +326,12 @@ impl Control {
             Self::Map => KeyCode::KeyM,
             Self::Mount => KeyCode::KeyZ,
             Self::Talk => KeyCode::KeyV,
+            // `KeyO` was in `REBINDABLE_KEYS` and bound to nothing at all until this
+            // control existed, which is the same shape `Talk` arrived in on `KeyV`: a
+            // settings file written by an older client carries no `sessions` line, and
+            // [`Bindings::from_pairs`] gives it the first key nothing else holds — which
+            // is `KeyO` unless the player has moved something onto it.
+            Self::Sessions => KeyCode::KeyO,
         }
     }
 }
@@ -2774,11 +2785,14 @@ mod tests {
     /// thirteenth entry, and where it sits is the assertion that matters: [`Bindings`]
     /// indexes by `control as usize`, so a control *inserted* rather than appended hands
     /// every control below it somebody else's key while every reading still looks right.
+    ///
+    /// It stopped being the *last* entry when the sessions window was bound, and the index
+    /// is what this test was always about: `talk_is_appended_last_and_starts_on_v` asserted
+    /// both, and only one of the two is a property of `Talk`.
     #[test]
-    fn talk_is_appended_last_and_starts_on_v() {
-        assert_eq!(CONTROLS.len(), 13);
-        assert_eq!(CONTROLS[CONTROLS.len() - 1], Control::Talk);
-        assert_eq!(Control::Talk as usize, CONTROLS.len() - 1);
+    fn talk_is_the_thirteenth_control_and_starts_on_v() {
+        assert_eq!(CONTROLS[12], Control::Talk);
+        assert_eq!(Control::Talk as usize, 12);
 
         let mut settings = Settings::default();
         assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
@@ -2798,6 +2812,39 @@ mod tests {
         assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyB);
         settings.reset(Tab::Controls);
         assert_eq!(settings.bindings().key(Control::Talk), KeyCode::KeyV);
+    }
+
+    /// **The key the dungeon sessions window opens on, end to end through the model.**
+    ///
+    /// Appended, and the position is the assertion that matters for the reason the test
+    /// above states: [`Bindings`] indexes by `control as usize`. `KeyO` was in
+    /// [`REBINDABLE_KEYS`] and held by nothing at all before this control existed, which
+    /// is the same shape `Talk` arrived in on `KeyV` — so a settings file written by an
+    /// older client carries no `sessions` line and gets the key from the default.
+    #[test]
+    fn the_sessions_control_is_appended_last_and_starts_on_o() {
+        assert_eq!(CONTROLS.len(), 14);
+        assert_eq!(CONTROLS[CONTROLS.len() - 1], Control::Sessions);
+        assert_eq!(Control::Sessions as usize, CONTROLS.len() - 1);
+
+        let mut settings = Settings::default();
+        assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyO);
+        assert_eq!(key_name(KeyCode::KeyO), Some("o"));
+        assert_eq!(Control::Sessions.label(), "Dungeon sessions");
+
+        // A control like any other: a key another control holds is refused, a free one is
+        // taken, and the tab's own reset puts it back.
+        assert_eq!(
+            settings.rebind(Control::Sessions, KeyCode::KeyM),
+            Err(RebindRefusal::WouldUnbind(Control::Map))
+        );
+        assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyO);
+        settings
+            .rebind(Control::Sessions, KeyCode::KeyB)
+            .expect("b is free");
+        assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyB);
+        settings.reset(Tab::Controls);
+        assert_eq!(settings.bindings().key(Control::Sessions), KeyCode::KeyO);
     }
 
     /// The mode knob's whole bound: three values, stopping at each end, starting on the one

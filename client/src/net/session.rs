@@ -305,6 +305,14 @@ pub(super) enum SessionEvent {
     /// owes no frame withdrawing one, so whatever holds this must drop it on a world
     /// change, on a disconnect and on a later offer rather than wait to be told.
     InstanceEntryOffer(codec::InstanceEntryOffer),
+    /// Every saved run this character owes, **replacing** the client's copy wholesale.
+    ///
+    /// An empty list is a statement — this character owes nothing anywhere — so a
+    /// consumer that kept its previous copy on receiving one would be showing a lockout
+    /// that has already reset. It arrives on entering the world, on binding, and on a
+    /// run's reset, and each of those sends the whole list rather than the part that
+    /// moved.
+    InstanceBindings(codec::InstanceBindings),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1824,6 +1832,9 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::WardsNearby(wards)) => {
                     events.send(SessionEvent::WardsNearby(wards)).ok()?;
+                }
+                Ok(Transition::InstanceBindings(bindings)) => {
+                    events.send(SessionEvent::InstanceBindings(bindings)).ok()?;
                 }
                 Ok(Transition::VoiceHeard(heard)) => {
                     events.send(SessionEvent::VoiceHeard(heard)).ok()?;

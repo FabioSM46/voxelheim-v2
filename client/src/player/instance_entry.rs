@@ -136,6 +136,18 @@ pub struct EntryOfferAnswer {
     pub accept: bool,
 }
 
+/// Orders the dialog after the offer it draws.
+///
+/// **The dialog and the offer are two modules and one frame.** `reconcile_entry_offer`
+/// decides whether there is an offer and whether it may own the controls; `ui/instance_entry`
+/// turns that decision into something on screen. Both run before `ApplyInputMode`, which
+/// says nothing about their order relative to each other — so without this set the frame
+/// that drains an offer can render nothing, and `mark_presented` will then call a dialog
+/// "seen" that was never drawn, which is precisely the guard `EntryOffer::answerable`
+/// exists to provide. Reviewed on #1052.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReconcileEntryOffer;
+
 pub(super) struct InstanceEntryPlugin;
 
 impl Plugin for InstanceEntryPlugin {
@@ -148,6 +160,7 @@ impl Plugin for InstanceEntryPlugin {
             .add_systems(
                 Update,
                 reconcile_entry_offer
+                    .in_set(ReconcileEntryOffer)
                     .after(crate::net::DrainNetwork)
                     .before(ApplyInputMode),
             )
