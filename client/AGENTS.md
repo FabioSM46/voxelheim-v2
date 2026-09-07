@@ -1917,6 +1917,25 @@ mono device is not panned at all** — one loudspeaker cannot carry a direction,
 gain and the filter apply and the pan is skipped, rather than averaging the pair and making a
 hard-panned voice 3 dB quieter for no reason a listener could act on.
 
+**Generated sound is described under `audio/synth/`, separately from capture DSP.** A `Sound`
+names bounded layers (exciter, gain, envelope and optional filter). `bake` renders a shared
+buffer once at the mixer rate; `continuous` retains only generator state and requires sustained
+noise so a periodic tone cannot masquerade as a non-repeating bed. Both validate before
+allocating. Filtering precedes the final envelope, so even a resonant tail ends at zero.
+
+`Rendering::Baked` and `Rendering::Continuous` make that choice visible to `Playback::start`.
+The producer claims once, pumps at most one ring capacity per Update, preserves pending samples,
+and keeps the source until its final sample drains. A revoked source is released; a changed
+output rate terminates it and asks its caller to rebuild. A source rate tag also silences old
+queued samples in the callback before Update can observe the change; recycling clears the tag
+so a future voice owner remains rate-flexible. Continuous `stop` fades
+from the envelope level already reached; dropping a producer is immediate cancellation.
+
+`audio/arrival.rs` is the single proof sound: a world-entry chime at the authoritative spawn,
+on SFX through `spatial::place`, baked once per device rate and played once per session. Sound
+remains presentation: no gameplay reads it, and no test opens an audio device. The ignored
+`continuous_cpu_budget` test records generator cost without asserting a timing bound in CI.
+
 ## Conventions that are not obvious from the code
 
 - **`net/codec.rs` is the only place untrusted bytes are read.** It copies every field it needs
