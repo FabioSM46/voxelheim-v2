@@ -475,8 +475,10 @@ pub enum MaterialClass {
     Air,
     /// Rock, ore, brick, tile and worked stone. Dense and hard.
     Stone,
-    /// Loose ground: soil, sand, gravel, snow. Solid, and nothing like rock.
+    /// Loose ground: soil, gravel, snow. Solid, and nothing like rock.
     Earth,
+    /// Fine dry grains, acoustically distinct from packed soil.
+    Sand,
     /// Cut and grown timber.
     Wood,
     /// Anything leafy or strawy — grown, porous, and mostly gaps.
@@ -506,7 +508,8 @@ pub enum MaterialClass {
 pub fn material_class(block: BlockId) -> MaterialClass {
     match block {
         AIR => MaterialClass::Air,
-        DIRT | GRASS | SNOW | SAND | GRAVEL => MaterialClass::Earth,
+        DIRT | GRASS | SNOW | GRAVEL => MaterialClass::Earth,
+        SAND => MaterialClass::Sand,
         LOG | PLANKS | PALM_LOG | DARK_TIMBER | PALE_TIMBER => MaterialClass::Wood,
         LEAVES | PALM_FRONDS | BROAD_LEAVES | THATCH => MaterialClass::Foliage,
         DESERT_SHRUB | BUSH | WINTER_BRAMBLE => MaterialClass::Foliage,
@@ -908,6 +911,7 @@ mod tests {
         for class in [
             MaterialClass::Stone,
             MaterialClass::Earth,
+            MaterialClass::Sand,
             MaterialClass::Wood,
             MaterialClass::Foliage,
             MaterialClass::Glass,
@@ -939,7 +943,7 @@ mod tests {
             (COAL_ORE, MaterialClass::Stone),
             (DIRT, MaterialClass::Earth),
             (SNOW, MaterialClass::Earth),
-            (SAND, MaterialClass::Earth),
+            (SAND, MaterialClass::Sand),
             (LOG, MaterialClass::Wood),
             (PLANKS, MaterialClass::Wood),
             (DARK_TIMBER, MaterialClass::Wood),

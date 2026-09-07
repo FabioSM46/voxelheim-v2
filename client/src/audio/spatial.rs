@@ -403,7 +403,7 @@ pub fn occlusion_weight(class: MaterialClass) -> f32 {
     match class {
         MaterialClass::Air | MaterialClass::Water => 0.0,
         MaterialClass::Stone => 1.0,
-        MaterialClass::Earth => 0.9,
+        MaterialClass::Earth | MaterialClass::Sand => 0.9,
         MaterialClass::Wood => 0.6,
         MaterialClass::Foliage => 0.3,
         MaterialClass::Glass => 0.2,

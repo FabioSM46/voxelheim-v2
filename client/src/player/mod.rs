@@ -72,6 +72,7 @@ mod shapes;
 mod sky;
 mod structures;
 mod target;
+mod tool_audio;
 mod trade;
 mod vendor;
 mod wards;
