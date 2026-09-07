@@ -49,6 +49,7 @@
 //! enable, ducking and mono fold; every synthesized sound passes through those same controls.
 
 mod arrival;
+mod city;
 mod codec;
 mod device;
 mod dsp;
@@ -164,6 +165,7 @@ impl Plugin for AudioPlugin {
         let capture = AudioCapture::start();
 
         arrival::register(app);
+        city::register(app);
         app.insert_resource(AudioMixer(mixer))
             .insert_resource(device)
             .insert_resource(capture)
