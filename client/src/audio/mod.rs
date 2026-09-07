@@ -49,6 +49,7 @@
 //! enable, ducking and mono fold; every synthesized sound passes through those same controls.
 
 mod arrival;
+mod city;
 mod codec;
 mod device;
 mod dsp;
