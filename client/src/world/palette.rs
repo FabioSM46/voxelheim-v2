@@ -1099,10 +1099,10 @@ mod tests {
     fn every_non_water_material_colour_is_distinct() {
         // Two materials that render the same colour would make the landscape unreadable
         // while every test still passed. Water ids and slate's geometry variants
-        // deliberately share one material each.
+        // deliberately share one material each. Portal cells are drawn by their effect.
         let materials: Vec<(BlockId, [f32; 4])> = PALETTE
             .iter()
-            .filter(|block| !is_water(**block))
+            .filter(|block| !is_water(**block) && !is_portal(**block))
             .map(|block| (shape_of(*block).material, linear_rgba(*block)))
             .collect();
         for (i, (a_material, a_colour)) in materials.iter().enumerate() {
@@ -1119,7 +1119,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=WINTER_BRAMBLE {
+        for block in 1..=PORTAL_HEART {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
