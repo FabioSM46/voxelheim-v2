@@ -60,6 +60,7 @@ func (s *Sim) Transfer(p *Player, target *Sim, spawn [3]float32) error {
 	p.closePlayerTradeLocked(vnet.PlayerTradeCloseReasonDisconnected)
 	p.setMiningLocked(nil)
 	p.mineCompleting = false
+	p.miningCompleted = nil
 	p.mineReset = nil
 	p.blocking = false
 

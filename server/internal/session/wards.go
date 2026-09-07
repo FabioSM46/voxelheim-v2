@@ -74,7 +74,7 @@ func followSnapshots(
 					return
 				}
 				if !offerSnapshot(event) {
-					log.Debug("blow dropped: the session's outbound queue is full")
+					log.Debug("transient outcome dropped: the session's outbound queue is full")
 				}
 			}
 		}

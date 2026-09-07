@@ -153,6 +153,7 @@ func (p *Player) dieLocked() {
 	p.setMiningLocked(nil)
 	p.mineReset = nil
 	p.mineCompleting = false
+	p.miningCompleted = nil
 
 	// The combat seam this comment promised. A swing accepted before the blow that
 	// killed them does not land afterwards.
