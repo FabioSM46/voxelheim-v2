@@ -218,7 +218,7 @@ func TestCacheDefaultGeneratorPreservesOpenWorldGoldens(t *testing.T) {
 			{goldenCoord, goldenPath}, {goldenWaterCoord, goldenWaterPath},
 			{goldenSettlementCoord, goldenSettlementPath}, {goldenPlainsCoord, goldenPlainsPath},
 			{goldenRiverCoord, goldenRiverPath}, {goldenBushCoord, goldenBushPath},
-			{Coord{X: -1462, Y: 2, Z: 1716}, "testdata/chunk_golden_ruin.bin"},
+			{Coord{X: 55, Y: 2, Z: 55}, "testdata/chunk_golden_ruin.bin"},
 		} {
 			_, encoded, err := cache.Get(context.Background(), fixture.coord)
 			if err != nil {

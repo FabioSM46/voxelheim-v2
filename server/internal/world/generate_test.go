@@ -140,7 +140,7 @@ func TestGenerateMatchesTheGoldenChunk(t *testing.T) {
 		{"plains-conifer", goldenPlainsCoord, goldenPlainsPath},
 		{"river", goldenRiverCoord, goldenRiverPath},
 		{"bush", goldenBushCoord, goldenBushPath},
-		{"ruin-arch", Coord{X: -1462, Y: 2, Z: 1716}, "testdata/chunk_golden_ruin.bin"},
+		{"ruin-arch", Coord{X: 55, Y: 2, Z: 55}, "testdata/chunk_golden_ruin.bin"},
 	} {
 		got := encodedBytes(Encode(Generate(goldenSeed, fixture.coord)))
 

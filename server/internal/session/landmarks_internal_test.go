@@ -61,7 +61,7 @@ func TestPortalKnowledgePrecedesDiscoveryAndSurvivesWorldReload(t *testing.T) {
 	cache := world.NewPersistentCache(storedWorld, 1, 8)
 	store, character := exploringCharacter(t, dir)
 	e := newExploration(store, character.ID, nil, false, nil)
-	r := landmarkFixture(t, -6, 6)
+	r := landmarkFixture(t, 0, 0)
 	request := portalRequest(r, 1)
 	before := landmarksForTile(cache.Seed(), request, e)
 	if len(before.Landmarks) != 1 || before.Landmarks[0].Discovered {
@@ -104,7 +104,7 @@ func TestPortalKnowledgePrecedesDiscoveryAndSurvivesWorldReload(t *testing.T) {
 }
 
 func TestPortalTileLookupIsBoundedAndStableAcrossScales(t *testing.T) {
-	r := landmarkFixture(t, -6, 6)
+	r := landmarkFixture(t, 0, 0)
 	var id uint64
 	for _, scale := range protocol.MapTileScales {
 		span := protocol.MapTileSpan(scale)
@@ -150,7 +150,7 @@ func TestMapRequestSendsUndiscoveredPortalWhileTerrainStaysFogged(t *testing.T) 
 	clock := &stoppedClock{}
 	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, send, func() {}, clock.now, log)
 	s.RecordExploration(e)
-	r := landmarkFixture(t, -6, 6)
+	r := landmarkFixture(t, 0, 0)
 	req := portalRequest(r, 1)
 	msg, err := protocol.Decode(protocol.EncodeMapTileRequest(req))
 	if err != nil {
@@ -210,27 +210,29 @@ func TestStreamingPushesCanonicalDiscoveryWithoutMapRequest(t *testing.T) {
 	if len(frames) != 0 {
 		t.Fatal("initial global list is forbidden")
 	}
-	for _, r := range []world.Ruin{landmarkFixture(t, -6, 6), landmarkFixture(t, 0, -12)} {
-		frames = nil
-		coord := world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z)
-		if err := s.MoveTo(context.Background(), coord); err != nil {
-			t.Fatal(err)
-		}
-		if len(frames) < 3 || vnet.GetRootAsEnvelope(frames[len(frames)-2], 0).PayloadType() != vnet.PayloadMapExplored {
-			t.Fatal("discovery must follow exploration")
-		}
-		list := landmarkEntries(t, frames[len(frames)-1])
-		want := portalRequest(r, 1)
-		if list.OriginX != want.OriginX || list.OriginZ != want.OriginZ || list.Scale != 1 || len(list.Landmarks) != 1 || !list.Landmarks[0].Discovered {
-			t.Fatal("discovery is not one canonical tile")
-		}
-		frames = nil
-		if err := s.MoveTo(context.Background(), coord); err != nil {
-			t.Fatal(err)
-		}
-		if len(frames) != 0 {
-			t.Fatal("unchanged view resent discovery")
-		}
+	// A world holds one portal (#1020), so where this walked two sites of one world it
+	// now walks the one it has. The second half — moving back into the same view — is
+	// unchanged and is what pins that discovery is not re-sent.
+	r := landmarkFixture(t, 0, 0)
+	frames = nil
+	coord := world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z)
+	if err := s.MoveTo(context.Background(), coord); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) < 3 || vnet.GetRootAsEnvelope(frames[len(frames)-2], 0).PayloadType() != vnet.PayloadMapExplored {
+		t.Fatal("discovery must follow exploration")
+	}
+	list := landmarkEntries(t, frames[len(frames)-1])
+	want := portalRequest(r, 1)
+	if list.OriginX != want.OriginX || list.OriginZ != want.OriginZ || list.Scale != 1 || len(list.Landmarks) != 1 || !list.Landmarks[0].Discovered {
+		t.Fatal("discovery is not one canonical tile")
+	}
+	frames = nil
+	if err := s.MoveTo(context.Background(), coord); err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 0 {
+		t.Fatal("unchanged view resent discovery")
 	}
 }
 
@@ -239,7 +241,7 @@ func TestFailedChunkSendNeverDiscoversALandmark(t *testing.T) {
 	blocked := errors.New("test send failed")
 	s := NewStreamer(world.NewCache(mapTileSeed, 1, 8), 0, func([]byte) error { return blocked }, func() {}, time.Now, slog.New(slog.DiscardHandler))
 	s.RecordExploration(e)
-	r := landmarkFixture(t, -6, 6)
+	r := landmarkFixture(t, 0, 0)
 	if err := s.MoveTo(context.Background(), world.ChunkOf(r.Arch.X, r.Arch.Y, r.Arch.Z)); !errors.Is(err, blocked) {
 		t.Fatal(err)
 	}
@@ -249,7 +251,7 @@ func TestFailedChunkSendNeverDiscoversALandmark(t *testing.T) {
 }
 
 func BenchmarkPortalTileLookup(b *testing.B) {
-	r, ok := world.RuinAt(mapTileSeed, -6, 6)
+	r, ok := world.RuinAt(mapTileSeed, 0, 0)
 	if !ok {
 		b.Fatal("fixture missing")
 	}
