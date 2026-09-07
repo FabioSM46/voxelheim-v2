@@ -108,6 +108,13 @@ pub use codec::{
 #[allow(unused_imports)] // The window that reads these is the second half of #979.
 pub use codec::{InstanceBindings, SessionBinding};
 
+// V35's dungeon-entry surface. Named here for the reason the blocks above are: the
+// consent dialog (#1030, part 2) should not have to reopen `codec.rs` to find out what
+// it is allowed to spell. The answer's encoder is here too and nothing calls it yet —
+// the dialog that does is the only thing left to write.
+#[allow(unused_imports)]
+pub use codec::{InstanceEntryAnswer, InstanceEntryOffer, encode_instance_entry_answer};
+
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
 // name nothing outside `net` can start deciding from.
@@ -984,6 +991,49 @@ const VOICE_INBOX: usize = 16;
 #[derive(Resource, Debug, Default)]
 pub struct VoiceInbox(VecDeque<codec::VoiceHeard>);
 
+/// The one entry offer the server is holding for this character, if any.
+///
+/// **One, not a queue, and that is the contract rather than a simplification.** A later
+/// crossing supersedes the earlier offer and the server has already forgotten it, so a
+/// second offer arriving is the first one ending. Keeping both would mean holding an id
+/// the server would answer with `EntryOfferUnknown` and giving a player a choice that no
+/// longer exists.
+///
+/// It is also why this queue is bounded by construction and needs no ceiling: every other
+/// inbox in this module is a one-frame queue drained unconditionally by its consumer,
+/// and this one cannot grow whether it is drained or not.
+///
+/// An offer is not durable and the server owes no frame withdrawing one. What ends it
+/// here is the same list `schemas/instance.fbs` states: a world change clears it beside
+/// every other inbox, a session ending takes the resource down with the rest, and a later
+/// offer replaces it. The run's own reset is the one the client cannot see, and it is why
+/// answering is a request rather than an outcome.
+#[derive(Resource, Debug, Default)]
+pub struct EntryOfferInbox(Option<codec::InstanceEntryOffer>);
+
+impl EntryOfferInbox {
+    /// Takes the outstanding offer, leaving the inbox empty.
+    ///
+    /// Taking it is what spends it on this side, which mirrors the server: an offer is
+    /// answered once and forgotten on either answer, so a consumer that kept the id
+    /// would be holding one every later answer is refused with `EntryOfferUnknown`.
+    pub fn take(&mut self) -> Option<codec::InstanceEntryOffer> {
+        self.0.take()
+    }
+
+    /// Drops an offer that belonged to a world or a session which is no longer current.
+    fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Holds one offer as `drain_session_events` would. Test-only, so the consent dialog
+    /// can be driven without a socket — `WorldInbox::push`'s reason.
+    #[cfg(test)]
+    pub fn push_for_test(&mut self, offer: codec::InstanceEntryOffer) {
+        self.0 = Some(offer);
+    }
+}
+
 impl VoiceInbox {
     /// Takes every queued frame, leaving the inbox empty.
     pub fn take(&mut self) -> Vec<codec::VoiceHeard> {
@@ -1483,6 +1533,7 @@ impl Plugin for NetPlugin {
             .init_resource::<WardsInbox>()
             .init_resource::<InstanceBindingsInbox>()
             .init_resource::<VoiceInbox>()
+            .init_resource::<EntryOfferInbox>()
             .init_resource::<ChatInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(settings.clone())
@@ -2091,6 +2142,8 @@ struct Inboxes<'w> {
     wards: ResMut<'w, WardsInbox>,
     bindings: ResMut<'w, InstanceBindingsInbox>,
     voice: ResMut<'w, VoiceInbox>,
+    // Optional only for focused boundary tests that install the drain directly.
+    entry_offers: Option<ResMut<'w, EntryOfferInbox>>,
     // Optional only for focused net-boundary tests that install the drain directly.
     // NetPlugin always initialises it, so a live client never drops this queue.
     chat: Option<ResMut<'w, ChatInbox>>,
@@ -2259,6 +2312,12 @@ fn drain_session_events(
                 inboxes.storms.0.clear();
                 inboxes.wards.0.clear();
                 inboxes.voice.0.clear();
+                // An offer belongs to the world it was made in: the crossing it names is
+                // one this character is no longer standing at, and the server has already
+                // forgotten it.
+                if let Some(inbox) = inboxes.entry_offers.as_deref_mut() {
+                    inbox.clear();
+                }
                 if let Some(inbox) = inboxes.loot.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2350,6 +2409,13 @@ fn drain_session_events(
             Ok(SessionEvent::VendorClosed(closed)) => {
                 if let Some(vendor) = inboxes.vendor.as_deref_mut() {
                     vendor.0.push(VendorEvent::Closed(closed));
+                }
+            }
+            // V35's entry offer. Not logged: it is one frame at a crossing rather than a
+            // stream, and what a player needs is the dialog rather than a line in a file.
+            Ok(SessionEvent::InstanceEntryOffer(offer)) => {
+                if let Some(inbox) = inboxes.entry_offers.as_deref_mut() {
+                    inbox.0 = Some(offer);
                 }
             }
             Ok(SessionEvent::PlayerTradeState(state)) => {
@@ -5883,6 +5949,88 @@ mod tests {
         assert_eq!(
             app.world_mut().resource_mut::<WardsInbox>().take(),
             vec![wards]
+        );
+    }
+
+    /// One offer at a time, because that is what the server holds: a later crossing
+    /// supersedes the earlier offer and the server has already forgotten it, so keeping
+    /// the first would be holding an id it would answer with `EntryOfferUnknown`.
+    #[test]
+    fn a_later_entry_offer_replaces_the_one_the_server_has_forgotten() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        app.init_resource::<EntryOfferInbox>();
+        let terms = SessionBinding {
+            arch: BlockCoord {
+                x: -96,
+                y: 61,
+                z: 704,
+            },
+            bosses_defeated: 1,
+            bosses_total: 2,
+            resets_at_unix: 1_800_000_000,
+        };
+        let first = InstanceEntryOffer { offer_id: 5, terms };
+        let second = InstanceEntryOffer { offer_id: 6, terms };
+
+        events
+            .send(SessionEvent::InstanceEntryOffer(first))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::InstanceEntryOffer(second))
+            .expect("the app holds the receiver");
+        app.update();
+
+        let mut inbox = app.world_mut().resource_mut::<EntryOfferInbox>();
+        assert_eq!(inbox.take(), Some(second));
+        // Taking it empties it: an offer is answered once, and a client that kept the id
+        // would be holding one the server has already spent.
+        assert_eq!(inbox.take(), None);
+    }
+
+    /// An offer belongs to the world the crossing was requested from. Nothing withdraws
+    /// it, so the boundary that discards the old world discards it too.
+    #[test]
+    fn a_world_change_discards_an_unanswered_entry_offer() {
+        use crate::world::transition::CurrentWorld;
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        app.init_resource::<crate::world::ChunkStore>()
+            .init_resource::<crate::player::SnapshotBuffer>()
+            .init_resource::<MapInbox>()
+            .init_resource::<CurrentWorld>()
+            .init_resource::<EntryOfferInbox>();
+
+        events
+            .send(SessionEvent::InstanceEntryOffer(InstanceEntryOffer {
+                offer_id: 5,
+                terms: SessionBinding {
+                    arch: BlockCoord {
+                        x: -96,
+                        y: 61,
+                        z: 704,
+                    },
+                    bosses_defeated: 1,
+                    bosses_total: 2,
+                    resets_at_unix: 1_800_000_000,
+                },
+            }))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::WorldChange(WorldChange {
+                world_id: 9,
+                world_seed: 3,
+                arrival: [0.0, 64.0, 0.0],
+                exit_arch: Some(BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                }),
+            }))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut().resource_mut::<EntryOfferInbox>().take(),
+            None
         );
     }
 

@@ -16,6 +16,7 @@ mod hotbar;
 /// puts it in `player`, on the other side of this boundary. Nothing outside the tests calls
 /// into here; the drawing is still reached through `stack_style` and `refresh_cell_contents`.
 pub(crate) mod icon;
+mod instance_entry;
 mod inventory;
 mod leaving;
 mod login;
@@ -50,9 +51,9 @@ use crate::net::{
 };
 
 use crate::player::{
-    ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick,
-    ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick, SelfVitals, ViewMode,
-    item_linear_rgba, item_livery, item_shape,
+    ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick, EntryOffer,
+    EntryOfferAnswer, ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick,
+    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -193,6 +194,7 @@ impl Plugin for UiPlugin {
             .add_message::<crate::player::PlayerTradeClick>()
             .add_message::<crate::player::PlayerTradeEnded>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<DisconnectRequest>()
             .add_message::<CancelLeaveRequest>()
             // Registered here as well as by `net::SignInPlugin`, which is not built
@@ -240,6 +242,7 @@ impl Plugin for UiPlugin {
                 (
                     loot::LootUiPlugin,
                     map::MapUiPlugin,
+                    instance_entry::EntryOfferUiPlugin,
                     prompt::ConfirmationPromptUiPlugin,
                     trade::PlayerTradeUiPlugin,
                     vendor::VendorUiPlugin,
@@ -269,6 +272,11 @@ impl Plugin for UiPlugin {
 /// copied into a test would not test that at all — it would test the copy.
 fn add_input_mode_systems(app: &mut App) {
     app.init_resource::<ConfirmationPrompt>()
+        // `player::instance_entry` owns this pair in the game. Initialising them here
+        // too keeps this narrow bundle installable on its own, which is the reason every
+        // other resource in this list is here.
+        .init_resource::<EntryOffer>()
+        .add_message::<EntryOfferAnswer>()
         .add_message::<CancelLeaveRequest>()
         .add_message::<ConfirmationAnswer>()
         .add_message::<PlayerTradeClick>()
@@ -342,6 +350,42 @@ struct ModalControls<'w> {
     prompt: ResMut<'w, ConfirmationPrompt>,
     prompt_answers: MessageWriter<'w, ConfirmationAnswer>,
     trade_clicks: MessageWriter<'w, PlayerTradeClick>,
+    entry_offer: Res<'w, EntryOffer>,
+    entry_answers: MessageWriter<'w, EntryOfferAnswer>,
+}
+
+impl ModalControls<'_> {
+    /// Answers `Escape` over the entry dialog, and returns the mode it leaves behind.
+    ///
+    /// **A refusal, not a dismissal.** The key that closes this dialog is the player
+    /// saying no, so it is worth sending: it costs the character nothing and it lets the
+    /// server forget the offer at once. The id comes from the offer on screen, which is
+    /// what keeps a press from answering a crossing that replaced it.
+    ///
+    /// **A press made before the dialog existed answers nothing**, and the mode does not
+    /// move either. The offer is drained before this system runs, so the frame that opens
+    /// the dialog can also carry an `Escape` aimed at the pause menu the player was about
+    /// to open — and refusing there would give away a crossing nobody saw, silently,
+    /// since a refusal produces no frame to notice. The press is absorbed instead: the
+    /// dialog stays up and the next press answers it. `EntryOffer::answerable` is the one
+    /// place that rule lives, so the click path is not asked to repeat it — a button
+    /// cannot be pressed before it is drawn.
+    fn answer_entry_offer_with_escape(&mut self) -> InputMode {
+        let Some(offer_id) = self.entry_offer.answerable() else {
+            // Nothing to answer at all is a different case from too early to answer, and
+            // only the first should hand the controls back.
+            return if self.entry_offer.current().is_some() {
+                InputMode::EntryOffer
+            } else {
+                InputMode::Playing
+            };
+        };
+        self.entry_answers.write(EntryOfferAnswer {
+            offer_id,
+            accept: false,
+        });
+        InputMode::Playing
+    }
 }
 
 impl Controls<'_> {
@@ -547,6 +591,11 @@ fn choose_input_mode(
                     modals.trade_clicks.write(PlayerTradeClick::Cancel);
                     InputMode::Playing
                 }
+                // The dialog's own No. `player::instance_entry` owns what happens next:
+                // it spends the offer and hands the controls back, and this returns to
+                // `Playing` for the frame in between rather than deciding anything. The
+                // one press it declines to act on is one made before the dialog was up.
+                InputMode::EntryOffer => modals.answer_entry_offer_with_escape(),
                 InputMode::Menu
                 | InputMode::Loot
                 | InputMode::Vendor
@@ -574,6 +623,7 @@ fn choose_input_mode(
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
             InputMode::Trade => return,
+            InputMode::EntryOffer => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -601,6 +651,7 @@ fn choose_input_mode(
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
             InputMode::Trade => return,
+            InputMode::EntryOffer => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Sessions => return,
@@ -629,6 +680,10 @@ fn choose_input_mode(
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
             InputMode::Trade => return,
+            // The entry dialog is a question the server asked, so it is the one surface
+            // `O` must not replace: the list behind it is a fact the player can read at
+            // any time, and the offer in front of them is not.
+            InputMode::EntryOffer => return,
             InputMode::Chat => return,
             InputMode::Menu => return,
             InputMode::Map => return,
@@ -1767,8 +1822,10 @@ mod tests {
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(life_state)))
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1829,8 +1886,10 @@ mod tests {
             .insert_resource(prompt)
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -1851,6 +1910,134 @@ mod tests {
         assert!(!answers[0].accepted);
     }
 
+    /// **Escape over the entry dialog is a refusal, not a dismissal.** It costs the
+    /// character nothing, it leaves them outside and unbound, and it is what lets the
+    /// server forget the offer at once rather than hold it. The id is the one on screen,
+    /// which is what keeps the press from answering a crossing that replaced it.
+    #[test]
+    fn escape_refuses_the_entry_offer_and_names_the_one_on_screen() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+        let mut offer = EntryOffer::default();
+        offer.open_for_test(crate::net::InstanceEntryOffer {
+            offer_id: 41,
+            terms: crate::net::SessionBinding {
+                arch: crate::net::BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_800_000_000,
+            },
+        });
+        // A dialog the player has had a frame to read, which is what
+        // `player::instance_entry::reconcile_entry_offer` records every frame it is up.
+        offer.present_for_test();
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(keys)
+            .insert_resource(InputMode::EntryOffer)
+            .insert_resource(offer)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<ConfirmationPrompt>()
+            .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
+            .add_message::<PlayerTradeClick>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<Messages<EntryOfferAnswer>>()
+                .drain()
+                .collect::<Vec<_>>(),
+            vec![EntryOfferAnswer {
+                offer_id: 41,
+                accept: false,
+            }]
+        );
+    }
+
+    /// **No other key may replace the entry dialog.** It is the one surface on screen that
+    /// is a question the server asked, and every other overlay is something the player can
+    /// open again a second later: the pack, the map and the sessions list are all readable
+    /// at any time, and an offer is not. Pressing their keys over the dialog therefore does
+    /// nothing at all, which is the rule `E` over the loot window and `M` over the pack
+    /// already follow.
+    ///
+    /// Written because a mutation audit of this file found all three arms unexercised
+    /// (#1052): the review that would have read them was truncated, and turning each
+    /// `InputMode::EntryOffer => return` into a mode change broke no test.
+    #[test]
+    fn no_other_overlay_key_replaces_the_entry_dialog() {
+        for key in [KeyCode::KeyE, KeyCode::KeyM, KeyCode::KeyO, KeyCode::KeyT] {
+            assert_eq!(
+                mode_after_key(InputMode::EntryOffer, key),
+                InputMode::EntryOffer,
+                "{key:?} took the controls from a server question"
+            );
+        }
+    }
+
+    /// The other half of the same rule: a press that predates the dialog answers nothing
+    /// and moves nothing. The dialog stays up, and the next press answers it.
+    ///
+    /// Reachable because the offer is drained before `choose_input_mode` runs, so the
+    /// frame that opens the dialog can carry an `Escape` the player aimed at the pause
+    /// menu. A refusal there would give away a crossing nobody saw, and give it away
+    /// silently, since nothing about a refusal reaches the screen.
+    #[test]
+    fn escape_over_a_dialog_that_only_just_appeared_answers_nothing() {
+        let mut keys = ButtonInput::default();
+        keys.press(KeyCode::Escape);
+        let mut offer = EntryOffer::default();
+        offer.open_for_test(crate::net::InstanceEntryOffer {
+            offer_id: 41,
+            terms: crate::net::SessionBinding {
+                arch: crate::net::BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_800_000_000,
+            },
+        });
+        // Deliberately not presented: this is the frame the dialog opened on.
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(keys)
+            .insert_resource(InputMode::EntryOffer)
+            .insert_resource(offer)
+            .insert_resource(session())
+            .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
+            .init_resource::<ConfirmationPrompt>()
+            .add_message::<CancelLeaveRequest>()
+            .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
+            .add_message::<PlayerTradeClick>()
+            .add_systems(Update, choose_input_mode);
+        app.update();
+
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::EntryOffer);
+        assert!(
+            app.world_mut()
+                .resource_mut::<Messages<EntryOfferAnswer>>()
+                .drain()
+                .next()
+                .is_none(),
+            "a press made before the dialog existed refused the offer"
+        );
+    }
+
     #[test]
     fn escape_during_leave_asks_but_only_the_server_answer_restores_play() {
         let mut keys = ButtonInput::default();
@@ -1867,8 +2054,10 @@ mod tests {
             })
             .insert_resource(LeaveCancellation::Available)
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();
@@ -2028,8 +2217,10 @@ mod tests {
             .insert_resource(screen)
             .insert_resource(SelfVitals::from_server(vitals(LifeState::Alive)))
             .init_resource::<ConfirmationPrompt>()
+            .init_resource::<EntryOffer>()
             .add_message::<CancelLeaveRequest>()
             .add_message::<ConfirmationAnswer>()
+            .add_message::<EntryOfferAnswer>()
             .add_message::<PlayerTradeClick>()
             .add_systems(Update, choose_input_mode);
         app.update();

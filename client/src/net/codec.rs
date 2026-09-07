@@ -2195,6 +2195,30 @@ pub struct WorldChange {
     pub exit_arch: Option<BlockCoord>,
 }
 
+/// The server offering one character a crossing that would bind them.
+///
+/// **Not a crossing, and not a question this client may answer on its own.** Nothing has
+/// moved and nothing is bound: the character is still standing in the open world. The
+/// only thing an answer may name is `offer_id`, it is single use, and the offer is not
+/// durable — a world change, a disconnect, a later crossing or the run's own reset each
+/// end it, and the server owes no frame saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceEntryOffer {
+    pub offer_id: u64,
+    pub terms: SessionBinding,
+}
+
+/// One character's answer to one offer. **Intent, never outcome.**
+///
+/// No destination, no session, no position and no binding: an id the server minted and a
+/// yes or a no. `accept` is read through its absent-field zero on the server, so the
+/// field that decides whether somebody is locked to a dungeon for the day fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceEntryAnswer {
+    pub offer_id: u64,
+    pub accept: bool,
+}
+
 /// Complete membership of one validated half-open map-tile rectangle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandmarkList {
@@ -2951,6 +2975,10 @@ pub enum Message {
     /// here; nothing plays it until the client's audio path (#851), exactly as
     /// `MapTile` was carried this far before the map window existed.
     VoiceHeard(VoiceHeard),
+    /// One crossing the server is offering this character, and the terms it would bind
+    /// them to. Copied and validated here; the dialog that shows it is #1030's second
+    /// part, and nothing about a session changes what the offer means.
+    InstanceEntryOffer(InstanceEntryOffer),
     /// Every saved run this character owes, replacing the client's copy wholesale.
     ///
     /// Sibling of [`Self::MarkerList`] and [`Self::WardsNearby`] rather than of the
@@ -3638,6 +3666,33 @@ pub enum DecodeError {
         speaker_entity_id: u64,
         len: usize,
     },
+    /// An `InstanceEntryOffer` carries the reserved offer id 0. Nothing could answer it:
+    /// the id is the only thing an answer may name, and the server refuses a zero.
+    EntryOfferWithoutIdentity,
+    /// An `InstanceEntryOffer` states no `terms`. The terms *are* the disclosure the
+    /// prompt exists to make, so an offer without them is not one.
+    EntryOfferWithoutTerms,
+    /// A `SessionBinding` names no arch, so it names no place.
+    SessionBindingWithoutArch,
+    /// A `SessionBinding` arch lies outside the ±2^24 block domain.
+    SessionBindingArchOutOfDomain {
+        value: i32,
+    },
+    /// A `SessionBinding` progress pair is not a progress: a zero denominator, or more
+    /// bosses defeated than the dungeon has. Refused rather than clamped, because a
+    /// clamp would draw "3 / 3" over a server that meant something else.
+    SessionBindingBossCount {
+        defeated: u8,
+        total: u8,
+    },
+    /// A `SessionBinding` reset second is zero or negative.
+    ///
+    /// **Only the sign is checked, deliberately.** The contract says the second is in
+    /// the future when it is sent, and this side cannot hold the server to that: the two
+    /// clocks are not the same clock, and a client that refused a frame on its own skew
+    /// would drop a legitimate offer and tell the player nothing. What a zero or a
+    /// negative *is* is a server that wrote no time at all, which no clock excuses.
+    SessionBindingResetTime(i64),
 }
 
 impl fmt::Display for DecodeError {
@@ -4264,6 +4319,26 @@ impl fmt::Display for DecodeError {
                 "a VoiceHeard from entity {speaker_entity_id} carries {len} Opus bytes, \
                  at most {MAX_OPUS_BYTES}"
             ),
+            Self::EntryOfferWithoutIdentity => {
+                write!(f, "an InstanceEntryOffer carries reserved offer id 0")
+            }
+            Self::EntryOfferWithoutTerms => {
+                write!(f, "an InstanceEntryOffer states no terms")
+            }
+            Self::SessionBindingWithoutArch => {
+                write!(f, "a SessionBinding names no arch")
+            }
+            Self::SessionBindingArchOutOfDomain { value } => write!(
+                f,
+                "a SessionBinding arch component {value} is outside the block domain"
+            ),
+            Self::SessionBindingBossCount { defeated, total } => write!(
+                f,
+                "a SessionBinding reports {defeated} of {total} bosses defeated"
+            ),
+            Self::SessionBindingResetTime(seconds) => {
+                write!(f, "a SessionBinding resets at Unix second {seconds}")
+            }
         }
     }
 }
@@ -4854,17 +4929,23 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 target,
             }))
         }
-        // V35's entry prompt, carried by name and read by nobody yet. The dialog that
-        // shows a player what they are about to accept is #1030; the contract it consumes
-        // is settled here so that it does not have to invent a message. It is deferred
-        // rather than consumed for the reason `MapTile` was before the map window
-        // existed — there is no value for a decoded offer to become — and the arm that
-        // reads it belongs with the first consumer that needs one.
-        fb::Payload::InstanceEntryOffer => Ok(Message::Deferred(name)),
-        // V35's list of what this character already owes, read by an arm of its own since
-        // the payload half of #979. It was `Deferred` beside the offer above, which is
-        // the staged shape V24's map payloads and V25's stall each had, and `Deferred`
-        // meant "this build has no arm yet" rather than "this contract has no member".
+        // V35's two, each read by an arm of its own now that both have a consumer. Both
+        // were `Deferred` in the contract part that added them — the staged shape V24's
+        // map payloads and V25's stall each had — and `Deferred` meant "this build has no
+        // arm yet" rather than "this contract has no member".
+        //
+        // The entry prompt's consumer is the consent dialog (#1030), and the bindings
+        // list's is the sessions window (#979). Each is validated here rather than where
+        // it is drawn, for the reason every other payload is: a zero offer id, absent
+        // terms or an impossible progress pair ends the session now, and neither surface
+        // has to ask whether the numbers it is about to put in front of a player mean
+        // anything.
+        fb::Payload::InstanceEntryOffer => {
+            let payload = envelope
+                .payload_as_instance_entry_offer()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::InstanceEntryOffer(instance_entry_offer(&payload)?))
+        }
         fb::Payload::InstanceBindings => {
             let payload = envelope
                 .payload_as_instance_bindings()
@@ -5043,6 +5124,64 @@ fn marker_list(list: &fb::MarkerList<'_>) -> Result<MarkerList, DecodeError> {
         });
     }
     Ok(MarkerList { markers: decoded })
+}
+
+/// Copies and validates the terms of one saved run.
+///
+/// Every invariant `schemas/instance.fbs` states for this table, in the order the table
+/// declares them. The reset second is the one that is only partly checkable here, and
+/// [`DecodeError::SessionBindingResetTime`] says why.
+fn session_binding(binding: &fb::SessionBinding<'_>) -> Result<SessionBinding, DecodeError> {
+    let arch = binding
+        .arch()
+        .ok_or(DecodeError::SessionBindingWithoutArch)?;
+    let arch = BlockCoord {
+        x: arch.x(),
+        y: arch.y(),
+        z: arch.z(),
+    };
+    if let Some(value) = [arch.x, arch.y, arch.z]
+        .into_iter()
+        .find(|value| !(-BLOCK_DOMAIN..=BLOCK_DOMAIN).contains(value))
+    {
+        return Err(DecodeError::SessionBindingArchOutOfDomain { value });
+    }
+
+    let defeated = binding.bosses_defeated();
+    let total = binding.bosses_total();
+    if total == 0 || defeated > total {
+        return Err(DecodeError::SessionBindingBossCount { defeated, total });
+    }
+
+    let resets_at_unix = binding.resets_at_unix();
+    if resets_at_unix <= 0 {
+        return Err(DecodeError::SessionBindingResetTime(resets_at_unix));
+    }
+
+    Ok(SessionBinding {
+        arch,
+        bosses_defeated: defeated,
+        bosses_total: total,
+        resets_at_unix,
+    })
+}
+
+/// Copies and validates one entry offer.
+///
+/// The id is read first because it is the only thing an answer may name: terms nobody can
+/// answer about are not an offer, whatever else is in them.
+fn instance_entry_offer(
+    offer: &fb::InstanceEntryOffer<'_>,
+) -> Result<InstanceEntryOffer, DecodeError> {
+    let offer_id = offer.offer_id();
+    if offer_id == 0 {
+        return Err(DecodeError::EntryOfferWithoutIdentity);
+    }
+    let terms = offer.terms().ok_or(DecodeError::EntryOfferWithoutTerms)?;
+    Ok(InstanceEntryOffer {
+        offer_id,
+        terms: session_binding(&terms)?,
+    })
 }
 
 /// Copies and validates the complete list of saved runs one character owes.
@@ -6829,6 +6968,47 @@ pub fn encode_player_trade_request(request: &PlayerTradeRequest) -> Vec<u8> {
     )
 }
 
+/// Builds one answer to one entry offer. An id the server minted, and a yes or a no.
+///
+/// **No destination, no position, no binding, and deliberately no way to state one.**
+/// Accepting asks to cross; it does not cross, and the successful answer to it is a
+/// `WorldChange` the server sends. A refusal is written out rather than skipped: it costs
+/// the character nothing and it is what lets the server forget the offer at once.
+///
+/// **A refusal is bytes-identical to a frame that never mentions `accept`, and that is
+/// the contract rather than a defect.** FlatBuffers omits a scalar equal to its default,
+/// so `accept: false` is elided: measured, a refusal and a table carrying only `offer_id`
+/// are the same 48 bytes, and an acceptance is 56. `schemas/instance.fbs` says the server
+/// reads this field through its absent-field zero *deliberately*, so that the field
+/// deciding whether somebody is locked to a dungeon for the day fails closed — the
+/// elision is that rule working, not a message losing something.
+///
+/// This comment previously claimed the opposite: that writing `false` explicitly kept a
+/// refusal distinguishable from a truncated frame. It was wrong twice, and neither half
+/// was measured before it was written. The bytes are identical whatever this encoder
+/// passes, and a truncated frame is not a refusal at all — it fails verification in
+/// [`decode`] and never reaches a payload to be read as one. `force_defaults` would make
+/// the first half true and buy nothing: the server cannot distinguish the two and is
+/// specified not to, and the flag is builder-wide, so it would also write the zero
+/// `offer_id` this contract refuses. Found in review on #1052.
+// V35 establishes this outbound contract; the consent dialog that calls it is #1030 part
+// 2, which is assembled into this branch.
+pub fn encode_instance_entry_answer(answer: &InstanceEntryAnswer) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let payload = fb::InstanceEntryAnswer::create(
+        &mut builder,
+        &fb::InstanceEntryAnswerArgs {
+            offer_id: answer.offer_id,
+            accept: answer.accept,
+        },
+    );
+    finish_envelope(
+        builder,
+        fb::Payload::InstanceEntryAnswer,
+        payload.as_union_value(),
+    )
+}
+
 /// Writes one appearance table and returns its offset.
 ///
 /// Must be called while no other table is open: a nested table is reached through an
@@ -7279,6 +7459,41 @@ pub(super) mod server_side {
             },
         );
         finish_envelope(builder, fb::Payload::WorldChange, payload.as_union_value())
+    }
+
+    /// Builds one offer from the same `SessionBindingWire` the bindings-list encoder
+    /// uses, rather than a second spelling of the same table.
+    ///
+    /// One test vocabulary for one wire shape: the offer's `terms` and a bindings-list
+    /// entry *are* the same table, so a helper of my own here would have been a second
+    /// place for the invalid cases to be described and a second chance to describe them
+    /// differently. Reconciled with #979 when the two stacks met.
+    pub fn encode_instance_entry_offer(
+        offer_id: u64,
+        terms: Option<SessionBindingWire>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::new();
+        let terms = terms.map(|binding| {
+            let arch = binding.arch.map(|[x, y, z]| fb::BlockCoord::new(x, y, z));
+            fb::SessionBinding::create(
+                &mut builder,
+                &fb::SessionBindingArgs {
+                    arch: arch.as_ref(),
+                    bosses_defeated: binding.bosses_defeated,
+                    bosses_total: binding.bosses_total,
+                    resets_at_unix: binding.resets_at_unix,
+                },
+            )
+        });
+        let payload = fb::InstanceEntryOffer::create(
+            &mut builder,
+            &fb::InstanceEntryOfferArgs { offer_id, terms },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::InstanceEntryOffer,
+            payload.as_union_value(),
+        )
     }
 
     pub type LandmarkWire = (u64, i32, i32, u8, bool);
@@ -9768,7 +9983,7 @@ mod tests {
         (fb::Payload::WorldChange, Handling::Consumed),
         (fb::Payload::BlowLanded, Handling::Consumed),
         (fb::Payload::MiningActivity, Handling::Consumed),
-        (fb::Payload::InstanceEntryOffer, Handling::Deferred),
+        (fb::Payload::InstanceEntryOffer, Handling::Consumed),
         (fb::Payload::InstanceEntryAnswer, Handling::ClientOnly),
         // Read by an arm of its own since the payload half of #979. `Consumed` is about
         // the decode boundary rather than about a consumer, exactly as it was for
@@ -16677,3 +16892,251 @@ mod world_change_tests {
 
 #[cfg(test)]
 mod blow_tests;
+
+#[cfg(test)]
+mod instance_entry_tests {
+    use super::server_side::{SessionBindingWire, encode_instance_entry_offer};
+    use super::*;
+
+    /// Terms a server would actually send, so a test that is not about a field never has
+    /// to name one. `SOUND` is #979's, and sharing it is the point: one description of a
+    /// correct binding, so every invalid case below reads as a deviation from it.
+    const TERMS: SessionBindingWire = SessionBindingWire::SOUND;
+
+    #[test]
+    fn an_offer_decodes_its_identity_and_the_terms_accepting_would_bind() {
+        for offer_id in [1, u64::MAX] {
+            for (defeated, total) in [(0, 1), (1, 2), (3, 3), (0, u8::MAX)] {
+                let bytes = encode_instance_entry_offer(
+                    offer_id,
+                    Some(SessionBindingWire {
+                        arch: Some([-16_777_216, 0, 16_777_216]),
+                        bosses_defeated: defeated,
+                        bosses_total: total,
+                        resets_at_unix: 1,
+                    }),
+                );
+                let Ok(Message::InstanceEntryOffer(offer)) = decode(&bytes) else {
+                    panic!("a legal offer was rejected")
+                };
+                assert_eq!(offer.offer_id, offer_id);
+                assert_eq!(
+                    offer.terms,
+                    SessionBinding {
+                        arch: BlockCoord {
+                            x: -16_777_216,
+                            y: 0,
+                            z: 16_777_216,
+                        },
+                        bosses_defeated: defeated,
+                        bosses_total: total,
+                        resets_at_unix: 1,
+                    }
+                );
+                // Every truncation of a legal frame is refused rather than read short.
+                for end in 0..bytes.len() {
+                    assert!(decode(&bytes[..end]).is_err());
+                }
+            }
+        }
+    }
+
+    /// The offer id is the only thing an answer may name, so terms nobody can answer
+    /// about are refused before anything in them is read.
+    #[test]
+    fn an_offer_without_an_answerable_identity_or_terms_is_refused() {
+        assert_eq!(
+            decode(&encode_instance_entry_offer(0, Some(TERMS))),
+            Err(DecodeError::EntryOfferWithoutIdentity)
+        );
+        // Zero is refused even when the terms beside it are impossible: the id is read
+        // first, and an unanswerable offer is not improved by its contents.
+        assert_eq!(
+            decode(&encode_instance_entry_offer(0, None)),
+            Err(DecodeError::EntryOfferWithoutIdentity)
+        );
+        assert_eq!(
+            decode(&encode_instance_entry_offer(9, None)),
+            Err(DecodeError::EntryOfferWithoutTerms)
+        );
+    }
+
+    #[test]
+    fn terms_that_name_no_place_or_a_place_outside_the_block_domain_are_refused() {
+        assert_eq!(
+            decode(&encode_instance_entry_offer(
+                9,
+                Some(SessionBindingWire {
+                    arch: None,
+                    ..SessionBindingWire::SOUND
+                })
+            )),
+            Err(DecodeError::SessionBindingWithoutArch)
+        );
+        for axis in 0..3 {
+            for value in [i32::MIN, i32::MAX, 16_777_217, -16_777_217] {
+                let mut arch = [0; 3];
+                arch[axis] = value;
+                assert_eq!(
+                    decode(&encode_instance_entry_offer(
+                        9,
+                        Some(SessionBindingWire {
+                            arch: Some(arch),
+                            ..SessionBindingWire::SOUND
+                        })
+                    )),
+                    Err(DecodeError::SessionBindingArchOutOfDomain { value })
+                );
+            }
+        }
+    }
+
+    /// A progress a client would draw as "3 / 0" or "4 / 3" is refused rather than
+    /// clamped: a clamp would put a number in front of a player that the server never
+    /// stated, and hide the disagreement that produced it.
+    #[test]
+    fn a_progress_pair_that_is_not_a_progress_is_refused() {
+        for (defeated, total) in [(0, 0), (1, 0), (2, 1), (u8::MAX, u8::MAX - 1)] {
+            assert_eq!(
+                decode(&encode_instance_entry_offer(
+                    9,
+                    Some(SessionBindingWire {
+                        bosses_defeated: defeated,
+                        bosses_total: total,
+                        ..SessionBindingWire::SOUND
+                    })
+                )),
+                Err(DecodeError::SessionBindingBossCount { defeated, total })
+            );
+        }
+    }
+
+    /// Only the sign, and deliberately: the two clocks are not the same clock, so a
+    /// second this side judges to be in the past is evidence about skew rather than
+    /// about the server. A zero or a negative is a server that wrote no time at all.
+    #[test]
+    fn a_reset_second_is_checked_for_its_sign_and_nothing_else() {
+        for seconds in [0, -1, i64::MIN] {
+            assert_eq!(
+                decode(&encode_instance_entry_offer(
+                    9,
+                    Some(SessionBindingWire {
+                        resets_at_unix: seconds,
+                        ..SessionBindingWire::SOUND
+                    })
+                )),
+                Err(DecodeError::SessionBindingResetTime(seconds))
+            );
+        }
+        // A second long past on any real calendar still decodes: this side holds no
+        // clock a frame may be refused against.
+        assert!(matches!(
+            decode(&encode_instance_entry_offer(
+                9,
+                Some(SessionBindingWire {
+                    resets_at_unix: 1,
+                    ..SessionBindingWire::SOUND
+                })
+            )),
+            Ok(Message::InstanceEntryOffer(_))
+        ));
+    }
+
+    /// **A refusal is the elided field, and the test says so in bytes.**
+    ///
+    /// Reading `answer.accept()` back is not enough to know what was sent: the accessor
+    /// returns the default for an absent field, so it answers `false` whether the field
+    /// was written or omitted. The measurement is the comparison below — a refusal
+    /// against a table built with `offer_id` alone — which is what turns the encoder's
+    /// doc comment from a claim into a fact. Added in review on #1052, where the comment
+    /// asserted the opposite and nothing could see it.
+    #[test]
+    fn a_refusal_is_the_elided_field_the_server_reads_as_a_refusal() {
+        let refusal = encode_instance_entry_answer(&InstanceEntryAnswer {
+            offer_id: 41,
+            accept: false,
+        });
+        let only_the_id = {
+            let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+            let mut table = fb::InstanceEntryAnswerBuilder::new(&mut builder);
+            table.add_offer_id(41);
+            let payload = table.finish();
+            finish_envelope(
+                builder,
+                fb::Payload::InstanceEntryAnswer,
+                payload.as_union_value(),
+            )
+        };
+        assert_eq!(
+            refusal, only_the_id,
+            "a refusal must be the frame the server reads through its absent-field zero"
+        );
+
+        // And an acceptance is not: the one verdict that has to reach the wire does.
+        let acceptance = encode_instance_entry_answer(&InstanceEntryAnswer {
+            offer_id: 41,
+            accept: true,
+        });
+        assert_ne!(acceptance, refusal);
+        assert!(acceptance.len() > refusal.len());
+    }
+
+    /// Both verdicts read back as themselves, whichever way they travelled.
+    #[test]
+    fn an_answer_carries_the_offer_id_and_states_both_verdicts_explicitly() {
+        for accept in [true, false] {
+            for offer_id in [1, u64::MAX] {
+                let bytes = encode_instance_entry_answer(&InstanceEntryAnswer { offer_id, accept });
+                let envelope = fb::root_as_envelope(&bytes).expect("a well-formed envelope");
+                assert_eq!(envelope.payload_type(), fb::Payload::InstanceEntryAnswer);
+                let answer = envelope
+                    .payload_as_instance_entry_answer()
+                    .expect("the tag names the payload");
+                assert_eq!(answer.offer_id(), offer_id);
+                assert_eq!(answer.accept(), accept);
+                // The client never receives its own intent, and the decoder says so.
+                assert_eq!(
+                    decode(&bytes),
+                    Ok(Message::ClientOnly("InstanceEntryAnswer"))
+                );
+            }
+        }
+    }
+
+    /// Every refusal this arm can produce says which invariant failed, because
+    /// "malformed" on its own tells an operator nothing about which side to fix.
+    #[test]
+    fn every_entry_refusal_names_the_invariant_it_failed() {
+        for (error, want) in [
+            (
+                DecodeError::EntryOfferWithoutIdentity,
+                "an InstanceEntryOffer carries reserved offer id 0",
+            ),
+            (
+                DecodeError::EntryOfferWithoutTerms,
+                "an InstanceEntryOffer states no terms",
+            ),
+            (
+                DecodeError::SessionBindingWithoutArch,
+                "a SessionBinding names no arch",
+            ),
+            (
+                DecodeError::SessionBindingArchOutOfDomain { value: -7 },
+                "a SessionBinding arch component -7 is outside the block domain",
+            ),
+            (
+                DecodeError::SessionBindingBossCount {
+                    defeated: 4,
+                    total: 3,
+                },
+                "a SessionBinding reports 4 of 3 bosses defeated",
+            ),
+            (
+                DecodeError::SessionBindingResetTime(0),
+                "a SessionBinding resets at Unix second 0",
+            ),
+        ] {
+            assert_eq!(error.to_string(), want);
+        }
+    }
+}

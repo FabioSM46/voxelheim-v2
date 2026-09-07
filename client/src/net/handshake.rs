@@ -31,12 +31,12 @@ use std::fmt;
 use super::codec::WorldChange;
 
 use super::codec::{
-    ActionRefused, BlowLanded, CharacterList, ChatMessage, InstanceBindings, InventoryState,
-    LandmarkList, LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState, LootClosed, LootState,
-    MapExplored, MapTile, MarkerList, Message, MineProgress, MiningActivity, MobHit, PartyInvite,
-    PlayerAppearance, PlayerTradeClosed, PlayerTradeState, Reject, ResidentAppearance,
-    SessionParams, Snapshot, StormWarning, VendorClosed, VendorState, VoiceHeard, WardsNearby,
-    WorldClock, WorldUpdate,
+    ActionRefused, BlowLanded, CharacterList, ChatMessage, InstanceBindings, InstanceEntryOffer,
+    InventoryState, LandmarkList, LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState,
+    LootClosed, LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MiningActivity,
+    MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed, PlayerTradeState, Reject,
+    ResidentAppearance, SessionParams, Snapshot, StormWarning, VendorClosed, VendorState,
+    VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -169,6 +169,16 @@ pub enum Transition {
     /// speaker's id is a live entity's, but so is a `MobHit`'s attacker, and this layer
     /// has never held a roster to test one against.
     VoiceHeard(VoiceHeard),
+    /// One crossing the server is offering this character, admitted because a session
+    /// exists.
+    ///
+    /// Nothing is checked here that the codec has not, and there is nothing in the
+    /// welcome for an offer to be checked against: the id, the arch's domain and the
+    /// progress pair are properties of the message, and the run it names is one this
+    /// client has never been in. Admitted only in [`Phase::Established`] for the reason
+    /// every server payload is — an offer before a character is chosen names a crossing
+    /// for nobody.
+    InstanceEntryOffer(InstanceEntryOffer),
     /// Every saved run this character owes, admitted because a session exists.
     ///
     /// Nothing is checked here either, and there is nothing the welcome could add: the
@@ -592,6 +602,9 @@ impl Handshake {
             (Phase::Established, Message::WorldChange(change)) => {
                 Ok(Transition::WorldChange(change))
             }
+            (Phase::Established, Message::InstanceEntryOffer(offer)) => {
+                Ok(Transition::InstanceEntryOffer(offer))
+            }
             (Phase::Established, Message::LandmarkList(list)) => Ok(Transition::LandmarkList(list)),
             // V25's three server payloads, carried by name for the same reason: each is
             // fully validated at the decode boundary, and nothing about a session changes
@@ -666,6 +679,9 @@ impl Handshake {
             (_, Message::StormWarning(_)) => Err(HandshakeError::Premature("StormWarning")),
             (_, Message::WardsNearby(_)) => Err(HandshakeError::Premature("WardsNearby")),
             (_, Message::VoiceHeard(_)) => Err(HandshakeError::Premature("VoiceHeard")),
+            (_, Message::InstanceEntryOffer(_)) => {
+                Err(HandshakeError::Premature("InstanceEntryOffer"))
+            }
             (_, Message::InstanceBindings(_)) => Err(HandshakeError::Premature("InstanceBindings")),
         }
     }
@@ -1903,6 +1919,43 @@ mod tests {
         assert_eq!(
             admitted.apply(Message::MobHit(hit)),
             Ok(Transition::MobHit(hit))
+        );
+    }
+
+    /// An offer names a crossing for a character, so it means nothing before one has
+    /// been chosen — the rule every server payload on this channel follows.
+    #[test]
+    fn an_entry_offer_only_belongs_to_an_established_session() {
+        let offer = InstanceEntryOffer {
+            offer_id: 77,
+            terms: super::super::codec::SessionBinding {
+                arch: super::super::codec::BlockCoord {
+                    x: -96,
+                    y: 61,
+                    z: 704,
+                },
+                bosses_defeated: 1,
+                bosses_total: 2,
+                resets_at_unix: 1_800_000_000,
+            },
+        };
+
+        let mut early = Handshake::new();
+        assert_eq!(
+            early.apply(Message::InstanceEntryOffer(offer)),
+            Err(HandshakeError::Premature("InstanceEntryOffer"))
+        );
+
+        let mut live = established();
+        assert_eq!(
+            live.apply(Message::InstanceEntryOffer(offer)),
+            Ok(Transition::InstanceEntryOffer(offer))
+        );
+        // Nothing about the transition is stateful: a second offer supersedes the first
+        // on the server, and this layer carries both rather than deciding between them.
+        assert_eq!(
+            live.apply(Message::InstanceEntryOffer(offer)),
+            Ok(Transition::InstanceEntryOffer(offer))
         );
     }
 
