@@ -58,6 +58,7 @@ mod crafting;
 mod drops;
 mod hands;
 mod horse;
+mod instance_entry;
 mod interpolate;
 mod inventory;
 mod items;
@@ -119,6 +120,7 @@ pub(crate) use sky::{Daylight, SkyClock, sun_phase};
 // The sky the low-health vignette has to be visible against. Test-only and deliberately
 // so: `ui/health.rs` reads the colour to assert that its edge is not one the night has
 // already reached (#553), and nothing at runtime may read a rule back out of it.
+pub use instance_entry::{EntryOffer, EntryOfferAnswer};
 pub use prompt::{ConfirmationAnswer, ConfirmationPrompt};
 #[cfg(test)]
 pub(crate) use sky::NIGHT_SKY;
@@ -302,6 +304,15 @@ pub enum InputMode {
     /// Pointer visible and confined over one authoritative player trade. Horizontal
     /// movement remains live so the server can close a trade that walks out of reach.
     Trade,
+    /// Pointer visible and confined over the server's dungeon-entry offer.
+    ///
+    /// **Movement is closed, unlike the two prompts above it**, and that is presentation
+    /// rather than a rule: an offer is scoped to the crossing that produced it, so the
+    /// server refuses an acceptance from a character who has walked away from the arch.
+    /// Keeping the axes live would let a player answer a question the answer to which had
+    /// already stopped being available. Nothing here decides that — the server refuses it
+    /// either way — this only declines to invite it.
+    EntryOffer,
     /// Pointer visible and confined while the pause menu is visible.
     Menu,
     /// Pointer visible and confined over the world map. Movement is closed, as it is for
@@ -501,6 +512,7 @@ impl Plugin for PlayerPlugin {
             .add_plugins(loot::LootPlugin)
             .add_plugins(mounts::MountsPlugin)
             .add_plugins(trade::PlayerTradePlugin)
+            .add_plugins(instance_entry::InstanceEntryPlugin)
             .add_plugins(vendor::VendorPlugin)
             // After the camera plugin, because the ray starts at the camera and the
             // ordering inside `BlockTargetPlugin` is written against its system set.
@@ -3192,6 +3204,7 @@ pub(crate) fn reset_world(world: &mut World) {
     reset::<VendorWindow>(world);
     reset::<PlayerTradeWindow>(world);
     reset::<ConfirmationPrompt>(world);
+    reset::<EntryOffer>(world);
     reset::<PickedStack>(world);
     reset::<structures::StructureTarget>(world);
     reset::<structures::FootprintPreview>(world);
@@ -3214,6 +3227,7 @@ pub(crate) fn reset_world(world: &mut World) {
     trade::reset_world(world);
     use crate::world::transition::clear_messages;
     clear_messages::<ConfirmationAnswer>(world);
+    clear_messages::<EntryOfferAnswer>(world);
     clear_messages::<PlayerTradePromptRequest>(world);
     clear_messages::<PlayerTradeClick>(world);
     clear_messages::<PlayerTradeEnded>(world);
