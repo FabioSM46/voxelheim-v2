@@ -33,15 +33,16 @@ of gallery, rather than checking its dimensions alone.
 
 Values are distance from the starting centre to the trailing edge of the whole
 player footprint after ordinary lateral movement. Each preparation reserves 0.25 s
-plus one tick; remaining time rounds down to complete simulation ticks. Inputs
+plus one tick; integer duration arithmetic rounds the remaining time down to
+complete simulation ticks (56 at 60 Hz for a 1.2 s preparation). Inputs
 are refreshed every tick. No jump, mount, sprint, damage or invulnerability.
 
 | Tick rate | Hunger | 0.9 s preparation | 1.2 s preparation | 1.5 s preparation |
 | --- | --- | --- | --- | --- |
 | 20 Hz | zero | 1.764 | 2.796 | 3.828 |
 | 20 Hz | fed | 2.280 | 3.570 | 4.860 |
-| 60 Hz | zero | 1.879 | 2.853 | 3.943 |
-| 60 Hz | fed | 2.423 | 3.642 | 5.003 |
+| 60 Hz | zero | 1.879 | 2.911 | 3.943 |
+| 60 Hz | fed | 2.423 | 3.713 | 5.003 |
 
 Both arena fixtures produce these central clear-floor results. A 1.5-block lateral
 target passes every sampled case. A 2-block target **fails** at 0.9 s with zero

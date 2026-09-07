@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 )
@@ -21,13 +22,13 @@ func dungeonStudyTerrain(outer int64, monoliths bool) scriptedTerrain {
 	}}
 }
 
-func dungeonStudyWalk(terrain Terrain, start [3]float64, rate int, hunger uint16, seconds, dx, dz float64) [3]float64 {
+func dungeonStudyWalk(terrain Terrain, start [3]float64, rate int, hunger uint16, ticks int, dx, dz float64) [3]float64 {
 	p := Player{
 		sim: &Sim{idleLimit: rate}, pos: start, health: PlayerMaxHealth,
 		hunger: hunger, onGround: true, lifeState: vnet.LifeStateAlive,
 	}
 	length := math.Hypot(dx, dz)
-	for range int(math.Floor(seconds * float64(rate))) {
+	for range ticks {
 		// A fresh full-intent sample every tick, as a connected moving player sends.
 		// Normalise before the internal step; the public Submit boundary does this.
 		p.current = intent{moveX: dx / length, moveZ: -dz / length}
@@ -45,11 +46,14 @@ func TestDungeonStudyEscapeWindows(t *testing.T) {
 	}{{"courtyard", 29, true}, {"hall", 33, false}} {
 		for _, rate := range []int{20, 60} {
 			for _, hunger := range []uint16{0, 1} {
-				for _, preparation := range []float64{0.9, 1.2, 1.5} {
-					name := fmt.Sprintf("%s/%dHz/hunger%d/%.1fs", arena.name, rate, hunger, preparation)
+				for _, preparation := range []time.Duration{900 * time.Millisecond, 1200 * time.Millisecond, 1500 * time.Millisecond} {
+					name := fmt.Sprintf("%s/%dHz/hunger%d/%.1fs", arena.name, rate, hunger, preparation.Seconds())
 					t.Run(name, func(t *testing.T) {
 						terrain := dungeonStudyTerrain(arena.outer, arena.pillars)
-						available := preparation - 0.25 - 1/float64(rate)
+						available := int((preparation-250*time.Millisecond)*time.Duration(rate)/time.Second) - 1
+						if rate == 60 && preparation == 1200*time.Millisecond && available != 56 {
+							t.Fatal("1.2s must leave 56 whole ticks at 60 Hz")
+						}
 						start := [3]float64{0, 1, 0}
 						pos := dungeonStudyWalk(terrain, start, rate, hunger, available, 1, 0)
 						// Whole footprint outside a strip ending at X=target; reaching
@@ -61,10 +65,10 @@ func TestDungeonStudyEscapeWindows(t *testing.T) {
 						if clearance < 1.5 {
 							t.Fatalf("smallest arc escape fails: whole-body clearance %.3f", clearance)
 						}
-						if preparation >= 1.2 && clearance < 2 {
+						if preparation >= 1200*time.Millisecond && clearance < 2 {
 							t.Fatalf("landing/sector escape fails: clearance %.3f", clearance)
 						}
-						if hunger == 0 && preparation == 0.9 && clearance >= 2 {
+						if hunger == 0 && preparation == 900*time.Millisecond && clearance >= 2 {
 							t.Fatal("negative control: 0.9s unexpectedly admits a 2-block slow escape")
 						}
 						t.Logf("whole-body clearance %.3f blocks; 2-block target accepted=%v", clearance, clearance >= 2)
@@ -79,15 +83,15 @@ func TestDungeonStudyWallsMonolithsAndAlternativeEscape(t *testing.T) {
 	terrain := dungeonStudyTerrain(29, true)
 	for _, rate := range []int{20, 60} {
 		start := [3]float64{6.5, 1, 8.5}
-		blocked := dungeonStudyWalk(terrain, start, rate, 0, 1.2, 1, 0)
+		blocked := dungeonStudyWalk(terrain, start, rate, 0, rate*12/10, 1, 0)
 		if blocked[0] >= 8 || blocked[0]-start[0] >= 1.5 {
 			t.Fatal("pillar was crossed or incorrectly counted as a successful escape")
 		}
-		alternative := dungeonStudyWalk(terrain, start, rate, 0, 1.2, 0, -1)
+		alternative := dungeonStudyWalk(terrain, start, rate, 0, rate*12/10, 0, -1)
 		if start[2]-alternative[2]-PlayerWidth/2 < 2 {
 			t.Fatal("central cross did not provide the alternative escape")
 		}
-		wall := dungeonStudyWalk(terrain, [3]float64{12.5, 1, 0}, rate, 1, 3, 1, 0)
+		wall := dungeonStudyWalk(terrain, [3]float64{12.5, 1, 0}, rate, 1, rate*3, 1, 0)
 		if playerBox(wall).max[0] > 14 || wall[0] < 13 {
 			t.Fatalf("outer wall did not stop the body at its inside face: %v", wall)
 		}
