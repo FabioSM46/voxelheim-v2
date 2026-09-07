@@ -50,7 +50,13 @@ impl BedVoice {
             mut placement,
             seed,
         } = frame;
-        self.gain += (target - self.gain) * (1.0 - (-dt / FADE_SECONDS).exp());
+        // The crossfade measures audible time, not time waiting for an available slot.
+        // A new stream has its own short attack; it must also receive the full bed fade.
+        if self.playing.is_some() {
+            self.gain += (target - self.gain) * (1.0 - (-dt / FADE_SECONDS).exp());
+        } else {
+            self.gain = 0.0;
+        }
         self.retry = (self.retry - dt).max(0.0);
         if target == 0.0 && self.gain < SILENT {
             self.playing = None;

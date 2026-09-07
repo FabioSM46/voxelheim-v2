@@ -97,6 +97,8 @@ fn fade_is_gradual_and_eventually_returns_the_source() {
     let mixer = mixer();
     let mut voice = BedVoice::default();
     play_bed(&mut voice, &mixer, 1.0, 0.0);
+    assert_eq!(voice.gain, 0.0);
+    play_bed(&mut voice, &mixer, 1.0, 0.0);
     assert!(voice.gain > 0.0 && voice.gain < 0.1);
     for _ in 0..100 {
         play_bed(&mut voice, &mixer, 1.0, 0.0);
@@ -270,4 +272,45 @@ fn cricket_trills_have_pulses_and_a_slow_phrase_contour() {
     );
     assert!((cricket_trill(1024.0) - cricket_trill(1024.0001)).abs() < 0.01);
     assert_ne!(cricket_trill(0.125), cricket_trill(10.125));
+}
+
+#[test]
+fn prolonged_source_pressure_does_not_spend_the_recovery_fade() {
+    let mixer = mixer();
+    let mut voice = BedVoice::default();
+    let held: Vec<_> = (0..MAX_SOURCES)
+        .map(|_| mixer.shared_for_test().claim(Bus::Voice).unwrap())
+        .collect();
+    for _ in 0..60 {
+        play_bed(&mut voice, &mixer, 1.0, 0.0);
+        assert_eq!(voice.gain, 0.0, "an inaudible bed must not spend its fade");
+        assert_eq!(energy(&mixer, 800), 0.0);
+    }
+    drop(held);
+    energy(&mixer, 800); // The callback returns the dropped slots before admission.
+    for _ in 0..20 {
+        play_bed(&mut voice, &mixer, 1.0, 0.0);
+        energy(&mixer, 800);
+        if voice.gain > 0.0 {
+            break;
+        }
+    }
+    assert!(voice.gain > 0.0 && voice.gain < 0.1);
+    let mut early = 0.0;
+    for _ in 0..10 {
+        play_bed(&mut voice, &mixer, 1.0, 0.0);
+        early += energy(&mixer, 800);
+    }
+    assert!(voice.gain < 0.5);
+    for _ in 0..90 {
+        play_bed(&mut voice, &mixer, 1.0, 0.0);
+        energy(&mixer, 800);
+    }
+    let mut settled = 0.0;
+    for _ in 0..10 {
+        play_bed(&mut voice, &mixer, 1.0, 0.0);
+        settled += energy(&mixer, 800);
+    }
+    assert!(early > 0.0 && early < settled * 0.3);
+    assert!(voice.gain > 0.99);
 }
