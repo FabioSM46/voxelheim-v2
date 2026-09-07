@@ -24,6 +24,8 @@ pub(crate) fn replace(world: &mut World, change: WorldChange, map: Vec<MapEvent>
     }
     crate::ui::replace_world_map(world, change, map);
     reset::<super::ChunkStore>(world);
+    reset::<super::portal::PortalSites>(world);
+    despawn::<super::portal::PortalVisual>(world);
     reset::<super::DecodeQueue>(world);
     super::render::reset_world(world);
     crate::player::reset_world(world);
@@ -47,6 +49,8 @@ pub(crate) fn replace(world: &mut World, change: WorldChange, map: Vec<MapEvent>
 pub(crate) fn new_session(world: &mut World, seed: i64) {
     crate::ui::reset_world_maps(world);
     reset::<super::ChunkStore>(world);
+    reset::<super::portal::PortalSites>(world);
+    despawn::<super::portal::PortalVisual>(world);
     reset::<super::DecodeQueue>(world);
     super::render::reset_world(world);
     crate::player::reset_world(world);
