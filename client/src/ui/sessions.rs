@@ -83,8 +83,34 @@ const MINUTE: i64 = 60;
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct SavedRuns(Vec<SessionBinding>);
 
+/// The wall-clock second every reading on this surface is computed against.
+///
+/// **One number per frame, read in one place**, so the line a row is spawned with and the
+/// line it is later refreshed to cannot disagree about what time it is.
+///
+/// `None` is the game: the real clock. `Some` is a test pinning it, and it is here for a
+/// reason no other seam covers — what has to be asserted is a window left open while the
+/// clock moves, and the only other way to write that test is to wait a minute.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+struct Clock(Option<i64>);
+
+impl Clock {
+    fn now(self) -> i64 {
+        self.0.unwrap_or_else(now_unix)
+    }
+}
+
 #[derive(Component)]
 struct SessionsRoot;
+
+/// One row's second line, carrying the binding it was drawn from.
+///
+/// The binding rather than the finished string, because the string goes stale: a reset is a
+/// wall-clock second and the sentence about it is only true for the minute it was written
+/// in. Carrying the numbers is what lets [`refresh_readings`] rewrite the line without the
+/// list having moved.
+#[derive(Component, Debug, Clone, Copy)]
+struct RowReading(SessionBinding);
 
 pub(super) struct SessionsUiPlugin;
 
@@ -92,14 +118,28 @@ impl Plugin for SessionsUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SavedRuns>()
             .init_resource::<InputMode>()
+            .init_resource::<Clock>()
             .init_resource::<InstanceBindingsInbox>()
             .add_systems(Startup, spawn_window)
-            // `rebuild_window` spawns rows through deferred commands, so the visibility
-            // system is chained behind `ApplyDeferred` for the reason the vendor window's
-            // purse is: a window shown before its children exist is one empty frame.
+            // `rebuild_window` spawns rows through deferred commands, so everything after
+            // it is chained behind `ApplyDeferred` for the reason the vendor window's purse
+            // is: a window shown before its children exist is one empty frame, and a
+            // refresh before them has nothing to write to.
+            //
+            // `refresh_readings` sits before `show_window` deliberately. It is gated on the
+            // same mode `show_window` reads rather than on the `Visibility` it writes, so
+            // the frame `O` is pressed on is refreshed *and then* shown — gated on the
+            // component instead, the first drawn frame would be the stale one.
             .add_systems(
                 Update,
-                (apply_bindings, rebuild_window, ApplyDeferred, show_window).chain(),
+                (
+                    apply_bindings,
+                    rebuild_window,
+                    ApplyDeferred,
+                    refresh_readings,
+                    show_window,
+                )
+                    .chain(),
             );
     }
 }
@@ -165,13 +205,14 @@ fn apply_bindings(
 /// second opinion about which row is which.
 fn rebuild_window(
     runs: Res<SavedRuns>,
+    clock: Res<Clock>,
     roots: Query<Entity, With<SessionsRoot>>,
     mut commands: Commands,
 ) {
     if !runs.is_changed() {
         return;
     }
-    let now = now_unix();
+    let now = clock.now();
     for root in &roots {
         commands.entity(root).despawn_related::<Children>();
         commands.entity(root).with_children(|root| {
@@ -257,11 +298,8 @@ fn spawn_row(rows: &mut ChildSpawnerCommands<'_>, binding: SessionBinding, now: 
                 TextLayout::no_wrap(),
             ));
             lines.spawn((
-                Text::new(format!(
-                    "{} | {}",
-                    progress_reading(binding),
-                    reset_reading(binding.resets_at_unix, now)
-                )),
+                RowReading(binding),
+                Text::new(row_reading(binding, now)),
                 TextFont {
                     font_size: FontSize::Px(ROW_SIZE),
                     ..default()
@@ -271,6 +309,54 @@ fn spawn_row(rows: &mut ChildSpawnerCommands<'_>, binding: SessionBinding, now: 
             ));
         });
     });
+}
+
+/// A row's second line: how the run stands, and when it ends.
+///
+/// One function rather than a format string in two places, because the line is written
+/// twice — once when the row is spawned and again whenever [`refresh_readings`] finds the
+/// clock has moved the reset under it — and two copies would drift the moment either is
+/// retouched.
+fn row_reading(binding: SessionBinding, now: i64) -> String {
+    format!(
+        "{} | {}",
+        progress_reading(binding),
+        reset_reading(binding.resets_at_unix, now)
+    )
+}
+
+/// Keeps every visible row's reading true as the wall clock moves.
+///
+/// **A countdown that is only written when the list changes is a countdown that is wrong.**
+/// `rebuild_window` runs on `SavedRuns::is_changed`, and the list changes on exactly three
+/// server events — entering the world, binding, and a reset. A player who logs in and opens
+/// this window an hour later would otherwise read the sentence that was true at login: the
+/// row would still say `resets in 6h 0m` when five of those hours had gone. Found in review
+/// on #1053.
+///
+/// Gated on the mode rather than on the drawn `Visibility`, because the two are not the same
+/// frame: `show_window` writes that component after this system runs, so a gate on it would
+/// make the first frame of every opening the stale one — which is precisely the frame a
+/// player reads.
+///
+/// The progress half is recomputed with it and cannot change: it comes from the same
+/// binding, and a binding is only replaced by a whole new list. Recomputing the line entire
+/// is what keeps one function the only thing that knows how a row reads.
+fn refresh_readings(
+    mode: Res<InputMode>,
+    clock: Res<Clock>,
+    mut lines: Query<(&RowReading, &mut Text)>,
+) {
+    if *mode != InputMode::Sessions {
+        return;
+    }
+    let now = clock.now();
+    for (reading, mut text) in &mut lines {
+        let next = row_reading(reading.0, now);
+        if text.0 != next {
+            text.0 = next;
+        }
+    }
 }
 
 /// How the two boss counts read on a row.
@@ -382,15 +468,25 @@ mod tests {
         }
     }
 
-    /// An app with the window built, a live session, and the window open.
+    /// An app with the window built, a live session, the window open, and the clock pinned
+    /// one whole day before [`RESET`] — so every reading below is a number this test chose
+    /// rather than one the machine's calendar happened to produce.
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
             .insert_resource(InputMode::Sessions)
+            .insert_resource(Clock(Some(RESET - 24 * HOUR)))
             .add_plugins(SessionsUiPlugin);
         app.update();
         app
+    }
+
+    /// Moves the pinned clock forward and runs a frame, touching nothing else.
+    fn advance(app: &mut App, seconds: i64) {
+        let mut clock = app.world_mut().resource_mut::<Clock>();
+        clock.0 = Some(clock.0.expect("this app pins its clock") + seconds);
+        app.update();
     }
 
     /// Delivers one complete list the way the net boundary does, and runs a frame.
@@ -527,6 +623,73 @@ mod tests {
             "a lockout does not survive the character that owed it"
         );
         assert!(lines(&mut app).contains(&NOTHING_SAVED.to_owned()));
+    }
+
+    /// The countdown advances while the window is open, without the list having moved.
+    ///
+    /// **The defect this pins is a wiring one, and it survived a passing unit test of
+    /// `reset_reading`.** `rebuild_window` runs on `SavedRuns::is_changed`, and the list
+    /// changes on three server events only — so the sentence was baked when the list
+    /// arrived and never rewritten. A player who logged in and opened the window an hour
+    /// later read the countdown that was true at login. Found in review on #1053; the
+    /// assertions below fail against that build and pass against this one.
+    #[test]
+    fn the_countdown_advances_with_the_clock_and_not_only_with_the_list() {
+        let mut app = app();
+        deliver(&mut app, vec![binding(-4096, 8192, 1, 2)]);
+        assert!(
+            lines(&mut app).contains(&"1 / 2 bosses | resets in 24h 0m".to_owned()),
+            "{:?}",
+            lines(&mut app)
+        );
+
+        // Nine hours pass with the window open and no server frame at all.
+        advance(&mut app, 9 * HOUR);
+        let drawn = lines(&mut app);
+        assert!(
+            drawn.contains(&"1 / 2 bosses | resets in 15h 0m".to_owned()),
+            "the reading is stale: the list never moved, so nothing rewrote it: {drawn:?}"
+        );
+
+        // Past the reset on this clock, the row is still drawn and still says something
+        // true about itself. Nothing here removes it — only a shorter list from the server
+        // does that, which is what `a_new_list_replaces_the_old_one_whole_...` covers.
+        advance(&mut app, 20 * HOUR);
+        let drawn = lines(&mut app);
+        assert!(
+            drawn.contains(&"1 / 2 bosses | resets shortly".to_owned()),
+            "{drawn:?}"
+        );
+        assert!(
+            drawn.contains(&"X -4096 | Z 8192 | alt 61".to_owned()),
+            "a client must not expire a binding on its own clock: {drawn:?}"
+        );
+    }
+
+    /// The first drawn frame of an opening is already current, not the one before it.
+    ///
+    /// The refresh is gated on [`InputMode`] rather than on the `Visibility` it precedes,
+    /// and this is the difference: gated on the component, the frame `O` is pressed on
+    /// would still carry the reading from whenever the window was last open.
+    #[test]
+    fn opening_the_window_shows_the_reading_of_the_frame_it_opened_on() {
+        let mut app = app();
+        deliver(&mut app, vec![binding(-4096, 8192, 1, 2)]);
+
+        // Closed, and half a day goes by. The list does not move.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        advance(&mut app, 12 * HOUR);
+        assert!(!visible(&mut app));
+
+        // The frame the window opens on is refreshed before it is shown.
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Sessions;
+        app.update();
+        assert!(visible(&mut app));
+        let drawn = lines(&mut app);
+        assert!(
+            drawn.contains(&"1 / 2 bosses | resets in 12h 0m".to_owned()),
+            "the first frame a player sees carries a reading from before it opened: {drawn:?}"
+        );
     }
 
     /// A reset is read, and a reset the local clock has passed is still read rather than
