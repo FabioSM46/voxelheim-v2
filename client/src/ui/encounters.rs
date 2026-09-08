@@ -72,6 +72,8 @@ fn reading(one: &PresentedMove) -> String {
                 ""
             }
         )
+    } else if let Some((step, total)) = one.announced.combo {
+        format!(" - blow {step}/{total}")
     } else {
         String::new()
     };
@@ -229,6 +231,20 @@ mod tests {
             progress: 0.5,
             remaining_ticks: 10,
         }
+    }
+
+    #[test]
+    fn physical_step_reading_uses_the_announced_position_even_in_recovery() {
+        let mut one = shown();
+        one.announced.kind = EncounterMoveKind::ThreeTolls;
+        one.announced.combo = Some((3, 3));
+        assert!(reading(&one).contains("blow 3/3"));
+        one.announced.phase = MovePhase::Recovery;
+        assert!(reading(&one).contains("Recovering 50% - blow 3/3"));
+        one.window = Window::AwaitingUpdate;
+        assert!(reading(&one).contains("Awaiting server update 50% - blow 3/3"));
+        one.announced.combo = None;
+        assert!(!reading(&one).contains("blow"));
     }
 
     #[test]

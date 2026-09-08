@@ -6241,6 +6241,7 @@ mod tests {
                 radius: 6.0,
                 height: 3.0,
             }],
+            combo: None,
             pulse: None,
             interruptible: false,
             ended: None,

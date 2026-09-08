@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 37;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 38;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -315,11 +315,14 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    /// V37: boss move and spell timelines are announced before they can damage anybody.
-    pub const Current: Self = Self(37);
+    /// V38: explicit physical combo position survives missed earlier announcements.
+    /// Appending fields is layout-compatible, but a V37 client silently drops the
+    /// position and a V38 client cannot recover it from a V37 server. Both directions
+    /// must reject the handshake rather than disagree about the final opening.
+    pub const Current: Self = Self(38);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 37;
+    pub const ENUM_MAX: u16 = 38;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

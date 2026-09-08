@@ -409,3 +409,75 @@ func TestEncounterTimelineAcceptsItsOwnBoundaries(t *testing.T) {
 		t.Fatalf("a full announcement set was refused: %v", err)
 	}
 }
+
+// Every late entry carries the complete position, including recovery and ending.
+func TestPhysicalComboPositionsRoundTripAcrossPhasesAndEndings(t *testing.T) {
+	for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls, vnet.EncounterMoveKindPrisonerClaws} {
+		total := uint8(2)
+		if kind == vnet.EncounterMoveKindThreeTolls {
+			total = 3
+		}
+		for step := uint8(1); step <= total; step++ {
+			for _, phase := range []vnet.MovePhase{vnet.MovePhaseTelegraph, vnet.MovePhaseRelease, vnet.MovePhaseRecovery} {
+				for _, ending := range []vnet.MoveEnd{vnet.MoveEndUnknown, vnet.MoveEndCompleted, vnet.MoveEndCancelled} {
+					timeline := soundTimeline()
+					timeline.Moves[0].Kind = kind
+					timeline.Moves[0].Phase = phase
+					timeline.Moves[0].Ended = ending
+					timeline.Moves[0].ComboStep, timeline.Moves[0].ComboTotal = step, total
+					decoded := encodedTimeline(t, timeline)
+					var move vnet.EncounterMove
+					if !decoded.Moves(&move, 0) || move.ComboStep() != step || move.ComboTotal() != total || move.Ended() != ending {
+						t.Fatal("combo position lost")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestPhysicalComboRejectsMalformedCombinations(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		kind        vnet.EncounterMoveKind
+		step, total uint8
+		phase       vnet.MovePhase
+		valid       bool
+	}{
+		{"ordinary bite", vnet.EncounterMoveKindBiteAndTear, 0, 0, vnet.MovePhaseTelegraph, true},
+		{"first bite", vnet.EncounterMoveKindBiteAndTear, 1, 2, vnet.MovePhaseTelegraph, true},
+		{"last bite", vnet.EncounterMoveKindBiteAndTear, 2, 2, vnet.MovePhaseTelegraph, true},
+		{"last toll", vnet.EncounterMoveKindThreeTolls, 3, 3, vnet.MovePhaseTelegraph, true},
+		{"paired claws", vnet.EncounterMoveKindPrisonerClaws, 2, 2, vnet.MovePhaseTelegraph, true},
+		{"triple claws", vnet.EncounterMoveKindPrisonerClaws, 3, 3, vnet.MovePhaseTelegraph, true},
+		{"zero step", vnet.EncounterMoveKindBiteAndTear, 0, 2, vnet.MovePhaseTelegraph, false},
+		{"missing total", vnet.EncounterMoveKindBiteAndTear, 1, 0, vnet.MovePhaseTelegraph, false},
+		{"single blow", vnet.EncounterMoveKindBiteAndTear, 1, 1, vnet.MovePhaseTelegraph, false},
+		{"past last", vnet.EncounterMoveKindBiteAndTear, 3, 2, vnet.MovePhaseTelegraph, false},
+		{"bite wrong total", vnet.EncounterMoveKindBiteAndTear, 1, 3, vnet.MovePhaseTelegraph, false},
+		{"toll wrong total", vnet.EncounterMoveKindThreeTolls, 1, 2, vnet.MovePhaseTelegraph, false},
+		{"oversized", vnet.EncounterMoveKindPrisonerClaws, 1, 4, vnet.MovePhaseTelegraph, false},
+		{"byte maximum", vnet.EncounterMoveKindPrisonerClaws, 255, 255, vnet.MovePhaseTelegraph, false},
+		{"ordinary charge", vnet.EncounterMoveKindCollarCharge, 0, 0, vnet.MovePhaseTelegraph, true},
+		{"wrong physical kind", vnet.EncounterMoveKindCollarCharge, 1, 2, vnet.MovePhaseTelegraph, false},
+		{"spell combo", vnet.EncounterMoveKindBurial, 1, 2, vnet.MovePhaseTelegraph, false},
+		{"combo channel", vnet.EncounterMoveKindBiteAndTear, 1, 2, vnet.MovePhaseChannel, false},
+		{"ordinary channel", vnet.EncounterMoveKindBurial, 0, 0, vnet.MovePhaseChannel, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			move := soundMove()
+			move.Kind = tc.kind
+			move.Phase = tc.phase
+			if tc.phase == vnet.MovePhaseChannel {
+				move.PulseTotal = 2
+			}
+			move.ComboStep, move.ComboTotal = tc.step, tc.total
+			timeline := soundTimeline()
+			timeline.Moves[0] = move
+			_, err := EncodeEncounterTimeline(timeline)
+			if (err == nil) != tc.valid {
+				t.Fatalf("err=%v, valid=%v", err, tc.valid)
+			}
+		})
+	}
+}

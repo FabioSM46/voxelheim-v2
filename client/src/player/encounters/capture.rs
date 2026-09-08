@@ -119,7 +119,8 @@ fn capture_encounter_presentation() {
         let tick = 110 + index as u32 * 30;
         let mut snap = tests::snapshot(tick);
         let mut guardian = tests::timeline();
-        guardian.moves[0].kind = EncounterMoveKind::BonebreakerJaws;
+        guardian.moves[0].kind = EncounterMoveKind::BiteAndTear;
+        guardian.moves[0].combo = Some((2, 2));
         guardian.moves[0].phase = if phase == MovePhase::Channel {
             MovePhase::Telegraph
         } else {
@@ -143,6 +144,7 @@ fn capture_encounter_presentation() {
         } else {
             EncounterMoveKind::Burial
         };
+        king.moves[0].combo = None;
         king.moves[0].phase = phase;
         king.moves[0].hazards[0] = HazardVolume {
             shape: HazardShape::Ring { inner_radius: 2.0 },

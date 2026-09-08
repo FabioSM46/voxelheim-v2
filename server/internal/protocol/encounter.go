@@ -66,6 +66,8 @@ type EncounterMove struct {
 	PulseIndex       uint8
 	PulseTotal       uint8
 	Interruptible    bool
+	ComboStep        uint8
+	ComboTotal       uint8
 	Ended            vnet.MoveEnd
 }
 
@@ -200,6 +202,14 @@ func (m EncounterMove) validate() error {
 			return err
 		}
 	}
+	if m.ComboStep != 0 || m.ComboTotal != 0 {
+		legalTotal := (m.Kind == vnet.EncounterMoveKindBiteAndTear && m.ComboTotal == 2) ||
+			(m.Kind == vnet.EncounterMoveKindThreeTolls && m.ComboTotal == 3) ||
+			(m.Kind == vnet.EncounterMoveKindPrisonerClaws && (m.ComboTotal == 2 || m.ComboTotal == 3))
+		if !legalTotal || m.ComboStep == 0 || m.ComboStep > m.ComboTotal || m.Phase == vnet.MovePhaseChannel {
+			return fmt.Errorf("protocol: invalid physical combo position")
+		}
+	}
 	if m.Phase == vnet.MovePhaseChannel {
 		if m.PulseTotal == 0 {
 			return fmt.Errorf("protocol: a channel has no pulses")
@@ -270,6 +280,8 @@ func addEncounterMove(b *flatbuffers.Builder, move EncounterMove) flatbuffers.UO
 	vnet.EncounterMoveAddPulseTotal(b, move.PulseTotal)
 	vnet.EncounterMoveAddInterruptible(b, move.Interruptible)
 	vnet.EncounterMoveAddEnded(b, move.Ended)
+	vnet.EncounterMoveAddComboStep(b, move.ComboStep)
+	vnet.EncounterMoveAddComboTotal(b, move.ComboTotal)
 	return vnet.EncounterMoveEnd(b)
 }
 

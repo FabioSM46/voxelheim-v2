@@ -2502,6 +2502,9 @@ pub struct EncounterMove {
     /// Which pulse of a channel is next, counted from zero, and how many there are.
     /// `None` outside [`MovePhase::Channel`].
     pub pulse: Option<(u8, u8)>,
+    /// Physical blow position (one-based step, total), or no combination. Copied
+    /// whole from the server; never inferred by counting previous announcements.
+    pub combo: Option<(u8, u8)>,
     /// Whether the server will honour an interrupt against this instance. **It grants no
     /// ability**: what can interrupt is whatever the server already accepts, and false is
     /// the ordinary case. Only a channel can be true.
@@ -3994,8 +3997,14 @@ pub enum DecodeError {
     MoveAimsAtNothing {
         index: usize,
     },
-    /// An `EncounterMove` counts pulses outside a channel, claims a channel with none, or
-    /// names a pulse past its own last.
+    /// A physical combo has an invalid position, kind or channel phase.
+    MoveComboInvalid {
+        index: usize,
+        step: u8,
+        total: u8,
+    },
+    /// An `EncounterMove` counts pulses outside a channel, claims a channel with none,
+    /// or names a pulse past its own last.
     MovePulseOutOfPhase {
         index: usize,
         pulse_index: u8,
@@ -4705,6 +4714,12 @@ impl fmt::Display for DecodeError {
                 f,
                 "announced move {index} names neither a target nor a usable direction"
             ),
+            Self::MoveComboInvalid { index, step, total } => {
+                write!(
+                    f,
+                    "announced move {index} has invalid physical combo {step}/{total}"
+                )
+            }
             Self::MovePulseOutOfPhase {
                 index,
                 pulse_index,
@@ -5794,6 +5809,22 @@ fn encounter_move(
         hazards.push(hazard_volume(&hazard, index)?);
     }
 
+    let (step, total) = (announced.combo_step(), announced.combo_total());
+    let combo = if step == 0 && total == 0 {
+        None
+    } else {
+        let legal_total = matches!(
+            (kind, total),
+            (EncounterMoveKind::BiteAndTear, 2)
+                | (EncounterMoveKind::ThreeTolls, 3)
+                | (EncounterMoveKind::PrisonerClaws, 2 | 3)
+        );
+        if !legal_total || step == 0 || step > total || phase == MovePhase::Channel {
+            return Err(DecodeError::MoveComboInvalid { index, step, total });
+        }
+        Some((step, total))
+    };
+
     let (pulse_index, pulse_total) = (announced.pulse_index(), announced.pulse_total());
     let interruptible = announced.interruptible();
     let pulse = if phase == MovePhase::Channel {
@@ -5836,6 +5867,7 @@ fn encounter_move(
         target_entity_id,
         aim,
         hazards,
+        combo,
         pulse,
         interruptible,
         ended,
@@ -10070,6 +10102,8 @@ pub(super) mod server_side {
         pub target_entity_id: u64,
         pub aim: Option<[f32; 3]>,
         pub hazards: Option<Vec<HazardVolumeWire>>,
+        pub combo_step: u8,
+        pub combo_total: u8,
         pub pulse_index: u8,
         pub pulse_total: u8,
         pub interruptible: bool,
@@ -10089,6 +10123,8 @@ pub(super) mod server_side {
                 target_entity_id: 77,
                 aim: None,
                 hazards: Some(vec![HazardVolumeWire::SOUND]),
+                combo_step: 0,
+                combo_total: 0,
                 pulse_index: 0,
                 pulse_total: 0,
                 interruptible: false,
@@ -10152,6 +10188,8 @@ pub(super) mod server_side {
                             target_entity_id: one.target_entity_id,
                             aim: aim.as_ref(),
                             hazards,
+                            combo_step: one.combo_step,
+                            combo_total: one.combo_total,
                             pulse_index: one.pulse_index,
                             pulse_total: one.pulse_total,
                             interruptible: one.interruptible,
@@ -10605,7 +10643,7 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 37);
+        assert_eq!(fb::ProtocolVersion::Current.0, 38);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -17982,6 +18020,219 @@ mod encounter_tests {
         match decode(&sound(moves)) {
             Ok(Message::EncounterTimeline(timeline)) => timeline,
             other => panic!("a legal timeline was rejected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn physical_combo_is_complete_in_a_late_phase_or_ending() {
+        for (kind, total) in [
+            (fb::EncounterMoveKind::BiteAndTear, 2),
+            (fb::EncounterMoveKind::ThreeTolls, 3),
+            (fb::EncounterMoveKind::PrisonerClaws, 3),
+        ] {
+            for step in 1..=total {
+                for phase in [
+                    fb::MovePhase::Telegraph,
+                    fb::MovePhase::Release,
+                    fb::MovePhase::Recovery,
+                ] {
+                    for ended in [
+                        fb::MoveEnd::Unknown,
+                        fb::MoveEnd::Completed,
+                        fb::MoveEnd::Cancelled,
+                    ] {
+                        let one = decoded(&[EncounterMoveWire {
+                            kind,
+                            phase,
+                            ended,
+                            combo_step: step,
+                            combo_total: total,
+                            ..EncounterMoveWire::sound()
+                        }]);
+                        assert_eq!(one.moves[0].combo, Some((step, total)));
+                        assert_eq!(one.moves[0].pulse, None);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_physical_combo_metadata_is_refused() {
+        for (name, kind, step, total, phase, valid) in [
+            (
+                "ordinary bite",
+                fb::EncounterMoveKind::BiteAndTear,
+                0,
+                0,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "first bite",
+                fb::EncounterMoveKind::BiteAndTear,
+                1,
+                2,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "last bite",
+                fb::EncounterMoveKind::BiteAndTear,
+                2,
+                2,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "last toll",
+                fb::EncounterMoveKind::ThreeTolls,
+                3,
+                3,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "paired claws",
+                fb::EncounterMoveKind::PrisonerClaws,
+                2,
+                2,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "triple claws",
+                fb::EncounterMoveKind::PrisonerClaws,
+                3,
+                3,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "zero step",
+                fb::EncounterMoveKind::BiteAndTear,
+                0,
+                2,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "missing total",
+                fb::EncounterMoveKind::BiteAndTear,
+                1,
+                0,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "single blow",
+                fb::EncounterMoveKind::BiteAndTear,
+                1,
+                1,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "past last",
+                fb::EncounterMoveKind::BiteAndTear,
+                3,
+                2,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "bite wrong total",
+                fb::EncounterMoveKind::BiteAndTear,
+                1,
+                3,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "toll wrong total",
+                fb::EncounterMoveKind::ThreeTolls,
+                1,
+                2,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "oversized",
+                fb::EncounterMoveKind::PrisonerClaws,
+                1,
+                4,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "byte maximum",
+                fb::EncounterMoveKind::PrisonerClaws,
+                255,
+                255,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "ordinary charge",
+                fb::EncounterMoveKind::CollarCharge,
+                0,
+                0,
+                fb::MovePhase::Telegraph,
+                true,
+            ),
+            (
+                "wrong physical kind",
+                fb::EncounterMoveKind::CollarCharge,
+                1,
+                2,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "spell combo",
+                fb::EncounterMoveKind::Burial,
+                1,
+                2,
+                fb::MovePhase::Telegraph,
+                false,
+            ),
+            (
+                "combo channel",
+                fb::EncounterMoveKind::BiteAndTear,
+                1,
+                2,
+                fb::MovePhase::Channel,
+                false,
+            ),
+            (
+                "ordinary channel",
+                fb::EncounterMoveKind::Burial,
+                0,
+                0,
+                fb::MovePhase::Channel,
+                true,
+            ),
+        ] {
+            let wire = EncounterMoveWire {
+                kind,
+                phase,
+                combo_step: step,
+                combo_total: total,
+                pulse_total: if phase == fb::MovePhase::Channel {
+                    2
+                } else {
+                    0
+                },
+                ..EncounterMoveWire::sound()
+            };
+            let result = decode(&sound(&[wire]));
+            assert_eq!(result.is_ok(), valid, "{name}: {result:?}");
+            if !valid {
+                assert!(
+                    matches!(result, Err(DecodeError::MoveComboInvalid { .. })),
+                    "{name}"
+                );
+            }
         }
     }
 

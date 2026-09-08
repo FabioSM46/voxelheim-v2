@@ -3357,6 +3357,17 @@ table EncounterMove {
 
   /// Why this instance stopped, or `Unknown` while it is still running.
   ended: MoveEnd;
+
+  /// V38: physical combination position, counted from one. 0/0 means an ordinary
+  /// independent move. Otherwise 1 <= combo_step <= combo_total <= 3. BiteAndTear
+  /// requires total 2; ThreeTolls requires total 3 (left cut, right cut, thrust).
+  /// PrisonerClaws reserves totals 2 or 3 for alternating blows; all other kinds
+  /// require 0/0. A combo never uses Channel, pulses or interruptibility.
+  /// Each blow has a NEW move_instance_id, with this pair immutable for that instance
+  /// across its telegraph, release, recovery and ending. A late snapshot is complete:
+  /// receivers never count previous moves to reconstruct this position.
+  combo_step: ubyte;
+  combo_total: ubyte;
 }
 
 /// One boss encounter's complete live timeline. Server -> client, and authoritative.

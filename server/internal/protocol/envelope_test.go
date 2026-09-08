@@ -317,8 +317,8 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 37 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 37", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 38 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 38", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
