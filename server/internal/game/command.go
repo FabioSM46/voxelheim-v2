@@ -11,7 +11,7 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
-const commandHelp = "/help | /teleport <x> <y> <z> | /additem <item-id> <count>"
+const commandHelp = "/help | /teleport <x> <y> <z> | /additem <item-id> <count> | /immortal <true|false>"
 
 // commandLocked parses one slash-prefixed line under Sim.mu.
 func (p *Player) commandLocked(line string) ChatOutcome {
@@ -49,6 +49,8 @@ func (p *Player) commandLocked(line string) ChatOutcome {
 		outcome, accepted = p.teleportCommandLocked(args)
 	case "/additem":
 		outcome, accepted = p.addItemCommandLocked(args)
+	case "/immortal":
+		outcome, accepted = p.immortalCommandLocked(args)
 	default:
 		return privateCommand("Unknown command.")
 	}
@@ -198,4 +200,39 @@ func (p *Player) addSilverCommandLocked(argument string) (ChatOutcome, bool) {
 		PrivateText: fmt.Sprintf("Added %d silver.", rawCount),
 		Inventory:   &state,
 	}, true
+}
+
+// immortalCommandLocked turns the development immortality toggle on or off.
+//
+// Unlike /teleport and /additem this does not go through cannotActLocked: those two act
+// on the world and must be refused for a dead or busy player, whereas this one only
+// changes what the next blow does. A player who has just died is exactly who wants it,
+// and refusing there would mean dying, respawning and typing it again.
+//
+// The state it sets is session-only and is deliberately not idempotent-silent: setting
+// it to what it already is answers with the same confirmation, because the useful thing
+// to report is what is now true, not whether the command changed anything.
+func (p *Player) immortalCommandLocked(args []string) (ChatOutcome, bool) {
+	if len(args) != 1 {
+		return privateCommand(fmt.Sprintf("/immortal needs 1 argument <true|false>; got %d.", len(args))), false
+	}
+
+	// strconv.ParseBool is deliberately not used: it also accepts "1", "t", "T", "0",
+	// "f" and "F", and a development command whose help says <true|false> should refuse
+	// what its help does not offer rather than quietly widening its own surface.
+	var enabled bool
+	switch args[0] {
+	case "true":
+		enabled = true
+	case "false":
+		enabled = false
+	default:
+		return privateCommand(fmt.Sprintf("/immortal argument %q is not true or false.", args[0])), false
+	}
+
+	p.immortal = enabled
+	if enabled {
+		return privateCommand("Immortality on: the server will refuse all damage."), true
+	}
+	return privateCommand("Immortality off: damage applies normally."), true
 }

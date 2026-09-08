@@ -770,6 +770,16 @@ type Player struct {
 	penaltyApplied  bool
 	spawn           [3]float64
 
+	// immortal is a development toggle, set only by /immortal and therefore only
+	// reachable on a server started with -dev-commands. Session-only: Join never
+	// restores it and Record never writes it back, so it dies with the connection
+	// rather than becoming a property of the character.
+	//
+	// It is read in exactly one place, damageLocked, because that is the one place
+	// damage is applied and the only caller of dieLocked. A second check anywhere
+	// else would be a second answer to "can this player be hurt".
+	immortal bool
+
 	// inventoryDirty records that a pickup changed the slots and the client has not
 	// been told yet. Guarded by sim.mu rather than by the inventory's own lock: it is
 	// the tick that sets it and the tick that clears it, and the inventory lock is only
