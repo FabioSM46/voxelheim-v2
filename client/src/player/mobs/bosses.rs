@@ -1,10 +1,10 @@
 //! Authored boss silhouettes. Only meshes and cosmetic poses live here.
 use super::*;
 
-const IRON: Color = Color::srgb(0.27, 0.30, 0.32);
-const FROST: Color = Color::srgb(0.72, 0.81, 0.84);
-const BONE: Color = Color::srgb(0.72, 0.70, 0.63);
-const FUR: Color = Color::srgb(0.12, 0.14, 0.16);
+pub(super) const IRON: Color = Color::srgb(0.27, 0.30, 0.32);
+pub(super) const FROST: Color = Color::srgb(0.72, 0.81, 0.84);
+pub(super) const BONE: Color = Color::srgb(0.72, 0.70, 0.63);
+pub(super) const FUR: Color = Color::srgb(0.12, 0.14, 0.16);
 
 pub(super) fn boxes(parts: &[(Vec3, Vec3, Color)]) -> Mesh {
     let mut mesh = draugr_box(parts[0].0, parts[0].1, parts[0].2);
@@ -18,6 +18,7 @@ pub(super) fn boxes(parts: &[(Vec3, Vec3, Color)]) -> Mesh {
     mesh
 }
 
+#[cfg(test)]
 pub(super) fn guardian_body() -> Mesh {
     let mut parts = vec![
         (Vec3::new(0.86, 0.48, 0.50), Vec3::new(0.0, 0.85, 0.38), FUR),
@@ -57,6 +58,7 @@ pub(super) fn guardian_body() -> Mesh {
     boxes(&parts)
 }
 
+#[cfg(test)]
 pub(super) fn guardian_head() -> Mesh {
     boxes(&[
         (
@@ -102,6 +104,7 @@ pub(super) fn guardian_head() -> Mesh {
     ])
 }
 
+#[cfg(test)]
 pub(super) fn guardian_legs() -> Mesh {
     let mut parts = Vec::new();
     for x in [-0.58, 0.58] {
@@ -118,34 +121,24 @@ pub(super) fn guardian_legs() -> Mesh {
     boxes(&parts)
 }
 
-pub(super) fn guardian_visuals(
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-) -> SpeciesVisuals {
-    let material = materials.add(StandardMaterial::from_color(Color::WHITE));
-    SpeciesVisuals {
-        king_parts: None,
-        body: meshes.add(guardian_body()),
-        head: meshes.add(guardian_head()),
-        legs: Some(meshes.add(guardian_legs())),
-        arms: None,
-        eyes: None,
-        body_material: material.clone(),
-        head_material: material,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn posed_meshes(kind: MobKind, action: MobAction) -> Vec<Mesh> {
         let mut meshes = if kind == MobKind::VargrGuardian {
-            vec![guardian_body(), guardian_head(), guardian_legs()]
+            let down = if action == MobAction::Corpse {
+                1.0
+            } else {
+                0.0
+            };
+            guardian::posed_meshes(action, Duration::from_secs(1), down)
         } else {
             king::posed_meshes(action, Duration::from_secs(1))
         };
-        let rotation = if action == MobAction::Corpse {
+        let rotation = if kind == MobKind::VargrGuardian {
+            Quat::IDENTITY
+        } else if action == MobAction::Corpse {
             collapse(kind, 1.0)
         } else {
             Quat::from_rotation_x(lean_for(kind, action))
@@ -331,8 +324,20 @@ mod tests {
 
     #[test]
     fn guardian_frost_and_fangs_have_unoccluded_outer_faces() {
-        assert_eq!(visible_caps(guardian_body(), FROST, 1, true), 4);
-        assert_eq!(visible_caps(guardian_head(), BONE, 2, false), 2);
+        let all = guardian::meshes();
+        let mut mesh = all[0].1.clone();
+        merge_all(
+            &mut mesh,
+            all.into_iter().skip(1).map(|(_, m)| m),
+            "actual guardian",
+        );
+        assert_eq!(visible_caps(mesh.clone(), FROST, 1, true), 4);
+        let head = guardian::meshes()
+            .into_iter()
+            .find(|(s, _)| *s == guardian::Segment::Head)
+            .unwrap()
+            .1;
+        assert_eq!(visible_caps(head, BONE, 2, false), 2);
     }
 
     #[test]
@@ -340,7 +345,10 @@ mod tests {
         for (kind, meshes) in [
             (
                 MobKind::VargrGuardian,
-                vec![guardian_body(), guardian_head(), guardian_legs()],
+                guardian::meshes()
+                    .into_iter()
+                    .map(|(_, mesh)| mesh)
+                    .collect::<Vec<_>>(),
             ),
             (
                 MobKind::DraugrKing,

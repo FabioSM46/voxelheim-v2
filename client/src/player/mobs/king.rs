@@ -201,6 +201,7 @@ pub(super) fn visuals(
         body_material: material.clone(),
         head_material: material,
         king_parts: Some(parts),
+        guardian_parts: None,
     }
 }
 
