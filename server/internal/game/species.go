@@ -98,6 +98,20 @@ type mobDefinition struct {
 	windup   time.Duration
 	recovery time.Duration
 
+	// phaseHealthPercents is where a boss's repertoire changes, as remaining-health
+	// percentages in descending order.
+	//
+	// **A boss row has at least one and every other row has none.** A stage is the
+	// encounter contract this species fights under, and a creature with no stages is not
+	// a creature whose stages were forgotten — TestEverySpeciesIsFullyDescribed holds
+	// both halves of that. `encounterPhaseFor` counts how many of these the current
+	// health has passed, so the wire's stage ordinal is one more than that count.
+	//
+	// Playtest values from the approved design, not final balance: the guardian tears
+	// the last strap at just over half, and the king is a duellist, then a ritualist,
+	// then a cracked-open thing that combines the two.
+	phaseHealthPercents []uint8
+
 	// body is the box this species occupies, and the only statement of it.
 	//
 	// **Read by the collision, by the swing that reaches it, by the separation the
@@ -301,8 +315,10 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		damage:      22,
 		windup:      900 * time.Millisecond,
 		recovery:    1300 * time.Millisecond,
-		body:        body{width: 1.6, height: 1.8},
-		nocturnal:   false,
+		// One change of stage, at the strap that finally tears.
+		phaseHealthPercents: []uint8{55},
+		body:                body{width: 1.6, height: 1.8},
+		nocturnal:           false,
 		// Three to five pelts and a pair of bones. The count is the reward: two pelts
 		// make one leather patch, so a field vargr is half a repair and this is one and
 		// a half to two and a half of them at once. No silver — money in this world
@@ -357,8 +373,10 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 		damage:      28,
 		windup:      1200 * time.Millisecond,
 		recovery:    1800 * time.Millisecond,
-		body:        body{width: 1.0, height: 2.8},
-		nocturnal:   false,
+		// Duel, then ritual, then the armour cracked open and both together.
+		phaseHealthPercents: []uint8{70, 35},
+		body:                body{width: 1.0, height: 2.8},
+		nocturnal:           false,
 		// The king's own iron sword, and the bones of what he was. One blade, fixed:
 		// stackOf gives it full durability, so this is a whole second weapon rather than
 		// a fraction of one, and a fixed count is what keeps a boss's reward a *thing*

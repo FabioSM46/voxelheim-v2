@@ -247,6 +247,10 @@ func (s *Sim) discardMobLocked(m *mob) {
 	}
 	delete(s.mobs, m.entityID)
 	m.firstHit = nil
+	// Cancelled before it is dropped, so the encounter's own state is truthful at the
+	// moment it ends rather than merely absent. See withdrawEncounterMovesLocked for what
+	// this can and cannot promise a client that was watching.
+	withdrawEncounterMovesLocked(m)
 	m.encounter = nil
 }
 
