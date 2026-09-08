@@ -64,7 +64,7 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		MaxHealth:        p.maxHealthLocked(),
 		LifeState:        p.lifeState,
 		RespawnTicks:     p.respawnTicks,
-		Invulnerable:     p.protectionTicks > 0,
+		Invulnerable:     p.protectionTicks > 0 || p.immortal,
 		Hunger:           p.hunger,
 		MaxHunger:        PlayerMaxHunger,
 		Level:            level,
@@ -84,9 +84,15 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 // Zero is ignored rather than treated as a hit — a swing that connects for nothing is
 // not a hit — and negative damage is unrepresentable, which is the point of the type.
 //
+// **The development immortality toggle is refused here and nowhere else**, for the
+// reason the paragraph above gives: this is the one place damage is applied and the only
+// caller of dieLocked, so refusing here covers a mob's blow and a fall alike, and no
+// future damage source can be added that quietly bypasses it. It sits beside the
+// respawn-protection guard because it answers the same question for longer.
+//
 // The caller holds sim.mu.
 func (p *Player) damageLocked(amount uint16) bool {
-	if amount == 0 || !p.alive() || p.protectionTicks > 0 {
+	if amount == 0 || !p.alive() || p.protectionTicks > 0 || p.immortal {
 		return false
 	}
 

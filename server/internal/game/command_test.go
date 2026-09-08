@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -33,6 +34,7 @@ func TestCommandsDefaultToDisabledAndChangeNothing(t *testing.T) {
 	for _, line := range []string{
 		"/additem 1 1",
 		"/teleport 0 100 0",
+		"/immortal true",
 		"/help",
 		"/this-server-never-heard-of-it",
 		"/help",
@@ -342,5 +344,111 @@ func TestAcceptedCommandsAreInfoLoggedWithActorAndArguments(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("log %q does not contain %q", line, want)
 		}
+	}
+}
+
+func TestImmortalValidatesItsArgument(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		line string
+		word string
+	}{
+		{name: "zero arguments", line: "/immortal", word: "1 argument"},
+		{name: "two arguments", line: "/immortal true false", word: "1 argument"},
+		{name: "not a boolean", line: "/immortal yes", word: "not true or false"},
+		// ParseBool would accept each of these. The help offers <true|false>, so a
+		// command that accepted more than its help describes would be widening its own
+		// surface silently.
+		{name: "numeric one", line: "/immortal 1", word: "not true or false"},
+		{name: "abbreviated", line: "/immortal t", word: "not true or false"},
+		{name: "capitalised", line: "/immortal True", word: "not true or false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			h, player, _ := commandPlayer(t, true)
+			outcome, err := player.Chat(test.line)
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			if !strings.Contains(outcome.PrivateText, test.word) {
+				t.Errorf("answer = %q, want it to name %q", outcome.PrivateText, test.word)
+			}
+			h.sim.mu.Lock()
+			immortal := player.immortal
+			h.sim.mu.Unlock()
+			if immortal {
+				t.Error("a refused /immortal turned immortality on")
+			}
+		})
+	}
+}
+
+func TestImmortalRefusesEveryDamageSourceAndIsReversible(t *testing.T) {
+	t.Parallel()
+
+	h, player, _ := commandPlayer(t, true)
+	h.advance(int(h.sim.protectionTicks))
+
+	if _, err := player.Chat("/immortal true"); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	// A mob's blow and a fall are the two callers of damageLocked, and the toggle is
+	// refused inside it rather than at either caller, so both are covered by one guard.
+	h.hurt(player, 1)
+	h.hurt(player, PlayerMaxHealth)
+	if got := h.vitals(player); got.Health != got.MaxHealth {
+		t.Errorf("health = %d of %d, want untouched", got.Health, got.MaxHealth)
+	}
+	if got := h.vitals(player).LifeState; got != vnet.LifeStateAlive {
+		t.Errorf("life state = %v, want alive after a lethal blow", got)
+	}
+
+	// The wire says so too, through the field that already means "the server is
+	// refusing damage to this player" rather than through a new one.
+	if !h.vitals(player).Invulnerable {
+		t.Error("vitals did not report the player as invulnerable")
+	}
+
+	if _, err := player.Chat("/immortal false"); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if h.vitals(player).Invulnerable {
+		t.Error("vitals still reported invulnerable after /immortal false")
+	}
+	h.hurt(player, 3)
+	if got := h.vitals(player); got.Health != got.MaxHealth-3 {
+		t.Errorf("health = %d, want %d once immortality was turned off", got.Health, got.MaxHealth-3)
+	}
+}
+
+func TestImmortalIsAcceptedWhileDeadAndSurvivesNoSession(t *testing.T) {
+	t.Parallel()
+
+	h, player, _ := commandPlayer(t, true)
+	h.advance(int(h.sim.protectionTicks))
+	h.hurt(player, PlayerMaxHealth)
+	if got := h.vitals(player).LifeState; got == vnet.LifeStateAlive {
+		t.Fatalf("life state = %v, want the player dead before the toggle is tried", got)
+	}
+
+	// Unlike /teleport and /additem this does not act on the world, so it is not
+	// refused for a dead player — who is exactly the person about to want it.
+	outcome, err := player.Chat("/immortal true")
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(outcome.PrivateText, "Immortality on") {
+		t.Errorf("answer = %q, want the toggle to be accepted while dead", outcome.PrivateText)
+	}
+
+	// A second player joining the same simulation is mortal: the flag is one session's,
+	// not the server's.
+	other, _ := h.join(2, [3]float32{1.5, 64, 0.5})
+	h.advance(int(h.sim.protectionTicks))
+	h.hurt(other, 4)
+	if got := h.vitals(other); got.Health != got.MaxHealth-4 {
+		t.Errorf("second player's health = %d, want %d — immortality leaked between sessions", got.Health, got.MaxHealth-4)
 	}
 }
