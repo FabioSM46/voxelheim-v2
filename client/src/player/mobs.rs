@@ -1481,6 +1481,71 @@ pub(super) fn animate(
         if let MobPart::King(segment) = part.part {
             *transform = king::transform(segment, action, elapsed, arm_swing);
         }
+        if kind == MobKind::VargrGuardian && matches!(part.part, MobPart::Head | MobPart::Eyes) {
+            // Encounter neck poses are frame-local overrides, not persistent rig state.
+            *transform = Transform::IDENTITY;
+        }
+    }
+}
+
+/// Boss phase poses replace the generic MobAction animation after reconciliation.
+/// Their root translation stays entirely on the snapshot interpolation path.
+pub(super) fn pose_encounters(
+    presentation: Res<super::encounters::EncounterPresentation>,
+    mut mobs: Query<(Entity, &Mob, &mut Transform)>,
+    mut parts: Query<(&MobVisual, &mut Transform), Without<Mob>>,
+) {
+    use super::encounters::Window;
+    use crate::net::{EncounterMoveKind, MovePhase};
+    for (entity, mob, mut root) in &mut mobs {
+        if !matches!(mob.kind, MobKind::VargrGuardian | MobKind::DraugrKing)
+            || mob.falling.is_some()
+        {
+            continue;
+        }
+        let one = presentation
+            .0
+            .iter()
+            .filter(|one| one.key.boss == mob.entity_id)
+            .filter(|one| one.window == Window::Current)
+            // Stable selection if a future repertoire announces concurrent moves:
+            // live contact first, then the newest server instance.
+            .max_by_key(|one| (one.damaging(), one.key.instance));
+        if one.is_none() && !matches!(mob.action, MobAction::Windup | MobAction::Recovery) {
+            // Preserve ordinary breathing and locomotion. Only a stale combat action
+            // needs suppression when no authoritative move window supports its pose.
+            continue;
+        }
+        let (lean, neck) = one.map_or((0.0, 0.0), |one| {
+            let strength = match one.announced.phase {
+                MovePhase::Telegraph => -(0.4 + 0.6 * one.progress),
+                MovePhase::Release => 1.0,
+                MovePhase::Channel => -0.7,
+                MovePhase::Recovery => 0.7 * (1.0 - one.progress),
+            };
+            let neck = match one.announced.kind {
+                EncounterMoveKind::CollarCharge | EncounterMoveKind::PredatorLeap => 0.25,
+                EncounterMoveKind::BonebreakerJaws => -0.4,
+                _ => 0.15,
+            };
+            (strength * 0.12, strength * neck)
+        });
+        root.rotation = Quat::from_rotation_y(mob.yaw) * Quat::from_rotation_x(lean);
+        for (part, mut transform) in &mut parts {
+            if part.owner != entity {
+                continue;
+            }
+            if let MobPart::King(segment) = part.part {
+                *transform = king::encounter_transform(segment, one);
+            } else if matches!(part.part, MobPart::Head | MobPart::Eyes) {
+                let pivot = Vec3::new(0.0, 0.9, -0.35);
+                *transform = Transform::from_matrix(
+                    Mat4::from_translation(pivot)
+                        * Mat4::from_quat(Quat::from_rotation_x(neck))
+                        * Mat4::from_translation(-pivot),
+                );
+            }
+        }
     }
 }
 
@@ -2937,6 +3002,122 @@ mod tests {
             app.update();
             assert!(bodies(&mut app).is_empty());
             assert!(parts(&mut app).is_empty());
+        }
+    }
+
+    #[test]
+    fn boss_pose_uses_received_phase_progress_and_cancellation_without_root_motion() {
+        use crate::net::{EncounterMoveKind, EncounterTimelineInbox, MovePhase};
+        let mut app = headless();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)));
+        let state = MobState {
+            kind: MobKind::DraugrKing,
+            ..draugr(900, 3.0, 100, MobAction::Windup)
+        };
+        let mut timeline = crate::player::encounters::tests::timeline();
+        timeline.boss = state.kind;
+        timeline.boss_entity_id = state.entity_id;
+        timeline.moves[0].kind = EncounterMoveKind::SepulchreSpear;
+        timeline.moves[0].phase = MovePhase::Telegraph;
+        app.world_mut()
+            .resource_mut::<EncounterTimelineInbox>()
+            .push(timeline.clone());
+        deliver(&mut app, 115, vec![state]);
+        app.update();
+        let pose = |app: &mut App| {
+            let world = app.world_mut();
+            world
+                .query::<(&MobVisual, &Transform)>()
+                .iter(world)
+                .filter_map(|(part, transform)| {
+                    matches!(part.part, MobPart::King(king::Segment::UpperLeft))
+                        .then_some(*transform)
+                })
+                .next()
+                .unwrap()
+        };
+        let cast_pose = pose(&mut app);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            pose(&mut app),
+            cast_pose,
+            "silence must not restart or advance a cast pose"
+        );
+        timeline.moves[0].kind = EncounterMoveKind::KingsSentence;
+        timeline.moves[0].move_instance_id += 1;
+        app.world_mut()
+            .resource_mut::<EncounterTimelineInbox>()
+            .push(timeline.clone());
+        app.update();
+        assert_ne!(
+            pose(&mut app),
+            cast_pose,
+            "physical and spell preparations need distinct silhouettes"
+        );
+        let world = app.world_mut();
+        let root = world
+            .query_filtered::<&Transform, With<Mob>>()
+            .single(world)
+            .unwrap();
+        assert_eq!(root.translation, Vec3::from_array(state.pos));
+        timeline.moves.clear();
+        world
+            .resource_mut::<EncounterTimelineInbox>()
+            .push(timeline);
+        app.update();
+        assert_eq!(
+            pose(&mut app),
+            king::encounter_transform(king::Segment::UpperLeft, None)
+        );
+    }
+
+    #[test]
+    fn bosses_keep_ordinary_animation_before_and_after_encounter_moves() {
+        use crate::net::EncounterTimelineInbox;
+        let mut app = headless();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            50,
+        )));
+        let mut state = MobState {
+            kind: MobKind::DraugrKing,
+            ..draugr(900, 3.0, 100, MobAction::Idle)
+        };
+        for (tick, action, with_move) in [
+            (110, MobAction::Idle, false),
+            (111, MobAction::Chase, false),
+            (112, MobAction::Windup, true),
+            (113, MobAction::Chase, false),
+            (114, MobAction::Idle, false),
+        ] {
+            let mut timeline = crate::player::encounters::tests::timeline();
+            timeline.boss = state.kind;
+            timeline.boss_entity_id = state.entity_id;
+            if !with_move {
+                timeline.moves.clear();
+            }
+            app.world_mut()
+                .resource_mut::<EncounterTimelineInbox>()
+                .push(timeline);
+            state.action = action;
+            deliver(&mut app, tick, vec![state]);
+            app.update();
+            if with_move {
+                continue;
+            }
+            let world = app.world_mut();
+            let mob = world.query::<&Mob>().single(world).unwrap();
+            let elapsed = mob.action_elapsed;
+            let arm = draugr_arm_swing(action, mob.arm_start_angle, elapsed);
+            let mut compared = 0;
+            for (part, transform) in world.query::<(&MobVisual, &Transform)>().iter(world) {
+                if let MobPart::King(segment) = part.part {
+                    assert_eq!(*transform, king::transform(segment, action, elapsed, arm));
+                    compared += 1;
+                }
+            }
+            assert!(compared > 0);
         }
     }
 

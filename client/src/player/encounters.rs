@@ -7,6 +7,18 @@
 
 use bevy::prelude::*;
 
+#[cfg(test)]
+mod capture;
+mod cues;
+
+pub(crate) fn is_spell(kind: crate::net::EncounterMoveKind) -> bool {
+    use crate::net::EncounterMoveKind::*;
+    matches!(
+        kind,
+        Burial | EdictOfTheGraves | SepulchreSpear | RequiemOfTheBuried
+    )
+}
+
 use super::{ApplySnapshots, SnapshotBuffer};
 use crate::net::{
     EncounterMove, EncounterTimeline, EncounterTimelineInbox, HazardVolume, MobAction, MobKind,
@@ -40,9 +52,12 @@ pub(crate) struct PresentedMove {
 }
 
 impl PresentedMove {
+    pub fn label_height(&self) -> f32 {
+        super::mobs::body(self.boss_kind).height + 0.25
+    }
+
     /// Geometry is copied from the announcement, never reconstructed from its name
     /// or aimed at the current player position. Recovery and expired windows draw none.
-    #[allow(dead_code)] // Part 2 of #1025 consumes this in the hazard renderer.
     pub fn hazards(&self) -> &[HazardVolume] {
         if self.window == Window::AwaitingUpdate || self.announced.phase == MovePhase::Recovery {
             &[]
@@ -51,7 +66,6 @@ impl PresentedMove {
         }
     }
 
-    #[allow(dead_code)] // Part 2 distinguishes an announced region from live danger.
     pub fn damaging(&self) -> bool {
         // The server announces each channel pulse for its interval, then resolves
         // contact on the last tick only. Release damages throughout its window.
@@ -66,12 +80,13 @@ impl PresentedMove {
 pub(crate) struct EncounterPresentation(pub Vec<PresentedMove>);
 
 pub(super) fn register(app: &mut App) {
+    cues::register(app);
     app.init_resource::<EncounterTimelineInbox>()
         .init_resource::<EncounterPresentation>()
         .add_systems(Update, reconcile.after(ApplySnapshots));
 }
 
-fn reconcile(
+pub(super) fn reconcile(
     session: Option<Res<Session>>,
     inbox: Res<EncounterTimelineInbox>,
     snapshots: Res<SnapshotBuffer>,
@@ -152,11 +167,11 @@ fn sample_window(tick: u32, announced: &EncounterMove) -> (Window, f32) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::net::{EncounterMoveKind, HazardShape, MobState, MoveEnd};
 
-    fn timeline() -> EncounterTimeline {
+    pub(crate) fn timeline() -> EncounterTimeline {
         EncounterTimeline {
             encounter_id: 5,
             boss_entity_id: 9,
@@ -184,7 +199,7 @@ mod tests {
         }
     }
 
-    fn snapshot(tick: u32) -> Snapshot {
+    pub(crate) fn snapshot(tick: u32) -> Snapshot {
         Snapshot {
             server_tick: tick,
             mobs: vec![MobState {
@@ -293,7 +308,9 @@ mod tests {
         use crate::net::SessionParams;
         use std::time::Instant;
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .init_resource::<SnapshotBuffer>()
             .insert_resource(Session(SessionParams {
                 clock: Default::default(),

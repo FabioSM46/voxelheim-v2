@@ -5,6 +5,7 @@ mod character;
 mod chat;
 mod compass;
 mod crosshair;
+pub(crate) mod encounters;
 mod experience;
 mod health;
 mod hunger;
@@ -230,6 +231,7 @@ impl Plugin for UiPlugin {
                     health::HealthUiPlugin,
                     leaving::LeavingUiPlugin,
                     cast::CastUiPlugin,
+                    encounters::EncounterUiPlugin,
                     voice::VoiceUiPlugin,
                 ),
                 hunger::HungerUiPlugin,

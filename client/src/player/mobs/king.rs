@@ -333,6 +333,47 @@ pub(super) fn posed_meshes(action: MobAction, elapsed: Duration) -> Vec<Mesh> {
         .collect()
 }
 
+/// Use the same articulated joints as the body renderer, sampled directly from the
+/// announced phase. A cast raises the free arm, a channel plants the blade and a
+/// physical preparation raises the weapon arm. No timer restarts on late arrival.
+pub(super) fn encounter_transform(
+    segment: Segment,
+    one: Option<&crate::player::encounters::PresentedMove>,
+) -> Transform {
+    use crate::net::MovePhase;
+    let mut p = Pose {
+        breath: 0.0,
+        head: 0.0,
+        left: 0.0,
+        right: 0.0,
+        elbow: 0.0,
+        stride: 0.0,
+        cloak: 0.0,
+    };
+    if let Some(one) = one {
+        let strength = match one.announced.phase {
+            MovePhase::Telegraph => 0.4 + 0.6 * one.progress,
+            MovePhase::Release => -0.2,
+            MovePhase::Channel => 0.9,
+            MovePhase::Recovery => -0.3 * (1.0 - one.progress),
+        };
+        if crate::player::encounters::is_spell(one.announced.kind) {
+            p.left = strength * 1.35;
+            p.right = if one.announced.phase == MovePhase::Channel {
+                0.25
+            } else {
+                0.0
+            };
+            p.elbow = strength * 0.4;
+        } else {
+            p.right = strength * DRAUGR_ARM_RAISED;
+            p.left = p.right * 0.72;
+        }
+        p.head = strength * -0.12;
+    }
+    joint(segment, p)
+}
+
 #[cfg(test)]
 pub(super) fn cast_meshes() -> Vec<Mesh> {
     let p = Pose {
