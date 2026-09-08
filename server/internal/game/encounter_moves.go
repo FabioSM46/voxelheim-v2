@@ -120,9 +120,12 @@ type encounterHazard struct {
 // move says how much heavier or lighter than that ordinary blow it is. A second absolute
 // number here would be a second place a balance pass has to find.
 type encounterMoveDef struct {
-	combo   *encounterCombo
-	bearing float64
-	kind    vnet.EncounterMoveKind
+	combo *encounterCombo
+	// comboFromStage unlocks a combination without replacing the ordinary move.
+	// Zero leaves an always-available combo enabled.
+	comboFromStage uint8
+	bearing        float64
+	kind           vnet.EncounterMoveKind
 
 	// fromStage is the encounter stage that unlocks this move, counted from one exactly
 	// as `EncounterTimeline.phase` is. A stage never falls, so a move never leaves the
@@ -279,7 +282,7 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 	// The Vargr that guarded the tomb. Physical throughout — scratches, bites, a charge and
 	// a leap — so no row here is a cast and none may ever carry a channel. Stage 1 teaches
 	// the four answers: leave the frontal cone, the lane, the landing region, the arc of
-	// the sweep. Stage 2 adds the jaws, the same answer read faster against a heavier blow.
+	// the sweep. Stage 2 adds alternating claws and the jaws, each with its own signal.
 	vnet.MobKindVargrGuardian: {
 		// Head low, lip raised, shoulder loaded. The cheapest move it has and its fallback
 		// in contact: a short telegraph by boss standards, an ordinary blow, and a recovery
@@ -295,6 +298,7 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 		// the bite, on a cooldown long enough that the two do not read as one move.
 		{
 			kind: vnet.EncounterMoveKindPrisonerClaws, fromStage: 1,
+			combo: &clawCombo, comboFromStage: 2,
 			telegraph: 1000 * time.Millisecond, release: 300 * time.Millisecond,
 			recovery: 1400 * time.Millisecond, cooldown: 5 * time.Second,
 			minRange: 0, maxRange: 3.0, damagePercent: 95,

@@ -15,10 +15,13 @@ func comboFight(t *testing.T, rate uint8, kind vnet.EncounterMoveKind) (*vitalsH
 	h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
 	p, out := h.join(1, [3]float32{.5, 64, .5})
 	var id uint64
-	if kind == vnet.EncounterMoveKindBiteAndTear {
+	if kind != vnet.EncounterMoveKindThreeTolls {
 		id = pullGuardian(t, h, [3]float64{.5, 64, -2.5}, p)
 	} else {
 		id = pullKing(t, h, [3]float64{.5, 64, -2.5}, p)
+	}
+	if kind == vnet.EncounterMoveKindPrisonerClaws {
+		atStage(h, id, 2)
 	}
 	preferMove(h, id, kind)
 	return h, p, out, id
@@ -41,7 +44,7 @@ func awaitComboPhase(t *testing.T, h *vitalsHarness, p *Player, id uint64, step 
 // phase counts assert the complete combination, not just its catalogue definition.
 func TestPhysicalComboPublishesEveryBlowAndEarnsItsFinalOpening(t *testing.T) {
 	for _, rate := range []uint8{1, 3, DefaultTickRate} {
-		for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls} {
+		for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls, vnet.EncounterMoveKindPrisonerClaws} {
 			t.Run(fmt.Sprintf("%dHz_%v", rate, kind), func(t *testing.T) {
 				h, p, out, id := comboFight(t, rate, kind)
 				total := uint8(2)
@@ -49,6 +52,10 @@ func TestPhysicalComboPublishesEveryBlowAndEarnsItsFinalOpening(t *testing.T) {
 				if kind == vnet.EncounterMoveKindThreeTolls {
 					total = 3
 					final = 2200 * time.Millisecond
+				}
+				telegraph, release := 900*time.Millisecond, 200*time.Millisecond
+				if kind == vnet.EncounterMoveKindPrisonerClaws {
+					telegraph, release = time.Second, 300*time.Millisecond
 				}
 				ids := map[uint8]uint64{}
 				hits := map[uint8]int{}
@@ -123,10 +130,10 @@ func TestPhysicalComboPublishesEveryBlowAndEarnsItsFinalOpening(t *testing.T) {
 						t.Fatal("a new blow reused an identity")
 					}
 					// Preserve the existing initial announcement tick followed by the declared preparation.
-					if counts[step][vnet.MovePhaseTelegraph] != int(ticksFor(900*time.Millisecond, rate))+1 {
+					if counts[step][vnet.MovePhaseTelegraph] != int(ticksFor(telegraph, rate))+1 {
 						t.Fatal("a blow lost its complete preparation")
 					}
-					if counts[step][vnet.MovePhaseRelease] != int(ticksFor(200*time.Millisecond, rate)) {
+					if counts[step][vnet.MovePhaseRelease] != int(ticksFor(release, rate)) {
 						t.Fatal("release duration changed")
 					}
 					recovery := ticksFor(400*time.Millisecond, rate)
@@ -141,6 +148,9 @@ func TestPhysicalComboPublishesEveryBlowAndEarnsItsFinalOpening(t *testing.T) {
 					if geometry[1][0].Direction[0] <= 0 || geometry[2][0].Direction[0] >= 0 || geometry[3][0].Shape != vnet.HazardShapeLine {
 						t.Fatalf("tolls are not left, right and thrust: %+v", geometry)
 					}
+				}
+				if kind == vnet.EncounterMoveKindPrisonerClaws && (geometry[1][0].Direction[0] <= 0 || geometry[2][0].Direction[0] >= 0) {
+					t.Fatalf("claws did not alternate sides: %+v", geometry)
 				}
 				if r := runningMoveOf(h, id); r != nil {
 					t.Fatal("final opening did not complete")
@@ -178,7 +188,7 @@ func TestPhysicalComboRetargetsOnlyAtTheNextTelegraph(t *testing.T) {
 // Range, terrain and reachable space are revalidated at every intermediate seam.
 // Failing one grants a complete final recovery on the same immutable instance.
 func TestPhysicalComboFailedContinuationGrantsFinalRecovery(t *testing.T) {
-	for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls} {
+	for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls, vnet.EncounterMoveKindPrisonerClaws} {
 		total := uint8(2)
 		final := 1800 * time.Millisecond
 		if kind == vnet.EncounterMoveKindThreeTolls {
@@ -197,7 +207,7 @@ func TestPhysicalComboFailedContinuationGrantsFinalRecovery(t *testing.T) {
 						h.sim.terrain = monolith{groundTop: 63, fromZ: -1, toZ: -1}
 					case "no escape":
 						aperture := int64(65)
-						if kind == vnet.EncounterMoveKindBiteAndTear {
+						if kind != vnet.EncounterMoveKindThreeTolls {
 							aperture = 64
 						}
 						h.sim.terrain = scriptedTerrain{want: func(x, y, z int64) bool {
@@ -297,7 +307,7 @@ func TestPhysicalComboKeepsCommitmentAndRecoveryWhenHealthStageChanges(t *testin
 }
 
 func TestPhysicalComboLifecycleCancellationDropsAllFutureBlows(t *testing.T) {
-	for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls} {
+	for _, kind := range []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindThreeTolls, vnet.EncounterMoveKindPrisonerClaws} {
 		total := uint8(2)
 		if kind == vnet.EncounterMoveKindThreeTolls {
 			total = 3

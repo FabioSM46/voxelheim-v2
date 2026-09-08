@@ -488,6 +488,9 @@ func TestEveryCataloguedMoveIsAnnouncableAndBounded(t *testing.T) {
 			if move.fromStage < startEncounterPhase || move.fromStage > stages {
 				t.Errorf("%s/%s unlocks at stage %d of %d", kind, move.kind, move.fromStage, stages)
 			}
+			if move.comboFromStage > stages || (move.comboFromStage != 0 && (move.combo == nil || move.comboFromStage < move.fromStage)) {
+				t.Errorf("%s/%s has an invalid combo unlock stage %d", kind, move.kind, move.comboFromStage)
+			}
 			if move.telegraph <= 0 || move.release <= 0 || move.recovery <= 0 {
 				t.Errorf("%s/%s has an empty phase: %+v", kind, move.kind, move)
 			}
