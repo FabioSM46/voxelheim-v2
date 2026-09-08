@@ -179,6 +179,17 @@ type bossEncounter struct {
 	cooldowns map[vnet.EncounterMoveKind]uint32
 	lastUsed  map[vnet.EncounterMoveKind]uint64
 
+	// staggerTicks is the opening a successful interrupt bought, counted down while the
+	// creature stands and announces nothing.
+	//
+	// **Not a published recovery phase, and the encoder is the reason.** An interrupted
+	// instance has to carry its ending on a frame whose phase is `Channel`, because that
+	// is the only phase allowed to say `interruptible` and an `Interrupted` ending on a
+	// move that does not claim to be interruptible is a frame the encoder refuses. So the
+	// instance ends where it was broken, and the opening the design promises afterwards is
+	// this counter rather than a recovery belonging to a move that is already over.
+	staggerTicks uint32
+
 	// nextMoveID is the counter behind every announcement's instance identity. It is
 	// per-encounter and only ever rises, which is what lets a receiver holding a stale
 	// announcement tell it from a new instance of the same move.
@@ -952,6 +963,15 @@ func (m *mob) stepsUp(t Terrain, heading [2]float64, dt float64) bool {
 func (s *Sim) damageMobLocked(m *mob, amount uint16) bool {
 	if amount == 0 || m.health == 0 || s.dungeonBossLocked(m) {
 		return false
+	}
+
+	// Damage during an interruptible channel is what may break it. Recorded in the one
+	// funnel a creature loses health by, so no delivery mechanism can miss it, and before
+	// the kill branch below so a lethal blow is still counted for the instance it ends.
+	if m.encounter != nil && m.encounter.running != nil {
+		if r := m.encounter.running; r.phase == vnet.MovePhaseChannel && r.def.interruptible {
+			r.channelDamage += min(amount, m.health)
+		}
 	}
 
 	if amount >= m.health {

@@ -40,10 +40,10 @@ func runningMoveOf(h *vitalsHarness, id uint64) *runningMove {
 func preferMove(h *vitalsHarness, id uint64, want vnet.EncounterMoveKind) {
 	h.sim.mu.Lock()
 	defer h.sim.mu.Unlock()
-	e := h.sim.mobs[id].encounter
-	for _, def := range encounterMoveCatalog[vnet.MobKindVargrGuardian] {
+	m := h.sim.mobs[id]
+	for _, def := range encounterMoveCatalog[m.kind] {
 		if def.kind != want {
-			e.lastUsed[def.kind] = math.MaxUint32
+			m.encounter.lastUsed[def.kind] = math.MaxUint32
 		}
 	}
 }
@@ -541,7 +541,7 @@ func TestEveryAnnouncementACataloguedMoveProducesEncodes(t *testing.T) {
 				anchor:     m.hazardAnchor(move, aim, target),
 				phaseTicks: 4,
 			}
-			running.hazards = m.hazardsFor(move, running.aim, running.anchor)
+			running.hazards = m.hazardsForPulse(move, running.aim, running.anchor, 0)
 
 			for _, phase := range []vnet.MovePhase{
 				vnet.MovePhaseTelegraph, vnet.MovePhaseRelease, vnet.MovePhaseRecovery,

@@ -83,6 +83,22 @@ type runningMove struct {
 	// announced lane is not the same event as hitting a monolith, and only the second one
 	// is worth the longer opening.
 	laneSpent bool
+
+	// pulseIndex is which pulse of a channel is imminent, counted from zero exactly as the
+	// contract's `pulse_index` is.
+	pulseIndex uint8
+
+	// channelDamage is the health taken since this channel began, and the only thing an
+	// interrupt is decided from. Reset with the instance, never carried between moves.
+	channelDamage uint16
+
+	// flight is where a released projectile has got to, flightFrom where it stood at the
+	// start of this tick's step, and flightSpent that it has reached the end of its
+	// announced lane or a wall. The pair is the charge's [travelledFrom]/pos exactly, for
+	// a point that is not the creature.
+	flight      [3]float64
+	flightFrom  [3]float64
+	flightSpent bool
 }
 
 // announcement is this instance in the shape the wire carries it.
@@ -102,6 +118,16 @@ func (r *runningMove) announcement() protocol.EncounterMove {
 	if r.phase != vnet.MovePhaseRecovery {
 		move.Hazards = r.hazards
 	}
+	// **Only while channelling**, because the encoder refuses a move that counts pulses or
+	// claims to be interruptible in any other phase — and it is right to: a swing that
+	// advertised an interrupt would promise a player an escape the server does not honour.
+	// It is also why an interrupted instance is ended *here*, in `Channel`, rather than
+	// after a move to recovery that would strip the flag off the frame carrying the ending.
+	if r.phase == vnet.MovePhaseChannel {
+		move.PulseIndex = r.pulseIndex
+		move.PulseTotal = r.def.pulses
+		move.Interruptible = r.def.interruptible
+	}
 	return move
 }
 
@@ -110,6 +136,9 @@ func (r *runningMove) announcement() protocol.EncounterMove {
 // Runs whether or not a move is under way, so a heavy move's cooldown is measured from
 // when it ended rather than from when the creature next had nothing to do.
 func (e *bossEncounter) tickCooldownsLocked() {
+	if e.staggerTicks > 0 {
+		e.staggerTicks--
+	}
 	for kind, left := range e.cooldowns {
 		if left <= 1 {
 			delete(e.cooldowns, kind)
@@ -141,6 +170,14 @@ func (m *mob) stepEncounter(s *Sim, players []*Player, tick uint64) {
 	if target == nil || m.encounter == nil {
 		m.action = vnet.MobActionIdle
 		m.actionTicks = 0
+		m.vel[0], m.vel[2] = 0, 0
+		return
+	}
+
+	// An interrupt's opening is spent standing, and nothing may be announced through it.
+	// See [bossEncounter.staggerTicks] for why it is not a published recovery phase.
+	if m.encounter.staggerTicks > 0 {
+		m.action = vnet.MobActionRecovery
 		m.vel[0], m.vel[2] = 0, 0
 		return
 	}
@@ -226,7 +263,7 @@ func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Pla
 		aim:        aim,
 		anchor:     m.hazardAnchor(def, aim, target),
 	}
-	e.running.hazards = m.hazardsFor(def, e.running.aim, e.running.anchor)
+	e.running.hazards = m.hazardsForPulse(def, e.running.aim, e.running.anchor, 0)
 	e.lastUsed[def.kind] = tick
 
 	m.yaw = wrapAngle(math.Atan2(-aim[0], -aim[2]))
@@ -255,6 +292,12 @@ func (m *mob) aimAt(target *Player) [3]float64 {
 // leap can actually cover, so the region is never one the creature cannot reach.
 func (m *mob) hazardAnchor(def encounterMoveDef, aim [3]float64, target *Player) [3]float64 {
 	body := m.species().body
+	if def.hazard.pulse != pulseNone {
+		// A ritual's rings and sectors lie on the floor, so the band is centred half its
+		// own height above the ground rather than half the creature's: a wave that sat at
+		// a tall king's chest would be a region nobody standing in it is inside.
+		return [3]float64{m.pos[0], m.pos[1] + def.hazard.height/2, m.pos[2]}
+	}
 	centre := [3]float64{m.pos[0], m.pos[1] + body.height/2, m.pos[2]}
 	if def.travel != travelLeap {
 		return centre
@@ -267,13 +310,13 @@ func (m *mob) hazardAnchor(def encounterMoveDef, aim [3]float64, target *Player)
 	}
 }
 
-// hazardsFor is the region one move announces, placed in the world.
+// hazardsForPulse is the region one move announces on one pulse, placed in the world.
 //
-// One volume per move in this half of the encounter. The vector is what both the client
-// and [mob.moveReachesLocked] read, so the region drawn and the region resolved against
-// are the same numbers rather than two derivations of one intention.
-func (m *mob) hazardsFor(def encounterMoveDef, aim, anchor [3]float64) []protocol.HazardVolume {
-	hazard := protocol.HazardVolume{
+// The vector is what both the client and [mob.moveReachesLocked] read, so the region drawn
+// and the region resolved against are the same numbers rather than two derivations of one
+// intention. A move that is not channelled has one pulse, numbered zero.
+func (m *mob) hazardsForPulse(def encounterMoveDef, aim, anchor [3]float64, pulse uint8) []protocol.HazardVolume {
+	base := protocol.HazardVolume{
 		Shape:     def.hazard.shape,
 		Origin:    toWire(anchor),
 		Direction: toWire(aim),
@@ -282,12 +325,58 @@ func (m *mob) hazardsFor(def encounterMoveDef, aim, anchor [3]float64) []protoco
 		HalfAngle: float32(def.hazard.halfAngle),
 		HalfWidth: float32(def.hazard.halfWidth),
 	}
-	if def.hazard.shape == vnet.HazardShapeDisc {
-		// A disc reads neither, and the contract says a field a shape ignores is written
-		// as zero rather than carrying a value a later shape might be given a meaning for.
-		hazard.HalfAngle, hazard.HalfWidth = 0, 0
+	// A field a shape ignores is written as zero rather than carrying a value a later
+	// shape might be given a meaning for, which is what the contract asks.
+	if def.hazard.shape != vnet.HazardShapeCone {
+		base.HalfAngle = 0
 	}
-	return []protocol.HazardVolume{hazard}
+	if def.hazard.shape != vnet.HazardShapeLine {
+		base.HalfWidth = 0
+	}
+
+	switch def.hazard.pulse {
+	case pulseExpandingRings:
+		// One band per pulse, walking outward. The ring the client is shown is exactly the
+		// annulus the damage test uses, so the ground inside the wave and the ground
+		// beyond it are both genuinely safe.
+		inner := float64(pulse) * def.hazard.band
+		base.InnerRadius = float32(inner)
+		base.Radius = float32(inner + def.hazard.band)
+		return []protocol.HazardVolume{base}
+	case pulseSectors:
+		regions := make([]protocol.HazardVolume, 0, def.hazard.sectors)
+		for sector := range def.hazard.sectors {
+			bearing := sectorBearing(pulse, sector)
+			one := base
+			one.Radius = float32(def.hazard.reach)
+			one.Origin = toWire([3]float64{
+				anchor[0] + math.Cos(bearing)*def.hazard.sectorRing,
+				anchor[1],
+				anchor[2] + math.Sin(bearing)*def.hazard.sectorRing,
+			})
+			regions = append(regions, one)
+		}
+		return regions
+	}
+	return []protocol.HazardVolume{base}
+}
+
+// sectorSlots is how many places a ritual's sectors are drawn from.
+//
+// Six, against the two a pulse lights, so four are clear at every pulse. That is the
+// arithmetic behind the reachable-safe-space rule rather than a substitute for it — the
+// rule still runs on every candidate, because a later ritual could light five.
+const sectorSlots = 6
+
+// sectorBearing is where one sector of one pulse sits, in radians.
+//
+// Deterministic and spread: the slot walks by two per pulse and the sectors of a single
+// pulse sit three apart, so no pulse lights adjacent ground and no two consecutive pulses
+// light the same. A generator would make the same fight differ run to run, which is the
+// one property every tick path in this simulation keeps.
+func sectorBearing(pulse, sector uint8) float64 {
+	slot := (uint32(pulse)*2 + uint32(sector)*3) % sectorSlots
+	return 2 * math.Pi * float64(slot) / sectorSlots
 }
 
 // enterMovePhaseLocked moves the running instance into its next phase.
@@ -301,11 +390,16 @@ func (m *mob) enterMovePhaseLocked(phase vnet.MovePhase, ticks uint32, tick uint
 	r.phaseTicks = ticks
 	r.remaining = ticks
 	r.startedTick = uint32(tick)
-	if phase == vnet.MovePhaseRelease {
-		// One permitted hit per target per window, and the window is this release. A
-		// fresh ledger here rather than at the move's start is what makes that sentence
-		// mean the release rather than the whole instance.
+	if phase == vnet.MovePhaseRelease || phase == vnet.MovePhaseChannel {
+		// One permitted hit per target per window. The window is this release, or this
+		// single pulse of a channel — a fresh ledger here rather than at the move's start
+		// is what makes that sentence mean the window rather than the whole instance.
 		r.hit = make(map[uint64]struct{})
+	}
+	if phase == vnet.MovePhaseRelease {
+		// A thrown move's projectile starts at the anchor the lane was announced from, so
+		// the flight and the region share an origin by construction.
+		r.flight, r.flightFrom = r.anchor, r.anchor
 	}
 }
 
@@ -333,10 +427,34 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 	// guardian's 200 ms window is a single tick below five hertz and its whole release
 	// would publish as recovery. It also keeps `phase_started_tick` honest, since a phase
 	// is now entered on the first tick it runs.
-	if r.remaining == 0 || (r.phase == vnet.MovePhaseRelease && (r.impacted || r.laneSpent)) {
+	// An interrupt ends the instance where it stands, before this tick's pulse can fire.
+	// The ending is published on the `Channel` frame, which is the only phase allowed to
+	// carry `interruptible`; the opening it buys is the encounter's stagger.
+	if r.phase == vnet.MovePhaseChannel && r.def.interruptible &&
+		r.def.interruptDamage > 0 && r.channelDamage >= r.def.interruptDamage {
+		stagger := r.ticks.interruptRecovery
+		m.finishEncounterMoveLocked(vnet.MoveEndInterrupted)
+		m.encounter.staggerTicks = stagger
+		m.action = vnet.MobActionRecovery
+		m.vel[0], m.vel[2] = 0, 0
+		return
+	}
+
+	if r.remaining == 0 || (r.phase == vnet.MovePhaseRelease && (r.impacted || r.laneSpent || r.flightSpent)) {
 		switch r.phase {
 		case vnet.MovePhaseTelegraph:
-			m.enterMovePhaseLocked(vnet.MovePhaseRelease, r.ticks.release, tick)
+			if r.def.pulses > 0 {
+				m.enterChannelPulseLocked(0, tick)
+			} else {
+				m.enterMovePhaseLocked(vnet.MovePhaseRelease, r.ticks.release, tick)
+			}
+		case vnet.MovePhaseChannel:
+			// The next pulse, or the recovery once the last has fired.
+			if next := r.pulseIndex + 1; next < r.def.pulses {
+				m.enterChannelPulseLocked(next, tick)
+			} else {
+				m.enterMovePhaseLocked(vnet.MovePhaseRecovery, r.ticks.recovery, tick)
+			}
 		case vnet.MovePhaseRelease:
 			recovery := r.ticks.recovery
 			if r.impacted && r.ticks.impactRecovery > 0 {
@@ -358,9 +476,20 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 		// not also closing the distance it is measured against.
 		m.action = vnet.MobActionWindup
 		m.vel[0], m.vel[2] = 0, 0
+	case vnet.MovePhaseChannel:
+		// A ritual is anchored for the whole of it — the approved design's "the king stays
+		// anchored until the propagation ends". The pulse is shown for its interval and
+		// fires on the last tick of it, which is the telegraph's own promise one layer
+		// down: the region is drawn before it is dangerous, never with the damage.
+		m.action = vnet.MobActionWindup
+		m.vel[0], m.vel[2] = 0, 0
+		if r.remaining == 1 {
+			s.resolveMoveDamageLocked(m, players)
+		}
 	case vnet.MovePhaseRelease:
 		m.action = vnet.MobActionWindup
 		m.travelDuringReleaseLocked(s)
+		m.advanceProjectileLocked(s)
 		s.resolveMoveDamageLocked(m, players)
 	case vnet.MovePhaseRecovery:
 		m.action = vnet.MobActionRecovery
@@ -368,6 +497,57 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 	}
 	r.remaining--
 	m.publishRunningMoveLocked()
+}
+
+// enterChannelPulseLocked shows the next pulse of a channel.
+//
+// A pulse is a window in the sense the hit ledger means: cleared here, so one pulse lands
+// once on each target and the next pulse of the same ritual may land again.
+func (m *mob) enterChannelPulseLocked(pulse uint8, tick uint64) {
+	r := m.encounter.running
+	r.pulseIndex = pulse
+	r.hazards = m.hazardsForPulse(r.def, r.aim, r.anchor, pulse)
+	m.enterMovePhaseLocked(vnet.MovePhaseChannel, r.ticks.channelPulse, tick)
+}
+
+// advanceProjectileLocked moves a released spear one tick along its announced lane.
+//
+// **The charge's rules, for a point that is not the creature.** The step is clamped to what
+// is left of the announced lane, so the flight can never leave the region the client was
+// shown; the damage test is the segment crossed this tick rather than the point it ended
+// at, so a spear faster than a body is wide cannot pass through anybody; and the direction
+// is the move's locked aim, so it does not steer after it is thrown.
+//
+// Terrain stops it where a wall stops a charge. The check is the voxel the spear is about
+// to occupy rather than a swept traversal, which is the conservative direction: it stops
+// at the near face of a wall rather than inside it.
+func (m *mob) advanceProjectileLocked(s *Sim) {
+	r := m.encounter.running
+	if r.def.flightSpeed <= 0 {
+		return
+	}
+	r.flightFrom = r.flight
+
+	reach := min(r.def.flightSpeed*s.dt, r.remainingFlight())
+	if reach <= 0 {
+		r.flightSpent = true
+		return
+	}
+	next := [3]float64{r.flight[0] + r.aim[0]*reach, r.flight[1], r.flight[2] + r.aim[2]*reach}
+	if s.terrain.Solid(int64(math.Floor(next[0])), int64(math.Floor(next[1])), int64(math.Floor(next[2]))) {
+		r.flightSpent = true
+		return
+	}
+	r.flight = next
+}
+
+// remainingFlight is how much of the announced lane the spear has left to cross.
+func (r *runningMove) remainingFlight() float64 {
+	if len(r.hazards) == 0 {
+		return 0
+	}
+	crossed := math.Hypot(r.flight[0]-r.anchor[0], r.flight[2]-r.anchor[2])
+	return float64(r.hazards[0].Radius) - crossed
 }
 
 // travelDuringReleaseLocked displaces a charging or leaping creature by one tick.
@@ -472,6 +652,11 @@ func (s *Sim) resolveMoveDamageLocked(m *mob, players []*Player) {
 // for standing where it merely passed.
 func (m *mob) moveReachesLocked(p *Player) bool {
 	r := m.encounter.running
+	if r.def.flightSpeed > 0 {
+		// The spear's own segment, in the announced lane. [sweptLaneReaches] holds both
+		// halves: inside the strip the client was shown, and swept over during this tick.
+		return len(r.hazards) > 0 && sweptLaneReaches(r.hazards[0], r.flightFrom, r.flight, p.box())
+	}
 	switch r.def.travel {
 	case travelCharge:
 		return len(r.hazards) > 0 && sweptLaneReaches(r.hazards[0], r.travelledFrom, m.pos, p.box())
@@ -568,8 +753,44 @@ func anyLivePlayerInRange(m *mob, players []*Player) bool {
 // The caller holds Sim.mu.
 func (s *Sim) moveLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Player) bool {
 	aim := m.aimAt(target)
-	candidate := m.hazardsFor(def, aim, m.hazardAnchor(def, aim, target))
-	reach := WalkSpeed * def.telegraph.Seconds()
+	anchor := m.hazardAnchor(def, aim, target)
+
+	// **Every pulse, not merely the first.** A ritual is a schedule, and a schedule whose
+	// third pulse covers the ground its second one drove everybody onto is exactly the
+	// thing this rule exists to refuse — checking only what is announced first would pass
+	// it. A move that is not channelled has one pulse, numbered zero, so this is the same
+	// question asked once.
+	//
+	// The distance sampled is how far a walking player travels in the warning that pulse
+	// actually gives: a channel shows each pulse for its own interval, which is shorter
+	// than the telegraph that opened the ritual.
+	warning := def.telegraph
+	if def.pulses > 0 {
+		warning = def.channelPulse
+	}
+	reach := WalkSpeed * warning.Seconds()
+
+	pulses := max(def.pulses, 1)
+	for pulse := range pulses {
+		if !s.pulseLeavesAnEscapeLocked(m, def, target, aim, anchor, pulse, reach) {
+			return false
+		}
+	}
+	return true
+}
+
+// pulseLeavesAnEscapeLocked is the reachable-safe-space question for one pulse.
+//
+// **The schedule is refused, not the damage.** A pulse whose regions — with anything this
+// encounter already has running — cover every direction a player could walk in during its
+// warning is never announced, so there is no unavoidable window to survive. Solid ground
+// counts: a bearing that walks into a wall is not an escape, and neither is one that
+// leaves the addressable world.
+//
+// The caller holds Sim.mu.
+func (s *Sim) pulseLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Player,
+	aim, anchor [3]float64, pulse uint8, reach float64) bool {
+	candidate := m.hazardsForPulse(def, aim, anchor, pulse)
 
 	for bearing := range escapeBearings {
 		angle := 2 * math.Pi * float64(bearing) / escapeBearings
