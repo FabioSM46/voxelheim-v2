@@ -271,8 +271,48 @@ func (rcv *EncounterMove) MutateEnded(n MoveEnd) bool {
 	return rcv._tab.MutateByteSlot(26, byte(n))
 }
 
+// / V38: physical combination position, counted from one. 0/0 means an ordinary
+// / independent move. Otherwise 1 <= combo_step <= combo_total <= 3. BiteAndTear
+// / requires total 2; ThreeTolls requires total 3 (left cut, right cut, thrust).
+// / PrisonerClaws reserves totals 2 or 3 for alternating blows; all other kinds
+// / require 0/0. A combo never uses Channel, pulses or interruptibility.
+// / Each blow has a NEW move_instance_id, with this pair immutable for that instance
+// / across its telegraph, release, recovery and ending. A late snapshot is complete:
+// / receivers never count previous moves to reconstruct this position.
+func (rcv *EncounterMove) ComboStep() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / V38: physical combination position, counted from one. 0/0 means an ordinary
+// / independent move. Otherwise 1 <= combo_step <= combo_total <= 3. BiteAndTear
+// / requires total 2; ThreeTolls requires total 3 (left cut, right cut, thrust).
+// / PrisonerClaws reserves totals 2 or 3 for alternating blows; all other kinds
+// / require 0/0. A combo never uses Channel, pulses or interruptibility.
+// / Each blow has a NEW move_instance_id, with this pair immutable for that instance
+// / across its telegraph, release, recovery and ending. A late snapshot is complete:
+// / receivers never count previous moves to reconstruct this position.
+func (rcv *EncounterMove) MutateComboStep(n byte) bool {
+	return rcv._tab.MutateByteSlot(28, n)
+}
+
+func (rcv *EncounterMove) ComboTotal() byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.GetByte(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *EncounterMove) MutateComboTotal(n byte) bool {
+	return rcv._tab.MutateByteSlot(30, n)
+}
+
 func EncounterMoveStart(builder *flatbuffers.Builder) {
-	builder.StartObject(12)
+	builder.StartObject(14)
 }
 func EncounterMoveAddMoveInstanceId(builder *flatbuffers.Builder, moveInstanceId uint64) {
 	builder.PrependUint64Slot(0, moveInstanceId, 0)
@@ -312,6 +352,12 @@ func EncounterMoveAddInterruptible(builder *flatbuffers.Builder, interruptible b
 }
 func EncounterMoveAddEnded(builder *flatbuffers.Builder, ended MoveEnd) {
 	builder.PrependByteSlot(11, byte(ended), 0)
+}
+func EncounterMoveAddComboStep(builder *flatbuffers.Builder, comboStep byte) {
+	builder.PrependByteSlot(12, comboStep, 0)
+}
+func EncounterMoveAddComboTotal(builder *flatbuffers.Builder, comboTotal byte) {
+	builder.PrependByteSlot(13, comboTotal, 0)
 }
 func EncounterMoveEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

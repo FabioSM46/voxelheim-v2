@@ -845,6 +845,22 @@ mod tests {
     }
 
     #[test]
+    fn a_v37_server_refusal_prevents_a_v38_combo_client_entering() {
+        // The version decision belongs to the server's ClientHello boundary. The
+        // client preserves that refusal rather than entering a world without steps.
+        let mut handshake = Handshake::new();
+        let refusal = Reject {
+            code: "PROTOCOL_MISMATCH",
+            detail: "server speaks protocol 37, client speaks 38".to_owned(),
+        };
+        assert_eq!(
+            handshake.apply(Message::Reject(refusal.clone())),
+            Ok(Transition::Refused(refusal))
+        );
+        assert!(!handshake.established());
+    }
+
+    #[test]
     fn a_reject_refuses_the_session_and_preserves_the_reason() {
         let mut handshake = Handshake::new();
 

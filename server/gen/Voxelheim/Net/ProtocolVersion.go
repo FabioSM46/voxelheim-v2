@@ -297,8 +297,11 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	/// V37: boss move and spell timelines are announced before they can damage anybody.
-	ProtocolVersionCurrent ProtocolVersion = 37
+	/// V38: explicit physical combo position survives missed earlier announcements.
+	/// Appending fields is layout-compatible, but a V37 client silently drops the
+	/// position and a V38 client cannot recover it from a V37 server. Both directions
+	/// must reject the handshake rather than disagree about the final opening.
+	ProtocolVersionCurrent ProtocolVersion = 38
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

@@ -192,6 +192,7 @@ pub(crate) mod tests {
                     radius: 8.0,
                     height: 2.0,
                 }],
+                combo: None,
                 pulse: None,
                 interruptible: false,
                 ended: None,
@@ -215,6 +216,30 @@ pub(crate) mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn late_combo_step_survives_replacement_without_replaying_prior_blows() {
+        let mut next = timeline();
+        next.moves[0].kind = EncounterMoveKind::ThreeTolls;
+        next.moves[0].combo = Some((3, 3));
+        let snap = snapshot(110);
+        let shown = project(&[next.clone()], Some(&snap));
+        assert_eq!(shown[0].announced.combo, Some((3, 3)));
+        next.moves[0].phase = MovePhase::Recovery;
+        assert_eq!(
+            project(&[next.clone()], Some(&snap))[0].announced.combo,
+            Some((3, 3))
+        );
+        next.moves[0].move_instance_id += 1;
+        next.moves[0].kind = EncounterMoveKind::BiteAndTear;
+        next.moves[0].combo = Some((1, 2));
+        let replaced = project(&[next.clone()], Some(&snap));
+        assert_ne!(shown[0].key, replaced[0].key);
+        assert_eq!(replaced[0].announced.combo, Some((1, 2)));
+        next.moves[0].ended = Some(MoveEnd::Cancelled);
+        assert!(project(&[next], Some(&snap)).is_empty());
+        assert!(project(&[], Some(&snap)).is_empty());
     }
 
     #[test]

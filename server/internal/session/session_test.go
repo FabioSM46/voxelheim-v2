@@ -889,7 +889,7 @@ func TestServeRefusesAndExplains(t *testing.T) {
 		done <- session.Serve(context.Background(), conn, serveConfig(), noTimeouts(), chunks, sim, peers, ephemeralIdentities(), 3, discard())
 	}()
 
-	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersion(42), "Eivor")
+	conn.in <- protocol.EncodeClientHello(vnet.ProtocolVersion(37), "Eivor")
 
 	// The refusal must reach the client before the session ends: being told why is
 	// the whole point of ServerReject.

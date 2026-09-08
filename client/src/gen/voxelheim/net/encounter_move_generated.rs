@@ -75,6 +75,8 @@ impl<'a> EncounterMove<'a> {
     pub const VT_PULSE_TOTAL: ::flatbuffers::VOffsetT = 22;
     pub const VT_INTERRUPTIBLE: ::flatbuffers::VOffsetT = 24;
     pub const VT_ENDED: ::flatbuffers::VOffsetT = 26;
+    pub const VT_COMBO_STEP: ::flatbuffers::VOffsetT = 28;
+    pub const VT_COMBO_TOTAL: ::flatbuffers::VOffsetT = 30;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -101,6 +103,8 @@ impl<'a> EncounterMove<'a> {
         }
         builder.add_phase_ticks(args.phase_ticks);
         builder.add_phase_started_tick(args.phase_started_tick);
+        builder.add_combo_total(args.combo_total);
+        builder.add_combo_step(args.combo_step);
         builder.add_ended(args.ended);
         builder.add_interruptible(args.interruptible);
         builder.add_pulse_total(args.pulse_total);
@@ -257,6 +261,36 @@ impl<'a> EncounterMove<'a> {
                 .unwrap()
         }
     }
+    /// V38: physical combination position, counted from one. 0/0 means an ordinary
+    /// independent move. Otherwise 1 <= combo_step <= combo_total <= 3. BiteAndTear
+    /// requires total 2; ThreeTolls requires total 3 (left cut, right cut, thrust).
+    /// PrisonerClaws reserves totals 2 or 3 for alternating blows; all other kinds
+    /// require 0/0. A combo never uses Channel, pulses or interruptibility.
+    /// Each blow has a NEW move_instance_id, with this pair immutable for that instance
+    /// across its telegraph, release, recovery and ending. A late snapshot is complete:
+    /// receivers never count previous moves to reconstruct this position.
+    #[inline]
+    pub fn combo_step(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u8>(EncounterMove::VT_COMBO_STEP, Some(0))
+                .unwrap()
+        }
+    }
+    #[inline]
+    pub fn combo_total(&self) -> u8 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u8>(EncounterMove::VT_COMBO_TOTAL, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EncounterMove<'_> {
@@ -280,6 +314,8 @@ impl ::flatbuffers::Verifiable for EncounterMove<'_> {
             .visit_field::<u8>("pulse_total", Self::VT_PULSE_TOTAL, false)?
             .visit_field::<bool>("interruptible", Self::VT_INTERRUPTIBLE, false)?
             .visit_field::<MoveEnd>("ended", Self::VT_ENDED, false)?
+            .visit_field::<u8>("combo_step", Self::VT_COMBO_STEP, false)?
+            .visit_field::<u8>("combo_total", Self::VT_COMBO_TOTAL, false)?
             .finish();
         Ok(())
     }
@@ -301,6 +337,8 @@ pub struct EncounterMoveArgs<'a> {
     pub pulse_total: u8,
     pub interruptible: bool,
     pub ended: MoveEnd,
+    pub combo_step: u8,
+    pub combo_total: u8,
 }
 impl<'a> Default for EncounterMoveArgs<'a> {
     #[inline]
@@ -318,6 +356,8 @@ impl<'a> Default for EncounterMoveArgs<'a> {
             pulse_total: 0,
             interruptible: false,
             ended: MoveEnd::Unknown,
+            combo_step: 0,
+            combo_total: 0,
         }
     }
 }
@@ -396,6 +436,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EncounterMoveBuilder<'a, 'b, 
             .push_slot::<MoveEnd>(EncounterMove::VT_ENDED, ended, MoveEnd::Unknown);
     }
     #[inline]
+    pub fn add_combo_step(&mut self, combo_step: u8) {
+        self.fbb_
+            .push_slot::<u8>(EncounterMove::VT_COMBO_STEP, combo_step, 0);
+    }
+    #[inline]
+    pub fn add_combo_total(&mut self, combo_total: u8) {
+        self.fbb_
+            .push_slot::<u8>(EncounterMove::VT_COMBO_TOTAL, combo_total, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EncounterMoveBuilder<'a, 'b, A> {
@@ -427,6 +477,8 @@ impl ::core::fmt::Debug for EncounterMove<'_> {
         ds.field("pulse_total", &self.pulse_total());
         ds.field("interruptible", &self.interruptible());
         ds.field("ended", &self.ended());
+        ds.field("combo_step", &self.combo_step());
+        ds.field("combo_total", &self.combo_total());
         ds.finish()
     }
 }
