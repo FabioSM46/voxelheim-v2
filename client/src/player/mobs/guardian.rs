@@ -4,6 +4,8 @@
 use super::*;
 use bosses::{BONE, FROST, FUR, IRON, boxes};
 
+pub(super) mod choreography;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Segment {
     Pelvis,
@@ -23,9 +25,11 @@ pub(crate) enum Segment {
     ChainLeft,
     ChainMiddle,
     ChainRight,
+    CollarLeft,
+    CollarRight,
 }
 
-pub(super) const SEGMENTS: [Segment; 17] = [
+pub(super) const SEGMENTS: [Segment; 19] = [
     Segment::Pelvis,
     Segment::Thorax,
     Segment::Neck,
@@ -43,6 +47,8 @@ pub(super) const SEGMENTS: [Segment; 17] = [
     Segment::ChainLeft,
     Segment::ChainMiddle,
     Segment::ChainRight,
+    Segment::CollarLeft,
+    Segment::CollarRight,
 ];
 
 type BoxPart = (Vec3, Vec3, Color);
@@ -74,10 +80,20 @@ fn geometry(segment: Segment) -> Vec<BoxPart> {
             result.push(part([0.07, 0.28, 0.08], [-0.58, 1.37, -0.12], IRON));
             result
         }
-        Neck => vec![
-            part([1.20, 0.80, 0.17], [0.0, 1.18, -0.345], FUR),
-            part([0.75, 0.20, 0.58], [0.0, 1.00, -0.25], IRON),
-        ],
+        Neck => vec![part([1.20, 0.80, 0.17], [0.0, 1.18, -0.345], FUR)],
+        CollarLeft | CollarRight => vec![part(
+            [0.375, 0.20, 0.58],
+            [
+                if segment == CollarLeft {
+                    -0.1875
+                } else {
+                    0.1875
+                },
+                1.0,
+                -0.25,
+            ],
+            IRON,
+        )],
         Head => vec![
             part([0.62, 0.46, 0.40], [0.0, 0.97, -0.56], FUR),
             part([0.05, 0.15, 0.06], [-0.20, 0.73, -0.765], BONE),
@@ -206,7 +222,9 @@ pub(super) struct Motion {
     yaw: f32,
     feet: [Foot; 4],
     next_pair: usize,
-    pub(super) transforms: [Transform; 17],
+    pub(super) fast_travel: bool,
+    pub(super) stage: u8,
+    pub(super) transforms: [Transform; 19],
 }
 impl Motion {
     pub(super) fn new(position: Vec3, yaw: f32) -> Self {
@@ -224,7 +242,9 @@ impl Motion {
                 }
             }),
             next_pair: 0,
-            transforms: [Transform::IDENTITY; 17],
+            fast_travel: false,
+            stage: 1,
+            transforms: [Transform::IDENTITY; 19],
         }
     }
 
@@ -241,21 +261,25 @@ impl Motion {
         let turn = (yaw - self.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI;
         // A streaming/teleport correction is not a huge stride. Vertical movement
-        // follows the server (including its leap arc), not a locally animated jump.
+        // follows the server (including vertical corrections), not a locally animated jump.
         if displacement.length() > 0.75
             || turn.abs() > 0.8
             || displacement.y.abs() > 0.04
             || down > 0.0
         {
+            let travel = self.fast_travel;
+            let stage = self.stage;
             *self = Self::new(position, yaw);
+            self.fast_travel = travel;
+            self.stage = stage;
         }
         let rotation = Quat::from_rotation_y(yaw);
         let dt = delta.as_secs_f32().min(0.05);
         let speed =
             (displacement.xz().length() + turn.abs() * 0.7) / delta.as_secs_f32().max(0.001);
-        let swing_seconds = (0.16 / (1.0 + speed / 1.5)).clamp(0.045, 0.16);
+        let swing_seconds = (0.16 / (1.0 + speed / 1.5)).clamp(0.025, 0.16);
         let moving = displacement.xz().length() > 0.0001 || turn.abs() > 0.0001;
-        let gait_allowed = matches!(action, MobAction::Idle | MobAction::Chase);
+        let gait_allowed = matches!(action, MobAction::Idle | MobAction::Chase) || self.fast_travel;
         let mut targets = [Vec3::ZERO; 4];
         let swinging = self.feet.iter().any(|foot| foot.swing < 1.0);
         if !swinging && down == 0.0 && gait_allowed {
@@ -294,7 +318,7 @@ impl Motion {
             targets[i] = rotation.inverse() * (foot.contact - position);
             // The visual legs have a finite reach even if a render hitch skips a
             // whole support exchange. Replant instead of stretching geometry.
-            if targets[i].distance(rest_foot(i)) > 0.48 {
+            if targets[i].distance(rest_foot(i)) > if self.fast_travel { 0.58 } else { 0.48 } {
                 targets[i] = rest_foot(i);
                 foot.contact = position + rotation * targets[i];
                 foot.swing = 1.0;
@@ -353,7 +377,7 @@ pub(super) fn pose(
     action: MobAction,
     elapsed: Duration,
     down: f32,
-) -> [Transform; 17] {
+) -> [Transform; 19] {
     let breathing = if down == 0.0 {
         (elapsed.as_secs_f32() * 2.2).sin() * 0.008
     } else {
@@ -381,7 +405,7 @@ pub(super) fn pose(
         let local = match segment {
             Pelvis => lowered,
             Thorax => torso,
-            Neck => neck,
+            Neck | CollarLeft | CollarRight => neck,
             Head => head,
             Jaw => {
                 head * around(
@@ -439,7 +463,7 @@ pub(super) fn pose(
             *matrix = Mat4::from_translation(-Vec3::Y * lowest) * *matrix;
         }
     }
-    let _ = action; // Dedicated server-timed attacks are the second part of #1028.
+    let _ = action; // The encounter pass supplies attacks after timeline reconciliation.
     matrices.map(Transform::from_matrix)
 }
 
@@ -449,7 +473,18 @@ fn bounds(segment: Segment) -> [Vec3; 8] {
     let (lo, hi) = match segment {
         Pelvis => (Vec3::new(-0.43, 0.61, 0.13), Vec3::new(0.43, 1.09, 0.63)),
         Thorax => (Vec3::new(-0.615, 0.78, -0.30), Vec3::new(0.60, 1.8, 0.27)),
-        Neck => (Vec3::new(-0.60, 0.78, -0.54), Vec3::new(0.60, 1.58, 0.04)),
+        Neck => (Vec3::new(-0.60, 0.78, -0.43), Vec3::new(0.60, 1.58, -0.26)),
+        CollarLeft | CollarRight => {
+            let x = if segment == CollarLeft {
+                -0.1875
+            } else {
+                0.1875
+            };
+            (
+                Vec3::new(x - 0.1875, 0.9, -0.54),
+                Vec3::new(x + 0.1875, 1.1, 0.04),
+            )
+        }
         Head => (
             Vec3::new(-0.31, 0.655, -0.795),
             Vec3::new(0.31, 1.335, -0.36),
@@ -509,3 +544,6 @@ pub(super) fn posed_meshes(action: MobAction, elapsed: Duration, down: f32) -> V
 
 #[cfg(test)]
 mod capture;
+
+#[cfg(test)]
+mod system_tests;
