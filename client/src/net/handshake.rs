@@ -633,6 +633,14 @@ impl Handshake {
             (Phase::Established, Message::InstanceBindings(bindings)) => {
                 Ok(Transition::InstanceBindings(bindings))
             }
+            // Fully decoded and validated at the boundary, and dropped here because
+            // nothing presents a telegraph yet — this issue's second part is what gives
+            // it a consumer. `Ignored` rather than a `Transition` of its own for the
+            // reason it exists: a payload this build understands and does not yet use is
+            // not a peer breaking the contract.
+            (Phase::Established, Message::EncounterTimeline(_)) => {
+                Ok(Transition::Ignored("EncounterTimeline"))
+            }
 
             // -- And the same payloads before there is a session --------------------
             //
@@ -683,6 +691,9 @@ impl Handshake {
                 Err(HandshakeError::Premature("InstanceEntryOffer"))
             }
             (_, Message::InstanceBindings(_)) => Err(HandshakeError::Premature("InstanceBindings")),
+            (_, Message::EncounterTimeline(_)) => {
+                Err(HandshakeError::Premature("EncounterTimeline"))
+            }
         }
     }
 }
