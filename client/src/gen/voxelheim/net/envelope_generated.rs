@@ -1118,6 +1118,21 @@ impl<'a> Envelope<'a> {
             None
         }
     }
+
+    #[inline]
+    #[allow(non_snake_case)]
+    pub fn payload_as_encounter_timeline(&self) -> Option<EncounterTimeline<'a>> {
+        if self.payload_type() == Payload::EncounterTimeline {
+            self.payload().map(|t| {
+                // Safety:
+                // Created from a valid Table for this object
+                // Which contains a valid union in this slot
+                unsafe { EncounterTimeline::init_from_table(t) }
+            })
+        } else {
+            None
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for Envelope<'_> {
@@ -1199,6 +1214,7 @@ impl ::flatbuffers::Verifiable for Envelope<'_> {
           Payload::InstanceEntryOffer => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceEntryOffer>>("Payload::InstanceEntryOffer", pos),
           Payload::InstanceEntryAnswer => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceEntryAnswer>>("Payload::InstanceEntryAnswer", pos),
           Payload::InstanceBindings => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<InstanceBindings>>("Payload::InstanceBindings", pos),
+          Payload::EncounterTimeline => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<EncounterTimeline>>("Payload::EncounterTimeline", pos),
           _ => Ok(()),
         }
      })?
@@ -1952,6 +1968,16 @@ impl ::core::fmt::Debug for Envelope<'_> {
             }
             Payload::InstanceBindings => {
                 if let Some(x) = self.payload_as_instance_bindings() {
+                    ds.field("payload", &x)
+                } else {
+                    ds.field(
+                        "payload",
+                        &"InvalidFlatbuffer: Union discriminant does not match value.",
+                    )
+                }
+            }
+            Payload::EncounterTimeline => {
+                if let Some(x) = self.payload_as_encounter_timeline() {
                     ds.field("payload", &x)
                 } else {
                     ds.field(

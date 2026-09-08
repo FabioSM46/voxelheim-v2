@@ -4952,6 +4952,10 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::InstanceBindings(instance_bindings(&payload)?))
         }
+        // V37's one, carried by name until this issue's client half gives it an arm that
+        // reads it. Explicit rather than left to the fallback below: the fallback answers
+        // for a tag this build cannot name, and this is a member it can.
+        fb::Payload::EncounterTimeline => Ok(Message::Deferred(name)),
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -9790,15 +9794,24 @@ mod tests {
     /// bump because an offer nobody can answer is not one. The two appended
     /// `RefusalReason` members owe nothing on their own: that enum is read through its
     /// zero member and never fails a frame.
+    ///
+    /// **V37 appends `EncounterTimeline`, and it is the rule's other direction again.**
+    /// The payload travels server -> client, so an older client drops the tag safely and
+    /// that direction owes nothing. The bump is owed by the newer client against the
+    /// older server: it receives no timeline at all, which is indistinguishable from a
+    /// boss announcing nothing, so it draws no telegraph and is left reading an attack
+    /// off the animation already landing on it. Two peers disagreeing after a clean
+    /// handshake about whether a blow was announced is the `drop_durabilities` case of
+    /// V11, not the unknown-tag case of `ActionRefused`.
     #[test]
-    fn protocol_v35_appends_the_dungeon_entry_contract() {
+    fn protocol_v37_announces_a_boss_move_before_it_can_land() {
         assert_eq!(fb::ProtocolVersion::Unknown.0, 0);
         // V33 cannot be ignored: the two peers must agree which world is live. V34
         // appends `MobKind::VargrGuardian` and `MobKind::DraugrKing`, which is
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 36);
+        assert_eq!(fb::ProtocolVersion::Current.0, 37);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -9870,6 +9883,7 @@ mod tests {
             (fb::Payload::InstanceEntryOffer, 68),
             (fb::Payload::InstanceEntryAnswer, 69),
             (fb::Payload::InstanceBindings, 70),
+            (fb::Payload::EncounterTimeline, 71),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -9885,7 +9899,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            71,
+            72,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -9915,7 +9929,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 71] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 72] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -10003,6 +10017,10 @@ mod tests {
         // `MapTile` before the map window existed: the sessions window that draws these
         // is the other half of that issue.
         (fb::Payload::InstanceBindings, Handling::Consumed),
+        // V37's one, server→client. `Deferred` means "this build has no arm yet" rather
+        // than "this contract has no member" — the staged shape V24's map payloads, V25's
+        // stall and V35's two each had. The arm that reads it is this issue's client half.
+        (fb::Payload::EncounterTimeline, Handling::Deferred),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.

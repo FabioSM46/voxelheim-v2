@@ -314,11 +314,11 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // the version: it travels server -> client, an older client drops the tag, and an older
 // server sends none — which reads to a newer client as a character who owes nothing, and
 // a server with no saved runs is exactly that.
-func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
+func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 36 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 36", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 37 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 37", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -399,6 +399,11 @@ func TestProtocolV35AppendsTheDungeonEntryContract(t *testing.T) {
 		vnet.PayloadInstanceEntryOffer,
 		vnet.PayloadInstanceEntryAnswer,
 		vnet.PayloadInstanceBindings,
+		// V37's one, server -> client. An older client drops the tag safely; the bump is
+		// owed by the other direction, where a newer client against an older server
+		// receives no timeline, draws no telegraph, and reads an attack off the animation
+		// already landing on it. See ProtocolVersion in schemas/common.fbs.
+		vnet.PayloadEncounterTimeline,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
