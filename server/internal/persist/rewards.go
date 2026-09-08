@@ -175,14 +175,20 @@ func (s *RewardStore) commit(expected uint64, next RewardJournal) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.commitLocked(expected, next, nil)
+}
+
+// acknowledged contains only intents whose durable character receipts were verified.
+// This remains private so a whole-state caller cannot invent an acknowledgement.
+func (s *RewardStore) commitLocked(expected uint64, next RewardJournal, acknowledged []RewardIntent) error {
 	if expected != s.journal.Revision || expected == math.MaxUint64 || next.Revision != expected+1 || next.NextGeneration < s.journal.NextGeneration {
 		return ErrRewardJournalConflict
 	}
 
-	// No acknowledgement/GC API is active in this part. Unresolved intents cannot
-	// disappear or be recaptured through the storage primitive, even at expiry.
+	// Only verified acknowledgements may remove an intent. Neither snapshots nor
+	// expiry may delete or recapture a pending postimage.
 	for _, intent := range s.journal.Intents {
-		if !slices.Contains(next.Intents, intent) {
+		if !slices.Contains(next.Intents, intent) && !slices.Contains(acknowledged, intent) {
 			return ErrRewardJournalConflict
 		}
 	}
