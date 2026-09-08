@@ -382,19 +382,19 @@ func TestFiniteStreamerNeverInventsResidentChunksOrUnloads(t *testing.T) {
 }
 
 // Holders is the read that the isolation wait above needs and that BroadcastChunk could
-// not provide. Both halves matter: it must agree with what a broadcast reaches, and it
-// must leave that answer unchanged, because a wait that mutates what it is waiting for is
-// the defect one layer down from #1057 rather than a fix for it.
+// not provide. Three things must hold, and the third is why a second coordinate appears
+// here: it must apply the same predicate a broadcast selects on, it must leave that answer
+// unchanged, and it must be a predicate rather than a head count.
+//
+// **The unheld coordinate is load-bearing.** Asked only about a chunk every session holds,
+// "count the holders" and "count the sessions" return the same number, and the test passes
+// against an implementation that never consults a view. That is not hypothetical: the
+// first version of this test did exactly that, and survived a mutation replacing the whole
+// predicate with a head count.
 func TestHoldersAgreesWithABroadcastAndChangesNothing(t *testing.T) {
 	cfg := editConfig()
 	cfg.Spawn = [3]float32{.5, 1, .5}
-	group := game.NewWorldGroup()
-	chunks, open, peers := editDeps(t, cfg, game.WithWorldGroup(group))
-	manager, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, 2, peers.NextID, discard(), game.WithWorldGroup(group))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(manager.Close)
+	chunks, open, peers := editDeps(t, cfg)
 	peers.NextID()
 	peers.NextID()
 	_, fa := admit(t, cfg, chunks, open, peers, 1)
@@ -403,6 +403,13 @@ func TestHoldersAgreesWithABroadcastAndChangesNothing(t *testing.T) {
 
 	coord := world.Coord{}
 	waitUntil(t, "both sessions hold the coordinate", func() bool { return peers.Holders(coord) == 2 })
+
+	// Far outside anybody's view distance, in the same world and with both sessions still
+	// registered. A head count answers 2 here; the predicate answers 0.
+	unheld := world.Coord{X: 1 << 20, Z: 1 << 20}
+	if held := peers.Holders(unheld); held != 0 {
+		t.Fatalf("Holders of an unheld coordinate = %d, want 0", held)
+	}
 
 	// Reading it repeatedly may not move it. BroadcastChunk forgets the chunk on any
 	// session whose send failed, so the equivalent question asked that way is destructive.
@@ -414,17 +421,24 @@ func TestHoldersAgreesWithABroadcastAndChangesNothing(t *testing.T) {
 
 	// And it must be the same predicate a broadcast applies, or waiting on it would settle
 	// on a property the assertion does not depend on — which is exactly what #1057 was.
+	//
+	// The count is taken **before** the broadcast, and that ordering is the whole
+	// comparison. BroadcastChunk forgets the chunk on any session whose send fails, so a
+	// count read afterwards has already dropped exactly the sessions the broadcast failed
+	// to reach: the two would agree by construction in the one case worth discriminating,
+	// and the assertion would pass while saying nothing.
+	before := peers.Holders(coord)
 	update := protocol.EncodeBlockUpdate(protocol.BlockUpdate{Pos: [3]int32{0, 1, 0}, BlockID: uint16(world.Stone)})
-	if reached := peers.BroadcastChunk(coord, update); reached != peers.Holders(coord) {
-		t.Fatalf("broadcast reached %d sessions but Holders reports %d", reached, peers.Holders(coord))
+	if reached := peers.BroadcastChunk(coord, update); reached != before {
+		t.Fatalf("broadcast reached %d sessions but %d held the chunk beforehand", reached, before)
 	}
 	waitUntil(t, "both block updates", func() bool { return len(fa.blockUpdates()) == 1 && len(fb.blockUpdates()) == 1 })
 
 	// A session that leaves is not a holder, so the count is a live answer rather than a
 	// high-water mark.
-	before := peers.Holders(coord)
+	held := peers.Holders(coord)
 	peers.Remove(2)
-	if after := peers.Holders(coord); after != before-1 {
-		t.Fatalf("Holders = %d after one session left, want %d", after, before-1)
+	if after := peers.Holders(coord); after != held-1 {
+		t.Fatalf("Holders = %d after one session left, want %d", after, held-1)
 	}
 }
