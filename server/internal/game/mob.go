@@ -155,6 +155,9 @@ type bossEncounter struct {
 	// rising. See encounter.go, where both halves of that are argued.
 	phase uint8
 
+	// The next preferred root move in this stage; never a queued attack.
+	scheduleStage, scheduleCursor uint8
+
 	// moves is every announcement this boss currently has running, in the shape the wire
 	// carries them. Superseding rather than a log: what is here is what the next timeline
 	// says, and a move that leaves this slice has ended.
