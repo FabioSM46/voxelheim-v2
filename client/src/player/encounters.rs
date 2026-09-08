@@ -191,6 +191,7 @@ mod tests {
                 entity_id: 9,
                 kind: MobKind::VargrGuardian,
                 pos: [0.0; 3],
+                vel: [0.0; 3],
                 yaw: 0.0,
                 health: 0, // Health is deliberately not a death signal.
                 max_health: 100,
