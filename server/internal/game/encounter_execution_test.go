@@ -11,12 +11,9 @@ import (
 )
 
 // pullGuardian places the Vargr guardian, freezes the encounter against a player, and
-// answers with the boss's entity id.
-//
-// The pull is taken by hand rather than by walking somebody into the arena for
-// boss_species_test.go's reason: what these tests are about is what the creature does
-// once the fight has started, and a fight that started because of an aggro radius would
-// be measuring the aggro radius.
+// answers with the boss's entity id. Taken by hand rather than by walking somebody into
+// the arena, for boss_species_test.go's reason: a fight that started because of an aggro
+// radius would be measuring the aggro radius.
 func pullGuardian(t *testing.T, h *vitalsHarness, at [3]float64, first *Player) uint64 {
 	t.Helper()
 	id := h.placeSpeciesAt(vnet.MobKindVargrGuardian, at)
@@ -37,12 +34,9 @@ func runningMoveOf(h *vitalsHarness, id uint64) *runningMove {
 	return m.encounter.running
 }
 
-// preferMove puts every other move of the repertoire out of the least-recently-used
-// running so the named one is the next thing chosen.
-//
-// It never edits the catalog: what it moves is the *encounter's* ledger, which is what
-// the scheduler reads. A test that rewrote the repertoire would be testing a repertoire
-// no server has.
+// preferMove puts every other move out of the least-recently-used running so the named one
+// is chosen next. It never edits the catalog — what it moves is the *encounter's* ledger,
+// because a test that rewrote the repertoire would be testing one no server has.
 func preferMove(h *vitalsHarness, id uint64, want vnet.EncounterMoveKind) {
 	h.sim.mu.Lock()
 	defer h.sim.mu.Unlock()
@@ -67,10 +61,8 @@ func atStage(h *vitalsHarness, id uint64, stage uint8) {
 	m.encounter.phase = stage
 }
 
-// monolith is flat ground with one solid slab standing across a band of z.
-//
-// The approved design's monolith: the thing a charge is meant to be steered into, and the
-// only terrain feature these tests need.
+// monolith is flat ground with one solid slab across a band of z: the approved design's
+// monolith, the thing a charge is meant to be steered into.
 type monolith struct {
 	groundTop  int64
 	fromZ, toZ int64
@@ -93,10 +85,9 @@ func (w monolith) Solid(x, y, z int64) bool {
 // The preparation reaches a player before the damage exists, and the damage happens on
 // the ticks the announcement named.
 //
-// **This is the promise the whole encounter contract rests on**, and it fails in two
-// directions worth separating: a move that damaged during its telegraph would put an
-// attack in front of a player who had been given nothing to react to, and one that
-// damaged outside its release would make the announced window a decoration.
+// **The promise the whole encounter contract rests on**, failing in two directions worth
+// separating: damage during a telegraph puts an attack in front of a player given nothing
+// to react to, and damage outside a release makes the announced window a decoration.
 func TestAnAnnouncedMoveIsPreparedBeforeItIsDangerous(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -154,9 +145,8 @@ func TestAnAnnouncedMoveIsPreparedBeforeItIsDangerous(t *testing.T) {
 // One release window lands on each target exactly once, and a second instance may land
 // again.
 //
-// The window is what the ledger is keyed to rather than the instance, which is the pair
-// of assertions here: a release lasting several ticks is one blow, and the next move is a
-// new one.
+// The ledger is keyed to the window rather than the instance, which is the pair of
+// assertions here: a multi-tick release is one blow, and the next move is a new one.
 func TestOneReleaseWindowLandsOnceOnEachTarget(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	near, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -195,9 +185,9 @@ func TestOneReleaseWindowLandsOnceOnEachTarget(t *testing.T) {
 
 // Leaving the announced region is the answer, and it is the whole of the answer.
 //
-// The cone is fixed when the move is chosen and never re-aimed, so a player who steps out
-// of it takes nothing while one who stays in it is hit. A move that tracked its target
-// would make this test impossible to write, which is exactly why it is written.
+// The cone is fixed when the move is chosen and never re-aimed, so a player outside it
+// takes nothing. A move that tracked its target would make this test impossible to write,
+// which is exactly why it is written.
 func TestLeavingTheAnnouncedRegionIsTheAnswer(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	inside, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -223,10 +213,10 @@ func TestLeavingTheAnnouncedRegionIsTheAnswer(t *testing.T) {
 
 // A charge is resolved across the whole of each tick, not sampled at the end of it.
 //
-// **Run at five hertz, where the creature covers 2.2 blocks a tick and its body is 1.6
-// wide.** The test asserts the thing that makes the sweep necessary rather than merely
-// asserting a hit: the creature's own box never overlaps the player's on any tick, so an
-// endpoint test would report no contact at all, and the player is hit anyway.
+// **Run at five hertz, where the creature covers 2.2 blocks a tick.** It asserts the thing
+// that makes the sweep necessary rather than merely asserting a hit: the creature's box
+// never overlaps the player's on any tick, so an endpoint test would report no contact at
+// all, and the player is hit anyway.
 func TestAChargeIsSweptThroughTheWholeTickRatherThanSampledAtIt(t *testing.T) {
 	const coarse = 5
 	h := newVitalsHarness(t, coarse, dropTerrain{groundTop: 63})
@@ -258,10 +248,9 @@ func TestAChargeIsSweptThroughTheWholeTickRatherThanSampledAtIt(t *testing.T) {
 
 // Terrain stops a charge, and stopping it buys the approved design's longer opening.
 //
-// The wall is the continuous half of the collision requirement: the displacement goes
-// through the same [moveAndCollide] a player's does, so no speed carries the creature
-// past it. The recovery is the design's monolith reward, and it is the server's number
-// rather than an animation's.
+// The wall is the continuous half of the collision requirement: displacement goes through
+// the same [moveAndCollide] a player's does, so no speed carries the creature past it. The
+// recovery is the design's monolith reward, a server number rather than an animation's.
 func TestAChargeIsStoppedByTerrainAndPaysTheLongerRecovery(t *testing.T) {
 	// The slab stands past the player, which is the design's own picture of this move: the
 	// lane runs through whoever it was aimed at and ends against the stone behind them.
@@ -300,26 +289,18 @@ func TestAChargeIsStoppedByTerrainAndPaysTheLongerRecovery(t *testing.T) {
 
 // No blow lands outside the region that was announced, over a whole fight.
 //
-// **This is the acceptance criterion executed rather than restated.** Every tick that
-// costs a player health is checked against the announcement that was live at that moment,
-// read back off the wire: the player's own box has to be inside one of the regions the
-// client had already been shown. The three volumes stay apart by construction — the body
-// that collides, the body a blade reaches and the region an attack endangers are three
-// different numbers — and this is what says so at run time.
+// **The acceptance criterion executed rather than restated.** Every tick that costs a
+// player health is checked against the announcement live at that moment, read back off the
+// wire: the player's box has to be inside a region the client had already been shown.
 func TestNoBlowLandsOutsideTheRegionThatWasAnnounced(t *testing.T) {
-	// **Two placements and two rates, and the pairing is what the test is worth.**
-	//
-	// Written with the contact placement alone, this passed while covering nothing that
-	// could break it: a player parked in contact keeps the fight inside the two cones,
-	// whose regions do not move, and the charge's band starts five blocks out — so the
-	// only shape whose region a creature can leave was never exercised. The travelling
-	// placement is the case that matters, and the coverage assertion at the foot is what
-	// stops the pair silently collapsing back to the first one.
-	//
-	// The rate matters for the same reason. A lane is `travelSpeed x release` in
-	// wall-clock seconds and what is crossed is `travelSpeed x releaseTicks x dt`; those
-	// agree exactly at twenty hertz, where ticksFor converts 900 ms to a whole 18 ticks.
-	// Three hertz is one of the rates where it does not.
+	// **Two placements and two rates, and the pairing is what the test is worth.** With the
+	// contact placement alone this passed while covering nothing that could break it: a
+	// player parked in contact keeps the fight inside the two stationary cones, and the
+	// charge's band starts five blocks out, so the only shape whose region a creature can
+	// leave was never exercised. The coverage assertion at the foot is what stops the pair
+	// collapsing back to that. The rate matters for the same reason: a lane is
+	// `travelSpeed x release` while what is crossed is `travelSpeed x releaseTicks x dt`,
+	// and those agree at twenty hertz but not at three.
 	for _, rate := range []uint8{DefaultTickRate, 3} {
 		for _, placement := range []struct {
 			name   string
@@ -380,10 +361,10 @@ func TestNoBlowLandsOutsideTheRegionThatWasAnnounced(t *testing.T) {
 
 // Killing the boss withdraws what it had running, and says so.
 //
-// Cancelled rather than Completed, and the regions go with the ending: a party that kills
-// a creature mid-telegraph must not be left with a shape anybody still treats as
-// dangerous. The execution stops too, which is the half a client cannot observe and the
-// half that would otherwise keep resolving damage.
+// Cancelled rather than Completed, and the regions go with the ending: a party that kills a
+// creature mid-telegraph must not be left with a shape anybody still treats as dangerous.
+// The execution stops too — the half a client cannot observe, and the half that would
+// otherwise keep resolving damage.
 func TestKillingTheBossWithdrawsWhatItHadRunning(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -483,12 +464,10 @@ func TestASelectionThatCoversEveryEscapeIsRefused(t *testing.T) {
 
 // Every catalogued move is one a server can announce and one a player can read.
 //
-// A sweep over the whole table rather than a test per row, for species.go's reason: what
-// is being held is a property of the repertoire, and the next move added is a row rather
-// than a test. Each clause fails in its own direction — a zero window is a danger nobody
-// can be inside, a band wider than the announced reach is a move aimed at somebody it
-// never covers, and an announcement the encoder refuses is a frame that would be logged
-// and dropped with the fight silently missing from every client.
+// A sweep over the whole table rather than a test per row, for species.go's reason: the
+// next move added is a row rather than a test. Each clause fails in its own direction — a
+// zero window is a danger nobody can be inside, and a band wider than the announced reach
+// is a move aimed at somebody it never covers.
 func TestEveryCataloguedMoveIsAnnouncableAndBounded(t *testing.T) {
 	t.Parallel()
 
@@ -543,9 +522,8 @@ func TestEveryCataloguedMoveIsAnnouncableAndBounded(t *testing.T) {
 // And every phase of every catalogued move encodes.
 //
 // The encoder refuses exactly what a decoder would end a session over, and
-// [Sim.encounterFramesLocked] logs and drops a refusal — so a move whose announcement the
-// encoder will not take is a fight no client is ever told about, with nothing red anywhere
-// to say so. This is what stops that being discovered in a running world.
+// [Sim.encounterFramesLocked] logs and drops a refusal — so a move the encoder will not
+// take is a fight no client is told about, with nothing red to say so.
 func TestEveryAnnouncementACataloguedMoveProducesEncodes(t *testing.T) {
 	t.Parallel()
 
@@ -660,15 +638,14 @@ func (h *vitalsHarness) place(p *Player, pos [3]float64) {
 // A boss whose target is outside every move's range closes the distance.
 //
 // **The regression test for a scheduler that forgets to move**, asked for on review. The
-// selection band is the guardian's widest maxRange of 8.5 blocks and its awareness reaches
-// 24, so between the two there is a span where no move is choosable and the creature has
-// to walk. `stepEncounter` replaces the shared hostile branch and steers with the same
-// [mob.steerToward]; what integrates that steering is [mob.physics], which runs at the
-// foot of [mob.step] for every branch including this one.
+// guardian's widest band is 8.5 blocks and its awareness reaches 24, so between the two
+// no move is choosable and the creature has to walk. `stepEncounter` steers with the same
+// [mob.steerToward]; what integrates that is [mob.physics], which runs at the foot of
+// [mob.step] for every branch including this one.
 //
-// Being walled out is a different question and deliberately not tested here: the shared
-// state machine allows it — see [mob.inReach] — and a boss inherits that rather than
-// getting navigation of its own, which is #1024's Out of Scope.
+// Being walled out is deliberately not tested here: the shared state machine allows it —
+// see [mob.inReach] — and a boss inherits that rather than getting navigation of its own,
+// which is #1024's Out of Scope.
 func TestABossOutOfEveryMoveRangeClosesTheDistanceAndAttacks(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -710,15 +687,12 @@ func TestABossOutOfEveryMoveRangeClosesTheDistanceAndAttacks(t *testing.T) {
 
 // A charge never travels past the lane it announced, at any tick rate.
 //
-// **The rates are the point.** A move's lane is `travelSpeed x release`, a wall-clock
-// number; what it actually crosses is `travelSpeed x releaseTicks x dt`, and [ticksFor]
-// makes those two agree only where it converts the duration exactly. It truncates, so the
-// ordinary answer is short — but it also floors at one tick, and at a rate of 1 the
-// guardian's 900 ms release becomes a whole second: eleven blocks against an announced
-// 9.9. [NewSim] accepts a rate of 1.
-//
-// Every rate here runs the same assertion, so this is a property of the move rather than a
-// fact about twenty hertz.
+// **The rates are the point.** A lane is `travelSpeed x release` while what is crossed is
+// `travelSpeed x releaseTicks x dt`, and [ticksFor] makes those agree only where it
+// converts exactly. It truncates, so the ordinary answer is short — but it floors at one
+// tick, and at a rate of 1 (which [NewSim] accepts) the guardian's 900 ms release becomes
+// a whole second: eleven blocks against an announced 9.9. Every rate runs the same
+// assertion, so this is a property of the move rather than a fact about twenty hertz.
 func TestAChargeNeverTravelsPastTheLaneItAnnounced(t *testing.T) {
 	for _, rate := range []uint8{1, 2, 3, 5, 7, 10, 13, DefaultTickRate} {
 		h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
@@ -754,13 +728,11 @@ func TestAChargeNeverTravelsPastTheLaneItAnnounced(t *testing.T) {
 // And nobody standing past the end of an announced lane is hurt by it.
 //
 // The sharpest form of the invariant, at the rate that used to break it. Before the travel
-// clamp, a 1 Hz charge ran eleven blocks against an announced 9.9 and `sweptLaneReaches`
-// tested the whole of that segment, so this player — parked in the 1.1 blocks between the
-// two — lost health for standing outside the region they had been shown.
-//
-// The margin covers the second half of the same defect: the segment test's clamped
-// distance describes a capsule, whose rounded cap reaches `half_width` past the strip's
-// square end, so the lane's own extent has to be tested too.
+// clamp a 1 Hz charge ran eleven blocks against an announced 9.9 and `sweptLaneReaches`
+// tested that whole segment, so this player lost health for standing outside the region
+// they were shown. The margin also covers the second half of the same defect: the segment
+// test's clamped distance describes a capsule whose cap reaches `half_width` past the
+// strip's square end, so the lane's own extent has to be tested too.
 func TestNobodyPastTheEndOfAnAnnouncedLaneIsHurtByIt(t *testing.T) {
 	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
 	near, _ := h.join(1, [3]float32{0.5, 64, 0.5})
@@ -799,13 +771,11 @@ func TestNobodyPastTheEndOfAnAnnouncedLaneIsHurtByIt(t *testing.T) {
 // The tick that deals damage is published as the release that dealt it.
 //
 // **A phase one tick long is the ordinary case, not an edge one.** [ticksFor] floors at a
-// single tick, so the guardian's 200 ms bite window is one tick at every rate below five
-// hertz. Advanced at the foot of a tick, the machine would execute that release — travel,
-// contact, damage — and then publish the recovery it had moved into, so the only frame a
-// client ever received for the damaging tick would say the creature was open and nothing
-// was dangerous. The whole release would be invisible.
-//
-// Asserted off the wire, because the claim is about what a session was sent.
+// single tick, so the guardian's 200 ms bite window is one tick below five hertz. Advanced
+// at the foot of a tick, the machine executed that release and then published the recovery
+// it had moved into, so the only frame a client received for the damaging tick said the
+// creature was open and nothing was dangerous. Asserted off the wire, because the claim is
+// about what a session was sent.
 func TestTheDamagingTickIsPublishedAsItsRelease(t *testing.T) {
 	for _, rate := range []uint8{1, 2, 3, 4, DefaultTickRate} {
 		bite := encounterMoveCatalog[vnet.MobKindVargrGuardian][0]

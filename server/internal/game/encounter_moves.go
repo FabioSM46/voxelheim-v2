@@ -14,10 +14,9 @@ import (
 // move, and adding one is a row rather than a branch in the executor.
 //
 // **Nothing here is sent to a client.** The wire carries the announcement — a kind, a
-// phase, the ticks it lasts and the region it endangers — and never the table that
-// produced it. A client that held these numbers could compute the next move; a client
-// that holds the announcement can only read the one it has been shown, which is the
-// whole of the design's readability claim.
+// phase, its ticks and its region — never the table that produced it. A client holding
+// these numbers could compute the next move; one holding the announcement can only read
+// the move it has been shown.
 //
 // **A species with no rows here fights with the shared state machine in mob.go.** That
 // is a real answer rather than a gap: the Draugr king's casts, channels, pulses and
@@ -178,16 +177,14 @@ func (d encounterMoveDef) announcedRadius() float64 {
 // its 0.9–1.5 second band, the recoveries inside its 1.2–2 second one, and the charge's
 // impact recovery is the 2.5 seconds it names for the monolith.
 var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
-	// The Vargr that guarded the tomb. Physical throughout — scratches, bites, a charge
-	// and a leap — so not one of these rows is a cast and none may ever carry a channel.
-	//
-	// Stage 1 teaches the four answers: leave the frontal cone, step out of the lane,
-	// leave the landing region, leave the arc of the sweep. Stage 2 adds the jaws, which
-	// is the same answer read faster against a much heavier blow.
+	// The Vargr that guarded the tomb. Physical throughout — scratches, bites, a charge and
+	// a leap — so no row here is a cast and none may ever carry a channel. Stage 1 teaches
+	// the four answers: leave the frontal cone, the lane, the landing region, the arc of
+	// the sweep. Stage 2 adds the jaws, the same answer read faster against a heavier blow.
 	vnet.MobKindVargrGuardian: {
-		// Head low, lip raised, shoulder loaded. The cheapest move it has and the one it
-		// falls back to in contact: a short telegraph by boss standards, an ordinary
-		// blow, and a recovery that does not give a party the room the heavy moves do.
+		// Head low, lip raised, shoulder loaded. The cheapest move it has and its fallback
+		// in contact: a short telegraph by boss standards, an ordinary blow, and a recovery
+		// that does not give a party the room the heavy moves do.
 		{
 			kind: vnet.EncounterMoveKindBiteAndTear, fromStage: 1,
 			telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
@@ -195,9 +192,8 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			minRange: 0, maxRange: 2.6, damagePercent: 100,
 			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.0, height: 2.2, halfAngle: 0.70},
 		},
-		// A raised paw and open claws, showing which side the sweep comes from. Wider
-		// than the bite and cheaper per point of damage, on a long enough cooldown that
-		// the two do not read as one move.
+		// A raised paw and open claws, showing which side the sweep comes from. Wider than
+		// the bite, on a cooldown long enough that the two do not read as one move.
 		{
 			kind: vnet.EncounterMoveKindPrisonerClaws, fromStage: 1,
 			telegraph: 1000 * time.Millisecond, release: 300 * time.Millisecond,
@@ -206,9 +202,8 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.4, height: 2.2, halfAngle: 1.05},
 		},
 		// Two scrapes, the neck tensed, and a lane fixed before the creature moves. Eleven
-		// blocks a second for nine tenths of one is a lane just under ten blocks long, and
-		// the band it may be chosen in stops a block short of that so the lane always
-		// reaches past whoever it was aimed at.
+		// blocks a second for nine tenths of one is a lane just under ten long, and the
+		// band stops short of that so it always reaches past whoever it was aimed at.
 		{
 			kind: vnet.EncounterMoveKindCollarCharge, fromStage: 1,
 			telegraph: 1200 * time.Millisecond, release: 900 * time.Millisecond,
@@ -218,9 +213,9 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			travelSpeed: 11.0, travel: travelCharge,
 			hazard: encounterHazard{shape: vnet.HazardShapeLine, height: 2.4, halfWidth: 1.4},
 		},
-		// Crouched, watching one player, with the landing region shown before the jump.
-		// The region does not follow its target — that is what makes leaving it an answer
-		// — so the damage is resolved at the landing and never along the arc.
+		// Crouched, watching one player, with the landing region shown before the jump. It
+		// does not follow its target — which is what makes leaving it an answer — so the
+		// damage is resolved at the landing and never along the arc.
 		{
 			kind: vnet.EncounterMoveKindPredatorLeap, fromStage: 1,
 			telegraph: 1000 * time.Millisecond, release: 600 * time.Millisecond,
@@ -229,10 +224,9 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			travelSpeed: 12.0, travel: travelLeap,
 			hazard: encounterHazard{shape: vnet.HazardShapeDisc, reach: 3.0, height: 3.0},
 		},
-		// A full stop, the jaw opened and the neck loaded. The longest telegraph the
-		// species has, the narrowest cone, the heaviest blow and the longest recovery:
-		// there is no inescapable grab here, and the jaws closing on nothing is the whole
-		// of the reward for reading it.
+		// A full stop, the jaw opened and the neck loaded. The longest telegraph, narrowest
+		// cone, heaviest blow and longest recovery: no inescapable grab, and the jaws
+		// closing on nothing is the whole of the reward for reading it.
 		{
 			kind: vnet.EncounterMoveKindBonebreakerJaws, fromStage: 2,
 			telegraph: 1500 * time.Millisecond, release: 300 * time.Millisecond,

@@ -12,49 +12,32 @@ import (
 // Who decides what a boss does, and when what it does hurts anybody.
 //
 // **Every answer here is the server's, taken from simulation ticks.** Nothing reads an
-// animation event, a client marker or a presentation clock: a move is chosen on a tick,
-// its region is announced on a tick, it becomes dangerous on a tick the client was told
-// about in advance, and it stops on a tick. encounter.go publishes what this file
-// decides; #1025 draws it.
+// animation event, a client marker or a presentation clock. encounter.go publishes what
+// this file decides; #1025 draws it.
 //
-// **Three volumes, and they are deliberately three.** The box a boss collides with when
-// it moves is `mobDefinition.body` through [moveAndCollide]; the box a player's blade has
-// to reach is that same body box read by the swing; the region a boss's own attack
-// endangers is the announced [protocol.HazardVolume] and nothing else. A blow is never
-// resolved against the creature's body, so a long weapon cannot damage anybody outside
-// the region the client was shown.
-//
-// **A charge is swept, never sampled.** The creature's displacement each release tick
-// goes through [moveAndCollide], so it cannot cross a wall, and the damage test for that
-// tick is the *segment* it travelled rather than the box it ended in — so a player
-// standing between two ticks' positions is hit rather than skipped. Both halves are
-// required: continuous collision without a swept damage test would still let a fast
-// enough charge pass through a player.
+// **Three volumes, deliberately.** The box a boss collides with when it moves is
+// `mobDefinition.body` through [moveAndCollide]; the box a player's blade must reach is
+// that same body box read by the swing; the region a boss's attack endangers is the
+// announced [protocol.HazardVolume] and nothing else. A blow is never resolved against the
+// creature's body, so no weapon can damage anybody outside the region the client was shown
+// — see [mob.moveReachesLocked] and [sweptLaneReaches] for how that is kept true.
 
-// escapeBearings is how many directions the reachable-safe-space check tries.
-//
-// Sixteen is 22.5 degrees apart, which is finer than any single announced region's
-// opening and cheap enough to run on every candidate move: the check is O(bearings x
-// hazards) with both bounded, and the hazard bound is the contract's own
-// [protocol.MaxHazardsPerMove].
+// escapeBearings is how many directions the reachable-safe-space check tries. Sixteen is
+// 22.5 degrees apart — finer than any announced region's opening, and cheap enough to run
+// on every candidate: O(bearings x hazards), both bounded by [protocol.MaxHazardsPerMove].
 const escapeBearings = 16
 
 // hazardSampleCorners is the horizontal footprint sampled when asking whether a body is
-// inside a region.
-//
-// The centre plus the four corners, and the direction it fails in is the one to have:
-// a body whose sampled points all miss a region it clips a corner of is *not* hit. Under-
-// reporting costs a player nothing they were told to expect, while a test that rounded
-// outward would deal damage past the boundary the client drew — which is the one thing
-// this file exists to make impossible.
+// inside a region: the centre plus the four corners. The direction it fails in is the one
+// to have — a body whose samples all miss a region it clips is *not* hit. Under-reporting
+// costs a player nothing they were told to expect; rounding outward would deal damage past
+// the boundary the client drew, which is the one thing this file exists to prevent.
 const hazardSampleCorners = 4
 
-// runningMove is the one move an encounter is executing, as the server holds it.
-//
-// At most one at a time in this half of the encounter, which is what makes the reachable-
-// safe-space rule below trivially satisfiable for the guardian and is stated as a bound
-// rather than assumed: the king's overlapping rituals arrive with the rest of his
-// repertoire, and the rule is written here so they inherit it rather than grow their own.
+// runningMove is the one move an encounter is executing, as the server holds it. At most
+// one at a time in this half of the encounter, which is what makes the reachable-safe-space
+// rule below trivially satisfiable for the guardian — the king's overlapping rituals arrive
+// with the rest of his repertoire and inherit the rule rather than growing their own.
 type runningMove struct {
 	def   encounterMoveDef
 	ticks encounterMoveTicks
@@ -68,12 +51,11 @@ type runningMove struct {
 	phaseTicks  uint32
 	startedTick uint32
 
-	// aim is the horizontal unit direction this move locked before it began, and it is
-	// never revised. Every move in this half of the encounter is *aimed* rather than
-	// targeted, and that is the design rather than a simplification: the contract sends a
-	// direction exactly when no target is named, so a cone that named its target would
-	// leave a client unable to draw where the cone actually points — and a cone that
-	// followed its target would be a region nobody can leave.
+	// aim is the horizontal unit direction this move locked before it began, never revised.
+	// Every move here is *aimed* rather than targeted, by design: the contract sends a
+	// direction exactly when no target is named, so a cone naming its target would leave a
+	// client unable to draw where it points — and one that followed its target would be a
+	// region nobody can leave.
 	aim [3]float64
 
 	// anchor is the announced region's origin, locked with the aim. For a lane it is
@@ -175,14 +157,12 @@ func (m *mob) stepEncounter(s *Sim, players []*Player, tick uint64) {
 // selectEncounterMoveLocked is the move this creature commits to, or none.
 //
 // **Least recently used among what is available, and deterministic throughout.** The
-// cooldown decides what a move costs; this decides which of the affordable ones is taken,
-// and it draws no random numbers — the same encounter from the same state produces the
-// same fight, which is the property every other tick path in this simulation has.
+// cooldown decides what a move costs; this decides which affordable one is taken, drawing
+// no random numbers — the same encounter from the same state produces the same fight.
 //
 // A candidate that would leave its target no reachable safe space is refused and the next
-// one is tried. That is the acceptance criterion executed rather than asserted: with one
-// live move and a bounded opening it never fires for the guardian, and it is written at
-// the scheduler rather than inside a move so the overlapping rituals cannot bypass it.
+// tried. With one live move and a bounded opening that never fires for the guardian; it is
+// written at the scheduler so the king's overlapping rituals cannot bypass it.
 func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDef, bool) {
 	e := m.encounter
 	repertoire := encounterMoveCatalog[m.kind]
@@ -232,9 +212,8 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 // beginEncounterMoveLocked commits to a move and announces it.
 //
 // **The aim, the anchor and the whole region are fixed here**, at the first tick of the
-// telegraph rather than at its end. That is what the approved design asks for in three
-// separate places — the lane fixed before the sprint, the landing region shown before the
-// jump, the side of the sweep shown by the raised paw — and it is what makes every one of
+// telegraph rather than at its end — the lane fixed before the sprint, the landing shown
+// before the jump, the side of the sweep shown by the raised paw. It is what makes each of
 // these moves something a player leaves rather than something that follows them.
 func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Player, tick uint64) {
 	e := m.encounter
@@ -348,15 +327,12 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 
 	// **The phase changes at the top of a tick, so the phase a tick spends is the phase it
 	// publishes.** Advanced at the foot instead, a tick could execute a release — travel,
-	// contact, damage — and then publish the recovery it had just moved into, and the
-	// frame a client received for the tick it was hit on would say the creature was open
-	// and nothing was dangerous.
-	//
-	// That is not a boundary curiosity: it is the ordinary case wherever a phase is one
-	// tick long. [ticksFor] floors at a single tick, so the guardian's 200 ms bite window
-	// is one tick at every rate below five hertz, and the whole of its release would be
-	// published as recovery. It also keeps `phase_started_tick` honest, because the tick a
-	// phase is entered on is now the first tick it actually runs.
+	// contact, damage — and then publish the recovery it had moved into, so the frame a
+	// client received for the tick it was hit on said the creature was open and nothing
+	// was dangerous. Not a boundary curiosity: [ticksFor] floors at one tick, so the
+	// guardian's 200 ms window is a single tick below five hertz and its whole release
+	// would publish as recovery. It also keeps `phase_started_tick` honest, since a phase
+	// is now entered on the first tick it runs.
 	if r.remaining == 0 || (r.phase == vnet.MovePhaseRelease && (r.impacted || r.laneSpent)) {
 		switch r.phase {
 		case vnet.MovePhaseTelegraph:
@@ -411,32 +387,23 @@ func (m *mob) travelDuringReleaseLocked(s *Sim) {
 		return
 	}
 
-	// **Never past the region that was announced, and the clamp is what makes that
-	// structural rather than arithmetical.**
+	// **Never past the region that was announced.** A leap stops at its landing, a charge
+	// at the far end of its lane, and both bounds are read off the announcement the client
+	// holds rather than recomputed — so the segment [mob.moveReachesLocked] tests is a
+	// prefix of the announced strip whatever the tick rate does.
 	//
-	// A leap stops at its landing; a charge stops at the far end of its lane. Both bounds
-	// are read back off the announcement the client already holds rather than recomputed,
-	// so the segment [travelledFrom, pos] that [mob.moveReachesLocked] tests is a prefix of
-	// the announced strip whatever the tick rate does.
-	//
-	// It used to be a leap clamp alone, and the charge relied on `travelSpeed x release`
-	// happening to equal `travelSpeed x releaseTicks x dt`. Those two agree only where
-	// [ticksFor] converts the duration exactly. It truncates, so the ordinary answer is
-	// short — but it also floors at one tick, and at a tick rate of 1 the guardian's
-	// 900 ms release becomes one whole second: eleven blocks of travel against an
-	// announced 9.9, and a player standing in the 1.1 blocks between them damaged outside
-	// the region they were shown. A rate of 1 is a configuration [NewSim] accepts.
-	//
-	// Derived from the announcement rather than from the duration for the same reason the
-	// alternative fix was not taken: making the announced lane tick-derived would make the
-	// region a client is shown a property of this server's rate, when it is a property of
-	// the move.
+	// The charge used to have no clamp, relying on `travelSpeed x release` equalling
+	// `travelSpeed x releaseTicks x dt`. Those agree only where [ticksFor] converts
+	// exactly. It truncates, so the ordinary answer is short — but it floors at one tick,
+	// and at a rate of 1 (which [NewSim] accepts) the guardian's 900 ms release becomes a
+	// whole second: 11 blocks against an announced 9.9, damaging anybody in the 1.1
+	// between. Deriving the lane from ticks instead would have made the region a client is
+	// shown a property of this server's rate, when it is a property of the move.
 	reach := min(r.def.travelSpeed*s.dt, r.remainingTravel(m.pos))
 	if reach <= 0 {
-		// The lane is spent. A charge that has run its whole announced length is finished
-		// whatever ticks remain: spending them would be travelling past the region, which
-		// is the thing above. It pays its ordinary declared recovery and not the impact
-		// one, because reaching the end of a lane is not hitting anything.
+		// The lane is spent, so the run is finished whatever ticks remain — spending them
+		// would be travelling past the region. It pays the ordinary declared recovery:
+		// reaching the end of a lane is not hitting anything.
 		r.laneSpent = r.def.travel == travelCharge
 		return
 	}
@@ -452,10 +419,8 @@ func (m *mob) travelDuringReleaseLocked(s *Sim) {
 // remainingTravel is how much of this move's announced region the creature has left to
 // cross, in blocks.
 //
-// **Measured from the announcement's own anchor and radius**, which is exactly what a
-// client was handed: a lane runs `radius` blocks from where it started, and a leap's
-// landing is a point the creature travels to. Nothing here reads a duration, so nothing
-// here can disagree with the shape on the wire.
+// **Measured from the announcement's own anchor and radius**, which is what the client was
+// handed. Nothing here reads a duration, so nothing here can disagree with the wire.
 func (r *runningMove) remainingTravel(pos [3]float64) float64 {
 	if r.def.travel == travelNone || len(r.hazards) == 0 {
 		return 0
@@ -500,16 +465,11 @@ func (s *Sim) resolveMoveDamageLocked(m *mob, players []*Player) {
 
 // moveReachesLocked reports whether this release tick's danger reaches a player.
 //
-// **A charge is answered by the segment it travelled this tick, not by where it ended.**
-// That segment is a prefix of the announced lane by construction — same origin, same
-// direction, and a length the release can cover — so a swept hit is always inside what
-// the client was shown, and a player standing between two ticks' positions is hit rather
-// than stepped over.
-//
-// **A leap resolves once, on the last tick of its release**, because the danger is the
-// landing rather than the arc: the region was announced before the jump and does not
-// follow anybody, so damage before the creature has arrived would be damage for standing
-// where it merely passed.
+// **A charge is answered by the segment it travelled this tick, not by where it ended** —
+// see [sweptLaneReaches]. **A leap resolves once, on the last tick of its release**,
+// because the danger is the landing rather than the arc: the region was announced before
+// the jump and follows nobody, so damage before the creature has arrived would be damage
+// for standing where it merely passed.
 func (m *mob) moveReachesLocked(p *Player) bool {
 	r := m.encounter.running
 	switch r.def.travel {
@@ -538,11 +498,9 @@ func moveDamage(def mobDefinition, move encounterMoveDef) uint16 {
 	return max(uint16(uint32(def.damage)*uint32(move.damagePercent)/100), 1)
 }
 
-// publishRunningMoveLocked writes the instance under way into the encounter's live moves.
-//
-// Replaced in place where it is already announced and appended where it is not, so an
-// ending written by [finishEncounterMoveLocked] and left for encounter.go's sweep is never
-// overwritten by a later announcement of the same instance.
+// publishRunningMoveLocked writes the instance under way into the encounter's live moves —
+// replaced in place where already announced, appended where not, so an ending written by
+// [finishEncounterMoveLocked] for encounter.go's sweep is never overwritten.
 func (m *mob) publishRunningMoveLocked() {
 	e := m.encounter
 	announcement := e.running.announcement()
@@ -580,11 +538,9 @@ func (m *mob) finishEncounterMoveLocked(end vnet.MoveEnd) {
 	e.running = nil
 }
 
-// anyLivePlayerInRange reports whether this creature still has anybody to fight.
-//
-// The encounter's own withdrawal condition, and deliberately the aggro range rather than
-// the move's band: a party that has run out of the room has ended the attack, while one
-// that has merely stepped out of a cone has read it.
+// anyLivePlayerInRange reports whether this creature still has anybody to fight. The
+// withdrawal condition, deliberately the aggro range rather than a move's band: a party
+// that ran out of the room ended the attack, one that stepped out of a cone read it.
 func anyLivePlayerInRange(m *mob, players []*Player) bool {
 	def := m.species()
 	body := def.body.boxAt(m.pos)
@@ -602,15 +558,12 @@ func anyLivePlayerInRange(m *mob, players []*Player) bool {
 // moveLeavesAnEscapeLocked reports whether a candidate move leaves its target somewhere
 // safe it can actually reach.
 //
-// **The schedule is refused, not the damage.** A move whose announced region — together
-// with everything this encounter already has running — covers every direction a player
-// could walk in during its telegraph is never announced at all, so there is no unavoidable
-// window to survive. The distance sampled is exactly how far a walking player travels
-// while the telegraph plays out, which is what makes "reachable" mean reachable *in time*
-// rather than reachable eventually.
-//
-// Solid ground is part of reachable: a bearing that walks into a wall is not an escape,
-// and neither is one that leaves the addressable world.
+// **The schedule is refused, not the damage.** A move whose announced region — with
+// everything already running — covers every direction a player could walk during its
+// telegraph is never announced, so there is no unavoidable window to survive. The distance
+// sampled is how far a walking player travels while the telegraph plays out, which makes
+// "reachable" mean reachable *in time*. Solid ground counts: a bearing that walks into a
+// wall is not an escape, and neither is one leaving the addressable world.
 //
 // The caller holds Sim.mu.
 func (s *Sim) moveLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Player) bool {
@@ -723,24 +676,19 @@ func horizontalSamples(b box) [hazardSampleCorners + 1][2]float64 {
 // sweptLaneReaches reports whether the segment a charge covered this tick reaches a body.
 //
 // **A conjunction, and both halves are load-bearing.** A body is reached when it is inside
-// the announced strip *and* within half a width of the segment the creature crossed this
-// tick. Every bound of the first half — origin, direction, length, width, vertical extent
-// — is read off the volume the client already holds, so what this answers is a subset of
-// what was announced structurally rather than by two derivations agreeing.
+// the announced strip *and* within half a width of the segment crossed this tick. Every
+// bound of the first half is read off the volume the client holds, so the answer is a
+// subset of what was announced structurally rather than by two derivations agreeing. The
+// second half is what makes the sweep a sweep: measured against the segment rather than
+// either endpoint, a player standing between two ticks' positions is hit rather than
+// stepped over. Testing the announced lane alone would instead hurt everybody along it on
+// the first tick of the run, before the creature has reached them.
 //
-// The second half is the narrowing that makes the sweep a sweep: measured against the
-// segment rather than against either endpoint, a player standing between two ticks'
-// positions is hit rather than stepped over, which is the whole of "cannot skip a player
-// between ticks". Testing the announced lane alone instead would hurt everybody standing
-// anywhere along it on the first tick of the run — a region the creature has not reached
-// yet.
-//
-// **Neither half implies the other, which is why the first one is not redundant.** The
-// segment test measures distance to a point clamped onto the segment, so its region is a
-// capsule; `Line` is the rectangle [hazardReaches] tests. The capsule's rounded caps
-// bulge up to `half_width` past each end of the strip, so the segment test alone reaches
-// past the announcement at the end of a run — a smaller instance of the same defect the
-// travel clamp in [mob.travelDuringReleaseLocked] closes.
+// **Neither implies the other.** The segment test measures distance to a clamped point, so
+// its region is a capsule, while `Line` is the rectangle [hazardReaches] tests: the caps
+// bulge up to `half_width` past each square end. The segment test alone therefore reaches
+// past the announcement at the end of a run — the same defect the travel clamp in
+// [mob.travelDuringReleaseLocked] closes, one layer down.
 func sweptLaneReaches(lane protocol.HazardVolume, from, to [3]float64, b box) bool {
 	originY := float64(lane.Origin[1])
 	half := float64(lane.Height) / 2
