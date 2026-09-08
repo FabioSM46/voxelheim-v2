@@ -38,6 +38,7 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	player.hunger = 37
 	player.experience = 1337
 	player.learnedMounts = LearnedMounts(0b101)
+	player.bossRewardEpoch = 42
 	h.sim.mu.Unlock()
 
 	player.inventory.mu.Lock()
@@ -50,6 +51,9 @@ func TestARecordRestoresTheLifeItCaptured(t *testing.T) {
 	player.inventory.mu.Unlock()
 
 	saved := player.Record()
+	if saved.BossRewardEpoch != 42 {
+		t.Fatal("capture lost reward epoch")
+	}
 
 	// A second simulation, because a reconnect is not a re-entry: the whole point is
 	// that nothing of the first player survives in memory.

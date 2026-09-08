@@ -30,15 +30,16 @@ import (
 // length and no writer can produce a record with the wrong number of slots.
 type Life struct {
 	// Memory-only instance recovery; identity/persist deliberately never encode it.
-	recovery      dungeonRecovery
-	Pos           [3]float64
-	Yaw           float64
-	Health        uint16
-	Hunger        uint16
-	Experience    uint32
-	Silver        uint32
-	LearnedMounts LearnedMounts
-	Slots         [protocol.InventorySlots]protocol.InventoryStack
+	recovery        dungeonRecovery
+	Pos             [3]float64
+	Yaw             float64
+	Health          uint16
+	Hunger          uint16
+	Experience      uint32
+	Silver          uint32
+	LearnedMounts   LearnedMounts
+	BossRewardEpoch uint64
+	Slots           [protocol.InventorySlots]protocol.InventoryStack
 }
 
 // Validate reports the first way this life is not one the simulation could have
@@ -221,7 +222,7 @@ func (p *Player) recordLocked() Life {
 
 	life := Life{
 		Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger,
-		Experience: p.experience, Silver: state.Silver, LearnedMounts: p.learnedMounts,
+		Experience: p.experience, Silver: state.Silver, LearnedMounts: p.learnedMounts, BossRewardEpoch: p.bossRewardEpoch,
 	}
 	life.recovery = p.dungeonRecoveryLocked()
 	copy(life.Slots[:], state.Stacks)

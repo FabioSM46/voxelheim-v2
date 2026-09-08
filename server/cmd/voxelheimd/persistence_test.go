@@ -1018,11 +1018,11 @@ func TestAPreCharacterPlayersDirectoryIsSetAsideOnStart(t *testing.T) {
 		t.Fatalf("creating the old players directory: %v", err)
 	}
 
-	// A record with this server's magic and the format version before this one, which
-	// is what a build before characters left behind.
+	// Version 2 predates characters; a moving StoreVersion-1 would eventually
+	// name a losslessly migratable character format instead.
 	old := make([]byte, 40)
 	copy(old[0:4], []byte("VXHP"))
-	binary.LittleEndian.PutUint32(old[4:8], persist.StoreVersion-1)
+	binary.LittleEndian.PutUint32(old[4:8], 2)
 	name := strings.Repeat("ab", 32) + ".bin"
 	if err := os.WriteFile(filepath.Join(players, name), old, 0o600); err != nil {
 		t.Fatalf("writing the old record: %v", err)

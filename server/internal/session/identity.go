@@ -820,7 +820,8 @@ func (i *Identities) recall(character persist.Character) (*game.Life, bool, erro
 	life := game.Life{
 		Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger,
 		Experience: rec.Experience, Silver: rec.Silver,
-		LearnedMounts: game.LearnedMounts(rec.LearnedMounts), Slots: rec.Slots,
+		BossRewardEpoch: rec.BossRewardEpoch,
+		LearnedMounts:   game.LearnedMounts(rec.LearnedMounts), Slots: rec.Slots,
 	}
 	if vErr := life.Validate(); vErr != nil {
 		return nil, false, i.refuseRecord(character, vErr)
@@ -1067,15 +1068,16 @@ func (i *Identities) writeLife(character persist.CharacterID, life game.Life) er
 		// When this record was written, which is the end of the session on the teardown
 		// path and the moment of the pass on the autosave's. Both are "the last time
 		// this server knew anything about this character", which is what the field means.
-		LastSeen:      time.Now().UTC(),
-		Pos:           life.Pos,
-		Yaw:           life.Yaw,
-		Health:        life.Health,
-		Hunger:        life.Hunger,
-		Experience:    life.Experience,
-		Silver:        life.Silver,
-		LearnedMounts: uint8(life.LearnedMounts),
-		Slots:         life.Slots,
+		LastSeen:        time.Now().UTC(),
+		Pos:             life.Pos,
+		Yaw:             life.Yaw,
+		Health:          life.Health,
+		Hunger:          life.Hunger,
+		Experience:      life.Experience,
+		Silver:          life.Silver,
+		LearnedMounts:   uint8(life.LearnedMounts),
+		BossRewardEpoch: life.BossRewardEpoch,
+		Slots:           life.Slots,
 	})
 }
 
