@@ -47,6 +47,30 @@ const (
 	travelLeap
 )
 
+// encounterPulse is how a channelled move lays out the region of each of its pulses.
+//
+// **A channel announces the region of the pulse that is imminent, and nothing further
+// ahead**, which is what `MovePhase.Channel` states: `pulse_index` says which one is
+// coming and `hazards` is its own region. Showing the whole ritual at once would be a
+// different contract and a much larger frame.
+type encounterPulse uint8
+
+const (
+	// pulseNone is every move that is not channelled.
+	pulseNone encounterPulse = iota
+
+	// pulseExpandingRings walks a band outward from the anchor, one ring per pulse. The
+	// burial's lit cracks: the safe ground is the middle and then the outside, and the
+	// band's own width is what a player has to cross.
+	pulseExpandingRings
+
+	// pulseSectors lights a fixed number of discs on a ring around the anchor, at bearings
+	// that move with the pulse index. The grave sectors and the requiem's floor: several
+	// regions live at once, which makes it the case the reachable-safe-space rule was
+	// written for.
+	pulseSectors
+)
+
 // encounterHazard is the shape one move announces, before it is placed in the world.
 //
 // A template rather than a [protocol.HazardVolume]: the origin and direction are decided
@@ -71,6 +95,18 @@ type encounterHazard struct {
 
 	// halfWidth is half the lane's width, in blocks. Line only.
 	halfWidth float64
+
+	// pulse is how a channelled move places each pulse's region; pulseNone for every
+	// move that is not channelled.
+	pulse encounterPulse
+
+	// band is one expanding ring's thickness, in blocks. pulseExpandingRings only.
+	band float64
+
+	// sectors is how many regions one pulse lights, and sectorRing is how far from the
+	// anchor their centres sit. pulseSectors only.
+	sectors    uint8
+	sectorRing float64
 }
 
 // encounterMoveDef is one move in one species' repertoire.
@@ -129,6 +165,43 @@ type encounterMoveDef struct {
 
 	travel encounterTravel
 
+	// flightSpeed is how fast a released projectile crosses its announced lane, in blocks
+	// per second, and is zero for a move that throws nothing.
+	//
+	// **A projectile here is a point moving inside an announced lane, not an entity.** The
+	// lane is on the wire, the release's start tick and length are on the wire, and the
+	// speed is the quotient of the two — so a client can draw the spear exactly where the
+	// server has it without a second contract, and there is nothing for a client to
+	// disagree with. Direction is the move's locked aim and is never revised, which is the
+	// approved design's "does not steer after it is thrown".
+	flightSpeed float64
+
+	// channelPulse is how long one pulse is shown before it fires, and pulses is how many
+	// there are. Both zero for a move that is not channelled.
+	//
+	// The pulse is shown and *then* becomes dangerous, exactly as a telegraph is: the
+	// damage lands on the last tick of the interval, never on the first.
+	channelPulse time.Duration
+	pulses       uint8
+
+	// interruptible marks the one kind of move this contract lets an interrupt end, and
+	// interruptDamage is how much health has to be dealt during the channel to end it.
+	//
+	// **Damage is the interrupt, and it is not a new ability.** `castInterruptedByDamage`
+	// is already how this game stops a *player's* cast, so the rule is the one already in
+	// the world rather than a mechanic invented for a boss — the approved design asks for
+	// exactly that. What differs is the threshold, and it has to: a player is rarely hit
+	// during a one-second cast, while a boss is being hit continuously, so mirroring "any
+	// damage at all" would make the channel impossible to complete. That is not a reward
+	// for good play, it is the mechanic deleted. A threshold keeps it what the design
+	// asks: a prize for concentrated damage, never the only way to survive the pulses.
+	interruptible   bool
+	interruptDamage uint16
+
+	// interruptRecovery is the opening a successful interrupt buys, spent standing rather
+	// than as a published phase — see [bossEncounter.staggerTicks] for why.
+	interruptRecovery time.Duration
+
 	hazard encounterHazard
 }
 
@@ -139,7 +212,16 @@ type encounterMoveDef struct {
 // the swept segment the executor tests is a prefix of this length, always, because it is
 // produced by the same two numbers.
 func (d encounterMoveDef) laneLength() float64 {
-	return d.travelSpeed * d.release.Seconds()
+	return d.laneSpeed() * d.release.Seconds()
+}
+
+// laneSpeed is whatever crosses this move's lane during its release: the creature itself
+// for a charge or a leap, the projectile for a throw, and nothing for anything else.
+func (d encounterMoveDef) laneSpeed() float64 {
+	if d.travel != travelNone {
+		return d.travelSpeed
+	}
+	return d.flightSpeed
 }
 
 // selectionReach is how far from the creature this move can matter, in blocks.
@@ -149,8 +231,17 @@ func (d encounterMoveDef) laneLength() float64 {
 // runs that far, a leap's landing is placed that far away — while a move that plants the
 // creature can only matter as far as its own region reaches.
 func (d encounterMoveDef) selectionReach() float64 {
-	if d.travel != travelNone {
+	if d.laneSpeed() > 0 {
 		return d.laneLength()
+	}
+	switch d.hazard.pulse {
+	case pulseSectors:
+		// A ritual reaches its sectors, which sit a ring away from the creature.
+		return d.hazard.sectorRing + d.hazard.reach
+	case pulseExpandingRings:
+		// The outermost band the last pulse lights, which is what the pulses and the band
+		// produce between them rather than a number stated twice.
+		return float64(d.pulses) * d.hazard.band
 	}
 	return d.hazard.reach
 }
@@ -164,8 +255,14 @@ func (d encounterMoveDef) selectionReach() float64 {
 // announce a disc covering the whole jump — a region far larger than the one the design
 // asks a player to leave.
 func (d encounterMoveDef) announcedRadius() float64 {
-	if d.hazard.shape == vnet.HazardShapeLine {
+	if d.hazard.shape == vnet.HazardShapeLine && d.laneSpeed() > 0 {
 		return d.laneLength()
+	}
+	if d.hazard.pulse == pulseExpandingRings {
+		// The widest band any pulse lights. [mob.hazardsForPulse] narrows it to the one
+		// annulus a given pulse actually announces; this is the extent of the whole move,
+		// which is what a range band and the registry sweep ask about.
+		return float64(d.pulses) * d.hazard.band
 	}
 	return d.hazard.reach
 }
@@ -235,15 +332,101 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.6, height: 2.2, halfAngle: 0.38},
 		},
 	},
+
+	// The Draugr king. A warrior and a caster both, which is the whole reason `MovePhase`
+	// has `Channel` at all. Stage 1 is the duel — a vertical cut, a sweeping toll, and the
+	// spear that says out loud he is not only a swordsman. Stage 2 adds the rituals. Stage
+	// 3 adds the requiem, the one move here an interrupt may end.
+	vnet.MobKindDraugrKing: {
+		// The blade held high, a pause, and a low clang. A strip rather than a cone: a
+		// two-handed vertical cut has a lane and the answer is to leave it sideways.
+		{
+			kind: vnet.EncounterMoveKindKingsSentence, fromStage: 1,
+			telegraph: 1200 * time.Millisecond, release: 250 * time.Millisecond,
+			recovery: 1800 * time.Millisecond, cooldown: 3 * time.Second,
+			minRange: 0, maxRange: 4.0, damagePercent: 110,
+			hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 5.0, height: 3.0, halfWidth: 1.1},
+		},
+		// Three distinct poses, announced one at a time. Each toll is a move instance of
+		// its own with its own telegraph and its own id — the contract has no combo
+		// counter, and a short cooldown against a long recovery is what makes them arrive
+		// in a run rather than as one three-part animation the server would have to own.
+		{
+			kind: vnet.EncounterMoveKindThreeTolls, fromStage: 1,
+			telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
+			recovery: 1300 * time.Millisecond, cooldown: 1500 * time.Millisecond,
+			minRange: 0, maxRange: 3.4, damagePercent: 75,
+			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.8, height: 3.0, halfAngle: 0.95},
+		},
+		// The free hand raised, a crystal forming, a direction fixed before release. The
+		// lane is what the spear crosses during its release and the spear does not steer
+		// after it is thrown, so the band it may be chosen in stops well inside the reach.
+		{
+			kind: vnet.EncounterMoveKindSepulchreSpear, fromStage: 1,
+			telegraph: 1400 * time.Millisecond, release: 800 * time.Millisecond,
+			recovery: 1600 * time.Millisecond, cooldown: 7 * time.Second,
+			minRange: 4.0, maxRange: 14.0, damagePercent: 95,
+			flightSpeed: 22.0,
+			hazard:      encounterHazard{shape: vnet.HazardShapeLine, height: 2.6, halfWidth: 0.9},
+		},
+		// The sword planted and rings of lit cracks running outward in sequence. Four
+		// pulses of a two-block band: the safe ground is ahead of the wave and then behind
+		// it, and the band is narrow enough to cross on foot.
+		{
+			kind: vnet.EncounterMoveKindBurial, fromStage: 2,
+			telegraph: 1500 * time.Millisecond, channelPulse: 700 * time.Millisecond, pulses: 4,
+			release: 200 * time.Millisecond, recovery: 2000 * time.Millisecond,
+			cooldown: 14 * time.Second,
+			minRange: 0, maxRange: 8.0, damagePercent: 70,
+			hazard: encounterHazard{
+				shape: vnet.HazardShapeRing, height: 2.0,
+				pulse: pulseExpandingRings, band: 2.0,
+			},
+		},
+		// An arm thrown toward the graves, rune groups lighting in the order the sectors
+		// will erupt. Two of six sectors a pulse, so several regions are live at once and
+		// four are always clear — the reachable-safe-space rule is what holds that, not
+		// this comment.
+		{
+			kind: vnet.EncounterMoveKindEdictOfTheGraves, fromStage: 2,
+			telegraph: 1500 * time.Millisecond, channelPulse: 800 * time.Millisecond, pulses: 3,
+			release: 200 * time.Millisecond, recovery: 1800 * time.Millisecond,
+			cooldown: 16 * time.Second,
+			minRange: 0, maxRange: 10.0, damagePercent: 80,
+			hazard: encounterHazard{
+				shape: vnet.HazardShapeDisc, height: 2.4, reach: 3.0,
+				pulse: pulseSectors, sectors: 2, sectorRing: 7.0,
+			},
+		},
+		// The sword planted and three notes intoned, each floor sector shown before it
+		// activates. The one move this contract expects to be interruptible, and the
+		// interrupt is a reward rather than the only escape: the pulses are leaveable
+		// whether or not anybody breaks it.
+		{
+			kind: vnet.EncounterMoveKindRequiemOfTheBuried, fromStage: 3,
+			telegraph: 1500 * time.Millisecond, channelPulse: 900 * time.Millisecond, pulses: 3,
+			release: 200 * time.Millisecond, recovery: 2000 * time.Millisecond,
+			interruptible: true, interruptDamage: 150,
+			interruptRecovery: 3 * time.Second,
+			cooldown:          20 * time.Second,
+			minRange:          0, maxRange: 9.0, damagePercent: 90,
+			hazard: encounterHazard{
+				shape: vnet.HazardShapeDisc, height: 2.4, reach: 3.2,
+				pulse: pulseSectors, sectors: 2, sectorRing: 6.0,
+			},
+		},
+	},
 }
 
 // encounterMoveTicks is one move's four durations in the ticks Step counts.
 type encounterMoveTicks struct {
-	telegraph      uint32
-	release        uint32
-	recovery       uint32
-	impactRecovery uint32
-	cooldown       uint32
+	telegraph         uint32
+	release           uint32
+	recovery          uint32
+	impactRecovery    uint32
+	interruptRecovery uint32
+	channelPulse      uint32
+	cooldown          uint32
 }
 
 // encounterMoveTimingsFor converts every catalogued move at this server's tick rate.
@@ -265,8 +448,16 @@ func encounterMoveTimingsFor(tickRate uint8) map[vnet.EncounterMoveKind]encounte
 				recovery:  ticksFor(def.recovery, tickRate),
 				cooldown:  ticksFor(def.cooldown, tickRate),
 			}
+			// Each of these converts only when the move has it, so a move without one
+			// keeps a zero here rather than the one-tick floor [ticksFor] would give it.
 			if def.impactRecovery > 0 {
 				one.impactRecovery = ticksFor(def.impactRecovery, tickRate)
+			}
+			if def.interruptRecovery > 0 {
+				one.interruptRecovery = ticksFor(def.interruptRecovery, tickRate)
+			}
+			if def.channelPulse > 0 {
+				one.channelPulse = ticksFor(def.channelPulse, tickRate)
 			}
 			timings[def.kind] = one
 		}
