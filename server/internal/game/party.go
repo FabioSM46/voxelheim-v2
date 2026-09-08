@@ -354,7 +354,16 @@ func (s *Sim) startBossEncounterLocked(m *mob, first *Player) {
 		}
 	}
 	s.nextEncounterID++
-	m.encounter = &bossEncounter{id: s.nextEncounterID, roster: roster, phase: startEncounterPhase}
+	m.encounter = &bossEncounter{
+		id:     s.nextEncounterID,
+		roster: roster,
+		phase:  startEncounterPhase,
+		// Allocated with the encounter rather than lazily, so the scheduler in
+		// encounter_execution.go never has to ask whether a boss has been in a fight
+		// before: an encounter that exists has a repertoire ledger, empty or not.
+		cooldowns: make(map[vnet.EncounterMoveKind]uint32),
+		lastUsed:  make(map[vnet.EncounterMoveKind]uint64),
+	}
 }
 
 func (s *Sim) clearInvitesFromLocked(entityID uint64) {

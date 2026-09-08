@@ -90,6 +90,28 @@ func announcedTimelines(t *testing.T, frames [][]byte) []announcedTimeline {
 				Interruptible:    move.Interruptible(),
 				Ended:            move.Ended(),
 			})
+			// The announced regions, read back through the bindings for the reason every
+			// other field here is: what a test may assert about is the bytes a session was
+			// actually sent, and the geometry is the half of an announcement a player
+			// reacts to.
+			read := &one.moves[len(one.moves)-1]
+			for j := range move.HazardsLength() {
+				var hazard vnet.HazardVolume
+				move.Hazards(&hazard, j)
+				var origin, direction vnet.Vec3
+				hazard.Origin(&origin)
+				hazard.Direction(&direction)
+				read.Hazards = append(read.Hazards, protocol.HazardVolume{
+					Shape:       hazard.Shape(),
+					Origin:      [3]float32{origin.X(), origin.Y(), origin.Z()},
+					Direction:   [3]float32{direction.X(), direction.Y(), direction.Z()},
+					Radius:      hazard.Radius(),
+					Height:      hazard.Height(),
+					InnerRadius: hazard.InnerRadius(),
+					HalfAngle:   hazard.HalfAngle(),
+					HalfWidth:   hazard.HalfWidth(),
+				})
+			}
 		}
 		announced = append(announced, one)
 	}
