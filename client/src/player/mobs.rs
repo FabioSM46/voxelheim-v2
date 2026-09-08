@@ -433,6 +433,7 @@ pub(super) struct Mob {
     /// snapshot and the update path does — and never by a remembered action.
     falling: Option<Duration>,
     guardian_motion: Option<Box<guardian::Motion>>,
+    king_motion: Option<Box<king::motion::Motion>>,
 }
 
 /// Which part of a body one child mesh draws.
@@ -1032,6 +1033,13 @@ fn spawn_mob(
         .spawn((
             Mob {
                 entity_id,
+                king_motion: (state.kind == MobKind::DraugrKing).then(|| {
+                    Box::new(king::motion::Motion::new(
+                        state.pos,
+                        state.yaw,
+                        state.action,
+                    ))
+                }),
                 guardian_motion: (state.kind == MobKind::VargrGuardian)
                     .then(|| Box::new(guardian::Motion::new(state.pos, state.yaw))),
                 kind: state.kind,
@@ -1397,10 +1405,10 @@ pub(super) fn animate(
     // Everything a child needs: species and fall pose select its ordinary transforms,
     // the server's action plus local elapsed time poses the draugr's arms, and lootable
     // chooses the authoritative presentation wash.
-    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat, MobAction, Duration)> =
-        HashMap::new();
+    let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat)> = HashMap::new();
     let mut flashing = HashSet::new();
     let mut guardian_poses = HashMap::new();
+    let mut king_poses = HashMap::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
         // and never overshoots into a lean the server did not ask for. The timings the
@@ -1443,6 +1451,26 @@ pub(super) fn animate(
             transform.rotation = Quat::from_rotation_y(yaw);
         }
 
+        let in_encounter = timelines.as_ref().is_some_and(|inbox| {
+            inbox
+                .live()
+                .iter()
+                .any(|state| state.boss_entity_id == mob.entity_id)
+        });
+        if let Some(motion) = mob.king_motion.as_mut() {
+            motion.sample(
+                transform.translation,
+                yaw,
+                action,
+                elapsed,
+                down,
+                delta,
+                in_encounter,
+            );
+            king_poses.insert(entity, motion.transforms);
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
+
         if let Some(elapsed) = mob.flash.as_mut() {
             *elapsed += delta;
             if *elapsed >= FLASH_TIME {
@@ -1457,23 +1485,11 @@ pub(super) fn animate(
         } else {
             Quat::IDENTITY
         };
-        poses.insert(
-            entity,
-            (
-                mob.kind,
-                down,
-                mob.lootable,
-                arm_swing,
-                mob.action,
-                mob.action_elapsed,
-            ),
-        );
+        poses.insert(entity, (mob.kind, down, mob.lootable, arm_swing));
     }
 
     for (part, mut material, mut transform) in &mut parts {
-        let Some((kind, down, lootable, arm_swing, action, elapsed)) =
-            poses.get(&part.owner).copied()
-        else {
+        let Some((kind, down, lootable, arm_swing)) = poses.get(&part.owner).copied() else {
             // The body this part hangs under was despawned this frame and the child goes
             // with it. There is nothing left to recolour or to move.
             continue;
@@ -1529,8 +1545,10 @@ pub(super) fn animate(
                 .expect("guardian segment");
             *transform = pose[index];
         }
-        if let MobPart::King(segment) = part.part {
-            *transform = king::transform(segment, action, elapsed, arm_swing);
+        if let MobPart::King(segment) = part.part
+            && let Some(pose) = king_poses.get(&part.owner)
+        {
+            *transform = pose[segment as usize];
         }
         if kind == MobKind::VargrGuardian && matches!(part.part, MobPart::Head | MobPart::Eyes) {
             // Encounter neck poses are frame-local overrides, not persistent rig state.
@@ -1548,7 +1566,6 @@ pub(super) fn pose_encounters(
     mut parts: Query<(&MobVisual, &mut Transform), Without<Mob>>,
 ) {
     use super::encounters::Window;
-    use crate::net::{EncounterMoveKind, MovePhase};
     for (entity, mut mob, mut root) in &mut mobs {
         if !matches!(mob.kind, MobKind::VargrGuardian | MobKind::DraugrKing)
             || (mob.falling.is_some() && mob.kind != MobKind::VargrGuardian)
@@ -1592,43 +1609,17 @@ pub(super) fn pose_encounters(
             continue;
         }
         if one.is_none() && !matches!(mob.action, MobAction::Windup | MobAction::Recovery) {
-            // Preserve ordinary breathing and locomotion. Only a stale combat action
-            // needs suppression when no authoritative move window supports its pose.
             continue;
         }
-        let (lean, neck) = one.map_or((0.0, 0.0), |one| {
-            let strength = match one.announced.phase {
-                MovePhase::Telegraph => -(0.4 + 0.6 * one.progress),
-                MovePhase::Release => 1.0,
-                MovePhase::Channel => -0.7,
-                MovePhase::Recovery => 0.7 * (1.0 - one.progress),
-            };
-            let neck = match one.announced.kind {
-                EncounterMoveKind::CollarCharge | EncounterMoveKind::PredatorLeap => 0.25,
-                EncounterMoveKind::BonebreakerJaws => -0.4,
-                _ => 0.15,
-            };
-            (strength * 0.12, strength * neck)
-        });
-        root.rotation = Quat::from_rotation_y(mob.yaw)
-            * Quat::from_rotation_x(if mob.kind == MobKind::VargrGuardian {
-                0.0
-            } else {
-                lean
-            });
-        for (part, mut transform) in &mut parts {
-            if part.owner != entity {
-                continue;
-            }
-            if let MobPart::King(segment) = part.part {
-                *transform = king::encounter_transform(segment, one);
-            } else if matches!(part.part, MobPart::Head | MobPart::Eyes) {
-                let pivot = Vec3::new(0.0, 0.9, -0.35);
-                *transform = Transform::from_matrix(
-                    Mat4::from_translation(pivot)
-                        * Mat4::from_quat(Quat::from_rotation_x(neck))
-                        * Mat4::from_translation(-pivot),
-                );
+        root.rotation = Quat::from_rotation_y(mob.yaw);
+        if let Some(motion) = &mob.king_motion {
+            let pose = king::choreography::sample(motion, one, mob.yaw);
+            for (part, mut transform) in &mut parts {
+                if part.owner == entity
+                    && let MobPart::King(segment) = part.part
+                {
+                    *transform = pose[segment as usize];
+                }
             }
         }
     }
@@ -3082,13 +3073,7 @@ mod tests {
             deliver(&mut app, 6, vec![state]);
             app.update();
             let_the_body_land(&mut app);
-            assert!(
-                drawn_rotation(&mut app).angle_between(if kind == MobKind::VargrGuardian {
-                    Quat::IDENTITY
-                } else {
-                    collapse(kind, 1.0)
-                }) < 0.01
-            );
+            assert!(drawn_rotation(&mut app).angle_between(Quat::IDENTITY) < 0.01);
             deliver(&mut app, 7, vec![]);
             app.update();
             assert!(bodies(&mut app).is_empty());
@@ -3158,10 +3143,16 @@ mod tests {
             .resource_mut::<EncounterTimelineInbox>()
             .push(timeline);
         app.update();
-        assert_eq!(
-            pose(&mut app),
-            king::encounter_transform(king::Segment::UpperLeft, None)
-        );
+        let world = app.world_mut();
+        let neutral = world
+            .query::<&Mob>()
+            .single(world)
+            .unwrap()
+            .king_motion
+            .as_ref()
+            .unwrap()
+            .transforms[king::Segment::UpperLeft as usize];
+        assert_eq!(pose(&mut app), neutral);
     }
 
     #[test]
@@ -3199,12 +3190,11 @@ mod tests {
             }
             let world = app.world_mut();
             let mob = world.query::<&Mob>().single(world).unwrap();
-            let elapsed = mob.action_elapsed;
-            let arm = draugr_arm_swing(action, mob.arm_start_angle, elapsed);
+            let ordinary = mob.king_motion.as_ref().unwrap().transforms;
             let mut compared = 0;
             for (part, transform) in world.query::<(&MobVisual, &Transform)>().iter(world) {
                 if let MobPart::King(segment) = part.part {
-                    assert_eq!(*transform, king::transform(segment, action, elapsed, arm));
+                    assert_eq!(*transform, ordinary[segment as usize]);
                     compared += 1;
                 }
             }
