@@ -94,6 +94,46 @@ func TestDungeonCombatRejectsNewMembership(t *testing.T) {
 	}
 }
 
+func TestDungeonAbandonedBossResetIgnoresDirectorPopulationBudget(t *testing.T) {
+	for _, king := range []bool{false, true} {
+		t.Run(fmt.Sprint(king), func(t *testing.T) {
+			manager, session, p, id := recoveryDungeon(t, 20, king)
+			s := session.Sim
+			s.mu.Lock()
+			old := s.mobs[id]
+			home := old.pos
+			old.health = 10
+			s.mu.Unlock()
+			s.Leave(p)
+			manager.Leave(session.ID, instanceTestCharacter(1))
+			// No connected bodies means the director's world ceiling is zero.
+			// A placed encounter must still be replaced before the old one is removed.
+			s.mu.Lock()
+			bodies := len(s.players)
+			s.mu.Unlock()
+			if bodies != 0 {
+				t.Fatal("fixture still has connected bodies")
+			}
+			manager.Step()
+			s.mu.Lock()
+			freshID := s.dungeon.guardianID
+			if king {
+				freshID = s.dungeon.kingID
+			}
+			fresh := s.mobs[freshID]
+			reset := s.mobs[id] == nil && old.encounter == nil && fresh != nil && freshID != id &&
+				fresh.health == fresh.species().maxHealth && fresh.encounter == nil && fresh.pos == home
+			s.mu.Unlock()
+			if !reset {
+				t.Fatal("zero director budget prevented the abandoned boss reset")
+			}
+			if _, err := manager.Join(session.ID, instanceTestCharacter(2)); err != nil {
+				t.Fatalf("fresh boss retained the combat admission block: %v", err)
+			}
+		})
+	}
+}
+
 func TestDungeonDeathWaitsTenSecondsAndRisesInPlace(t *testing.T) {
 	for _, rate := range []uint8{1, 20, 60} {
 		t.Run(fmt.Sprint(rate), func(t *testing.T) {
