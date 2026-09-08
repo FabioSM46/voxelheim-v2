@@ -96,6 +96,12 @@ type Sim struct {
 	// but every mob's kind is registered, which is what makes the lookup always hit.
 	mobTimings map[vnet.MobKind]mobTicks
 
+	// encounterMoves is every catalogued boss move's phase durations in the ticks Step
+	// counts, converted once at construction beside mobTimings above and read-only
+	// afterwards for the same reason: it is a property of this server's rate rather than
+	// of the simulation's state.
+	encounterMoves map[vnet.EncounterMoveKind]encounterMoveTicks
+
 	// spawnEvery is how many ticks apart the director's spawn passes are, and
 	// mobDespawnTicks is how long a mob may go unwatched. Both derived from the rate,
 	// for the reason above: a night refills at the same speed on every server.
@@ -517,6 +523,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		regenIntervalTicks:   ticksFor(HealthRegenInterval, tickRate),
 		hungerDrainTicks:     ticksFor(HungerDrainInterval, tickRate),
 		mobTimings:           mobTimingsFor(tickRate),
+		encounterMoves:       encounterMoveTimingsFor(tickRate),
 		spawnEvery:           ticksFor(SpawnDirectorInterval, tickRate),
 		mobDespawnTicks:      ticksFor(MobDespawnGrace, tickRate),
 		threatDecayTicks:     uint32(tickRate),
@@ -1457,7 +1464,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// produced rather than the last one's — and after the swings above. Nothing dies here
 	// any more: a creature killed above is already a corpse and is already out of Sim.mobs,
 	// so this steps the survivors and nothing else.
-	mobs := s.advanceMobsLocked(players)
+	mobs := s.advanceMobsLocked(tick, players)
 
 	// And the director last, after the creatures it manages have been advanced: what it
 	// spawns is judged against the positions this tick produced, and what it removes it

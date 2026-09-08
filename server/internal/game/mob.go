@@ -159,11 +159,30 @@ type bossEncounter struct {
 	// carries them. Superseding rather than a log: what is here is what the next timeline
 	// says, and a move that leaves this slice has ended.
 	//
-	// **Nothing selects a move yet** — that is #1024, which owns preparation, locked
-	// targeting, active windows, channel pulses and recovery. What lives here is the
-	// state that gets published and the lifecycle around it: an ending is carried for one
-	// tick and then swept, and a withdrawal marks everything cancelled.
+	// **What writes it is the scheduler in encounter_execution.go**, which selects a move,
+	// runs its phases from simulation ticks and states how each instance stopped. An
+	// ending is carried here for one tick and then swept; a withdrawal marks everything
+	// cancelled.
 	moves []protocol.EncounterMove
+
+	// running is the move this encounter is executing, or nil between moves. Server-only
+	// state that is never sent: what a client receives is the announcement derived from
+	// it, in moves above.
+	running *runningMove
+
+	// cooldowns is how many ticks remain before each move kind may be chosen again, and
+	// lastUsed is the tick each was last committed to. The first bounds how often a heavy
+	// move can happen; the second decides which of the affordable ones is taken.
+	//
+	// Keyed by move kind rather than by catalog index, so reordering a repertoire cannot
+	// silently re-point a cooldown at a different move.
+	cooldowns map[vnet.EncounterMoveKind]uint32
+	lastUsed  map[vnet.EncounterMoveKind]uint64
+
+	// nextMoveID is the counter behind every announcement's instance identity. It is
+	// per-encounter and only ever rises, which is what lets a receiver holding a stale
+	// announcement tell it from a new instance of the same move.
+	nextMoveID uint64
 }
 
 // ticksFor is a duration in ticks at a rate, and never zero.
@@ -249,13 +268,16 @@ func (s *Sim) sortedMobsLocked() []*mob {
 // is gone.
 //
 // The caller holds Sim.mu.
-func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
+// The tick is carried in because a boss's announcements are stated in the ticks the
+// client already holds: which tick a phase began at is a number this loop is the only
+// place with, and deriving one from a counter of its own would be a second clock.
+func (s *Sim) advanceMobsLocked(tick uint64, players []*Player) []*mob {
 	mobs := s.sortedMobsLocked()
 	for _, m := range mobs {
 		if s.dungeonBossLocked(m) {
 			continue
 		}
-		m.step(s, players)
+		m.step(s, players, tick)
 		m.advanceThreatLocked(s)
 	}
 	return mobs
@@ -266,10 +288,19 @@ func (s *Sim) advanceMobsLocked(players []*Player) []*mob {
 // There is no death branch, because a dead creature is not in Sim.mobs to be stepped: the
 // blow that empties its health hands it to the corpse collection in the same call. The
 // caller holds Sim.mu.
-func (m *mob) step(s *Sim, players []*Player) {
-	if m.species().passive {
+// **A species with a repertoire takes a third branch and never the hostile one.** A
+// catalogued boss's damage comes from its announced moves alone — see
+// encounter_execution.go — so there is exactly one path by which one deals damage and
+// exactly one announcement describing it. A boss with no catalogued moves keeps the
+// shared hostile machine below, which is what stops a species arriving unable to fight
+// while the rest of its repertoire is being written.
+func (m *mob) step(s *Sim, players []*Player, tick uint64) {
+	switch {
+	case m.species().passive:
 		m.stepPassive(s.terrain, players)
-	} else {
+	case len(encounterMoveCatalog[m.kind]) > 0:
+		m.stepEncounter(s, players, tick)
+	default:
 		switch m.action {
 		case vnet.MobActionWindup:
 			// The *committed* target, not a fresh choice. A telegraph is aimed at somebody,
@@ -561,10 +592,28 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 		return
 	}
 
-	// Armour applies here rather than in damageLocked: a mob's blow is softened, while
-	// fall damage remains absolute and continues through the unchanged common funnel.
-	// Widen before multiplying so a future larger damage value cannot overflow uint16.
-	rawDamage := m.species().damage
+	s.landMobBlowLocked(m, target, m.species().damage)
+	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
+	// a target dancing on the edge of reach from raising the authoritative cadence.
+	m.action = vnet.MobActionRecovery
+	m.actionTicks = s.mobTimings[m.kind].recovery
+}
+
+// landMobBlowLocked is the one path a creature's own blow takes against a player.
+//
+// **One place, whatever produced the contact.** The ordinary telegraph-and-swing above
+// and every announced boss move resolve through here, so armour, the shield verdict, the
+// block taunt, the landed-blow projection and the hit feedback have exactly one
+// implementation rather than one per attack shape. The raw damage is the caller's — the
+// registry's blow for a swing, the move's share of it for an announced move — and
+// everything that happens to that number afterwards is here.
+//
+// Armour applies here rather than in damageLocked: a mob's blow is softened, while fall
+// damage remains absolute and continues through the unchanged common funnel. Widen before
+// multiplying so a future larger damage value cannot overflow uint16.
+//
+// The caller holds Sim.mu.
+func (s *Sim) landMobBlowLocked(m *mob, target *Player, rawDamage uint16) {
 	damage := uint16(uint32(rawDamage) * uint32(ArmourScale-target.worn.armour) / uint32(ArmourScale))
 	blocked := target.blocking && target.wornShield.fraction > 0 && shieldFacesMob(target, m)
 	if blocked {
@@ -584,10 +633,6 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 			AttackerPos:      toWire(m.pos),
 		})
 	}
-	// Every attack pays recovery, landed or not, which is what stops a low tick rate or
-	// a target dancing on the edge of reach from raising the authoritative cadence.
-	m.action = vnet.MobActionRecovery
-	m.actionTicks = s.mobTimings[m.kind].recovery
 }
 
 // shieldFacesMob tests the guard's horizontal front half-plane, ignoring pitch.
@@ -919,6 +964,11 @@ func (s *Sim) damageMobLocked(m *mob, amount uint16) bool {
 		m.idleThreatTicks = 0
 		m.noTargetTicks = 0
 		m.vel[0], m.vel[2] = 0, 0
+		// The attack ends with the creature. A boss killed mid-telegraph must not leave a
+		// region anybody still treats as dangerous, and the withdrawal is what says so on
+		// the encounter's own state rather than leaving a client to infer it from a body
+		// that stopped existing.
+		withdrawEncounterMovesLocked(m)
 		delete(s.mobs, m.entityID)
 		corpse := s.makeCorpseLocked(m)
 		s.log.Debug("mob died", "entity_id", m.entityID, "kind", m.kind,

@@ -116,8 +116,17 @@ func withdrawEncounterMovesLocked(m *mob) {
 	for i := range m.encounter.moves {
 		if m.encounter.moves[i].Ended == vnet.MoveEndUnknown {
 			m.encounter.moves[i].Ended = vnet.MoveEndCancelled
+			// A cancelled move endangers nobody, and the region goes with the ending: a
+			// receiver reading an instance's last frame must not be handed a shape it
+			// could still treat as dangerous.
+			m.encounter.moves[i].Hazards = nil
 		}
 	}
+	// **The execution stops here, not merely the announcement.** Leaving the scheduler's
+	// own instance in place would let a release window that has been publicly cancelled go
+	// on resolving damage against a region no client is drawing any more — which is
+	// exactly the shape of defect the announcement exists to rule out.
+	m.encounter.running = nil
 }
 
 // encounterFramesLocked is one timeline per live boss encounter this snapshot can see.
