@@ -2,7 +2,9 @@ package game
 
 import (
 	"fmt"
+	"math"
 	"slices"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
@@ -57,6 +59,7 @@ func (s *Sim) placeDungeonEncounters(seed int64, gate *world.InstanceGate, progr
 		}
 	}
 	s.dungeon = d
+	s.deathTicks = ticksFor(10*time.Second, uint8(math.Round(1/s.dt)))
 	return nil
 }
 

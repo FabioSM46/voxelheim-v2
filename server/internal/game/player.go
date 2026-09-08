@@ -1112,6 +1112,9 @@ func (s *Sim) joinCharacter(
 	p.inventory.mu.Lock()
 	p.refreshWornLocked()
 	p.inventory.mu.Unlock()
+	if resume != nil {
+		p.restoreDungeonRecoveryLocked(resume.recovery)
+	}
 	s.players[entityID] = p
 	s.byIdentity[playerID] = p
 	s.byName[foldPlayerName(name)] = p
@@ -1381,6 +1384,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	s.blows = s.blows[:0]
 	s.advancePartyInvitesLocked(tick)
 	s.flushDungeonGateLocked()
+	s.resetWipedDungeonLocked()
 	s.expireCorpsesLocked(tick)
 	s.advanceChunkRegenerationLocked()
 
@@ -1465,6 +1469,10 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// any more: a creature killed above is already a corpse and is already out of Sim.mobs,
 	// so this steps the survivors and nothing else.
 	mobs := s.advanceMobsLocked(tick, players)
+	if s.resetWipedDungeonLocked() {
+		mobs = s.sortedMobsLocked()
+		projectiles = nil
+	}
 
 	// And the director last, after the creatures it manages have been advanced: what it
 	// spawns is judged against the positions this tick produced, and what it removes it

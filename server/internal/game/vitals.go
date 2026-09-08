@@ -401,6 +401,9 @@ const respawnSettlementOffset = 3
 //
 // The caller holds sim.mu.
 func (p *Player) respawnPositionLocked() [3]float64 {
+	if p.sim.dungeon != nil {
+		return p.pos
+	} // Dungeon recovery is in place, not at an open-world home.
 	if home, standing := p.sim.tentOfLocked(p.playerID); standing {
 		anchor := home.anchorVoxel()
 		return [3]float64{

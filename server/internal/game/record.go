@@ -29,6 +29,8 @@ import (
 // [protocol.InventorySlots] of them by construction, so no reader has to check a
 // length and no writer can produce a record with the wrong number of slots.
 type Life struct {
+	// Memory-only instance recovery; identity/persist deliberately never encode it.
+	recovery      dungeonRecovery
 	Pos           [3]float64
 	Yaw           float64
 	Health        uint16
@@ -221,6 +223,7 @@ func (p *Player) recordLocked() Life {
 		Pos: pos, Yaw: p.yaw, Health: health, Hunger: hunger,
 		Experience: p.experience, Silver: state.Silver, LearnedMounts: p.learnedMounts,
 	}
+	life.recovery = p.dungeonRecoveryLocked()
 	copy(life.Slots[:], state.Stacks)
 	return life
 }

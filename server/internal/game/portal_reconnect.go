@@ -46,7 +46,7 @@ func (m *InstanceManager) ResumePortal(character InstanceCharacter) (*Life, *Por
 	}
 	life := recalled.life
 	if s := m.sessions[recalled.session]; s != nil && !m.closed {
-		if err := m.joinLocked(s, character); err != nil {
+		if err := m.joinRememberedLocked(s, character); err != nil {
 			return nil, nil, err
 		}
 		entry := PortalEntry{Session: s.snapshot(), Character: character, Return: recalled.returnPos, respawn: recalled.respawn}

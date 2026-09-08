@@ -80,6 +80,9 @@ func TestPortalRequestCrossesLiveBindingAndExitReturnsToEntryArch(t *testing.T) 
 	}
 	waitUntil(t, "player returned to open simulation", func() bool { return open.Count() == 1 && instance.Sim.Count() == 0 })
 	waitUntil(t, "exit releases occupancy", func() bool { retained, _ := cfg.Instances.Lookup(change.WorldID); return len(retained.Members) == 0 })
+	// The manager observes abandoned combat on its next authoritative tick.
+	// Production keeps ticking between requests; this fixture drives it explicitly.
+	cfg.Instances.Step()
 	beforeChunks := frames.chunkCount(centre)
 	// Re-entry before expiry keeps exactly that private copy.
 	conn.in <- protocol.EncodePortalRequest(request)

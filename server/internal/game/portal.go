@@ -101,6 +101,9 @@ func (m *InstanceManager) crossLocked(p *Player, request protocol.PortalRequest,
 		return PortalDecision{Outcome: PortalMismatch, Reason: vnet.RefusalReasonSessionMismatch}
 	case !isBound && selected != nil && selected.state == InstanceSaved:
 		// Case 2. Nothing is joined, nothing is bound, and the character is still outside.
+		if selected.sim.dungeonCombat() {
+			return refuse(vnet.RefusalReasonInstanceUnavailable)
+		}
 		return m.offerLocked(character, selected, site, request.Arch)
 	}
 

@@ -20,6 +20,7 @@ const DefaultMaxInstances = 32
 var (
 	ErrInstanceLimit       = errors.New("game: concurrent instance limit reached")
 	ErrInstanceClosed      = errors.New("game: instance manager is closed")
+	ErrInstanceCombat      = errors.New("game: boss combat blocks instance admission")
 	ErrInstanceMissing     = errors.New("game: instance no longer exists")
 	ErrCharacterInInstance = errors.New("game: character is already inside another instance")
 )
@@ -247,6 +248,14 @@ func (m *InstanceManager) Join(id uint64, character InstanceCharacter) (Instance
 }
 
 func (m *InstanceManager) joinLocked(s *instanceSession, character InstanceCharacter) error {
+	if _, already := s.members[character]; !already && s.sim.dungeonCombat() {
+		return ErrInstanceCombat
+	}
+	return m.joinRememberedLocked(s, character)
+}
+
+// Only a remembered authoritative visit may bypass new-admission combat checks.
+func (m *InstanceManager) joinRememberedLocked(s *instanceSession, character InstanceCharacter) error {
 	if id, inside := m.inside[character]; inside && id != s.id {
 		return ErrCharacterInInstance
 	}
