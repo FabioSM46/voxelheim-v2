@@ -286,3 +286,84 @@ func TestStrictRewardPolicySurvivesHighWaterOnlyRestartAndCannotBeBypassed(t *te
 		t.Fatal("nil recovery store accepted")
 	}
 }
+
+// Create owns initial record creation and bypasses Save; Save only updates an
+// indexed character. Strict receipts must preserve both halves of that boundary.
+func TestStrictRewardReceiptsAllowCreateAndSaveButRefuseMissingKnownRecords(t *testing.T) {
+	for _, mode := range []string{"live-allocation", "cold-high-water"} {
+		t.Run(mode, func(t *testing.T) {
+			players, dir := openStore(t)
+			rewards, err := OpenRewardStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "live-allocation" {
+				if err := rewards.AllocateRun(players, 1, SessionRecord{ID: 1, Seed: 19, ExpiresUnix: 100}, world.WorldgenVersion); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := rewards.commit(0, RewardJournal{Revision: 1, NextGeneration: 2}); err != nil {
+					t.Fatal(err)
+				}
+				cold, err := OpenRewardStore(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				players, err = OpenStoreWithRewardRecovery(dir, cold, recoveryValidator)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !players.strictRewards.Load() {
+				t.Fatal("fixture did not activate strict receipts")
+			}
+			created, err := players.Create(testID(7), "Freya", testAppearance())
+			if err != nil {
+				t.Fatalf("real Create after strict activation: %v", err)
+			}
+			rec, found, err := players.Load(created.ID)
+			if err != nil || !found || rec.Character != created.ID || rec.Owner != created.Owner {
+				t.Fatal("Create failed to publish its real initial file")
+			}
+			rec.Silver = 42
+			rec.Experience = 99
+			if err := players.Save(created.ID, rec); err != nil {
+				t.Fatalf("ordinary Save of newly created character: %v", err)
+			}
+			cold, err := OpenRewardStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenStoreWithRewardRecovery(dir, cold, recoveryValidator)
+			if err != nil {
+				t.Fatal(err)
+			}
+			disk, found, err := reopened.Load(created.ID)
+			if err != nil || !found || disk != rec {
+				t.Fatal("new character and ordinary update did not survive disk reopen")
+			}
+			if _, known := reopened.Character(created.ID); !known {
+				t.Fatal("new character not indexed after cold restart")
+			}
+			unknown := CharacterID(^uint64(0))
+			if _, known := reopened.Character(unknown); known {
+				t.Fatal("unknown-ID fixture collided")
+			}
+			if err := reopened.Save(unknown, Record{}); !errors.Is(err, ErrUnknownCharacter) {
+				t.Fatalf("update-only Save contract for an unknown ID: %v", err)
+			}
+			if _, err := os.Stat(reopened.recordPath(unknown)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("Save created an unindexed record")
+			}
+			if err := os.Remove(reopened.recordPath(created.ID)); err != nil {
+				t.Fatal(err)
+			}
+			if err := reopened.Save(created.ID, rec); !errors.Is(err, ErrRewardRecoveryRequired) {
+				t.Fatalf("missing known receipt was not refused: %v", err)
+			}
+			if _, err := os.Stat(reopened.recordPath(created.ID)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("stale Save recreated missing known receipt")
+			}
+		})
+	}
+}

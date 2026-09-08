@@ -859,12 +859,12 @@ func (s *Store) Save(id CharacterID, rec Record) error {
 
 	s.recordMu.Lock()
 	defer s.recordMu.Unlock()
-	if err := s.checkRewardSaveLocked(id, rec); err != nil {
-		return err
-	}
 	character, known := s.Character(id)
 	if !known {
 		return fmt.Errorf("%w: %s", ErrUnknownCharacter, id)
+	}
+	if err := s.checkRewardSaveLocked(id, rec); err != nil {
+		return err
 	}
 	return s.writeRecord(character, rec)
 }
