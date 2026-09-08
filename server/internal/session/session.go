@@ -2880,6 +2880,31 @@ func (r *Registry) BroadcastChunk(coord world.Coord, frame []byte) int {
 	return sent
 }
 
+// Holders reports how many sessions in this scope currently hold the chunk at coord.
+//
+// **A read, and the reason it exists is that the only other way to ask was to send
+// something.** BroadcastChunk answers the same question, but it answers it by delivering
+// a frame and by forgetting the chunk on any session whose send failed — so a test that
+// used it to wait would be changing the state it was waiting for, and would consume the
+// very update it meant to assert about. This takes the same lock and applies the same
+// predicate, and does nothing else.
+//
+// It is not used by the server itself. Its caller is the isolation test that must wait
+// for a view to have settled before measuring what a broadcast reaches; see
+// world_binding_test.go, and #1057 for what waiting on the wrong signal cost.
+func (r *Registry) Holders(coord world.Coord) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	held := 0
+	for _, p := range r.peers {
+		if p.view.Holds(coord) {
+			held++
+		}
+	}
+	return held
+}
+
 // ResendChunk schedules a complete ChunkData repair for every session that currently
 // holds coord, and reports how many sessions were scheduled.
 //
