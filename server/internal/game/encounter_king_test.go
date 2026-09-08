@@ -3,6 +3,7 @@ package game
 import (
 	"math"
 	"testing"
+	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
@@ -726,4 +727,153 @@ func TestWithdrawingARitualStillProducesAFrameAClientMayRead(t *testing.T) {
 			}
 		}
 	}
+}
+
+// thinWall is flat ground with a solid column exactly one block thick at wallZ.
+//
+// One block is the thickness that matters: it is the thinnest thing a step can straddle,
+// and the spear's step is longer than it at every tick rate.
+type thinWall struct {
+	groundTop int64
+	wallZ     int64
+}
+
+func (w thinWall) Block(_, y, z int64) (world.Block, bool) {
+	if y <= w.groundTop || (z == w.wallZ && y <= w.groundTop+6) {
+		return world.Stone, true
+	}
+	return world.Air, true
+}
+
+func (w thinWall) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+func (w thinWall) Solid(x, y, z int64) bool {
+	block, resident := w.Block(x, y, z)
+	return !resident || block != world.Air
+}
+
+// A spear cannot tunnel a one-block wall, at any tick rate.
+//
+// **The step is longer than the wall is thick, everywhere.** At 22 blocks a second the
+// spear covers 1.1 blocks per tick at the default rate, and at a rate of 1 it is clamped
+// only by its own 17.6-block lane — so a terrain test that samples where the step *ends*
+// can find air on both sides of a wall the flight went straight through.
+//
+// **Measured before the sweep was written**: at 1 Hz the flight reached the far end of its
+// lane through the wall and the player standing behind it lost 26 health. Two details of
+// that measurement are the reason this test is shaped as it is. The tunnel is
+// alignment-dependent — 1 Hz and 3 Hz tunnelled while 2, 5 and 20 happened not to — so a
+// single rate proves nothing either way. And the damage was invisible in the final health:
+// at 1 Hz a tick is a whole second, so regeneration had restored the player by the end of
+// the run. The minimum is what is asserted.
+func TestASpearCannotTunnelAOneBlockWall(t *testing.T) {
+	const wallZ = -6
+
+	for _, rate := range []uint8{1, 2, 3, 5, 9, DefaultTickRate} {
+		h := newVitalsHarness(t, rate, thinWall{groundTop: 63, wallZ: wallZ})
+		// In front of the wall, inside the spear's band, and the nearer target.
+		near, _ := h.join(1, [3]float32{0.5, 64, -8.0})
+		// Behind it, on the lane, and well inside the 17.6 blocks the lane covers.
+		behind, _ := h.join(2, [3]float32{0.5, 64, 0.5})
+		king := pullKing(t, h, [3]float64{0.5, 64, -14.0}, near)
+		preferMove(h, king, vnet.EncounterMoveKindSepulchreSpear)
+
+		thrown := false
+		lowest := uint16(PlayerMaxHealth)
+		for range 40 * int(rate) {
+			h.step()
+			h.heal(near)
+			lowest = min(lowest, h.vitals(behind).Health)
+			running := runningMoveOf(h, king)
+			if running == nil || running.def.kind != vnet.EncounterMoveKindSepulchreSpear ||
+				running.phase != vnet.MovePhaseRelease {
+				continue
+			}
+			thrown = true
+			// The near face of the wall voxel, which the flight must never reach.
+			if running.flight[2] >= float64(wallZ) {
+				t.Errorf("at %d Hz the spear reached %.3f, at or past the wall at %d",
+					rate, running.flight[2], wallZ)
+				break
+			}
+		}
+		if !thrown {
+			t.Errorf("at %d Hz the spear was never thrown, so nothing was tested", rate)
+		}
+		if lowest != PlayerMaxHealth {
+			t.Errorf("at %d Hz a player behind a wall was speared through it, down to %d",
+				rate, lowest)
+		}
+	}
+}
+
+// sealedRing is clear ground enclosed by a ring of wall four blocks across.
+//
+// Everything outside the ring is open, so a check that asks only whether a destination is
+// empty finds sixteen of them. Nothing outside can actually be walked to.
+type sealedRing struct{ groundTop int64 }
+
+func (w sealedRing) Block(x, y, z int64) (world.Block, bool) {
+	if y <= w.groundTop || (y <= w.groundTop+5 && (x == -2 || x == 2 || z == -2 || z == 2)) {
+		return world.Stone, true
+	}
+	return world.Air, true
+}
+
+func (w sealedRing) Fluid(x, y, z int64) bool { return fluidByBlock(w, x, y, z) }
+
+func (w sealedRing) Solid(x, y, z int64) bool {
+	block, resident := w.Block(x, y, z)
+	return !resident || block != world.Air
+}
+
+// Safe space has to be reachable, not merely empty.
+//
+// **The spear's defect one rule over**, and the reason this test exists at all: the escape
+// check tested each sampled destination and never the walk to it, so clear ground on the
+// far side of a wall counted as somewhere to go. That fails open — it would let the
+// scheduler announce a ritual whose only way out nobody can take.
+//
+// The sample is a straight-line walk at walking speed for the warning the pulse gives, so
+// the line-of-sight test is not a proxy for reachability here; it is exactly the motion
+// being offered.
+func TestAnEscapeBehindAWallIsNotAnEscape(t *testing.T) {
+	// A region that endangers nothing, so the only thing deciding the answer is whether a
+	// destination can be reached.
+	harmless := encounterMoveDef{
+		kind: vnet.EncounterMoveKindBurial, fromStage: 1,
+		telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
+		recovery: time.Second, minRange: 0, maxRange: 40, damagePercent: 10,
+		hazard: encounterHazard{shape: vnet.HazardShapeDisc, reach: 0.05, height: 0.05},
+	}
+
+	t.Run("open ground leaves one", func(t *testing.T) {
+		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		king := pullKing(t, h, [3]float64{0.5, 64, -3.0}, player)
+		h.sim.mu.Lock()
+		defer h.sim.mu.Unlock()
+		if !h.sim.moveLeavesAnEscapeLocked(h.sim.mobs[king], harmless, player) {
+			t.Fatal("open ground with a harmless region was judged to leave nowhere to stand")
+		}
+	})
+
+	t.Run("sealed ground leaves none, however clear the far side is", func(t *testing.T) {
+		h := newVitalsHarness(t, DefaultTickRate, sealedRing{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		king := pullKing(t, h, [3]float64{0.5, 64, -0.5}, player)
+
+		h.sim.mu.Lock()
+		defer h.sim.mu.Unlock()
+		// The premise: there really is empty ground at the sampled distance, so this is
+		// not passing because the destinations were solid.
+		reach := WalkSpeed * harmless.telegraph.Seconds()
+		outside := playerBox([3]float64{player.pos[0] + reach, player.pos[1], player.pos[2]})
+		if anyVoxel(outside, h.sim.terrain.Solid) {
+			t.Fatal("the ground outside the ring is not clear, so this tests nothing")
+		}
+		if h.sim.moveLeavesAnEscapeLocked(h.sim.mobs[king], harmless, player) {
+			t.Fatal("ground nobody can walk to was counted as an escape")
+		}
+	})
 }

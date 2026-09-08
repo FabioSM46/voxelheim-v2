@@ -510,6 +510,15 @@ func (m *mob) enterChannelPulseLocked(pulse uint8, tick uint64) {
 	m.enterMovePhaseLocked(vnet.MovePhaseChannel, r.ticks.channelPulse, tick)
 }
 
+// projectileSubStep is the furthest a spear travels between two terrain samples.
+//
+// [maxSubStep]'s reasoning, for a point rather than a body: a sample every quarter block
+// cannot step over a solid voxel, whatever the speed or the tick rate. The alternative is
+// a full voxel traversal of the segment, which is what [clearLineOfSight] does — but that
+// answers "is anything in the way" rather than "how far did it get", and the flight has to
+// stop *somewhere* the swept damage test can then use as its endpoint.
+const projectileSubStep = maxSubStep
+
 // advanceProjectileLocked moves a released spear one tick along its announced lane.
 //
 // **The charge's rules, for a point that is not the creature.** The step is clamped to what
@@ -518,9 +527,14 @@ func (m *mob) enterChannelPulseLocked(pulse uint8, tick uint64) {
 // at, so a spear faster than a body is wide cannot pass through anybody; and the direction
 // is the move's locked aim, so it does not steer after it is thrown.
 //
-// Terrain stops it where a wall stops a charge. The check is the voxel the spear is about
-// to occupy rather than a swept traversal, which is the conservative direction: it stops
-// at the near face of a wall rather than inside it.
+// **Terrain is swept, not sampled at the destination.** A single test of the voxel the step
+// ends in is not a wall check at all: at 22 blocks a second the spear covers 1.1 blocks per
+// tick at the default rate and the whole lane in one tick at a rate of 1, so a step can
+// begin in front of a one-block wall and end past it with both endpoints in air. Measured
+// before this was written — at 1 Hz the spear crossed the full 17.6-block lane through a
+// one-block wall and speared a player standing behind it. What made that shape worth a
+// paragraph is that it *looked* like it worked: the endpoint check happens to catch the
+// tunnel at some rates and not others, so its passing said nothing.
 func (m *mob) advanceProjectileLocked(s *Sim) {
 	r := m.encounter.running
 	if r.def.flightSpeed <= 0 {
@@ -533,12 +547,22 @@ func (m *mob) advanceProjectileLocked(s *Sim) {
 		r.flightSpent = true
 		return
 	}
-	next := [3]float64{r.flight[0] + r.aim[0]*reach, r.flight[1], r.flight[2] + r.aim[2]*reach}
-	if s.terrain.Solid(int64(math.Floor(next[0])), int64(math.Floor(next[1])), int64(math.Floor(next[2]))) {
-		r.flightSpent = true
-		return
+
+	// Bounded: the reach is already clamped to the announced lane, so the worst case is
+	// the whole lane in quarter blocks — tens of samples, once per tick, for one move.
+	steps := int(math.Ceil(reach / projectileSubStep))
+	step := reach / float64(steps)
+	for range steps {
+		next := [3]float64{r.flight[0] + r.aim[0]*step, r.flight[1], r.flight[2] + r.aim[2]*step}
+		if s.terrain.Solid(int64(math.Floor(next[0])), int64(math.Floor(next[1])), int64(math.Floor(next[2]))) {
+			// Stopped at the last free sample, so the spear rests in front of the face it
+			// struck rather than inside it — and the segment the damage test reads ends
+			// there too.
+			r.flightSpent = true
+			return
+		}
+		r.flight = next
 	}
-	r.flight = next
 }
 
 // remainingFlight is how much of the announced lane the spear has left to cross.
@@ -801,6 +825,14 @@ func (s *Sim) pulseLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Pl
 		}
 		box := playerBox(destination)
 		if box.beyondTheWorld() || anyVoxel(box, s.terrain.Solid) {
+			continue
+		}
+		// **And the walk to it has to exist.** The same endpoint-only reasoning the spear's
+		// terrain check had, one rule over: clear ground on the far side of a wall is not
+		// an escape, and counting one would let this rule accept a schedule whose only way
+		// out nobody can take. The sample *is* a straight-line walk at walking speed, so
+		// [clearLineOfSight] is not a proxy here — it is exactly the motion being offered.
+		if !clearLineOfSight(s.terrain, boxCentre(target.box()), boxCentre(box)) {
 			continue
 		}
 		if anyHazardReaches(candidate, box) {
