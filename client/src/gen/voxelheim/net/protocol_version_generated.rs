@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 36;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 37;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -291,6 +291,20 @@ pub const ENUM_VALUES_PROTOCOL_VERSION: [ProtocolVersion; 2] =
 /// offer nobody can answer is not one. The two appended RefusalReason members owe
 /// nothing on their own — that enum is read through its zero member and never fails
 /// a frame — and no existing tag, table field or frame bound changes.
+/// **V37 puts the announcement on the wire before the blow.** `EncounterTimeline` is
+/// server -> client and an older client drops its unknown tag safely, so that direction
+/// owes nothing. The bump is owed by the other one, on the rule stated above: ask what
+/// the receiver does with the value it does not recognise. A V37 client against a V36
+/// server receives no timeline at all, which is indistinguishable from a boss that is
+/// announcing nothing — so it shows no telegraph and falls back to reading an attack off
+/// an animation that has already reached it, which is precisely what the encounter's
+/// readability rests on not happening. Two peers disagreeing about whether a blow was
+/// announced, after a clean handshake, is the `drop_durabilities` case of V11 rather
+/// than the unknown-tag case of `ActionRefused`.
+///
+/// No existing tag, table field, enum member or frame bound changes. Every type the
+/// payload is built from — `EncounterMove`, `EncounterMoveKind`, `MovePhase`, `MoveEnd`,
+/// `HazardShape` and `HazardVolume` — is new and reachable only through it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct ProtocolVersion(pub u16);
@@ -301,11 +315,11 @@ impl ProtocolVersion {
     /// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
     /// is rejected, instead of defaulting to "whatever is current".
     pub const Unknown: Self = Self(0);
-    /// V36: portal veil/heart blocks are non-solid; older clients treat them as walls.
-    pub const Current: Self = Self(36);
+    /// V37: boss move and spell timelines are announced before they can damage anybody.
+    pub const Current: Self = Self(37);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 36;
+    pub const ENUM_MAX: u16 = 37;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

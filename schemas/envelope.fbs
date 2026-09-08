@@ -297,7 +297,20 @@ union Payload {
   //    saved runs has. Nothing refuses an unknown value here, so on the rule this file
   //    states the bump is avoided rather than owed. A client sending this authoritative
   //    payload is a protocol error. See `player.fbs`.
-  InstanceBindings        // 70  server -> client
+  InstanceBindings,       // 70  server -> client
+
+  //    Appended server-only state, and it carries the V37 bump. An older client cannot
+  //    name the tag and drops it, which on the rule this file has stated since V8 would
+  //    be a bump avoided rather than owed. The other direction is what owes it: a V37
+  //    client against a V36 server never receives a timeline, so it draws no telegraph
+  //    and is left reconstructing an attack from the animation that is already landing —
+  //    two peers disagreeing, after a clean handshake, about whether a blow was
+  //    announced. That is the `EntitySnapshot.drop_durabilities` case that moved V11,
+  //    and silent disagreement is the stronger argument of the two.
+  //
+  //    A client sending this authoritative payload is a protocol error. See
+  //    `player.fbs` for the table and for every type it is built from.
+  EncounterTimeline       // 71  server -> client
 }
 
 table Envelope {

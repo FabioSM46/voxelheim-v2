@@ -3027,3 +3027,388 @@ table InstanceEntryAnswer {
 table InstanceBindings {
   bindings: [SessionBinding];
 }
+
+
+/// Which announced boss move an `EncounterMove` names. Server -> client.
+///
+/// **A name, not a script.** What a receiver may do with this member is choose the
+/// pose, the sound and the wording it puts in front of a player. It never tells the
+/// client what the move *does*: the damaging region is `EncounterMove.hazards`, when
+/// it becomes dangerous is `phase` and `phase_started_tick`, and whether anybody was
+/// hit is a `BlowLanded` the server sends afterwards. A client that drew its own cone
+/// from this member would be re-deriving authoritative geometry from a label.
+///
+/// Zero is the absent-field sentinel, as everywhere else in this contract, and the
+/// field that carries this refuses it: a move nobody can name is a move nobody can
+/// read, and drawing a generic swing in its place would put an attack in front of a
+/// player that the server never announced.
+///
+/// The members are grouped by the species that performs them and appended in that
+/// order. **Nothing in the contract binds a member to a species** — the pairing lives
+/// in the server's encounter tables, and a receiver reads `EncounterState.boss` for
+/// the creature rather than inferring it from here.
+enum EncounterMoveKind : ubyte {
+  Unknown = 0,
+
+  // -- The Vargr that guarded the tomb. Physical throughout: scratches, bites, a
+  //    charge and a leap. No member of this group is ever a cast, which is why none
+  //    of them may carry `MovePhase.Channel`.
+
+  /// Head low, lip raised, shoulder loaded. The second bite of the pair carries a
+  /// telegraph of its own rather than continuing this one.
+  BiteAndTear = 1,
+
+  /// Two scrapes, the neck tensed, and a lane fixed before the creature moves. The
+  /// lane is fixed at `Telegraph` and never re-aimed — see `aim`.
+  CollarCharge = 2,
+
+  /// Crouched, watching one player, with the landing region shown before the jump.
+  /// The landing region does not follow its target, which is why this move is aimed
+  /// rather than targeted once it leaves `Telegraph`.
+  PredatorLeap = 3,
+
+  /// A raised paw and open claws, showing which side the sweep comes from.
+  PrisonerClaws = 4,
+
+  /// A full stop, the jaw opened and the neck loaded. A narrow cone and a long
+  /// recovery; there is no inescapable grab in this contract to carry.
+  BonebreakerJaws = 5,
+
+  // -- The Draugr king. A warrior and a caster both, which is why this group is the
+  //    reason `MovePhase` has `Channel` at all.
+
+  /// The blade held high, a pause, and a low clang.
+  KingsSentence = 6,
+
+  /// Three distinct poses — left cut, right cut, thrust — announced one at a time.
+  /// Each is a move instance of its own; this contract has no combo counter.
+  ThreeTolls = 7,
+
+  /// The sword planted and rings of lit cracks running outward in sequence. A cast,
+  /// and the first move here whose pulses are what a player reads.
+  Burial = 8,
+
+  /// An arm thrown toward the graves, rune groups lighting in the order the sectors
+  /// will erupt. A ritual: channelled, and it finishes before another physical
+  /// attack begins.
+  EdictOfTheGraves = 9,
+
+  /// The free hand raised, a crystal forming, and a direction fixed before release.
+  /// The projectile does not steer after it is thrown, which is why this move is
+  /// aimed rather than targeted at `Release`.
+  SepulchreSpear = 10,
+
+  /// The sword planted and three notes intoned, each floor sector showing its pulse
+  /// before it activates. The one move this contract expects to be interruptible —
+  /// and `interruptible` says so per instance rather than being read from here.
+  RequiemOfTheBuried = 11
+}
+
+/// Where one announced move has got to. Server -> client, and superseding.
+///
+/// **The client presents this; it never advances it.** A phase changes when the server
+/// says so and at no other moment, exactly as `MobAction` does. There is no local timer
+/// to complete and no event to replay: a dropped frame costs one update and the next one
+/// carries the whole answer.
+///
+/// The order is the order a move runs in, and it is deliberately not a promise that every
+/// move visits every member. A physical swing is `Telegraph -> Release -> Recovery` and
+/// never `Channel`; a ritual is `Telegraph -> Channel -> Recovery` and never `Release`.
+/// What a receiver may rely on is the *meaning* of the member it is holding, not the
+/// sequence that produced it.
+///
+/// Zero is the absent-field sentinel and is refused by the field that carries it.
+enum MovePhase : ubyte {
+  Unknown = 0,
+
+  /// Announced and preparing. **Nothing here damages anybody** — that is the whole of
+  /// what this member promises, and it is the promise the encounter is built on: the
+  /// preparation reaches the client before the damage exists, so a player reads an
+  /// attack rather than reconstructing one from an animation that has already hit them.
+  ///
+  /// `hazards` in this phase is the region the move *will* endanger. It is shown, and
+  /// it is not yet dangerous.
+  Telegraph = 1,
+
+  /// The damaging window of a move that has one instant of contact — a bite, a sweep,
+  /// a charge, a thrown spear. `hazards` is dangerous now, on the same ticks the client
+  /// is being told about.
+  Release = 2,
+
+  /// A cast or ritual running its pulses. `pulse_index` and `pulse_total` say which one
+  /// is imminent and how many there are; each pulse's own region is in `hazards`.
+  ///
+  /// **A channel is the only phase this contract lets an interrupt end**, and only when
+  /// `interruptible` is true on that instance. Interruption is authoritative like every
+  /// other outcome: the server decides it and states it here as `MoveEnd.Interrupted`.
+  Channel = 3,
+
+  /// The move is over and the creature is open. Nothing in `hazards` is dangerous in
+  /// this phase; the vector is normally empty. This is the reward for reading the
+  /// telegraph, and it is the server's statement rather than an animation's.
+  Recovery = 4
+}
+
+/// How one move instance stopped. Server -> client.
+///
+/// **Read through its zero member, and never a decode failure.** Zero means the instance
+/// is still running, which is the ordinary case in every frame that carries a move at
+/// all — the same treatment `RefusalReason` gets, and for the same reason: a receiver one
+/// contract behind must show a move ending rather than drop the session over a reason it
+/// cannot name. A receiver that does not recognise a non-zero member here ends the move
+/// and says nothing about why.
+///
+/// An ended instance is announced once and is then gone from the encounter's `moves`. A
+/// receiver that never saw the announcement — it arrived while the frame was dropped, or
+/// the player was elsewhere — sees the instance disappear instead, which is why
+/// disappearance must be treated as an ending too. Both mean: stop drawing this move, and
+/// stop treating its hazards as dangerous.
+enum MoveEnd : ubyte {
+  /// Still running. Not an error, and not a member a server chooses.
+  Unknown = 0,
+
+  /// The move ran to its end. A `Recovery` that expires reaches this.
+  Completed = 1,
+
+  /// A channel the server allowed to be broken, and that something broke. Only an
+  /// instance whose `interruptible` was true can carry this, and what counts as an
+  /// interrupt is the server's rule: **this contract assumes no new player ability**
+  /// and grants none. An interrupt is a reward when it exists, never the only escape.
+  Interrupted = 2,
+
+  /// The encounter withdrew the move: the boss died, the party wiped, the run reset, or
+  /// the creature left the state that produced it. Every hazard the instance announced
+  /// stops being dangerous at the same moment, and a receiver that keeps drawing one is
+  /// showing a danger the server has already cancelled.
+  Cancelled = 3
+}
+
+/// The shape of one announced danger region. Server -> client.
+///
+/// Four shapes, chosen because they are what the approved encounter actually needs — a
+/// jaw cone, a charge lane and a spear path, a sector or landing disc, and a burial ring
+/// that expands. Zero is the absent-field sentinel and is refused.
+///
+/// Which fields of `HazardVolume` a shape reads is stated on that table, per shape. A
+/// field a shape does not read is ignored rather than refused: the server writes zero
+/// there and a later shape may give it a meaning.
+enum HazardShape : ubyte {
+  Unknown = 0,
+
+  /// A cone opening from `origin` along `direction`: everything within `radius` whose
+  /// bearing is within `half_angle`. Bites and jaws.
+  Cone = 1,
+
+  /// A strip running from `origin` along `direction` for `radius`, `half_width` to
+  /// either side. Charge lanes, vertical cuts and the spear's path.
+  Line = 2,
+
+  /// A disc centred on `origin` of `radius`. Landing zones and floor sectors.
+  Disc = 3,
+
+  /// An annulus centred on `origin`, between `inner_radius` and `radius`. The burial
+  /// wave, whose safe ground is inside the ring it has already passed.
+  Ring = 4
+}
+
+/// One bounded region an announced move endangers, in world space. Server -> client.
+///
+/// **It is the region, not the damage.** Whether a player standing in it is hit is the
+/// server's answer and arrives as `BlowLanded`; nothing here lets a client decide it, and
+/// a client that took a health point away because a body overlapped this volume would be
+/// deciding a gameplay outcome. The volume exists so the danger can be *shown* — which is
+/// the readability the whole encounter rests on — and so a receiver can tell the region
+/// announced in `Telegraph` from the one that is live in `Release`.
+///
+/// Every region is bounded, and the bound is checked rather than assumed: an unbounded
+/// or non-finite volume reaches a renderer as a shape covering the world, and a receiver
+/// that clamped it would be inventing a danger boundary the server did not state.
+///
+/// Decoder invariants:
+///   - `shape` is a known non-zero member
+///   - `origin` is present and every component is finite and inside the +/-2^24 block
+///     domain
+///   - `direction` is present and every component is finite. `Cone` and `Line` require a
+///     non-zero direction; `Disc` and `Ring` ignore it, and a server writes zero there
+///   - `radius` is finite, strictly positive, and at most 128 blocks. No move in this
+///     encounter reaches further, and an arena is smaller than that
+///   - `height` is finite, strictly positive, and at most 128 blocks
+///   - `inner_radius` is finite and in `0 .. radius`; `Ring` requires it strictly less
+///     than `radius`, and the other three shapes ignore it
+///   - `half_angle` is finite and in `0 .. pi` radians; `Cone` requires it strictly
+///     positive, and the other three shapes ignore it. The bound is pi *as a float32
+///     holds it* — the nearest float32 to pi sits fractionally above the real value, so
+///     a receiver comparing in double precision would refuse the widest cone a sender
+///     can encode
+///   - `half_width` is finite and in `0 .. radius`; `Line` requires it strictly
+///     positive, and the other three shapes ignore it
+table HazardVolume {
+  shape: HazardShape;
+
+  /// The region's anchor in world space. For `Cone` and `Line` it is the apex or the
+  /// start of the strip; for `Disc` and `Ring` it is the centre.
+  origin: Vec3;
+
+  /// Where the region points, as a unit vector the server has already normalised. It is
+  /// **fixed by the server**, and for an aimed move it is fixed once — see
+  /// `EncounterMove.aim`. A receiver never re-aims it at a player.
+  direction: Vec3;
+
+  /// Reach, in blocks: the cone's length, the strip's length, or the outer radius of a
+  /// disc or ring.
+  radius: float;
+
+  /// Vertical extent, in blocks, centred on `origin`. A ground wave is short and a
+  /// leap's landing is not; a receiver that assumed a floor plane would draw a danger
+  /// the wrong height.
+  height: float;
+
+  /// Inner radius, in blocks. `Ring` only.
+  inner_radius: float;
+
+  /// Half the cone's opening angle, in radians. `Cone` only.
+  half_angle: float;
+
+  /// Half the strip's width, in blocks. `Line` only.
+  half_width: float;
+}
+
+/// One announced move of one boss, as the server holds it this tick. Server -> client.
+///
+/// **Superseding state, not an event.** Every frame carries the encounter's live moves
+/// entire, so there is nothing to merge, nothing to replay and no ordering to preserve
+/// across frames. A client that has been away — the frame was dropped, the player was
+/// out of the arena, the session reconnected — is correct again on the next frame it
+/// receives, which is the late-snapshot behaviour this contract requires everywhere else.
+///
+/// **A move is identified by `move_instance_id`, and that is what makes a late frame
+/// safe.** The id is unique among the encounter's live instances and is never reused
+/// inside one encounter instance, so a receiver holding a stale instance can tell it from
+/// a new one that happens to be the same `kind`. Two bites in a row are two ids.
+///
+/// **Timing is in server ticks, and they are the same ticks the client already holds.**
+/// `phase_started_tick` and `phase_ticks` are counted at `ServerWelcome.tick_rate` and
+/// share `EntitySnapshot.tick`'s wrapping, so a receiver measures a telegraph against the
+/// snapshot stream rather than against a local clock it started when a frame arrived.
+/// **The damage window is these ticks**, not an animation's length: a presentation that
+/// ran long or short must not move when the danger begins.
+///
+/// **Aimed or targeted, never both.** `target_entity_id` names a player the move is
+/// tracking; `aim` states a direction fixed before release. A move that has locked its
+/// direction sends `aim` and clears the target, which is exactly what makes a charge
+/// dodgeable by stepping aside — the contract says the lane will not follow.
+///
+/// Decoder invariants:
+///   - `move_instance_id` is non-zero, and no two live moves of one encounter share one
+///   - `kind` and `phase` are known non-zero members
+///   - `phase_ticks` is non-zero: a phase with no duration is not a phase a client can
+///     present, and one that lasted no ticks would already be over
+///   - `hazards` is present. Empty is legal and ordinary — a `Recovery` endangers
+///     nothing — and at most 16 entries, which is more sectors than the widest ritual
+///     announces. Every entry satisfies `HazardVolume`
+///   - `aim` is present exactly when `target_entity_id` is zero, and when present every
+///     component is finite and it is not the zero vector. A move that names neither a
+///     target nor a direction points nowhere
+///   - `pulse_total` is non-zero exactly when `phase` is `Channel`, and `pulse_index` is
+///     strictly less than `pulse_total` there. Outside `Channel` both are zero
+///   - `interruptible` is only ever true on a `Channel` phase. Nothing else in this
+///     contract can be interrupted, and a true here on a swing would promise a player an
+///     escape the server does not honour
+///   - `ended` is read through its zero member and never fails a frame. A non-zero value
+///     a receiver cannot name still ends the move
+table EncounterMove {
+  move_instance_id: ulong;
+
+  kind: EncounterMoveKind;
+
+  phase: MovePhase;
+
+  /// The server tick this phase began at, at `ServerWelcome.tick_rate`. Wraps as
+  /// `EntitySnapshot.tick` does.
+  phase_started_tick: uint;
+
+  /// How many ticks this phase lasts. **A count, never a deadline** — the same rule
+  /// `PlayerVitals.respawn_ticks` states: a client holds it unchanged while frames are
+  /// absent rather than extrapolating an end it was not told about.
+  phase_ticks: uint;
+
+  /// The player this move is tracking, or zero when it has fixed a direction instead.
+  /// Presentation only, exactly as `MobState.target_entity_id` is.
+  target_entity_id: ulong;
+
+  /// The direction the move has locked, present exactly when `target_entity_id` is zero.
+  /// A unit vector the server normalised, and it does not move again for this instance.
+  aim: Vec3;
+
+  /// Every region this move endangers in its current phase. Announced in `Telegraph`,
+  /// live in `Release` and in each `Channel` pulse, and normally empty in `Recovery`.
+  hazards: [HazardVolume];
+
+  /// Which pulse of a channel is next, counted from zero. Zero outside `Channel`.
+  pulse_index: ubyte;
+
+  /// How many pulses the channel has. Zero outside `Channel`.
+  pulse_total: ubyte;
+
+  /// Whether the server will honour an interrupt against this instance. **It grants no
+  /// ability**: what can interrupt is whatever the server already accepts, and a false
+  /// here is the ordinary case rather than a failure.
+  interruptible: bool;
+
+  /// Why this instance stopped, or `Unknown` while it is still running.
+  ended: MoveEnd;
+}
+
+/// One boss encounter's complete live timeline. Server -> client, and authoritative.
+///
+/// **Replaced wholesale on every send**, for the reason `InstanceBindings` and
+/// `MarkerList` are: a partial list has an ordering and a revision to get right, and a
+/// client holding a move the server has forgotten is drawing a danger that no longer
+/// exists. An empty `moves` is therefore a statement — this boss is announcing nothing
+/// right now — and never the absence of one.
+///
+/// **It is not a snapshot of the boss.** Where the creature is, how much health it has
+/// and what its finite-state machine is doing arrive in `MobState` as they always have;
+/// this message carries only what has been *announced*. The two are joined by
+/// `boss_entity_id`, and a receiver that has no `MobState` for that id has a boss it
+/// cannot see and should present nothing.
+///
+/// **`phase` is an ordinal, not a name.** The approved encounter changes a boss's
+/// repertoire at health thresholds, and the wire carries which stage the server is in so
+/// that presentation can follow it; it deliberately does not carry the threshold, the
+/// health that crossed it, or a name for the stage. A client that computed the stage from
+/// the health bar would be deciding a gameplay fact.
+///
+/// **Version compatibility.** This payload is appended at V37 and travels server ->
+/// client only. An older client cannot name the tag and drops it — which on this
+/// contract's own rule is a bump avoided, not owed. The bump is owed by the other
+/// direction: a V37 client against a V36 server never receives a timeline, shows no
+/// telegraph, and is left inferring an attack from the animation that is already landing
+/// — the exact reconstruction this encounter's design forbids. Two peers that disagree
+/// about whether an attack was announced is the `EntitySnapshot.drop_durabilities`
+/// argument that moved V11: silent disagreement after a clean handshake is a stronger
+/// case for a bump than a decode refusal. A client sending this authoritative payload is
+/// a protocol error.
+///
+/// Decoder invariants:
+///   - `encounter_id` and `boss_entity_id` are both non-zero
+///   - `boss` is a known non-zero `MobKind`. It is not required to be a boss-rank
+///     species: which kinds are boss-rank is the server's registry, and a receiver that
+///     hard-coded the pair would need a new build for the third boss
+///   - `phase` is non-zero. Stages are counted from one
+///   - `moves` is present; empty is legal and is a statement. At most 8 entries — more
+///     simultaneous announcements than any approved move set produces, and a bound
+///     because the vector drives allocation. Every entry satisfies `EncounterMove`
+///   - no two entries share a `move_instance_id`
+table EncounterTimeline {
+  encounter_id: ulong;
+
+  boss_entity_id: ulong;
+
+  boss: MobKind;
+
+  /// Which stage of the encounter the server is in, counted from one.
+  phase: ubyte;
+
+  moves: [EncounterMove];
+}

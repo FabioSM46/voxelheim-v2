@@ -275,6 +275,20 @@ import "strconv"
 // / offer nobody can answer is not one. The two appended RefusalReason members owe
 // / nothing on their own — that enum is read through its zero member and never fails
 // / a frame — and no existing tag, table field or frame bound changes.
+// / **V37 puts the announcement on the wire before the blow.** `EncounterTimeline` is
+// / server -> client and an older client drops its unknown tag safely, so that direction
+// / owes nothing. The bump is owed by the other one, on the rule stated above: ask what
+// / the receiver does with the value it does not recognise. A V37 client against a V36
+// / server receives no timeline at all, which is indistinguishable from a boss that is
+// / announcing nothing — so it shows no telegraph and falls back to reading an attack off
+// / an animation that has already reached it, which is precisely what the encounter's
+// / readability rests on not happening. Two peers disagreeing about whether a blow was
+// / announced, after a clean handshake, is the `drop_durabilities` case of V11 rather
+// / than the unknown-tag case of `ActionRefused`.
+// /
+// / No existing tag, table field, enum member or frame bound changes. Every type the
+// / payload is built from — `EncounterMove`, `EncounterMoveKind`, `MovePhase`, `MoveEnd`,
+// / `HazardShape` and `HazardVolume` — is new and reachable only through it.
 type ProtocolVersion uint16
 
 const (
@@ -283,8 +297,8 @@ const (
 	/// closed: a `ClientHello` carrying no version at all reads as `Unknown` and
 	/// is rejected, instead of defaulting to "whatever is current".
 	ProtocolVersionUnknown ProtocolVersion = 0
-	/// V36: portal veil/heart blocks are non-solid; older clients treat them as walls.
-	ProtocolVersionCurrent ProtocolVersion = 36
+	/// V37: boss move and spell timelines are announced before they can damage anybody.
+	ProtocolVersionCurrent ProtocolVersion = 37
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

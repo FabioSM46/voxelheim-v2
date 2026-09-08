@@ -68,6 +68,14 @@ pub mod voxelheim {
         pub use self::mining_tool_generated::*;
         mod mining_phase_generated;
         pub use self::mining_phase_generated::*;
+        mod encounter_move_kind_generated;
+        pub use self::encounter_move_kind_generated::*;
+        mod move_phase_generated;
+        pub use self::move_phase_generated::*;
+        mod move_end_generated;
+        pub use self::move_end_generated::*;
+        mod hazard_shape_generated;
+        pub use self::hazard_shape_generated::*;
         mod payload_generated;
         pub use self::payload_generated::*;
         mod vec_3_generated;
@@ -260,6 +268,12 @@ pub mod voxelheim {
         pub use self::instance_entry_answer_generated::*;
         mod instance_bindings_generated;
         pub use self::instance_bindings_generated::*;
+        mod hazard_volume_generated;
+        pub use self::hazard_volume_generated::*;
+        mod encounter_move_generated;
+        pub use self::encounter_move_generated::*;
+        mod encounter_timeline_generated;
+        pub use self::encounter_timeline_generated::*;
         mod envelope_generated;
         pub use self::envelope_generated::*;
     } // net
