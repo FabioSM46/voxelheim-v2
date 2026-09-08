@@ -56,6 +56,7 @@ mod combat_audio;
 mod constants;
 mod crafting;
 mod drops;
+pub(crate) mod encounters;
 mod hands;
 mod horse;
 mod instance_entry;
@@ -342,6 +343,7 @@ impl Plugin for PlayerPlugin {
         ambient_sound::register(app);
         tool_audio::register(app);
         combat_audio::register(app);
+        encounters::register(app);
         // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
         // Bevy panics on a unique plugin added twice.
         if !app.is_plugin_added::<BodyVisualsPlugin>() {
@@ -457,6 +459,7 @@ impl Plugin for PlayerPlugin {
                         .after(apply_snapshots)
                         .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
+                    mobs::pose_encounters.after(encounters::reconcile),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_weather_without_a_session.after(ApplySnapshots),
                     ambience::forget_ambience_without_a_session.after(ApplySnapshots),
@@ -3196,6 +3199,7 @@ pub(crate) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<portal::PortalFocus>(world);
     use crate::world::transition::{despawn, reset};
     reset::<SnapshotBuffer>(world);
+    reset::<encounters::EncounterPresentation>(world);
     reset::<Appearances>(world);
     reset::<SelfVitals>(world);
     reset::<LocalMount>(world);
