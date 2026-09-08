@@ -1954,6 +1954,18 @@ pub const MAX_MARKERS: usize = 64;
 /// arithmetic downstream of a decoded coordinate cannot leave `i32`.
 const BLOCK_DOMAIN: i32 = 1 << 24;
 
+/// The furthest one announced hazard may reach or rise, in blocks.
+///
+/// The contract's bound, checked rather than assumed: an unbounded or non-finite volume
+/// reaches a renderer as a shape covering the world, and clamping one here would be this
+/// side inventing a danger boundary the server never stated.
+pub const MAX_HAZARD_EXTENT: f32 = 128.0;
+
+/// The longest hazard vector one move may announce, and the largest number of moves one
+/// encounter may announce at once. Both bound an allocation driven by a peer's vector.
+pub const MAX_HAZARDS_PER_MOVE: usize = 16;
+pub const MAX_LIVE_MOVES: usize = 8;
+
 /// The most bytes a mark's note may carry. Bytes rather than characters, because a byte
 /// is what the wire carries and what both decoders can count without agreeing on an
 /// encoding of characters.
@@ -2292,6 +2304,235 @@ pub struct SessionBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InstanceBindings {
     pub bindings: Vec<SessionBinding>,
+}
+
+/// Which announced boss move an [`EncounterMove`] names.
+///
+/// **A name, not a script.** What this client may do with it is choose the pose, the
+/// sound and the wording; it never says what the move *does*. The damaging region is
+/// [`EncounterMove::hazards`], when it becomes dangerous is the phase and its ticks, and
+/// whether anybody was hit arrives afterwards as a [`BlowLanded`]. A client that drew its
+/// own cone from this member would be re-deriving authoritative geometry from a label.
+///
+/// No `Unknown` variant, for the reason [`MobKind`] has none: the contract's zero is the
+/// absent field, and a move whose name failed to arrive is refused rather than drawn as a
+/// generic swing — which would put an attack in front of a player that the server never
+/// announced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncounterMoveKind {
+    BiteAndTear,
+    CollarCharge,
+    PredatorLeap,
+    PrisonerClaws,
+    BonebreakerJaws,
+    KingsSentence,
+    ThreeTolls,
+    Burial,
+    EdictOfTheGraves,
+    SepulchreSpear,
+    RequiemOfTheBuried,
+}
+
+impl EncounterMoveKind {
+    fn from_wire(value: fb::EncounterMoveKind) -> Option<Self> {
+        match value {
+            fb::EncounterMoveKind::BiteAndTear => Some(Self::BiteAndTear),
+            fb::EncounterMoveKind::CollarCharge => Some(Self::CollarCharge),
+            fb::EncounterMoveKind::PredatorLeap => Some(Self::PredatorLeap),
+            fb::EncounterMoveKind::PrisonerClaws => Some(Self::PrisonerClaws),
+            fb::EncounterMoveKind::BonebreakerJaws => Some(Self::BonebreakerJaws),
+            fb::EncounterMoveKind::KingsSentence => Some(Self::KingsSentence),
+            fb::EncounterMoveKind::ThreeTolls => Some(Self::ThreeTolls),
+            fb::EncounterMoveKind::Burial => Some(Self::Burial),
+            fb::EncounterMoveKind::EdictOfTheGraves => Some(Self::EdictOfTheGraves),
+            fb::EncounterMoveKind::SepulchreSpear => Some(Self::SepulchreSpear),
+            fb::EncounterMoveKind::RequiemOfTheBuried => Some(Self::RequiemOfTheBuried),
+            _ => None,
+        }
+    }
+}
+
+/// Where one announced move has got to.
+///
+/// **This client presents it; it never advances it.** A phase changes when the server
+/// says so and at no other moment, exactly as [`MobAction`] does. There is no local timer
+/// to complete and no event to replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MovePhase {
+    /// Announced and preparing, and **nothing here damages anybody**. The hazards are
+    /// the regions the move *will* endanger: shown, and not yet dangerous. This is the
+    /// member the whole encounter's readability rests on.
+    Telegraph,
+    /// The damaging window of a move with one instant of contact. The hazards are live
+    /// on the ticks this phase names.
+    Release,
+    /// A cast or ritual running its pulses. [`EncounterMove::pulse_index`] says which one
+    /// is next.
+    Channel,
+    /// The move is over and the creature is open. The hazards are normally empty and
+    /// none of them is dangerous.
+    Recovery,
+}
+
+impl MovePhase {
+    fn from_wire(value: fb::MovePhase) -> Option<Self> {
+        match value {
+            fb::MovePhase::Telegraph => Some(Self::Telegraph),
+            fb::MovePhase::Release => Some(Self::Release),
+            fb::MovePhase::Channel => Some(Self::Channel),
+            fb::MovePhase::Recovery => Some(Self::Recovery),
+            _ => None,
+        }
+    }
+}
+
+/// How one move instance stopped, or that it has not.
+///
+/// **Read through its zero member, and never a decode failure** — the treatment
+/// [`RefusalReason`] gets, and for the same reason: a build one contract behind must show
+/// a move ending rather than drop the session over a reason it cannot name. So an
+/// unrecognised non-zero value arrives here as [`Self::Unknown`] *after* the move has
+/// already been reported as ended, which is what [`EncounterMove::ended`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveEnd {
+    /// A reason from a newer contract. The move still ended.
+    Unknown,
+    /// The move ran to its end.
+    Completed,
+    /// A channel the server allowed to be broken, and that something broke.
+    Interrupted,
+    /// The encounter withdrew the move: the boss died, the party wiped, the run reset.
+    /// Every hazard it announced stops being dangerous at the same moment.
+    Cancelled,
+}
+
+impl MoveEnd {
+    /// Total, because this is the one enum in this payload that never fails a frame.
+    fn from_wire(value: fb::MoveEnd) -> Self {
+        match value {
+            fb::MoveEnd::Completed => Self::Completed,
+            fb::MoveEnd::Interrupted => Self::Interrupted,
+            fb::MoveEnd::Cancelled => Self::Cancelled,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// The shape of one announced danger region.
+///
+/// Each variant carries only the measurements its shape reads; the fields the wire sends
+/// for the other shapes are zero and are ignored rather than refused, so a later shape
+/// can give them a meaning without this build refusing today's frames.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HazardShape {
+    /// Everything within `radius` of the origin whose bearing from `direction` is within
+    /// `half_angle` radians. Bites and jaws.
+    Cone { half_angle: f32 },
+    /// A strip running from the origin along `direction` for `radius`, `half_width` to
+    /// either side. Charge lanes, vertical cuts and the spear's path.
+    Line { half_width: f32 },
+    /// A disc centred on the origin. Landing zones and floor sectors.
+    Disc,
+    /// An annulus between `inner_radius` and `radius`. The burial wave, whose safe ground
+    /// is inside the ring it has already passed.
+    Ring { inner_radius: f32 },
+}
+
+/// One bounded region an announced move endangers, in world space.
+///
+/// **It is the region, not the damage.** Whether a player standing in it is hit is the
+/// server's answer and arrives as [`Message::BlowLanded`]; a client that took a health
+/// point away because a body overlapped this volume would be deciding a gameplay outcome.
+/// The volume exists so the danger can be *shown*, and so a receiver can tell the region
+/// announced in [`MovePhase::Telegraph`] from the one that is live in
+/// [`MovePhase::Release`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HazardVolume {
+    pub shape: HazardShape,
+    /// The apex of a cone, the start of a strip, or the centre of a disc or ring.
+    pub origin: [f32; 3],
+    /// A unit vector the server already normalised, and **fixed by the server**. A
+    /// receiver never re-aims it at a player. Zero for a disc or a ring, which ignore it.
+    pub direction: [f32; 3],
+    /// Reach in blocks: a cone's or strip's length, or a disc's or ring's outer radius.
+    /// Finite, strictly positive, at most [`MAX_HAZARD_EXTENT`].
+    pub radius: f32,
+    /// Vertical extent in blocks, centred on the origin. Finite, strictly positive, at
+    /// most [`MAX_HAZARD_EXTENT`]. A ground wave is short and a leap's landing is not.
+    pub height: f32,
+}
+
+/// One announced move of one boss, as the server holds it this tick.
+///
+/// **Superseding state, not an event.** Every frame carries the encounter's live moves
+/// entire, so there is nothing to merge, nothing to replay and no ordering to preserve
+/// across frames. A client that has been away — the frame was dropped, the player was
+/// outside the arena, the session reconnected — is correct again on the next frame it
+/// receives.
+///
+/// **[`Self::move_instance_id`] is what makes a late frame safe.** It is unique among the
+/// encounter's live moves and never reused inside one encounter, so a stale instance is
+/// distinguishable from a new one that happens to be the same [`EncounterMoveKind`]. Two
+/// bites in a row are two ids.
+///
+/// **A move that vanishes has ended.** An ended instance is announced once and is then
+/// gone; a receiver that never saw the announcement sees it disappear instead, and both
+/// mean the same thing — stop drawing it, and stop treating its hazards as dangerous.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncounterMove {
+    pub move_instance_id: u64,
+    pub kind: EncounterMoveKind,
+    pub phase: MovePhase,
+    /// The server tick this phase began at, at `SessionParams::tick_rate`. Wraps as
+    /// `Snapshot::tick` does.
+    pub phase_started_tick: u32,
+    /// How many ticks this phase lasts. **A count, never a deadline**: hold it unchanged
+    /// while frames are absent rather than extrapolating an end nobody stated. **The
+    /// damage window is these ticks**, not the length of whatever animation plays.
+    pub phase_ticks: u32,
+    /// The player this move is tracking, or `None` when it has fixed a direction. Exactly
+    /// one of this and [`Self::aim`] is present.
+    pub target_entity_id: Option<u64>,
+    /// The direction the move has locked, present exactly when it names no target. It
+    /// does not move again for this instance, which is what makes a charge dodgeable by
+    /// stepping aside.
+    pub aim: Option<[f32; 3]>,
+    /// Every region this move endangers in its current phase. Empty is legal and ordinary.
+    pub hazards: Vec<HazardVolume>,
+    /// Which pulse of a channel is next, counted from zero, and how many there are.
+    /// `None` outside [`MovePhase::Channel`].
+    pub pulse: Option<(u8, u8)>,
+    /// Whether the server will honour an interrupt against this instance. **It grants no
+    /// ability**: what can interrupt is whatever the server already accepts, and false is
+    /// the ordinary case. Only a channel can be true.
+    pub interruptible: bool,
+    /// Why this instance stopped, or `None` while it is still running.
+    pub ended: Option<MoveEnd>,
+}
+
+/// One boss encounter's complete live timeline, **replacing** the client's copy wholesale.
+///
+/// An empty `moves` is a statement — this boss is announcing nothing right now — and
+/// never the absence of one. A receiver that kept a previous list would be drawing a
+/// danger the server has already withdrawn.
+///
+/// **It is not a snapshot of the boss.** Where the creature is, how much health it has and
+/// what its state machine is doing arrive in the mob half of [`Snapshot`] as they always
+/// have; this carries only what has been *announced*. The two are joined by
+/// [`Self::boss_entity_id`], and a receiver with no mob for that id has a boss it cannot
+/// see and should present nothing.
+///
+/// **[`Self::phase`] is an ordinal, not a name.** It says which stage the server is in,
+/// counted from one. It deliberately carries no threshold and no health, and a client that
+/// computed the stage from the health bar would be deciding a gameplay fact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EncounterTimeline {
+    pub encounter_id: u64,
+    pub boss_entity_id: u64,
+    pub boss: MobKind,
+    /// Which stage of the encounter the server is in, counted from one. Never zero.
+    pub phase: u8,
+    pub moves: Vec<EncounterMove>,
 }
 
 /// What a resident does in their settlement.
@@ -2985,6 +3226,14 @@ pub enum Message {
     /// event-shaped payloads around it: the message *is* the state, so an empty one is a
     /// statement and there is no earlier list for it to be checked against.
     InstanceBindings(InstanceBindings),
+    /// One boss encounter's complete live announcement set, replacing the client's copy
+    /// wholesale.
+    ///
+    /// Sibling of [`Self::InstanceBindings`] rather than of the event-shaped payloads
+    /// around it: the message *is* the state, so an empty one is a statement. Copied and
+    /// validated here; the presentation that draws a telegraph is this issue's second
+    /// part, exactly as `MapTile` was carried this far before the map window existed.
+    EncounterTimeline(EncounterTimeline),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
     Deferred(&'static str),
@@ -3693,6 +3942,91 @@ pub enum DecodeError {
     /// would drop a legitimate offer and tell the player nothing. What a zero or a
     /// negative *is* is a server that wrote no time at all, which no clock excuses.
     SessionBindingResetTime(i64),
+    /// An `EncounterTimeline` carries the reserved encounter id 0, names no boss entity,
+    /// or states stage 0. Nothing joins an anonymous timeline to a creature on screen,
+    /// and stages are counted from one.
+    EncounterWithoutIdentity,
+    /// An `EncounterTimeline` names a `MobKind` this build cannot. Refused rather than
+    /// dropped, for `MobState`'s reason: a boss the server said was there cannot be
+    /// silently left out, and a default enemy in its place would be worse.
+    UnknownEncounterBoss {
+        value: u8,
+    },
+    /// An `EncounterTimeline` announces more moves than any encounter produces, or an
+    /// `EncounterMove` more hazards than any ritual lights. Both bound an allocation a
+    /// peer chose the size of.
+    EncounterTooCrowded {
+        moves: usize,
+        hazards: usize,
+    },
+    /// Two announced moves of one encounter share a `move_instance_id`. The id is what
+    /// tells a stale announcement from a new one, so one appearing twice is a frame no
+    /// correct server sends.
+    DuplicateMoveInstance {
+        move_instance_id: u64,
+    },
+    /// An `EncounterMove` carries the reserved instance id 0, so nothing can be said
+    /// about it across two frames.
+    MoveWithoutIdentity {
+        index: usize,
+    },
+    /// An `EncounterMove` names a move this build cannot. Refused for the same reason an
+    /// unknown boss is: a generic swing drawn in its place is an attack the server never
+    /// announced.
+    UnknownEncounterMove {
+        index: usize,
+        value: u8,
+    },
+    /// An `EncounterMove` names a phase this build cannot, or none at all. The phase is
+    /// what says whether the hazards are dangerous yet.
+    UnknownMovePhase {
+        index: usize,
+        value: u8,
+    },
+    /// An `EncounterMove` phase lasts no ticks. A phase with no duration is not one a
+    /// receiver can present, and one that lasted no ticks would already be over.
+    MoveWithoutDuration {
+        index: usize,
+    },
+    /// An `EncounterMove` names neither a target nor a direction, or its direction is
+    /// non-finite or zero. Such a move points nowhere.
+    MoveAimsAtNothing {
+        index: usize,
+    },
+    /// An `EncounterMove` counts pulses outside a channel, claims a channel with none, or
+    /// names a pulse past its own last.
+    MovePulseOutOfPhase {
+        index: usize,
+        pulse_index: u8,
+        pulse_total: u8,
+    },
+    /// An `EncounterMove` that is not channelling claims to be interruptible, which would
+    /// promise a player an escape the server does not honour.
+    MoveInterruptibleOutOfPhase {
+        index: usize,
+    },
+    /// A `HazardVolume` names a shape this build cannot, or none at all.
+    UnknownHazardShape {
+        index: usize,
+        value: u8,
+    },
+    /// A `HazardVolume` states no origin, or one that is non-finite or outside the block
+    /// domain.
+    HazardOriginOutOfDomain {
+        index: usize,
+    },
+    /// A `HazardVolume` states no direction, or a non-finite one; or a cone or line whose
+    /// direction is the zero vector and therefore points nowhere.
+    HazardDirectionUnusable {
+        index: usize,
+    },
+    /// A `HazardVolume` measurement is not a bounded one: a reach or height that is not
+    /// finite and inside `0 .. MAX_HAZARD_EXTENT`, a cone with no opening or one wider
+    /// than half a turn, a line with no width or wider than its reach, or a ring whose
+    /// inner radius does not lie inside its outer one.
+    HazardUnbounded {
+        index: usize,
+    },
 }
 
 impl fmt::Display for DecodeError {
@@ -4339,6 +4673,64 @@ impl fmt::Display for DecodeError {
             Self::SessionBindingResetTime(seconds) => {
                 write!(f, "a SessionBinding resets at Unix second {seconds}")
             }
+            Self::EncounterWithoutIdentity => {
+                write!(f, "an EncounterTimeline names no encounter, boss or stage")
+            }
+            Self::UnknownEncounterBoss { value } => {
+                write!(f, "an EncounterTimeline names MobKind {value}")
+            }
+            Self::EncounterTooCrowded { moves, hazards } => write!(
+                f,
+                "an EncounterTimeline announces {moves} moves and one of them {hazards} \
+                 hazards, at most {MAX_LIVE_MOVES} and {MAX_HAZARDS_PER_MOVE}"
+            ),
+            Self::DuplicateMoveInstance { move_instance_id } => write!(
+                f,
+                "two announced moves share instance id {move_instance_id}"
+            ),
+            Self::MoveWithoutIdentity { index } => {
+                write!(f, "announced move {index} carries reserved instance id 0")
+            }
+            Self::UnknownEncounterMove { index, value } => {
+                write!(f, "announced move {index} names EncounterMoveKind {value}")
+            }
+            Self::UnknownMovePhase { index, value } => {
+                write!(f, "announced move {index} names MovePhase {value}")
+            }
+            Self::MoveWithoutDuration { index } => {
+                write!(f, "announced move {index} lasts no ticks")
+            }
+            Self::MoveAimsAtNothing { index } => write!(
+                f,
+                "announced move {index} names neither a target nor a usable direction"
+            ),
+            Self::MovePulseOutOfPhase {
+                index,
+                pulse_index,
+                pulse_total,
+            } => write!(
+                f,
+                "announced move {index} is at pulse {pulse_index} of {pulse_total}"
+            ),
+            Self::MoveInterruptibleOutOfPhase { index } => write!(
+                f,
+                "announced move {index} is interruptible without channelling"
+            ),
+            Self::UnknownHazardShape { index, value } => {
+                write!(f, "a hazard of announced move {index} names shape {value}")
+            }
+            Self::HazardOriginOutOfDomain { index } => write!(
+                f,
+                "a hazard of announced move {index} is anchored outside the block domain"
+            ),
+            Self::HazardDirectionUnusable { index } => {
+                write!(f, "a hazard of announced move {index} points nowhere")
+            }
+            Self::HazardUnbounded { index } => write!(
+                f,
+                "a hazard of announced move {index} is not bounded by {MAX_HAZARD_EXTENT} \
+                 blocks and its own shape"
+            ),
         }
     }
 }
@@ -4952,10 +5344,17 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 .ok_or(DecodeError::MissingPayload(name))?;
             Ok(Message::InstanceBindings(instance_bindings(&payload)?))
         }
-        // V37's one, carried by name until this issue's client half gives it an arm that
-        // reads it. Explicit rather than left to the fallback below: the fallback answers
-        // for a tag this build cannot name, and this is a member it can.
-        fb::Payload::EncounterTimeline => Ok(Message::Deferred(name)),
+        // V37's one, server→client. Validated here rather than where it is drawn, for the
+        // reason every other payload is: an unbounded hazard, a phase this build cannot
+        // name or a move with no identity ends the session now, and the presentation that
+        // draws a telegraph never has to ask whether the geometry it is about to put in
+        // front of a player means anything.
+        fb::Payload::EncounterTimeline => {
+            let payload = envelope
+                .payload_as_encounter_timeline()
+                .ok_or(DecodeError::MissingPayload(name))?;
+            Ok(Message::EncounterTimeline(encounter_timeline(&payload)?))
+        }
         fb::Payload::NONE => Ok(Message::Deferred(name)),
         // A tag from a contract newer than this build. The arm cannot be deleted and
         // the compiler will never ask for a twentieth: flatc emits `Payload` as a
@@ -5246,6 +5645,250 @@ fn instance_bindings(list: &fb::InstanceBindings<'_>) -> Result<InstanceBindings
         });
     }
     Ok(InstanceBindings { bindings: decoded })
+}
+
+/// Copies and validates one bounded danger region.
+///
+/// Every clause is a decoder invariant `schemas/player.fbs` states, and the order is the
+/// order the table declares them in. The shape is read last because it is what decides
+/// which of the measurements are read at all: a field a shape ignores is left at zero by
+/// the server and is ignored here rather than refused, so a later shape can be given a
+/// meaning without this build refusing today's frames.
+fn hazard_volume(hazard: &fb::HazardVolume<'_>, index: usize) -> Result<HazardVolume, DecodeError> {
+    let origin = hazard
+        .origin()
+        .ok_or(DecodeError::HazardOriginOutOfDomain { index })?;
+    let origin = [origin.x(), origin.y(), origin.z()];
+    if origin
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > BLOCK_DOMAIN as f32)
+    {
+        return Err(DecodeError::HazardOriginOutOfDomain { index });
+    }
+
+    let direction = hazard
+        .direction()
+        .ok_or(DecodeError::HazardDirectionUnusable { index })?;
+    let direction = [direction.x(), direction.y(), direction.z()];
+    if direction.iter().any(|value| !value.is_finite()) {
+        return Err(DecodeError::HazardDirectionUnusable { index });
+    }
+    let points_somewhere = direction.iter().any(|value| *value != 0.0);
+
+    let bounded = |value: f32, ceiling: f32| value.is_finite() && value > 0.0 && value <= ceiling;
+    let (radius, height) = (hazard.radius(), hazard.height());
+    if !bounded(radius, MAX_HAZARD_EXTENT) || !bounded(height, MAX_HAZARD_EXTENT) {
+        return Err(DecodeError::HazardUnbounded { index });
+    }
+
+    let shape = match hazard.shape() {
+        fb::HazardShape::Cone => {
+            if !points_somewhere {
+                return Err(DecodeError::HazardDirectionUnusable { index });
+            }
+            let half_angle = hazard.half_angle();
+            // `std::f32::consts::PI` and not `f64`'s: the wire is a float32, whose
+            // nearest value to pi sits fractionally above it, so bounding in f64 would
+            // refuse the widest cone a server can actually encode.
+            if !bounded(half_angle, std::f32::consts::PI) {
+                return Err(DecodeError::HazardUnbounded { index });
+            }
+            HazardShape::Cone { half_angle }
+        }
+        fb::HazardShape::Line => {
+            if !points_somewhere {
+                return Err(DecodeError::HazardDirectionUnusable { index });
+            }
+            let half_width = hazard.half_width();
+            if !bounded(half_width, radius) {
+                return Err(DecodeError::HazardUnbounded { index });
+            }
+            HazardShape::Line { half_width }
+        }
+        fb::HazardShape::Disc => HazardShape::Disc,
+        fb::HazardShape::Ring => {
+            let inner_radius = hazard.inner_radius();
+            // Zero is a legal inner radius on the wire — the invariant is `0 .. radius`
+            // — but a ring needs a band, so the lower bound here is exclusive of the
+            // outer radius rather than of zero.
+            if !inner_radius.is_finite() || inner_radius < 0.0 || inner_radius >= radius {
+                return Err(DecodeError::HazardUnbounded { index });
+            }
+            HazardShape::Ring { inner_radius }
+        }
+        other => {
+            return Err(DecodeError::UnknownHazardShape {
+                index,
+                value: other.0,
+            });
+        }
+    };
+
+    Ok(HazardVolume {
+        shape,
+        origin,
+        direction,
+        radius,
+        height,
+    })
+}
+
+/// Copies and validates one announced move.
+///
+/// The identity is read first because it is the only thing that survives between frames:
+/// a move nobody can name across two snapshots cannot be told from a new one, whatever
+/// else is in it.
+fn encounter_move(
+    announced: &fb::EncounterMove<'_>,
+    index: usize,
+) -> Result<EncounterMove, DecodeError> {
+    let move_instance_id = announced.move_instance_id();
+    if move_instance_id == 0 {
+        return Err(DecodeError::MoveWithoutIdentity { index });
+    }
+    let kind = EncounterMoveKind::from_wire(announced.kind()).ok_or(
+        DecodeError::UnknownEncounterMove {
+            index,
+            value: announced.kind().0,
+        },
+    )?;
+    let phase = MovePhase::from_wire(announced.phase()).ok_or(DecodeError::UnknownMovePhase {
+        index,
+        value: announced.phase().0,
+    })?;
+    let phase_ticks = announced.phase_ticks();
+    if phase_ticks == 0 {
+        return Err(DecodeError::MoveWithoutDuration { index });
+    }
+
+    // Exactly one of the two, and the target is what decides which: a move that fixed its
+    // lane clears its target, and one tracking a player sends no aim at all.
+    let target_entity_id = match announced.target_entity_id() {
+        0 => None,
+        id => Some(id),
+    };
+    let aim = match target_entity_id {
+        Some(_) => None,
+        None => {
+            let aim = announced
+                .aim()
+                .ok_or(DecodeError::MoveAimsAtNothing { index })?;
+            let aim = [aim.x(), aim.y(), aim.z()];
+            if aim.iter().any(|value| !value.is_finite()) || aim.iter().all(|value| *value == 0.0) {
+                return Err(DecodeError::MoveAimsAtNothing { index });
+            }
+            Some(aim)
+        }
+    };
+
+    let announced_hazards = announced.hazards().unwrap_or_default();
+    if announced_hazards.len() > MAX_HAZARDS_PER_MOVE {
+        return Err(DecodeError::EncounterTooCrowded {
+            moves: 0,
+            hazards: announced_hazards.len(),
+        });
+    }
+    let mut hazards = Vec::with_capacity(announced_hazards.len());
+    for hazard in announced_hazards.iter() {
+        hazards.push(hazard_volume(&hazard, index)?);
+    }
+
+    let (pulse_index, pulse_total) = (announced.pulse_index(), announced.pulse_total());
+    let interruptible = announced.interruptible();
+    let pulse = if phase == MovePhase::Channel {
+        if pulse_total == 0 || pulse_index >= pulse_total {
+            return Err(DecodeError::MovePulseOutOfPhase {
+                index,
+                pulse_index,
+                pulse_total,
+            });
+        }
+        Some((pulse_index, pulse_total))
+    } else {
+        if pulse_total != 0 || pulse_index != 0 {
+            return Err(DecodeError::MovePulseOutOfPhase {
+                index,
+                pulse_index,
+                pulse_total,
+            });
+        }
+        if interruptible {
+            return Err(DecodeError::MoveInterruptibleOutOfPhase { index });
+        }
+        None
+    };
+
+    // The one field read through its zero member: a reason this build cannot name still
+    // ends the move, because refusing the frame would cost a player the statement that
+    // the danger is over.
+    let ended = match announced.ended() {
+        fb::MoveEnd::Unknown => None,
+        value => Some(MoveEnd::from_wire(value)),
+    };
+
+    Ok(EncounterMove {
+        move_instance_id,
+        kind,
+        phase,
+        phase_started_tick: announced.phase_started_tick(),
+        phase_ticks,
+        target_entity_id,
+        aim,
+        hazards,
+        pulse,
+        interruptible,
+        ended,
+    })
+}
+
+/// Copies and validates one boss encounter's complete live timeline.
+///
+/// **An empty `moves` is accepted and is not the same thing as an absent field.** Both
+/// arrive here as an empty vector, and both mean this boss is announcing nothing — which
+/// is a statement about the list this frame replaces, not the absence of one.
+///
+/// Uniqueness is checked for the reason [`instance_bindings`] checks it: the list replaces
+/// the client's copy wholesale, and two rows sharing an instance id are two announcements
+/// with one address that nothing downstream could tell apart.
+fn encounter_timeline(
+    timeline: &fb::EncounterTimeline<'_>,
+) -> Result<EncounterTimeline, DecodeError> {
+    let encounter_id = timeline.encounter_id();
+    let boss_entity_id = timeline.boss_entity_id();
+    let phase = timeline.phase();
+    if encounter_id == 0 || boss_entity_id == 0 || phase == 0 {
+        return Err(DecodeError::EncounterWithoutIdentity);
+    }
+    let boss = MobKind::from_wire(timeline.boss()).ok_or(DecodeError::UnknownEncounterBoss {
+        value: timeline.boss().0,
+    })?;
+
+    let announced = timeline.moves().unwrap_or_default();
+    if announced.len() > MAX_LIVE_MOVES {
+        return Err(DecodeError::EncounterTooCrowded {
+            moves: announced.len(),
+            hazards: 0,
+        });
+    }
+    let mut moves = Vec::with_capacity(announced.len());
+    let mut instances = HashSet::new();
+    for (index, one) in announced.iter().enumerate() {
+        let decoded = encounter_move(&one, index)?;
+        if !instances.insert(decoded.move_instance_id) {
+            return Err(DecodeError::DuplicateMoveInstance {
+                move_instance_id: decoded.move_instance_id,
+            });
+        }
+        moves.push(decoded);
+    }
+
+    Ok(EncounterTimeline {
+        encounter_id,
+        boss_entity_id,
+        boss,
+        phase,
+        moves,
+    })
 }
 
 /// Copies and validates one storm warning.
@@ -9385,6 +10028,156 @@ pub(super) mod server_side {
         )
     }
 
+    /// One announced hazard, with every field independently settable so that a test can
+    /// break exactly one of them.
+    #[derive(Debug, Clone, Copy)]
+    pub struct HazardVolumeWire {
+        pub shape: fb::HazardShape,
+        pub origin: Option<[f32; 3]>,
+        pub direction: Option<[f32; 3]>,
+        pub radius: f32,
+        pub height: f32,
+        pub inner_radius: f32,
+        pub half_angle: f32,
+        pub half_width: f32,
+    }
+
+    impl HazardVolumeWire {
+        /// A cone a correct server would send. Every invalid case is written as a
+        /// deviation from this, so a test states only what makes its frame wrong.
+        pub const SOUND: Self = Self {
+            shape: fb::HazardShape::Cone,
+            origin: Some([12.0, 61.0, -40.0]),
+            direction: Some([0.0, 0.0, 1.0]),
+            radius: 6.0,
+            height: 3.0,
+            inner_radius: 0.0,
+            half_angle: 0.7,
+            half_width: 0.0,
+        };
+    }
+
+    /// One announced move. `hazards: None` omits the vector entirely, which is the other
+    /// spelling of a move that endangers nothing.
+    #[derive(Debug, Clone)]
+    pub struct EncounterMoveWire {
+        pub move_instance_id: u64,
+        pub kind: fb::EncounterMoveKind,
+        pub phase: fb::MovePhase,
+        pub phase_started_tick: u32,
+        pub phase_ticks: u32,
+        pub target_entity_id: u64,
+        pub aim: Option<[f32; 3]>,
+        pub hazards: Option<Vec<HazardVolumeWire>>,
+        pub pulse_index: u8,
+        pub pulse_total: u8,
+        pub interruptible: bool,
+        pub ended: fb::MoveEnd,
+    }
+
+    impl EncounterMoveWire {
+        /// A telegraphed bite tracking one player: the shape the encounter's readability
+        /// rests on, announced and not yet dangerous.
+        pub fn sound() -> Self {
+            Self {
+                move_instance_id: 0x51,
+                kind: fb::EncounterMoveKind::BiteAndTear,
+                phase: fb::MovePhase::Telegraph,
+                phase_started_tick: 900,
+                phase_ticks: 27,
+                target_entity_id: 77,
+                aim: None,
+                hazards: Some(vec![HazardVolumeWire::SOUND]),
+                pulse_index: 0,
+                pulse_total: 0,
+                interruptible: false,
+                ended: fb::MoveEnd::Unknown,
+            }
+        }
+    }
+
+    /// An `EncounterTimeline` whose move vector can be absent, present-and-empty, or
+    /// anything else. The first two are the same message by contract — this boss is
+    /// announcing nothing — and this helper keeps them distinguishable on the wire.
+    pub fn encode_encounter_timeline(
+        encounter_id: u64,
+        boss_entity_id: u64,
+        boss: fb::MobKind,
+        phase: u8,
+        moves: Option<&[EncounterMoveWire]>,
+    ) -> Vec<u8> {
+        let mut builder = FlatBufferBuilder::with_capacity(
+            moves.map_or(0, |moves| moves.len() * 256) + super::BUILDER_CAPACITY,
+        );
+        let moves = moves.map(|moves| {
+            // Every table is built before the vector that points at it: a vector may not
+            // be under construction while a table is.
+            let laid_out: Vec<_> = moves
+                .iter()
+                .map(|one| {
+                    let hazards = one.hazards.as_ref().map(|hazards| {
+                        let volumes: Vec<_> = hazards
+                            .iter()
+                            .map(|hazard| {
+                                let origin = hazard.origin.map(|[x, y, z]| fb::Vec3::new(x, y, z));
+                                let direction =
+                                    hazard.direction.map(|[x, y, z]| fb::Vec3::new(x, y, z));
+                                fb::HazardVolume::create(
+                                    &mut builder,
+                                    &fb::HazardVolumeArgs {
+                                        shape: hazard.shape,
+                                        origin: origin.as_ref(),
+                                        direction: direction.as_ref(),
+                                        radius: hazard.radius,
+                                        height: hazard.height,
+                                        inner_radius: hazard.inner_radius,
+                                        half_angle: hazard.half_angle,
+                                        half_width: hazard.half_width,
+                                    },
+                                )
+                            })
+                            .collect();
+                        builder.create_vector(&volumes)
+                    });
+                    let aim = one.aim.map(|[x, y, z]| fb::Vec3::new(x, y, z));
+                    fb::EncounterMove::create(
+                        &mut builder,
+                        &fb::EncounterMoveArgs {
+                            move_instance_id: one.move_instance_id,
+                            kind: one.kind,
+                            phase: one.phase,
+                            phase_started_tick: one.phase_started_tick,
+                            phase_ticks: one.phase_ticks,
+                            target_entity_id: one.target_entity_id,
+                            aim: aim.as_ref(),
+                            hazards,
+                            pulse_index: one.pulse_index,
+                            pulse_total: one.pulse_total,
+                            interruptible: one.interruptible,
+                            ended: one.ended,
+                        },
+                    )
+                })
+                .collect();
+            builder.create_vector(&laid_out)
+        });
+        let payload = fb::EncounterTimeline::create(
+            &mut builder,
+            &fb::EncounterTimelineArgs {
+                encounter_id,
+                boss_entity_id,
+                boss,
+                phase,
+                moves,
+            },
+        );
+        finish_envelope(
+            builder,
+            fb::Payload::EncounterTimeline,
+            payload.as_union_value(),
+        )
+    }
+
     /// Encodes a `VoiceHeard` envelope. `None` omits the vector entirely, which is how
     /// an absent field reaches the decoder; an empty slice is the other shape of no
     /// audio, and the decoder owes both the same answer.
@@ -10017,10 +10810,11 @@ mod tests {
         // `MapTile` before the map window existed: the sessions window that draws these
         // is the other half of that issue.
         (fb::Payload::InstanceBindings, Handling::Consumed),
-        // V37's one, server→client. `Deferred` means "this build has no arm yet" rather
-        // than "this contract has no member" — the staged shape V24's map payloads, V25's
-        // stall and V35's two each had. The arm that reads it is this issue's client half.
-        (fb::Payload::EncounterTimeline, Handling::Deferred),
+        // V37's one, read by an arm of its own from the contract part that adds it. It
+        // is validated here and nothing draws it yet — the telegraph presentation is
+        // this issue's second part — and `Consumed` is about the decode boundary rather
+        // than about a consumer, exactly as it was for `MapTile` before the map window.
+        (fb::Payload::EncounterTimeline, Handling::Consumed),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -17169,5 +17963,697 @@ mod instance_entry_tests {
         ] {
             assert_eq!(error.to_string(), want);
         }
+    }
+}
+
+#[cfg(test)]
+mod encounter_tests {
+    use super::server_side::{EncounterMoveWire, HazardVolumeWire, encode_encounter_timeline};
+    use super::*;
+
+    /// A timeline a correct server would send, so a test that is not about the encounter
+    /// header never has to name one.
+    fn sound(moves: &[EncounterMoveWire]) -> Vec<u8> {
+        encode_encounter_timeline(0xDEC0DE, 4242, fb::MobKind::VargrGuardian, 1, Some(moves))
+    }
+
+    fn decoded(moves: &[EncounterMoveWire]) -> EncounterTimeline {
+        match decode(&sound(moves)) {
+            Ok(Message::EncounterTimeline(timeline)) => timeline,
+            other => panic!("a legal timeline was rejected: {other:?}"),
+        }
+    }
+
+    /// The announcement arrives whole, and it arrives before anything can damage anybody
+    /// — which is the one thing this payload exists to make true.
+    #[test]
+    fn a_telegraph_decodes_its_identity_geometry_and_timing() {
+        let bytes = sound(&[EncounterMoveWire::sound()]);
+        let Ok(Message::EncounterTimeline(timeline)) = decode(&bytes) else {
+            panic!("a legal timeline was rejected")
+        };
+        assert_eq!(timeline.encounter_id, 0xDEC0DE);
+        assert_eq!(timeline.boss_entity_id, 4242);
+        assert_eq!(timeline.boss, MobKind::VargrGuardian);
+        assert_eq!(timeline.phase, 1);
+
+        let announced = &timeline.moves[0];
+        assert_eq!(announced.move_instance_id, 0x51);
+        assert_eq!(announced.kind, EncounterMoveKind::BiteAndTear);
+        assert_eq!(announced.phase, MovePhase::Telegraph);
+        assert_eq!(announced.phase_started_tick, 900);
+        assert_eq!(announced.phase_ticks, 27);
+        // Tracking a player, so the lane is not fixed: exactly one of the two is present,
+        // and that is what a receiver reads the choice from.
+        assert_eq!(announced.target_entity_id, Some(77));
+        assert_eq!(announced.aim, None);
+        assert_eq!(announced.pulse, None);
+        assert!(!announced.interruptible);
+        assert_eq!(announced.ended, None);
+        assert_eq!(
+            announced.hazards,
+            vec![HazardVolume {
+                shape: HazardShape::Cone { half_angle: 0.7 },
+                origin: [12.0, 61.0, -40.0],
+                direction: [0.0, 0.0, 1.0],
+                radius: 6.0,
+                height: 3.0,
+            }]
+        );
+
+        // Every truncation of a legal frame is refused rather than read short.
+        for end in 0..bytes.len() {
+            assert!(decode(&bytes[..end]).is_err());
+        }
+    }
+
+    /// A move that has fixed its lane sends the direction and clears the target. The
+    /// contract promises the lane will not follow, and this is where a receiver can rely
+    /// on it.
+    #[test]
+    fn an_aimed_move_carries_a_lane_and_no_target() {
+        let charge = EncounterMoveWire {
+            kind: fb::EncounterMoveKind::CollarCharge,
+            phase: fb::MovePhase::Release,
+            target_entity_id: 0,
+            aim: Some([1.0, 0.0, 0.0]),
+            hazards: Some(vec![HazardVolumeWire {
+                shape: fb::HazardShape::Line,
+                half_width: 1.5,
+                radius: 18.0,
+                ..HazardVolumeWire::SOUND
+            }]),
+            ..EncounterMoveWire::sound()
+        };
+        let timeline = decoded(&[charge]);
+        let announced = &timeline.moves[0];
+        assert_eq!(announced.target_entity_id, None);
+        assert_eq!(announced.aim, Some([1.0, 0.0, 0.0]));
+        assert_eq!(
+            announced.hazards[0].shape,
+            HazardShape::Line { half_width: 1.5 }
+        );
+    }
+
+    /// Each shape reads only its own measurements, and the zeros the server writes for
+    /// the fields it ignores are ignored rather than refused — otherwise three of the
+    /// four shapes would be unsendable.
+    #[test]
+    fn each_hazard_shape_reads_only_the_measurements_it_owns() {
+        for (name, wire, want) in [
+            (
+                "a disc reads neither an angle nor a width",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Disc,
+                    direction: Some([0.0, 0.0, 0.0]),
+                    half_angle: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                HazardShape::Disc,
+            ),
+            (
+                "a ring reads its band and nothing else",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Ring,
+                    direction: Some([0.0, 0.0, 0.0]),
+                    inner_radius: 4.0,
+                    half_angle: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                HazardShape::Ring { inner_radius: 4.0 },
+            ),
+        ] {
+            let timeline = decoded(&[EncounterMoveWire {
+                hazards: Some(vec![wire]),
+                ..EncounterMoveWire::sound()
+            }]);
+            assert_eq!(timeline.moves[0].hazards[0].shape, want, "{name}");
+        }
+    }
+
+    /// A channel counts its pulses and may be interruptible; nothing else may do either.
+    ///
+    /// The interrupt is the reward for reading a ritual, never the only escape — so what
+    /// this pins is that the flag cannot appear on a swing, where it would promise a
+    /// player an escape the server does not honour.
+    #[test]
+    fn only_a_channel_counts_pulses_or_admits_an_interrupt() {
+        let requiem = EncounterMoveWire {
+            kind: fb::EncounterMoveKind::RequiemOfTheBuried,
+            phase: fb::MovePhase::Channel,
+            pulse_index: 1,
+            pulse_total: 3,
+            interruptible: true,
+            ended: fb::MoveEnd::Interrupted,
+            ..EncounterMoveWire::sound()
+        };
+        let timeline = decoded(std::slice::from_ref(&requiem));
+        assert_eq!(timeline.moves[0].pulse, Some((1, 3)));
+        assert!(timeline.moves[0].interruptible);
+        assert_eq!(timeline.moves[0].ended, Some(MoveEnd::Interrupted));
+
+        for (name, wire, want) in [
+            (
+                "a channel with no pulses",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Channel,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MovePulseOutOfPhase {
+                    index: 0,
+                    pulse_index: 0,
+                    pulse_total: 0,
+                },
+            ),
+            (
+                "a pulse past the last one",
+                EncounterMoveWire {
+                    pulse_index: 3,
+                    pulse_total: 3,
+                    ..requiem.clone()
+                },
+                DecodeError::MovePulseOutOfPhase {
+                    index: 0,
+                    pulse_index: 3,
+                    pulse_total: 3,
+                },
+            ),
+            (
+                "a swing that counts pulses",
+                EncounterMoveWire {
+                    pulse_total: 2,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MovePulseOutOfPhase {
+                    index: 0,
+                    pulse_index: 0,
+                    pulse_total: 2,
+                },
+            ),
+            (
+                "a swing that claims to be interruptible",
+                EncounterMoveWire {
+                    interruptible: true,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveInterruptibleOutOfPhase { index: 0 },
+            ),
+        ] {
+            assert_eq!(decode(&sound(&[wire])), Err(want), "{name}");
+        }
+    }
+
+    /// An ending this build cannot name still ends the move.
+    ///
+    /// This is the one field in the payload read through its zero member, and the reason
+    /// is the asymmetry: refusing the frame would cost a player the statement that the
+    /// danger is over, which is worse than showing an ending with no reason attached.
+    #[test]
+    fn an_ending_from_a_newer_contract_still_ends_the_move() {
+        for (wire, want) in [
+            (fb::MoveEnd::Unknown, None),
+            (fb::MoveEnd::Completed, Some(MoveEnd::Completed)),
+            (fb::MoveEnd::Cancelled, Some(MoveEnd::Cancelled)),
+            (fb::MoveEnd(200), Some(MoveEnd::Unknown)),
+        ] {
+            let timeline = decoded(&[EncounterMoveWire {
+                ended: wire,
+                ..EncounterMoveWire::sound()
+            }]);
+            assert_eq!(timeline.moves[0].ended, want, "{wire:?}");
+        }
+    }
+
+    /// A boss announcing nothing is a statement, and the two spellings of it are one
+    /// message.
+    ///
+    /// A recipient replaces its copy wholesale, so treating an empty list as silence
+    /// would leave a hazard drawn that the server has already withdrawn — the same
+    /// argument `InstanceBindings` makes about a lockout that has already reset.
+    #[test]
+    fn a_boss_announcing_nothing_is_a_statement_in_both_its_spellings() {
+        for (name, bytes) in [
+            (
+                "an absent vector",
+                encode_encounter_timeline(1, 2, fb::MobKind::DraugrKing, 3, None),
+            ),
+            (
+                "a present but empty vector",
+                encode_encounter_timeline(1, 2, fb::MobKind::DraugrKing, 3, Some(&[])),
+            ),
+        ] {
+            assert_eq!(
+                decode(&bytes),
+                Ok(Message::EncounterTimeline(EncounterTimeline {
+                    encounter_id: 1,
+                    boss_entity_id: 2,
+                    boss: MobKind::DraugrKing,
+                    phase: 3,
+                    moves: Vec::new(),
+                })),
+                "{name} says this boss is announcing nothing"
+            );
+        }
+    }
+
+    /// The header identifies the encounter, the creature and the stage, and each of the
+    /// three is refused when it is missing.
+    #[test]
+    fn a_timeline_nothing_can_be_joined_to_is_refused() {
+        for (name, bytes, want) in [
+            (
+                "no encounter id",
+                encode_encounter_timeline(0, 2, fb::MobKind::VargrGuardian, 1, Some(&[])),
+                DecodeError::EncounterWithoutIdentity,
+            ),
+            (
+                "no boss entity to join to a snapshot",
+                encode_encounter_timeline(1, 0, fb::MobKind::VargrGuardian, 1, Some(&[])),
+                DecodeError::EncounterWithoutIdentity,
+            ),
+            (
+                "stage zero, where stages are counted from one",
+                encode_encounter_timeline(1, 2, fb::MobKind::VargrGuardian, 0, Some(&[])),
+                DecodeError::EncounterWithoutIdentity,
+            ),
+            (
+                "the absent-field species",
+                encode_encounter_timeline(1, 2, fb::MobKind::Unknown, 1, Some(&[])),
+                DecodeError::UnknownEncounterBoss { value: 0 },
+            ),
+            (
+                "a species from a newer contract",
+                encode_encounter_timeline(1, 2, fb::MobKind(200), 1, Some(&[])),
+                DecodeError::UnknownEncounterBoss { value: 200 },
+            ),
+        ] {
+            assert_eq!(decode(&bytes), Err(want), "{name}");
+        }
+    }
+
+    /// Every move-level invariant the contract states, refused with the reason it states.
+    #[test]
+    fn an_announcement_no_player_could_read_is_refused() {
+        for (name, wire, want) in [
+            (
+                "the reserved instance id",
+                EncounterMoveWire {
+                    move_instance_id: 0,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveWithoutIdentity { index: 0 },
+            ),
+            (
+                "the absent-field move",
+                EncounterMoveWire {
+                    kind: fb::EncounterMoveKind::Unknown,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::UnknownEncounterMove { index: 0, value: 0 },
+            ),
+            (
+                "a move from a newer contract",
+                EncounterMoveWire {
+                    kind: fb::EncounterMoveKind(200),
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::UnknownEncounterMove {
+                    index: 0,
+                    value: 200,
+                },
+            ),
+            (
+                "the absent-field phase",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Unknown,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::UnknownMovePhase { index: 0, value: 0 },
+            ),
+            (
+                "a phase that lasts no ticks",
+                EncounterMoveWire {
+                    phase_ticks: 0,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveWithoutDuration { index: 0 },
+            ),
+            (
+                "neither a target nor a lane",
+                EncounterMoveWire {
+                    target_entity_id: 0,
+                    aim: None,
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveAimsAtNothing { index: 0 },
+            ),
+            (
+                "a lane pointing nowhere",
+                EncounterMoveWire {
+                    target_entity_id: 0,
+                    aim: Some([0.0, 0.0, 0.0]),
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveAimsAtNothing { index: 0 },
+            ),
+            (
+                "a non-finite lane",
+                EncounterMoveWire {
+                    target_entity_id: 0,
+                    aim: Some([f32::NAN, 0.0, 1.0]),
+                    ..EncounterMoveWire::sound()
+                },
+                DecodeError::MoveAimsAtNothing { index: 0 },
+            ),
+        ] {
+            assert_eq!(decode(&sound(&[wire])), Err(want), "{name}");
+        }
+    }
+
+    /// Every hazard-level invariant the contract states.
+    ///
+    /// An unbounded or non-finite volume reaches a renderer as a shape covering the
+    /// world, and clamping one here would be this side inventing a danger boundary the
+    /// server never stated — so each of these ends the session instead.
+    #[test]
+    fn a_hazard_nothing_can_bound_is_refused() {
+        for (name, wire, want) in [
+            (
+                "the absent-field shape",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Unknown,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::UnknownHazardShape { index: 0, value: 0 },
+            ),
+            (
+                "a shape from a newer contract",
+                HazardVolumeWire {
+                    shape: fb::HazardShape(200),
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::UnknownHazardShape {
+                    index: 0,
+                    value: 200,
+                },
+            ),
+            (
+                "no origin",
+                HazardVolumeWire {
+                    origin: None,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardOriginOutOfDomain { index: 0 },
+            ),
+            (
+                "a non-finite origin",
+                HazardVolumeWire {
+                    origin: Some([f32::INFINITY, 61.0, 0.0]),
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardOriginOutOfDomain { index: 0 },
+            ),
+            (
+                "an origin outside the block domain",
+                HazardVolumeWire {
+                    origin: Some([BLOCK_DOMAIN as f32 * 2.0, 61.0, 0.0]),
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardOriginOutOfDomain { index: 0 },
+            ),
+            (
+                "no direction",
+                HazardVolumeWire {
+                    direction: None,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardDirectionUnusable { index: 0 },
+            ),
+            (
+                "a non-finite direction",
+                HazardVolumeWire {
+                    direction: Some([0.0, 0.0, f32::NAN]),
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardDirectionUnusable { index: 0 },
+            ),
+            (
+                "a cone pointing nowhere",
+                HazardVolumeWire {
+                    direction: Some([0.0, 0.0, 0.0]),
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardDirectionUnusable { index: 0 },
+            ),
+            (
+                "a line pointing nowhere",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Line,
+                    direction: Some([0.0, 0.0, 0.0]),
+                    half_width: 1.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardDirectionUnusable { index: 0 },
+            ),
+            (
+                "no reach",
+                HazardVolumeWire {
+                    radius: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a reach past the arena",
+                HazardVolumeWire {
+                    radius: MAX_HAZARD_EXTENT + 1.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a non-finite reach",
+                HazardVolumeWire {
+                    radius: f32::INFINITY,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "no height",
+                HazardVolumeWire {
+                    height: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a height past the arena",
+                HazardVolumeWire {
+                    height: MAX_HAZARD_EXTENT + 1.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a cone with no opening",
+                HazardVolumeWire {
+                    half_angle: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a cone wider than half a turn",
+                HazardVolumeWire {
+                    half_angle: std::f32::consts::PI * 2.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a line with no width",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Line,
+                    half_width: 0.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a line wider than its reach",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Line,
+                    half_width: HazardVolumeWire::SOUND.radius + 1.0,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+            (
+                "a ring with no band",
+                HazardVolumeWire {
+                    shape: fb::HazardShape::Ring,
+                    inner_radius: HazardVolumeWire::SOUND.radius,
+                    ..HazardVolumeWire::SOUND
+                },
+                DecodeError::HazardUnbounded { index: 0 },
+            ),
+        ] {
+            let frame = sound(&[EncounterMoveWire {
+                hazards: Some(vec![wire]),
+                ..EncounterMoveWire::sound()
+            }]);
+            assert_eq!(decode(&frame), Err(want), "{name}");
+        }
+    }
+
+    /// The two cardinality bounds, and the identity rule that makes a late frame safe.
+    #[test]
+    fn a_crowded_or_ambiguous_announcement_is_refused() {
+        let crowded: Vec<_> = (0..=MAX_LIVE_MOVES)
+            .map(|i| EncounterMoveWire {
+                move_instance_id: i as u64 + 1,
+                ..EncounterMoveWire::sound()
+            })
+            .collect();
+        assert_eq!(
+            decode(&sound(&crowded)),
+            Err(DecodeError::EncounterTooCrowded {
+                moves: MAX_LIVE_MOVES + 1,
+                hazards: 0,
+            })
+        );
+
+        let overfull = EncounterMoveWire {
+            hazards: Some(vec![HazardVolumeWire::SOUND; MAX_HAZARDS_PER_MOVE + 1]),
+            ..EncounterMoveWire::sound()
+        };
+        assert_eq!(
+            decode(&sound(&[overfull])),
+            Err(DecodeError::EncounterTooCrowded {
+                moves: 0,
+                hazards: MAX_HAZARDS_PER_MOVE + 1,
+            })
+        );
+
+        // Two announcements of one id: the id is what tells a stale move from a new one,
+        // so one appearing twice leaves nothing downstream able to separate them.
+        assert_eq!(
+            decode(&sound(&[
+                EncounterMoveWire::sound(),
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Release,
+                    ..EncounterMoveWire::sound()
+                },
+            ])),
+            Err(DecodeError::DuplicateMoveInstance {
+                move_instance_id: 0x51,
+            })
+        );
+    }
+
+    /// The boundaries, at the value that is legal rather than only at the one past it.
+    ///
+    /// **Both directions, because a validator can fail either way and only one of them is
+    /// loud.** Refusing a value over the line costs a frame nobody should have sent;
+    /// refusing one exactly on it ends a session over a correct frame and says nothing
+    /// about why. The recovery is the case that matters most: it endangers nothing, and a
+    /// non-empty requirement would refuse the encounter's whole reward window.
+    #[test]
+    fn the_boundaries_of_a_legal_announcement_are_accepted() {
+        for (name, wire) in [
+            (
+                "a recovery that endangers nothing",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Recovery,
+                    hazards: None,
+                    ended: fb::MoveEnd::Completed,
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "a recovery whose hazard vector is present and empty",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Recovery,
+                    hazards: Some(Vec::new()),
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "a channel of one pulse",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Channel,
+                    pulse_index: 0,
+                    pulse_total: 1,
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "the last pulse of the longest channel",
+                EncounterMoveWire {
+                    phase: fb::MovePhase::Channel,
+                    pulse_index: u8::MAX - 1,
+                    pulse_total: u8::MAX,
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "a cone at every bound it has",
+                EncounterMoveWire {
+                    hazards: Some(vec![HazardVolumeWire {
+                        origin: Some([BLOCK_DOMAIN as f32, -(BLOCK_DOMAIN as f32), 0.0]),
+                        radius: MAX_HAZARD_EXTENT,
+                        height: MAX_HAZARD_EXTENT,
+                        half_angle: std::f32::consts::PI,
+                        ..HazardVolumeWire::SOUND
+                    }]),
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "a line exactly as wide as its reach",
+                EncounterMoveWire {
+                    hazards: Some(vec![HazardVolumeWire {
+                        shape: fb::HazardShape::Line,
+                        half_width: HazardVolumeWire::SOUND.radius,
+                        ..HazardVolumeWire::SOUND
+                    }]),
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "a ring whose band starts at the centre",
+                EncounterMoveWire {
+                    hazards: Some(vec![HazardVolumeWire {
+                        shape: fb::HazardShape::Ring,
+                        inner_radius: 0.0,
+                        ..HazardVolumeWire::SOUND
+                    }]),
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+            (
+                "as many sectors as a ritual may light",
+                EncounterMoveWire {
+                    hazards: Some(vec![HazardVolumeWire::SOUND; MAX_HAZARDS_PER_MOVE]),
+                    ..EncounterMoveWire::sound()
+                },
+            ),
+        ] {
+            let got = decode(&sound(&[wire]));
+            assert!(
+                matches!(got, Ok(Message::EncounterTimeline(_))),
+                "{name} is legal, and refusing it would end a session over a correct \
+                 frame: {got:?}"
+            );
+        }
+
+        let full: Vec<_> = (0..MAX_LIVE_MOVES)
+            .map(|i| EncounterMoveWire {
+                move_instance_id: i as u64 + 1,
+                ..EncounterMoveWire::sound()
+            })
+            .collect();
+        assert_eq!(decoded(&full).moves.len(), MAX_LIVE_MOVES);
     }
 }
