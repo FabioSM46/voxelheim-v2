@@ -1,9 +1,9 @@
 use super::*;
 
 #[test]
-fn guardian_has_seventeen_bounded_meshes_and_preserves_rest_pose() {
+fn guardian_has_nineteen_bounded_meshes_and_preserves_rest_pose() {
     let all = meshes();
-    assert_eq!(all.len(), 17);
+    assert_eq!(all.len(), 19);
     let mut triangles = 0;
     for (segment, mesh) in all {
         triangles += mesh.indices().unwrap().len() / 3;

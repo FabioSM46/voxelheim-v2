@@ -1373,6 +1373,8 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
 /// frame late.
 pub(super) fn animate(
     time: Res<Time>,
+    timelines: Option<Res<crate::net::EncounterTimelineInbox>>,
+    snapshots: Option<Res<SnapshotBuffer>>,
     visuals: Option<Res<MobVisuals>>,
     mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
     // `Without<Mob>` so Bevy can prove the two `&mut Transform` sets are disjoint: the
@@ -1426,7 +1428,15 @@ pub(super) fn animate(
             * Quat::from_rotation_x(mob.lean);
 
         let (yaw, action, elapsed) = (mob.yaw, mob.action, mob.action_elapsed);
+        let fast_travel =
+            timelines
+                .as_ref()
+                .zip(snapshots.as_ref())
+                .is_some_and(|(inbox, snapshots)| {
+                    guardian::choreography::travelling(inbox, snapshots, mob.entity_id)
+                });
         if let Some(motion) = mob.guardian_motion.as_mut() {
+            motion.fast_travel = fast_travel;
             motion.sample(transform.translation, yaw, action, elapsed, down, delta);
             guardian_poses.insert(entity, motion.transforms);
             // Articulation, including collapse, belongs to the mesh children.
@@ -1533,14 +1543,15 @@ pub(super) fn animate(
 /// Their root translation stays entirely on the snapshot interpolation path.
 pub(super) fn pose_encounters(
     presentation: Res<super::encounters::EncounterPresentation>,
-    mut mobs: Query<(Entity, &Mob, &mut Transform)>,
+    inbox: Res<crate::net::EncounterTimelineInbox>,
+    mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
     mut parts: Query<(&MobVisual, &mut Transform), Without<Mob>>,
 ) {
     use super::encounters::Window;
     use crate::net::{EncounterMoveKind, MovePhase};
-    for (entity, mob, mut root) in &mut mobs {
+    for (entity, mut mob, mut root) in &mut mobs {
         if !matches!(mob.kind, MobKind::VargrGuardian | MobKind::DraugrKing)
-            || mob.falling.is_some()
+            || (mob.falling.is_some() && mob.kind != MobKind::VargrGuardian)
         {
             continue;
         }
@@ -1552,6 +1563,34 @@ pub(super) fn pose_encounters(
             // Stable selection if a future repertoire announces concurrent moves:
             // live contact first, then the newest server instance.
             .max_by_key(|one| (one.damaging(), one.key.instance));
+        if mob.kind == MobKind::VargrGuardian {
+            let stage = inbox
+                .live()
+                .iter()
+                .find(|state| state.boss_entity_id == mob.entity_id && state.boss == mob.kind)
+                .map(|state| state.phase);
+            let (falling, yaw) = (mob.falling.is_some(), mob.yaw);
+            if let Some(motion) = &mut mob.guardian_motion {
+                // The inbox evicts dead encounters. Preserve the last announced
+                // fastening on this corpse only; a newly spawned root starts at one.
+                if let Some(stage) = stage {
+                    motion.stage = stage;
+                }
+                let pose = if falling {
+                    guardian::choreography::corpse_pose(motion.transforms, motion.stage)
+                } else {
+                    guardian::choreography::sample(motion, one, motion.stage, yaw)
+                };
+                for (part, mut transform) in &mut parts {
+                    if part.owner == entity
+                        && let MobPart::Guardian(segment) = part.part
+                    {
+                        *transform = pose[segment as usize];
+                    }
+                }
+            }
+            continue;
+        }
         if one.is_none() && !matches!(mob.action, MobAction::Windup | MobAction::Recovery) {
             // Preserve ordinary breathing and locomotion. Only a stale combat action
             // needs suppression when no authoritative move window supports its pose.
@@ -1581,29 +1620,7 @@ pub(super) fn pose_encounters(
             if part.owner != entity {
                 continue;
             }
-            if let MobPart::Guardian(segment) = part.part {
-                if matches!(
-                    segment,
-                    guardian::Segment::Thorax
-                        | guardian::Segment::Neck
-                        | guardian::Segment::Head
-                        | guardian::Segment::Jaw
-                ) {
-                    let pivot = Vec3::new(0.0, 1.0, -0.28);
-                    let angle =
-                        if matches!(segment, guardian::Segment::Head | guardian::Segment::Jaw) {
-                            neck
-                        } else {
-                            lean
-                        };
-                    *transform = Transform::from_matrix(
-                        Mat4::from_translation(pivot)
-                            * Mat4::from_rotation_x(angle)
-                            * Mat4::from_translation(-pivot)
-                            * transform.to_matrix(),
-                    );
-                }
-            } else if let MobPart::King(segment) = part.part {
+            if let MobPart::King(segment) = part.part {
                 *transform = king::encounter_transform(segment, one);
             } else if matches!(part.part, MobPart::Head | MobPart::Eyes) {
                 let pivot = Vec3::new(0.0, 0.9, -0.35);
@@ -1632,7 +1649,7 @@ mod tests {
 
     const INTERVAL: Duration = Duration::from_millis(50);
 
-    fn session() -> Session {
+    pub(super) fn session() -> Session {
         Session(SessionParams {
             clock: Default::default(),
             entity_id: 7,
