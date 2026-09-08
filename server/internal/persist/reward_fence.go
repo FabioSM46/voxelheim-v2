@@ -43,6 +43,13 @@ func (s *Store) checkRewardSaveLocked(id CharacterID, rec Record) error {
 	if s.rewardFences[id] != nil {
 		return ErrRewardPending
 	}
+	if s.strictRewards.Load() {
+		if _, found, err := s.Load(id); err != nil {
+			return err
+		} else if !found {
+			return ErrRewardRecoveryRequired
+		}
+	}
 	floor, err := s.rewardFloorLocked(id)
 	if err != nil {
 		return err

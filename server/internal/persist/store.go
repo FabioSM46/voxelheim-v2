@@ -62,6 +62,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -346,6 +347,7 @@ type Store struct {
 	recordMu        sync.Mutex
 	rewardFences    map[CharacterID]*RewardReservation
 	rewardFloors    map[CharacterID]uint64
+	strictRewards   atomic.Bool
 	recordWriter    func(string, []byte) error
 	migrationWriter func(string, []byte) error
 
@@ -380,6 +382,12 @@ func NewMemoryStore() *Store {
 // **The first start under this format sets a superseded directory aside**, before
 // anything else happens to it. See [Store.setAsideSuperseded].
 func OpenStore(worldDir string) (*Store, error) {
+	return openPlayerStore(worldDir, nil)
+}
+
+// beforeIndex is an exclusive startup hook; no character or ordinary writer is
+// published until it succeeds. Production OpenStore supplies no recovery hook.
+func openPlayerStore(worldDir string, beforeIndex func(*Store) error) (*Store, error) {
 	if worldDir == "" {
 		// Not a nil store returned quietly: an empty -world-dir is the ephemeral
 		// world, and choosing it is main's decision to make rather than a shape this
@@ -397,6 +405,11 @@ func OpenStore(worldDir string) (*Store, error) {
 		return nil, fmt.Errorf("persist: creating %s: %w", s.dir, err)
 	}
 
+	if beforeIndex != nil {
+		if err := beforeIndex(s); err != nil {
+			return nil, err
+		}
+	}
 	// Before the sweep and before the scan: whatever is in a superseded directory moves
 	// whole, temporaries and all, so that "nothing was deleted" is true of every byte in
 	// it rather than of the records alone.
@@ -502,6 +515,9 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 			return false, fmt.Errorf("%w: %s was written by a build that speaks format version %d; this build speaks %d and will not move a newer world aside",
 				world.ErrCorruptStore, s.dir, version, StoreVersion)
 		default:
+			if s.strictRewards.Load() {
+				return false, ErrRewardRecoveryRequired
+			}
 			older = true
 			if version == previousStoreVersion || version == 10 {
 				info, infoErr := entry.Info()
@@ -669,6 +685,9 @@ func (s *Store) index() error {
 
 		character, err := s.readIndexed(path, entry.Name())
 		if err != nil {
+			if s.strictRewards.Load() {
+				return fmt.Errorf("%w: character index cannot be rebuilt safely", ErrRewardRecoveryRequired)
+			}
 			if errors.Is(err, errRecordGone) {
 				// Nothing to set aside and nothing lost: a record that vanished between
 				// the directory listing and the read is a transient, and a retry sails
@@ -774,18 +793,29 @@ func (s *Store) Load(id CharacterID) (Record, bool, error) {
 	if s == nil || s.dir == "" {
 		return Record{}, false, nil
 	}
-	return s.read(s.recordPath(id))
+	rec, found, err := s.read(s.recordPath(id))
+	if s.strictRewards.Load() && err == nil && !found {
+		if _, known := s.Character(id); known {
+			return Record{}, false, ErrRewardRecoveryRequired
+		}
+	}
+	return rec, found, err
 }
 
 // read is Load without the ephemeral guard and without deriving the path, so that the
 // startup scan can read a file it found rather than one it named.
 func (s *Store) read(path string) (Record, bool, error) {
-	info, err := os.Stat(path)
+	file, err := os.Open(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return Record{}, false, nil
 	case err != nil:
 		return Record{}, false, fmt.Errorf("persist: reading %s: %w", path, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return Record{}, false, err
 	}
 	// Before the read, not after: a file this large is not one this format wrote, and
 	// finding that out by allocating it is how a corrupt directory becomes an OOM.
@@ -796,9 +826,12 @@ func (s *Store) read(path string) (Record, bool, error) {
 			world.ErrCorruptStore, path, info.Size(), maxRecordSize)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, int64(maxRecordSize)+1))
 	if err != nil {
 		return Record{}, false, fmt.Errorf("persist: reading %s: %w", path, err)
+	}
+	if len(data) > maxRecordSize {
+		return Record{}, false, world.ErrCorruptStore
 	}
 
 	rec, err := decodeRecord(data)
@@ -826,12 +859,12 @@ func (s *Store) Save(id CharacterID, rec Record) error {
 
 	s.recordMu.Lock()
 	defer s.recordMu.Unlock()
-	if err := s.checkRewardSaveLocked(id, rec); err != nil {
-		return err
-	}
 	character, known := s.Character(id)
 	if !known {
 		return fmt.Errorf("%w: %s", ErrUnknownCharacter, id)
+	}
+	if err := s.checkRewardSaveLocked(id, rec); err != nil {
+		return err
 	}
 	return s.writeRecord(character, rec)
 }
@@ -885,7 +918,7 @@ func (s *Store) Quarantine(id CharacterID) (string, error) {
 	if s.rewardFences[id] != nil {
 		return "", ErrRewardPending
 	}
-	if s.rewardFloors[id] != 0 {
+	if s.strictRewards.Load() || s.rewardFloors[id] != 0 {
 		return "", ErrRewardEpoch
 	}
 	if rec, found, err := s.Load(id); err == nil && found && rec.BossRewardEpoch != 0 {

@@ -3082,6 +3082,91 @@ mod tests {
     }
 
     #[test]
+    fn guardian_neck_moves_survive_late_windows_and_reset_when_ended_or_expired() {
+        use crate::net::{EncounterMoveKind::*, EncounterTimelineInbox, MoveEnd, MovePhase};
+        for kind in [CollarCharge, PredatorLeap, BonebreakerJaws] {
+            for (action, phase) in [
+                (MobAction::Windup, MovePhase::Telegraph),
+                (MobAction::Recovery, MovePhase::Recovery),
+            ] {
+                let mut app = headless();
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+                let body = MobState {
+                    kind: MobKind::VargrGuardian,
+                    ..draugr(900, 3.0, 100, action)
+                };
+                let mut state = crate::player::encounters::tests::timeline();
+                state.boss_entity_id = body.entity_id;
+                state.moves[0].kind = kind;
+                state.moves[0].phase = phase;
+                let draw = |app: &mut App| {
+                    let world = app.world_mut();
+                    let mut heads = Vec::new();
+                    for (part, transform) in world.query::<(&MobVisual, &Transform)>().iter(world) {
+                        assert!(
+                            !matches!(part.part, MobPart::Head | MobPart::Eyes),
+                            "guardian unexpectedly spawned the obsolete generic head"
+                        );
+                        if let MobPart::Guardian(segment) = part.part
+                            && matches!(
+                                segment,
+                                guardian::Segment::Neck
+                                    | guardian::Segment::Head
+                                    | guardian::Segment::Jaw
+                            )
+                        {
+                            heads.push((segment as usize, *transform));
+                        }
+                    }
+                    heads.sort_by_key(|(segment, _)| *segment);
+                    assert_eq!(heads.len(), 3);
+                    heads
+                };
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(state.clone());
+                deliver(&mut app, 110, vec![body]); // First sight halfway through the server window.
+                app.update();
+                let active = draw(&mut app);
+                state.moves[0].ended = Some(MoveEnd::Cancelled);
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(state.clone());
+                app.update();
+                let cancelled = draw(&mut app);
+                assert_ne!(
+                    active, cancelled,
+                    "{kind:?}/{phase:?} never posed the actual head"
+                );
+                state.moves[0].ended = None;
+                state.moves[0].move_instance_id += 1;
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(state.clone());
+                app.update();
+                assert_eq!(
+                    active,
+                    draw(&mut app),
+                    "replacement did not restore its current pose"
+                );
+                deliver(&mut app, 120, vec![body]); // Expired while MobAction remains unchanged.
+                app.update();
+                assert_eq!(
+                    cancelled,
+                    draw(&mut app),
+                    "{kind:?}/{phase:?} retained an expired neck pose"
+                );
+                state.moves.clear();
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(state);
+                app.update();
+                assert_eq!(cancelled, draw(&mut app));
+            }
+        }
+    }
+
+    #[test]
     fn boss_pose_uses_received_phase_progress_and_cancellation_without_root_motion() {
         use crate::net::{EncounterMoveKind, EncounterTimelineInbox, MovePhase};
         let mut app = headless();

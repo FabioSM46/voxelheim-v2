@@ -70,7 +70,7 @@ Recorded sheets: [physical poses](draugr-choreography-1034/physical.png),
 [reach/replacement overlays](draugr-choreography-1034/reach.png).
 
 Validation: workspace format, all-target Clippy with warnings denied, build and
-all 2,382 tests passed (15 opt-in tests ignored); the GPU capture was run separately
+all 2,383 tests passed (15 opt-in tests ignored); the GPU capture was run separately
 and passed. All automation shell tests and DeepSeek Python tests passed. No new
 runtime dependencies, protocol changes or server behavior were introduced.
 
