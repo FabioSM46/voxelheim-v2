@@ -122,19 +122,32 @@ func TestAnAnnouncedMoveIsPreparedBeforeItIsDangerous(t *testing.T) {
 		t.Fatal("a pulled boss standing in contact never hurt anybody")
 	}
 
+	// The declared count, plus the frame the move was announced on. A move is published
+	// the moment it is chosen and *then* spends its declared telegraph ticks, so a client
+	// sees one more telegraph frame than the count it is told to count down — and the
+	// count is what it counts down, which is asserted off the wire below.
 	want := ticksFor(encounterMoveCatalog[vnet.MobKindVargrGuardian][0].telegraph, DefaultTickRate)
-	if uint32(telegraphTicks) != want {
-		t.Fatalf("the telegraph ran %d ticks before the first blow, want %d", telegraphTicks, want)
+	if uint32(telegraphTicks) != want+1 {
+		t.Fatalf("the telegraph ran %d frames before the first blow, want %d (%d declared, plus the announcement)",
+			telegraphTicks, want+1, want)
 	}
 
-	// And the region was announced through the whole of it, on the wire, rather than
-	// appearing with the damage.
+	// And the frame the client held on the tick it was hurt says so: the release phase,
+	// the declared window, and the region. A frame that had already advanced to recovery
+	// would be telling a player nothing was dangerous on the tick it damaged them.
 	timeline := newestTimeline(t, out.all())
 	if len(timeline.moves) != 1 {
 		t.Fatalf("the encounter announced %d moves at the blow", len(timeline.moves))
 	}
-	if len(timeline.moves[0].Hazards) == 0 {
+	hurtBy := timeline.moves[0]
+	if hurtBy.Phase != vnet.MovePhaseRelease {
+		t.Fatalf("the tick that dealt damage was published as %v", hurtBy.Phase)
+	}
+	if len(hurtBy.Hazards) == 0 {
 		t.Fatal("the dangerous phase announced no region at all")
+	}
+	if hurtBy.PhaseTicks != ticksFor(encounterMoveCatalog[vnet.MobKindVargrGuardian][0].release, DefaultTickRate) {
+		t.Fatalf("the release announced %d ticks", hurtBy.PhaseTicks)
 	}
 }
 
@@ -294,38 +307,74 @@ func TestAChargeIsStoppedByTerrainAndPaysTheLongerRecovery(t *testing.T) {
 // that collides, the body a blade reaches and the region an attack endangers are three
 // different numbers — and this is what says so at run time.
 func TestNoBlowLandsOutsideTheRegionThatWasAnnounced(t *testing.T) {
-	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
-	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
-	pullGuardian(t, h, [3]float64{0.5, 64, -2.5}, player)
+	// **Two placements and two rates, and the pairing is what the test is worth.**
+	//
+	// Written with the contact placement alone, this passed while covering nothing that
+	// could break it: a player parked in contact keeps the fight inside the two cones,
+	// whose regions do not move, and the charge's band starts five blocks out — so the
+	// only shape whose region a creature can leave was never exercised. The travelling
+	// placement is the case that matters, and the coverage assertion at the foot is what
+	// stops the pair silently collapsing back to the first one.
+	//
+	// The rate matters for the same reason. A lane is `travelSpeed x release` in
+	// wall-clock seconds and what is crossed is `travelSpeed x releaseTicks x dt`; those
+	// agree exactly at twenty hertz, where ticksFor converts 900 ms to a whole 18 ticks.
+	// Three hertz is one of the rates where it does not.
+	for _, rate := range []uint8{DefaultTickRate, 3} {
+		for _, placement := range []struct {
+			name   string
+			at     [3]float64
+			prefer vnet.EncounterMoveKind
+		}{
+			{"in contact", [3]float64{0.5, 64, -2.5}, vnet.EncounterMoveKindUnknown},
+			{"at charging distance", [3]float64{0.5, 64, -7.6}, vnet.EncounterMoveKindCollarCharge},
+		} {
+			h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
+			player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+			boss := pullGuardian(t, h, placement.at, player)
+			if placement.prefer != vnet.EncounterMoveKindUnknown {
+				preferMove(h, boss, placement.prefer)
+			}
 
-	landed := 0
-	for tick := 1; tick <= 400; tick++ {
-		before := h.vitals(player).Health
-		if before == 0 {
-			break
-		}
-		h.step()
-		if h.vitals(player).Health >= before {
-			continue
-		}
-		landed++
-		timeline := newestTimeline(t, out.all())
-		hurt := player.box()
-		inside := false
-		for _, move := range timeline.moves {
-			for _, hazard := range move.Hazards {
-				if hazardReaches(hazard, hurt) {
-					inside = true
+			landed := 0
+			exercised := map[vnet.EncounterMoveKind]bool{}
+			for tick := 1; tick <= 40*int(rate); tick++ {
+				before := h.vitals(player).Health
+				h.step()
+				if running := runningMoveOf(h, boss); running != nil {
+					exercised[running.def.kind] = true
+				}
+				// Healed rather than allowed to die, so a long run keeps measuring the
+				// invariant instead of ending at the first fight's outcome.
+				if hurt := h.vitals(player).Health; hurt < before {
+					landed++
+					timeline := newestTimeline(t, out.all())
+					box := player.box()
+					inside := false
+					for _, move := range timeline.moves {
+						for _, hazard := range move.Hazards {
+							if hazardReaches(hazard, box) {
+								inside = true
+							}
+						}
+					}
+					if !inside {
+						t.Fatalf("%d Hz %s: tick %d cost health with the player outside every announced region: %+v",
+							rate, placement.name, tick, timeline.moves)
+					}
+					h.heal(player)
 				}
 			}
+			if landed < 3 {
+				t.Errorf("%d Hz %s: only %d blows landed, too few to have tested anything",
+					rate, placement.name, landed)
+			}
+			// The coverage this test used to lack, asserted rather than assumed.
+			if placement.prefer != vnet.EncounterMoveKindUnknown && !exercised[placement.prefer] {
+				t.Errorf("%d Hz %s: %v never ran, so the travelling case went untested (saw %v)",
+					rate, placement.name, placement.prefer, exercised)
+			}
 		}
-		if !inside {
-			t.Fatalf("tick %d cost health with the player outside every announced region: %+v",
-				tick, timeline.moves)
-		}
-	}
-	if landed < 3 {
-		t.Fatalf("only %d blows landed in four hundred ticks, which is too few to have tested anything", landed)
 	}
 }
 
@@ -606,4 +655,191 @@ func (h *vitalsHarness) place(p *Player, pos [3]float64) {
 	defer h.sim.mu.Unlock()
 	p.pos = pos
 	p.chunk = chunkAt(pos)
+}
+
+// A boss whose target is outside every move's range closes the distance.
+//
+// **The regression test for a scheduler that forgets to move**, asked for on review. The
+// selection band is the guardian's widest maxRange of 8.5 blocks and its awareness reaches
+// 24, so between the two there is a span where no move is choosable and the creature has
+// to walk. `stepEncounter` replaces the shared hostile branch and steers with the same
+// [mob.steerToward]; what integrates that steering is [mob.physics], which runs at the
+// foot of [mob.step] for every branch including this one.
+//
+// Being walled out is a different question and deliberately not tested here: the shared
+// state machine allows it — see [mob.inReach] — and a boss inherits that rather than
+// getting navigation of its own, which is #1024's Out of Scope.
+func TestABossOutOfEveryMoveRangeClosesTheDistanceAndAttacks(t *testing.T) {
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+
+	// Twenty blocks: inside the 24-block awareness that starts the fight, and well outside
+	// the 8.5 of the widest move band, so nothing at all is choosable on the first tick.
+	boss := pullGuardian(t, h, [3]float64{0.5, 64, -20.5}, player)
+
+	h.sim.mu.Lock()
+	m := h.sim.mobs[boss]
+	widest := 0.0
+	for _, def := range encounterMoveCatalog[vnet.MobKindVargrGuardian] {
+		widest = max(widest, def.maxRange)
+	}
+	opening := boxDistance(m.species().body.boxAt(m.pos), player.box())
+	h.sim.mu.Unlock()
+	if opening <= widest {
+		t.Fatalf("the target started %v blocks off, inside the widest band of %v", opening, widest)
+	}
+
+	h.step()
+	if running := runningMoveOf(h, boss); running != nil {
+		t.Fatalf("a move was announced at %v blocks, past every band: %v", opening, running.def.kind)
+	}
+
+	for range 300 {
+		h.step()
+		if h.vitals(player).Health < PlayerMaxHealth {
+			return
+		}
+	}
+
+	h.sim.mu.Lock()
+	stalled := boxDistance(h.sim.mobs[boss].species().body.boxAt(h.sim.mobs[boss].pos), player.box())
+	h.sim.mu.Unlock()
+	t.Fatalf("the boss never reached its target: %v blocks off after three hundred ticks, from %v",
+		stalled, opening)
+}
+
+// A charge never travels past the lane it announced, at any tick rate.
+//
+// **The rates are the point.** A move's lane is `travelSpeed x release`, a wall-clock
+// number; what it actually crosses is `travelSpeed x releaseTicks x dt`, and [ticksFor]
+// makes those two agree only where it converts the duration exactly. It truncates, so the
+// ordinary answer is short — but it also floors at one tick, and at a rate of 1 the
+// guardian's 900 ms release becomes a whole second: eleven blocks against an announced
+// 9.9. [NewSim] accepts a rate of 1.
+//
+// Every rate here runs the same assertion, so this is a property of the move rather than a
+// fact about twenty hertz.
+func TestAChargeNeverTravelsPastTheLaneItAnnounced(t *testing.T) {
+	for _, rate := range []uint8{1, 2, 3, 5, 7, 10, 13, DefaultTickRate} {
+		h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		boss := pullGuardian(t, h, [3]float64{0.5, 64, -7.6}, player)
+		preferMove(h, boss, vnet.EncounterMoveKindCollarCharge)
+
+		charged := false
+		for range 12 * int(rate) {
+			h.step()
+			running := runningMoveOf(h, boss)
+			if running == nil || running.def.kind != vnet.EncounterMoveKindCollarCharge {
+				continue
+			}
+			charged = true
+			h.sim.mu.Lock()
+			pos := h.sim.mobs[boss].pos
+			h.sim.mu.Unlock()
+			crossed := math.Hypot(pos[0]-running.anchor[0], pos[2]-running.anchor[2])
+			announced := float64(running.hazards[0].Radius)
+			if crossed > announced+1e-6 {
+				t.Errorf("at %d Hz the charge crossed %.3f blocks of an announced %.3f",
+					rate, crossed, announced)
+				break
+			}
+		}
+		if !charged {
+			t.Errorf("at %d Hz the charge never ran, so nothing was tested", rate)
+		}
+	}
+}
+
+// And nobody standing past the end of an announced lane is hurt by it.
+//
+// The sharpest form of the invariant, at the rate that used to break it. Before the travel
+// clamp, a 1 Hz charge ran eleven blocks against an announced 9.9 and `sweptLaneReaches`
+// tested the whole of that segment, so this player — parked in the 1.1 blocks between the
+// two — lost health for standing outside the region they had been shown.
+//
+// The margin covers the second half of the same defect: the segment test's clamped
+// distance describes a capsule, whose rounded cap reaches `half_width` past the strip's
+// square end, so the lane's own extent has to be tested too.
+func TestNobodyPastTheEndOfAnAnnouncedLaneIsHurtByIt(t *testing.T) {
+	h := newVitalsHarness(t, 1, dropTerrain{groundTop: 63})
+	near, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	boss := pullGuardian(t, h, [3]float64{0.5, 64, -7.6}, near)
+	preferMove(h, boss, vnet.EncounterMoveKindCollarCharge)
+
+	h.step()
+	running := runningMoveOf(h, boss)
+	if running == nil || running.def.kind != vnet.EncounterMoveKindCollarCharge {
+		t.Fatalf("the boss chose %+v rather than the charge", running)
+	}
+	lane := running.hazards[0]
+	end := running.anchor[2] + float64(lane.Radius)
+
+	// Half a block past the end of the announced strip, and dead on its centre line so
+	// only the lane's length can exclude them.
+	beyond, _ := h.join(2, [3]float32{float32(running.anchor[0]), 64, float32(end + 0.5)})
+	if hazardReaches(lane, beyond.box()) {
+		t.Fatal("the player placed past the lane is inside the announced region after all")
+	}
+
+	for range 12 {
+		h.step()
+		if r := runningMoveOf(h, boss); r == nil || r.instanceID != running.instanceID {
+			break
+		}
+	}
+	if got := h.vitals(near).Health; got == PlayerMaxHealth {
+		t.Fatal("the charge never hit the player standing inside its lane")
+	}
+	if got := h.vitals(beyond).Health; got != PlayerMaxHealth {
+		t.Fatalf("a player past the end of the announced lane lost health, ending at %d", got)
+	}
+}
+
+// The tick that deals damage is published as the release that dealt it.
+//
+// **A phase one tick long is the ordinary case, not an edge one.** [ticksFor] floors at a
+// single tick, so the guardian's 200 ms bite window is one tick at every rate below five
+// hertz. Advanced at the foot of a tick, the machine would execute that release — travel,
+// contact, damage — and then publish the recovery it had moved into, so the only frame a
+// client ever received for the damaging tick would say the creature was open and nothing
+// was dangerous. The whole release would be invisible.
+//
+// Asserted off the wire, because the claim is about what a session was sent.
+func TestTheDamagingTickIsPublishedAsItsRelease(t *testing.T) {
+	for _, rate := range []uint8{1, 2, 3, 4, DefaultTickRate} {
+		bite := encounterMoveCatalog[vnet.MobKindVargrGuardian][0]
+		if rate < 5 && ticksFor(bite.release, rate) != 1 {
+			t.Fatalf("%d Hz no longer gives the bite a one-tick release", rate)
+		}
+
+		h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
+		player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+		pullGuardian(t, h, [3]float64{0.5, 64, -2.5}, player)
+
+		hurt := false
+		for range 30 * int(rate) {
+			before := h.vitals(player).Health
+			h.step()
+			if h.vitals(player).Health >= before {
+				continue
+			}
+			hurt = true
+			timeline := newestTimeline(t, out.all())
+			if len(timeline.moves) != 1 {
+				t.Fatalf("%d Hz: %d moves announced on the damaging tick", rate, len(timeline.moves))
+			}
+			move := timeline.moves[0]
+			if move.Phase != vnet.MovePhaseRelease {
+				t.Errorf("%d Hz: the damaging tick was published as %v", rate, move.Phase)
+			}
+			if len(move.Hazards) == 0 {
+				t.Errorf("%d Hz: the damaging tick announced no region", rate)
+			}
+			break
+		}
+		if !hurt {
+			t.Errorf("%d Hz: nobody was ever hurt, so nothing was tested", rate)
+		}
+	}
 }

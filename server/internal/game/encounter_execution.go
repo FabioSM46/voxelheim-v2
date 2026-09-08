@@ -95,6 +95,12 @@ type runningMove struct {
 	// impacted records that terrain stopped a charge. It ends the run early and buys the
 	// approved design's longer opening.
 	impacted bool
+
+	// laneSpent records that a charge has crossed the whole of its announced lane. It
+	// ends the run early too, and pays the ordinary declared recovery: running out of
+	// announced lane is not the same event as hitting a monolith, and only the second one
+	// is worth the longer opening.
+	laneSpent bool
 }
 
 // announcement is this instance in the shape the wire carries it.
@@ -340,6 +346,35 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 		return
 	}
 
+	// **The phase changes at the top of a tick, so the phase a tick spends is the phase it
+	// publishes.** Advanced at the foot instead, a tick could execute a release — travel,
+	// contact, damage — and then publish the recovery it had just moved into, and the
+	// frame a client received for the tick it was hit on would say the creature was open
+	// and nothing was dangerous.
+	//
+	// That is not a boundary curiosity: it is the ordinary case wherever a phase is one
+	// tick long. [ticksFor] floors at a single tick, so the guardian's 200 ms bite window
+	// is one tick at every rate below five hertz, and the whole of its release would be
+	// published as recovery. It also keeps `phase_started_tick` honest, because the tick a
+	// phase is entered on is now the first tick it actually runs.
+	if r.remaining == 0 || (r.phase == vnet.MovePhaseRelease && (r.impacted || r.laneSpent)) {
+		switch r.phase {
+		case vnet.MovePhaseTelegraph:
+			m.enterMovePhaseLocked(vnet.MovePhaseRelease, r.ticks.release, tick)
+		case vnet.MovePhaseRelease:
+			recovery := r.ticks.recovery
+			if r.impacted && r.ticks.impactRecovery > 0 {
+				recovery = r.ticks.impactRecovery
+			}
+			m.enterMovePhaseLocked(vnet.MovePhaseRecovery, recovery, tick)
+		case vnet.MovePhaseRecovery:
+			m.finishEncounterMoveLocked(vnet.MoveEndCompleted)
+			m.action = vnet.MobActionIdle
+			m.vel[0], m.vel[2] = 0, 0
+			return
+		}
+	}
+
 	switch r.phase {
 	case vnet.MovePhaseTelegraph:
 		// Committed means stationary for everything that does not travel, and everything
@@ -347,31 +382,15 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 		// not also closing the distance it is measured against.
 		m.action = vnet.MobActionWindup
 		m.vel[0], m.vel[2] = 0, 0
-		r.remaining--
-		if r.remaining == 0 {
-			m.enterMovePhaseLocked(vnet.MovePhaseRelease, r.ticks.release, tick)
-		}
 	case vnet.MovePhaseRelease:
 		m.action = vnet.MobActionWindup
 		m.travelDuringReleaseLocked(s)
 		s.resolveMoveDamageLocked(m, players)
-		r.remaining--
-		if r.remaining == 0 || r.impacted {
-			recovery := r.ticks.recovery
-			if r.impacted && r.ticks.impactRecovery > 0 {
-				recovery = r.ticks.impactRecovery
-			}
-			m.enterMovePhaseLocked(vnet.MovePhaseRecovery, recovery, tick)
-		}
 	case vnet.MovePhaseRecovery:
 		m.action = vnet.MobActionRecovery
 		m.vel[0], m.vel[2] = 0, 0
-		r.remaining--
-		if r.remaining == 0 {
-			m.finishEncounterMoveLocked(vnet.MoveEndCompleted)
-			return
-		}
 	}
+	r.remaining--
 	m.publishRunningMoveLocked()
 }
 
@@ -392,13 +411,33 @@ func (m *mob) travelDuringReleaseLocked(s *Sim) {
 		return
 	}
 
-	reach := r.def.travelSpeed * s.dt
-	if r.def.travel == travelLeap {
-		// Never past the announced landing. A leap that overshot would put the creature
-		// outside the region it told everybody it was going to.
-		reach = min(reach, math.Hypot(r.anchor[0]-m.pos[0], r.anchor[2]-m.pos[2]))
-	}
+	// **Never past the region that was announced, and the clamp is what makes that
+	// structural rather than arithmetical.**
+	//
+	// A leap stops at its landing; a charge stops at the far end of its lane. Both bounds
+	// are read back off the announcement the client already holds rather than recomputed,
+	// so the segment [travelledFrom, pos] that [mob.moveReachesLocked] tests is a prefix of
+	// the announced strip whatever the tick rate does.
+	//
+	// It used to be a leap clamp alone, and the charge relied on `travelSpeed x release`
+	// happening to equal `travelSpeed x releaseTicks x dt`. Those two agree only where
+	// [ticksFor] converts the duration exactly. It truncates, so the ordinary answer is
+	// short — but it also floors at one tick, and at a tick rate of 1 the guardian's
+	// 900 ms release becomes one whole second: eleven blocks of travel against an
+	// announced 9.9, and a player standing in the 1.1 blocks between them damaged outside
+	// the region they were shown. A rate of 1 is a configuration [NewSim] accepts.
+	//
+	// Derived from the announcement rather than from the duration for the same reason the
+	// alternative fix was not taken: making the announced lane tick-derived would make the
+	// region a client is shown a property of this server's rate, when it is a property of
+	// the move.
+	reach := min(r.def.travelSpeed*s.dt, r.remainingTravel(m.pos))
 	if reach <= 0 {
+		// The lane is spent. A charge that has run its whole announced length is finished
+		// whatever ticks remain: spending them would be travelling past the region, which
+		// is the thing above. It pays its ordinary declared recovery and not the impact
+		// one, because reaching the end of a lane is not hitting anything.
+		r.laneSpent = r.def.travel == travelCharge
 		return
 	}
 
@@ -408,6 +447,27 @@ func (m *mob) travelDuringReleaseLocked(s *Sim) {
 	if r.def.travel == travelCharge && (blocked[0] || blocked[2]) {
 		r.impacted = true
 	}
+}
+
+// remainingTravel is how much of this move's announced region the creature has left to
+// cross, in blocks.
+//
+// **Measured from the announcement's own anchor and radius**, which is exactly what a
+// client was handed: a lane runs `radius` blocks from where it started, and a leap's
+// landing is a point the creature travels to. Nothing here reads a duration, so nothing
+// here can disagree with the shape on the wire.
+func (r *runningMove) remainingTravel(pos [3]float64) float64 {
+	if r.def.travel == travelNone || len(r.hazards) == 0 {
+		return 0
+	}
+	// The distance between where the creature is and the announcement's anchor. For a
+	// leap the anchor is the landing, so this is what is left to close; for a lane it is
+	// where the run began, so this is what has been crossed already.
+	toAnchor := math.Hypot(pos[0]-r.anchor[0], pos[2]-r.anchor[2])
+	if r.def.travel == travelLeap {
+		return toAnchor
+	}
+	return float64(r.hazards[0].Radius) - toAnchor
 }
 
 // resolveMoveDamageLocked applies this release tick's contacts.
@@ -662,33 +722,70 @@ func horizontalSamples(b box) [hazardSampleCorners + 1][2]float64 {
 
 // sweptLaneReaches reports whether the segment a charge covered this tick reaches a body.
 //
-// **Every bound but the segment comes from the announced lane itself** — its vertical
-// extent, its half-width — so what this answers is always a subset of what the client was
-// shown, structurally rather than by two derivations agreeing. Only the horizontal extent
-// is narrowed, from the whole lane to the part of it the creature has actually crossed.
+// **A conjunction, and both halves are load-bearing.** A body is reached when it is inside
+// the announced strip *and* within half a width of the segment the creature crossed this
+// tick. Every bound of the first half — origin, direction, length, width, vertical extent
+// — is read off the volume the client already holds, so what this answers is a subset of
+// what was announced structurally rather than by two derivations agreeing.
 //
-// That narrowing is the point: measured against the segment rather than against either
-// endpoint, a player standing between two ticks' positions is hit rather than stepped
-// over, which is the whole of "cannot skip a player between ticks". Using the announced
-// lane directly instead would hurt everybody standing anywhere along it on the first tick
-// of the run — a region the creature has not reached yet.
+// The second half is the narrowing that makes the sweep a sweep: measured against the
+// segment rather than against either endpoint, a player standing between two ticks'
+// positions is hit rather than stepped over, which is the whole of "cannot skip a player
+// between ticks". Testing the announced lane alone instead would hurt everybody standing
+// anywhere along it on the first tick of the run — a region the creature has not reached
+// yet.
+//
+// **Neither half implies the other, which is why the first one is not redundant.** The
+// segment test measures distance to a point clamped onto the segment, so its region is a
+// capsule; `Line` is the rectangle [hazardReaches] tests. The capsule's rounded caps
+// bulge up to `half_width` past each end of the strip, so the segment test alone reaches
+// past the announcement at the end of a run — a smaller instance of the same defect the
+// travel clamp in [mob.travelDuringReleaseLocked] closes.
 func sweptLaneReaches(lane protocol.HazardVolume, from, to [3]float64, b box) bool {
-	origin := float64(lane.Origin[1])
+	originY := float64(lane.Origin[1])
 	half := float64(lane.Height) / 2
-	if b.max[1] <= origin-half || b.min[1] >= origin+half {
+	if b.max[1] <= originY-half || b.min[1] >= originY+half {
 		return false
 	}
 	halfWidth := float64(lane.HalfWidth)
 
+	// The announced strip's own frame: where it starts, which way it runs, and how far.
+	// Read off the volume the client holds rather than recomputed from the creature, so
+	// the two cannot disagree.
+	originX, originZ := float64(lane.Origin[0]), float64(lane.Origin[2])
+	dirX, dirZ := float64(lane.Direction[0]), float64(lane.Direction[2])
+	if length := math.Hypot(dirX, dirZ); length > 0 {
+		dirX, dirZ = dirX/length, dirZ/length
+	}
+	radius := float64(lane.Radius)
+
 	dx, dz := to[0]-from[0], to[2]-from[2]
 	lengthSquared := dx*dx + dz*dz
 	for _, sample := range horizontalSamples(b) {
-		px, pz := sample[0]-from[0], sample[1]-from[2]
-		along := 0.0
-		if lengthSquared > 0 {
-			along = min(max((px*dx+pz*dz)/lengthSquared, 0), 1)
+		// Inside the announced strip first. This clause is not redundant with the
+		// segment test below, and the difference is the whole reason it is here: the
+		// segment test measures distance to a clamped point, which is a *capsule* with
+		// rounded ends, while `Line` is the rectangle `hazardReaches` tests — so the
+		// caps bulge up to `half_width` past each end of the strip. Without this the
+		// last tick of a run could damage somebody standing 1.4 blocks beyond the lane
+		// the client was shown.
+		alongLane := (sample[0]-originX)*dirX + (sample[1]-originZ)*dirZ
+		if alongLane < 0 || alongLane > radius {
+			continue
 		}
-		if math.Hypot(px-along*dx, pz-along*dz) <= halfWidth {
+		if math.Abs((sample[0]-originX)*dirZ-(sample[1]-originZ)*dirX) > halfWidth {
+			continue
+		}
+
+		// And swept over during *this* tick. What narrows the announced strip to the part
+		// of it the creature actually crossed, so a player standing between two ticks'
+		// positions is hit rather than stepped over.
+		px, pz := sample[0]-from[0], sample[1]-from[2]
+		alongStep := 0.0
+		if lengthSquared > 0 {
+			alongStep = min(max((px*dx+pz*dz)/lengthSquared, 0), 1)
+		}
+		if math.Hypot(px-alongStep*dx, pz-alongStep*dz) <= halfWidth {
 			return true
 		}
 	}
