@@ -1018,7 +1018,6 @@ impl EncounterTimelineInbox {
     ///
     /// Borrowed rather than taken, because this is state rather than a queue: the consumer
     /// reads it every frame and the server's next tick is what replaces it.
-    #[allow(dead_code)] // The presentation that draws these is #1025.
     pub fn live(&self) -> &[EncounterTimeline] {
         &self.0
     }
