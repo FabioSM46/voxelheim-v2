@@ -792,11 +792,11 @@ func (s *Sim) moveLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Pla
 	if def.pulses > 0 {
 		warning = def.channelPulse
 	}
-	reach := WalkSpeed * warning.Seconds()
+	warningTicks := ticksFor(warning, uint8(math.Round(1/s.dt)))
 
 	pulses := max(def.pulses, 1)
 	for pulse := range pulses {
-		if !s.pulseLeavesAnEscapeLocked(m, def, target, aim, anchor, pulse, reach) {
+		if !s.pulseLeavesAnEscapeLocked(m, def, target, aim, anchor, pulse, warningTicks) {
 			return false
 		}
 	}
@@ -813,28 +813,16 @@ func (s *Sim) moveLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Pla
 //
 // The caller holds Sim.mu.
 func (s *Sim) pulseLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Player,
-	aim, anchor [3]float64, pulse uint8, reach float64) bool {
+	aim, anchor [3]float64, pulse uint8, warningTicks uint32) bool {
 	candidate := m.hazardsForPulse(def, aim, anchor, pulse)
 
 	for bearing := range escapeBearings {
 		angle := 2 * math.Pi * float64(bearing) / escapeBearings
-		destination := [3]float64{
-			target.pos[0] + math.Cos(angle)*reach,
-			target.pos[1],
-			target.pos[2] + math.Sin(angle)*reach,
+		destination, reachable := s.walkEscapeRoute(target.pos, angle, warningTicks)
+		if !reachable {
+			continue
 		}
 		box := playerBox(destination)
-		if box.beyondTheWorld() || anyVoxel(box, s.terrain.Solid) {
-			continue
-		}
-		// **And the walk to it has to exist.** The same endpoint-only reasoning the spear's
-		// terrain check had, one rule over: clear ground on the far side of a wall is not
-		// an escape, and counting one would let this rule accept a schedule whose only way
-		// out nobody can take. The sample *is* a straight-line walk at walking speed, so
-		// [clearLineOfSight] is not a proxy here — it is exactly the motion being offered.
-		if !clearLineOfSight(s.terrain, boxCentre(target.box()), boxCentre(box)) {
-			continue
-		}
 		if anyHazardReaches(candidate, box) {
 			continue
 		}
@@ -845,6 +833,35 @@ func (s *Sim) pulseLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Pl
 		return true
 	}
 	return false
+}
+
+// walkEscapeRoute tries one ordinary, unmounted walking bearing. Each step uses the
+// player's collision, gravity and half-block step-up rules, so a centre ray through
+// a low lintel or beside a wall cannot stand in for a traversable body. Check the
+// destination actually reached, including its height after stairs or falling.
+//
+// Work is bounded by sixteen bearings times the tick-quantized warning from the
+// server's fixed move catalogue. There is no search, retry or terrain generation.
+// A blocked horizontal axis refuses this bearing instead of claiming the original
+// endpoint was reached after sliding along a wall. This deliberately remains a
+// conservative straight-walk test, not a general route planner.
+func (s *Sim) walkEscapeRoute(start [3]float64, angle float64, warningTicks uint32) ([3]float64, bool) {
+	pos := start
+	verticalSpeed := 0.0
+	delta := [3]float64{math.Cos(angle) * WalkSpeed * s.dt, 0, math.Sin(angle) * WalkSpeed * s.dt}
+	for range warningTicks {
+		verticalSpeed = max(verticalSpeed-Gravity*s.dt, -TerminalFallSpeed)
+		delta[1] = verticalSpeed * s.dt
+		next, blocked := moveAndCollideWithStep(s.terrain, playerBody, pos, delta, playerStepHeight)
+		if blocked[0] || blocked[2] {
+			return pos, false
+		}
+		if blocked[1] {
+			verticalSpeed = 0
+		}
+		pos = next
+	}
+	return pos, !overlaps(s.terrain, playerBox(pos))
 }
 
 func anyHazardReaches(hazards []protocol.HazardVolume, b box) bool {

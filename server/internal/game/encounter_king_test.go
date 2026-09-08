@@ -1,6 +1,7 @@
 package game
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -811,10 +812,13 @@ func TestASpearCannotTunnelAOneBlockWall(t *testing.T) {
 //
 // Everything outside the ring is open, so a check that asks only whether a destination is
 // empty finds sixteen of them. Nothing outside can actually be walked to.
-type sealedRing struct{ groundTop int64 }
+type sealedRing struct {
+	groundTop      int64
+	apertureHeight int64
+}
 
 func (w sealedRing) Block(x, y, z int64) (world.Block, bool) {
-	if y <= w.groundTop || (y <= w.groundTop+5 && (x == -2 || x == 2 || z == -2 || z == 2)) {
+	if y <= w.groundTop || (y > w.groundTop+w.apertureHeight && y <= w.groundTop+5 && (x == -2 || x == 2 || z == -2 || z == 2)) {
 		return world.Stone, true
 	}
 	return world.Air, true
@@ -834,9 +838,7 @@ func (w sealedRing) Solid(x, y, z int64) bool {
 // far side of a wall counted as somewhere to go. That fails open — it would let the
 // scheduler announce a ritual whose only way out nobody can take.
 //
-// The sample is a straight-line walk at walking speed for the warning the pulse gives, so
-// the line-of-sight test is not a proxy for reachability here; it is exactly the motion
-// being offered.
+// A centre ray misses low ceilings; the route must fit the whole walking body.
 func TestAnEscapeBehindAWallIsNotAnEscape(t *testing.T) {
 	// A region that endangers nothing, so the only thing deciding the answer is whether a
 	// destination can be reached.
@@ -858,22 +860,24 @@ func TestAnEscapeBehindAWallIsNotAnEscape(t *testing.T) {
 		}
 	})
 
-	t.Run("sealed ground leaves none, however clear the far side is", func(t *testing.T) {
-		h := newVitalsHarness(t, DefaultTickRate, sealedRing{groundTop: 63})
-		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-		king := pullKing(t, h, [3]float64{0.5, 64, -0.5}, player)
+	for _, aperture := range []int64{0, 1} {
+		t.Run(fmt.Sprintf("wall with %d-block aperture", aperture), func(t *testing.T) {
+			h := newVitalsHarness(t, DefaultTickRate, sealedRing{groundTop: 63, apertureHeight: aperture})
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			king := pullKing(t, h, [3]float64{0.5, 64, -0.5}, player)
 
-		h.sim.mu.Lock()
-		defer h.sim.mu.Unlock()
-		// The premise: there really is empty ground at the sampled distance, so this is
-		// not passing because the destinations were solid.
-		reach := WalkSpeed * harmless.telegraph.Seconds()
-		outside := playerBox([3]float64{player.pos[0] + reach, player.pos[1], player.pos[2]})
-		if anyVoxel(outside, h.sim.terrain.Solid) {
-			t.Fatal("the ground outside the ring is not clear, so this tests nothing")
-		}
-		if h.sim.moveLeavesAnEscapeLocked(h.sim.mobs[king], harmless, player) {
-			t.Fatal("ground nobody can walk to was counted as an escape")
-		}
-	})
+			h.sim.mu.Lock()
+			defer h.sim.mu.Unlock()
+			// The premise: there really is empty ground at the sampled distance, so this is
+			// not passing because the destinations were solid.
+			reach := WalkSpeed * harmless.telegraph.Seconds()
+			outside := playerBox([3]float64{player.pos[0] + reach, player.pos[1], player.pos[2]})
+			if anyVoxel(outside, h.sim.terrain.Solid) {
+				t.Fatal("the ground outside the ring is not clear, so this tests nothing")
+			}
+			if h.sim.moveLeavesAnEscapeLocked(h.sim.mobs[king], harmless, player) {
+				t.Fatal("ground nobody can walk to was counted as an escape")
+			}
+		})
+	}
 }
