@@ -199,9 +199,9 @@ func (m *mob) stepEncounter(s *Sim, players []*Player, tick uint64) {
 
 // selectEncounterMoveLocked is the move this creature commits to, or none.
 //
-// **Least recently used among what is available, and deterministic throughout.** The
-// cooldown decides what a move costs; this decides which affordable one is taken, drawing
-// no random numbers — the same encounter from the same state produces the same fight.
+// **Preferred eligible cycle for the king, least recently used within each class.**
+// Other bosses keep their least-recently-used repertoire. Cooldown, range and escape
+// still decide eligibility; no random numbers enter either order.
 //
 // A candidate that would leave its target no reachable safe space is refused and the next
 // tried. With one live move and a bounded opening that never fires for the guardian; it is
@@ -232,13 +232,17 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 		}
 		candidates = append(candidates, i)
 	}
-	// Never used sorts first, because its recorded tick is zero and no move has ever
+	// The king's next eligible cycle slot sorts first, with LRU breaking class ties.
+	// Never used sorts first within that class, because its recorded tick is zero and no move has ever
 	// been used at tick zero. Catalog order breaks the tie, which is why the rows are
 	// written in the order the design teaches them.
 	// cmp.Compare rather than a subtraction: a tick count is a uint64 and the difference
 	// of two of them does not fit an int on a 32-bit build, where the server also has to
 	// run.
 	slices.SortStableFunc(candidates, func(a, b int) int {
+		if priority := cmp.Compare(m.schedulePriority(repertoire[a].kind), m.schedulePriority(repertoire[b].kind)); priority != 0 {
+			return priority
+		}
 		return cmp.Compare(e.lastUsed[repertoire[a].kind], e.lastUsed[repertoire[b].kind])
 	})
 
@@ -260,6 +264,7 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 // these moves something a player leaves rather than something that follows them.
 func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Player, tick uint64) {
 	def = def.forStage(m.encounter.phase)
+	m.commitSchedule(def.kind)
 	step := uint8(0)
 	if def.combo != nil {
 		step = 1

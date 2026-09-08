@@ -41,6 +41,17 @@ func preferMove(h *vitalsHarness, id uint64, want vnet.EncounterMoveKind) {
 	h.sim.mu.Lock()
 	defer h.sim.mu.Unlock()
 	m := h.sim.mobs[id]
+	// Select the intended class as well as its least-recently-used member.
+	if slots, _ := m.kingSchedule(); len(slots) > 0 {
+		for i, slot := range slots {
+			for _, kind := range slot {
+				if kind == want {
+					m.encounter.scheduleStage = m.encounter.phase
+					m.encounter.scheduleCursor = uint8(i)
+				}
+			}
+		}
+	}
 	for _, def := range encounterMoveCatalog[m.kind] {
 		if def.kind != want {
 			m.encounter.lastUsed[def.kind] = math.MaxUint32
