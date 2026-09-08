@@ -37,6 +37,7 @@ use super::{InputMode, merge_all};
 use crate::net::{MobAction, MobKind, Session};
 
 mod bosses;
+mod guardian;
 mod king;
 
 /// The box one species occupies, in blocks: square in plan, `height` tall, standing on
@@ -305,6 +306,7 @@ struct SpeciesVisuals {
     body_material: Handle<StandardMaterial>,
     head_material: Handle<StandardMaterial>,
     king_parts: Option<Vec<(king::Segment, Handle<Mesh>)>>,
+    guardian_parts: Option<Vec<(guardian::Segment, Handle<Mesh>)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -430,6 +432,7 @@ pub(super) struct Mob {
     /// The two are told apart by where they are decided — [`spawn_mob`] has no previous
     /// snapshot and the update path does — and never by a remembered action.
     falling: Option<Duration>,
+    guardian_motion: Option<Box<guardian::Motion>>,
 }
 
 /// Which part of a body one child mesh draws.
@@ -440,6 +443,7 @@ pub(super) struct Mob {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MobPart {
     King(king::Segment),
+    Guardian(guardian::Segment),
     Body,
     Head,
     Legs,
@@ -480,6 +484,7 @@ pub(super) fn create_visuals(
     commands.insert_resource(MobVisuals {
         draugr: SpeciesVisuals {
             king_parts: None,
+            guardian_parts: None,
             body: meshes.add(draugr_body_mesh()),
             head: meshes.add(draugr_head_mesh()),
             legs: None,
@@ -490,6 +495,7 @@ pub(super) fn create_visuals(
         },
         vargr: SpeciesVisuals {
             king_parts: None,
+            guardian_parts: None,
             body: meshes.add(vargr_body_mesh()),
             head: meshes.add(vargr_head_mesh()),
             legs: Some(meshes.add(vargr_legs_mesh())),
@@ -508,6 +514,7 @@ pub(super) fn create_visuals(
         },
         deer: SpeciesVisuals {
             king_parts: None,
+            guardian_parts: None,
             body: meshes.add(deer_body_mesh()),
             head: meshes.add(deer_head_mesh()),
             legs: Some(meshes.add(deer_legs_mesh())),
@@ -516,7 +523,7 @@ pub(super) fn create_visuals(
             body_material: materials.add(StandardMaterial::from_color(DEER_BODY_COLOUR)),
             head_material: materials.add(StandardMaterial::from_color(DEER_HEAD_COLOUR)),
         },
-        guardian: bosses::guardian_visuals(&mut meshes, &mut materials),
+        guardian: guardian::visuals(&mut meshes, &mut materials),
         king: king::visuals(&mut meshes, &mut materials),
         flash_material: materials.add(StandardMaterial::from_color(FLASH_COLOUR)),
         lootable_material: materials.add(StandardMaterial::from_color(LOOTABLE_COLOUR)),
@@ -1025,6 +1032,8 @@ fn spawn_mob(
         .spawn((
             Mob {
                 entity_id,
+                guardian_motion: (state.kind == MobKind::VargrGuardian)
+                    .then(|| Box::new(guardian::Motion::new(state.pos, state.yaw))),
                 kind: state.kind,
                 action: state.action,
                 action_elapsed: Duration::ZERO,
@@ -1052,6 +1061,20 @@ fn spawn_mob(
         .id();
 
     commands.entity(owner).with_children(|parent| {
+        if let Some(parts) = species.guardian_parts {
+            for (segment, mesh) in parts {
+                parent.spawn((
+                    MobVisual {
+                        owner,
+                        part: MobPart::Guardian(segment),
+                    },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(species.body_material.clone()),
+                    Transform::IDENTITY,
+                ));
+            }
+            return;
+        }
         if let Some(parts) = species.king_parts {
             for (segment, mesh) in parts {
                 parent.spawn((
@@ -1375,6 +1398,7 @@ pub(super) fn animate(
     let mut poses: HashMap<Entity, (MobKind, f32, bool, Quat, MobAction, Duration)> =
         HashMap::new();
     let mut flashing = HashSet::new();
+    let mut guardian_poses = HashMap::new();
     for (entity, mut mob, mut transform) in &mut mobs {
         // Exponential easing towards the target, so the pose is frame-rate independent
         // and never overshoots into a lean the server did not ask for. The timings the
@@ -1400,6 +1424,14 @@ pub(super) fn animate(
         transform.rotation = Quat::from_rotation_y(mob.yaw)
             * collapse(mob.kind, down)
             * Quat::from_rotation_x(mob.lean);
+
+        let (yaw, action, elapsed) = (mob.yaw, mob.action, mob.action_elapsed);
+        if let Some(motion) = mob.guardian_motion.as_mut() {
+            motion.sample(transform.translation, yaw, action, elapsed, down, delta);
+            guardian_poses.insert(entity, motion.transforms);
+            // Articulation, including collapse, belongs to the mesh children.
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
 
         if let Some(elapsed) = mob.flash.as_mut() {
             *elapsed += delta;
@@ -1478,6 +1510,15 @@ pub(super) fn animate(
         if part.part == MobPart::Arms {
             transform.rotation = arm_swing;
         }
+        if let MobPart::Guardian(segment) = part.part
+            && let Some(pose) = guardian_poses.get(&part.owner)
+        {
+            let index = guardian::SEGMENTS
+                .iter()
+                .position(|s| *s == segment)
+                .expect("guardian segment");
+            *transform = pose[index];
+        }
         if let MobPart::King(segment) = part.part {
             *transform = king::transform(segment, action, elapsed, arm_swing);
         }
@@ -1530,12 +1571,39 @@ pub(super) fn pose_encounters(
             };
             (strength * 0.12, strength * neck)
         });
-        root.rotation = Quat::from_rotation_y(mob.yaw) * Quat::from_rotation_x(lean);
+        root.rotation = Quat::from_rotation_y(mob.yaw)
+            * Quat::from_rotation_x(if mob.kind == MobKind::VargrGuardian {
+                0.0
+            } else {
+                lean
+            });
         for (part, mut transform) in &mut parts {
             if part.owner != entity {
                 continue;
             }
-            if let MobPart::King(segment) = part.part {
+            if let MobPart::Guardian(segment) = part.part {
+                if matches!(
+                    segment,
+                    guardian::Segment::Thorax
+                        | guardian::Segment::Neck
+                        | guardian::Segment::Head
+                        | guardian::Segment::Jaw
+                ) {
+                    let pivot = Vec3::new(0.0, 1.0, -0.28);
+                    let angle =
+                        if matches!(segment, guardian::Segment::Head | guardian::Segment::Jaw) {
+                            neck
+                        } else {
+                            lean
+                        };
+                    *transform = Transform::from_matrix(
+                        Mat4::from_translation(pivot)
+                            * Mat4::from_rotation_x(angle)
+                            * Mat4::from_translation(-pivot)
+                            * transform.to_matrix(),
+                    );
+                }
+            } else if let MobPart::King(segment) = part.part {
                 *transform = king::encounter_transform(segment, one);
             } else if matches!(part.part, MobPart::Head | MobPart::Eyes) {
                 let pivot = Vec3::new(0.0, 0.9, -0.35);
@@ -2997,7 +3065,13 @@ mod tests {
             deliver(&mut app, 6, vec![state]);
             app.update();
             let_the_body_land(&mut app);
-            assert!(drawn_rotation(&mut app).angle_between(collapse(kind, 1.0)) < 0.01);
+            assert!(
+                drawn_rotation(&mut app).angle_between(if kind == MobKind::VargrGuardian {
+                    Quat::IDENTITY
+                } else {
+                    collapse(kind, 1.0)
+                }) < 0.01
+            );
             deliver(&mut app, 7, vec![]);
             app.update();
             assert!(bodies(&mut app).is_empty());
