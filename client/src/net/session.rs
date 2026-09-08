@@ -313,6 +313,15 @@ pub(super) enum SessionEvent {
     /// run's reset, and each of those sends the whole list rather than the part that
     /// moved.
     InstanceBindings(codec::InstanceBindings),
+    /// One boss encounter's complete live announcement set, **replacing** whatever this
+    /// client held for that encounter.
+    ///
+    /// Superseding per-tick state rather than an event: what arrives *is* the answer, so
+    /// there is nothing to merge and a dropped frame costs one update. An empty move list
+    /// is a statement — this boss is announcing nothing right now — and a consumer that
+    /// kept the previous list on receiving one would be drawing a danger the server has
+    /// already withdrawn.
+    EncounterTimeline(codec::EncounterTimeline),
     /// Something worth a line in the log happened, and the session continues.
     ///
     /// This module runs below `net/mod.rs` and so has no Bevy in scope — including
@@ -1835,6 +1844,11 @@ fn pump(conn: Connection<'_>) -> Option<SessionEvent> {
                 }
                 Ok(Transition::InstanceBindings(bindings)) => {
                     events.send(SessionEvent::InstanceBindings(bindings)).ok()?;
+                }
+                Ok(Transition::EncounterTimeline(timeline)) => {
+                    events
+                        .send(SessionEvent::EncounterTimeline(timeline))
+                        .ok()?;
                 }
                 Ok(Transition::VoiceHeard(heard)) => {
                     events.send(SessionEvent::VoiceHeard(heard)).ok()?;

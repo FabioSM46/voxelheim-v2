@@ -72,8 +72,10 @@ func TestTheBossRowsCarryThePricedNumbers(t *testing.T) {
 		damage:      22,
 		windup:      900 * time.Millisecond,
 		recovery:    1300 * time.Millisecond,
-		body:        body{width: 1.6, height: 1.8},
-		nocturnal:   false,
+		// One change of stage, at the strap that finally tears.
+		phaseHealthPercents: []uint8{55},
+		body:                body{width: 1.6, height: 1.8},
+		nocturnal:           false,
 		loot: []lootRoll{
 			{item: ItemVargrPelt, min: 3, max: 5},
 			{item: ItemBone, min: 2, max: 2},
@@ -93,8 +95,10 @@ func TestTheBossRowsCarryThePricedNumbers(t *testing.T) {
 		damage:      28,
 		windup:      1200 * time.Millisecond,
 		recovery:    1800 * time.Millisecond,
-		body:        body{width: 1.0, height: 2.8},
-		nocturnal:   false,
+		// Duel, then ritual, then the armour cracked open and both together.
+		phaseHealthPercents: []uint8{70, 35},
+		body:                body{width: 1.0, height: 2.8},
+		nocturnal:           false,
 		loot: []lootRoll{
 			{item: ItemIronSword, min: 1, max: 1},
 			{item: ItemBone, min: 3, max: 5},

@@ -144,7 +144,26 @@ type mobTap struct {
 }
 
 type bossEncounter struct {
+	// id is this fight's identity on the wire, minted at the pull. It is not an entity
+	// id and never names one: the boss's body is `EncounterTimeline.BossEntityID`, and
+	// this is the fight, which outlives any one announcement inside it.
+	id uint64
+
 	roster []corpseOwner
+
+	// phase is the stage this encounter has reached, counted from one and only ever
+	// rising. See encounter.go, where both halves of that are argued.
+	phase uint8
+
+	// moves is every announcement this boss currently has running, in the shape the wire
+	// carries them. Superseding rather than a log: what is here is what the next timeline
+	// says, and a move that leaves this slice has ended.
+	//
+	// **Nothing selects a move yet** — that is #1024, which owns preparation, locked
+	// targeting, active windows, channel pulses and recovery. What lives here is the
+	// state that gets published and the lifecycle around it: an ending is carried for one
+	// tick and then swept, and a withdrawal marks everything cancelled.
+	moves []protocol.EncounterMove
 }
 
 // ticksFor is a duration in ticks at a rate, and never zero.

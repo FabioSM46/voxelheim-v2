@@ -93,6 +93,34 @@ func TestEverySpeciesIsFullyDescribed(t *testing.T) {
 				t.Errorf("hostile %s has a recovery of %v", kind, def.recovery)
 			}
 		}
+		// Stages are the encounter contract a boss fights under, and every boss row must
+		// state at least one. A normal row must state none: a creature with stages the
+		// simulation never publishes is a row somebody half-filled in, and a boss with
+		// none is one whose repertoire never changes — both are decisions rather than
+		// defaults, so neither may be reached by forgetting the field.
+		if def.rank == mobRankBoss && len(def.phaseHealthPercents) == 0 {
+			t.Errorf("boss %s never changes stage, so its encounter contract was never decided", kind)
+		}
+		if def.rank != mobRankBoss && len(def.phaseHealthPercents) != 0 {
+			t.Errorf("%s is not boss-rank and yet carries stages %v", kind, def.phaseHealthPercents)
+		}
+		if len(def.phaseHealthPercents) > maxEncounterPhases-1 {
+			t.Errorf("%s has %d stage changes, more than a client is told to expect",
+				kind, len(def.phaseHealthPercents))
+		}
+		for i, percent := range def.phaseHealthPercents {
+			// Strictly inside the range, and strictly descending. A stage at 100 begins
+			// before the fight does and a stage at 0 begins after it ends, and two in the
+			// wrong order would be reached out of sequence — each of which is a stage
+			// nobody could ever have meant.
+			if percent == 0 || percent >= 100 {
+				t.Errorf("%s changes stage at %d%% health, which is not inside a fight", kind, percent)
+			}
+			if i > 0 && percent >= def.phaseHealthPercents[i-1] {
+				t.Errorf("%s stages %v are not in descending order", kind, def.phaseHealthPercents)
+			}
+		}
+
 		if def.body.width <= 0 || def.body.height <= 0 {
 			t.Errorf("%s has a body of %v by %v, which occupies nothing", kind, def.body.width, def.body.height)
 		}

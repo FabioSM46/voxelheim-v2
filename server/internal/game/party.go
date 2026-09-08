@@ -353,7 +353,8 @@ func (s *Sim) startBossEncounterLocked(m *mob, first *Player) {
 			roster = append(roster, corpseOwnerFromPartyKey(member.key))
 		}
 	}
-	m.encounter = &bossEncounter{roster: roster}
+	s.nextEncounterID++
+	m.encounter = &bossEncounter{id: s.nextEncounterID, roster: roster, phase: startEncounterPhase}
 }
 
 func (s *Sim) clearInvitesFromLocked(entityID uint64) {

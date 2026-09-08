@@ -3231,8 +3231,9 @@ pub enum Message {
     ///
     /// Sibling of [`Self::InstanceBindings`] rather than of the event-shaped payloads
     /// around it: the message *is* the state, so an empty one is a statement. Copied and
-    /// validated here; the presentation that draws a telegraph is this issue's second
-    /// part, exactly as `MapTile` was carried this far before the map window existed.
+    /// validated here and carried to `EncounterTimelineInbox`; the presentation that
+    /// draws a telegraph from it is #1025, exactly as `MapTile` crossed this boundary
+    /// before the map window existed.
     EncounterTimeline(EncounterTimeline),
     /// A server→client payload no system consumes yet, or a member added by a newer
     /// contract. Named for diagnostics; each becomes real in its own issue.
@@ -10810,10 +10811,10 @@ mod tests {
         // `MapTile` before the map window existed: the sessions window that draws these
         // is the other half of that issue.
         (fb::Payload::InstanceBindings, Handling::Consumed),
-        // V37's one, read by an arm of its own from the contract part that adds it. It
-        // is validated here and nothing draws it yet — the telegraph presentation is
-        // this issue's second part — and `Consumed` is about the decode boundary rather
-        // than about a consumer, exactly as it was for `MapTile` before the map window.
+        // V37's one, read by an arm of its own. It reaches `EncounterTimelineInbox` and
+        // nothing draws it yet — the telegraph presentation is #1025 — and `Consumed` is
+        // about the decode boundary rather than about a consumer, exactly as it was for
+        // `MapTile` before the map window existed.
         (fb::Payload::EncounterTimeline, Handling::Consumed),
     ];
 

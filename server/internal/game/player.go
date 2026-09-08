@@ -271,6 +271,16 @@ type Sim struct {
 	// bounded by the number of boss rows in mobRegistry.
 	defeatedBosses []vnet.MobKind
 
+	// nextEncounterID is the counter behind every boss encounter's identity on the wire.
+	//
+	// **Separate from the entity-id source, deliberately.** An encounter is the fight and
+	// not the creature: the two are different things with different lifetimes, and a
+	// contract that let one be read as the other would invite a client to join a timeline
+	// to the wrong body. The wire carries both, side by side, for exactly that reason.
+	// Counted from one, so the zero this never mints stays the absent-field value the
+	// encoder refuses.
+	nextEncounterID uint64
+
 	// spawns is the director's random source: seeded from the world seed at
 	// construction and advanced only here, under this lock, inside Step.
 	//
@@ -1459,6 +1469,13 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// the director has already finished without ever seeing them.
 	s.advancePaddockHorsesLocked(worldTick)
 
+	// And the encounter stages last of everything that could have moved a boss's health,
+	// so the stage every timeline below carries is the one this tick's damage produced
+	// rather than the previous tick's. Its counterpart — the sweep that takes an ended
+	// announcement away — runs at the foot of this function, after every viewer has been
+	// offered the tick's bundle.
+	s.advanceEncounterPhasesLocked()
+
 	states := make([]protocol.EntityState, len(players))
 	for i, p := range players {
 		states[i] = protocol.EntityState{
@@ -1767,6 +1784,10 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		}
 		following := s.blowFramesLocked(snapshot)
 		following = append(following, s.miningFramesLocked(viewer, snapshot)...)
+		// Projected off the snapshot's own mobs vector, exactly as the two above are: a
+		// recipient is told what a boss has announced precisely when it has just been told
+		// that boss exists.
+		following = append(following, s.encounterFramesLocked(snapshot)...)
 		if !viewer.deliverSnapshot(protocol.EncodeEntitySnapshot(snapshot), viewer.chunk.Column(), following) {
 			// Debug, not warn: a full queue is a slow client rather than a broken
 			// server, and one line per tick per slow client would bury whatever else
@@ -1781,6 +1802,13 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	for _, player := range players {
 		player.miningCompleted = nil
 	}
+	// And the endings, after every viewer — including the ones whose bundle was refused.
+	// The rule is the mining completion's above: an ending is offered once, to whoever
+	// could receive it, and is then gone. Doing it here rather than at the top of the next
+	// tick is what makes it independent of *when* in a tick a move ended, so an ending
+	// written before the creatures are stepped is published on the same tick as one
+	// written while they are.
+	s.sweepEndedEncounterMovesLocked()
 	return waterChanges
 }
 

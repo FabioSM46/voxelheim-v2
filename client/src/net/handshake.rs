@@ -31,12 +31,12 @@ use std::fmt;
 use super::codec::WorldChange;
 
 use super::codec::{
-    ActionRefused, BlowLanded, CharacterList, ChatMessage, InstanceBindings, InstanceEntryOffer,
-    InventoryState, LandmarkList, LearnedMounts, LeaveCancelResult, LeaveStarted, LifeState,
-    LootClosed, LootState, MapExplored, MapTile, MarkerList, Message, MineProgress, MiningActivity,
-    MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed, PlayerTradeState, Reject,
-    ResidentAppearance, SessionParams, Snapshot, StormWarning, VendorClosed, VendorState,
-    VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
+    ActionRefused, BlowLanded, CharacterList, ChatMessage, EncounterTimeline, InstanceBindings,
+    InstanceEntryOffer, InventoryState, LandmarkList, LearnedMounts, LeaveCancelResult,
+    LeaveStarted, LifeState, LootClosed, LootState, MapExplored, MapTile, MarkerList, Message,
+    MineProgress, MiningActivity, MobHit, PartyInvite, PlayerAppearance, PlayerTradeClosed,
+    PlayerTradeState, Reject, ResidentAppearance, SessionParams, Snapshot, StormWarning,
+    VendorClosed, VendorState, VoiceHeard, WardsNearby, WorldClock, WorldUpdate,
 };
 
 /// How far the handshake has got.
@@ -187,6 +187,15 @@ pub enum Transition {
     /// a `MarkerList`, so there is no earlier list to check it against — and an empty one
     /// is a statement rather than a frame with nothing in it.
     InstanceBindings(InstanceBindings),
+    /// One boss encounter's complete live announcement set, admitted because a session
+    /// exists.
+    ///
+    /// Nothing is checked here and there is nothing the welcome could add: the identity,
+    /// the stage, the phase rules, the timings and every hazard bound are properties of
+    /// the payload and are held at the decode boundary. Complete by definition like an
+    /// `InstanceBindings`, so there is no earlier timeline to check it against — and an
+    /// empty one is a statement rather than a frame with nothing in it.
+    EncounterTimeline(EncounterTimeline),
 }
 
 /// A message that breaks the handshake's rules. Every variant ends the
@@ -633,13 +642,8 @@ impl Handshake {
             (Phase::Established, Message::InstanceBindings(bindings)) => {
                 Ok(Transition::InstanceBindings(bindings))
             }
-            // Fully decoded and validated at the boundary, and dropped here because
-            // nothing presents a telegraph yet — this issue's second part is what gives
-            // it a consumer. `Ignored` rather than a `Transition` of its own for the
-            // reason it exists: a payload this build understands and does not yet use is
-            // not a peer breaking the contract.
-            (Phase::Established, Message::EncounterTimeline(_)) => {
-                Ok(Transition::Ignored("EncounterTimeline"))
+            (Phase::Established, Message::EncounterTimeline(timeline)) => {
+                Ok(Transition::EncounterTimeline(timeline))
             }
 
             // -- And the same payloads before there is a session --------------------

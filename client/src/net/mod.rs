@@ -106,7 +106,10 @@ pub use codec::{
 // window that draws these should not have to reopen `codec.rs` to find out what it is
 // allowed to spell.
 #[allow(unused_imports)] // The window that reads these is the second half of #979.
-pub use codec::{InstanceBindings, SessionBinding};
+pub use codec::{
+    EncounterMove, EncounterMoveKind, EncounterTimeline, HazardShape, HazardVolume,
+    InstanceBindings, MoveEnd, MovePhase, SessionBinding,
+};
 
 // V35's dungeon-entry surface. Named here for the reason the blocks above are: the
 // consent dialog (#1030, part 2) should not have to reopen `codec.rs` to find out what
@@ -972,6 +975,118 @@ impl InstanceBindingsInbox {
     }
 }
 
+/// How many **live** boss encounters this client will hold announcements for at once.
+///
+/// The dungeon holds two. Four leaves room for a design that grows without letting a peer
+/// choose how much this client allocates — which is the reason the number exists at all,
+/// and the reason it is a *bound* rather than a capacity: past it, a further encounter is
+/// refused rather than evicting one somebody is currently fighting.
+///
+/// **"Live" is load-bearing and was not always true.** Refusing the extra one is only
+/// defensible while every held entry is a fight still happening, and the first version of
+/// this inbox had no way to let one go: an encounter entered and left only with the whole
+/// world. That made this a count of encounter ids *ever seen*, so the fights that had
+/// ended kept the slots and a genuinely live one was refused for ever — the exact failure
+/// the refusal is supposed to avoid, with the new fight the one nobody sees. What makes
+/// the count honest is [`EncounterTimelineInbox::retain_live`].
+pub const MAX_LIVE_ENCOUNTERS: usize = 4;
+
+/// The newest timeline the net thread has delivered for each live boss encounter.
+///
+/// **Not a queue, and that is the difference from every inbox beside it.** A timeline is
+/// superseding per-tick state: two of them for one encounter are two successive statements
+/// of the same thing, and only the newer is true. So this keeps the last per
+/// `encounter_id` and is bounded by [`MAX_LIVE_ENCOUNTERS`] whether or not anything ever
+/// drains it — where a `Vec` would grow at the tick rate until a consumer existed.
+///
+/// **An empty `moves` is kept, never dropped.** It says the boss is announcing nothing
+/// right now, which is what withdraws the hazards a previous timeline announced.
+///
+/// **Silence is the other statement, and it is read off the snapshot rather than off the
+/// absence of a timeline.** An entry lives exactly as long as the newest snapshot names
+/// its boss as a living creature — see [`Self::retain_live`] — so it disappears when that
+/// boss is killed, when it leaves this recipient's view, and when the world or the session
+/// changes under it. It deliberately does *not* disappear merely because a tick carried no
+/// timeline for it: `followSnapshots` drops a transient outcome under queue pressure while
+/// still delivering its snapshot, so "no timeline this tick" means "one update lost", and
+/// treating it as an ending would make a live boss's telegraph flicker.
+#[derive(Resource, Debug, Default)]
+pub struct EncounterTimelineInbox(Vec<EncounterTimeline>);
+
+impl EncounterTimelineInbox {
+    /// Every encounter this client currently holds an announcement for.
+    ///
+    /// Borrowed rather than taken, because this is state rather than a queue: the consumer
+    /// reads it every frame and the server's next tick is what replaces it.
+    #[allow(dead_code)] // The presentation that draws these is #1025.
+    pub fn live(&self) -> &[EncounterTimeline] {
+        &self.0
+    }
+
+    /// Records one timeline, replacing whatever this client held for that encounter.
+    ///
+    /// A new encounter past the bound is **refused rather than admitted by evicting one**.
+    /// Dropping the oldest would silently stop updating a fight somebody is standing in,
+    /// which is worse than not showing a fifth: the entries already here are fights whose
+    /// bosses the newest snapshot still names, because [`Self::retain_live`] is what makes
+    /// that sentence true rather than merely hoped for.
+    fn replace(&mut self, timeline: EncounterTimeline) {
+        if let Some(held) = self
+            .0
+            .iter_mut()
+            .find(|held| held.encounter_id == timeline.encounter_id)
+        {
+            *held = timeline;
+            return;
+        }
+        if self.0.len() < MAX_LIVE_ENCOUNTERS {
+            self.0.push(timeline);
+        }
+    }
+
+    /// Forgets every encounter whose boss this snapshot does not name as a living
+    /// creature.
+    ///
+    /// **This is the contract's own join rule executed rather than assumed.**
+    /// `schemas/player.fbs` says a timeline and the creature it describes are joined by
+    /// `boss_entity_id`, and that a receiver holding no `MobState` for that id has a boss
+    /// it cannot see and should present nothing. The snapshot is the complete existence
+    /// set for this recipient, so its mobs vector is the authoritative answer to "is this
+    /// fight still in front of me" — and the server's own publisher asks exactly the same
+    /// question, projecting each timeline off the mobs vector it has just sent.
+    ///
+    /// **A corpse is not a fight.** A killed creature keeps its entity id and stays in the
+    /// snapshot as a body, so membership alone would hold a dead boss's last telegraph for
+    /// ever. `Dying` and `Corpse` are the server's statement that it is over — the only
+    /// statement of death this contract makes — so reading them here is not this side
+    /// deciding anything; it is this side believing what it was told.
+    ///
+    /// **Never a timer, and never "no timeline for a while".** Both would be the client
+    /// deciding a fight had ended on its own, and the second is wrong besides: a tick
+    /// whose timeline was dropped under queue pressure still delivers its snapshot, and
+    /// that is one lost update rather than an ending.
+    fn retain_live(&mut self, snapshot: &Snapshot) {
+        self.0.retain(|held| {
+            snapshot.mobs.iter().any(|mob| {
+                mob.entity_id == held.boss_entity_id
+                    && !matches!(mob.action, MobAction::Dying | MobAction::Corpse)
+            })
+        });
+    }
+
+    /// Forgets every encounter, for a session or a world this client has left.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Records one timeline as the net thread would. Test-only, so a consumer can be
+    /// driven without a socket.
+    #[cfg(test)]
+    pub fn push(&mut self, timeline: EncounterTimeline) {
+        self.replace(timeline);
+    }
+}
+
 /// How many relayed voice frames may wait for the audio module in one frame.
 ///
 /// Sixteen 20 ms frames is 320 ms of one speaker, or 80 ms of four. **A bound, because the
@@ -1534,6 +1649,7 @@ impl Plugin for NetPlugin {
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
             .init_resource::<InstanceBindingsInbox>()
+            .init_resource::<EncounterTimelineInbox>()
             .init_resource::<VoiceInbox>()
             .init_resource::<EntryOfferInbox>()
             .init_resource::<ChatInbox>()
@@ -2143,6 +2259,7 @@ struct Inboxes<'w> {
     storms: ResMut<'w, StormInbox>,
     wards: ResMut<'w, WardsInbox>,
     bindings: ResMut<'w, InstanceBindingsInbox>,
+    encounters: ResMut<'w, EncounterTimelineInbox>,
     voice: ResMut<'w, VoiceInbox>,
     // Optional only for focused boundary tests that install the drain directly.
     entry_offers: Option<ResMut<'w, EntryOfferInbox>>,
@@ -2241,6 +2358,7 @@ fn drain_session_events(
                 // drain belong to the new session and are queued normally.
                 inboxes.wards.clear();
                 inboxes.bindings.clear();
+                inboxes.encounters.clear();
                 if let Some(inbox) = inboxes.mining_activity.as_deref_mut() {
                     inbox.0.clear();
                 }
@@ -2313,6 +2431,10 @@ fn drain_session_events(
                 inboxes.refusals.0.clear();
                 inboxes.storms.0.clear();
                 inboxes.wards.0.clear();
+                // A fight belongs to the world it is happening in. The bosses of the one
+                // this session has left are not being fought any more, and the server
+                // will never send another word about them.
+                inboxes.encounters.clear();
                 inboxes.voice.0.clear();
                 // An offer belongs to the world it was made in: the crossing it names is
                 // one this character is no longer standing at, and the server has already
@@ -2340,7 +2462,15 @@ fn drain_session_events(
 
             // Queued, not logged, for the same reason as a chunk: there are twenty of
             // these a second. The player module's counters are the visible signal.
-            Ok(SessionEvent::Snapshot { snapshot, at }) => inboxes.snapshots.0.push((snapshot, at)),
+            Ok(SessionEvent::Snapshot { snapshot, at }) => {
+                // The snapshot first, and the timelines that follow it in the same bundle
+                // afterwards — which is the order the server sent them and the order this
+                // channel preserves. So a fight this tick still has is pruned here and put
+                // straight back by its own timeline a moment later, while one that has
+                // ended is pruned and never returns.
+                inboxes.encounters.retain_live(&snapshot);
+                inboxes.snapshots.0.push((snapshot, at));
+            }
 
             // Complete state, queued for the player module rather than interpreted here.
             Ok(SessionEvent::Inventory(inventory)) => inboxes.inventories.0.push(inventory),
@@ -2451,6 +2581,14 @@ fn drain_session_events(
             // because an empty one says this character owes nothing and dropping it would
             // leave a reset lockout standing.
             Ok(SessionEvent::InstanceBindings(bindings)) => inboxes.bindings.0.push(bindings),
+
+            // Replaced rather than queued, because a timeline is state and not an event:
+            // a second one for the same encounter is the same fight a tick later, and
+            // keeping both would let a consumer draw a hazard the server has already
+            // moved. Not logged either — one line per boss per tick would bury the log.
+            Ok(SessionEvent::EncounterTimeline(timeline)) => {
+                inboxes.encounters.replace(timeline);
+            }
 
             // Queued, never logged: a voice frame is personal data, and even a count
             // would be a diagnostic about who spoke. The decoder that consumes these is
@@ -5765,6 +5903,7 @@ mod tests {
             .init_resource::<StormInbox>()
             .init_resource::<WardsInbox>()
             .init_resource::<InstanceBindingsInbox>()
+            .init_resource::<EncounterTimelineInbox>()
             .init_resource::<VoiceInbox>()
             .init_resource::<SessionEndingInbox>()
             .insert_resource(NetLink(Mutex::new(Channels {
@@ -6072,6 +6211,360 @@ mod tests {
                 .take(),
             vec![owed, reset],
             "the empty list is the newer answer and must reach the consumer to clear the older"
+        );
+    }
+
+    /// A timeline for one encounter that would be sent, as a correct server sends it.
+    fn announced(encounter_id: u64, phase: u8, moves: Vec<EncounterMove>) -> EncounterTimeline {
+        EncounterTimeline {
+            encounter_id,
+            boss_entity_id: 4242,
+            boss: MobKind::VargrGuardian,
+            phase,
+            moves,
+        }
+    }
+
+    /// One telegraph, so a test that is not about a move's contents never writes one.
+    fn telegraph(move_instance_id: u64) -> EncounterMove {
+        EncounterMove {
+            move_instance_id,
+            kind: EncounterMoveKind::BiteAndTear,
+            phase: MovePhase::Telegraph,
+            phase_started_tick: 900,
+            phase_ticks: 18,
+            target_entity_id: Some(77),
+            aim: None,
+            hazards: vec![HazardVolume {
+                shape: HazardShape::Cone { half_angle: 0.6 },
+                origin: [12.0, 61.0, -40.0],
+                direction: [0.0, 0.0, 1.0],
+                radius: 6.0,
+                height: 3.0,
+            }],
+            pulse: None,
+            interruptible: false,
+            ended: None,
+        }
+    }
+
+    /// A second timeline for one encounter replaces the first, and does not queue behind it.
+    ///
+    /// **This is the late/replaced-state rule at the client's own boundary.** A timeline is
+    /// superseding: two of them are two successive statements about one fight, and a
+    /// consumer handed both would be free to draw the older. The empty list is the case a
+    /// queue that dropped "nothing to say" would get wrong — it is what withdraws the
+    /// hazard the first one announced.
+    #[test]
+    fn a_newer_timeline_replaces_the_one_it_supersedes() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+
+        let telegraphing = announced(1, 1, vec![telegraph(7)]);
+        let silent = announced(1, 2, Vec::new());
+        events
+            .send(SessionEvent::EncounterTimeline(telegraphing.clone()))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::EncounterTimeline(silent.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<EncounterTimelineInbox>()
+                .live(),
+            [silent],
+            "the newer statement about one fight is the only one that is still true"
+        );
+    }
+
+    /// Two fights are two entries, and a fifth is refused rather than shown by evicting one.
+    ///
+    /// Refusing is the deliberate direction: the entries already held are ones the server
+    /// is describing every tick, and silently stopping updates for a fight somebody is
+    /// standing in would be worse than not admitting a fifth.
+    #[test]
+    fn each_encounter_holds_its_own_entry_up_to_the_bound() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        for encounter_id in 1..=(MAX_LIVE_ENCOUNTERS as u64 + 1) {
+            events
+                .send(SessionEvent::EncounterTimeline(announced(
+                    encounter_id,
+                    1,
+                    Vec::new(),
+                )))
+                .expect("the app holds the receiver");
+        }
+        app.update();
+
+        let mut inbox = app.world_mut().resource_mut::<EncounterTimelineInbox>();
+        let held: Vec<u64> = inbox.live().iter().map(|one| one.encounter_id).collect();
+        assert_eq!(
+            held,
+            (1..=MAX_LIVE_ENCOUNTERS as u64).collect::<Vec<_>>(),
+            "the fights already being followed are the ones that keep being updated"
+        );
+
+        // And the bound does not stop a fight already held from being superseded.
+        inbox.push(announced(1, 3, vec![telegraph(9)]));
+        assert_eq!(inbox.live()[0].phase, 3);
+        assert_eq!(inbox.live().len(), MAX_LIVE_ENCOUNTERS);
+    }
+
+    /// A fight belongs to the world it happens in, and to the session that watched it.
+    ///
+    /// Both boundaries clear it for the same reason an entry offer is cleared at one of
+    /// them: the server will never send another word about these encounters, so anything
+    /// still held would be drawn for ever with nothing left to withdraw it.
+    #[test]
+    fn a_world_change_and_a_new_session_each_forget_every_fight() {
+        for (name, boundary) in [
+            (
+                "a world change",
+                SessionEvent::WorldChange(WorldChange {
+                    world_id: 9,
+                    world_seed: 3,
+                    arrival: [0.0, 64.0, 0.0],
+                    exit_arch: None,
+                }),
+            ),
+            (
+                "a newly established session",
+                SessionEvent::Established {
+                    params: params(),
+                    returning: Some(true),
+                },
+            ),
+        ] {
+            let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+            events
+                .send(SessionEvent::EncounterTimeline(announced(
+                    1,
+                    1,
+                    vec![telegraph(7)],
+                )))
+                .expect("the app holds the receiver");
+            events.send(boundary).expect("the app holds the receiver");
+            app.update();
+
+            assert!(
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .live()
+                    .is_empty(),
+                "{name} left a fight behind that nothing will ever update again"
+            );
+        }
+    }
+
+    /// A snapshot that names one boss in the state the server says it is in.
+    fn snapshot_naming(boss_entity_id: u64, action: MobAction) -> SessionEvent {
+        SessionEvent::Snapshot {
+            snapshot: Snapshot {
+                server_tick: 1,
+                mobs: vec![MobState {
+                    entity_id: boss_entity_id,
+                    kind: MobKind::VargrGuardian,
+                    pos: [0.0, 64.0, 0.0],
+                    vel: [0.0; 3],
+                    yaw: 0.0,
+                    health: 720,
+                    max_health: 720,
+                    action,
+                    target_entity_id: 0,
+                }],
+                ..default()
+            },
+            at: Instant::now(),
+        }
+    }
+
+    /// A snapshot that names nothing at all — a recipient who has walked out of the arena.
+    fn snapshot_naming_nobody() -> SessionEvent {
+        SessionEvent::Snapshot {
+            snapshot: Snapshot {
+                server_tick: 2,
+                ..default()
+            },
+            at: Instant::now(),
+        }
+    }
+
+    /// A fight ends when the server stops naming its boss as a living creature, and the
+    /// entry goes with it.
+    ///
+    /// **Both endings, because they are different code paths on the server and were the
+    /// same bug here.** A killed boss keeps its entity id and stays in the snapshot as a
+    /// body, so membership alone would hold its last telegraph for ever; a boss that
+    /// leaves view is simply absent. Neither one is published a further timeline, so
+    /// before this the entry survived both — and the count of "live" encounters was a
+    /// count of encounters ever seen.
+    #[test]
+    fn an_encounter_is_forgotten_when_the_server_stops_naming_a_living_boss() {
+        for (name, ending) in [
+            (
+                "a killed boss going down",
+                snapshot_naming(4242, MobAction::Dying),
+            ),
+            (
+                "the body it leaves behind",
+                snapshot_naming(4242, MobAction::Corpse),
+            ),
+            ("a boss that left this view", snapshot_naming_nobody()),
+        ] {
+            let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+            events
+                .send(snapshot_naming(4242, MobAction::Windup))
+                .expect("the app holds the receiver");
+            events
+                .send(SessionEvent::EncounterTimeline(announced(
+                    1,
+                    1,
+                    vec![telegraph(7)],
+                )))
+                .expect("the app holds the receiver");
+            app.update();
+            assert_eq!(
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .live()
+                    .len(),
+                1,
+                "{name}: the fight was never held in the first place"
+            );
+
+            events.send(ending).expect("the app holds the receiver");
+            app.update();
+            assert!(
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .live()
+                    .is_empty(),
+                "{name} left a telegraph standing over a fight that is over"
+            );
+        }
+    }
+
+    /// A tick that carried no timeline is one lost update, not an ending.
+    ///
+    /// This is why the rule is snapshot membership rather than "refreshed this bundle":
+    /// `followSnapshots` drops a transient outcome under queue pressure while still
+    /// delivering its snapshot, so a live boss legitimately arrives with no timeline of
+    /// its own. Dropping the entry there would make its telegraph flicker off and back on.
+    #[test]
+    fn a_tick_that_lost_its_timeline_keeps_the_fight_it_did_not_mention() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+        events
+            .send(snapshot_naming(4242, MobAction::Windup))
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::EncounterTimeline(announced(
+                1,
+                1,
+                vec![telegraph(7)],
+            )))
+            .expect("the app holds the receiver");
+        app.update();
+
+        // The next tick's snapshot arrives; its timeline does not.
+        events
+            .send(snapshot_naming(4242, MobAction::Windup))
+            .expect("the app holds the receiver");
+        app.update();
+
+        let inbox = app.world_mut().resource_mut::<EncounterTimelineInbox>();
+        assert_eq!(
+            inbox.live().len(),
+            1,
+            "a dropped follower ended a fight that is still happening"
+        );
+        assert_eq!(
+            inbox.live()[0].moves[0].move_instance_id,
+            7,
+            "the last thing the server said stands until it says another"
+        );
+    }
+
+    /// The bound counts fights that are still happening, so a new one is admitted once an
+    /// old one has ended.
+    ///
+    /// **This is the finding the refusal policy was written against.** Refusing a fifth
+    /// encounter is only defensible while the four held are live; with no way to let one
+    /// go, four bosses killed in one world would have kept the slots for ever and the next
+    /// live fight would have been refused every tick — the failure the refusal claims to
+    /// avoid, with the new fight the one nobody sees.
+    #[test]
+    fn a_slot_freed_by_an_ended_fight_admits_the_next_one() {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Connected);
+
+        // Four fights, each with a boss the snapshot names as alive.
+        let alive: Vec<MobState> = (1..=MAX_LIVE_ENCOUNTERS as u64)
+            .map(|id| MobState {
+                entity_id: 4000 + id,
+                kind: MobKind::VargrGuardian,
+                pos: [0.0, 64.0, 0.0],
+                vel: [0.0; 3],
+                yaw: 0.0,
+                health: 720,
+                max_health: 720,
+                action: MobAction::Windup,
+                target_entity_id: 0,
+            })
+            .collect();
+        events
+            .send(SessionEvent::Snapshot {
+                snapshot: Snapshot {
+                    server_tick: 1,
+                    mobs: alive.clone(),
+                    ..default()
+                },
+                at: Instant::now(),
+            })
+            .expect("the app holds the receiver");
+        for id in 1..=MAX_LIVE_ENCOUNTERS as u64 {
+            let mut timeline = announced(id, 1, Vec::new());
+            timeline.boss_entity_id = 4000 + id;
+            events
+                .send(SessionEvent::EncounterTimeline(timeline))
+                .expect("the app holds the receiver");
+        }
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<EncounterTimelineInbox>()
+                .live()
+                .len(),
+            MAX_LIVE_ENCOUNTERS
+        );
+
+        // All four die; a fifth boss is pulled in the same world.
+        let mut fifth = announced(MAX_LIVE_ENCOUNTERS as u64 + 1, 1, vec![telegraph(9)]);
+        fifth.boss_entity_id = 9999;
+        let after = MobState {
+            entity_id: 9999,
+            ..alive[0]
+        };
+        events
+            .send(SessionEvent::Snapshot {
+                snapshot: Snapshot {
+                    server_tick: 2,
+                    mobs: vec![after],
+                    ..default()
+                },
+                at: Instant::now(),
+            })
+            .expect("the app holds the receiver");
+        events
+            .send(SessionEvent::EncounterTimeline(fifth.clone()))
+            .expect("the app holds the receiver");
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<EncounterTimelineInbox>()
+                .live(),
+            [fifth],
+            "the four ended fights kept their slots and the live one was refused"
         );
     }
 
