@@ -10,7 +10,6 @@ import (
 // A physical combination is bounded at three independently announced blows. It is
 // not a channel: every blow gets a fresh instance and hit ledger. The sequence is
 // owned by its running instance, so withdrawing that instance cancels the future too.
-// PrisonerClaws can opt into this same catalogue seam when its alternating set lands.
 type encounterCombo struct {
 	total          uint8
 	between, final time.Duration
@@ -28,6 +27,26 @@ var biteCombo = encounterCombo{
 		{hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3, height: 2.2, halfAngle: .70}},
 		{hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3, height: 2.2, halfAngle: .70}},
 	},
+}
+
+// Phase two alternates paws. Each cone leaves the opposite flank open, and the
+// executor checks a body-clear escape again before committing the second claw.
+var clawCombo = encounterCombo{
+	total: 2, between: 400 * time.Millisecond, final: 1800 * time.Millisecond,
+	blows: [3]encounterComboBlow{
+		{bearing: -.45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.4, height: 2.2, halfAngle: 1.05}},
+		{bearing: .45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.4, height: 2.2, halfAngle: 1.05}},
+	},
+}
+
+// forStage freezes the repertoire at selection. A phase-one claw already under
+// way remains a single blow even if its damage window crosses the health threshold.
+// The catalogue keeps the combo so its timings are converted once at construction.
+func (d encounterMoveDef) forStage(stage uint8) encounterMoveDef {
+	if stage < d.comboFromStage {
+		d.combo = nil
+	}
+	return d
 }
 
 var tollCombo = encounterCombo{

@@ -243,7 +243,7 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 	})
 
 	for _, i := range candidates {
-		one := repertoire[i].forComboStep(1)
+		one := repertoire[i].forStage(e.phase).forComboStep(1)
 		if !s.moveLeavesAnEscapeLocked(m, one, target) {
 			continue
 		}
@@ -259,6 +259,7 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 // before the jump, the side of the sweep shown by the raised paw. It is what makes each of
 // these moves something a player leaves rather than something that follows them.
 func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Player, tick uint64) {
+	def = def.forStage(m.encounter.phase)
 	step := uint8(0)
 	if def.combo != nil {
 		step = 1
