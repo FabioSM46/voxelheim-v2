@@ -222,6 +222,8 @@ pub(super) struct Motion {
     yaw: f32,
     feet: [Foot; 4],
     next_pair: usize,
+    audio_serial: u64,
+    audio_contact: Option<Vec3>,
     pub(super) fast_travel: bool,
     pub(super) stage: u8,
     pub(super) transforms: [Transform; 19],
@@ -242,6 +244,8 @@ impl Motion {
                 }
             }),
             next_pair: 0,
+            audio_serial: 0,
+            audio_contact: None,
             fast_travel: false,
             stage: 1,
             transforms: [Transform::IDENTITY; 19],
@@ -257,6 +261,7 @@ impl Motion {
         down: f32,
         delta: Duration,
     ) {
+        self.audio_contact = None;
         let displacement = position - self.last;
         let turn = (yaw - self.yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
             - std::f32::consts::PI;
@@ -267,9 +272,11 @@ impl Motion {
             || displacement.y.abs() > 0.04
             || down > 0.0
         {
+            let serial = self.audio_serial;
             let travel = self.fast_travel;
             let stage = self.stage;
             *self = Self::new(position, yaw);
+            self.audio_serial = serial;
             self.fast_travel = travel;
             self.stage = stage;
         }
@@ -305,12 +312,16 @@ impl Motion {
                 self.next_pair ^= 1;
             }
         }
+        let mut landed = Vec3::ZERO;
+        let mut landings = 0;
         for (i, foot) in self.feet.iter_mut().enumerate() {
+            let mut contact_finished = false;
             if !gait_allowed || down > 0.0 {
                 foot.contact = position + rotation * rest_foot(i);
                 foot.swing = 1.0;
             } else if foot.swing < 1.0 {
                 foot.swing = (foot.swing + dt / swing_seconds).min(1.0);
+                contact_finished = foot.swing == 1.0;
                 let t = foot.swing * foot.swing * (3.0 - 2.0 * foot.swing);
                 foot.contact = foot.from.lerp(foot.to, t)
                     + Vec3::Y * (std::f32::consts::PI * foot.swing).sin() * 0.12;
@@ -319,10 +330,19 @@ impl Motion {
             // The visual legs have a finite reach even if a render hitch skips a
             // whole support exchange. Replant instead of stretching geometry.
             if targets[i].distance(rest_foot(i)) > if self.fast_travel { 0.58 } else { 0.48 } {
+                contact_finished = false;
                 targets[i] = rest_foot(i);
                 foot.contact = position + rotation * targets[i];
                 foot.swing = 1.0;
             }
+            if contact_finished {
+                landed += foot.contact;
+                landings += 1;
+            }
+        }
+        if landings > 0 {
+            self.audio_serial = self.audio_serial.wrapping_add(1);
+            self.audio_contact = Some(landed / landings as f32);
         }
         self.last = position;
         self.yaw = yaw;
@@ -547,3 +567,17 @@ mod capture;
 
 #[cfg(test)]
 mod system_tests;
+
+// This accessor lives with the Vargr rig so other boss modules need no audio coupling.
+// A stamp describes this render frame's completed cosmetic support exchange, not a
+// collision or an authoritative hit. Missing geometry simply means no gait sound.
+impl Mob {
+    pub(in crate::player) fn guardian_audio_contact(&self) -> Option<(u64, u64, Vec3)> {
+        let motion = self.guardian_motion.as_ref()?;
+        (self.kind == MobKind::VargrGuardian).then_some(())?;
+        Some((self.entity_id, motion.audio_serial, motion.audio_contact?))
+    }
+}
+
+#[cfg(test)]
+mod audio_tests;
