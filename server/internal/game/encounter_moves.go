@@ -120,7 +120,9 @@ type encounterHazard struct {
 // move says how much heavier or lighter than that ordinary blow it is. A second absolute
 // number here would be a second place a balance pass has to find.
 type encounterMoveDef struct {
-	kind vnet.EncounterMoveKind
+	combo   *encounterCombo
+	bearing float64
+	kind    vnet.EncounterMoveKind
 
 	// fromStage is the encounter stage that unlocks this move, counted from one exactly
 	// as `EncounterTimeline.phase` is. A stage never falls, so a move never leaves the
@@ -283,11 +285,11 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 		// in contact: a short telegraph by boss standards, an ordinary blow, and a recovery
 		// that does not give a party the room the heavy moves do.
 		{
-			kind: vnet.EncounterMoveKindBiteAndTear, fromStage: 1,
+			kind: vnet.EncounterMoveKindBiteAndTear, fromStage: 1, combo: &biteCombo,
 			telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
-			recovery: 1300 * time.Millisecond, cooldown: 2 * time.Second,
+			recovery: biteCombo.final, cooldown: 2 * time.Second,
 			minRange: 0, maxRange: 2.6, damagePercent: 100,
-			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.0, height: 2.2, halfAngle: 0.70},
+			hazard: biteCombo.blows[0].hazard,
 		},
 		// A raised paw and open claws, showing which side the sweep comes from. Wider than
 		// the bite, on a cooldown long enough that the two do not read as one move.
@@ -348,15 +350,14 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 5.0, height: 3.0, halfWidth: 1.1},
 		},
 		// Three distinct poses, announced one at a time. Each toll is a move instance of
-		// its own with its own telegraph and its own id — the contract has no combo
-		// counter, and a short cooldown against a long recovery is what makes them arrive
-		// in a run rather than as one three-part animation the server would have to own.
+		// its own with its own telegraph and id. The committed physical combination
+		// bypasses the ordinary scheduler until its final recovery is earned.
 		{
-			kind: vnet.EncounterMoveKindThreeTolls, fromStage: 1,
+			kind: vnet.EncounterMoveKindThreeTolls, fromStage: 1, combo: &tollCombo,
 			telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
-			recovery: 1300 * time.Millisecond, cooldown: 1500 * time.Millisecond,
+			recovery: tollCombo.final, cooldown: 1500 * time.Millisecond,
 			minRange: 0, maxRange: 3.4, damagePercent: 75,
-			hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.8, height: 3.0, halfAngle: 0.95},
+			hazard: tollCombo.blows[0].hazard,
 		},
 		// The free hand raised, a crystal forming, a direction fixed before release. The
 		// lane is what the spear crosses during its release and the spear does not steer
@@ -420,13 +421,14 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 
 // encounterMoveTicks is one move's four durations in the ticks Step counts.
 type encounterMoveTicks struct {
-	telegraph         uint32
-	release           uint32
-	recovery          uint32
-	impactRecovery    uint32
-	interruptRecovery uint32
-	channelPulse      uint32
-	cooldown          uint32
+	comboBetween, comboFinal uint32
+	telegraph                uint32
+	release                  uint32
+	recovery                 uint32
+	impactRecovery           uint32
+	interruptRecovery        uint32
+	channelPulse             uint32
+	cooldown                 uint32
 }
 
 // encounterMoveTimingsFor converts every catalogued move at this server's tick rate.
@@ -458,6 +460,10 @@ func encounterMoveTimingsFor(tickRate uint8) map[vnet.EncounterMoveKind]encounte
 			}
 			if def.channelPulse > 0 {
 				one.channelPulse = ticksFor(def.channelPulse, tickRate)
+			}
+			if def.combo != nil {
+				one.comboBetween = ticksFor(def.combo.between, tickRate)
+				one.comboFinal = ticksFor(def.combo.final, tickRate)
 			}
 			timings[def.kind] = one
 		}

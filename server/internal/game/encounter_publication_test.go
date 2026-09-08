@@ -80,6 +80,8 @@ func announcedTimelines(t *testing.T, frames [][]byte) []announcedTimeline {
 			timeline.Moves(&move, i)
 			one.moves = append(one.moves, protocol.EncounterMove{
 				MoveInstanceID:   move.MoveInstanceId(),
+				ComboStep:        move.ComboStep(),
+				ComboTotal:       move.ComboTotal(),
 				Kind:             move.Kind(),
 				Phase:            move.Phase(),
 				PhaseStartedTick: move.PhaseStartedTick(),

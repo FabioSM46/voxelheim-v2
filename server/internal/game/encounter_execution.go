@@ -39,8 +39,12 @@ const hazardSampleCorners = 4
 // rule below trivially satisfiable for the guardian — the king's overlapping rituals arrive
 // with the rest of his repertoire and inherit the rule rather than growing their own.
 type runningMove struct {
-	def   encounterMoveDef
-	ticks encounterMoveTicks
+	// The pair belongs to this blow and never changes across phases or ending.
+	// comboStopped is separate: failed continuation cannot turn step 1 into step 2.
+	comboStep, comboTotal uint8
+	comboStopped          bool
+	def                   encounterMoveDef
+	ticks                 encounterMoveTicks
 
 	// instanceID is this instance's identity on the wire, unique among the encounter's
 	// live moves and never reused inside one encounter. Two bites in a row are two ids.
@@ -109,6 +113,8 @@ type runningMove struct {
 func (r *runningMove) announcement() protocol.EncounterMove {
 	move := protocol.EncounterMove{
 		MoveInstanceID:   r.instanceID,
+		ComboStep:        r.comboStep,
+		ComboTotal:       r.comboTotal,
 		Kind:             r.def.kind,
 		Phase:            r.phase,
 		PhaseStartedTick: r.startedTick,
@@ -237,7 +243,7 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 	})
 
 	for _, i := range candidates {
-		one := repertoire[i]
+		one := repertoire[i].forComboStep(1)
 		if !s.moveLeavesAnEscapeLocked(m, one, target) {
 			continue
 		}
@@ -253,8 +259,16 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 // before the jump, the side of the sweep shown by the raised paw. It is what makes each of
 // these moves something a player leaves rather than something that follows them.
 func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Player, tick uint64) {
+	step := uint8(0)
+	if def.combo != nil {
+		step = 1
+	}
+	m.beginEncounterComboBlowLocked(s, def.forComboStep(step), target, tick, step)
+}
+
+func (m *mob) beginEncounterComboBlowLocked(s *Sim, def encounterMoveDef, target *Player, tick uint64, step uint8) {
 	e := m.encounter
-	aim := m.aimAt(target)
+	aim := m.aimForMove(def, target)
 	e.nextMoveID++
 	e.running = &runningMove{
 		def:        def,
@@ -262,6 +276,13 @@ func (m *mob) beginEncounterMoveLocked(s *Sim, def encounterMoveDef, target *Pla
 		instanceID: e.nextMoveID,
 		aim:        aim,
 		anchor:     m.hazardAnchor(def, aim, target),
+	}
+	if step > 0 {
+		e.running.comboStep, e.running.comboTotal = step, def.combo.total
+		e.running.ticks.recovery = e.running.ticks.comboFinal
+		if step < def.combo.total {
+			e.running.ticks.recovery = e.running.ticks.comboBetween
+		}
 	}
 	e.running.hazards = m.hazardsForPulse(def, e.running.aim, e.running.anchor, 0)
 	e.lastUsed[def.kind] = tick
@@ -462,6 +483,9 @@ func (m *mob) advanceRunningMoveLocked(s *Sim, players []*Player, tick uint64) {
 			}
 			m.enterMovePhaseLocked(vnet.MovePhaseRecovery, recovery, tick)
 		case vnet.MovePhaseRecovery:
+			if m.continueComboLocked(s, players, tick) {
+				return
+			}
 			m.finishEncounterMoveLocked(vnet.MoveEndCompleted)
 			m.action = vnet.MobActionIdle
 			m.vel[0], m.vel[2] = 0, 0
@@ -776,7 +800,7 @@ func anyLivePlayerInRange(m *mob, players []*Player) bool {
 //
 // The caller holds Sim.mu.
 func (s *Sim) moveLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Player) bool {
-	aim := m.aimAt(target)
+	aim := m.aimForMove(def, target)
 	anchor := m.hazardAnchor(def, aim, target)
 
 	// **Every pulse, not merely the first.** A ritual is a schedule, and a schedule whose
@@ -827,6 +851,7 @@ func (s *Sim) pulseLeavesAnEscapeLocked(m *mob, def encounterMoveDef, target *Pl
 			continue
 		}
 		if m.encounter != nil && m.encounter.running != nil &&
+			m.encounter.running.phase != vnet.MovePhaseRecovery &&
 			anyHazardReaches(m.encounter.running.hazards, box) {
 			continue
 		}
