@@ -612,6 +612,13 @@ func openPlayers(opts options, log *slog.Logger) (*persist.Store, error) {
 		return nil, nil
 	}
 
+	rewards, err := persist.OpenRewardStore(opts.worldDir)
+	if err != nil {
+		return nil, fmt.Errorf("opening the boss reward journal: %w", err)
+	}
+	if err := rewards.CheckInactive(); err != nil {
+		return nil, err
+	}
 	store, err := persist.OpenStore(opts.worldDir)
 	if err != nil {
 		return nil, fmt.Errorf("opening the player store: %w", err)

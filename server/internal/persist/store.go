@@ -128,7 +128,9 @@ import (
 // than this package deciding what a mount means. There is no migration: a v9 record
 // cannot say which mounts the character learned, and inventing an empty set would erase
 // permanent progression while presenting it as a successful load.
-const StoreVersion uint32 = 10
+// 11 adds the monotonic boss-reward receipt epoch. Versions 10 and eligible 7
+// migrate losslessly with epoch zero: neither format could contain a boss receipt.
+const StoreVersion uint32 = 11
 
 const (
 	previousStoreVersion   uint32 = 7
@@ -146,7 +148,7 @@ const (
 //	    skin:u32 shirt:u32 trousers:u32 shoes:u32 hair:u32 hair_model:u8
 //	    pos:3×f64 yaw:f64 health:u16 hunger:u16 experience:u32
 //	    slots:InventorySlots × (item:u16 count:u16 durability:u16 max_durability:u16)
-//	    silver:u32 learned_mounts:u8
+//	    silver:u32 learned_mounts:u8 boss_reward_epoch:u64
 //	    name_len:u16 name[name_len] crc32:u32
 //
 // Everything fixed-width first and the one variable-length field last, so the only
@@ -197,19 +199,20 @@ const (
 	// above names them.
 	appearanceSize = 5*4 + 1
 
-	offLastSeen      = world.HeaderSize
-	offCharacter     = offLastSeen + 8
-	offOwner         = offCharacter + 8
-	offAppearance    = offOwner + identity.IDSize
-	offPos           = offAppearance + appearanceSize
-	offYaw           = offPos + 3*8
-	offHealth        = offYaw + 8
-	offHunger        = offHealth + 2
-	offExperience    = offHunger + 2
-	offSlots         = offExperience + 4
-	offSilver        = offSlots + slotsSize
-	offLearnedMounts = offSilver + 4
-	offNameLen       = offLearnedMounts + 1
+	offLastSeen        = world.HeaderSize
+	offCharacter       = offLastSeen + 8
+	offOwner           = offCharacter + 8
+	offAppearance      = offOwner + identity.IDSize
+	offPos             = offAppearance + appearanceSize
+	offYaw             = offPos + 3*8
+	offHealth          = offYaw + 8
+	offHunger          = offHealth + 2
+	offExperience      = offHunger + 2
+	offSlots           = offExperience + 4
+	offSilver          = offSlots + slotsSize
+	offLearnedMounts   = offSilver + 4
+	offBossRewardEpoch = offLearnedMounts + 1
+	offNameLen         = offBossRewardEpoch + 8
 
 	recordHeaderSize      = offNameLen + 2
 	maxRecordSize         = recordHeaderSize + MaxNameBytes + world.ChecksumSize
@@ -290,6 +293,9 @@ type Record struct {
 	// it verbatim because deciding which bits name real mounts is a gameplay rule.
 	LearnedMounts uint8
 
+	// BossRewardEpoch advances only with an atomically persisted reward postimage.
+	BossRewardEpoch uint64
+
 	// Slots is the whole pack, in the shape the wire announces, so a stored pack and a
 	// sent InventoryState are the same value rather than two that have to agree.
 	Slots [protocol.InventorySlots]protocol.InventoryStack
@@ -312,13 +318,10 @@ func (r Record) Unplayed() bool { return r.Health == 0 }
 
 // Store is one world's players directory and the index over it.
 //
-// The file half needs no lock of its own: every path is derived from one character id,
-// and a character has at most one live session by construction — one account holds one
-// session (see session.Identities) and one session plays one character — so two
-// goroutines never write the same file. The index half is guarded by [Store.mu].
-// [Store.Load] never takes it; [Store.Save] takes it only to look up which character it
-// is writing; [Store.Create] is the one method that holds it across a write, and
-// characters.go says why.
+// recordMu orders saves, quarantine and reward reservations. The separate index
+// mutex protects character creation and lookup; no caller holds it while waiting
+// for recordMu. Create writes a new, unpublished identity under the index lock.
+// Load relies on atomic replacement and does not acquire either writer lock.
 //
 // **A nil *Store keeps nothing at all** and every method is a no-op on one rather than a
 // branch at each call site, the same shape world.Cache uses for a nil world.Store. It is
@@ -338,6 +341,13 @@ type Store struct {
 	// unreadable is every file the startup scan could not index and set aside instead,
 	// by the path it went to. Reported for the same reason.
 	unreadable []string
+
+	// recordMu serializes writes and reservations, separately from the name index.
+	recordMu        sync.Mutex
+	rewardFences    map[CharacterID]*RewardReservation
+	rewardFloors    map[CharacterID]uint64
+	recordWriter    func(string, []byte) error
+	migrationWriter func(string, []byte) error
 
 	mu      sync.Mutex
 	byID    map[CharacterID]Character
@@ -378,6 +388,9 @@ func OpenStore(worldDir string) (*Store, error) {
 		return nil, errors.New("persist: the world directory must be named")
 	}
 
+	if err := refuseInterruptedPlayerMigration(worldDir); err != nil {
+		return nil, err
+	}
 	s := NewMemoryStore()
 	s.dir = filepath.Join(worldDir, playersDirName)
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -490,18 +503,31 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 				world.ErrCorruptStore, s.dir, version, StoreVersion)
 		default:
 			older = true
-			if version == previousStoreVersion {
+			if version == previousStoreVersion || version == 10 {
 				info, infoErr := entry.Info()
-				if infoErr != nil || info.Size() > int64(previousMaxRecordSize) {
+				if infoErr != nil || info.Size() > int64(maxRecordSize) {
+					if version == 10 {
+						return false, fmt.Errorf("%w: unreadable v10 migration source", world.ErrCorruptStore)
+					}
 					continue
 				}
 				path := filepath.Join(s.dir, entry.Name())
 				data, readErr := os.ReadFile(path)
 				if readErr != nil {
+					if version == 10 {
+						return false, readErr
+					}
 					continue
 				}
-				record, decodeErr := decodeV7Record(data)
-				if decodeErr == nil && v7RecordHasNoSilverStack(record) {
+				slots := previousInventorySlots
+				if version == 10 {
+					slots = int(protocol.InventorySlots)
+				}
+				record, decodeErr := decodeRecordLayout(data, version, slots)
+				if version == 10 && decodeErr != nil {
+					return false, decodeErr
+				}
+				if decodeErr == nil && (version == 10 || v7RecordHasNoSilverStack(record)) {
 					migrations = append(migrations, migration{name: entry.Name(), record: record})
 				}
 			}
@@ -547,6 +573,18 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 		}
 	}
 
+	// Keep both source and staging after any uncertain migration attempt. Presence
+	// of the durable marker prevents startup from making an empty players directory.
+	prepared = true
+	marker := filepath.Join(filepath.Dir(s.dir), playerMigrationMarker)
+	markerBody := []byte(fmt.Sprintf("player migration v%d at %d; preserve source and staging for operator recovery\n", StoreVersion, timestamp))
+	markerWrite := s.migrationWriter
+	if markerWrite == nil {
+		markerWrite = world.WriteAtomic
+	}
+	if err := markerWrite(marker, markerBody); err != nil {
+		return false, err
+	}
 	if err := os.Rename(s.dir, aside); err != nil {
 		return false, fmt.Errorf("persist: setting %s aside: %w", s.dir, err)
 	}
@@ -556,7 +594,16 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 		}
 		return false, fmt.Errorf("persist: installing migrated records: %w", err)
 	}
-	prepared = true
+
+	// Rewriting the marker fsyncs the same parent directory AFTER both renames.
+	// Only then may its removal permit startup. If an unflushed removal is lost on
+	// crash, the conservative result is another refusal, never missing characters.
+	if err := markerWrite(marker, markerBody); err != nil {
+		return false, err
+	}
+	if err := os.Remove(marker); err != nil {
+		return false, err
+	}
 	s.setAside = aside
 	return true, nil
 }
@@ -628,6 +675,9 @@ func (s *Store) index() error {
 				// through it. Refusing to start would be refusing over a condition that
 				// has already resolved itself.
 				continue
+			}
+			if rec, found, readErr := s.read(path); readErr == nil && found && rec.BossRewardEpoch != 0 {
+				return fmt.Errorf("%w: refusing to discard a character receipt during indexing", ErrRewardEpoch)
 			}
 			if aErr := s.setAsideUnreadable(path); aErr != nil {
 				return aErr
@@ -774,6 +824,11 @@ func (s *Store) Save(id CharacterID, rec Record) error {
 		return nil
 	}
 
+	s.recordMu.Lock()
+	defer s.recordMu.Unlock()
+	if err := s.checkRewardSaveLocked(id, rec); err != nil {
+		return err
+	}
 	character, known := s.Character(id)
 	if !known {
 		return fmt.Errorf("%w: %s", ErrUnknownCharacter, id)
@@ -792,7 +847,11 @@ func (s *Store) writeRecord(character Character, rec Record) error {
 	rec.Owner = character.Owner
 	rec.Name = character.Name
 	rec.Appearance = character.Appearance
-	return world.WriteAtomic(s.recordPath(character.ID), encodeRecord(rec))
+	writer := s.recordWriter
+	if writer == nil {
+		writer = world.WriteAtomic
+	}
+	return writer(s.recordPath(character.ID), encodeRecord(rec))
 
 }
 
@@ -805,7 +864,10 @@ func (s *Store) writeRecord(character Character, rec Record) error {
 // next save to replace — turns "one player lost an evening" into "nobody can ever find
 // out why".
 //
-// **The character survives; only its life is gone.** The index is untouched, so the
+// **A reward receipt must survive too.** A known or readable nonzero reward epoch
+// refuses quarantine; starting that character as epoch zero would erase the receipt.
+//
+// **For characters without receipts, the character survives; only its life is gone.** The index is untouched, so the
 // name stays that character's and the account still owns it — a player comes back to
 // the character they had, standing where a character that has never played stands. The
 // alternative, dropping it from the index, would free a name that a record on disk is
@@ -818,6 +880,20 @@ func (s *Store) Quarantine(id CharacterID) (string, error) {
 	if s == nil || s.dir == "" {
 		return "", nil
 	}
+	s.recordMu.Lock()
+	defer s.recordMu.Unlock()
+	if s.rewardFences[id] != nil {
+		return "", ErrRewardPending
+	}
+	if s.rewardFloors[id] != 0 {
+		return "", ErrRewardEpoch
+	}
+	if rec, found, err := s.Load(id); err == nil && found && rec.BossRewardEpoch != 0 {
+		return "", ErrRewardEpoch
+	}
+	// A malformed record without a known floor retains the existing quarantine
+	// policy. Before gameplay activation, journal recovery must identify unresolved
+	// characters before indexing and refuse/recover these cases instead of resetting.
 	return setAside(s.recordPath(id), corruptFileSuffix)
 }
 
@@ -848,8 +924,11 @@ func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	name := rec.Name
 	silverOffset := offSlots + inventorySlots*slotSize
 	nameOffset := silverOffset
-	if version == StoreVersion {
+	if version >= 10 {
 		nameOffset += 5
+	}
+	if version >= 11 {
+		nameOffset += 8
 	}
 	headerSize := nameOffset + 2
 
@@ -879,11 +958,14 @@ func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 		binary.LittleEndian.PutUint16(buf[at+4:at+6], stack.Durability)
 		binary.LittleEndian.PutUint16(buf[at+6:at+8], stack.MaxDurability)
 	}
-	if version == StoreVersion {
+	if version >= 10 {
 		binary.LittleEndian.PutUint32(buf[silverOffset:silverOffset+4], rec.Silver)
 		buf[silverOffset+4] = rec.LearnedMounts
 	}
 
+	if version >= 11 {
+		binary.LittleEndian.PutUint64(buf[silverOffset+5:silverOffset+13], rec.BossRewardEpoch)
+	}
 	binary.LittleEndian.PutUint16(buf[nameOffset:nameOffset+2], uint16(len(name)))
 	copy(buf[headerSize:], name)
 
@@ -902,10 +984,6 @@ func decodeRecord(data []byte) (Record, error) {
 	return decodeRecordLayout(data, StoreVersion, int(protocol.InventorySlots))
 }
 
-func decodeV7Record(data []byte) (Record, error) {
-	return decodeRecordLayout(data, previousStoreVersion, previousInventorySlots)
-}
-
 func v7RecordHasNoSilverStack(rec Record) bool {
 	for _, stack := range rec.Slots[:previousInventorySlots] {
 		if stack.ItemID == previousSilverItemID {
@@ -918,8 +996,11 @@ func v7RecordHasNoSilverStack(rec Record) bool {
 func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
 	silverOffset := offSlots + inventorySlots*slotSize
 	nameOffset := silverOffset
-	if version == StoreVersion {
+	if version >= 10 {
 		nameOffset += 5
+	}
+	if version >= 11 {
+		nameOffset += 8
 	}
 	headerSize := nameOffset + 2
 	if len(data) < headerSize+world.ChecksumSize {
@@ -937,7 +1018,7 @@ func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record
 	// it indexes anything. A truncated record fails here, which is the case this check
 	// exists for: a shorter name is a perfectly plausible one.
 	nameLen := uint64(binary.LittleEndian.Uint16(data[nameOffset : nameOffset+2]))
-	if want := uint64(headerSize) + nameLen + world.ChecksumSize; want != uint64(len(data)) {
+	if want := uint64(headerSize) + nameLen + world.ChecksumSize; nameLen > MaxNameBytes || want != uint64(len(data)) {
 		return Record{}, fmt.Errorf("%w: the record claims a %d-byte name, which needs %d bytes, but the file is %d",
 			world.ErrCorruptStore, nameLen, want, len(data))
 	}
@@ -967,9 +1048,12 @@ func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record
 			MaxDurability: binary.LittleEndian.Uint16(data[at+6 : at+8]),
 		}
 	}
-	if version == StoreVersion {
+	if version >= 10 {
 		rec.Silver = binary.LittleEndian.Uint32(data[silverOffset : silverOffset+4])
 		rec.LearnedMounts = data[silverOffset+4]
+	}
+	if version >= 11 {
+		rec.BossRewardEpoch = binary.LittleEndian.Uint64(data[silverOffset+5 : silverOffset+13])
 	}
 	return rec, nil
 }

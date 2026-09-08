@@ -478,14 +478,14 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V10 keeps the v9 purse and appends the learned-mount byte before the variable name. Pin
+// V11 keeps the purse and learned-mount byte, then appends the reward epoch. Pin
 // every relationship and the bytes themselves: changing only the struct field would
 // otherwise round trip through an equally wrong encoder and decoder.
-func TestV10StoresLearnedMountsAfterSilver(t *testing.T) {
+func TestV11StoresRewardEpochAfterLearnedMounts(t *testing.T) {
 	t.Parallel()
 
-	if StoreVersion != 10 {
-		t.Fatalf("StoreVersion = %d, want 10", StoreVersion)
+	if StoreVersion != 11 {
+		t.Fatalf("StoreVersion = %d, want 11", StoreVersion)
 	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
@@ -505,8 +505,8 @@ func TestV10StoresLearnedMountsAfterSilver(t *testing.T) {
 	if offLearnedMounts != offSilver+4 {
 		t.Fatalf("offLearnedMounts = %d, want offSilver+4 = %d", offLearnedMounts, offSilver+4)
 	}
-	if offNameLen != offLearnedMounts+1 {
-		t.Fatalf("offNameLen = %d, want offLearnedMounts+1 = %d", offNameLen, offLearnedMounts+1)
+	if offNameLen != offLearnedMounts+9 {
+		t.Fatalf("offNameLen = %d, want offLearnedMounts+9 = %d", offNameLen, offLearnedMounts+9)
 	}
 
 	rec := Record{Health: 0x1234, Hunger: 0x5678, Experience: 0x9abcdef0, Silver: 0x12345678, LearnedMounts: 0b101}

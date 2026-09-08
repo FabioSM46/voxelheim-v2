@@ -760,7 +760,8 @@ type Player struct {
 	// learnedMounts is the character's permanent mount set. Unlike cast and mounted
 	// state it outlives this session, so Join restores it and Record writes it back.
 	// Guarded by sim.mu with the rest of the authoritative life.
-	learnedMounts LearnedMounts
+	learnedMounts   LearnedMounts
+	bossRewardEpoch uint64
 	// mounted is session-only authoritative state. The zero MountKind is unmounted,
 	// Join never restores it, and every snapshot projects it only while this body is
 	// visible to its recipient.
@@ -1037,7 +1038,9 @@ func (s *Sim) joinCharacter(
 
 	joinSpawn := [3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])}
 	pos, yaw, health, hunger, experience, silver, learnedMounts, slots := joinSpawn, 0.0, uint16(PlayerMaxHealth), uint16(PlayerMaxHunger), uint32(0), uint32(0), LearnedMounts(0), starterSlots()
+	bossRewardEpoch := uint64(0)
 	if resume != nil {
+		bossRewardEpoch = resume.BossRewardEpoch
 		pos, yaw, health, hunger, experience, silver, learnedMounts, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, resume.Silver, resume.LearnedMounts, restoredSlots(resume.Slots)
 	}
 
@@ -1069,12 +1072,13 @@ func (s *Sim) joinCharacter(
 		// The intent carries the yaw too, because step reads p.current.yaw and writes it
 		// back over p.yaw on the first tick. Without this a restored player would snap to
 		// facing north before their client's first input arrived.
-		current:       intent{yaw: yaw},
-		health:        health,
-		hunger:        hunger,
-		experience:    experience,
-		learnedMounts: learnedMounts,
-		lifeState:     vnet.LifeStateAlive,
+		current:         intent{yaw: yaw},
+		health:          health,
+		hunger:          hunger,
+		experience:      experience,
+		learnedMounts:   learnedMounts,
+		bossRewardEpoch: bossRewardEpoch,
+		lifeState:       vnet.LifeStateAlive,
 		// Not on the ground until a tick says so — for a restored player exactly as for a
 		// new one. The spawn sits a couple of blocks above the surface
 		// (world.SpawnClearance) and a stored position was written wherever the player
