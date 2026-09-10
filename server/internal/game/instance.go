@@ -87,13 +87,15 @@ type instanceSession struct {
 	// generation is this run's boss reward journal identity, or zero until the reward
 	// producer has allocated one. Runtime ids are reused across restarts; generations never are.
 	generation uint64
-	members    map[InstanceCharacter]struct{}
-	sim        *Sim
-	chunks     *world.Cache
-	ctx        context.Context
-	cancel     context.CancelFunc
-	emptyTicks uint32
-	tick       uint64
+	// pendingRewards are frozen boss defeats the reward journal has not yet made durable.
+	pendingRewards []BossRewardDefeat
+	members        map[InstanceCharacter]struct{}
+	sim            *Sim
+	chunks         *world.Cache
+	ctx            context.Context
+	cancel         context.CancelFunc
+	emptyTicks     uint32
+	tick           uint64
 }
 
 type instanceVisit struct {

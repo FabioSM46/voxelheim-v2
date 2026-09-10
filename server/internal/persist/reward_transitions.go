@@ -56,16 +56,36 @@ func (s *RewardStore) matchesPlayers(players *Store) bool {
 // AllocateRun uses a generation captured by the caller, not an implicit mint on
 // every retry. Repeating the exact allocation is idempotent after uncertain success.
 // Baseline defeated bosses from older saved runs acquire no new reward entitlement.
-func (s *RewardStore) AllocateRun(players *Store, generation uint64, record SessionRecord, content uint32) error {
+//
+// defeats, when given, are the run's defeats with their frozen entitlements, one per
+// record.DefeatedBosses entry in the same order, so identity, progress and what each
+// defeat owes become durable in one write. Every entitlement in them must be unconsumed.
+func (s *RewardStore) AllocateRun(players *Store, generation uint64, record SessionRecord, content uint32, defeats ...RewardDefeat) error {
 	if !s.matchesPlayers(players) {
 		return ErrRewardJournalConflict
+	}
+	run := RewardRun{Generation: generation, ContentVersion: content, Session: record}
+	if len(defeats) == 0 {
+		for _, kind := range record.DefeatedBosses {
+			run.Defeats = append(run.Defeats, RewardDefeat{Kind: kind})
+		}
+	} else {
+		if len(defeats) != len(record.DefeatedBosses) {
+			return ErrRewardJournalConflict
+		}
+		for i, defeat := range defeats {
+			if defeat.Kind != record.DefeatedBosses[i] || !unconsumedRewardDefeat(defeat) {
+				return ErrRewardJournalConflict
+			}
+		}
+		run.Defeats = defeats
 	}
 	players.EnableStrictRewardReceipts()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, run := range s.journal.Runs {
-		if run.Generation == generation {
-			if run.ContentVersion == content && reflect.DeepEqual(run.Session, record) {
+	for _, existing := range s.journal.Runs {
+		if existing.Generation == generation {
+			if sameRewardRun(existing, run) {
 				return nil
 			}
 			return ErrRewardJournalConflict
@@ -77,10 +97,6 @@ func (s *RewardStore) AllocateRun(players *Store, generation uint64, record Sess
 	next, err := cloneRewardJournal(s.journal)
 	if err != nil {
 		return err
-	}
-	run := RewardRun{Generation: generation, ContentVersion: content, Session: record}
-	for _, kind := range record.DefeatedBosses {
-		run.Defeats = append(run.Defeats, RewardDefeat{Kind: kind})
 	}
 	next.Runs = append(next.Runs, run)
 	next.NextGeneration++
@@ -119,15 +135,8 @@ func (s *RewardStore) AppendDefeat(generation uint64, defeat RewardDefeat, bound
 		}
 		changed := false
 		if !known {
-			for _, p := range defeat.Personal {
-				if p.Taken != 0 || p.SilverTaken {
-					return ErrRewardJournalConflict
-				}
-			}
-			for _, xp := range defeat.Experience {
-				if xp.Taken {
-					return ErrRewardJournalConflict
-				}
+			if !unconsumedRewardDefeat(defeat) {
+				return ErrRewardJournalConflict
 			}
 			run.Defeats = append(run.Defeats, defeat)
 			run.Session.DefeatedBosses = append(run.Session.DefeatedBosses, defeat.Kind)
@@ -146,6 +155,28 @@ func (s *RewardStore) AppendDefeat(generation uint64, defeat RewardDefeat, bound
 		return s.commitLocked(s.journal.Revision, next, nil)
 	}
 	return ErrRewardJournalConflict
+}
+
+// unconsumedRewardDefeat reports whether no entitlement in a new defeat is already taken.
+func unconsumedRewardDefeat(defeat RewardDefeat) bool {
+	for _, p := range defeat.Personal {
+		if p.Taken != 0 || p.SilverTaken {
+			return false
+		}
+	}
+	for _, xp := range defeat.Experience {
+		if xp.Taken {
+			return false
+		}
+	}
+	return true
+}
+
+// sameRewardRun compares a stored run with a candidate as the journal encodes them, so a
+// nil list and an empty one are the same run.
+func sameRewardRun(stored, candidate RewardRun) bool {
+	normalized, err := cloneRewardJournal(RewardJournal{NextGeneration: candidate.Generation + 1, Runs: []RewardRun{candidate}})
+	return err == nil && len(normalized.Runs) == 1 && reflect.DeepEqual(stored, normalized.Runs[0])
 }
 
 // ValidateClaim is the no-I/O check BEFORE sealing a Store reservation. A second

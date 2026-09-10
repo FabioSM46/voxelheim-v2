@@ -277,6 +277,12 @@ type Sim struct {
 	// bounded by the number of boss rows in mobRegistry.
 	defeatedBosses []vnet.MobKind
 
+	// durableBossRewards holds a dungeon boss's personal loot for the boss reward journal,
+	// and bossRewards is every frozen defeat not yet handed to the manager. See
+	// boss_reward_journal.go.
+	durableBossRewards bool
+	bossRewards        []BossRewardDefeat
+
 	// nextEncounterID is the counter behind every boss encounter's identity on the wire.
 	//
 	// **Separate from the entity-id source, deliberately.** An encounter is the fight and
@@ -420,9 +426,10 @@ type Sim struct {
 }
 
 type simOptions struct {
-	group       *WorldGroup
-	devCommands bool
-	voiceRange  float64
+	group              *WorldGroup
+	devCommands        bool
+	voiceRange         float64
+	durableBossRewards bool
 }
 
 // SimOption is one startup-only simulation choice.
@@ -505,6 +512,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		group:              configured.group,
 		dt:                 1 / float64(tickRate),
 		devCommands:        configured.devCommands,
+		durableBossRewards: configured.durableBossRewards,
 		viewDistance:       int32(viewDistance),
 		idleLimit:          idleLimitTicks(tickRate),
 		terrain:            terrain,

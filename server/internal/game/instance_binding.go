@@ -77,6 +77,7 @@ func (s *Sim) takeDefeatedBosses() []vnet.MobKind {
 // caller holds InstanceManager.mu and has just stepped this session's simulation.
 func (m *InstanceManager) collectBossDefeatsLocked(s *instanceSession) {
 	defeated := s.sim.takeDefeatedBosses()
+	s.pendingRewards = append(s.pendingRewards, s.sim.takeBossRewards()...)
 	if len(defeated) == 0 {
 		return
 	}

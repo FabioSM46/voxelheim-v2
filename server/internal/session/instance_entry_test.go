@@ -327,14 +327,22 @@ func TestAcceptingAnOfferOverTheWireCrossesAndBinds(t *testing.T) {
 	if id, bound := cfg.Instances.Bound(saved.Ruin, friend); !bound || id != 7001 {
 		t.Fatalf("accepting bound %d, %v", id, bound)
 	}
-	// The character is now owed this run, so their list says so.
-	waitUntil(t, "the saved-run list to name the new binding", func() bool {
-		lists := other.frames.savedRunLists()
-		return len(lists) > 1 && len(lists[len(lists)-1]) == 1
-	})
-	lists := other.frames.savedRunLists()
-	if got := lists[len(lists)-1][0]; got.Arch != request.Arch || got.BossesDefeated != 1 {
-		t.Fatalf("the new binding reads %+v", got)
+	// The character is now owed this run, and the manager's list says so authoritatively.
+	//
+	// **The wire restatement is checked for consistency, never waited for.** A changed list
+	// is offered to a non-blocking queue and dropped when that queue is full, then restated
+	// only by the next change (game/instance_bindings.go). Straight after a crossing the new
+	// world's chunk stream can fill the queue, so waiting for this frame was a race rather
+	// than an assertion: it timed out on a loaded CI runner. The first statement, which is
+	// not best-effort, keeps its wire coverage in the admission tests above.
+	owed := cfg.Instances.Bindings(friend)
+	if len(owed) != 1 || owed[0].Ruin != saved.Ruin || owed[0].BossesDefeated != 1 {
+		t.Fatalf("the manager lists %+v, want the one new binding", owed)
+	}
+	if lists := other.frames.savedRunLists(); len(lists) > 1 {
+		if got := lists[len(lists)-1]; len(got) != 1 || got[0].Arch != request.Arch || got[0].BossesDefeated != 1 {
+			t.Fatalf("the restated saved-run list reads %+v", got)
+		}
 	}
 }
 
