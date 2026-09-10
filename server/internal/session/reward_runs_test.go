@@ -417,6 +417,8 @@ func (f *fakeRuns) ReleaseBossRewards(run game.SavedSession, kind vnet.MobKind) 
 	return false
 }
 
+func (f *fakeRuns) PlayerInside(uint64, game.InstanceCharacter) *game.Player { return nil }
+
 func (f *fakeRuns) update(change func(*game.SavedSession)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -552,5 +554,63 @@ func TestSyncRewardRunsKeepsAnOccupiedRunJournaledPastItsReset(t *testing.T) {
 	}
 	if got := w.journalNow(t); len(got.Runs) != 1 || got.Runs[0].Generation != 2 {
 		t.Fatalf("the next run = %+v, want generation 2", got.Runs)
+	}
+}
+
+// A defeat's frozen experience is journaled with it, for recipients who are neither the loot
+// roster nor the bindings, and the corpse is released only when the journal owes that too.
+func TestSyncRewardRunsJournalsFrozenExperienceWithItsDefeat(t *testing.T) {
+	t.Parallel()
+	store, journal := openRunStores(t)
+	w := newRunWorld(t, store, journal)
+	owner, helper := runCharacter(51), runCharacter(52)
+	run := savedRun(time.Now().Add(time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, owner)
+	run.PendingRewards = frozenLoot(vnet.MobKindVargrGuardian, owner, 30, rewardBones)
+	run.PendingRewards[0].Experience = []game.BossExperienceReward{{Owner: owner, Amount: 60}, {Owner: helper, Amount: 60}}
+	runs := &fakeRuns{saved: []game.SavedSession{run}}
+	w.ids.rewards.runs = runs
+
+	if err := w.ids.SyncRewardRuns(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got := w.journalNow(t).Runs[0]
+	xp := got.Defeats[0].Experience
+	want := sessionCharacters(owner, helper)
+	if len(xp) != 2 || xp[0].Owner != want[0] || xp[1].Owner != want[1] || xp[0].Amount != 60 || xp[1].Amount != 60 || xp[0].Taken || xp[1].Taken {
+		t.Fatalf("journaled experience = %+v, want 60 untaken for each recipient", xp)
+	}
+	if len(got.Defeats[0].Personal) != 1 || !slices.Equal(got.Session.Bound, want[:1]) {
+		t.Fatalf("the recipients changed the roster or the bindings: personal %+v, bound %+v", got.Defeats[0].Personal, got.Session.Bound)
+	}
+	if kinds := runs.releasedKinds(); !slices.Equal(kinds, []vnet.MobKind{vnet.MobKindVargrGuardian}) {
+		t.Fatalf("released = %v, want the guardian once", kinds)
+	}
+}
+
+// A defeat the journal owes different experience keeps its corpse held.
+func TestSyncRewardRunsNeverReleasesAHoldWhoseExperienceTheJournalOwesDifferently(t *testing.T) {
+	t.Parallel()
+	store, journal := openRunStores(t)
+	w := newRunWorld(t, store, journal)
+	owner := runCharacter(51)
+	run := savedRun(time.Now().Add(time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, owner)
+	run.PendingRewards = frozenLoot(vnet.MobKindVargrGuardian, owner, 30, rewardBones)
+	run.PendingRewards[0].Experience = []game.BossExperienceReward{{Owner: owner, Amount: 60}}
+	stored := journalDefeatOf(run, vnet.MobKindVargrGuardian)
+	stored.Experience[0].Amount = 59
+	record := persist.SessionRecord{ID: run.ID, Seed: run.Seed, Ruin: [2]int64{run.Ruin.CellX, run.Ruin.CellZ}, ExpiresUnix: run.ExpiresUnix,
+		DefeatedBosses: run.DefeatedBosses, Bound: sessionCharacters(owner)}
+	if err := journal.AllocateRun(store, 1, record, world.WorldgenVersion, stored); err != nil {
+		t.Fatal(err)
+	}
+	run.Generation = 1
+	runs := &fakeRuns{saved: []game.SavedSession{run}}
+	w.ids.rewards.runs = runs
+
+	if err := w.ids.SyncRewardRuns(time.Now()); !errors.Is(err, persist.ErrRewardJournalConflict) {
+		t.Fatalf("a mismatched experience entitlement = %v, want %v", err, persist.ErrRewardJournalConflict)
+	}
+	if kinds := runs.releasedKinds(); len(kinds) != 0 {
+		t.Fatalf("a hold whose experience the journal owes differently was released: %v", kinds)
 	}
 }

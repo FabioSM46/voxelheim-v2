@@ -1268,6 +1268,46 @@ dungeon boss's personal loot is delivered only through the journal.
     drives that routing through `Serve`. Only the corpse is replaced, through the
     `PutBossLootBehind` test seam.
 
+### Boss experience is delivered only through claims
+
+A durable dungeon boss's experience follows its loot into the journal (#1036).
+
+- **Frozen or awarded, never both.** `Sim.creditMobDamageLocked` looks up the defeat this corpse's
+  death froze (`frozenBossDefeatLocked`). When there is one, every share goes into
+  `BossRewardDefeat.Experience` and nothing is awarded live. When there is none, every share is
+  awarded live as before. The split is the same either way: the online owner or its nearby party,
+  or the offline tap. The recipients are a group of their own, distinct from the loot roster and
+  the bindings.
+- **An offline first hitter waits for its owner in both modes.** Without durable rewards the award
+  is held in the dungeon's own simulation until the owner joins it again, since `voxelheimd` writes
+  only the open world's offline awards. With them the frozen share is claimed when the owner is
+  inside the run again. The same person receives it under the same condition.
+- **Journaled with the defeat.** The sync writes the shares with the defeat's loot and releases the
+  corpse only when the journal owes both exactly (`sameEntitlements`).
+- **Claimed on a dungeon visit.** `Identities.DeliverBossExperience`, run by `voxelheimd` after each
+  sync pass, claims every untaken share whose owner is playing and inside the run
+  (`InstanceManager.PlayerInside`). `ReserveBossReward` additionally requires that character's
+  portal entry. The pass reads only the journal, so a share still owed after a restart is offered
+  again the same way. One claim per character at a time, through the shared journal write gate.
+
+### Owed boss loot is offered again after a restart
+
+A restart rebuilds no simulation state, so a boss corpse and its held loot are gone with the
+process. The journal still owes that loot, and startup offers it again (#1036). The owner decided
+on #1036 that partly taken loot comes back too.
+
+- **Exactly what each owner has not taken.** `persist.RewardJournal.OwedLoot` keeps, per owner, the
+  entries outside `Taken` at their original indices and the silver unless `SilverTaken`. It leaves
+  out an owner who took everything or whom a prepared intent for that defeat names. The journal's
+  per-owner taken record is the only source, so nothing is offered twice. Experience is not
+  considered: no corpse holds it, and `DeliverBossExperience` claims it from the journal.
+- **Rebuilt as the claimed corpse it was.** `voxelheimd` passes those defeats to
+  `InstanceManager.RestoreSessions` as `SavedSession.HeldRewards`. The restore validates them with
+  the rest of the file, including that every taken index lies inside the roll, and refuses the whole
+  restore rather than rebuild a roll it cannot hold exactly. It then places each defeat as a claimed
+  corpse at its boss's home anchor. Each owner's remaining entries keep their roll indices, so a
+  claim names what the journal records. The corpse does not expire; the run's reset removes it.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

@@ -868,8 +868,16 @@ func restoreSessions(instances *game.InstanceManager, store *persist.SessionStor
 		if err != nil {
 			return fmt.Errorf("restoring the dungeon runs over the boss reward journal: %w", err)
 		}
+		journal, err := rewards.Snapshot()
+		if err != nil {
+			return fmt.Errorf("reading the boss reward journal to restore its runs: %w", err)
+		}
 		for _, run := range overlaid {
-			saved = append(saved, savedSessionOf(run.Session, run.Generation))
+			restored := savedSessionOf(run.Session, run.Generation)
+			// Loot the journal still owes is offered again; see persist.RewardJournal.OwedLoot
+			// for what qualifies.
+			restored.HeldRewards = heldRewardsOf(journal.OwedLoot(run.Generation))
+			saved = append(saved, restored)
 		}
 	}
 	if len(saved) == 0 {
@@ -907,6 +915,22 @@ func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSess
 		Bound:          bound,
 		Generation:     generation,
 	}
+}
+
+// heldRewardsOf is the journal's owed loot as a restore rebuilds it.
+func heldRewardsOf(defeats []persist.RewardDefeat) []game.BossRewardDefeat {
+	var held []game.BossRewardDefeat
+	for _, d := range defeats {
+		defeat := game.BossRewardDefeat{Kind: d.Kind}
+		for _, p := range d.Personal {
+			defeat.Personal = append(defeat.Personal, game.BossPersonalReward{
+				Owner:   game.InstanceCharacter{PlayerID: p.Owner.PlayerID, CharacterID: p.Owner.CharacterID},
+				Entries: p.Entries, Silver: p.Silver, Taken: p.Taken, SilverTaken: p.SilverTaken,
+			})
+		}
+		held = append(held, defeat)
+	}
+	return held
 }
 
 func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {
@@ -1451,6 +1475,7 @@ func (s *server) syncRewardRunsLoop(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			s.syncRewardRuns()
+			s.deliverBossExperience()
 		}
 	}
 }
@@ -1461,6 +1486,17 @@ func (s *server) syncRewardRuns() {
 	}
 	if err := s.identities.SyncRewardRuns(time.Now()); err != nil {
 		s.log.Error("the boss reward journal could not be brought up to date; it will be retried", "error", err)
+	}
+}
+
+// deliverBossExperience claims the boss experience the journal owes characters inside its run.
+// It runs only in the loop: at shutdown the coordinator is draining and would refuse a claim.
+func (s *server) deliverBossExperience() {
+	if s.identities == nil {
+		return
+	}
+	if err := s.identities.DeliverBossExperience(); err != nil {
+		s.log.Error("boss experience could not be offered; it will be retried", "error", err)
 	}
 }
 

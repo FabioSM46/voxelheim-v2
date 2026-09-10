@@ -11,7 +11,9 @@ import (
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -133,5 +135,57 @@ func TestStartupAcceptsHighWaterOnlyRewardsAndEphemeralWorld(t *testing.T) {
 	}
 	if s, r, err := openPlayers(options{}, discard()); err != nil || s != nil || r != nil {
 		t.Fatal("ephemeral startup changed")
+	}
+}
+
+// journalWithLoot writes a reward journal holding one live run whose guardian's loot, one item
+// and 30 silver for one owner, nobody has taken from yet.
+func journalWithLoot(t *testing.T, item uint16) string {
+	t.Helper()
+	dir := t.TempDir()
+	players, err := persist.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := persist.OpenRewardStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	character, err := players.Create(identity.IDOf(identity.Account{9}), "Looter", testAppearance())
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := persist.SessionCharacter{PlayerID: character.Owner, CharacterID: uint64(character.ID)}
+	record := persist.SessionRecord{ID: 7, Seed: 19, Ruin: [2]int64{2, 3}, ExpiresUnix: time.Now().Add(time.Hour).Unix(),
+		DefeatedBosses: []vnet.MobKind{vnet.MobKindVargrGuardian}, Bound: []persist.SessionCharacter{owner}}
+	defeat := persist.RewardDefeat{Kind: vnet.MobKindVargrGuardian, Personal: []persist.PersonalReward{{Owner: owner, Entries: []protocol.InventoryStack{{ItemID: item, Count: 1}}, Silver: 30}}}
+	if err := journal.AllocateRun(players, 1, record, world.WorldgenVersion, defeat); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Startup hands the restore the loot the journal still owes. The proof needs nothing
+// but the restore's own verdict: loot a pack could hold comes back with its run, and loot no
+// pack could hold refuses the whole startup restore, which it could only do if it was handed.
+func TestStartupRebuildsTheBossLootTheJournalStillOwes(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		item    uint16
+		refused bool
+	}{
+		{"loot a pack could hold", uint16(game.ItemBone), false},
+		{"loot no pack could hold", 65535, true},
+	} {
+		instances, err := restoreOver(t, journalWithLoot(t, c.item))
+		if c.refused {
+			if !errors.Is(err, game.ErrInvalidSession) || instances.Count() != 0 {
+				t.Errorf("%s: restore = %v with %d sessions, want %v and none", c.name, err, instances.Count(), game.ErrInvalidSession)
+			}
+			continue
+		}
+		if err != nil || len(instances.SavedSessions()) != 1 {
+			t.Errorf("%s: restore = %v with runs %+v, want the run back", c.name, err, instances.SavedSessions())
+		}
 	}
 }

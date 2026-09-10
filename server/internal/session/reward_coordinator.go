@@ -472,6 +472,7 @@ type rewardRunManager interface {
 	SavedSessions() []game.SavedSession
 	AssignRunGeneration(run game.SavedSession, generation uint64) bool
 	ReleaseBossRewards(run game.SavedSession, kind vnet.MobKind) bool
+	PlayerInside(run uint64, character game.InstanceCharacter) *game.Player
 }
 
 // journalWrite runs one journal write through the gate every writer shares. A write that

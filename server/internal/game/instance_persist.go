@@ -89,6 +89,11 @@ type SavedSession struct {
 	// made durable, in death order. They are not in the sessions file and are not restored:
 	// the journal is what outlives a restart.
 	PendingRewards []BossRewardDefeat
+	// HeldRewards are defeats whose loot the reward journal still owes untouched, handed to a
+	// restore so each is offered again as a claimed corpse at its boss's home anchor. A restore
+	// is their only reader: SavedSessions never reports them, and a live run's corpses are
+	// already in its simulation.
+	HeldRewards []BossRewardDefeat
 }
 
 // SavedSessions is every run this server would have to restore, in a stable order.
@@ -225,6 +230,9 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 			}
 			generations[rec.Generation] = struct{}{}
 		}
+		if err := validHeldRewards(rec); err != nil {
+			return 0, 0, err
+		}
 		// Counted against the same expiry test the loop applies, so this is the number of
 		// sessions that will actually be built rather than the number of records in the
 		// file. A file holding two thousand runs that all reset last week restores none,
@@ -257,6 +265,7 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 		s.expiresUnix = rec.ExpiresUnix
 		s.generation = rec.Generation
 		s.defeated = append([]vnet.MobKind(nil), rec.DefeatedBosses...)
+		s.sim.restoreHeldBossRewards(rec.Seed, rec.HeldRewards)
 		for _, character := range rec.Bound {
 			m.bindLocked(s, character)
 			// **And the visit, which is what makes "re-entering returns them to the same
