@@ -14,13 +14,12 @@ pub(super) enum Cue {
     DraugrAttack,
     VargrNotice,
     VargrAttack,
-    GuardianNotice,
-    GuardianAttack,
+    Guardian(super::guardian::sounds::Cue),
     KingNotice,
     KingAttack,
 }
 
-pub(super) const CUES: [Cue; 12] = [
+pub(super) const CUES: [Cue; 10] = [
     Cue::DryImpact,
     Cue::BeastImpact,
     Cue::ClothImpact,
@@ -29,8 +28,6 @@ pub(super) const CUES: [Cue; 12] = [
     Cue::DraugrAttack,
     Cue::VargrNotice,
     Cue::VargrAttack,
-    Cue::GuardianNotice,
-    Cue::GuardianAttack,
     Cue::KingNotice,
     Cue::KingAttack,
 ];
@@ -62,8 +59,8 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         // These species have no combat telegraph voice: civilians and mounts do not
         // belong to this hostile voice catalogue. Their physical impacts still play.
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
-        (MobKind::VargrGuardian, false) => Some(Cue::GuardianNotice),
-        (MobKind::VargrGuardian, true) => Some(Cue::GuardianAttack),
+        // The guardian is routed by its explicit encounter phases, never Windup.
+        (MobKind::VargrGuardian, _) => None,
         (MobKind::DraugrKing, false) => Some(Cue::KingNotice),
         (MobKind::DraugrKing, true) => Some(Cue::KingAttack),
     }
@@ -80,14 +77,16 @@ impl Cue {
             Self::DraugrAttack => 0.27,
             Self::VargrNotice => 0.40,
             Self::VargrAttack => 0.18,
-            Self::GuardianNotice => 0.65,
-            Self::GuardianAttack => 0.31,
+            Self::Guardian(cue) => cue.seconds(),
             Self::KingNotice => 0.78,
             Self::KingAttack => 0.38,
         }
     }
 
     pub fn describe(self) -> Sound {
+        if let Self::Guardian(cue) = self {
+            return cue.describe();
+        }
         // Sine/noise transients make impacts; rough tones are reserved for creature
         // voices. No player grunt is synthesized by the cloth-and-body contact cue.
         let (hz, tone, noise, cutoff, wave) = match self {
@@ -99,11 +98,9 @@ impl Cue {
             Self::DraugrAttack => (103.0, 0.18, 0.42, 1800.0, Wave::Triangle),
             Self::VargrNotice => (157.0, 0.32, 0.22, 650.0, Wave::Triangle),
             Self::VargrAttack => (281.0, 0.30, 0.37, 2200.0, Wave::Triangle),
-            // The guardian has a low chest growl and a shorter, rougher bark.
             // The king has a hollow sustained groan and a metallic-throated effort.
             // These describe voices, never cast or encounter state.
-            Self::GuardianNotice => (61.0, 0.34, 0.26, 520.0, Wave::Triangle),
-            Self::GuardianAttack => (127.0, 0.28, 0.43, 1450.0, Wave::Triangle),
+            Self::Guardian(_) => unreachable!("guardian recipes return above"),
             Self::KingNotice => (47.0, 0.29, 0.32, 730.0, Wave::Triangle),
             Self::KingAttack => (83.0, 0.25, 0.40, 2400.0, Wave::Triangle),
         };
@@ -168,7 +165,10 @@ mod tests {
                         .map(|(a, b)| (a - b).abs())
                         .sum::<f32>()
                         / length as f32;
-                    assert!(difference > 0.01, "two catalogue entries sound alike");
+                    assert!(
+                        difference > 0.01,
+                        "two catalogue waveforms collapsed to the same recipe"
+                    );
                 }
             }
         }
@@ -195,10 +195,7 @@ mod tests {
     /// Each boss has its own notice/attack pair; the existing impact stays put.
     #[test]
     fn the_bosses_have_distinct_hostile_voices_and_keep_their_impacts() {
-        for (boss, field) in [
-            (MobKind::VargrGuardian, MobKind::Vargr),
-            (MobKind::DraugrKing, MobKind::Draugr),
-        ] {
+        for (boss, field) in [(MobKind::DraugrKing, MobKind::Draugr)] {
             let notice = voice(boss, false).expect("hostile notice");
             let attack = voice(boss, true).expect("hostile attack");
             assert_ne!(notice, attack);
