@@ -91,6 +91,17 @@ struct SpellEffect {
     shape: Shape,
 }
 
+/// Test-only: the move instances whose spell shapes are drawn now.
+#[cfg(test)]
+pub(super) fn drawn(world: &mut World) -> std::collections::HashSet<MoveKey> {
+    world
+        .query::<(&SpellEffect, &InheritedVisibility)>()
+        .iter(world)
+        .filter(|(_, visible)| visible.get())
+        .map(|(effect, _)| effect.key)
+        .collect()
+}
+
 pub(super) fn register(app: &mut App) {
     app.add_systems(Startup, setup)
         .add_systems(Update, refresh.after(reconcile));

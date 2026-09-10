@@ -170,6 +170,15 @@ fn sample_window(tick: u32, announced: &EncounterMove) -> (Window, f32) {
     }
 }
 
+/// Test-only: every concurrent cosmetic effect group the spell and strike layers draw, one per
+/// move instance per layer. The telegraph cues are the encounter's readings, not effects.
+#[cfg(test)]
+pub(crate) fn effect_groups(world: &mut World) -> Vec<MoveKey> {
+    let mut groups: Vec<MoveKey> = spells::drawn(world).into_iter().collect();
+    groups.extend(strikes::drawn(world));
+    groups
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

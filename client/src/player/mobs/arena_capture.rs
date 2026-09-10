@@ -8,6 +8,9 @@
 //!
 //! Every frame also measures clipping on the CPU: each vertex of the boss's visible meshes
 //! against the chamber's solid voxels and the floor top, written beside the PNGs.
+//!
+//! A second opt-in test measures rendering cost in the same scene: frame times with the GPU
+//! work included, and what each boss draws against the design's authoring budgets.
 use std::path::Path;
 
 use super::*;
@@ -471,16 +474,14 @@ fn yaw_toward(direction: Vec3) -> f32 {
     (-direction.x).atan2(-direction.z)
 }
 
-#[test]
-#[ignore = "requires a render adapter and the server source; writes arena PNGs and a clipping CSV to the temporary directory"]
-fn capture_bosses_in_the_shipped_chamber() {
-    use MovePhase::{Channel, Recovery, Release, Telegraph};
+/// The production presentation over the meshed chamber, drawn offscreen at 1280 × 720: the
+/// app, its camera and the image that camera renders into.
+fn chamber_app(chamber: &Chamber) -> (App, Entity, Handle<Image>) {
     use bevy::camera::RenderTarget;
     use bevy::core_pipeline::tonemapping::Tonemapping;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
     use bevy::window::ExitCondition;
 
-    let chamber = Chamber::read();
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -596,7 +597,16 @@ fn capture_bosses_in_the_shipped_chamber() {
         (held, meshable),
         "the chamber never finished meshing: {stats:?}"
     );
+    (app, camera, target)
+}
 
+#[test]
+#[ignore = "requires a render adapter and the server source; writes arena PNGs and a clipping CSV to the temporary directory"]
+fn capture_bosses_in_the_shipped_chamber() {
+    use MovePhase::{Channel, Recovery, Release, Telegraph};
+
+    let chamber = Chamber::read();
+    let (mut app, camera, target) = chamber_app(&chamber);
     let mut review = Review {
         camera,
         target,
@@ -1156,6 +1166,358 @@ fn capture_bosses_in_the_shipped_chamber() {
     std::fs::write(
         std::env::temp_dir().join("arena-1037-clipping.csv"),
         review.rows.join("\n") + "\n",
+    )
+    .unwrap();
+    let render = app.get_sub_app(bevy::render::RenderApp).unwrap();
+    let cache = render
+        .world()
+        .resource::<bevy::render::render_resource::PipelineCache>();
+    for pipeline in cache.pipelines() {
+        if let bevy::render::render_resource::CachedPipelineState::Err(error) = &pipeline.state {
+            panic!("render pipeline failed: {error}");
+        }
+    }
+}
+
+/// Frames each scene settles for before any is timed, then how many are timed.
+const WARM_FRAMES: usize = 120;
+const TIMED_FRAMES: usize = 900;
+
+/// One frame at 60 Hz: the update, then a wait until the GPU has finished what it was sent,
+/// so the time includes the GPU's work and not only its submission.
+fn timed_frame(app: &mut App) -> Duration {
+    let started = Instant::now();
+    app.update();
+    app.get_sub_app(bevy::render::RenderApp)
+        .unwrap()
+        .world()
+        .resource::<bevy::render::renderer::RenderDevice>()
+        .poll(bevy::render::render_resource::PollType::wait_indefinitely())
+        .expect("the GPU finishes the frame");
+    started.elapsed()
+}
+
+/// What one boss draws at a moment, in the terms of the design's authoring budgets.
+#[derive(Default, Clone, Copy)]
+struct Drawn {
+    segments: usize,
+    triangles: usize,
+    materials: usize,
+    effect_groups: usize,
+}
+
+impl Drawn {
+    fn peak(self, other: Self) -> Self {
+        Self {
+            segments: self.segments.max(other.segments),
+            triangles: self.triangles.max(other.triangles),
+            materials: self.materials.max(other.materials),
+            effect_groups: self.effect_groups.max(other.effect_groups),
+        }
+    }
+}
+
+/// The boss's visible rig segments and their triangles; the material handles on those segments
+/// and on visible regalia; and its concurrent cosmetic effect groups: each move instance a spell
+/// or strike layer draws for it, plus the king's core glow and hand crystal while visible.
+fn drawn(app: &mut App, boss: Boss) -> Drawn {
+    use super::king::regalia::{CoreGlow, HandCrystal};
+    let world = app.world_mut();
+    let Some(owner) = world
+        .query::<(Entity, &Mob)>()
+        .iter(world)
+        .find(|(_, mob)| mob.entity_id == boss.entity)
+        .map(|(entity, _)| entity)
+    else {
+        return Drawn::default();
+    };
+    let mut materials = std::collections::HashSet::new();
+    let segments: Vec<Handle<Mesh>> = world
+        .query::<(
+            &MobVisual,
+            &Mesh3d,
+            &MeshMaterial3d<StandardMaterial>,
+            &InheritedVisibility,
+        )>()
+        .iter(world)
+        .filter(|(visual, _, _, visible)| {
+            visual.owner == owner
+                && visible.get()
+                && matches!(visual.part, MobPart::King(_) | MobPart::Guardian(_))
+        })
+        .map(|(_, mesh, material, _)| {
+            materials.insert(material.0.id());
+            mesh.0.clone()
+        })
+        .collect();
+    let meshes = world.resource::<Assets<Mesh>>();
+    let triangles = segments
+        .iter()
+        .filter_map(|handle| meshes.get(handle).and_then(|mesh| mesh.indices()))
+        .map(|indices| indices.len() / 3)
+        .sum();
+    let mut effect_groups = encounters::effect_groups(world)
+        .into_iter()
+        .filter(|key| key.boss == boss.entity)
+        .count();
+    if boss.kind == MobKind::DraugrKing {
+        for (material, visible) in world
+            .query_filtered::<(&MeshMaterial3d<StandardMaterial>, &InheritedVisibility), Or<(
+                With<CoreGlow>,
+                With<HandCrystal>,
+            )>>()
+            .iter(world)
+        {
+            if visible.get() {
+                materials.insert(material.0.id());
+                effect_groups += 1;
+            }
+        }
+    }
+    Drawn {
+        segments: segments.len(),
+        triangles,
+        materials: materials.len(),
+        effect_groups,
+    }
+}
+
+/// A move phase to loop: kind, combination step, phase and pulse.
+type Step = (EncounterMoveKind, Option<(u8, u8)>, MovePhase, u8);
+
+/// A timed scene: its name, the boss if any, where it stands, the encounter stage and the
+/// phases it loops.
+type Scene<'a> = (&'a str, Option<Boss>, Vec3, u8, &'a [Step]);
+
+/// Holds a scene at 60 Hz for [`WARM_FRAMES`] and then [`TIMED_FRAMES`], delivering a snapshot
+/// every third frame (20 Hz) and looping `steps` at the catalogue's phase ticks, each phase
+/// announced on the tick it begins. Answers the timed frames and the peak of what the boss drew.
+#[allow(clippy::too_many_arguments)]
+fn hold(
+    app: &mut App,
+    tick: &mut u32,
+    boss: Option<Boss>,
+    pos: Vec3,
+    yaw: f32,
+    stage: u8,
+    steps: &[Step],
+) -> (Vec<Duration>, Drawn) {
+    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+        Duration::from_micros(16_667),
+    ));
+    let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+    let (mut next, mut left, mut instance, mut action) = (0, 0_u32, 0_u64, MobAction::Idle);
+    let mut times = Vec::with_capacity(TIMED_FRAMES);
+    let mut peak = Drawn::default();
+    for frame in 0..WARM_FRAMES + TIMED_FRAMES {
+        if frame % 3 == 0 {
+            *tick += 1;
+            if let (Some(boss), true, Some(&(kind, combo, phase, pulse))) =
+                (boss, left == 0, steps.get(next))
+            {
+                let (ticks, hazards, pulses) =
+                    region(boss.kind, kind, combo, phase, pulse, pos, forward);
+                if phase == MovePhase::Telegraph {
+                    instance = u64::from(*tick);
+                }
+                action = if phase == MovePhase::Recovery {
+                    MobAction::Recovery
+                } else {
+                    MobAction::Windup
+                };
+                let mut timeline = fixture::timeline();
+                (timeline.boss_entity_id, timeline.boss, timeline.phase) =
+                    (boss.entity, boss.kind, stage);
+                let one = &mut timeline.moves[0];
+                (
+                    one.move_instance_id,
+                    one.kind,
+                    one.combo,
+                    one.phase,
+                    one.phase_ticks,
+                    one.pulse,
+                    one.hazards,
+                ) = (instance, kind, combo, phase, ticks, pulses, hazards);
+                one.phase_started_tick = *tick;
+                one.aim = Some(forward.to_array());
+                one.target_entity_id = None;
+                one.interruptible = kind == RequiemOfTheBuried && phase == MovePhase::Channel;
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(timeline);
+                (left, next) = (ticks, (next + 1) % steps.len());
+            }
+            left = left.saturating_sub(1);
+            let mut snapshot = fixture::snapshot(*tick);
+            match boss {
+                None => snapshot.mobs.clear(),
+                Some(boss) => {
+                    let mob = &mut snapshot.mobs[0];
+                    (mob.entity_id, mob.kind, mob.pos, mob.yaw, mob.action) =
+                        (boss.entity, boss.kind, pos.to_array(), yaw, action);
+                }
+            }
+            app.world_mut()
+                .resource_mut::<SnapshotBuffer>()
+                .accept(snapshot, Instant::now() - Duration::from_millis(100));
+        }
+        let time = timed_frame(app);
+        if frame >= WARM_FRAMES {
+            times.push(time);
+            if let Some(boss) = boss {
+                peak = peak.peak(drawn(app, boss));
+            }
+        }
+    }
+    (times, peak)
+}
+
+#[test]
+#[ignore = "requires a render adapter and the server source; times frames and writes a CSV and PNGs to the temporary directory"]
+fn measure_rendering_cost_in_the_shipped_chamber() {
+    use MovePhase::{Channel, Recovery, Release, Telegraph};
+
+    let chamber = Chamber::read();
+    let (mut app, camera, target) = chamber_app(&chamber);
+    let adapter = app
+        .get_sub_app(bevy::render::RenderApp)
+        .unwrap()
+        .world()
+        .resource::<bevy::render::renderer::RenderAdapterInfo>()
+        .0
+        .clone();
+    let mut rows = vec![
+        format!(
+            "# {} ({} {}), {:?}, 1280x720, {TIMED_FRAMES} timed frames per scene after {WARM_FRAMES} warm-up frames",
+            adapter.name, adapter.driver, adapter.driver_info, adapter.backend
+        ),
+        "scene,frames,mean_ms,p50_ms,p95_ms,p99_ms,max_ms,segments,segment_cap,triangles,triangle_cap,materials,material_cap,effect_groups,effect_group_cap".to_owned(),
+    ];
+    let mut review = Review {
+        camera,
+        target,
+        rows: Vec::new(),
+    };
+    let mut tick = 1000_u32;
+    let guardian = Boss {
+        kind: MobKind::VargrGuardian,
+        entity: 21,
+    };
+    let king = Boss {
+        kind: MobKind::DraugrKing,
+        entity: 22,
+    };
+    let home = Vec3::new(16.5, FLOOR_TOP, 14.5);
+    let throne = Vec3::new(16.5, FLOOR_TOP, 52.5);
+    let one = |kind| {
+        [
+            (kind, None, Telegraph, 0),
+            (kind, None, Release, 0),
+            (kind, None, Recovery, 0),
+        ]
+    };
+    let (leap, spear) = (one(PredatorLeap), one(SepulchreSpear));
+    let claws = [1, 2].map(|step| {
+        [Telegraph, Release, Recovery].map(|phase| (PrisonerClaws, Some((step, 2)), phase, 0))
+    });
+    let claws = claws.as_flattened();
+    let burial = [
+        (Burial, None, Telegraph, 0),
+        (Burial, None, Channel, 0),
+        (Burial, None, Channel, 1),
+        (Burial, None, Channel, 2),
+        (Burial, None, Channel, 3),
+        (Burial, None, Recovery, 0),
+    ];
+    let requiem = [
+        (RequiemOfTheBuried, None, Telegraph, 0),
+        (RequiemOfTheBuried, None, Channel, 0),
+        (RequiemOfTheBuried, None, Channel, 1),
+        (RequiemOfTheBuried, None, Channel, 2),
+        (RequiemOfTheBuried, None, Recovery, 0),
+    ];
+    let scenes: [Scene; 9] = [
+        ("empty-courtyard", None, home, 1, &[]),
+        ("empty-hall", None, throne, 1, &[]),
+        ("vargr-idle", Some(guardian), home, 1, &[]),
+        ("vargr-paired-claws", Some(guardian), home, 2, claws),
+        ("vargr-leap", Some(guardian), home, 1, &leap),
+        ("draugr-idle", Some(king), throne, 1, &[]),
+        ("draugr-spear", Some(king), throne, 1, &spear),
+        ("draugr-burial", Some(king), throne, 2, &burial),
+        (
+            "draugr-requiem-final-stage",
+            Some(king),
+            throne,
+            3,
+            &requiem,
+        ),
+    ];
+    for (name, boss, at, stage, steps) in scenes {
+        // A standing player's eyes eight blocks in front of the boss.
+        let eye = Vec3::new(at.x, FLOOR_TOP + 1.7, at.z + 8.0);
+        *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+            Transform::from_translation(eye).looking_at(at + Vec3::Y, Vec3::Y);
+        let (times, peak) = hold(
+            &mut app,
+            &mut tick,
+            boss,
+            at,
+            yaw_toward(eye - at),
+            stage,
+            steps,
+        );
+        let caps = match boss.map(|boss| boss.kind) {
+            Some(MobKind::DraugrKing) => [17, 12_000, 2, 4],
+            Some(_) => [19, 12_000, 2, 2],
+            None => [0; 4],
+        };
+        if let Some(boss) = boss {
+            assert!(peak.segments > 0, "{name}: the boss drew nothing");
+            let counts = [
+                peak.segments,
+                peak.triangles,
+                peak.materials,
+                peak.effect_groups,
+            ];
+            assert!(
+                counts.iter().zip(caps).all(|(count, cap)| *count <= cap),
+                "{name} exceeds the authoring budget: {counts:?} against {caps:?}"
+            );
+            review.shot(
+                &mut app,
+                &chamber,
+                boss,
+                &format!("cost-{name}"),
+                eye,
+                at + Vec3::Y,
+            );
+        }
+        let mut millis: Vec<f64> = times.iter().map(|time| time.as_secs_f64() * 1e3).collect();
+        millis.sort_by(f64::total_cmp);
+        let mean = millis.iter().sum::<f64>() / millis.len() as f64;
+        let rank =
+            |p: f64| millis[((p * millis.len() as f64).ceil() as usize).clamp(1, millis.len()) - 1];
+        rows.push(format!(
+            "{name},{},{mean:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{}",
+            millis.len(),
+            rank(0.5),
+            rank(0.95),
+            rank(0.99),
+            millis[millis.len() - 1],
+            peak.segments,
+            caps[0],
+            peak.triangles,
+            caps[1],
+            peak.materials,
+            caps[2],
+            peak.effect_groups,
+            caps[3],
+        ));
+    }
+    std::fs::write(
+        std::env::temp_dir().join("dungeon-render-cost-1037.csv"),
+        rows.join("\n") + "\n",
     )
     .unwrap();
     let render = app.get_sub_app(bevy::render::RenderApp).unwrap();

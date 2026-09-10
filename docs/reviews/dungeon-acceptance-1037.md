@@ -104,7 +104,7 @@ attenuates with distance, and it is silent when muted.
 **What they do not establish:** how any cue sounds to a player, whether cues can be told apart by
 ear, or whether they read at distance.
 
-The owner decided that #1037 closes with no separate human inspection. The listening pass deferred
+The owner decided that #1037 is completed with no separate human inspection. The listening pass deferred
 from #1029 and #1035 is therefore met by this recorded evidence, stated as not being a listening
 claim: the [manifest analysis](dungeon-acceptance-1037/audio-onsets.csv) and the exporters that
 regenerate the WAVs and manifests.
@@ -152,7 +152,58 @@ instances.
 
 ## Rendering cost
 
-<!-- pending: the rendering cost harness in the shipped chamber -->
+From `<worktree>/client`:
+
+```sh
+WGPU_BACKEND=vulkan cargo test --locked \
+    player::mobs::arena_capture::measure_rendering_cost_in_the_shipped_chamber -- --ignored --exact
+```
+
+`measure_rendering_cost_in_the_shipped_chamber` uses [part 3b](bosses-in-motion-1037.md)'s scene.
+The shipped chamber is drawn by the production chunk mesher, and the bosses by the production
+snapshot, animation, regalia, encounter and effect systems.
+
+- **Frame:** one `App::update` at 60 Hz, then a wait until the GPU has finished the work that frame
+  submitted. The time therefore includes GPU work, not only its submission.
+- **What it is not:** it is rendered offscreen at 1280 × 720 with the default field of view, so there
+  is no presentation, vsync or compositor. The lighting is part 3b's review lighting, unshadowed.
+- **Scenes:** each scene settles for 120 frames, then 900 frames are timed. The camera is at a
+  standing player's eye height, eight blocks in front of the boss.
+  - The empty courtyard and the empty hall.
+  - The Vargr idle, looping its paired claws in stage two, and looping its leap.
+  - The Draugr idle, looping the Spear in stage one, Burial in stage two, and Requiem in the final
+    stage.
+- **Pacing:** snapshots arrive at 20 Hz and each phase is announced on the tick it begins, at the
+  catalogue's durations.
+- **Runs:** three consecutive runs with no other build or capture running; the host's one-minute
+  load average was 1.8–3.0. A PNG of each boss scene was inspected after run 1 to confirm the boss
+  and its effects were drawn.
+- **Reference:** no frame-time budget was set. These numbers are the baseline for later comparison,
+  not a pass or fail.
+
+Across the three runs ([run 1](dungeon-acceptance-1037/render-cost-run1.csv),
+[2](dungeon-acceptance-1037/render-cost-run2.csv), [3](dungeon-acceptance-1037/render-cost-run3.csv)):
+
+| Scene | Mean | p50 | p99 | Max |
+| --- | ---: | ---: | ---: | ---: |
+| Empty courtyard | 4.75–4.82 ms | 4.64–4.70 ms | 5.57–5.73 ms | 6.00–7.38 ms |
+| Empty hall | 4.75–4.78 ms | 4.64–4.68 ms | 5.45–5.55 ms | 5.89–6.22 ms |
+| Vargr idle | 4.89–4.96 ms | 4.76–4.83 ms | 5.57–5.80 ms | 6.05–7.45 ms |
+| Vargr paired claws | 5.08–5.16 ms | 4.97–5.08 ms | 5.85–5.97 ms | 6.26–7.45 ms |
+| Vargr leap | 5.05–5.10 ms | 4.90–5.01 ms | 5.81–5.87 ms | 6.18–6.26 ms |
+| Draugr idle | 4.69–4.94 ms | 4.73–4.83 ms | 5.67–5.75 ms | 6.03–11.23 ms |
+| Draugr Spear | 4.98–5.11 ms | 4.88–5.03 ms | 5.61–6.04 ms | 5.74–6.66 ms |
+| Draugr Burial | 4.99–5.14 ms | 4.93–5.06 ms | 5.67–5.95 ms | 5.87–7.63 ms |
+| Draugr Requiem, final stage | 4.92–5.14 ms | 4.97–5.06 ms | 5.75–6.07 ms | 6.23–8.22 ms |
+
+- **Mean cost of a boss:** an idle boss is within run-to-run variation of the empty chamber; one
+  Draugr idle run averaged 4.69 ms, below the empty chamber. A boss looping a move adds up to 0.4 ms
+  mean.
+- **p99:** stays within 5.4–6.1 ms in every scene.
+- **Max:** the single slowest frames, up to 11.23 ms once in a Draugr idle run, did not recur across
+  runs; this is a shared workstation.
+- **Scope:** one boss in view with its effects. No party of players, other mobs, shadows or the
+  dungeon's own lighting are included, and nothing here predicts frame rate on other hardware.
 
 ## Recorded budgets
 
@@ -168,7 +219,26 @@ The design sets no frame-time budget and makes no FPS promise without hardware. 
 above are measured on the named reference machine and recorded as the baseline for later
 comparison, not as a pass or fail.
 
-<!-- pending: measured segments, triangles, materials and concurrent effect groups -->
+Counts are taken every timed frame of the scenes above, and each row is the largest value seen. The
+harness fails if any count exceeds its cap.
+- **Segments:** the boss's visible rig meshes.
+- **Triangles:** the triangles of those segments.
+- **Materials:** the distinct material handles on those segments and on visible regalia.
+- **Effect groups:** each move instance a spell or strike layer draws for the boss, plus the king's
+  core glow and hand crystal while visible. Telegraph outlines and the encounter reading are not
+  counted: the [#1028 review](vargr-choreography-1028.md) records that cues and UI keep their own
+  budgets.
+
+| Boss | Segments | Triangles | Materials | Concurrent effect groups |
+| --- | --- | --- | --- | --- |
+| Vargr | 19 of 19 | 648 of 12,000 | 1 of 2 | 1 of 2 (paired claws) |
+| Draugr | 17 of 17 | 1,464 of 12,000 | 2 of 2 (Spear, Burial, final-stage Requiem) | 2 of 4 (the same scenes) |
+
+- **Segments:** both bosses use every segment their cap allows.
+- **Triangles:** at most 12.2% of the triangle cap.
+- **The Draugr:** its second material comes from its regalia, and its effect groups from the regalia
+  and its spell shapes.
+- **The Vargr:** idle and the leap draw no effect group.
 
 ## Remaining limits
 
@@ -183,4 +253,37 @@ comparison, not as a pass or fail.
 
 ## Acceptance criteria
 
-<!-- pending -->
+Each criterion of #1037, with the test or recorded evidence that proves it.
+
+1. **Party sizes, entry equipment, kill times, escape paths, punish windows, tuning changes.**
+   - **Measurement:** [part 1](dungeon-combat-1037.md), from `TestFirstDungeonPlaytest`, covering
+     parties of one to four, three entry kits and every stage, with delay and loss.
+   - **Escapability:** `TestFirstDungeonReadersEscapeEveryAnnouncedRegion` and
+     `TestFirstDungeonEveryStageRepertoireIsEscapable`.
+   - **Tuning changes:** recorded in [part 2](dungeon-corrections-1037.md), with
+     `TestPlantedBlowsReachNoFartherThanTheirEngagement` and
+     `TestAPlantedMoveIsChosenOnlyWhereItsRegionReachesTheTarget`.
+   - **Fight length:** handed to #1099 at the owner's decision.
+2. **Delayed and lost snapshots, reduced visual effects, muted audio; telegraphs before damage; no
+   unavoidable overlap.**
+   - **Delay and loss:** part 1's network sweep and `TestFirstDungeonRitualPulsesSurviveLatency`.
+   - **Telegraphs before damage:** `TestFirstDungeonDamageNeverPrecedesItsPerceivedAnnouncement`.
+   - **No unavoidable overlap:** `TestASelectionThatCoversEveryEscapeIsRefused` and
+     `TestFirstDungeonEveryStageRepertoireIsEscapable`.
+   - **Muted audio:** the tests and muted takes under [Muted audio](#muted-audio).
+   - **Reduced visual effects:** blocked on #1093, with no stand-in setting.
+3. **Final models in motion, feet and weapon clipping, rendering and server cost against the recorded
+   budgets; demonstrated issues corrected; remaining limits documented.**
+   - **Strike presentation:** [part 3a](boss-strikes-1037.md), with
+     `every_strike_stays_inside_its_announced_volume_and_reaches_its_boundary_on_the_last_release_tick`.
+   - **Models in motion and clipping:** [part 3b](bosses-in-motion-1037.md), with
+     `capture_bosses_in_the_shipped_chamber` and the corrected corpse fall pinned by
+     `a_corpse_folds_away_from_terrain_it_would_otherwise_lie_in`.
+   - **Cost:** [rendering cost](#rendering-cost) and the [authoring caps](#recorded-budgets), from
+     `measure_rendering_cost_in_the_shipped_chamber`; [server cost](#server-cost), from
+     `TestFirstDungeonServerCost`.
+   - **Listening pass deferred from #1029 and #1035:** met by recordings plus signal measurements
+     against the manifests, stated as not a listening claim, under [Listening](#listening).
+   - **Limits:** [Remaining limits](#remaining-limits).
+4. **Workspace checks.** The client and server gates and the automation suite pass on this branch.
+   No schema changes.
