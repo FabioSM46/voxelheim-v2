@@ -33,6 +33,21 @@ func (m *InstanceManager) DisconnectPortal(entry PortalEntry, life Life) {
 	}
 }
 
+// ReplaceDisconnectedLife swaps a remembered visit's life for its successor only while the
+// remembered value is still exactly previous, so an expired or resumed visit is never
+// recreated and a newer life is never overwritten. It reports whether it replaced one.
+func (m *InstanceManager) ReplaceDisconnectedLife(character InstanceCharacter, previous, next Life) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	visit, found := m.disconnected[character]
+	if !found || visit.life != previous {
+		return false
+	}
+	visit.life = next
+	m.disconnected[character] = visit
+	return true
+}
+
 // ResumePortal claims a remembered live copy atomically with respect to expiry.
 // With no live remembered visit both answers are nil: the caller uses the safe
 // open-world character record it loaded during character selection.

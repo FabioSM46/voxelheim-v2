@@ -345,7 +345,7 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// After openWorld and never before it: the seed and worldgen checks are what
 	// refuse a directory this server did not write, and a player record must not be
 	// created inside one that is about to be rejected.
-	players, err := openPlayers(opts, log)
+	players, rewards, err := openPlayers(opts, log)
 	if err != nil {
 		return err
 	}
@@ -426,6 +426,13 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	}
 	defer instances.Close()
 	cfg.Instances = instances
+	// The boss reward coordinator, over the journal startup has already checked. Nothing
+	// submits a claim yet, so it stays idle until the reward producer is connected.
+	if rewards != nil {
+		if err := identities.EnableRewards(rewards, instances); err != nil {
+			return fmt.Errorf("enabling boss rewards: %w", err)
+		}
+	}
 	if err := sim.ConfigureChunkRegeneration(chunks, registry.ForWorld(chunks).ResendChunk); err != nil {
 		return fmt.Errorf("configure chunk regeneration: %w", err)
 	}
@@ -605,23 +612,23 @@ func listen(opts options, log *slog.Logger) (transport.Transport, string, error)
 // the same shape openWorld above uses for the chunk cache. An ephemeral world still
 // mints tokens and still refuses a second session on one identity — those need no
 // disk — so the difference the operator chose is exactly the one they get.
-func openPlayers(opts options, log *slog.Logger) (*persist.Store, error) {
+func openPlayers(opts options, log *slog.Logger) (*persist.Store, *persist.RewardStore, error) {
 	if opts.worldDir == "" {
 		// openWorld has already warned that this world is ephemeral; saying it twice
 		// would be a second warning about the same decision.
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	rewards, err := persist.OpenRewardStore(opts.worldDir)
 	if err != nil {
-		return nil, fmt.Errorf("opening the boss reward journal: %w", err)
+		return nil, nil, fmt.Errorf("opening the boss reward journal: %w", err)
 	}
 	if err := rewards.CheckInactive(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	store, err := persist.OpenStore(opts.worldDir)
 	if err != nil {
-		return nil, fmt.Errorf("opening the player store: %w", err)
+		return nil, nil, fmt.Errorf("opening the player store: %w", err)
 	}
 	log.Info("player store opened",
 		"players_dir", store.Dir(), "format_version", persist.StoreVersion,
@@ -641,7 +648,7 @@ func openPlayers(opts options, log *slog.Logger) (*persist.Store, error) {
 			"kept_at", kept)
 	}
 
-	return store, nil
+	return store, rewards, nil
 }
 
 // openStructures opens the structures file under the same -world-dir, or answers nil
@@ -1383,6 +1390,9 @@ func (s *server) flushSessions() {
 	}
 }
 
+// rewardDrainTimeout bounds how long shutdown waits for pending boss rewards.
+const rewardDrainTimeout = 10 * time.Second
+
 // shutdown stops the server in the only order that terminates.
 //
 // Closing the listener unblocks Accept, but an accept-loop iteration can already
@@ -1411,6 +1421,17 @@ func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 	accepting.Wait()
 	s.registry.CloseAll()
 	workers.Wait()
+	// Every session has torn down, so each leaving character with a pending boss reward has
+	// handed its last word to the coordinator. The wait is bounded: a claim still pending
+	// keeps its barrier and durable intent for startup recovery rather than holding the
+	// process open. Before Close, because a detached claim may replace a remembered visit.
+	if s.identities != nil {
+		drain, cancel := context.WithTimeout(context.Background(), rewardDrainTimeout)
+		if err := s.identities.DrainRewards(drain); err != nil {
+			s.log.Error("boss rewards were still pending at shutdown", "error", err)
+		}
+		cancel()
+	}
 	// Before Close and not after, which is the whole of the ordering: Close tears every
 	// session down, so the same flush one line later would write an empty file over every
 	// lockout in the world. workers.Wait() above is the first moment the tick loop has

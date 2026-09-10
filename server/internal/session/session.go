@@ -661,30 +661,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				identities.rememberPortalReturn(self, portalVisit.Return)
 				cfg.Instances.DisconnectPortal(*portalVisit, *self.Life)
 			}
-			// An external world binding without a portal visit has no known return
-			// point. Keep its previous disk life rather than write foreign coordinates.
-			if current == phaseInWorld && player != nil && (portalVisit != nil || chunks == openBinding.Chunks) {
-				life := player.Record()
-				if portalVisit != nil {
-					identities.rememberPortalReturn(self, portalVisit.Return)
-					cfg.Instances.DisconnectPortal(*portalVisit, life)
-					// Disk always contains the open-world return point, including
-					// on graceful shutdown. The instance life stays in memory only.
-					for i, value := range portalVisit.Return {
-						life.Pos[i] = float64(value)
-					}
-				}
-				if rErr := identities.Remember(self, life); rErr != nil {
-					// Logged rather than returned: the session is over and the connection
-					// was fine, so failing it would report the wrong thing. Loud, because
-					// this is the line that says a player's record did not survive.
-					log.Error("the player's record was not saved",
-						"player_id", self.ID.Short(), "error", rErr)
-				}
-			}
+			// A pending boss reward is asked first, whatever world the character is leaving.
+			// See Identities.rememberLeaving, which also keeps an external binding's record.
+			rewardOwned := current == phaseInWorld && player != nil &&
+				identities.rememberLeaving(self, player, portalVisit, cfg.Instances, chunks == openBinding.Chunks, log)
 			// The account's, not the character's: the claim was taken when the ticket
 			// verified, which is one phase before there was a character to name it by.
-			identities.Release(account.ID)
+			if !rewardOwned {
+				identities.Release(account.ID)
+			}
 		}
 	}()
 

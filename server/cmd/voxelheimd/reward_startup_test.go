@@ -47,7 +47,7 @@ func TestStartupRefusesPendingOrCorruptRewardsBeforeOpeningPlayers(t *testing.T)
 		if err := os.WriteFile(filepath.Join(dir, "boss-rewards.bin"), b, 0600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := openPlayers(options{worldDir: dir}, discard())
+		_, _, err := openPlayers(options{worldDir: dir}, discard())
 		want := persist.ErrRewardReplayRequired
 		if corrupt {
 			want = world.ErrCorruptStore
@@ -67,10 +67,10 @@ func TestStartupAcceptsHighWaterOnlyRewardsAndEphemeralWorld(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "boss-rewards.bin"), b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openPlayers(options{worldDir: dir}, discard()); err != nil {
+	if _, _, err := openPlayers(options{worldDir: dir}, discard()); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := openPlayers(options{}, discard()); err != nil || s != nil {
+	if s, r, err := openPlayers(options{}, discard()); err != nil || s != nil || r != nil {
 		t.Fatal("ephemeral startup changed")
 	}
 }
