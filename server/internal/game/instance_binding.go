@@ -52,21 +52,25 @@ func (s *Sim) recordBossDefeatLocked(kind vnet.MobKind) {
 	s.defeatedBosses = append(s.defeatedBosses, kind)
 }
 
-// takeDefeatedBosses hands over every defeat this simulation has not yet reported and
-// forgets them, in the order they died.
+// takeBossOutcomes hands over every defeat this simulation has not yet reported, in the
+// order they died, together with every frozen boss reward, and forgets both.
 //
 // A drain rather than a read, because the manager is the authoritative record once a
 // session exists: persistence restores a session's defeated encounters into the manager,
 // where a fresh simulation has never heard of them.
-func (s *Sim) takeDefeatedBosses() []vnet.MobKind {
+//
+// **One lock acquisition for both, and that is the invariant the reward sync stands on.** A
+// kill records its defeat and freezes its reward under the same Sim.mu hold
+// ([Sim.makeCorpseLocked]), and draining them together means the manager never files one
+// without the other. Two drains would leave a window in which a kill landing between them
+// separates them: a saved run could then report a defeat whose reward arrives a tick later,
+// and the journal would hold that defeat without what it owes.
+func (s *Sim) takeBossOutcomes() ([]vnet.MobKind, []BossRewardDefeat) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.defeatedBosses) == 0 {
-		return nil
-	}
-	taken := s.defeatedBosses
-	s.defeatedBosses = nil
-	return taken
+	defeated, rewards := s.defeatedBosses, s.bossRewards
+	s.defeatedBosses, s.bossRewards = nil, nil
+	return defeated, rewards
 }
 
 // collectBossDefeatsLocked moves this tick's defeats into the session and saves it the
@@ -76,8 +80,8 @@ func (s *Sim) takeDefeatedBosses() []vnet.MobKind {
 // nobody, or binds a party without being saved, is not a state this can produce. The
 // caller holds InstanceManager.mu and has just stepped this session's simulation.
 func (m *InstanceManager) collectBossDefeatsLocked(s *instanceSession) {
-	defeated := s.sim.takeDefeatedBosses()
-	s.pendingRewards = append(s.pendingRewards, s.sim.takeBossRewards()...)
+	defeated, rewards := s.sim.takeBossOutcomes()
+	s.pendingRewards = append(s.pendingRewards, rewards...)
 	if len(defeated) == 0 {
 		return
 	}

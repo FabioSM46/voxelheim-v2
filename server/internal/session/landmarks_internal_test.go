@@ -157,7 +157,7 @@ func TestMapRequestSendsUndiscoveredPortalWhileTerrainStaysFogged(t *testing.T) 
 		t.Fatal(err)
 	}
 	for i := 0; i < mapTileBurst; i++ {
-		if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log); err != nil {
+		if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -191,7 +191,7 @@ func TestMapRequestSendsUndiscoveredPortalWhileTerrainStaysFogged(t *testing.T) 
 		}
 	}
 	frames = nil
-	if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log); err != nil {
+	if err := handlePostHandshake(context.Background(), msg, nil, s, nil, nil, send, log, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(frames) != 0 {

@@ -420,7 +420,10 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
 	instances, err := game.NewInstanceManager(cfg.TickRate, cfg.ViewDistance, int(opts.maxInstances), registry.NextID, log,
-		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup),
+		// A dungeon boss's loot waits for the reward journal wherever there is one; an
+		// ephemeral world keeps it live.
+		game.WithDurableBossRewards(rewards != nil))
 	if err != nil {
 		return fmt.Errorf("invalid instance manager: %w", err)
 	}

@@ -804,6 +804,9 @@ type Player struct {
 	openLootID   uint64
 	lootDirty    bool
 	lootClosures []uint64
+	// lootRefusals are TakeLoot refusals decided after the take returned, such as a boss
+	// reward claim that did not land. Each is cleared only after its delivery succeeds.
+	lootRefusals []vnet.RefusalReason
 
 	// One open stall per session, and the same three-part shape for the same three
 	// reasons. openVendorID is the resident this session is trading with and is zero

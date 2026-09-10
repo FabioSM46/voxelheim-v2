@@ -105,7 +105,8 @@ func newRewardWorld(t *testing.T) *rewardWorld {
 func (w *rewardWorld) claim() BossRewardClaim {
 	return BossRewardClaim{
 		Self: w.self, Player: w.player, Generation: 1, Boss: vnet.MobKindVargrGuardian,
-		Grant: game.BossRewardGrant{Entries: []protocol.InventoryStack{rewardBones}, Silver: 30, Experience: 90},
+		Grant:        game.BossRewardGrant{Entries: []protocol.InventoryStack{rewardBones}, Silver: 30, Experience: 90},
+		EntryIndices: []uint8{0},
 	}
 }
 

@@ -1235,6 +1235,39 @@ stays off until the session side is wired.
   first defeat and what it owes land in one write. `ExpireRuns` retains the generations a caller
   names, so a run players are still inside at midnight keeps its journal run.
 
+### Boss loot goes live through claims
+
+With a reward journal, `main` passes `WithDurableBossRewards` to the instance manager, so a
+dungeon boss's personal loot is delivered only through the journal.
+
+- **The sync writes what a defeat owes.** A defeat still pending on its saved run is allocated or
+  appended with each loot-roster owner's frozen roll. The corpse is released through
+  `ReleaseBossRewards` only after that write lands, and only when the journal owes exactly what was
+  frozen. A mismatch keeps the corpse held and the sync reports `ErrRewardJournalConflict`, which
+  `voxelheimd` logs. Boss experience keeps its live award and is not journaled.
+- **A defeat is never seen without what it owes.** A kill records the defeat and freezes the reward
+  under one Sim lock, and `Sim.takeBossOutcomes` drains both under one lock too. So a saved run
+  never reports a defeat whose reward arrives later. A restore builds no corpse and restores no
+  pending reward.
+- **Occupied midnight.** The manager keeps a run past its reset while players are inside. The sync
+  therefore journals every run the manager still reports and retains those generations, and a run is
+  collected only once the manager lets it go.
+- **One journal gate.** Claim writes (`PrepareClaim`, `AcknowledgeClaim`) and sync writes
+  (`AllocateRun`, `AppendDefeat`, `ExpireRuns`) all go through `rewardCoordinator.journalWrite`. A
+  write that leaves the journal `Uncertain` makes its writer the only permitted writer until its
+  identical retry lands. Anyone else gets a retryable `errJournalBusy` and writes nothing.
+- **A take becomes a claim.**
+  - `ErrBossRewardClaimRequired` routes the take, on the portal visit into that run only, through
+    `claimBossLoot`.
+  - The claim carries each entry's frozen roll index, which becomes the journal's entry mask.
+  - When it finishes, the corpse gives up exactly what was taken.
+  - A claim that fails later is reported through `Player.QueueLootRefusal`, which the tick delivers
+    and never drops.
+  - `visitLootTakes` reads the session's current visit on every take, and a take routed outside
+    its visit is logged at warn. `TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit`
+    drives that routing through `Serve`. Only the corpse is replaced, through the
+    `PutBossLootBehind` test seam.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

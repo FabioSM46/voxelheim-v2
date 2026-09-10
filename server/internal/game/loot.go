@@ -543,6 +543,13 @@ func (p *Player) offerLootLocked() {
 		}
 		p.lootClosures = p.lootClosures[1:]
 	}
+	for len(p.lootRefusals) > 0 {
+		frame := protocol.EncodeActionRefused(protocol.ActionRefused{Action: vnet.RefusedActionTakeLoot, Reason: p.lootRefusals[0]})
+		if !p.deliver(frame) {
+			return
+		}
+		p.lootRefusals = p.lootRefusals[1:]
+	}
 	if !p.lootDirty || p.openLootID == 0 {
 		return
 	}
