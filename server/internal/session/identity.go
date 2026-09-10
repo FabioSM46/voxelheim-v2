@@ -298,6 +298,10 @@ type Identities struct {
 	// the last *decision* about it rather than whichever goroutine's rename happened to
 	// land second. See RememberAll.
 	writeMu sync.Mutex
+
+	// rewards is the boss reward coordinator, or nil where rewards are not enabled.
+	// Guarded by mu. See reward_coordinator.go.
+	rewards *rewardCoordinator
 }
 
 // liveIdentity is what one live session's identity carries beside the claim itself.
@@ -331,6 +335,11 @@ type liveIdentity struct {
 	// finalised records that this session's teardown has already written its last
 	// word. See RememberAll, which is the only reader.
 	finalised bool
+
+	// reward is the pending boss reward that owns this character's last word, or nil.
+	// While it is set the autosave skips the character, offline experience stays queued,
+	// and a teardown hands its life to the reward rather than writing it.
+	reward *rewardTask
 }
 
 // NewIdentities returns an empty claim set over store. A nil logger discards, which is
@@ -817,12 +826,7 @@ func (i *Identities) recall(character persist.Character) (*game.Life, bool, erro
 	// means and how much health is a full bar are game's answers, so they are asked
 	// here — once, before anything is built from them, and about the whole record
 	// rather than slot by slot.
-	life := game.Life{
-		Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger,
-		Experience: rec.Experience, Silver: rec.Silver,
-		BossRewardEpoch: rec.BossRewardEpoch,
-		LearnedMounts:   game.LearnedMounts(rec.LearnedMounts), Slots: rec.Slots,
-	}
+	life := lifeOfRecord(rec)
 	if vErr := life.Validate(); vErr != nil {
 		return nil, false, i.refuseRecord(character, vErr)
 	}
@@ -900,6 +904,44 @@ func (i *Identities) Remember(self Resolved, life game.Life) error {
 	return err
 }
 
+// rememberLeaving is the teardown's last word for a character leaving a world, and it
+// reports whether a pending boss reward took that word over. The caller releases the
+// account only when it did not.
+//
+// **A pending reward is asked first, whatever world the character leaves.** Ownership
+// does not depend on knowing a return point: the reward keeps the account until its own
+// final write, so a reconnect can never resume a life the reward has not reached. An
+// external binding with no portal visit still writes no foreign coordinates; there the
+// reward's durable postimage stands as the record, as the previous record otherwise does.
+func (i *Identities) rememberLeaving(self Resolved, player *game.Player, portal *game.PortalEntry, instances *game.InstanceManager, openWorld bool, log *slog.Logger) (rewardOwned bool) {
+	known := portal != nil || openWorld
+	if i.detachReward(self, player, portal, instances, known) {
+		return true
+	}
+	if !known {
+		// An external world binding without a portal visit has no known return point.
+		// Keep its previous disk life rather than write foreign coordinates.
+		return false
+	}
+	life := player.Record()
+	if portal != nil {
+		i.rememberPortalReturn(self, portal.Return)
+		instances.DisconnectPortal(*portal, life)
+		// Disk always contains the open-world return point, including on graceful
+		// shutdown. The instance life stays in memory only.
+		for axis, value := range portal.Return {
+			life.Pos[axis] = float64(value)
+		}
+	}
+	if err := i.Remember(self, life); err != nil {
+		// Logged rather than returned: the session is over and the connection was fine,
+		// so failing it would report the wrong thing. Loud, because this is the line that
+		// says a player's record did not survive.
+		log.Error("the player's record was not saved", "player_id", self.ID.Short(), "error", err)
+	}
+	return false
+}
+
 // RememberExperience makes an offline tap award durable on the character that earned
 // it. The award carries an absolute lifetime total, so a retry after an uncertain write
 // is idempotent and a newer stored total is never moved backwards.
@@ -944,15 +986,19 @@ func (i *Identities) RememberExperience(award game.ExperienceAward) (persisted b
 	return true, nil
 }
 
-// sessionMayStillWrite reports whether one live session can still put an older total
-// onto character's record. The caller holds writeMu, which orders this answer against
-// Remember's final write; mu only protects the claim itself.
+// sessionMayStillWrite reports whether a live claim can still put an older total onto
+// character's record, so RememberExperience, its one caller, keeps the award queued
+// rather than writing it. A session that has not written its last word can; so can one
+// whose teardown was handed to a pending boss reward, because that reward's final write
+// carries the life captured at detach and would land over the award. The answer only
+// ever defers a write and never permits one. The caller holds writeMu, which orders this
+// answer against those final writes; mu only protects the claim itself.
 func (i *Identities) sessionMayStillWrite(id identity.PlayerID, character persist.CharacterID) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
 	held, live := i.live[id]
-	return live && !held.finalised && held.character == character
+	return live && held.character == character && (!held.finalised || held.reward != nil)
 }
 
 // RememberAll writes a record for every identity in lives that still has a session
@@ -1064,21 +1110,28 @@ func (i *Identities) write(character persist.CharacterID, life game.Life, explor
 // caller put in them, so there is no way for a save to rename a character or move it to
 // another account. A session writes a life; who lived it was decided at creation.
 func (i *Identities) writeLife(character persist.CharacterID, life game.Life) error {
-	return i.store.Save(character, persist.Record{
-		// When this record was written, which is the end of the session on the teardown
-		// path and the moment of the pass on the autosave's. Both are "the last time
-		// this server knew anything about this character", which is what the field means.
-		LastSeen:        time.Now().UTC(),
-		Pos:             life.Pos,
-		Yaw:             life.Yaw,
-		Health:          life.Health,
-		Hunger:          life.Hunger,
-		Experience:      life.Experience,
-		Silver:          life.Silver,
-		LearnedMounts:   uint8(life.LearnedMounts),
-		BossRewardEpoch: life.BossRewardEpoch,
-		Slots:           life.Slots,
-	})
+	// When this record was written, which is the end of the session on the teardown
+	// path and the moment of the pass on the autosave's. Both are "the last time
+	// this server knew anything about this character", which is what the field means.
+	rec := persist.Record{LastSeen: time.Now().UTC()}
+	applyLife(&rec, life)
+	return i.store.Save(character, rec)
+}
+
+// lifeOfRecord and applyLife are the one mapping between a stored record and a life.
+func lifeOfRecord(rec persist.Record) game.Life {
+	return game.Life{
+		Pos: rec.Pos, Yaw: rec.Yaw, Health: rec.Health, Hunger: rec.Hunger,
+		Experience: rec.Experience, Silver: rec.Silver,
+		BossRewardEpoch: rec.BossRewardEpoch,
+		LearnedMounts:   game.LearnedMounts(rec.LearnedMounts), Slots: rec.Slots,
+	}
+}
+
+func applyLife(rec *persist.Record, life game.Life) {
+	rec.Pos, rec.Yaw, rec.Health, rec.Hunger = life.Pos, life.Yaw, life.Health, life.Hunger
+	rec.Experience, rec.Silver = life.Experience, life.Silver
+	rec.LearnedMounts, rec.BossRewardEpoch, rec.Slots = uint8(life.LearnedMounts), life.BossRewardEpoch, life.Slots
 }
 
 // stillPlaying reports the character id has a live session on, and whether that session
@@ -1096,7 +1149,7 @@ func (i *Identities) stillPlaying(id identity.PlayerID) (persist.CharacterID, *E
 	defer i.mu.Unlock()
 
 	held, live := i.live[id]
-	if !live || held.finalised || held.character.IsZero() {
+	if !live || held.finalised || held.character.IsZero() || held.reward != nil {
 		return 0, nil, nil, false
 	}
 	return held.character, held.exploration, held.markers, true
