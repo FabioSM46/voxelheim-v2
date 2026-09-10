@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func portalHarness(t *testing.T, limit int) (*InstanceManager, *Sim, protocol.PortalRequest, func() *Player) {
+func portalHarness(t *testing.T, limit int, options ...SimOption) (*InstanceManager, *Sim, protocol.PortalRequest, func() *Player) {
 	t.Helper()
 	const seed = 0x5EED
 	ruin, ok := world.RuinAt(seed, 0, 0)
@@ -25,7 +25,7 @@ func portalHarness(t *testing.T, limit int) (*InstanceManager, *Sim, protocol.Po
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewInstanceManager(20, 1, limit, mint, slog.New(slog.DiscardHandler), WithWorldGroup(group))
+	m, err := NewInstanceManager(20, 1, limit, mint, slog.New(slog.DiscardHandler), append([]SimOption{WithWorldGroup(group)}, options...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
