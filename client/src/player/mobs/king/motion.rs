@@ -19,7 +19,9 @@ pub(in super::super) struct Motion {
     feet: [Foot; 2],
     next: usize,
     entrance: Option<Duration>,
-    pub(in super::super) transforms: [Transform; 15],
+    /// Mask, crown and core state. Survives a replant: a teleport is not a new fight.
+    pub(in super::super) regalia: super::regalia::Regalia,
+    pub(in super::super) transforms: [Transform; 17],
 }
 
 impl Motion {
@@ -39,7 +41,8 @@ impl Motion {
             }),
             next: 0,
             entrance: (action == MobAction::Idle).then_some(Duration::ZERO),
-            transforms: [Transform::IDENTITY; 15],
+            regalia: default(),
+            transforms: [Transform::IDENTITY; 17],
         }
     }
 
@@ -59,7 +62,9 @@ impl Motion {
             - std::f32::consts::PI;
         if displacement.length() > 1.5 || turn.abs() > 1.0 {
             // A discontinuous replacement cannot drag feet across the room or replay entry.
+            let regalia = std::mem::take(&mut self.regalia);
             *self = Self::new(position, yaw, action);
+            self.regalia = regalia;
             self.entrance = None;
         }
         if action != MobAction::Idle || in_encounter || down > 0.0 {
@@ -117,13 +122,17 @@ impl Motion {
             } else {
                 0.0
             },
+            crown: self.regalia.crown(),
             ..default()
         };
         if let Some(entry) = self.entrance.as_mut() {
             *entry += delta;
             let progress = entry.as_secs_f32() / 1.3;
             if progress < 1.0 {
-                p = super::choreography::entrance(progress);
+                p = super::choreography::Controls {
+                    crown: self.regalia.crown(),
+                    ..super::choreography::entrance(progress)
+                };
             } else {
                 self.entrance = None;
             }
@@ -136,6 +145,7 @@ impl Motion {
                 drop: 0.12 * (std::f32::consts::PI * down).sin(),
                 grip: Vec3::new(0.42, 1.39, -0.115),
                 head: 0.25 * down,
+                crown: self.regalia.crown(),
                 ..default()
             };
             let mut pose = super::choreography::assemble(p, REST_FEET);
@@ -160,6 +170,12 @@ impl Motion {
             }
             self.transforms = pose;
         }
+        self.regalia.update(
+            &mut self.transforms,
+            position,
+            yaw,
+            delta.as_secs_f32().min(0.1),
+        );
         self.last = position;
         self.yaw = yaw;
     }
@@ -200,7 +216,7 @@ pub(super) fn leg_matrices(index: usize, target: Vec3, drop: f32) -> (Mat4, Mat4
 // empty corners and would visibly float the real mesh above the floor.
 fn ground_points(segment: Segment) -> &'static [Vec3] {
     use bevy::mesh::VertexAttributeValues;
-    static POINTS: std::sync::LazyLock<[Vec<Vec3>; 15]> = std::sync::LazyLock::new(|| {
+    static POINTS: std::sync::LazyLock<[Vec<Vec3>; 17]> = std::sync::LazyLock::new(|| {
         SEGMENTS.map(|segment| {
             let mesh = geometry(segment);
             let Some(VertexAttributeValues::Float32x3(positions)) =

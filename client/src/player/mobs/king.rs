@@ -9,6 +9,7 @@ pub(super) mod choreography;
 #[cfg(test)]
 mod choreography_tests;
 pub(super) mod motion;
+pub(super) mod regalia;
 
 const IRON: Color = Color::srgb(0.22, 0.27, 0.30);
 const EDGE: Color = Color::srgb(0.39, 0.44, 0.45);
@@ -36,9 +37,14 @@ pub(crate) enum Segment {
     BootLeft,
     BootRight,
     Cloak,
+    /// The funeral mask over the right cheek. It follows the head until the server's
+    /// final stage, then falls; see [`regalia`].
+    Mask,
+    /// The broken crown, welded to the helm until the final stage tilts it.
+    Crown,
 }
 
-pub(super) const SEGMENTS: [Segment; 15] = [
+pub(super) const SEGMENTS: [Segment; 17] = [
     Segment::Pelvis,
     Segment::Torso,
     Segment::Head,
@@ -54,6 +60,8 @@ pub(super) const SEGMENTS: [Segment; 15] = [
     Segment::BootLeft,
     Segment::BootRight,
     Segment::Cloak,
+    Segment::Mask,
+    Segment::Crown,
 ];
 
 type Part = (Vec3, Vec3, Color);
@@ -95,12 +103,17 @@ fn geometry(segment: Segment) -> Mesh {
         Head => {
             parts.push(part([0.34, 0.33, 0.33], [0.0, 2.45, 0.0], BONE));
             parts.push(part([0.37, 0.09, 0.38], [0.0, 2.60, 0.0], IRON));
-            parts.push(part([0.19, 0.30, 0.04], [0.10, 2.44, -0.19], IRON));
             parts.push(part([0.13, 0.075, 0.02], [-0.09, 2.49, -0.174], CLOTH));
             parts.push(part([0.04, 0.025, 0.015], [-0.09, 2.49, -0.187], ICE));
             for x in [-0.14, -0.08, -0.02] {
                 parts.push(part([0.027, 0.065, 0.025], [x, 2.31, -0.18], BONE));
             }
+        }
+        Mask => {
+            // Unchanged plate, moved out of the head so the final stage can drop it.
+            parts.push(part([0.19, 0.30, 0.04], [0.10, 2.44, -0.19], IRON));
+        }
+        Crown => {
             parts.push(part([0.43, 0.055, 0.43], [0.0, 2.665, 0.0], RUST));
             for (x, h) in [(-0.17, 0.08), (-0.06, 0.13), (0.06, 0.09), (0.17, 0.05)] {
                 for z in [-0.17, 0.17] {
@@ -281,7 +294,7 @@ fn joint(segment: Segment, p: Pose) -> Transform {
     let matrix = match segment {
         Pelvis => Mat4::IDENTITY,
         Torso => torso,
-        Head => torso * around(Vec3::Y * 2.30, Quat::from_rotation_y(p.head)),
+        Head | Mask | Crown => torso * around(Vec3::Y * 2.30, Quat::from_rotation_y(p.head)),
         UpperLeft => shoulder(true),
         UpperRight => shoulder(false),
         ForeLeft => elbow(true),
@@ -438,6 +451,7 @@ mod tests {
                         .unwrap()
                 };
                 assert!(edge(Segment::Blade, true, p) > edge(Segment::Head, false, p));
+                assert!(edge(Segment::Blade, true, p) > edge(Segment::Crown, false, p));
                 // Crossguard may meet the arm but must not enter the torso.
                 assert!(edge(Segment::Blade, true, p) > edge(Segment::Torso, false, p));
                 // Preview-only free-hand cast key pose; no cast state is inferred
