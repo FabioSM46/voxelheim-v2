@@ -85,15 +85,6 @@ func (s *Sim) holdBossRewardsLocked(c *corpse, kind vnet.MobKind, roster []corps
 	s.bossRewards = append(s.bossRewards, defeat)
 }
 
-// takeBossRewards hands over every frozen defeat this simulation has not yet reported.
-func (s *Sim) takeBossRewards() []BossRewardDefeat {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	taken := s.bossRewards
-	s.bossRewards = nil
-	return taken
-}
-
 func clonePendingRewards(pending []BossRewardDefeat) []BossRewardDefeat {
 	if len(pending) == 0 {
 		return nil

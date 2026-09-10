@@ -302,6 +302,11 @@ type Identities struct {
 	// rewards is the boss reward coordinator, or nil where rewards are not enabled.
 	// Guarded by mu. See reward_coordinator.go.
 	rewards *rewardCoordinator
+
+	// bossLoot is a test seam for the loot a session's takes reach. It stands in for the one
+	// thing a session test cannot build, a killed dungeon boss's corpse. Set before any
+	// session starts and never after. Nil in production, where takes reach the player.
+	bossLoot func(*game.Player) sessionLoot
 }
 
 // liveIdentity is what one live session's identity carries beside the claim itself.

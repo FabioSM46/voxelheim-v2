@@ -1101,14 +1101,14 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 	}()
 	defer func() { close(readRequests); <-readerDone }()
 	// A dungeon boss's loot is delivered only by a reward claim, and only on the portal visit
-	// into that run. It reads the session's current visit each time it is called.
-	claimLoot := func(corpseID uint64, revision uint32, entryID uint64) (vnet.RefusalReason, error) {
+	// into that run. The takes read the session's current visit each time one arrives.
+	takes := visitLootTakes{identities: identities, log: log, current: func() (Resolved, *game.Player, uint64) {
 		run := uint64(0)
 		if cfg.Instances != nil && portalVisit != nil && chunks == portalVisit.Session.Chunks {
 			run = portalVisit.Session.ID
 		}
-		return identities.claimBossLoot(self, player, player, run, corpseID, revision, entryID)
-	}
+		return self, player, run
+	}}
 	lastFrame := time.Now()
 	for {
 		// Armed before every read, which is the same thing as re-armed after every
@@ -1608,7 +1608,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			continue
 		}
 
-		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log, claimLoot); hErr != nil {
+		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log, takes); hErr != nil {
 			if errors.Is(hErr, errLeaveRequested) {
 				// Inert before the acknowledgement is queued: once the server accepts the
 				// request, no input already behind it can become one last action.
@@ -1793,7 +1793,7 @@ func followMining(ctx context.Context, player *game.Player, peers *Registry, sen
 // Direction is a protocol rule rather than a type rule — both sides share one
 // union — so a client sending a server-only payload is a protocol violation and
 // the connection ends.
-func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, marks *Markers, peers *Registry, send func([]byte) error, log *slog.Logger, claimLoot func(corpseID uint64, revision uint32, entryID uint64) (vnet.RefusalReason, error)) error {
+func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, marks *Markers, peers *Registry, send func([]byte) error, log *slog.Logger, takes lootTakes) error {
 	switch msg.Kind {
 	case vnet.PayloadPlayerInput:
 		if player == nil || msg.PlayerInput == nil {
@@ -2411,16 +2411,13 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 		return nil
 
 	case vnet.PayloadLootTakeRequest:
-		if player == nil || msg.LootTake == nil {
+		if player == nil || takes == nil || msg.LootTake == nil {
 			log.Debug("loot take arrived with no player or intent; discarding")
 			return nil
 		}
 
 		request := *msg.LootTake
-		reason, takeErr := player.TakeLoot(request)
-		if errors.Is(takeErr, game.ErrBossRewardClaimRequired) && claimLoot != nil {
-			reason, takeErr = claimLoot(request.CorpseID, request.Revision, request.EntryID)
-		}
+		reason, takeErr := takes.TakeLoot(request)
 		if takeErr == nil {
 			return nil
 		}
@@ -2443,16 +2440,13 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 	// arrives here too — the entries that moved are already committed, and the refusal
 	// is what says the rest did not.
 	case vnet.PayloadLootTakeAllRequest:
-		if player == nil || msg.LootTakeAll == nil {
+		if player == nil || takes == nil || msg.LootTakeAll == nil {
 			log.Debug("loot take-all arrived with no player or intent; discarding")
 			return nil
 		}
 
 		request := *msg.LootTakeAll
-		reason, takeErr := player.TakeAllLoot(request)
-		if errors.Is(takeErr, game.ErrBossRewardClaimRequired) && claimLoot != nil {
-			reason, takeErr = claimLoot(request.CorpseID, request.Revision, 0)
-		}
+		reason, takeErr := takes.TakeAllLoot(request)
 		if takeErr == nil {
 			return nil
 		}

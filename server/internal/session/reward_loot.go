@@ -2,9 +2,11 @@ package session
 
 import (
 	"errors"
+	"log/slog"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 )
 
 // bossLootClaimer is what a take needs from the game to deliver a boss's claimed loot. It is
@@ -90,4 +92,66 @@ func lootRefusalFor(err error) vnet.RefusalReason {
 	default:
 		return vnet.RefusalReasonCorpseUnavailable
 	}
+}
+
+// lootTakes is how a session's decoded loot takes reach the game.
+type lootTakes interface {
+	TakeLoot(request protocol.LootTakeRequest) (vnet.RefusalReason, error)
+	TakeAllLoot(request protocol.LootTakeAllRequest) (vnet.RefusalReason, error)
+}
+
+// sessionLoot is the loot a take reaches: the player itself in production.
+type sessionLoot interface {
+	lootTakes
+	bossLootClaimer
+}
+
+// lootOf is the loot this player's takes reach.
+func (i *Identities) lootOf(player *game.Player) sessionLoot {
+	if i.bossLoot != nil {
+		return i.bossLoot(player)
+	}
+	return player
+}
+
+// visitLootTakes routes one session's loot takes. Live loot goes straight to the game. A
+// dungeon boss's held loot goes through a reward claim, and only on the portal visit into
+// that boss's run.
+type visitLootTakes struct {
+	identities *Identities
+	log        *slog.Logger
+	// current reads the session's state when a take arrives: who is playing, the live
+	// player, and the saved run it is visiting through a portal, or zero outside one.
+	current func() (self Resolved, player *game.Player, run uint64)
+}
+
+func (t visitLootTakes) TakeLoot(request protocol.LootTakeRequest) (vnet.RefusalReason, error) {
+	self, player, run := t.current()
+	loot := t.identities.lootOf(player)
+	reason, err := loot.TakeLoot(request)
+	if !errors.Is(err, game.ErrBossRewardClaimRequired) {
+		return reason, err
+	}
+	return t.claim(self, player, loot, run, request.CorpseID, request.Revision, request.EntryID)
+}
+
+func (t visitLootTakes) TakeAllLoot(request protocol.LootTakeAllRequest) (vnet.RefusalReason, error) {
+	self, player, run := t.current()
+	loot := t.identities.lootOf(player)
+	reason, err := loot.TakeAllLoot(request)
+	if !errors.Is(err, game.ErrBossRewardClaimRequired) {
+		return reason, err
+	}
+	return t.claim(self, player, loot, run, request.CorpseID, request.Revision, 0)
+}
+
+// claim turns a take into a boss reward claim. A take routed outside its visit is logged at
+// warn: a boss corpse lives only inside its dungeon, so one reaching here means the session's
+// idea of where the player stands has gone wrong, and a player would silently lose the loot.
+func (t visitLootTakes) claim(self Resolved, player *game.Player, loot sessionLoot, run, corpseID uint64, revision uint32, entryID uint64) (vnet.RefusalReason, error) {
+	reason, err := t.identities.claimBossLoot(self, player, loot, run, corpseID, revision, entryID)
+	if errors.Is(err, errBossLootOutsideVisit) {
+		t.log.Warn("a boss reward take arrived outside its dungeon visit; refusing it", "corpse_id", corpseID)
+	}
+	return reason, err
 }
