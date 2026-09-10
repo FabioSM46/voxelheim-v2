@@ -144,14 +144,14 @@ func TestADurableRewardDungeonHoldsBossLootUntilTheJournalReleasesIt(t *testing.
 		t.Fatal("a stale revision was selected")
 	}
 
-	if !p.ConsumeClaimedBossLoot(id, all.EntryIndices, true) {
+	if !p.ConsumeClaimedBossLoot(id, all.EntryIndices, all.Silver) {
 		t.Fatal("an acknowledged claim could not be consumed")
 	}
 	left := frozenContainer(t, session, id, p)
 	if len(left.entries) != 0 || left.silver != 0 || left.revision != rolled.revision+1 {
 		t.Fatalf("container after consumption = %+v", left)
 	}
-	if len(all.EntryIndices) > 0 && p.ConsumeClaimedBossLoot(id, all.EntryIndices, false) {
+	if p.ConsumeClaimedBossLoot(id, all.EntryIndices, all.Silver) {
 		t.Fatal("consumed entries were consumed twice")
 	}
 }
@@ -178,7 +178,7 @@ func TestASingleBossEntrySelectionNamesItsRollIndex(t *testing.T) {
 	if _, _, err := p.BossLootToClaim(id, rolled.revision, 99); err == nil {
 		t.Fatal("an entry that is not there was selected")
 	}
-	if !p.ConsumeClaimedBossLoot(id, one.EntryIndices, false) {
+	if !p.ConsumeClaimedBossLoot(id, one.EntryIndices, 0) {
 		t.Fatal("consuming one entry failed")
 	}
 	if left := frozenContainer(t, session, id, p); len(left.entries) != len(rolled.entries)-1 || left.silver != rolled.silver {
@@ -229,7 +229,7 @@ func TestBossLootStaysLiveWithoutDurableRewards(t *testing.T) {
 	if _, _, err := p.BossLootToClaim(id, rolled.revision+1, 0); err == nil {
 		t.Fatal("live loot produced a claim selection")
 	}
-	if p.ConsumeClaimedBossLoot(id, nil, true) {
+	if p.ConsumeClaimedBossLoot(id, nil, 1) {
 		t.Fatal("live loot was consumed as a claim")
 	}
 }
@@ -248,5 +248,56 @@ func TestAnOpenWorldBossIgnoresDurableRewards(t *testing.T) {
 	}
 	if len(sim.bossRewards) != 0 || sim.corpses[id].rewards != bossRewardsOpen {
 		t.Fatal("an open-world boss held its loot for a journal it has none of")
+	}
+}
+
+// releasedGuardian kills and releases a durable guardian, leaving its loot claim-only.
+func releasedGuardian(t *testing.T) (InstanceSession, *Player, uint64) {
+	t.Helper()
+	m, session, p, id := rewardDungeon(t, true)
+	killRewardBoss(t, session, id)
+	m.Step()
+	if !m.ReleaseBossRewards(m.SavedSessions()[0], vnet.MobKindVargrGuardian) {
+		t.Fatal("the durable defeat was not released")
+	}
+	return session, p, id
+}
+
+// A claim of silver alone follows the entries' rule: the purse must still hold exactly what
+// was claimed, so the same silver cannot be consumed twice.
+func TestAClaimOfSilverAloneIsConsumedOnce(t *testing.T) {
+	session, p, id := releasedGuardian(t)
+	session.Sim.mu.Lock()
+	container, _ := session.Sim.corpses[id].containerFor(p)
+	container.entries = nil
+	container.silver = 25
+	session.Sim.mu.Unlock()
+
+	if p.ConsumeClaimedBossLoot(id, nil, 26) {
+		t.Fatal("more silver than the purse holds was consumed")
+	}
+	if !p.ConsumeClaimedBossLoot(id, nil, 25) {
+		t.Fatal("the claimed silver was not consumed")
+	}
+	if p.ConsumeClaimedBossLoot(id, nil, 25) {
+		t.Fatal("the same silver was consumed twice")
+	}
+	if left := frozenContainer(t, session, id, p); left.silver != 0 {
+		t.Fatalf("purse after consumption = %d, want 0", left.silver)
+	}
+	if p.ConsumeClaimedBossLoot(id, nil, 0) {
+		t.Fatal("a consumption naming nothing was accepted")
+	}
+}
+
+// A corpse that expired or was replaced before its claim was consumed is refused without
+// touching anything.
+func TestConsumingAMissingBossCorpseReportsFalse(t *testing.T) {
+	session, p, id := releasedGuardian(t)
+	session.Sim.mu.Lock()
+	session.Sim.removeCorpseLocked(id)
+	session.Sim.mu.Unlock()
+	if p.ConsumeClaimedBossLoot(id, []uint8{0}, 0) || p.ConsumeClaimedBossLoot(id+1000, nil, 5) {
+		t.Fatal("a missing corpse was consumed")
 	}
 }

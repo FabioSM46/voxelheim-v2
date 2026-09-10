@@ -186,14 +186,18 @@ func (p *Player) BossLootToClaim(corpseID uint64, revision uint32, entryID uint6
 }
 
 // ConsumeClaimedBossLoot removes what an acknowledged claim took from its corpse: the entries
-// at those roll indices and, when silver was claimed, the silver. It reports false, changing
-// nothing, when the corpse, the owner's container or any named entry is no longer there.
-func (p *Player) ConsumeClaimedBossLoot(corpseID uint64, indices []uint8, silver bool) bool {
+// at those roll indices and the silver it claimed. Entries and silver follow one rule: each
+// must still be exactly there. A claim consumed twice, or against a corpse that expired or
+// changed, therefore reports false and changes nothing, as does a consumption naming nothing.
+func (p *Player) ConsumeClaimedBossLoot(corpseID uint64, indices []uint8, silver uint32) bool {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 	c := p.sim.corpses[corpseID]
+	if c == nil || c.rewards != bossRewardsClaimed || (len(indices) == 0 && silver == 0) {
+		return false
+	}
 	container, owned := c.containerFor(p)
-	if c == nil || !owned || c.rewards != bossRewardsClaimed {
+	if !owned || (silver != 0 && container.silver != silver) {
 		return false
 	}
 	taken := func(e corpseEntry) bool { return slices.Contains(indices, uint8(e.entryID-1)) }
@@ -203,9 +207,7 @@ func (p *Player) ConsumeClaimedBossLoot(corpseID uint64, indices []uint8, silver
 		}
 	}
 	container.entries = slices.DeleteFunc(container.entries, taken)
-	if silver {
-		container.silver = 0
-	}
+	container.silver -= silver
 	container.revision++
 	if p.openLootID == corpseID {
 		p.lootDirty = true
