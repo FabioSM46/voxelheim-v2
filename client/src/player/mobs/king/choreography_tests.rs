@@ -123,7 +123,7 @@ pub(super) fn presented(
     }
 }
 
-fn poses(one: &PresentedMove) -> [Transform; 15] {
+fn poses(one: &PresentedMove) -> [Transform; 17] {
     let motion = motion::Motion::new(Vec3::ZERO, 0.0, MobAction::Windup);
     choreography::sample(&motion, Some(one), 0.0)
 }

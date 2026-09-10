@@ -119,7 +119,7 @@ fn refresh(
     }
 }
 
-fn placement(volume: HazardVolume, boss: crate::net::MobKind) -> Transform {
+pub(super) fn placement(volume: HazardVolume, boss: crate::net::MobKind) -> Transform {
     let [x, y, z] = volume.origin;
     // Server hazardAnchor centres melee/lanes on the boss and areas on their own
     // height. Project those fixed anchors onto the arena floor, not the moving boss.

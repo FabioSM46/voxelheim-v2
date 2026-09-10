@@ -40,6 +40,8 @@ mod bosses;
 mod guardian;
 mod king;
 
+pub(super) use king::regalia::{present as present_regalia, setup as setup_regalia};
+
 /// The box one species occupies, in blocks: square in plan, `height` tall, standing on
 /// the point the snapshot puts it at.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1451,6 +1453,9 @@ pub(super) fn animate(
             transform.rotation = Quat::from_rotation_y(yaw);
         }
 
+        let stage = timelines
+            .as_ref()
+            .and_then(|inbox| king::regalia::boss_stage(inbox.live(), mob.entity_id));
         let in_encounter = timelines.as_ref().is_some_and(|inbox| {
             inbox
                 .live()
@@ -1458,6 +1463,7 @@ pub(super) fn animate(
                 .any(|state| state.boss_entity_id == mob.entity_id)
         });
         if let Some(motion) = mob.king_motion.as_mut() {
+            motion.regalia.observe(stage);
             motion.sample(
                 transform.translation,
                 yaw,
@@ -1657,7 +1663,7 @@ mod tests {
         })
     }
 
-    fn draugr(entity_id: u64, x: f32, health: u16, action: MobAction) -> MobState {
+    pub(super) fn draugr(entity_id: u64, x: f32, health: u16, action: MobAction) -> MobState {
         MobState {
             entity_id,
             kind: MobKind::Draugr,
@@ -1698,7 +1704,7 @@ mod tests {
         }
     }
 
-    fn headless() -> App {
+    pub(super) fn headless() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()))
             .init_asset::<Mesh>()
@@ -1708,7 +1714,7 @@ mod tests {
         app
     }
 
-    fn deliver(app: &mut App, tick: u32, mobs: Vec<MobState>) {
+    pub(super) fn deliver(app: &mut App, tick: u32, mobs: Vec<MobState>) {
         app.world_mut().resource_mut::<SnapshotInbox>().push(
             Snapshot {
                 server_tick: tick,
