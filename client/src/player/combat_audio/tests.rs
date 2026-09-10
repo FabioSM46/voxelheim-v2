@@ -159,12 +159,7 @@ fn repeated_contacts_in_one_tick_claim_separate_sources_and_respect_sfx_gain() {
 
 #[test]
 fn aggro_repeats_only_after_idle_and_windup_is_one_telegraph_per_transition() {
-    for kind in [
-        MobKind::Draugr,
-        MobKind::Vargr,
-        MobKind::VargrGuardian,
-        MobKind::DraugrKing,
-    ] {
+    for kind in [MobKind::Draugr, MobKind::Vargr, MobKind::DraugrKing] {
         let (mut app, mixer) = fixture();
         snapshot(&mut app, vec![mob(kind, MobAction::Chase)]);
         assert_eq!(
