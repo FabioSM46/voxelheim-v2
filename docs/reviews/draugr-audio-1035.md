@@ -79,9 +79,11 @@ Export peaks: catalogue .1651; Sentence .1007 versus behind stone .0826; tolls .
 .0990, 13 blocks .0183, interrupted .0967; notice/mask/death .1470. Maximum boss sources:
 Sentence 3, every other take 2 or fewer.
 
-**Manual listening is pending.** No listening or perceived acoustic quality is claimed.
-Actual listener feedback or an explicit user decision remains required, and signal metrics
-and manifests do not substitute for audition. Every cue duplicates information already on
+**No listening pass was performed.** At closure the owner folded the manual listening pass
+into #1037. That issue's [acceptance record](dungeon-acceptance-1037.md#audio) re-exports these
+takes and measures them against their manifests, and it still makes no listening claim. No
+perceived acoustic quality is claimed here, and signal metrics and manifests do not substitute
+for audition. Every cue duplicates information already on
 screen (pose, cast label, countdown, hazard geometry and spell shapes); none is necessary
 to survive.
 
