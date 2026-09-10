@@ -1106,6 +1106,41 @@ second visibility decision to keep in step with the first.
   client still tips only the viewer's own body, and `client/AGENTS.md` still records that gap
   until the half that closes it lands.
 
+## A boss reward claim, and why the pack freezes before the disk is touched
+
+`internal/game/boss_reward.go` is the live half of a crash-consistent boss reward (#1036). No
+gameplay producer calls it yet; the coordinator that pairs it with `persist`'s reward barrier
+and journal is a later part.
+
+- **Reserve, Seal, Publish, Finish — or Reserve, Abort.** `InstanceManager.ReserveBossReward`
+  runs after the Store barrier's I/O has returned, with that barrier's record as the durable
+  baseline. Every check precedes every change, so a refusal leaves the character untouched. It
+  takes already-rolled entries only: `Partial` is `TakeAllLoot`'s whole-entry fit policy, a purse
+  that cannot hold the silver refuses everything, and at most 64 entries fit the persisted mask.
+  Durable experience joins the live total before the capture. A character inside an instance is
+  imaged at its portal return, as `Records` writes it, and one with no return is refused.
+  `Seal` precedes the intent write and forbids `Abort` from then on. `Publish` follows the
+  durable character write, and `Finish` follows the journal acknowledgement. The lock order is
+  manager → `Sim` → inventory → claim, and the claim's mutex never spans I/O.
+- **From Reserve to Finish, every inventory and silver mutation of the owner is refused before
+  its side effects**: moves and equipment, consumption, crafting, repair, loot, vendor trade,
+  dropping and collecting, structure and block placement, development grants, and a player-trade
+  settlement on either side. The tick treats a pending reward the way it treats a contended
+  inventory. A launch is postponed, while a melee swing, which spends nothing, is judged as usual.
+  A blocked blow is free of wear exactly as a contended one is. Mining spends nothing and is
+  unaffected.
+- **Death wear before publication is a per-slot debt, not a skipped penalty.** A capture
+  carries it applied to its pack, so no writer can store a death for free. `Publish` spends it
+  on the image, so a reward is never worn by deaths that happened before it arrived, and
+  `Abort` spends it on the pack. After publication the pack *is* the image, and wear lands
+  directly. 46 deaths wear any durability to zero, which bounds the count.
+- **The epoch is what makes a capture stale.** A capture before publication carries the old
+  epoch and the old pack, and the Store refuses it once its barrier is released. A capture after
+  publication carries the new epoch and is a valid postimage. `Publish` adds the grant to live
+  experience rather than assigning the image's total, so experience earned during the write
+  survives. `PublishRemembered` and `FinishRemembered` are the same transitions for a character
+  that detached, and they have no caller until identity ownership across a disconnect lands.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

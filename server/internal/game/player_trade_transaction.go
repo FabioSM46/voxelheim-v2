@@ -53,6 +53,9 @@ func settlePlayerTradeLocked(left, right playerTradeSide) playerTradeSettlement 
 		return playerTradeSettlementChanged
 	}
 
+	if left.player.rewardInventoryBusyLocked() || right.player.rewardInventoryBusyLocked() {
+		return playerTradeSettlementBusy
+	}
 	first, second := left.player, right.player
 	if first.entityID > second.entityID {
 		first, second = second, first

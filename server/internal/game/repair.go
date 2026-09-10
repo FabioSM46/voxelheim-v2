@@ -123,7 +123,7 @@ func (p *Player) Repair(req protocol.RepairRequest) (protocol.InventoryState, er
 	// TryLock, never Lock, and the same argument Craft records: every other holder of this
 	// inventory is either this session's own read goroutine or the tick, and the tick only
 	// ever takes it under the lock this function is holding.
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return protocol.InventoryState{}, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
