@@ -6,7 +6,7 @@ use super::{Pending, king, sounds::Cue as CatalogueCue};
 use crate::{
     net::{
         BlowTarget, EncounterMoveKind, EncounterTimelineInbox, MobAction, MobKind, MobState,
-        MovePhase, Snapshot,
+        MoveEnd, MovePhase, Snapshot,
     },
     player::{
         encounters::{EncounterPresentation, MoveKey, PresentedMove, Window},
@@ -59,6 +59,8 @@ struct Observed {
     phase: Option<PhaseKey>,
     consumed: u8,
     current: Option<PhaseKey>,
+    /// The watched instance whose authoritative interrupt has already been voiced.
+    interrupted: Option<MoveKey>,
     foot_serial: Option<u64>,
 }
 #[derive(Default)]
@@ -74,6 +76,8 @@ pub(super) struct Voice {
     pub(super) death: CatalogueCue,
     /// Observed crossing into this stage ordinal, inside one encounter, plays the cue once.
     pub(super) stage: (u8, CatalogueCue),
+    /// Played once when a channel this client watched is ended by an authoritative interrupt.
+    pub(super) interrupted: Option<CatalogueCue>,
     /// Where a cue sits in the boss frame; `side` is -1 for left and +1 for right.
     pub(super) offset: fn(CatalogueCue, f32) -> Vec3,
 }
@@ -85,6 +89,8 @@ static GUARDIAN: Voice = Voice {
     notice: CatalogueCue::Guardian(Cue::Notice),
     death: CatalogueCue::Guardian(Cue::Death),
     stage: (2, CatalogueCue::Guardian(Cue::StrapTear)),
+    // Physical throughout: the guardian never channels.
+    interrupted: None,
     offset: guardian_offset,
 };
 
@@ -262,13 +268,12 @@ impl State {
                 enqueue(pending, mob, voice, voice.notice, Owner::Alive, 0.0);
             }
             seen.action = Some(mob.action);
-            let stage = inbox
-                .and_then(|inbox| {
-                    inbox.live().iter().find(|timeline| {
-                        timeline.boss_entity_id == mob.entity_id && timeline.boss == mob.kind
-                    })
+            let timeline = inbox.and_then(|inbox| {
+                inbox.live().iter().find(|timeline| {
+                    timeline.boss_entity_id == mob.entity_id && timeline.boss == mob.kind
                 })
-                .map(|timeline| (timeline.encounter_id, timeline.phase));
+            });
+            let stage = timeline.map(|timeline| (timeline.encounter_id, timeline.phase));
             let (to, cue) = voice.stage;
             if !dead(mob.action)
                 && seen
@@ -281,6 +286,24 @@ impl State {
             // A frame without a timeline is not a new stage; only an announcement is.
             if stage.is_some() {
                 seen.stage = stage;
+            }
+            // An interrupt is voiced once, only for a channel this client watched, and only
+            // while the snapshot is still inside that pulse's announced window.
+            if let (Some(cue), Some(was), Some(timeline)) =
+                (voice.interrupted, seen.phase, timeline)
+                && !dead(mob.action)
+                && was.phase == MovePhase::Channel
+                && seen.interrupted != Some(was.key)
+                && timeline.encounter_id == was.key.encounter
+                && timeline.moves.iter().any(|ended| {
+                    ended.move_instance_id == was.key.instance
+                        && ended.ended == Some(MoveEnd::Interrupted)
+                        && snapshot.server_tick.wrapping_sub(ended.phase_started_tick)
+                            <= ended.phase_ticks + u32::from(rate) / 10
+                })
+            {
+                seen.interrupted = Some(was.key);
+                enqueue(pending, mob, voice, cue, Owner::Alive, 0.0);
             }
             let one = (!dead(mob.action))
                 .then(|| current(presentation, mob.entity_id, voice))

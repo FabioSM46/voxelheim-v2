@@ -51,18 +51,51 @@ fn frame(
     }
 }
 
-/// Every phase of each listed blow at catalogue durations, then an empty timeline.
-fn blows(recording: &mut Recording, tick: &mut u32, kind: Move, combos: &[Option<(u8, u8)>]) {
-    for (index, combo) in combos.iter().enumerate() {
-        for phase in [Phase::Telegraph, Phase::Release, Phase::Recovery] {
+/// The phases between telegraph and recovery: a ritual's pulses or one release.
+fn middle(kind: Move) -> Vec<(Phase, Option<(u8, u8)>)> {
+    let pulses = match kind {
+        Move::Burial => 4,
+        Move::EdictOfTheGraves | Move::RequiemOfTheBuried => 3,
+        _ => return vec![(Phase::Release, None)],
+    };
+    (0..pulses)
+        .map(|index| (Phase::Channel, Some((index, pulses))))
+        .collect()
+}
+
+/// Every phase of each listed instance at catalogue durations, then an empty timeline.
+/// `end` stops the move halfway through that pulse with the server's stated ending.
+fn perform(
+    recording: &mut Recording,
+    tick: &mut u32,
+    kind: Move,
+    combos: &[Option<(u8, u8)>],
+    end: Option<(u8, MoveEnd)>,
+) {
+    'instances: for (index, combo) in combos.iter().enumerate() {
+        let phases = std::iter::once((Phase::Telegraph, None))
+            .chain(middle(kind))
+            .chain(std::iter::once((Phase::Recovery, None)));
+        for (phase, pulse) in phases {
             let mut state = timeline(kind, phase, *combo, *tick);
             state.moves[0].move_instance_id = 21 + index as u64;
+            state.moves[0].pulse = pulse;
             let action = if phase == Phase::Recovery {
                 Action::Recovery
             } else {
                 Action::Windup
             };
-            for elapsed in 0..state.moves[0].phase_ticks {
+            let ticks = state.moves[0].phase_ticks;
+            for elapsed in 0..ticks {
+                if let Some((_, how)) =
+                    end.filter(|(at, _)| elapsed == ticks / 2 && pulse.map(|p| p.0) == Some(*at))
+                {
+                    state.moves[0].ended = Some(how);
+                    state.moves[0].hazards.clear();
+                    frame(recording, *tick, Action::Recovery, Some(state));
+                    *tick += 1;
+                    break 'instances;
+                }
                 frame(
                     recording,
                     *tick,
@@ -73,34 +106,39 @@ fn blows(recording: &mut Recording, tick: &mut u32, kind: Move, combos: &[Option
             }
         }
     }
-    let mut empty = timeline(kind, Phase::Recovery, None, *tick);
-    empty.moves.clear();
-    for elapsed in 0..20 {
-        frame(
-            recording,
-            *tick,
-            Action::Idle,
-            (elapsed == 0).then(|| empty.clone()),
-        );
+    for _ in 0..20 {
+        frame(recording, *tick, Action::Idle, None);
         *tick += 1;
     }
+    let mut empty = timeline(kind, Phase::Recovery, None, *tick);
+    empty.moves.clear();
+    frame(recording, *tick, Action::Idle, Some(empty));
 }
 
-fn physical(directory: &Path, name: &str, kind: Move, distance: f32, mute: bool, wall: bool) {
-    let mut recording = king_recording(distance, mute);
-    if wall {
+struct Take<'a> {
+    name: &'a str,
+    kind: Move,
+    distance: f32,
+    mute: bool,
+    wall: bool,
+    end: Option<(u8, MoveEnd)>,
+}
+
+fn sequence(directory: &Path, take: Take) {
+    let mut recording = king_recording(take.distance, take.mute);
+    if take.wall {
         stone_wall(recording.app.world_mut());
     }
     let mut tick = 100;
     frame(&mut recording, tick, Action::Idle, None);
     tick += 1;
-    let combos: &[_] = if kind == Move::ThreeTolls {
+    let combos: &[_] = if take.kind == Move::ThreeTolls {
         &TOLLS
     } else {
         &[None]
     };
-    blows(&mut recording, &mut tick, kind, combos);
-    recording.save(directory, name);
+    perform(&mut recording, &mut tick, take.kind, combos, take.end);
+    recording.save(directory, take.name);
 }
 
 #[test]
@@ -116,19 +154,45 @@ fn export_king_audio_sequences() {
     let directory = review_directory();
     let sentence = Move::KingsSentence;
     let tolls = Move::ThreeTolls;
-    physical(&directory, "sentence", sentence, 3.0, false, false);
-    physical(
-        &directory,
-        "sentence-stone-wall",
-        sentence,
-        3.0,
-        false,
-        true,
-    );
-    physical(&directory, "three-tolls", tolls, 3.0, false, false);
-    physical(&directory, "tolls-13-blocks", tolls, 13.0, false, false);
-    physical(&directory, "tolls-25-blocks", tolls, 25.0, false, false);
-    physical(&directory, "tolls-muted", tolls, 3.0, true, false);
+    let requiem = Move::RequiemOfTheBuried;
+    let edict = Move::EdictOfTheGraves;
+    let plain = |name, kind, distance| Take {
+        name,
+        kind,
+        distance,
+        mute: false,
+        wall: false,
+        end: None,
+    };
+    for take in [
+        plain("sentence", sentence, 3.0),
+        Take {
+            wall: true,
+            ..plain("sentence-stone-wall", sentence, 3.0)
+        },
+        plain("three-tolls", tolls, 3.0),
+        plain("tolls-13-blocks", tolls, 13.0),
+        plain("tolls-25-blocks", tolls, 25.0),
+        Take {
+            mute: true,
+            ..plain("tolls-muted", tolls, 3.0)
+        },
+        plain("spear", Move::SepulchreSpear, 3.0),
+        plain("burial", Move::Burial, 3.0),
+        plain("edict", edict, 3.0),
+        plain("requiem", requiem, 3.0),
+        plain("requiem-13-blocks", requiem, 13.0),
+        Take {
+            end: Some((1, MoveEnd::Interrupted)),
+            ..plain("requiem-interrupted", requiem, 3.0)
+        },
+        Take {
+            end: Some((1, MoveEnd::Cancelled)),
+            ..plain("edict-cancelled", edict, 3.0)
+        },
+    ] {
+        sequence(&directory, take);
+    }
 
     // An observed notice, the stage 2 → 3 mask fall, then the corpse.
     let mut recording = king_recording(3.0, false);
