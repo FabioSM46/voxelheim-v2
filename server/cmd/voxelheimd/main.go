@@ -1390,6 +1390,9 @@ func (s *server) flushSessions() {
 	}
 }
 
+// rewardDrainTimeout bounds how long shutdown waits for pending boss rewards.
+const rewardDrainTimeout = 10 * time.Second
+
 // shutdown stops the server in the only order that terminates.
 //
 // Closing the listener unblocks Accept, but an accept-loop iteration can already
@@ -1409,9 +1412,6 @@ func (s *server) flushSessions() {
 // to the world directory — which makes this one flush the last word on what the world
 // holds. Flushing any earlier races an edit into oblivion; flushing outside shutdown, from
 // main, would run after the process has already told itself it stopped.
-// rewardDrainTimeout bounds how long shutdown waits for pending boss rewards.
-const rewardDrainTimeout = 10 * time.Second
-
 func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 	s.log.Info("shutting down", "sessions", s.registry.Count())
 

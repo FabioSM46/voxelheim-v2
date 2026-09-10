@@ -67,7 +67,8 @@ type rewardCoordinator struct {
 
 // rewardTask is one claim's ownership. Its mutex orders the claim's live steps against a
 // teardown, and is never held across disk I/O except the single reservation read. Lock
-// order: rewardTask.mu before Identities.mu, the manager, Sim and inventory.
+// order, on every path including ClaimBossReward: rewardTask.mu before Identities.mu, the
+// manager, Sim and inventory.
 type rewardTask struct {
 	mu       sync.Mutex
 	self     Resolved
@@ -84,6 +85,9 @@ type rewardDetachment struct {
 	live   game.Life // as the simulation last held it, instance coordinates included
 	disk   game.Life // what the final record stores: the portal return, for a visit
 	portal bool
+	// write is false for an external binding with no portal visit. It has no known return
+	// point, so the reward's durable postimage stands as the record instead.
+	write bool
 }
 
 // EnableRewards starts the coordinator over the world's reward journal. An ephemeral world
@@ -114,28 +118,29 @@ func (i *Identities) ClaimBossReward(req BossRewardClaim) (<-chan error, error) 
 		return nil, ErrRewardNotPlaying
 	}
 	task := &rewardTask{self: req.Self, player: req.Player}
+	// Taken before Identities.mu, in the documented order. It stays held until the
+	// reservation resolves, so a teardown waits to learn whether the claim owns it.
+	task.mu.Lock()
+	refuse := func(err error) (<-chan error, error) {
+		i.mu.Unlock()
+		task.mu.Unlock()
+		return nil, err
+	}
 
 	i.mu.Lock()
 	c := i.rewards
 	switch held, live := i.live[req.Self.ID]; {
 	case c == nil:
-		i.mu.Unlock()
-		return nil, ErrRewardsDisabled
+		return refuse(ErrRewardsDisabled)
 	case c.closing:
-		i.mu.Unlock()
-		return nil, ErrRewardsDraining
+		return refuse(ErrRewardsDraining)
 	case !live || held.finalised || held.character != req.Self.Character:
-		i.mu.Unlock()
-		return nil, ErrRewardNotPlaying
+		return refuse(ErrRewardNotPlaying)
 	case held.reward != nil:
-		i.mu.Unlock()
-		return nil, ErrRewardOwned
+		return refuse(ErrRewardOwned)
 	default:
 		held.reward = task
 	}
-	// Unreachable by anyone else until this returns, so taking it here cannot block. It is
-	// held until the reservation resolves, so a teardown waits to learn whether it owns one.
-	task.mu.Lock()
 	c.wg.Add(1)
 	i.mu.Unlock()
 
@@ -327,7 +332,8 @@ func (i *Identities) finishReward(c *rewardCoordinator, t *rewardTask) error {
 }
 
 // endRewardLocked ends a task's ownership. It is called with t.mu held and releases it.
-// A detached character's final record is written before its account is released.
+// A detached character's final record is written before its account is released; an
+// external binding keeps the reward's durable postimage instead.
 func (i *Identities) endRewardLocked(t *rewardTask) {
 	t.closed = true
 	d := t.detached
@@ -339,8 +345,11 @@ func (i *Identities) endRewardLocked(t *rewardTask) {
 	t.mu.Unlock()
 
 	i.writeMu.Lock()
-	err := i.write(t.self.Character, d.disk, t.self.Explored, t.self.Marks)
-	if err == nil {
+	var err error
+	if d.write {
+		err = i.write(t.self.Character, d.disk, t.self.Explored, t.self.Marks)
+	}
+	if d.write && err == nil {
 		i.mu.Lock()
 		delete(i.portalReturns, t.self.Character)
 		i.mu.Unlock()
@@ -364,7 +373,9 @@ func (i *Identities) clearReward(t *rewardTask) {
 // detachReward hands a leaving character's last word to its pending boss reward. It
 // reports false when there is none, and the teardown then writes and releases as always.
 // Called after sim.Leave; on true the claim owns the record write and the release.
-func (i *Identities) detachReward(self Resolved, player *game.Player, portal *game.PortalEntry, instances *game.InstanceManager) bool {
+// writeRecord is false when the character leaves an external binding with no known
+// return point, whose record must not receive its coordinates.
+func (i *Identities) detachReward(self Resolved, player *game.Player, portal *game.PortalEntry, instances *game.InstanceManager, writeRecord bool) bool {
 	i.mu.Lock()
 	var t *rewardTask
 	if held := i.live[self.ID]; held != nil && held.character == self.Character {
@@ -388,7 +399,7 @@ func (i *Identities) detachReward(self Resolved, player *game.Player, portal *ga
 			disk.Pos[axis] = float64(value)
 		}
 	}
-	t.detached = &rewardDetachment{live: life, disk: disk, portal: portal != nil}
+	t.detached = &rewardDetachment{live: life, disk: disk, portal: portal != nil, write: writeRecord}
 	i.finalise(self.ID)
 	return true
 }

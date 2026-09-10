@@ -271,7 +271,7 @@ func TestRewardCoordinatorOwnsADetachedCharacterUntilItsFinalWrite(t *testing.T)
 			awaitStage(t, reached)
 
 			w.sim.Leave(w.player)
-			if !w.ids.detachReward(w.self, w.player, nil, w.manager) {
+			if !w.ids.rememberLeaving(w.self, w.player, nil, w.manager, true, slog.New(slog.DiscardHandler)) {
 				t.Fatal("the teardown did not hand its life to the pending reward")
 			}
 			if w.ids.claim(w.owner) {
@@ -454,5 +454,55 @@ func TestEnableRewardsRefusesAWorldWithoutADurableBarrier(t *testing.T) {
 	}
 	if _, err := w.ids.ClaimBossReward(BossRewardClaim{}); !errors.Is(err, ErrRewardNotPlaying) {
 		t.Fatalf("a claim naming nobody = %v", err)
+	}
+}
+
+// Leaving an external binding writes no foreign coordinates, but a pending reward still
+// owns the character: the account stays claimed until the reward ends, and the record the
+// reward made durable is left standing rather than overwritten.
+func TestLeavingAnExternalWorldHandsAPendingRewardItsCharacter(t *testing.T) {
+	t.Parallel()
+	w := newRewardWorld(t)
+	reached, resume := w.pauseAt(t, "written")
+	done, err := w.ids.ClaimBossReward(w.claim())
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitStage(t, reached)
+
+	w.sim.Leave(w.player)
+	if !w.ids.rememberLeaving(w.self, w.player, nil, w.manager, false, slog.New(slog.DiscardHandler)) {
+		t.Fatal("an external teardown released a character its pending reward owns")
+	}
+	if w.ids.claim(w.owner) {
+		t.Fatal("a reconnect was admitted while the reward was pending")
+	}
+	postimage := w.record(t)
+
+	resume()
+	if err := awaitReward(t, done); err != nil {
+		t.Fatal(err)
+	}
+	w.assertDelivered(t)
+	if got := w.record(t); got != postimage {
+		t.Fatal("an external teardown wrote over the reward's durable record")
+	}
+	if !w.ids.claim(w.owner) {
+		t.Fatal("the account was not released after the reward ended")
+	}
+}
+
+// Without a reward the external branch keeps its previous record and leaves the release
+// to the teardown, exactly as before rewards existed.
+func TestLeavingAnExternalWorldWithoutARewardKeepsTheRecord(t *testing.T) {
+	t.Parallel()
+	w := newRewardWorld(t)
+	before := w.record(t)
+	w.sim.Leave(w.player)
+	if w.ids.rememberLeaving(w.self, w.player, nil, w.manager, false, slog.New(slog.DiscardHandler)) {
+		t.Fatal("an external teardown without a reward claimed ownership")
+	}
+	if got := w.record(t); got != before {
+		t.Fatal("an external teardown wrote foreign coordinates")
 	}
 }
