@@ -136,6 +136,9 @@ type playtestConfig struct {
 	// the fight after that long instead of at playtestLimitSeconds.
 	stage   uint8
 	seconds int
+
+	// timed records the wall time of every simulation step, for the server cost harness.
+	timed bool
 }
 
 func (c playtestConfig) String() string {
@@ -207,6 +210,9 @@ type playtestResult struct {
 
 	// bossDamage is the health the party took from the boss, by what the boss was doing.
 	bossDamage map[string]int
+
+	// stepNanos is the wall time of every simulation step, when the config asked for it.
+	stepNanos []int64
 }
 
 func (r *playtestResult) move(kind vnet.EncounterMoveKind) *playtestMoveStats {
@@ -262,6 +268,10 @@ type playtest struct {
 	// beforeStep, when set, runs before every simulation step. A test seam for mutations
 	// that prove the referee catches what it claims to.
 	beforeStep func()
+
+	// timed records the wall time of every simulation step in stepNanos.
+	timed     bool
+	stepNanos []int64
 }
 
 func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
@@ -281,7 +291,7 @@ func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
 		}
 	}
 	loadDungeon(t, session)
-	pt := &playtest{cfg: cfg, manager: m, s: session.Sim, escapeTicks: map[vnet.EncounterMoveKind]uint64{}}
+	pt := &playtest{cfg: cfg, manager: m, s: session.Sim, escapeTicks: map[vnet.EncounterMoveKind]uint64{}, timed: cfg.timed}
 	if cfg.network.delayMillis > 0 {
 		pt.delay = uint64(ticksFor(time.Duration(cfg.network.delayMillis)*time.Millisecond, DefaultTickRate))
 	}
@@ -361,7 +371,13 @@ func (pt *playtest) bossIDLocked() uint64 {
 
 func (pt *playtest) step() {
 	pt.tick++
+	if !pt.timed {
+		pt.manager.Step()
+		return
+	}
+	started := time.Now()
 	pt.manager.Step()
+	pt.stepNanos = append(pt.stepNanos, time.Since(started).Nanoseconds())
 }
 
 // playtestWindow is one damaging window: a move instance, and which pulse of it.
@@ -1062,7 +1078,9 @@ func runPlaytest(t *testing.T, cfg playtestConfig) playtestResult {
 	t.Helper()
 	var result playtestResult
 	t.Run(cfg.String(), func(t *testing.T) {
-		result = newPlaytest(t, cfg).run()
+		pt := newPlaytest(t, cfg)
+		result = pt.run()
+		result.stepNanos = pt.stepNanos
 		t.Log(result)
 	})
 	return result
