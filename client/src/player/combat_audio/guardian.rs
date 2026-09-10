@@ -1,7 +1,8 @@
-//! Once-only physical gestures sampled from the server timeline, plus explicitly
-//! cosmetic gait contacts. Neither path infers a successful hit.
+//! Once-only boss gestures sampled from the server timeline, plus the guardian's
+//! explicitly cosmetic gait contacts. Neither path infers a successful hit. The
+//! observer is shared by every boss [`Voice`]; a species adds only its catalogue.
 pub(super) mod sounds;
-use super::{Pending, sounds::Cue as CatalogueCue};
+use super::{Pending, king, sounds::Cue as CatalogueCue};
 use crate::{
     net::{
         BlowTarget, EncounterMoveKind, EncounterTimelineInbox, MobAction, MobKind, MobState,
@@ -17,10 +18,11 @@ use sounds::Cue;
 use std::collections::HashMap;
 
 // Four correlated boss gestures must coexist with protected voice references.
-// This is authored source headroom, not a mixer or user-setting change.
+// This is authored source headroom, not a mixer or user-setting change. The caps are
+// shared by every boss voice, not granted again to each species.
 pub(super) const SOURCE_GAIN: f32 = 0.5;
 pub(super) const MAX_PER_BOSS: usize = 3;
-pub(super) const MAX_GUARDIAN_SOURCES: usize = 4;
+pub(super) const MAX_BOSS_SOURCES: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PhaseKey {
@@ -44,7 +46,8 @@ impl From<&PresentedMove> for PhaseKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Owner {
     Phase(PhaseKey),
-    Landing(PhaseKey),
+    /// Rings on through later phases of the same announced instance, never past it.
+    Tail(PhaseKey),
     Alive,
     Death,
     Gait,
@@ -61,6 +64,36 @@ struct Observed {
 #[derive(Default)]
 pub(super) struct State(HashMap<u64, Observed>);
 
+/// One boss species' authored routing. Observation, freshness, ownership and caps
+/// stay here, so a second boss cannot drift from these replay rules.
+pub(super) struct Voice {
+    pub(super) kind: MobKind,
+    pub(super) supported: fn(EncounterMoveKind) -> bool,
+    pub(super) markers: fn(&PresentedMove) -> Vec<(u32, CatalogueCue, f32)>,
+    pub(super) notice: CatalogueCue,
+    pub(super) death: CatalogueCue,
+    /// Observed crossing into this stage ordinal, inside one encounter, plays the cue once.
+    pub(super) stage: (u8, CatalogueCue),
+    /// Where a cue sits in the boss frame; `side` is -1 for left and +1 for right.
+    pub(super) offset: fn(CatalogueCue, f32) -> Vec3,
+}
+
+static GUARDIAN: Voice = Voice {
+    kind: MobKind::VargrGuardian,
+    supported,
+    markers: guardian_markers,
+    notice: CatalogueCue::Guardian(Cue::Notice),
+    death: CatalogueCue::Guardian(Cue::Death),
+    stage: (2, CatalogueCue::Guardian(Cue::StrapTear)),
+    offset: guardian_offset,
+};
+
+fn voice(kind: MobKind) -> Option<&'static Voice> {
+    [&GUARDIAN, &king::VOICE]
+        .into_iter()
+        .find(|voice| voice.kind == kind)
+}
+
 fn dead(action: MobAction) -> bool {
     matches!(action, MobAction::Dying | MobAction::Corpse)
 }
@@ -74,16 +107,20 @@ fn supported(kind: EncounterMoveKind) -> bool {
             | EncounterMoveKind::BonebreakerJaws
     )
 }
-fn current(presentation: Option<&EncounterPresentation>, boss: u64) -> Option<&PresentedMove> {
+fn current<'a>(
+    presentation: Option<&'a EncounterPresentation>,
+    boss: u64,
+    voice: &Voice,
+) -> Option<&'a PresentedMove> {
     presentation?
         .0
         .iter()
         .filter(|one| {
             one.key.boss == boss
-                && one.boss_kind == MobKind::VargrGuardian
+                && one.boss_kind == voice.kind
                 && one.window == Window::Current
                 && one.announced.ended.is_none()
-                && supported(one.announced.kind)
+                && (voice.supported)(one.announced.kind)
         })
         .max_by_key(|one| (one.damaging(), one.key.instance))
 }
@@ -94,15 +131,18 @@ fn fresh(tick: u32, marker: u32, rate: u8) -> bool {
     tick.wrapping_sub(marker) <= u32::from(rate) / 10
 }
 
-fn enqueue(pending: &mut Vec<Pending>, mob: &MobState, cue: Cue, owner: Owner, side: f32) {
-    let offset = if cue.at_feet() {
-        Vec3::new(side * 0.58, 0.05, -0.34)
-    } else {
-        Vec3::new(0.0, 1.25, -0.32)
-    };
+fn enqueue(
+    pending: &mut Vec<Pending>,
+    mob: &MobState,
+    voice: &Voice,
+    cue: CatalogueCue,
+    owner: Owner,
+    side: f32,
+) {
+    let offset = (voice.offset)(cue, side);
     let rotated = Quat::from_rotation_y(mob.yaw) * offset;
     pending.push(Pending {
-        cue: CatalogueCue::Guardian(cue),
+        cue,
         id: mob.entity_id,
         target: BlowTarget::Mob(mob.kind),
         origin: Vec3::from_array(mob.pos) + rotated,
@@ -110,6 +150,21 @@ fn enqueue(pending: &mut Vec<Pending>, mob: &MobState, cue: Cue, owner: Owner, s
         offset: Some(offset),
         owner: Some(owner),
     });
+}
+
+fn guardian_offset(cue: CatalogueCue, side: f32) -> Vec3 {
+    if matches!(cue, CatalogueCue::Guardian(cue) if cue.at_feet()) {
+        Vec3::new(side * 0.58, 0.05, -0.34)
+    } else {
+        Vec3::new(0.0, 1.25, -0.32)
+    }
+}
+
+fn guardian_markers(one: &PresentedMove) -> Vec<(u32, CatalogueCue, f32)> {
+    markers(one)
+        .into_iter()
+        .map(|(tick, cue, side)| (tick, CatalogueCue::Guardian(cue), side))
+        .collect()
 }
 
 /// Small marker schedules use normalized authoritative intervals. There is no local
@@ -194,18 +249,17 @@ impl State {
             snapshot
                 .mobs
                 .iter()
-                .any(|mob| mob.entity_id == *id && mob.kind == MobKind::VargrGuardian)
+                .any(|mob| mob.entity_id == *id && voice(mob.kind).is_some())
         });
-        for mob in snapshot
-            .mobs
-            .iter()
-            .filter(|mob| mob.kind == MobKind::VargrGuardian)
-        {
+        for mob in &snapshot.mobs {
+            let Some(voice) = voice(mob.kind) else {
+                continue;
+            };
             let seen = self.0.entry(mob.entity_id).or_default();
             if seen.action.is_some_and(|action| !dead(action)) && dead(mob.action) {
-                enqueue(pending, mob, Cue::Death, Owner::Death, 0.0);
+                enqueue(pending, mob, voice, voice.death, Owner::Death, 0.0);
             } else if seen.action == Some(MobAction::Idle) && mob.action == MobAction::Chase {
-                enqueue(pending, mob, Cue::Notice, Owner::Alive, 0.0);
+                enqueue(pending, mob, voice, voice.notice, Owner::Alive, 0.0);
             }
             seen.action = Some(mob.action);
             let stage = inbox
@@ -215,17 +269,21 @@ impl State {
                     })
                 })
                 .map(|timeline| (timeline.encounter_id, timeline.phase));
+            let (to, cue) = voice.stage;
             if !dead(mob.action)
                 && seen
                     .stage
                     .zip(stage)
-                    .is_some_and(|(old, new)| old.0 == new.0 && old.1 == 1 && new.1 == 2)
+                    .is_some_and(|(old, new)| old.0 == new.0 && old.1 < to && new.1 >= to)
             {
-                enqueue(pending, mob, Cue::StrapTear, Owner::Alive, 0.0);
+                enqueue(pending, mob, voice, cue, Owner::Alive, 0.0);
             }
-            seen.stage = stage;
+            // A frame without a timeline is not a new stage; only an announcement is.
+            if stage.is_some() {
+                seen.stage = stage;
+            }
             let one = (!dead(mob.action))
-                .then(|| current(presentation, mob.entity_id))
+                .then(|| current(presentation, mob.entity_id, voice))
                 .flatten();
             if one.is_none() && seen.current.is_some() {
                 seen.consumed = u8::MAX;
@@ -239,7 +297,7 @@ impl State {
                 seen.phase = Some(key);
                 seen.consumed = 0;
             }
-            for (index, (offset, cue, side)) in markers(one).into_iter().enumerate() {
+            for (index, (offset, cue, side)) in (voice.markers)(one).into_iter().enumerate() {
                 let tick = one.announced.phase_started_tick.wrapping_add(offset);
                 if snapshot.server_tick.wrapping_sub(tick) >= 1 << 31
                     || seen.consumed & (1 << index) != 0
@@ -252,9 +310,10 @@ impl State {
                     enqueue(
                         pending,
                         mob,
+                        voice,
                         cue,
-                        if cue == Cue::Landing {
-                            Owner::Landing(key)
+                        if cue.tail() {
+                            Owner::Tail(key)
                         } else {
                             Owner::Phase(key)
                         },
@@ -322,11 +381,10 @@ impl State {
         };
         match owner {
             Owner::Phase(key) => seen.current == Some(key),
-            Owner::Landing(key) => seen.current.is_some_and(|now| {
-                now.key == key.key
-                    && now.kind == key.kind
-                    && matches!(now.phase, MovePhase::Release | MovePhase::Recovery)
-            }),
+            // Phases of one instance only move forward, so identity is the whole test.
+            Owner::Tail(key) => seen
+                .current
+                .is_some_and(|now| now.key == key.key && now.kind == key.kind),
             Owner::Death => seen.action.is_some_and(dead),
             Owner::Alive => seen.action.is_some_and(|action| !dead(action)),
             Owner::Gait => {
@@ -342,6 +400,6 @@ impl State {
 }
 
 #[cfg(test)]
-mod capture;
+pub(super) mod capture;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

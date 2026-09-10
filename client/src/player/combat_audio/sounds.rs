@@ -15,11 +15,10 @@ pub(super) enum Cue {
     VargrNotice,
     VargrAttack,
     Guardian(super::guardian::sounds::Cue),
-    KingNotice,
-    KingAttack,
+    King(super::king::sounds::Cue),
 }
 
-pub(super) const CUES: [Cue; 10] = [
+pub(super) const CUES: [Cue; 8] = [
     Cue::DryImpact,
     Cue::BeastImpact,
     Cue::ClothImpact,
@@ -28,8 +27,6 @@ pub(super) const CUES: [Cue; 10] = [
     Cue::DraugrAttack,
     Cue::VargrNotice,
     Cue::VargrAttack,
-    Cue::KingNotice,
-    Cue::KingAttack,
 ];
 
 pub(super) fn impact(target: BlowTarget) -> Cue {
@@ -59,10 +56,8 @@ pub(super) fn voice(kind: MobKind, windup: bool) -> Option<Cue> {
         // These species have no combat telegraph voice: civilians and mounts do not
         // belong to this hostile voice catalogue. Their physical impacts still play.
         (MobKind::Deer | MobKind::Villager | MobKind::Horse, _) => None,
-        // The guardian is routed by its explicit encounter phases, never Windup.
-        (MobKind::VargrGuardian, _) => None,
-        (MobKind::DraugrKing, false) => Some(Cue::KingNotice),
-        (MobKind::DraugrKing, true) => Some(Cue::KingAttack),
+        // Both bosses are routed by their explicit encounter phases, never Windup.
+        (MobKind::VargrGuardian | MobKind::DraugrKing, _) => None,
     }
 }
 
@@ -78,14 +73,33 @@ impl Cue {
             Self::VargrNotice => 0.40,
             Self::VargrAttack => 0.18,
             Self::Guardian(cue) => cue.seconds(),
-            Self::KingNotice => 0.78,
-            Self::KingAttack => 0.38,
+            Self::King(cue) => cue.seconds(),
         }
     }
 
+    /// Admission order: boss cues carry their authored priority, generic cues sit at three.
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Guardian(cue) => cue.priority(),
+            Self::King(cue) => cue.priority(),
+            _ => 3,
+        }
+    }
+
+    /// A boss cue that may ring on through later phases of its own move instance. The
+    /// king's phases are short at 20 Hz, so each of his gestures owns its instance.
+    pub fn tail(self) -> bool {
+        matches!(
+            self,
+            Self::Guardian(super::guardian::sounds::Cue::Landing) | Self::King(_)
+        )
+    }
+
     pub fn describe(self) -> Sound {
-        if let Self::Guardian(cue) = self {
-            return cue.describe();
+        match self {
+            Self::Guardian(cue) => return cue.describe(),
+            Self::King(cue) => return cue.describe(),
+            _ => {}
         }
         // Sine/noise transients make impacts; rough tones are reserved for creature
         // voices. No player grunt is synthesized by the cloth-and-body contact cue.
@@ -98,11 +112,7 @@ impl Cue {
             Self::DraugrAttack => (103.0, 0.18, 0.42, 1800.0, Wave::Triangle),
             Self::VargrNotice => (157.0, 0.32, 0.22, 650.0, Wave::Triangle),
             Self::VargrAttack => (281.0, 0.30, 0.37, 2200.0, Wave::Triangle),
-            // The king has a hollow sustained groan and a metallic-throated effort.
-            // These describe voices, never cast or encounter state.
-            Self::Guardian(_) => unreachable!("guardian recipes return above"),
-            Self::KingNotice => (47.0, 0.29, 0.32, 730.0, Wave::Triangle),
-            Self::KingAttack => (83.0, 0.25, 0.40, 2400.0, Wave::Triangle),
+            Self::Guardian(_) | Self::King(_) => unreachable!("boss recipes return above"),
         };
         let envelope = Envelope {
             attack: 0.004,
@@ -192,25 +202,23 @@ mod tests {
         );
     }
 
-    /// Each boss has its own notice/attack pair; the existing impact stays put.
+    /// Bosses speak only through announced phases; the existing impact stays put.
     #[test]
-    fn the_bosses_have_distinct_hostile_voices_and_keep_their_impacts() {
-        for (boss, field) in [(MobKind::DraugrKing, MobKind::Draugr)] {
-            let notice = voice(boss, false).expect("hostile notice");
-            let attack = voice(boss, true).expect("hostile attack");
-            assert_ne!(notice, attack);
-            assert_ne!(Some(notice), voice(field, false));
-            assert_ne!(Some(attack), voice(field, true));
-            for cue in [notice, attack] {
-                assert!(CUES.contains(&cue));
-                assert!(cue.seconds().is_finite() && cue.seconds() > 0.0);
-            }
-            assert_eq!(
-                impact(BlowTarget::Mob(boss)),
-                impact(BlowTarget::Mob(field)),
-                "a boss meets a blade like the species it shares a name with"
-            );
+    fn the_bosses_have_no_windup_voice_and_keep_their_impacts() {
+        for boss in [MobKind::VargrGuardian, MobKind::DraugrKing] {
+            assert_eq!(voice(boss, false), None);
+            assert_eq!(voice(boss, true), None);
         }
+        assert!(
+            CUES.iter()
+                .all(|cue| !matches!(cue, Cue::Guardian(_) | Cue::King(_))),
+            "boss recipes are baked from their own catalogues"
+        );
+        assert_eq!(
+            impact(BlowTarget::Mob(MobKind::DraugrKing)),
+            impact(BlowTarget::Mob(MobKind::Draugr)),
+            "a boss meets a blade like the species it shares a name with"
+        );
         // And the two bosses are not one material: a beast and a suit of grave-iron.
         assert_ne!(
             impact(BlowTarget::Mob(MobKind::VargrGuardian)),

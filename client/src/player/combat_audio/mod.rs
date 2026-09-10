@@ -1,5 +1,6 @@
 //! Server outcomes and visible action transitions only. No input, swings or health deltas.
 mod guardian;
+mod king;
 mod sounds;
 
 use super::{AimCamera, ApplySnapshots, SnapshotBuffer, WorldCamera};
@@ -22,7 +23,7 @@ use std::{
 /// Visibility binding remains mandatory even inside this presentation-only distance.
 const COMBAT_RANGE: f32 = 32.0;
 /// Generic contacts expire even if the output device stops draining its ring.
-/// Guardian cues use their bounded recipe duration plus a half-second scheduling tail.
+/// Boss cues use their bounded recipe duration plus a half-second scheduling tail.
 const MAX_PLAYBACK_AGE: Duration = Duration::from_secs(1);
 
 #[derive(Resource, Default)]
@@ -214,6 +215,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             .iter()
             .copied()
             .chain(guardian::sounds::CUES.into_iter().map(Cue::Guardian))
+            .chain(king::sounds::CUES.into_iter().map(Cue::King))
             .filter_map(|cue| {
                 cue.describe()
                     .bake(cue.seconds(), rate, 19)
@@ -274,12 +276,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         active.playback.place(placed);
         active.playback.pump() == Status::Playing
     });
-    pending.sort_by_key(|pending| {
-        std::cmp::Reverse(match pending.cue {
-            Cue::Guardian(cue) => cue.priority(),
-            _ => 3,
-        })
-    });
+    pending.sort_by_key(|pending| std::cmp::Reverse(pending.cue.priority()));
     for cue in pending {
         let mut placed = placement(cue.origin);
         if cue.owner.is_some() {
@@ -291,7 +288,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         let Some((_, baked)) = state.palette.iter().find(|(kind, _)| *kind == cue.cue) else {
             continue;
         };
-        if let Cue::Guardian(guardian_cue) = cue.cue {
+        if cue.owner.is_some() {
             let count = state
                 .playing
                 .iter()
@@ -302,7 +299,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                 .iter()
                 .filter(|active| active.owner.is_some() && active.id == cue.id)
                 .count();
-            if count >= guardian::MAX_GUARDIAN_SOURCES || per_boss >= guardian::MAX_PER_BOSS {
+            if count >= guardian::MAX_BOSS_SOURCES || per_boss >= guardian::MAX_PER_BOSS {
                 // Admission can discard our own low-priority texture, never another bus.
                 let victim = state
                     .playing
@@ -311,7 +308,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                     .filter(|(_, active)| {
                         active.owner.is_some()
                             && (per_boss < guardian::MAX_PER_BOSS || active.id == cue.id)
-                            && active.priority < guardian_cue.priority()
+                            && active.priority < cue.cue.priority()
                     })
                     .min_by_key(|(_, active)| active.priority)
                     .map(|(index, _)| index);
@@ -338,10 +335,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                 follows: cue.follows,
                 offset: cue.offset,
                 owner: cue.owner,
-                priority: match cue.cue {
-                    Cue::Guardian(cue) => cue.priority(),
-                    _ => 3,
-                },
+                priority: cue.cue.priority(),
                 expires: inputs.time.elapsed()
                     + if cue.owner.is_some() {
                         Duration::from_secs_f32(cue.cue.seconds() + 0.5)
