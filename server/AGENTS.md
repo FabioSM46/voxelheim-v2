@@ -1211,6 +1211,30 @@ That is deliberate: a journal that delivers nothing cannot duplicate them.
   prepared intent names it. `NextGeneration` never decreases, so a collected generation is
   never reissued.
 
+### A boss's loot waits for the journal
+
+`internal/game/boss_reward_journal.go` is the game half of durable boss loot. In production it
+stays off until the session side is wired.
+
+- **Freezing.** `WithDurableBossRewards` affects dungeon simulations only. When it is on, a boss's
+  death freezes each loot-roster owner's personal roll, in roll order, into a pending
+  `BossRewardDefeat`, and holds the corpse. Nobody can open held loot, and a snapshot does not
+  advertise it.
+- **Three separate groups.** The roster is the encounter's personal-loot roster, frozen at the pull.
+  It is not the run's bindings, which are who was inside, and not the experience recipients, which
+  keep their own rule and are not journaled yet.
+- **Release.** A run's pending defeats appear on its `SavedSession` until
+  `InstanceManager.ReleaseBossRewards` records that the journal made them durable. The release is
+  exact-match on the run, as `AssignRunGeneration` is. After it, loot is delivered only through a
+  claim:
+  - a take answers `ErrBossRewardClaimRequired`;
+  - `BossLootToClaim` returns the exact entries with their frozen roll indices, plus silver for
+    take-all;
+  - `ConsumeClaimedBossLoot` removes what an acknowledged claim took.
+- **The journal side.** `RewardStore.AllocateRun` can carry entitlement-bearing defeats, so a run's
+  first defeat and what it owes land in one write. `ExpireRuns` retains the generations a caller
+  names, so a run players are still inside at midnight keeps its journal run.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

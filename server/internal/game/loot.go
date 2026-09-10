@@ -78,6 +78,9 @@ type corpse struct {
 	// independent entry slice and revision; normal mobs keep one container above.
 	personal    map[corpseOwner]*corpseContainer
 	expiresTick uint64
+	// rewards says whether a dungeon boss's personal loot is live, held for the boss reward
+	// journal, or delivered only through claims. See boss_reward_journal.go.
+	rewards bossRewardHold
 }
 
 func (c *corpse) ownedBy(p *Player) bool {
@@ -200,6 +203,9 @@ func (s *Sim) makeCorpseLocked(m *mob) *corpse {
 		for _, owner := range roster {
 			container := s.rollLootLocked(m)
 			c.personal[owner] = &container
+		}
+		if s.durableBossRewards && s.dungeon != nil {
+			s.holdBossRewardsLocked(c, m.kind, roster)
 		}
 	} else {
 		if m.firstHit != nil {
@@ -365,9 +371,12 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	}
 	p.haveLootTakeTick, p.lastLootTakeTick = true, req.ClientTick
 
-	_, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
+	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
 	if err != nil {
 		return reason, err
+	}
+	if c.rewards == bossRewardsClaimed {
+		return vnet.RefusalReasonUnknown, ErrBossRewardClaimRequired
 	}
 	entryIndex := -1
 	for index := range container.entries {
@@ -418,9 +427,12 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 	}
 	p.haveLootTakeAllTick, p.lastLootTakeAllTick = true, req.ClientTick
 
-	_, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
+	c, container, reason, err := p.openContainerLocked(req.CorpseID, req.Revision)
 	if err != nil {
 		return reason, err
+	}
+	if c.rewards == bossRewardsClaimed {
+		return vnet.RefusalReasonUnknown, ErrBossRewardClaimRequired
 	}
 	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
@@ -479,6 +491,9 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 	if c == nil || !withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errors.New("the corpse is unavailable")
 	}
+	if c.rewards == bossRewardsHeld {
+		return nil, nil, vnet.RefusalReasonCorpseUnavailable, errBossRewardHeld
+	}
 	container, owned := c.containerFor(p)
 	if !owned {
 		return nil, nil, vnet.RefusalReasonLootNotOwned, errors.New("the corpse belongs to another character")
@@ -497,7 +512,7 @@ func (p *Player) accessibleCorpseLocked(id uint64) (*corpse, *corpseContainer, v
 // no reason because a snapshot advertises capabilities rather than refusals.
 func (p *Player) canOpenCorpseLocked(c *corpse) bool {
 	container, owned := c.containerFor(p)
-	if c == nil || !owned || container.empty() || p.cannotActLocked() != nil ||
+	if c == nil || c.rewards == bossRewardsHeld || !owned || container.empty() || p.cannotActLocked() != nil ||
 		!withinView(p.chunk, c.chunk, p.sim.viewDistance) {
 		return false
 	}

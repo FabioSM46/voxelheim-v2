@@ -1,11 +1,14 @@
 package persist
 
+import "slices"
+
 // ExpireRuns is the journal's collection at the daily reset. It removes each run whose
-// reset has passed, unless a prepared intent still names its generation: expiry never
-// discards an unresolved claim. NextGeneration is untouched, so a collected generation is
-// never issued again. It reports how many runs it removed; a pass with nothing to collect
-// writes nothing.
-func (s *RewardStore) ExpireRuns(now int64) (int, error) {
+// reset has passed, unless a prepared intent still names its generation, which means expiry
+// never discards an unresolved claim, or retain names it: a run that players are still
+// inside keeps its journal run past midnight. NextGeneration is untouched, so a collected
+// generation is never issued again. It reports how many runs it removed; a pass with nothing
+// to collect writes nothing.
+func (s *RewardStore) ExpireRuns(now int64, retain ...uint64) (int, error) {
 	if s == nil {
 		return 0, ErrRewardJournalConflict
 	}
@@ -21,7 +24,7 @@ func (s *RewardStore) ExpireRuns(now int64) (int, error) {
 	}
 	kept := next.Runs[:0]
 	for _, run := range next.Runs {
-		if run.Session.ExpiresUnix > now || pending[run.Generation] {
+		if run.Session.ExpiresUnix > now || pending[run.Generation] || slices.Contains(retain, run.Generation) {
 			kept = append(kept, run)
 		}
 	}

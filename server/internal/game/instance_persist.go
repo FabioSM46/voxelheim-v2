@@ -85,6 +85,10 @@ type SavedSession struct {
 	// Generation is the run's boss reward journal identity, or zero before one is
 	// allocated. It is not in the sessions file: a restore takes it from the journal.
 	Generation uint64
+	// PendingRewards are the run's frozen boss defeats that the reward journal has not yet
+	// made durable, in death order. They are not in the sessions file and are not restored:
+	// the journal is what outlives a restart.
+	PendingRewards []BossRewardDefeat
 }
 
 // SavedSessions is every run this server would have to restore, in a stable order.
@@ -123,6 +127,7 @@ func (m *InstanceManager) SavedSessions() []SavedSession {
 		})
 		saved = append(saved, SavedSession{
 			ID: id, Seed: s.seed, Ruin: s.ruin, ExpiresUnix: s.expiresUnix, Generation: s.generation,
+			PendingRewards: clonePendingRewards(s.pendingRewards),
 			DefeatedBosses: append([]vnet.MobKind(nil), s.defeated...),
 			Bound:          who,
 		})
