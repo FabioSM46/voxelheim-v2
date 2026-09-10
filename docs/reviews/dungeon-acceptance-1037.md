@@ -95,11 +95,19 @@ session is delivered, and parts 1 and 2 swept delayed and lost snapshots.
 
 ### Listening
 
-**No listening claim is made.** The agent has no audio input. The measurements above establish that
-each cue is present in the mix on its manifested tick, attenuates with distance, and is silent when
-muted. They do not establish how any cue sounds to a player, whether cues are distinguishable by
-ear, or whether they read at distance. The manual inspection #1029 and #1035 deferred here is
-delivered as these recordings and measurements, not as an audition.
+**These are recordings and signal measurements against the manifests, not a listening claim.** The
+agent has no audio input.
+
+**What the measurements establish:** each cue is present in the mix on its manifested tick, it
+attenuates with distance, and it is silent when muted.
+
+**What they do not establish:** how any cue sounds to a player, whether cues can be told apart by
+ear, or whether they read at distance.
+
+The owner decided that #1037 closes with no separate human inspection. The listening pass deferred
+from #1029 and #1035 is therefore met by this recorded evidence, stated as not being a listening
+claim: the [manifest analysis](dungeon-acceptance-1037/audio-onsets.csv) and the exporters that
+regenerate the WAVs and manifests.
 
 ## Server cost
 
@@ -120,8 +128,9 @@ It uses part 1's harness, whose scripted players decode their own frames outside
 - **Warm-up:** one discarded cleared-dungeon run precedes the recorded ones.
 - **Runs:** three consecutive runs with nothing else started by this work; the host's one-minute
   load average was 1.7–1.8.
-- **Budget:** there is no recorded server cost budget. The reference is the tick interval, 50 ms at
-  the default 20 Hz.
+- **Reference:** no server cost budget was set. The owner's decision is to report the cost against
+  the tick interval, 50 ms at the default 20 Hz, and to record these numbers as the baseline for
+  later comparison, not as a pass or fail against a threshold.
 
 Across the three runs ([run 1](dungeon-acceptance-1037/server-cost-run1.csv),
 [2](dungeon-acceptance-1037/server-cost-run2.csv), [3](dungeon-acceptance-1037/server-cost-run3.csv)):
@@ -148,10 +157,29 @@ instances.
 ## Recorded budgets
 
 The design's [initial authoring budgets](../first-dungeon/README.md#initial-authoring-budgets) are
-the only recorded reference budgets. It states that a final GPU performance budget remains a
-measured follow-up.
+the only recorded reference budgets. The owner treats them as real limits, so the actual counts
+below are checked against them:
+- moving mesh segments;
+- triangles;
+- material handles;
+- concurrent cosmetic effect groups.
+
+The design sets no frame-time budget and makes no FPS promise without hardware. The frame times
+above are measured on the named reference machine and recorded as the baseline for later
+comparison, not as a pass or fail.
 
 <!-- pending: measured segments, triangles, materials and concurrent effect groups -->
+
+## Remaining limits
+
+- **The Draugr's blade enters adjacent terrain.** [Part 3b](bosses-in-motion-1037.md) measured 24–96
+  vertices inside the monolith in the Sentence and Toll frames at 1.1 blocks from it. This part
+  changes no blade pose. The limit is tracked by #1103, a presentation-only blade pose that avoids
+  terrain.
+- **Reduced visual effects** stays blocked on #1093; no stand-in setting was built.
+- **Fight length** is handed to #1099. Part 1 measured every fight far shorter than the design's
+  targets, and no health, damage or scaling value changes here.
+- **No listening claim** is made about any cue, as stated under [Listening](#listening).
 
 ## Acceptance criteria
 
