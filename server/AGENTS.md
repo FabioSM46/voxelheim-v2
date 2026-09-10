@@ -1175,6 +1175,34 @@ barrier to its acknowledgement. Nothing submits a claim until the reward produce
   barrier and durable intent, which startup recovery replays. That wait comes before the instance
   manager closes.
 
+### Defeated progress is durable before any reward is
+
+The journal records which encounters a run has put down, and who owes it, before it
+delivers anything. Every piece below lands with no personal loot or experience entitlement,
+so boss loot and experience still reach players through the live corpse and award paths.
+That is deliberate: a journal that delivers nothing cannot duplicate them.
+
+- **Startup recovers first.** `persist.OpenStoreWithRewardRecovery` replaces `CheckInactive`.
+  A prepared reward is replayed or reconfirmed before the players directory is indexed, and a
+  journal that has issued a generation makes receipt handling strict. `session.ValidateRewardRecord`
+  is the game's judgement of a recovered life.
+- **Saved runs restore through the journal.** `OverlaySessions` lays the journal over the
+  sessions file:
+  - its defeats are authoritative;
+  - bindings are unioned;
+  - each run carries its generation, even when the file is stale or missing.
+
+  A journal-held run that cannot be overlaid or restored stops startup, because starting free
+  would respawn a boss the journal records as dead.
+- **The producer is `Identities.SyncRewardRuns`, every `rewardSyncInterval` and at shutdown.**
+  It allocates a generation for a saved run without one, appends each defeat in the order it
+  died, and unions every binding. Each step is an idempotent retry, and no simulation lock is
+  held across a write. A crash between allocation and the first append restores the run without
+  that defeat, which is the conservative direction.
+- **The reset collects.** `RewardStore.ExpireRuns` removes a run whose reset has passed unless a
+  prepared intent names it. `NextGeneration` never decreases, so a collected generation is
+  never reissued.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

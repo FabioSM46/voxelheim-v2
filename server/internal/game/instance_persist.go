@@ -82,6 +82,9 @@ type SavedSession struct {
 	ExpiresUnix    int64
 	DefeatedBosses []vnet.MobKind
 	Bound          []InstanceCharacter
+	// Generation is the run's boss reward journal identity, or zero before one is
+	// allocated. It is not in the sessions file: a restore takes it from the journal.
+	Generation uint64
 }
 
 // SavedSessions is every run this server would have to restore, in a stable order.
@@ -119,7 +122,7 @@ func (m *InstanceManager) SavedSessions() []SavedSession {
 			return cmp.Compare(a.CharacterID, b.CharacterID)
 		})
 		saved = append(saved, SavedSession{
-			ID: id, Seed: s.seed, Ruin: s.ruin, ExpiresUnix: s.expiresUnix,
+			ID: id, Seed: s.seed, Ruin: s.ruin, ExpiresUnix: s.expiresUnix, Generation: s.generation,
 			DefeatedBosses: append([]vnet.MobKind(nil), s.defeated...),
 			Bound:          who,
 		})
@@ -201,6 +204,7 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 	now := m.now().Unix()
 
 	seen := make(map[uint64]struct{}, len(saved))
+	generations := make(map[uint64]struct{}, len(saved))
 	live := 0
 	for _, rec := range saved {
 		if rec.ID == 0 || rec.ExpiresUnix == 0 {
@@ -210,6 +214,12 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 			return 0, 0, fmt.Errorf("%w: %d", ErrDuplicateSession, rec.ID)
 		}
 		seen[rec.ID] = struct{}{}
+		if rec.Generation != 0 {
+			if _, duplicate := generations[rec.Generation]; duplicate {
+				return 0, 0, fmt.Errorf("%w: generation %d", ErrDuplicateSession, rec.Generation)
+			}
+			generations[rec.Generation] = struct{}{}
+		}
 		// Counted against the same expiry test the loop applies, so this is the number of
 		// sessions that will actually be built rather than the number of records in the
 		// file. A file holding two thousand runs that all reset last week restores none,
@@ -240,6 +250,7 @@ func (m *InstanceManager) RestoreSessions(saved []SavedSession) (restored, expir
 		}
 		s.state = InstanceSaved
 		s.expiresUnix = rec.ExpiresUnix
+		s.generation = rec.Generation
 		s.defeated = append([]vnet.MobKind(nil), rec.DefeatedBosses...)
 		for _, character := range rec.Bound {
 			m.bindLocked(s, character)

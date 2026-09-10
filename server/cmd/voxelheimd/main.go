@@ -455,7 +455,9 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// the first entry after a restart would hand out a fresh copy of a dungeon that
 	// player already cleared. It is also the last moment the manager is empty, which is
 	// what game.InstanceManager.RestoreSessions requires.
-	restoreSessions(instances, runs, log)
+	if err := restoreSessions(instances, runs, rewards, time.Now(), log); err != nil {
+		return err
+	}
 
 	stormDeadlineChanged := false
 	if opts.stormPeriod == 0 {
@@ -623,10 +625,10 @@ func openPlayers(opts options, log *slog.Logger) (*persist.Store, *persist.Rewar
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the boss reward journal: %w", err)
 	}
-	if err := rewards.CheckInactive(); err != nil {
-		return nil, nil, err
-	}
-	store, err := persist.OpenStore(opts.worldDir)
+	// Recovery runs before the players directory is indexed and before any login or
+	// ordinary writer exists: a prepared boss reward is replayed or reconfirmed first, and
+	// a journal that has issued a generation makes receipt handling strict from here on.
+	store, err := persist.OpenStoreWithRewardRecovery(opts.worldDir, rewards, session.ValidateRewardRecord)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening the player store: %w", err)
 	}
@@ -832,44 +834,76 @@ func openSessions(opts options, log *slog.Logger) (*persist.SessionStore, error)
 // dirty flag to hold it back. That is the trade a lockout forces — a corrupt file costs
 // its world one night's dungeon lockouts, which is a strictly smaller loss than refusing
 // to start.
-func restoreSessions(instances *game.InstanceManager, store *persist.SessionStore, log *slog.Logger) {
+// **Over a boss reward journal the journal decides.** Its runs are overlaid on the
+// sessions file: its defeats are authoritative, bindings are unioned, and each run keeps
+// the generation a later defeat is appended to, even when the file is stale or missing.
+// A run the journal holds is not something to start without, so an overlay or restore it
+// cannot complete stops startup rather than respawning a boss the journal says is dead.
+func restoreSessions(instances *game.InstanceManager, store *persist.SessionStore, rewards *persist.RewardStore, now time.Time, log *slog.Logger) error {
 	stored, found, err := store.Load()
 	if err != nil {
-		log.Error("the saved dungeon runs could not be read; every ruin starts free, and the file is kept",
+		if rewards == nil {
+			log.Error("the saved dungeon runs could not be read; every ruin starts free, and the file is kept",
+				"sessions_file", store.Path(), "error", err)
+			return nil
+		}
+		log.Error("the saved dungeon runs could not be read; the runs the boss reward journal holds are still restored, and the file is kept",
 			"sessions_file", store.Path(), "error", err)
-		return
+		stored, found = nil, false
 	}
-	if !found {
-		return
+	if !found && rewards == nil {
+		return nil
 	}
 
-	saved := make([]game.SavedSession, len(stored))
-	for i, rec := range stored {
-		// The six fields, one at a time. game and persist do not import each other, so
-		// this loop is the mapping — the same job restoreStructures does between
-		// persist.StructureRecord and game.Structure, and here for the same reason.
-		bound := make([]game.InstanceCharacter, len(rec.Bound))
-		for k, who := range rec.Bound {
-			bound[k] = game.InstanceCharacter{PlayerID: who.PlayerID, CharacterID: who.CharacterID}
+	var saved []game.SavedSession
+	if rewards == nil {
+		for _, rec := range stored {
+			saved = append(saved, savedSessionOf(rec, 0))
 		}
-		saved[i] = game.SavedSession{
-			ID:             rec.ID,
-			Seed:           rec.Seed,
-			Ruin:           game.InstanceRuin{CellX: rec.Ruin[0], CellZ: rec.Ruin[1]},
-			ExpiresUnix:    rec.ExpiresUnix,
-			DefeatedBosses: rec.DefeatedBosses,
-			Bound:          bound,
+	} else {
+		overlaid, err := rewards.OverlaySessions(stored, now.Unix(), world.WorldgenVersion)
+		if err != nil {
+			return fmt.Errorf("restoring the dungeon runs over the boss reward journal: %w", err)
 		}
+		for _, run := range overlaid {
+			saved = append(saved, savedSessionOf(run.Session, run.Generation))
+		}
+	}
+	if len(saved) == 0 {
+		return nil
 	}
 
 	restored, expired, err := instances.RestoreSessions(saved)
 	if err != nil {
+		if rewards != nil {
+			return fmt.Errorf("the dungeon runs over the boss reward journal were refused: %w", err)
+		}
 		log.Error("the saved dungeon runs were refused whole; every ruin starts free, and the file is kept",
 			"sessions_file", store.Path(), "sessions", len(saved), "error", err)
-		return
+		return nil
 	}
 	log.Info("saved dungeon runs restored", "sessions_file", store.Path(),
 		"restored", restored, "expired", expired)
+	return nil
+}
+
+// savedSessionOf is the one mapping from a stored run to the manager's. game and persist
+// do not import each other, so this is where the six fields cross, one at a time, beside
+// the reward generation the journal associates with the run.
+func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSession {
+	bound := make([]game.InstanceCharacter, len(rec.Bound))
+	for k, who := range rec.Bound {
+		bound[k] = game.InstanceCharacter{PlayerID: who.PlayerID, CharacterID: who.CharacterID}
+	}
+	return game.SavedSession{
+		ID:             rec.ID,
+		Seed:           rec.Seed,
+		Ruin:           game.InstanceRuin{CellX: rec.Ruin[0], CellZ: rec.Ruin[1]},
+		ExpiresUnix:    rec.ExpiresUnix,
+		DefeatedBosses: rec.DefeatedBosses,
+		Bound:          bound,
+		Generation:     generation,
+	}
 }
 
 func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {
@@ -1104,6 +1138,14 @@ func (s *server) run(ctx context.Context) {
 		defer workers.Done()
 		if err := s.saveSessionsLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.log.Error("the saved-session autosave loop stopped", "error", err)
+		}
+	}()
+
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := s.syncRewardRunsLoop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			s.log.Error("the boss reward journal loop stopped", "error", err)
 		}
 	}()
 
@@ -1390,6 +1432,35 @@ func (s *server) flushSessions() {
 	}
 }
 
+// rewardSyncInterval is how soon a boss defeat reaches the reward journal.
+const rewardSyncInterval = time.Second
+
+// syncRewardRunsLoop copies every saved run's defeated progress and bindings into the
+// boss reward journal, and collects runs whose reset has passed, until ctx ends. A failed
+// pass is logged and retried on the next tick: every journal transition it makes is an
+// idempotent retry.
+func (s *server) syncRewardRunsLoop(ctx context.Context) error {
+	ticker := time.NewTicker(rewardSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s.syncRewardRuns()
+		}
+	}
+}
+
+func (s *server) syncRewardRuns() {
+	if s.identities == nil {
+		return
+	}
+	if err := s.identities.SyncRewardRuns(time.Now()); err != nil {
+		s.log.Error("the boss reward journal could not be brought up to date; it will be retried", "error", err)
+	}
+}
+
 // rewardDrainTimeout bounds how long shutdown waits for pending boss rewards.
 const rewardDrainTimeout = 10 * time.Second
 
@@ -1432,6 +1503,9 @@ func (s *server) shutdown(accepting, workers *sync.WaitGroup) {
 		}
 		cancel()
 	}
+	// The last defeated progress and bindings reach the reward journal before the sessions
+	// file and before Close, for the reason flushSessions below gives.
+	s.syncRewardRuns()
 	// Before Close and not after, which is the whole of the ordering: Close tears every
 	// session down, so the same flush one line later would write an empty file over every
 	// lockout in the world. workers.Wait() above is the first moment the tick loop has

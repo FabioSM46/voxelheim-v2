@@ -63,6 +63,10 @@ type rewardCoordinator struct {
 	retryMin, retryMax time.Duration
 	// step is a test seam called before each stage, with no lock held. Nil in production.
 	step func(stage string)
+
+	// syncMu serialises SyncRewardRuns, which reads the journal's next generation before
+	// allocating it.
+	syncMu sync.Mutex
 }
 
 // rewardTask is one claim's ownership. Its mutex orders the claim's live steps against a
