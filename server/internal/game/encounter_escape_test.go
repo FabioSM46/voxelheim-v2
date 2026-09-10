@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -88,5 +89,99 @@ func TestEscapeUsesQuantizedWarningRatherThanUnplayableFractionOfATick(t *testin
 				t.Fatalf("escape at %d Hz = %v, want %v", rate, got, want)
 			}
 		})
+	}
+}
+
+// engagementReach is the farthest a player's nearest damage sample can stand from a body's
+// centre, over every bearing, while the two axis-aligned boxes are still within SwordReach:
+// the ground a player can strike this body from. An axis-aligned gap reaches farthest on the
+// diagonal, which is why the bearings are swept rather than the front alone measured.
+func engagementReach(b body) float64 {
+	worst := 0.0
+	for tenth := range 901 {
+		angle := float64(tenth) / 10 * math.Pi / 180
+		at := func(d float64) [3]float64 { return [3]float64{d * math.Cos(angle), 0, d * math.Sin(angle)} }
+		near, far := 0.0, 20.0
+		for range 60 {
+			if mid := (near + far) / 2; boxDistance(b.boxAt([3]float64{}), playerBox(at(mid))) < SwordReach {
+				near = mid
+			} else {
+				far = mid
+			}
+		}
+		closest := math.Inf(1)
+		for _, sample := range horizontalSamples(playerBox(at(near))) {
+			closest = min(closest, math.Hypot(sample[0], sample[1]))
+		}
+		worst = max(worst, closest)
+	}
+	return worst
+}
+
+// Every blow that plants its creature reaches no farther than the ground a player can strike
+// that creature from, rounded up to a tenth. Reach beyond it damages players who could not be
+// hitting back, and it is the part of the gap to the visible strike no engagement explains.
+// The guardian's bite, claws and jaws sit within its 3.7; the king's strokes were cut to 3.3.
+func TestPlantedBlowsReachNoFartherThanTheirEngagement(t *testing.T) {
+	for kind, repertoire := range encounterMoveCatalog {
+		ceiling := math.Ceil(engagementReach(mobRegistry[kind].body)*10) / 10
+		for _, def := range repertoire {
+			blows := []encounterMoveDef{def}
+			if def.combo != nil {
+				blows = blows[:0]
+				for step := uint8(1); step <= def.combo.total; step++ {
+					blows = append(blows, def.forComboStep(step))
+				}
+			}
+			for _, blow := range blows {
+				if blow.travel != travelNone || blow.flightSpeed > 0 || blow.hazard.pulse != pulseNone {
+					continue
+				}
+				if radius := blow.announcedRadius(); radius > ceiling {
+					t.Errorf("%s/%s reaches %.2f, beyond the engagement reach %.1f", kind, blow.kind, radius, ceiling)
+				}
+			}
+		}
+	}
+	if got := math.Ceil(engagementReach(mobRegistry[vnet.MobKindDraugrKing].body)*10) / 10; got != 3.3 {
+		t.Fatalf("king engagement reach = %.1f, want the 3.3 the catalogue was cut to", got)
+	}
+}
+
+// A target at sword reach on the guardian's diagonal stands outside every region its planted
+// moves would announce, so none is chosen there and the guardian keeps closing; the same gap in
+// front is inside the claws' cone. The body-to-body band admits both.
+func TestAPlantedMoveIsChosenOnlyWhereItsRegionReachesTheTarget(t *testing.T) {
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 6.5})
+	at := [3]float64{0.5, 64, 0.5}
+	id := pullGuardian(t, h, at, player)
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	guardian := h.sim.mobs[id]
+	body := guardian.species().body.boxAt(at)
+	place := func(angle float64) {
+		near, far := 0.0, 20.0
+		for range 60 {
+			mid := (near + far) / 2
+			pos := [3]float64{at[0] + mid*math.Cos(angle), at[1], at[2] + mid*math.Sin(angle)}
+			if boxDistance(body, playerBox(pos)) < SwordReach-0.05 {
+				near = mid
+			} else {
+				far = mid
+			}
+		}
+		player.pos = [3]float64{at[0] + near*math.Cos(angle), at[1], at[2] + near*math.Sin(angle)}
+	}
+
+	place(math.Pi / 4)
+	if def, chosen := guardian.selectEncounterMoveLocked(h.sim, player); chosen {
+		t.Fatalf("chose %s for a diagonal target no planted region reaches", def.kind)
+	}
+	place(math.Pi / 2)
+	def, chosen := guardian.selectEncounterMoveLocked(h.sim, player)
+	planted := []vnet.EncounterMoveKind{vnet.EncounterMoveKindBiteAndTear, vnet.EncounterMoveKindPrisonerClaws}
+	if !chosen || !slices.Contains(planted, def.kind) || !guardian.announcedRegionReaches(def, player) {
+		t.Fatalf("front target at the same gap: chose %v (%s); want a planted move whose region reaches it", chosen, def.kind)
 	}
 }

@@ -1,5 +1,9 @@
 # First dungeon combat measurement, part 1 (#1037)
 
+This record is the baseline measured before any correction. Part 2 changed the ritual pulse
+intervals, the Draugr's strike reach and move selection; its before and after numbers, and the
+values below that moved, are recorded in [dungeon-corrections-1037.md](dungeon-corrections-1037.md).
+
 This part measures the assembled fights and changes no rule. Every number below comes
 from the production simulation of the shipped dungeon, at the default 20 Hz, and every
 tuning question it raises is handed to the parts that follow rather than settled here.

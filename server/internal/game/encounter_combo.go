@@ -49,12 +49,14 @@ func (d encounterMoveDef) forStage(stage uint8) encounterMoveDef {
 	return d
 }
 
+// Each toll reaches the king's engagement reach of 3.3 rather than the 3.8 it was drawn with,
+// for the reason the Sentence gives in encounter_moves.go.
 var tollCombo = encounterCombo{
 	total: 3, between: 400 * time.Millisecond, final: 2200 * time.Millisecond,
 	blows: [3]encounterComboBlow{
-		{bearing: -.45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.8, height: 3, halfAngle: .95}},
-		{bearing: .45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.8, height: 3, halfAngle: .95}},
-		{hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 3.8, height: 3, halfWidth: .65}},
+		{bearing: -.45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.3, height: 3, halfAngle: .95}},
+		{bearing: .45, hazard: encounterHazard{shape: vnet.HazardShapeCone, reach: 3.3, height: 3, halfAngle: .95}},
+		{hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 3.3, height: 3, halfWidth: .65}},
 	},
 }
 
@@ -93,6 +95,7 @@ func (m *mob) continueComboLocked(s *Sim, players []*Player, tick uint64) bool {
 		distance := boxDistance(body, target.box())
 		valid = distance >= def.minRange && distance <= def.maxRange &&
 			clearLineOfSight(s.terrain, boxCentre(body), boxCentre(target.box())) &&
+			m.announcedRegionReaches(def, target) &&
 			s.moveLeavesAnEscapeLocked(m, def, target)
 	}
 	if valid {
