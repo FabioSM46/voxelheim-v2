@@ -19,6 +19,9 @@ pub(in super::super) struct Motion {
     feet: [Foot; 2],
     next: usize,
     entrance: Option<Duration>,
+    /// Which way the corpse folds: 1 forward, the authored fall, or -1 backward. Chosen once
+    /// when a fall begins, from terrain, and cleared by a replant.
+    fall: Option<f32>,
     /// Mask, crown and core state. Survives a replant: a teleport is not a new fight.
     pub(in super::super) regalia: super::regalia::Regalia,
     pub(in super::super) transforms: [Transform; 17],
@@ -41,6 +44,7 @@ impl Motion {
             }),
             next: 0,
             entrance: (action == MobAction::Idle).then_some(Duration::ZERO),
+            fall: None,
             regalia: default(),
             transforms: [Transform::IDENTITY; 17],
         }
@@ -139,36 +143,7 @@ impl Motion {
         }
         self.transforms = super::choreography::assemble(p, feet);
         if down > 0.0 {
-            // Fold at the hips and knees before settling on the floor. All fifteen
-            // parts share the final grounding translation; no independent floating limbs.
-            p = super::choreography::Controls {
-                drop: 0.12 * (std::f32::consts::PI * down).sin(),
-                grip: Vec3::new(0.42, 1.39, -0.115),
-                head: 0.25 * down,
-                crown: self.regalia.crown(),
-                ..default()
-            };
-            let mut pose = super::choreography::assemble(p, REST_FEET);
-            let fall = around(
-                Vec3::Y * 1.05,
-                Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2 * down),
-            );
-            for transform in &mut pose {
-                *transform = Transform::from_matrix(fall * transform.to_matrix());
-            }
-            let minimum = SEGMENTS
-                .iter()
-                .zip(&pose)
-                .flat_map(|(&segment, transform)| {
-                    ground_points(segment)
-                        .iter()
-                        .map(|&point| transform.transform_point(point).y)
-                })
-                .fold(f32::INFINITY, f32::min);
-            for transform in &mut pose {
-                transform.translation.y -= minimum;
-            }
-            self.transforms = pose;
+            self.transforms = self.fold(down, self.fall.unwrap_or(1.0));
         }
         self.regalia.update(
             &mut self.transforms,
@@ -178,6 +153,80 @@ impl Motion {
         );
         self.last = position;
         self.yaw = yaw;
+    }
+}
+
+impl Motion {
+    /// The corpse pose `down` of the way through a fall, forward (`sign` 1) or backward.
+    ///
+    /// Fold at the hips and knees before settling on the floor. All fifteen parts share the
+    /// final grounding translation; no independent floating limbs.
+    fn fold(&self, down: f32, sign: f32) -> [Transform; 17] {
+        let p = super::choreography::Controls {
+            drop: 0.12 * (std::f32::consts::PI * down).sin(),
+            grip: Vec3::new(0.42, 1.39, -0.115),
+            head: 0.25 * down,
+            crown: self.regalia.crown(),
+            ..default()
+        };
+        let mut pose = super::choreography::assemble(p, REST_FEET);
+        let fall = around(
+            Vec3::Y * 1.05,
+            Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2 * down * sign),
+        );
+        for transform in &mut pose {
+            *transform = Transform::from_matrix(fall * transform.to_matrix());
+        }
+        let minimum = SEGMENTS
+            .iter()
+            .zip(&pose)
+            .flat_map(|(&segment, transform)| {
+                ground_points(segment)
+                    .iter()
+                    .map(|&point| transform.transform_point(point).y)
+            })
+            .fold(f32::INFINITY, f32::min);
+        for transform in &mut pose {
+            transform.translation.y -= minimum;
+        }
+        pose
+    }
+
+    /// Chooses once which way this corpse folds: forward, the authored fall, unless the
+    /// fully folded body would lie inside solid terrain and the backward fold would not.
+    ///
+    /// Measured in the shipped chamber (#1037): a king felled facing a monolith 1.1 blocks
+    /// away folded 108 vertices into it. Cosmetic only — the snapshot root and yaw are not
+    /// touched, and the pose is the same fold mirrored, inside the same envelope.
+    pub(in super::super) fn choose_fall(
+        &mut self,
+        position: Vec3,
+        yaw: f32,
+        solid: impl Fn(IVec3) -> bool,
+    ) {
+        if self.fall.is_some() {
+            return;
+        }
+        let root = Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), position);
+        let clips = |sign: f32| {
+            let pose = self.fold(1.0, sign);
+            SEGMENTS.iter().zip(&pose).any(|(&segment, transform)| {
+                let matrix = root * transform.to_matrix();
+                ground_points(segment).iter().any(|&point| {
+                    let p = matrix.transform_point3(point);
+                    let within = p - p.floor();
+                    p.y > position.y + 0.02
+                        && within.cmpge(Vec3::splat(0.02)).all()
+                        && within.cmple(Vec3::splat(0.98)).all()
+                        && solid(p.floor().as_ivec3())
+                })
+            })
+        };
+        self.fall = Some(if clips(1.0) && !clips(-1.0) {
+            -1.0
+        } else {
+            1.0
+        });
     }
 }
 
@@ -275,6 +324,88 @@ mod tests {
             }
         }
         assert!(planted_frames > 100 && steps > 10);
+    }
+
+    #[test]
+    fn a_corpse_folds_away_from_terrain_it_would_otherwise_lie_in() {
+        // Root half a block inside cell z = 0, so an integer boundary separates the forward
+        // fold's reach from the backward fold's front edge.
+        let root = Vec3::new(0.5, 0.0, 0.5);
+        let reach = |sign: f32| {
+            let motion = Motion::new(root, 0.0, MobAction::Corpse);
+            SEGMENTS
+                .iter()
+                .zip(&motion.fold(1.0, sign))
+                .flat_map(|(&segment, transform)| {
+                    ground_points(segment)
+                        .iter()
+                        .map(|&point| transform.transform_point(point).z + root.z)
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
+        assert!(
+            reach(1.0) < -1.05 && reach(-1.0) > -0.95,
+            "fixture boundary"
+        );
+        let wall_ahead = |voxel: IVec3| voxel.z <= -2 && voxel.y >= 0;
+
+        let mut felled = Motion::new(root, 0.0, MobAction::Corpse);
+        felled.choose_fall(root, 0.0, wall_ahead);
+        assert_eq!(felled.fall, Some(-1.0), "a wall ahead mirrors the fall");
+        felled.choose_fall(root, 0.0, |_| false);
+        assert_eq!(felled.fall, Some(-1.0), "the choice is made once");
+        felled.sample(
+            root,
+            0.0,
+            MobAction::Corpse,
+            Duration::ZERO,
+            1.0,
+            Duration::from_millis(16),
+            false,
+        );
+        let lowest = SEGMENTS
+            .iter()
+            .zip(&felled.transforms)
+            .flat_map(|(&segment, transform)| {
+                ground_points(segment)
+                    .iter()
+                    .map(|&point| transform.transform_point(point).y)
+            })
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            lowest.abs() < 0.005,
+            "the mirrored corpse rests on the floor: {lowest}"
+        );
+
+        for (terrain, expected) in [
+            (
+                Box::new(|_: IVec3| false) as Box<dyn Fn(IVec3) -> bool>,
+                1.0,
+            ),
+            (
+                Box::new(|voxel: IVec3| (voxel.z <= -2 || voxel.z >= 1) && voxel.y >= 0),
+                1.0,
+            ),
+        ] {
+            let mut motion = Motion::new(root, 0.0, MobAction::Corpse);
+            motion.choose_fall(root, 0.0, terrain);
+            assert_eq!(
+                motion.fall,
+                Some(expected),
+                "open or boxed-in ground keeps the authored fall"
+            );
+        }
+        let mut replanted = felled;
+        replanted.sample(
+            root + Vec3::X * 40.0,
+            0.0,
+            MobAction::Corpse,
+            Duration::ZERO,
+            1.0,
+            Duration::from_millis(16),
+            false,
+        );
+        assert_eq!(replanted.fall, None, "a replant chooses again");
     }
 
     #[test]
