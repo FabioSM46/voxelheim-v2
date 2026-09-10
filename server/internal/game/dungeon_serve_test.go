@@ -2,7 +2,6 @@ package game_test
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -533,7 +532,4 @@ func TestTheFirstDungeonProgressesAcrossRestartsWithEveryRewardDeliveredOnce(t *
 		t.Fatalf("the journal after the king = %+v, want the run at 2/2", snapshot.Runs)
 	}
 	w.shutdown(t, c)
-	if errors.Is(err, context.Canceled) {
-		t.Fatal("unreachable")
-	}
 }
