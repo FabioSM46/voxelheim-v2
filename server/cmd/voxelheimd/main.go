@@ -868,8 +868,16 @@ func restoreSessions(instances *game.InstanceManager, store *persist.SessionStor
 		if err != nil {
 			return fmt.Errorf("restoring the dungeon runs over the boss reward journal: %w", err)
 		}
+		journal, err := rewards.Snapshot()
+		if err != nil {
+			return fmt.Errorf("reading the boss reward journal to restore its runs: %w", err)
+		}
 		for _, run := range overlaid {
-			saved = append(saved, savedSessionOf(run.Session, run.Generation))
+			restored := savedSessionOf(run.Session, run.Generation)
+			// Loot the journal still owes untouched is offered again; see
+			// persist.RewardJournal.UntouchedLoot for what qualifies.
+			restored.HeldRewards = heldRewardsOf(journal.UntouchedLoot(run.Generation))
+			saved = append(saved, restored)
 		}
 	}
 	if len(saved) == 0 {
@@ -907,6 +915,22 @@ func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSess
 		Bound:          bound,
 		Generation:     generation,
 	}
+}
+
+// heldRewardsOf is the journal's untouched loot as a restore rebuilds it.
+func heldRewardsOf(defeats []persist.RewardDefeat) []game.BossRewardDefeat {
+	var held []game.BossRewardDefeat
+	for _, d := range defeats {
+		defeat := game.BossRewardDefeat{Kind: d.Kind}
+		for _, p := range d.Personal {
+			defeat.Personal = append(defeat.Personal, game.BossPersonalReward{
+				Owner:   game.InstanceCharacter{PlayerID: p.Owner.PlayerID, CharacterID: p.Owner.CharacterID},
+				Entries: p.Entries, Silver: p.Silver,
+			})
+		}
+		held = append(held, defeat)
+	}
+	return held
 }
 
 func openClock(opts options, log *slog.Logger) (*persist.ClockStore, error) {

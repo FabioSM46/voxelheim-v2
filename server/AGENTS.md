@@ -1286,6 +1286,22 @@ A durable dungeon boss's experience follows its loot into the journal (#1036).
   portal entry. The pass reads only the journal, so a share still owed after a restart is offered
   again the same way. One claim per character at a time, through the shared journal write gate.
 
+### Untouched boss loot is offered again after a restart
+
+A restart rebuilds no simulation state, so a boss corpse and its held loot are gone with the
+process. The journal still owes that loot, and startup offers it again (#1036).
+
+- **Only while nothing about it has been delivered.** `persist.RewardJournal.UntouchedLoot` picks a
+  run's defeats where no owner has taken an entry or silver and no prepared intent names the
+  defeat. A defeat anybody has taken from stays owed in the journal and is not rebuilt, so a
+  rebuilt corpse never offers what was already delivered. Experience is not considered: it is not
+  held by a corpse and `DeliverBossExperience` claims it from the journal.
+- **Rebuilt as the claimed corpse it was.** `voxelheimd` passes those defeats to
+  `InstanceManager.RestoreSessions` as `SavedSession.HeldRewards`. The restore validates them with
+  the rest of the file and refuses the whole restore rather than rebuild a roll it cannot hold
+  exactly. It then places each defeat as a claimed corpse at its boss's home anchor, with every
+  owner's frozen roll in roll order. The corpse does not expire; the run's reset removes it.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460
