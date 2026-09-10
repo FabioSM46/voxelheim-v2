@@ -1100,6 +1100,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}
 	}()
 	defer func() { close(readRequests); <-readerDone }()
+	// A dungeon boss's loot is delivered only by a reward claim, and only on the portal visit
+	// into that run. It reads the session's current visit each time it is called.
+	claimLoot := func(corpseID uint64, revision uint32, entryID uint64) (vnet.RefusalReason, error) {
+		run := uint64(0)
+		if cfg.Instances != nil && portalVisit != nil && chunks == portalVisit.Session.Chunks {
+			run = portalVisit.Session.ID
+		}
+		return identities.claimBossLoot(self, player, player, run, corpseID, revision, entryID)
+	}
 	lastFrame := time.Now()
 	for {
 		// Armed before every read, which is the same thing as re-armed after every
@@ -1599,7 +1608,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			continue
 		}
 
-		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log); hErr != nil {
+		if hErr := handlePostHandshake(ctx, msg, player, streamer, self.Marks, peers, enqueue, log, claimLoot); hErr != nil {
 			if errors.Is(hErr, errLeaveRequested) {
 				// Inert before the acknowledgement is queued: once the server accepts the
 				// request, no input already behind it can become one last action.
@@ -1784,7 +1793,7 @@ func followMining(ctx context.Context, player *game.Player, peers *Registry, sen
 // Direction is a protocol rule rather than a type rule — both sides share one
 // union — so a client sending a server-only payload is a protocol violation and
 // the connection ends.
-func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, marks *Markers, peers *Registry, send func([]byte) error, log *slog.Logger) error {
+func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game.Player, streamer *Streamer, marks *Markers, peers *Registry, send func([]byte) error, log *slog.Logger, claimLoot func(corpseID uint64, revision uint32, entryID uint64) (vnet.RefusalReason, error)) error {
 	switch msg.Kind {
 	case vnet.PayloadPlayerInput:
 		if player == nil || msg.PlayerInput == nil {
@@ -2409,6 +2418,9 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 
 		request := *msg.LootTake
 		reason, takeErr := player.TakeLoot(request)
+		if errors.Is(takeErr, game.ErrBossRewardClaimRequired) && claimLoot != nil {
+			reason, takeErr = claimLoot(request.CorpseID, request.Revision, request.EntryID)
+		}
 		if takeErr == nil {
 			return nil
 		}
@@ -2438,6 +2450,9 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 
 		request := *msg.LootTakeAll
 		reason, takeErr := player.TakeAllLoot(request)
+		if errors.Is(takeErr, game.ErrBossRewardClaimRequired) && claimLoot != nil {
+			reason, takeErr = claimLoot(request.CorpseID, request.Revision, 0)
+		}
 		if takeErr == nil {
 			return nil
 		}

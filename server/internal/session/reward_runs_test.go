@@ -1,9 +1,11 @@
 package session
 
 import (
+	"errors"
 	"log/slog"
 	"os"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/identity"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -162,38 +165,6 @@ func TestSyncRewardRunsExtendsARestoredRunUnderItsGeneration(t *testing.T) {
 	}
 	if bound := later.journalNow(t).Runs[0].Session.Bound; !slices.Equal(bound, sessionCharacters(first, second, third)) {
 		t.Fatalf("bindings = %+v", bound)
-	}
-}
-
-func TestSyncRewardRunsCollectsResetRunsAndNeverReusesTheirGeneration(t *testing.T) {
-	t.Parallel()
-	store, journal := openRunStores(t)
-	now := time.Now()
-	w := newRunWorld(t, store, journal)
-	run := savedRun(now.Add(time.Minute).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, runCharacter(51))
-	if _, _, err := w.manager.RestoreSessions([]game.SavedSession{run}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.ids.SyncRewardRuns(now); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.ids.SyncRewardRuns(now.Add(2 * time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if got := w.journalNow(t); len(got.Runs) != 0 || got.NextGeneration != 2 {
-		t.Fatalf("journal after the reset = %+v", got)
-	}
-
-	fresh := newRunWorld(t, store, journal)
-	tomorrow := savedRun(now.Add(time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, runCharacter(51))
-	if _, _, err := fresh.manager.RestoreSessions([]game.SavedSession{tomorrow}); err != nil {
-		t.Fatal(err)
-	}
-	if err := fresh.ids.SyncRewardRuns(now); err != nil {
-		t.Fatal(err)
-	}
-	if got := fresh.journalNow(t); len(got.Runs) != 1 || got.Runs[0].Generation != 2 {
-		t.Fatalf("the next run = %+v, want generation 2", got.Runs)
 	}
 }
 
@@ -400,5 +371,186 @@ func TestSyncRewardRunsRetriesAFailedJournalWriteVerbatim(t *testing.T) {
 	}
 	if w.manager.SavedSessions()[0].Generation != 1 {
 		t.Fatal("the manager was not told the generation after the retry")
+	}
+}
+
+// fakeRuns is a manager's saved runs as a boss kill would have left them, for the sync.
+type fakeRuns struct {
+	mu       sync.Mutex
+	saved    []game.SavedSession
+	released []vnet.MobKind
+}
+
+func (f *fakeRuns) SavedSessions() []game.SavedSession {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.saved)
+}
+
+func (f *fakeRuns) AssignRunGeneration(run game.SavedSession, generation uint64) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.saved {
+		if f.saved[i].ID == run.ID && f.saved[i].Generation == 0 {
+			f.saved[i].Generation = generation
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeRuns) ReleaseBossRewards(run game.SavedSession, kind vnet.MobKind) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.saved {
+		if f.saved[i].ID != run.ID {
+			continue
+		}
+		at := slices.IndexFunc(f.saved[i].PendingRewards, func(d game.BossRewardDefeat) bool { return d.Kind == kind })
+		if at < 0 {
+			return false
+		}
+		f.saved[i].PendingRewards = slices.Delete(slices.Clone(f.saved[i].PendingRewards), at, at+1)
+		f.released = append(f.released, kind)
+		return true
+	}
+	return false
+}
+
+func (f *fakeRuns) update(change func(*game.SavedSession)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(&f.saved[0])
+}
+
+func (f *fakeRuns) replace(saved ...game.SavedSession) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saved = saved
+}
+
+func (f *fakeRuns) releasedKinds() []vnet.MobKind {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.released)
+}
+
+func frozenLoot(kind vnet.MobKind, owner game.InstanceCharacter, silver uint32, entries ...protocol.InventoryStack) []game.BossRewardDefeat {
+	return []game.BossRewardDefeat{{Kind: kind, Personal: []game.BossPersonalReward{{Owner: owner, Entries: entries, Silver: silver}}}}
+}
+
+// A defeat's frozen loot is written with the defeat, and the corpse is released to claims
+// only once that write has landed.
+func TestSyncRewardRunsJournalsFrozenLootBeforeReleasingIt(t *testing.T) {
+	t.Parallel()
+	store, journal := openRunStores(t)
+	w := newRunWorld(t, store, journal)
+	owner := runCharacter(51)
+	pelt := protocol.InventoryStack{ItemID: uint16(game.ItemVargrPelt), Count: 3}
+	run := savedRun(time.Now().Add(time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, owner)
+	run.PendingRewards = frozenLoot(vnet.MobKindVargrGuardian, owner, 30, rewardBones)
+	runs := &fakeRuns{saved: []game.SavedSession{run}}
+	w.ids.rewards.runs = runs
+
+	before := w.journalNow(t).Revision
+	if err := w.ids.SyncRewardRuns(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got := w.journalNow(t)
+	if got.Revision != before+1 {
+		t.Fatalf("allocating a run with its loot took %d writes, want 1", got.Revision-before)
+	}
+	want := []persist.PersonalReward{{Owner: sessionCharacters(owner)[0], Entries: []protocol.InventoryStack{rewardBones}, Silver: 30}}
+	if !samePersonalRewards(got.Runs[0].Defeats[0].Personal, want) {
+		t.Fatalf("journaled loot = %+v, want %+v", got.Runs[0].Defeats[0].Personal, want)
+	}
+	if kinds := runs.releasedKinds(); !slices.Equal(kinds, []vnet.MobKind{vnet.MobKindVargrGuardian}) {
+		t.Fatalf("released = %v, want the guardian once", kinds)
+	}
+
+	runs.update(func(r *game.SavedSession) {
+		r.DefeatedBosses = append(slices.Clone(r.DefeatedBosses), vnet.MobKindDraugrKing)
+		r.PendingRewards = frozenLoot(vnet.MobKindDraugrKing, owner, 0, pelt)
+	})
+	if err := w.ids.SyncRewardRuns(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got = w.journalNow(t)
+	defeats := got.Runs[0].Defeats
+	if len(defeats) != 2 || defeats[1].Kind != vnet.MobKindDraugrKing || len(defeats[1].Personal) != 1 || !slices.Equal(defeats[1].Personal[0].Entries, []protocol.InventoryStack{pelt}) {
+		t.Fatalf("journaled defeats = %+v, want the king with its pelt", defeats)
+	}
+	if kinds := runs.releasedKinds(); !slices.Equal(kinds, []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing}) {
+		t.Fatalf("released = %v", kinds)
+	}
+	if err := w.ids.SyncRewardRuns(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if again := w.journalNow(t); again.Revision != got.Revision {
+		t.Fatal("a run with nothing new was written again")
+	}
+}
+
+// A defeat the journal already owes something else keeps its corpse held.
+func TestSyncRewardRunsNeverReleasesLootTheJournalOwesDifferently(t *testing.T) {
+	t.Parallel()
+	store, journal := openRunStores(t)
+	w := newRunWorld(t, store, journal)
+	owner := runCharacter(51)
+	run := savedRun(time.Now().Add(time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, owner)
+	record := persist.SessionRecord{ID: run.ID, Seed: run.Seed, Ruin: [2]int64{run.Ruin.CellX, run.Ruin.CellZ}, ExpiresUnix: run.ExpiresUnix,
+		DefeatedBosses: run.DefeatedBosses, Bound: sessionCharacters(owner)}
+	if err := journal.AllocateRun(store, 1, record, world.WorldgenVersion); err != nil {
+		t.Fatal(err)
+	}
+	run.Generation = 1
+	run.PendingRewards = frozenLoot(vnet.MobKindVargrGuardian, owner, 30, rewardBones)
+	runs := &fakeRuns{saved: []game.SavedSession{run}}
+	w.ids.rewards.runs = runs
+
+	if err := w.ids.SyncRewardRuns(time.Now()); !errors.Is(err, persist.ErrRewardJournalConflict) {
+		t.Fatalf("a mismatched entitlement = %v, want %v", err, persist.ErrRewardJournalConflict)
+	}
+	if kinds := runs.releasedKinds(); len(kinds) != 0 {
+		t.Fatalf("loot the journal does not owe was released: %v", kinds)
+	}
+	if personal := w.journalNow(t).Runs[0].Defeats[0].Personal; len(personal) != 0 {
+		t.Fatalf("the journal's defeat was rewritten: %+v", personal)
+	}
+}
+
+// Midnight does not collect a run the manager still holds, which it does only while players
+// are inside; a run is collected once it is let go, and its generation is never reused.
+func TestSyncRewardRunsKeepsAnOccupiedRunJournaledPastItsReset(t *testing.T) {
+	t.Parallel()
+	store, journal := openRunStores(t)
+	w := newRunWorld(t, store, journal)
+	now := time.Now()
+	runs := &fakeRuns{saved: []game.SavedSession{savedRun(now.Add(-time.Minute).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, runCharacter(51))}}
+	w.ids.rewards.runs = runs
+
+	for _, at := range []time.Time{now, now.Add(time.Hour)} {
+		if err := w.ids.SyncRewardRuns(at); err != nil {
+			t.Fatal(err)
+		}
+		if got := w.journalNow(t); len(got.Runs) != 1 || got.Runs[0].Generation != 1 {
+			t.Fatalf("an occupied run past its reset was not kept journaled: %+v", got)
+		}
+	}
+
+	runs.replace()
+	if err := w.ids.SyncRewardRuns(now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.journalNow(t); len(got.Runs) != 0 || got.NextGeneration != 2 {
+		t.Fatalf("a released run was not collected: %+v", got)
+	}
+
+	runs.replace(savedRun(now.Add(2*time.Hour).Unix(), []vnet.MobKind{vnet.MobKindVargrGuardian}, runCharacter(51)))
+	if err := w.ids.SyncRewardRuns(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.journalNow(t); len(got.Runs) != 1 || got.Runs[0].Generation != 2 {
+		t.Fatalf("the next run = %+v, want generation 2", got.Runs)
 	}
 }

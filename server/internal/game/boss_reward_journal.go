@@ -214,3 +214,17 @@ func (p *Player) ConsumeClaimedBossLoot(corpseID uint64, indices []uint8, silver
 	}
 	return true
 }
+
+// QueueLootRefusal records a TakeLoot refusal decided after the take returned, such as a boss
+// reward claim that did not fit or did not land. The tick delivers it and never drops it, and
+// a refusal already waiting is not queued twice.
+func (p *Player) QueueLootRefusal(reason vnet.RefusalReason) {
+	if reason == vnet.RefusalReasonUnknown {
+		return
+	}
+	p.sim.mu.Lock()
+	defer p.sim.mu.Unlock()
+	if !slices.Contains(p.lootRefusals, reason) {
+		p.lootRefusals = append(p.lootRefusals, reason)
+	}
+}

@@ -31,6 +31,13 @@ var (
 	ErrRewardsDraining = errors.New("session: boss rewards are draining for shutdown")
 	// ErrRewardNotPlaying refuses a claim for a character without a live session.
 	ErrRewardNotPlaying = errors.New("session: a boss reward names no playing character")
+	// ErrRewardSelection refuses a claim whose entries do not name distinct places in the
+	// frozen personal roll.
+	ErrRewardSelection = errors.New("session: a boss reward names entries outside its frozen roll")
+
+	// errJournalBusy refuses a journal write while another writer's uncertain write is
+	// still to be retried. It changes nothing and is retried like any transient failure.
+	errJournalBusy = errors.New("session: another boss reward journal write must be retried first")
 )
 
 const (
@@ -45,6 +52,12 @@ type BossRewardClaim struct {
 	Generation uint64
 	Boss       vnet.MobKind
 	Grant      game.BossRewardGrant
+	// EntryIndices names, for each Grant entry, its index in the frozen personal roll. The
+	// journal reference is built from these, never from the grant's own positions.
+	EntryIndices []uint8
+	// Delivered, when set, is called once after the claim has finished, with no lock held,
+	// with the frozen roll indices the claim took and whether it took the silver.
+	Delivered func(indices []uint8, silver bool)
 }
 
 type rewardCoordinator struct {
@@ -72,6 +85,15 @@ type rewardCoordinator struct {
 	pendingRunWrite func() error
 	// assignRun is a test seam for the manager's generation assignment. Nil in production.
 	assignRun func(run game.SavedSession, generation uint64) bool
+	// runs is what the sync reads saved runs from and releases durable loot through: the
+	// manager in production.
+	runs rewardRunManager
+
+	// journalMu orders every journal write, from claims and from the sync. journalOwner is
+	// the writer whose last write left the journal uncertain; nobody else writes until that
+	// writer's identical retry lands. Guarded by journalMu.
+	journalMu    sync.Mutex
+	journalOwner any
 }
 
 // rewardTask is one claim's ownership. Its mutex orders the claim's live steps against a
@@ -87,6 +109,11 @@ type rewardTask struct {
 	ref      persist.RewardReference
 	detached *rewardDetachment
 	closed   bool
+	// taken and silver are what the sealed claim takes from the frozen roll, and delivered
+	// is told them once the claim has finished.
+	taken     []uint8
+	silver    bool
+	delivered func(indices []uint8, silver bool)
 }
 
 // rewardDetachment is the leaving character's last word, held until the claim ends.
@@ -112,7 +139,7 @@ func (i *Identities) EnableRewards(journal *persist.RewardStore, manager *game.I
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	i.rewards = &rewardCoordinator{
-		journal: journal, manager: manager, ctx: ctx, cancel: cancel,
+		journal: journal, manager: manager, runs: manager, ctx: ctx, cancel: cancel,
 		retryMin: rewardRetryMin, retryMax: rewardRetryMax,
 	}
 	return nil
@@ -126,7 +153,17 @@ func (i *Identities) ClaimBossReward(req BossRewardClaim) (<-chan error, error) 
 	if req.Player == nil || req.Self.Character.IsZero() {
 		return nil, ErrRewardNotPlaying
 	}
-	task := &rewardTask{self: req.Self, player: req.Player}
+	if len(req.EntryIndices) != len(req.Grant.Entries) {
+		return nil, ErrRewardSelection
+	}
+	var named uint64
+	for _, index := range req.EntryIndices {
+		if index >= 64 || named&(uint64(1)<<index) != 0 {
+			return nil, ErrRewardSelection
+		}
+		named |= uint64(1) << index
+	}
+	task := &rewardTask{self: req.Self, player: req.Player, delivered: req.Delivered}
 	// Taken before Identities.mu, in the documented order. It stays held until the
 	// reservation resolves, so a teardown waits to learn whether the claim owns it.
 	task.mu.Lock()
@@ -196,12 +233,16 @@ func (i *Identities) runReward(c *rewardCoordinator, t *rewardTask, req BossRewa
 		run  func() error
 	}{
 		{"sealed", func() error {
-			return i.durably(c, func() error { return c.journal.PrepareClaim(i.store, t.token, t.ref) })
+			return i.durably(c, func() error {
+				return c.journalWrite(t, func() error { return c.journal.PrepareClaim(i.store, t.token, t.ref) })
+			})
 		}},
 		{"prepared", func() error { return i.durably(c, func() error { return i.store.WritePreparedReward(t.token) }) }},
 		{"written", func() error { return i.publishReward(c, t) }},
 		{"published", func() error {
-			return i.durably(c, func() error { return c.journal.AcknowledgeClaim(i.store, t.token, t.ref) })
+			return i.durably(c, func() error {
+				return c.journalWrite(t, func() error { return c.journal.AcknowledgeClaim(i.store, t.token, t.ref) })
+			})
 		}},
 		{"acknowledged", func() error { return i.finishReward(c, t) }},
 	}
@@ -234,10 +275,19 @@ func (i *Identities) reserveReward(c *rewardCoordinator, t *rewardTask, req Boss
 		i.endRewardLocked(t)
 		return err
 	}
+	// The image's mask is over the grant's entries; the journal's is over the frozen roll.
+	var entries uint64
+	var taken []uint8
+	for k, index := range req.EntryIndices {
+		if image.Entries&(uint64(1)<<k) != 0 {
+			entries |= uint64(1) << index
+			taken = append(taken, index)
+		}
+	}
 	ref := persist.RewardReference{
 		Generation: req.Generation, Boss: req.Boss,
 		Owner:   persist.SessionCharacter{PlayerID: req.Self.ID, CharacterID: uint64(character)},
-		Entries: image.Entries, Silver: image.Silver, Experience: image.Experience,
+		Entries: entries, Silver: image.Silver, Experience: image.Experience,
 	}
 	// The postimage keeps the baseline's identity and LastSeen. The journal compares
 	// intents whole, and a fresh timestamp would not survive its encoding unchanged.
@@ -254,6 +304,7 @@ func (i *Identities) reserveReward(c *rewardCoordinator, t *rewardTask, req Boss
 		return err
 	}
 	t.claim, t.token, t.ref = claim, token, ref
+	t.taken, t.silver = taken, image.Silver
 	if _, err := claim.Seal(); err != nil {
 		// Unreachable: this task is the claim's only holder. The Store half is sealed,
 		// so ownership is kept rather than guessed about.
@@ -337,6 +388,9 @@ func (i *Identities) finishReward(c *rewardCoordinator, t *rewardTask) error {
 		return err
 	}
 	i.endRewardLocked(t)
+	if t.delivered != nil {
+		t.delivered(t.taken, t.silver)
+	}
 	return nil
 }
 
@@ -411,6 +465,31 @@ func (i *Identities) detachReward(self Resolved, player *game.Player, portal *ga
 	t.detached = &rewardDetachment{live: life, disk: disk, portal: portal != nil, write: writeRecord}
 	i.finalise(self.ID)
 	return true
+}
+
+// rewardRunManager is what the sync needs from the instance manager.
+type rewardRunManager interface {
+	SavedSessions() []game.SavedSession
+	AssignRunGeneration(run game.SavedSession, generation uint64) bool
+	ReleaseBossRewards(run game.SavedSession, kind vnet.MobKind) bool
+}
+
+// journalWrite runs one journal write through the gate every writer shares. A write that
+// leaves the journal uncertain makes its writer the only one allowed to write until its
+// identical retry lands; any other writer is refused with errJournalBusy without writing.
+func (c *rewardCoordinator) journalWrite(owner any, op func() error) error {
+	c.journalMu.Lock()
+	defer c.journalMu.Unlock()
+	if c.journalOwner != nil && c.journalOwner != owner {
+		return errJournalBusy
+	}
+	err := op()
+	if c.journal.Uncertain() {
+		c.journalOwner = owner
+	} else {
+		c.journalOwner = nil
+	}
+	return err
 }
 
 func (t *rewardTask) owner() game.InstanceCharacter {
