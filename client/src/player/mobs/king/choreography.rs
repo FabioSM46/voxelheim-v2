@@ -14,6 +14,8 @@ pub(super) struct Controls {
     pub blade: Quat,
     pub two_hands: bool,
     pub free_hand: Vec3,
+    /// How far the final-stage crown has slipped, from 0 (welded) to 1.
+    pub crown: f32,
 }
 
 impl Default for Controls {
@@ -27,6 +29,7 @@ impl Default for Controls {
             blade: Quat::IDENTITY,
             two_hands: false,
             free_hand: Vec3::new(-0.39, 1.39, -0.02),
+            crown: 0.0,
         }
     }
 }
@@ -241,7 +244,7 @@ fn arm(left: bool, target: Vec3) -> (Mat4, Mat4, Vec3) {
     )
 }
 
-pub(super) fn assemble(p: Controls, feet: [Vec3; 2]) -> [Transform; 15] {
+pub(super) fn assemble(p: Controls, feet: [Vec3; 2]) -> [Transform; 17] {
     let torso = Mat4::from_translation(-Vec3::Y * p.drop)
         * around(
             Vec3::Y * 1.25,
@@ -259,12 +262,15 @@ pub(super) fn assemble(p: Controls, feet: [Vec3; 2]) -> [Transform; 15] {
     };
     let (left_upper, left_fore, _) = arm(true, left_target);
     let legs = std::array::from_fn::<_, 2, _>(|i| super::motion::leg_matrices(i, feet[i], p.drop));
+    let head = torso * around(Vec3::Y * 2.30, Quat::from_rotation_x(p.head));
     SEGMENTS.map(|segment| {
         use Segment::*;
         Transform::from_matrix(match segment {
             Pelvis => Mat4::from_translation(-Vec3::Y * p.drop),
             Torso => torso,
-            Head => torso * around(Vec3::Y * 2.30, Quat::from_rotation_x(p.head)),
+            // A worn mask is rigid on the face; a fallen one is placed by the regalia.
+            Head | Mask => head,
+            Crown => head * super::regalia::crown_tilt(p.crown),
             UpperLeft => torso * left_upper,
             UpperRight => torso * right_upper,
             ForeLeft => torso * left_fore,
@@ -285,16 +291,19 @@ pub(in super::super) fn sample(
     motion: &super::motion::Motion,
     one: Option<&PresentedMove>,
     yaw: f32,
-) -> [Transform; 15] {
+) -> [Transform; 17] {
     let Some(one) =
         one.filter(|one| one.window == Window::Current && one.announced.ended.is_none())
     else {
         return motion.transforms;
     };
     let mut p = controls(one);
+    p.crown = motion.regalia.crown();
     if let Some(aim) = one.announced.aim {
         let local = Quat::from_rotation_y(-yaw) * Vec3::from_array(aim);
         p.twist += (-local.x).atan2(-local.z).clamp(-0.25, 0.25);
     }
-    assemble(p, super::motion::REST_FEET)
+    let mut pose = assemble(p, super::motion::REST_FEET);
+    motion.regalia.dress(&mut pose);
+    pose
 }
