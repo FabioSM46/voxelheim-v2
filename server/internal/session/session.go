@@ -663,7 +663,15 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			}
 			// An external world binding without a portal visit has no known return
 			// point. Keep its previous disk life rather than write foreign coordinates.
+			rewardOwned := false
 			if current == phaseInWorld && player != nil && (portalVisit != nil || chunks == openBinding.Chunks) {
+				// A pending boss reward owns this character's last word. It captures the
+				// life under its own ordering, publishes the reward onto it, writes the
+				// record and releases the account itself, so a reconnect cannot resume a
+				// life the reward has not reached.
+				rewardOwned = identities.detachReward(self, player, portalVisit, cfg.Instances)
+			}
+			if !rewardOwned && current == phaseInWorld && player != nil && (portalVisit != nil || chunks == openBinding.Chunks) {
 				life := player.Record()
 				if portalVisit != nil {
 					identities.rememberPortalReturn(self, portalVisit.Return)
@@ -684,7 +692,9 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			}
 			// The account's, not the character's: the claim was taken when the ticket
 			// verified, which is one phase before there was a character to name it by.
-			identities.Release(account.ID)
+			if !rewardOwned {
+				identities.Release(account.ID)
+			}
 		}
 	}()
 

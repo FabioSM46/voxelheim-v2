@@ -1028,7 +1028,7 @@ func TestAPreCharacterPlayersDirectoryIsSetAsideOnStart(t *testing.T) {
 		t.Fatalf("writing the old record: %v", err)
 	}
 
-	store, err := openPlayers(options{worldDir: dir}, discard())
+	store, _, err := openPlayers(options{worldDir: dir}, discard())
 	if err != nil {
 		t.Fatalf("openPlayers: %v", err)
 	}

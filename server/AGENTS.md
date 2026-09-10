@@ -1141,6 +1141,40 @@ and journal is a later part.
   survives. `PublishRemembered` and `FinishRemembered` are the same transitions for a character
   that detached, and they have no caller until identity ownership across a disconnect lands.
 
+### Who owns a claim while the disk is written
+
+`internal/session/reward_coordinator.go` owns each claim, one per character, from the Store
+barrier to its acknowledgement. Nothing submits a claim until the reward producer is connected.
+
+- **Every disk step runs on the claim's own goroutine and retries idempotently, with no
+  simulation or inventory lock held.** Live methods run only between those steps. The order is
+  fixed:
+  1. Store reservation
+  2. game reservation
+  3. journal validation
+  4. the sealed intent
+  5. the journal intent write
+  6. the character postimage write
+  7. publication
+  8. journal acknowledgement
+  9. `Finish`
+  10. the Store release, only after `Finish`
+
+  A refusal before sealing undoes both reservations. A failure after sealing keeps ownership.
+- **A pending claim owns its character's last word.** The autosave skips the character and
+  offline experience stays queued. A teardown hands its captured life to the claim, which then:
+  1. publishes the reward onto that life
+  2. replaces a remembered portal visit only if it still holds exactly that life
+  3. writes the record
+  4. releases the account
+
+  Until that final write a reconnect is refused as `ALREADY_CONNECTED`, exactly as during a
+  leave linger, so nothing can resume a life the reward has not reached.
+- **Shutdown drains with a bound.** After sessions stop, `DrainRewards` refuses new claims and
+  waits up to `rewardDrainTimeout`. A claim still pending then stops retrying and keeps its
+  barrier and durable intent, which startup recovery replays. That wait comes before the instance
+  manager closes.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460
