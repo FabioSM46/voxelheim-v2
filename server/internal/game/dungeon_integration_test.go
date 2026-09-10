@@ -125,10 +125,14 @@ func TestAWipeLeavesAHeldDefeatAndItsRewardsUntouched(t *testing.T) {
 	}
 	s.mu.Lock()
 	fresh := s.mobs[s.dungeon.kingID]
-	hold := s.corpses[guardianID].rewards
+	dead, present := s.corpses[guardianID]
+	var hold bossRewardHold
+	if present {
+		hold = dead.rewards
+	}
 	s.mu.Unlock()
-	if fresh == nil || fresh.entityID == kingID || fresh.health != fresh.species().maxHealth || hold != bossRewardsHeld {
-		t.Fatalf("after the wipe: king %+v, guardian corpse hold %d; want a fresh king and the loot still held", fresh, hold)
+	if !present || fresh == nil || fresh.entityID == kingID || fresh.health != fresh.species().maxHealth || hold != bossRewardsHeld {
+		t.Fatalf("after the wipe: king %+v, guardian corpse present %v with hold %d; want a fresh king and the guardian's loot still held", fresh, present, hold)
 	}
 	if !m.ReleaseBossRewards(after[0], vnet.MobKindVargrGuardian) {
 		t.Fatal("the held defeat could not be released after the wipe")
@@ -262,6 +266,14 @@ func TestACharacterBoundAfterTheKillHoldsNoLootAndNoExperience(t *testing.T) {
 	}
 	if !m.ReleaseBossRewards(saved[0], vnet.MobKindVargrGuardian) {
 		t.Fatal("the defeat was not released")
+	}
+	// The same corpse is open to the member the kill did roll for, so the refusals below are
+	// about the latecomer and not about the loot.
+	if reason, err := p.OpenLoot(protocol.LootOpenRequest{CorpseID: guardianID, ClientTick: 1}); err != nil {
+		t.Fatalf("the entitled killer could not open the loot: %s, %v", reason, err)
+	}
+	if selection, reason, err := p.BossLootToClaim(guardianID, 1, 0); err != nil || len(selection.Entries) == 0 {
+		t.Fatalf("the entitled killer could not select the loot: %+v, %s, %v", selection, reason, err)
 	}
 	if _, err := q.OpenLoot(protocol.LootOpenRequest{CorpseID: guardianID, ClientTick: 1}); err == nil {
 		t.Fatal("the latecomer opened loot they hold no container in")
