@@ -346,12 +346,18 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 	vnet.MobKindDraugrKing: {
 		// The blade held high, a pause, and a low clang. A strip rather than a cone: a
 		// two-handed vertical cut has a lane and the answer is to leave it sideways.
+		//
+		// The strip ends at the king's engagement reach, 3.3: the farthest a player's nearest
+		// damage sample can stand from his centre while still within SwordReach of his body, on
+		// any bearing. It used to run 5.0, reaching players 1.8 blocks beyond any position they
+		// could strike him from and 3.5 beyond the visible blade (#1037). The band is that reach
+		// less his half-width, so the strip he announces reaches the target he chose.
 		{
 			kind: vnet.EncounterMoveKindKingsSentence, fromStage: 1,
 			telegraph: 1200 * time.Millisecond, release: 250 * time.Millisecond,
 			recovery: 1800 * time.Millisecond, cooldown: 3 * time.Second,
-			minRange: 0, maxRange: 4.0, damagePercent: 110,
-			hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 5.0, height: 3.0, halfWidth: 1.1},
+			minRange: 0, maxRange: 2.8, damagePercent: 110,
+			hazard: encounterHazard{shape: vnet.HazardShapeLine, reach: 3.3, height: 3.0, halfWidth: 1.1},
 		},
 		// Three distinct poses, announced one at a time. Each toll is a move instance of
 		// its own with its own telegraph and id. The committed physical combination
@@ -360,7 +366,7 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 			kind: vnet.EncounterMoveKindThreeTolls, fromStage: 1, combo: &tollCombo,
 			telegraph: 900 * time.Millisecond, release: 200 * time.Millisecond,
 			recovery: tollCombo.final, cooldown: 1500 * time.Millisecond,
-			minRange: 0, maxRange: 3.4, damagePercent: 75,
+			minRange: 0, maxRange: 2.8, damagePercent: 75,
 			hazard: tollCombo.blows[0].hazard,
 		},
 		// The free hand raised, a crystal forming, a direction fixed before release. The
@@ -377,9 +383,14 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 		// The sword planted and rings of lit cracks running outward in sequence. Four
 		// pulses of a two-block band: the safe ground is ahead of the wave and then behind
 		// it, and the band is narrow enough to cross on foot.
+		//
+		// Each pulse is shown for a second. At 700 ms the longest measured escape used the
+		// whole warning and a 400 ms delay turned 218 of 301 threatened pulses into hits
+		// (docs/reviews/dungeon-combat-1037.md); a second is the shortest interval the #1037
+		// sweep measured clean through 600 ms of delay and 200 ms stalls.
 		{
 			kind: vnet.EncounterMoveKindBurial, fromStage: 2,
-			telegraph: 1500 * time.Millisecond, channelPulse: 700 * time.Millisecond, pulses: 4,
+			telegraph: 1500 * time.Millisecond, channelPulse: time.Second, pulses: 4,
 			release: 200 * time.Millisecond, recovery: 2000 * time.Millisecond,
 			cooldown: 14 * time.Second,
 			minRange: 0, maxRange: 8.0, damagePercent: 70,
@@ -393,8 +404,10 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 		// four are always clear — the reachable-safe-space rule is what holds that, not
 		// this comment.
 		{
+			// A three-block disc takes most of a second to walk out of from its centre, so an
+			// 800 ms pulse failed from 250 ms of delay; 1.3 s is the #1037 sweep's clean value.
 			kind: vnet.EncounterMoveKindEdictOfTheGraves, fromStage: 2,
-			telegraph: 1500 * time.Millisecond, channelPulse: 800 * time.Millisecond, pulses: 3,
+			telegraph: 1500 * time.Millisecond, channelPulse: 1300 * time.Millisecond, pulses: 3,
 			release: 200 * time.Millisecond, recovery: 1800 * time.Millisecond,
 			cooldown: 16 * time.Second,
 			minRange: 0, maxRange: 10.0, damagePercent: 80,
@@ -408,8 +421,9 @@ var encounterMoveCatalog = map[vnet.MobKind][]encounterMoveDef{
 		// interrupt is a reward rather than the only escape: the pulses are leaveable
 		// whether or not anybody breaks it.
 		{
+			// 900 ms failed from 250 ms of delay; 1.3 s is the #1037 sweep's clean value.
 			kind: vnet.EncounterMoveKindRequiemOfTheBuried, fromStage: 3,
-			telegraph: 1500 * time.Millisecond, channelPulse: 900 * time.Millisecond, pulses: 3,
+			telegraph: 1500 * time.Millisecond, channelPulse: 1300 * time.Millisecond, pulses: 3,
 			release: 200 * time.Millisecond, recovery: 2000 * time.Millisecond,
 			interruptible: true, interruptDamage: 150,
 			interruptRecovery: 3 * time.Second,

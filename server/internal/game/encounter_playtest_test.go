@@ -819,8 +819,8 @@ func playtestTouches(regions []protocol.HazardVolume, body box) bool {
 }
 
 // TestFirstDungeonReadersEscapeEveryAnnouncedRegion is the always-run half of the
-// measurement. A reader perceiving the fight through its own frames — at no delay, at a
-// 250 ms delay, and through 200 ms stalls every second — kills both bosses solo in the
+// measurement. A reader perceiving the fight through its own frames — at no delay, at 250 and
+// 400 ms of delay, and through 200 ms stalls every second — kills both bosses solo in the
 // starter kit and as a party of four in iron without a single hit: no schedule in either
 // fight announced a region, a combination or a pulse sequence its walking target could not
 // leave in time under those conditions. The review record names the conditions that fail.
@@ -830,7 +830,7 @@ func TestFirstDungeonReadersEscapeEveryAnnouncedRegion(t *testing.T) {
 			party int
 			kit   playtestKit
 		}{{1, kitRusty}, {4, kitIron}} {
-			for _, network := range []playtestNetwork{{}, {delayMillis: 250}, {lossEvery: 20, lossBurst: 4}} {
+			for _, network := range []playtestNetwork{{}, {delayMillis: 250}, {delayMillis: 400}, {lossEvery: 20, lossBurst: 4}} {
 				cfg := playtestConfig{boss: boss, party: setup.party, kit: setup.kit, network: network}
 				t.Run(cfg.String(), func(t *testing.T) {
 					r := newPlaytest(t, cfg).run()
@@ -874,6 +874,37 @@ func TestFirstDungeonEveryStageRepertoireIsEscapable(t *testing.T) {
 					}
 					if moves == 0 {
 						t.Fatalf("the boss announced nothing in %d seconds\n%s", cfg.seconds, r)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestFirstDungeonRitualPulsesSurviveLatency holds the king at his ritual stages against
+// evaders perceiving the fight 400 ms late, and 250 ms late through 200 ms stalls every second.
+// No burial, edict or requiem pulse lands. Before #1037 lengthened the shown intervals, a
+// burial pulse struck 218 of 301 threatened windows at 400 ms.
+func TestFirstDungeonRitualPulsesSurviveLatency(t *testing.T) {
+	rituals := []vnet.EncounterMoveKind{vnet.EncounterMoveKindBurial, vnet.EncounterMoveKindEdictOfTheGraves, vnet.EncounterMoveKindRequiemOfTheBuried}
+	for stage := uint8(2); stage <= 3; stage++ {
+		for _, network := range []playtestNetwork{{delayMillis: 400}, {delayMillis: 250, lossEvery: 20, lossBurst: 4}} {
+			for _, setup := range []struct{ party, ranged int }{{1, 0}, {1, 1}, {4, 2}} {
+				cfg := playtestConfig{boss: vnet.MobKindDraugrKing, party: setup.party, ranged: setup.ranged, kit: kitRusty,
+					policy: policyEvader, network: network, stage: stage, seconds: 120}
+				t.Run(cfg.String(), func(t *testing.T) {
+					r := newPlaytest(t, cfg).run()
+					announced := 0
+					for _, kind := range rituals {
+						if stats := r.moves[kind]; stats != nil {
+							announced += stats.windows
+							if stats.hits != 0 {
+								t.Errorf("%s: %d pulses landed on players who were escaping", kind, stats.hits)
+							}
+						}
+					}
+					if announced == 0 || r.unattributed != 0 {
+						t.Fatalf("pulse windows=%d unattributed=%d; want rituals measured\n%s", announced, r.unattributed, r)
 					}
 				})
 			}

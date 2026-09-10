@@ -248,12 +248,30 @@ func (m *mob) selectEncounterMoveLocked(s *Sim, target *Player) (encounterMoveDe
 
 	for _, i := range candidates {
 		one := repertoire[i].forStage(e.phase).forComboStep(1)
-		if !s.moveLeavesAnEscapeLocked(m, one, target) {
+		if !m.announcedRegionReaches(one, target) || !s.moveLeavesAnEscapeLocked(m, one, target) {
 			continue
 		}
 		return one, true
 	}
 	return encounterMoveDef{}, false
+}
+
+// announcedRegionReaches reports whether a move that plants its creature would announce a
+// region its target is standing in.
+//
+// **The band is measured body to body and the region from the creature's centre**, and the two
+// do not describe the same ground: the bite's 2.6 band admits a target its 3.0 cone cannot reach,
+// and an axis-aligned gap reaches farther along a diagonal than in front. Measured on #1037, a
+// player holding 2.45 blocks from the guardian's body was announced three of four planted blows
+// whose regions did not reach it. A planted move is therefore chosen only when the region it
+// would announce reaches its target now; otherwise the creature keeps closing. Travelling,
+// thrown and ritual moves are placed by their own rules and are not affected.
+func (m *mob) announcedRegionReaches(def encounterMoveDef, target *Player) bool {
+	if def.travel != travelNone || def.flightSpeed > 0 || def.hazard.pulse != pulseNone {
+		return true
+	}
+	aim := m.aimForMove(def, target)
+	return anyHazardReaches(m.hazardsForPulse(def, aim, m.hazardAnchor(def, aim, target), 0), target.box())
 }
 
 // beginEncounterMoveLocked commits to a move and announces it.
