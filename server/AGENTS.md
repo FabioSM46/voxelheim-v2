@@ -1175,6 +1175,42 @@ barrier to its acknowledgement. Nothing submits a claim until the reward produce
   barrier and durable intent, which startup recovery replays. That wait comes before the instance
   manager closes.
 
+### Defeated progress is durable before any reward is
+
+The journal records which encounters a run has put down, and who owes it, before it
+delivers anything. Every piece below lands with no personal loot or experience entitlement,
+so boss loot and experience still reach players through the live corpse and award paths.
+That is deliberate: a journal that delivers nothing cannot duplicate them.
+
+- **Startup recovers first.** `persist.OpenStoreWithRewardRecovery` replaces `CheckInactive`.
+  A prepared reward is replayed or reconfirmed before the players directory is indexed, and a
+  journal that has issued a generation makes receipt handling strict. `session.ValidateRewardRecord`
+  is the game's judgement of a recovered life.
+- **Saved runs restore through the journal.** `OverlaySessions` lays the journal over the
+  sessions file:
+  - its defeats are authoritative;
+  - bindings are unioned;
+  - each run carries its generation, even when the file is stale or missing.
+
+  A journal-held run that cannot be overlaid or restored stops startup, because starting free
+  would respawn a boss the journal records as dead.
+- **The producer is `Identities.SyncRewardRuns`, every `rewardSyncInterval` and at shutdown.**
+  It reads one journal snapshot per pass and writes only what is missing:
+  - A saved run without a generation is allocated one with its current defeats and bindings in
+    the same write.
+  - A run the journal already holds under the same seed, ruin and reset is adopted, never
+    allocated twice. Two live runs with one identity would make the overlay refuse startup,
+    and adoption also repairs an allocation the manager did not accept.
+  - Later defeats are appended in death order, and a later binding is unioned.
+
+  A failed journal write may have landed, and the journal refuses other bytes until those are
+  retried, so it is retried verbatim before anything else. No simulation lock is held across a
+  write. A defeat the process stopped before journaling is restored undefeated: the journal only
+  claims progress it wrote, which is what lets a reward wait for its defeat to be durable.
+- **The reset collects.** `RewardStore.ExpireRuns` removes a run whose reset has passed unless a
+  prepared intent names it. `NextGeneration` never decreases, so a collected generation is
+  never reissued.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

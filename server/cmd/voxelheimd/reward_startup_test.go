@@ -5,9 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/persist"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/session"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
@@ -37,27 +42,83 @@ func startupRewardFixture(active bool) []byte {
 	return b
 }
 
-func TestStartupRefusesPendingOrCorruptRewardsBeforeOpeningPlayers(t *testing.T) {
-	for _, corrupt := range []bool{false, true} {
-		dir := t.TempDir()
-		b := startupRewardFixture(true)
-		if corrupt {
-			b[len(b)-1] ^= 1
-		}
-		if err := os.WriteFile(filepath.Join(dir, "boss-rewards.bin"), b, 0600); err != nil {
-			t.Fatal(err)
-		}
-		_, _, err := openPlayers(options{worldDir: dir}, discard())
-		want := persist.ErrRewardReplayRequired
-		if corrupt {
-			want = world.ErrCorruptStore
-		}
-		if !errors.Is(err, want) {
-			t.Fatalf("startup did not refuse reward state: %v", err)
-		}
-		if _, err := os.Stat(filepath.Join(dir, "players")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatal("refused startup modified players")
-		}
+func TestStartupRefusesACorruptRewardJournalBeforeOpeningPlayers(t *testing.T) {
+	dir := t.TempDir()
+	b := startupRewardFixture(true)
+	b[len(b)-1] ^= 1
+	if err := os.WriteFile(filepath.Join(dir, "boss-rewards.bin"), b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := openPlayers(options{worldDir: dir}, discard()); !errors.Is(err, world.ErrCorruptStore) {
+		t.Fatalf("startup did not refuse a corrupt reward journal: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "players")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused startup modified players")
+	}
+}
+
+// journalWithRun writes a reward journal holding one live run whose guardian is dead, with
+// no sessions file beside it, at the given content version.
+func journalWithRun(t *testing.T, content uint32) string {
+	t.Helper()
+	dir := t.TempDir()
+	players, err := persist.OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := persist.OpenRewardStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := persist.SessionRecord{ID: 7, Seed: 19, Ruin: [2]int64{2, 3}, ExpiresUnix: time.Now().Add(time.Hour).Unix()}
+	if err := journal.AllocateRun(players, 1, record, content); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.AppendDefeat(1, persist.RewardDefeat{Kind: vnet.MobKindVargrGuardian}, nil); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func restoreOver(t *testing.T, dir string) (*game.InstanceManager, error) {
+	t.Helper()
+	_, rewards, err := openPlayers(options{worldDir: dir}, discard())
+	if err != nil {
+		t.Fatalf("an active reward journal was refused at startup: %v", err)
+	}
+	runs, err := openSessions(options{worldDir: dir}, discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := game.NewInstanceManager(game.DefaultTickRate, 1, game.DefaultMaxInstances, session.NewRegistry(session.DefaultConcurrentSessions).NextID, discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(instances.Close)
+	return instances, restoreSessions(instances, runs, rewards, time.Now(), discard())
+}
+
+// An active journal is recovered rather than refused, and the run it holds comes back
+// with its generation and its dead guardian even though the sessions file is missing.
+func TestStartupRestoresTheRunsTheRewardJournalHolds(t *testing.T) {
+	instances, err := restoreOver(t, journalWithRun(t, world.WorldgenVersion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := instances.SavedSessions()
+	if len(saved) != 1 || saved[0].Generation != 1 || saved[0].Seed != 19 ||
+		!slices.Equal(saved[0].DefeatedBosses, []vnet.MobKind{vnet.MobKindVargrGuardian}) {
+		t.Fatalf("restored runs = %+v", saved)
+	}
+}
+
+func TestStartupStopsRatherThanStartFreeOverAJournalRunItCannotRestore(t *testing.T) {
+	instances, err := restoreOver(t, journalWithRun(t, world.WorldgenVersion+1))
+	if !errors.Is(err, persist.ErrRewardRecoveryRequired) {
+		t.Fatalf("a run from another worldgen = %v, want %v", err, persist.ErrRewardRecoveryRequired)
+	}
+	if instances.Count() != 0 {
+		t.Fatalf("a refused restore built %d sessions", instances.Count())
 	}
 }
 

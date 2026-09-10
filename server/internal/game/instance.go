@@ -84,13 +84,16 @@ type instanceSession struct {
 	// run cleared at 23:59 resets sixty seconds later and one cleared at 00:01 lasts the
 	// day, which is what "the day is the unit" means. See instance_reset.go.
 	expiresUnix int64
-	members     map[InstanceCharacter]struct{}
-	sim         *Sim
-	chunks      *world.Cache
-	ctx         context.Context
-	cancel      context.CancelFunc
-	emptyTicks  uint32
-	tick        uint64
+	// generation is this run's boss reward journal identity, or zero until the reward
+	// producer has allocated one. Runtime ids are reused across restarts; generations never are.
+	generation uint64
+	members    map[InstanceCharacter]struct{}
+	sim        *Sim
+	chunks     *world.Cache
+	ctx        context.Context
+	cancel     context.CancelFunc
+	emptyTicks uint32
+	tick       uint64
 }
 
 type instanceVisit struct {
