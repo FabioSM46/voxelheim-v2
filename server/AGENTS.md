@@ -1195,10 +1195,18 @@ That is deliberate: a journal that delivers nothing cannot duplicate them.
   A journal-held run that cannot be overlaid or restored stops startup, because starting free
   would respawn a boss the journal records as dead.
 - **The producer is `Identities.SyncRewardRuns`, every `rewardSyncInterval` and at shutdown.**
-  It allocates a generation for a saved run without one, appends each defeat in the order it
-  died, and unions every binding. Each step is an idempotent retry, and no simulation lock is
-  held across a write. A crash between allocation and the first append restores the run without
-  that defeat, which is the conservative direction.
+  It reads one journal snapshot per pass and writes only what is missing:
+  - A saved run without a generation is allocated one with its current defeats and bindings in
+    the same write.
+  - A run the journal already holds under the same seed, ruin and reset is adopted, never
+    allocated twice. Two live runs with one identity would make the overlay refuse startup,
+    and adoption also repairs an allocation the manager did not accept.
+  - Later defeats are appended in death order, and a later binding is unioned.
+
+  A failed journal write may have landed, and the journal refuses other bytes until those are
+  retried, so it is retried verbatim before anything else. No simulation lock is held across a
+  write. A defeat the process stopped before journaling is restored undefeated: the journal only
+  claims progress it wrote, which is what lets a reward wait for its defeat to be durable.
 - **The reset collects.** `RewardStore.ExpireRuns` removes a run whose reset has passed unless a
   prepared intent names it. `NextGeneration` never decreases, so a collected generation is
   never reissued.
