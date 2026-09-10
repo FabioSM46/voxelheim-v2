@@ -40,6 +40,7 @@ enum Mask {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in super::super) struct Regalia {
+    encounter: Option<u64>,
     stage: Option<u8>,
     crown: f32,
     mask: Mask,
@@ -50,6 +51,7 @@ pub(in super::super) struct Regalia {
 impl Default for Regalia {
     fn default() -> Self {
         Self {
+            encounter: None,
             stage: None,
             crown: 0.0,
             mask: Mask::Worn,
@@ -71,27 +73,28 @@ impl Regalia {
         self.mask != Mask::Absent
     }
 
-    /// `stage` is the live timeline's ordinal for this boss and `alive` the snapshot's
-    /// statement. A corpse's evicted timeline keeps what it last showed; a living boss
-    /// with no encounter is not in a fight, so a wipe's reset restores the regalia.
-    pub(in super::super) fn observe(&mut self, stage: Option<u8>, alive: bool) {
-        match stage {
-            Some(stage) => {
-                let seen = self.stage.replace(stage);
-                if stage < FINAL_STAGE {
-                    *self = Self {
-                        stage: Some(stage),
-                        ..default()
-                    };
-                } else if seen.is_none() && self.mask == Mask::Worn {
-                    self.crown = 1.0;
-                    self.mask = Mask::Absent;
-                } else if seen.is_some_and(|seen| seen < FINAL_STAGE) && self.mask == Mask::Worn {
-                    self.mask = Mask::Detach;
-                }
-            }
-            None if alive => *self = default(),
-            None => {}
+    /// `announced` is this boss's live encounter id and stage, from [`boss_stage`]. Only
+    /// positive evidence restores the regalia: a new encounter id (every pull gets one)
+    /// or an earlier stage. No timeline, whether a corpse's evicted one or a gap, changes
+    /// nothing, so a witnessed fall is never turned into a disappearance.
+    pub(in super::super) fn observe(&mut self, announced: Option<(u64, u8)>) {
+        let Some((encounter, stage)) = announced else {
+            return;
+        };
+        if self.encounter.is_some_and(|seen| seen != encounter) || stage < FINAL_STAGE {
+            *self = default();
+        }
+        self.encounter = Some(encounter);
+        let seen = self.stage.replace(stage);
+        if stage < FINAL_STAGE || self.mask != Mask::Worn {
+            return;
+        }
+        if seen.is_none() {
+            // First seen already final: show the result, never replay the fall.
+            self.crown = 1.0;
+            self.mask = Mask::Absent;
+        } else if seen.is_some_and(|seen| seen < FINAL_STAGE) {
+            self.mask = Mask::Detach;
         }
     }
 
@@ -137,6 +140,17 @@ impl Regalia {
             pose[Segment::Mask as usize] = local;
         }
     }
+}
+
+/// The contract joins a timeline to its creature by `boss_entity_id` alone, as
+/// `in_encounter` does; the kind it names is not a second key.
+pub(in super::super) fn boss_stage(
+    live: &[crate::net::EncounterTimeline],
+    entity_id: u64,
+) -> Option<(u64, u8)> {
+    live.iter()
+        .find(|state| state.boss_entity_id == entity_id)
+        .map(|state| (state.encounter_id, state.phase))
 }
 
 fn rest_matrix() -> Mat4 {
@@ -238,7 +252,9 @@ pub(in crate::player) fn present(
     let Some(visuals) = visuals else {
         return;
     };
-    let dressed: Vec<Entity> = cores.iter().map(|(core, ..)| core.owner).collect();
+    // One guard per child type, so a king missing either part never respawns the other.
+    let cored: Vec<Entity> = cores.iter().map(|(core, ..)| core.owner).collect();
+    let held: Vec<Entity> = crystals.iter().map(|(crystal, ..)| crystal.owner).collect();
     for (entity, part, visibility) in &mut parts {
         let Some(regalia) = mobs
             .get(part.owner)
@@ -266,7 +282,7 @@ pub(in crate::player) fn present(
                     None => {}
                 }
             }
-            MobPart::King(Segment::Torso) if !dressed.contains(&part.owner) => {
+            MobPart::King(Segment::Torso) if !cored.contains(&part.owner) => {
                 commands.spawn((
                     CoreGlow { owner: part.owner },
                     Mesh3d(visuals.core.clone()),
@@ -276,7 +292,7 @@ pub(in crate::player) fn present(
                     ChildOf(entity),
                 ));
             }
-            MobPart::King(Segment::ForeLeft) if !dressed.contains(&part.owner) => {
+            MobPart::King(Segment::ForeLeft) if !held.contains(&part.owner) => {
                 commands.spawn((
                     HandCrystal { owner: part.owner },
                     Mesh3d(visuals.crystal.clone()),
@@ -379,22 +395,25 @@ mod tests {
         let (position, yaw) = (Vec3::new(5.0, 64.0, 2.0), 0.7);
         let root = Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), position);
         let mut regalia = Regalia::default();
-        regalia.observe(Some(2), true);
+        regalia.observe(Some((1, 2)));
         let worn = sampled(&mut regalia, position, yaw, 0.1);
         assert_eq!(worn[Segment::Mask as usize], worn[Segment::Head as usize]);
         assert_eq!(regalia.crown(), 0.0);
 
-        regalia.observe(Some(3), true);
+        regalia.observe(Some((1, 3)));
+        let mask = |root: Mat4, pose: &[Transform; 17]| {
+            vertices(
+                Segment::Mask,
+                root * pose[Segment::Mask as usize].to_matrix(),
+            )
+        };
         let mut last = worn;
         for _ in 0..60 {
             last = sampled(&mut regalia, position, yaw, 1.0 / 60.0);
-            let lowest = vertices(
-                Segment::Mask,
-                root * last[Segment::Mask as usize].to_matrix(),
-            )
-            .iter()
-            .map(|point| point.y)
-            .fold(f32::INFINITY, f32::min);
+            let lowest = mask(root, &last)
+                .iter()
+                .map(|point| point.y)
+                .fold(f32::INFINITY, f32::min);
             assert!(
                 lowest >= position.y - 0.005,
                 "mask passed the floor: {lowest}"
@@ -405,10 +424,7 @@ mod tests {
             );
         }
         assert!(matches!(regalia.mask, Mask::Fallen(_)));
-        let landed = vertices(
-            Segment::Mask,
-            root * last[Segment::Mask as usize].to_matrix(),
-        );
+        let landed = mask(root, &last);
         for point in &landed {
             let local = root.inverse().transform_point3(*point);
             assert!(
@@ -421,10 +437,7 @@ mod tests {
         let (moved, turned) = (Vec3::new(9.0, 64.0, -1.0), 1.9);
         let later = sampled(&mut regalia, moved, turned, 0.1);
         let root = Mat4::from_rotation_translation(Quat::from_rotation_y(turned), moved);
-        for (a, b) in landed.iter().zip(vertices(
-            Segment::Mask,
-            root * later[Segment::Mask as usize].to_matrix(),
-        )) {
+        for (a, b) in landed.iter().zip(mask(root, &later)) {
             assert!(a.distance(b) < 1e-3);
         }
 
@@ -441,38 +454,48 @@ mod tests {
     }
 
     #[test]
-    fn late_final_stage_shows_the_result_and_only_a_living_withdrawal_restores_it() {
+    fn late_final_stage_shows_the_result_and_only_a_new_encounter_restores_it() {
         let mut late = Regalia::default();
-        late.observe(Some(3), true);
+        late.observe(Some((1, 3)));
         assert!(!late.mask_visible() && late.final_stage());
         assert_eq!(late.crown(), 1.0);
         let pose = sampled(&mut late, Vec3::ZERO, 0.0, 0.1);
         assert_eq!(pose[Segment::Mask as usize], pose[Segment::Head as usize]);
-        // The inbox forgets a corpse's encounter; the corpse keeps what it showed.
-        late.observe(None, false);
+        // An evicted corpse timeline is no evidence of a reset.
+        late.observe(None);
         assert!(!late.mask_visible() && late.final_stage());
 
         let mut fought = Regalia::default();
-        fought.observe(Some(2), true);
-        fought.observe(Some(3), true);
+        fought.observe(Some((1, 2)));
+        fought.observe(Some((1, 3)));
+        sampled(&mut fought, Vec3::ZERO, 0.0, 0.2);
+        let falling = fought.clone();
+        // One frame with no timeline, then the same stage 3 again: the fall continues.
+        fought.observe(None);
+        fought.observe(Some((1, 3)));
+        assert_eq!(fought, falling, "a timeline gap replaced a witnessed fall");
         sampled(&mut fought, Vec3::ZERO, 0.0, 1.0);
-        assert!(fought.local.is_some());
-        // A wipe ends the encounter on a living boss: the reset king wears it again.
-        fought.observe(None, true);
-        assert_eq!(fought, Regalia::default());
-        let pose = sampled(&mut fought, Vec3::ZERO, 0.0, 0.1);
+        assert!(fought.mask_visible() && matches!(fought.mask, Mask::Fallen(_)));
+        // A new pull carries a new encounter id: whole regalia, or a late stage 3.
+        let mut next = fought.clone();
+        next.observe(Some((2, 1)));
+        assert!(next.mask_visible() && !next.final_stage() && next.crown() == 0.0);
+        let pose = sampled(&mut next, Vec3::ZERO, 0.0, 0.1);
         assert_eq!(pose[Segment::Mask as usize], pose[Segment::Head as usize]);
-        // A newer pull starting at stage one is also a whole mask, whatever came before.
-        let mut replaced = Regalia::default();
-        replaced.observe(Some(3), true);
-        replaced.observe(Some(1), true);
-        assert!(replaced.mask_visible() && !replaced.final_stage());
-        assert_eq!(replaced.crown(), 0.0);
+        fought.observe(Some((2, 3)));
+        assert!(!fought.mask_visible() && fought.local.is_none());
+
+        // Joined by entity id alone: a timeline naming another kind still yields a stage.
+        let mut timeline = crate::player::encounters::tests::timeline();
+        (timeline.boss_entity_id, timeline.boss) = (900, MobKind::VargrGuardian);
+        let expected = Some((timeline.encounter_id, timeline.phase));
+        assert_eq!(boss_stage(std::slice::from_ref(&timeline), 900), expected);
+        assert_eq!(boss_stage(&[timeline], 901), None);
     }
 
     #[test]
     fn core_glow_and_hand_crystal_follow_the_announced_stage_and_spell() {
-        use crate::net::{EncounterTimelineInbox, MobState};
+        use crate::net::{EncounterMoveKind::*, EncounterTimelineInbox, MobState, MovePhase::*};
         use crate::player::mobs::tests::{deliver, draugr, headless};
         use bevy::time::TimeUpdateStrategy;
         let mut app = headless();
@@ -491,7 +514,7 @@ mod tests {
             let one = &mut timeline.moves[0];
             (one.kind, one.phase, one.phase_started_tick, one.phase_ticks) =
                 (kind, phase, started, ticks);
-            one.pulse = (phase == MovePhase::Channel).then_some((0, 3));
+            one.pulse = (phase == Channel).then_some((0, 3));
             app.world_mut()
                 .resource_mut::<EncounterTimelineInbox>()
                 .push(timeline);
@@ -522,14 +545,7 @@ mod tests {
             (state, crystal_visible, scale)
         };
 
-        push(
-            &mut app,
-            2,
-            EncounterMoveKind::SepulchreSpear,
-            MovePhase::Telegraph,
-            100,
-            20,
-        );
+        push(&mut app, 2, SepulchreSpear, Telegraph, 100, 20);
         deliver(&mut app, 110, vec![state]);
         for _ in 0..3 {
             app.update();
@@ -541,14 +557,7 @@ mod tests {
         );
         assert!(crystal && (scale - (0.25 + 0.55 * smooth(0.5))).abs() < 1e-4);
 
-        push(
-            &mut app,
-            3,
-            EncounterMoveKind::RequiemOfTheBuried,
-            MovePhase::Channel,
-            110,
-            18,
-        );
+        push(&mut app, 3, RequiemOfTheBuried, Channel, 110, 18);
         deliver(&mut app, 111, vec![state]);
         for _ in 0..3 {
             app.update();
@@ -580,5 +589,22 @@ mod tests {
             app.update();
         }
         assert_eq!(read(&mut app).0, "hidden", "a corpse holds no light");
+
+        // Losing the torso part must not grow a crystal (or anything else) per frame.
+        let world = app.world_mut();
+        let torsos: Vec<Entity> = world
+            .query::<(Entity, &MobVisual)>()
+            .iter(world)
+            .filter(|(_, part)| part.part == MobPart::King(Segment::Torso))
+            .map(|(entity, _)| entity)
+            .collect();
+        assert_eq!(torsos.len(), 1);
+        world.entity_mut(torsos[0]).despawn();
+        for _ in 0..5 {
+            app.update();
+        }
+        let world = app.world_mut();
+        assert_eq!(world.query::<&CoreGlow>().iter(world).count(), 0);
+        assert_eq!(world.query::<&HandCrystal>().iter(world).count(), 1);
     }
 }

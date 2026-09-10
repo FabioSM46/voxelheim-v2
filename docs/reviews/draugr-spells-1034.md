@@ -24,8 +24,8 @@ announced ticks, pulse and newest snapshot tick, never from a local clock. Tests
 vertex against its announced volume on every tick of each phase. A late, replaced, expired
 or cancelled move draws only what is current and releases removed meshes, at most 512
 effects of at most 768 vertices. A body first seen in stage 3 has no mask and replays no
-fall; a living boss without an encounter (a wipe's reset) wears it again; a corpse keeps
-what it showed and its core goes dark.
+fall; only a new encounter id or an earlier stage restores the regalia, never a missing
+timeline; a corpse keeps what it showed and its core goes dark.
 
 The approved geometry is unchanged: 1,464 triangles and one material, now in 17 segments
 because the mask and crown have their own. The crown only moves down or inward, the fallen
@@ -41,10 +41,9 @@ cargo test --locked -- player::encounters::spells player::mobs::king
 cargo test --locked player::encounters::spells::capture::capture_spells_and_regalia -- --ignored --exact
 ```
 
-The second command needs a GPU and writes `spells-1034-*.png` to the temporary directory,
-driving the production snapshot consumer, animator, reconciliation, boundary cues, spell
-layer, regalia and readings at 20 Hz catalogue durations. Fixture sector bearings are review
-placements, not the server's sequence; the floor and player-sized box are not a dungeon.
+The second needs a GPU and writes `spells-1034-*.png` to the temporary directory through the
+production consumers at 20 Hz catalogue durations. Its sector bearings, floor and
+player-sized box are review placements, not the server's sequence or a dungeon.
 
 ## Review record
 
@@ -59,8 +58,7 @@ inspection adapter, not a frame-rate guarantee. Manual inspection on 2026-09-10:
 - The mask falls visibly and rests beside the free-hand boot, low in contrast on a dark
   floor. The bare face and slipped crown read from front, side and 13 blocks; at 25 blocks
   the crown is marginal and the missing mask is not reliable.
-- The fissure light is brighter than the recessed ice of earlier stages and brightens on
-  contact, with a small effect on the silhouette.
+- The fissure light outshines the earlier recessed ice and brightens on contact.
 - A late stage-3 body had no mask and no fall. After death the core was dark and the mask
   stayed where it landed, in this sample under the collapsed torso.
 

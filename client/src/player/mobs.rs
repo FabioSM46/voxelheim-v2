@@ -1453,14 +1453,9 @@ pub(super) fn animate(
             transform.rotation = Quat::from_rotation_y(yaw);
         }
 
-        let stage = timelines.as_ref().and_then(|inbox| {
-            inbox
-                .live()
-                .iter()
-                .find(|state| state.boss_entity_id == mob.entity_id && state.boss == mob.kind)
-                .map(|state| state.phase)
-        });
-        let alive = mob.falling.is_none();
+        let stage = timelines
+            .as_ref()
+            .and_then(|inbox| king::regalia::boss_stage(inbox.live(), mob.entity_id));
         let in_encounter = timelines.as_ref().is_some_and(|inbox| {
             inbox
                 .live()
@@ -1468,7 +1463,7 @@ pub(super) fn animate(
                 .any(|state| state.boss_entity_id == mob.entity_id)
         });
         if let Some(motion) = mob.king_motion.as_mut() {
-            motion.regalia.observe(stage, alive);
+            motion.regalia.observe(stage);
             motion.sample(
                 transform.translation,
                 yaw,
