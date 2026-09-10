@@ -379,7 +379,7 @@ func (p *Player) TakeLoot(req protocol.LootTakeRequest) (vnet.RefusalReason, err
 	if entryIndex < 0 {
 		return vnet.RefusalReasonCorpseUnavailable, fmt.Errorf("loot entry %d is unavailable", req.EntryID)
 	}
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
@@ -422,7 +422,7 @@ func (p *Player) TakeAllLoot(req protocol.LootTakeAllRequest) (vnet.RefusalReaso
 	if err != nil {
 		return reason, err
 	}
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()

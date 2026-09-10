@@ -31,6 +31,7 @@ import (
 type Life struct {
 	// Memory-only instance recovery; identity/persist deliberately never encode it.
 	recovery        dungeonRecovery
+	rewardDeathDebt rewardDeathDebt
 	Pos             [3]float64
 	Yaw             float64
 	Health          uint16
@@ -226,6 +227,15 @@ func (p *Player) recordLocked() Life {
 	}
 	life.recovery = p.dungeonRecoveryLocked()
 	copy(life.Slots[:], state.Stacks)
+	if p.rewardDeathDebt.pending() {
+		// Wear a pending boss reward deferred is still wear. The captured pack carries it,
+		// so no writer can store a death for free; the debt itself travels beside it
+		// only so a detached publication can spend it on the reward image instead.
+		slots := restoredSlots(life.Slots)
+		p.rewardDeathDebt.apply(&slots)
+		life.Slots = slots.stored()
+		life.rewardDeathDebt = p.rewardDeathDebt
+	}
 	return life
 }
 

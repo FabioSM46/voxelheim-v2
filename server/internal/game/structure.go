@@ -674,7 +674,7 @@ func (p *Player) PlaceStructure(req protocol.PlaceStructureRequest) (protocol.In
 	// or the tick, and the tick only ever takes it under the lock this function is
 	// holding — and it is written as a refusal anyway, because "cannot fail" is a
 	// property of today's callers rather than of the lock.
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return protocol.InventoryState{}, vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()
