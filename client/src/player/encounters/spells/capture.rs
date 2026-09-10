@@ -72,6 +72,24 @@ fn announced(
     )
 }
 
+type View = ([f32; 3], [f32; 3]);
+
+/// One review action: an announcement, cosmetic time, a disappearance or a frame.
+enum Step {
+    Move(
+        u8,
+        EncounterMoveKind,
+        MovePhase,
+        u8,
+        u32,
+        MobAction,
+        Option<MoveEnd>,
+    ),
+    Wait(u64, usize),
+    Vanish,
+    Shot(&'static str, View),
+}
+
 #[test]
 #[ignore = "requires a render adapter; writes spell and regalia PNGs to the temporary directory"]
 fn capture_spells_and_regalia() {
@@ -202,382 +220,177 @@ fn capture_spells_and_regalia() {
         Transform::from_xyz(-2.2, 0.9, 0.6),
     ));
 
-    let tick = std::cell::Cell::new(1000u32);
-    #[allow(clippy::too_many_arguments)] // One fixture row per capture keeps each call legible.
-    let deliver = |app: &mut App,
-                   stage: u8,
-                   kind: EncounterMoveKind,
-                   phase: MovePhase,
-                   pulse: u8,
-                   percent: u32,
-                   action: MobAction,
-                   ended: Option<MoveEnd>| {
-        let next = tick.get() + 100;
-        tick.set(next);
-        let mut snapshot = tests::snapshot(next);
-        snapshot.mobs[0].kind = MobKind::DraugrKing;
-        snapshot.mobs[0].action = action;
-        let (ticks, hazards, pulse) = announced(kind, phase, pulse);
-        let mut timeline = tests::timeline();
-        timeline.boss = MobKind::DraugrKing;
-        timeline.phase = stage;
-        let one = &mut timeline.moves[0];
-        one.move_instance_id = u64::from(next);
-        (one.kind, one.phase, one.phase_ticks) = (kind, phase, ticks);
-        one.phase_started_tick = next - percent * (ticks - 1) / 100;
-        one.hazards = if ended.is_some() { Vec::new() } else { hazards };
-        one.pulse = pulse;
-        one.interruptible = kind == RequiemOfTheBuried && phase == MovePhase::Channel;
-        one.ended = ended;
-        app.world_mut()
-            .resource_mut::<SnapshotBuffer>()
-            .accept(snapshot, Instant::now() - Duration::from_millis(100));
-        app.world_mut()
-            .resource_mut::<EncounterTimelineInbox>()
-            .push(timeline);
-    };
-    let aim = |app: &mut App, from: Vec3, at: Vec3| {
-        *app.world_mut().get_mut::<Transform>(camera).unwrap() =
-            Transform::from_translation(from).looking_at(at, Vec3::Y);
-    };
-    let capture = |app: &mut App, name: &str| {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-        let output = std::env::temp_dir().join(format!("spells-1034-{name}.png"));
-        if output.exists() {
-            std::fs::remove_file(&output).unwrap();
-        }
-        for _ in 0..8 {
-            app.update();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        app.world_mut()
-            .spawn(Screenshot::image(target.clone()))
-            .observe(save_to_disk(output.clone()));
-        // Pipelines compile asynchronously: wait for the file rather than a frame count.
-        for _ in 0..400 {
-            if output.exists() {
-                break;
-            }
-            app.update();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(output.exists(), "missing capture {name}");
-    };
-    let run = |app: &mut App, step: Duration, frames: usize| {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(step));
-        for _ in 0..frames {
-            app.update();
-        }
-    };
-    let (near, face) = (Vec3::new(-1.7, 2.5, -2.9), Vec3::new(-0.45, 2.25, -0.35));
-    let above = (Vec3::new(0.0, 17.0, 11.0), Vec3::new(0.0, 0.0, -1.0));
-    use MobAction::{Recovery, Windup};
     for _ in 0..90 {
         app.update();
         std::thread::sleep(Duration::from_millis(10));
     }
-
-    // Stage one: the crystal forms in the raised hand, then crosses its locked lane.
-    for percent in [10, 60, 100] {
-        deliver(
-            &mut app,
-            1,
-            SepulchreSpear,
-            MovePhase::Telegraph,
-            0,
-            percent,
-            Windup,
-            None,
-        );
-        aim(&mut app, near, face);
-        capture(&mut app, &format!("spear-telegraph-{percent}"));
-    }
-    for percent in [0, 40, 100] {
-        deliver(
-            &mut app,
-            1,
-            SepulchreSpear,
-            MovePhase::Release,
-            0,
-            percent,
-            Windup,
-            None,
-        );
-        aim(
-            &mut app,
-            Vec3::new(9.0, 11.0, 5.0),
-            Vec3::new(0.0, 0.5, -8.0),
-        );
-        capture(&mut app, &format!("spear-release-{percent}"));
-    }
-
-    // Stage two rituals, seen from above: one announced pulse at a time.
-    deliver(
-        &mut app,
-        2,
-        Burial,
-        MovePhase::Telegraph,
-        0,
-        60,
-        Windup,
-        None,
-    );
-    aim(&mut app, above.0, above.1);
-    capture(&mut app, "burial-telegraph-60");
-    for pulse in 0..4 {
-        deliver(
-            &mut app,
-            2,
-            Burial,
-            MovePhase::Channel,
-            pulse,
-            50,
-            Windup,
-            None,
-        );
-        capture(&mut app, &format!("burial-pulse{}-50", pulse + 1));
-    }
-    deliver(
-        &mut app,
-        2,
-        Burial,
-        MovePhase::Channel,
-        1,
-        100,
-        Windup,
-        None,
-    );
-    capture(&mut app, "burial-pulse2-contact");
-    deliver(
-        &mut app,
-        2,
-        EdictOfTheGraves,
-        MovePhase::Telegraph,
-        0,
-        60,
-        Windup,
-        None,
-    );
-    capture(&mut app, "edict-telegraph-60");
-    for pulse in 0..3 {
-        deliver(
-            &mut app,
+    use MobAction::{Corpse, Windup};
+    use MovePhase::{Channel, Release, Telegraph};
+    use Step::{Move, Shot, Vanish, Wait};
+    const NEAR: View = ([-1.7, 2.5, -2.9], [-0.45, 2.25, -0.35]);
+    const LANE: View = ([9.0, 11.0, 5.0], [0.0, 0.5, -8.0]);
+    const ABOVE: View = ([0.0, 17.0, 11.0], [0.0, 0.0, -1.0]);
+    const FACE: View = ([1.0, 2.5, -3.3], [0.0, 1.6, 0.0]);
+    const HOLD: MovePhase = MovePhase::Recovery;
+    const OPEN: MobAction = MobAction::Recovery;
+    let script = [
+        // Stage one: the crystal forms in the raised hand, then crosses its locked lane.
+        Move(1, SepulchreSpear, Telegraph, 0, 10, Windup, None),
+        Shot("spear-telegraph-10", NEAR),
+        Move(1, SepulchreSpear, Telegraph, 0, 60, Windup, None),
+        Shot("spear-telegraph-60", NEAR),
+        Move(1, SepulchreSpear, Telegraph, 0, 100, Windup, None),
+        Shot("spear-telegraph-100", NEAR),
+        Move(1, SepulchreSpear, Release, 0, 0, Windup, None),
+        Shot("spear-release-0", LANE),
+        Move(1, SepulchreSpear, Release, 0, 40, Windup, None),
+        Shot("spear-release-40", LANE),
+        Move(1, SepulchreSpear, Release, 0, 100, Windup, None),
+        Shot("spear-release-100", LANE),
+        // Stage two rituals from above: one announced pulse at a time.
+        Move(2, Burial, Telegraph, 0, 60, Windup, None),
+        Shot("burial-telegraph-60", ABOVE),
+        Move(2, Burial, Channel, 0, 50, Windup, None),
+        Shot("burial-pulse1-50", ABOVE),
+        Move(2, Burial, Channel, 1, 50, Windup, None),
+        Shot("burial-pulse2-50", ABOVE),
+        Move(2, Burial, Channel, 2, 50, Windup, None),
+        Shot("burial-pulse3-50", ABOVE),
+        Move(2, Burial, Channel, 3, 50, Windup, None),
+        Shot("burial-pulse4-50", ABOVE),
+        Move(2, Burial, Channel, 1, 100, Windup, None),
+        Shot("burial-pulse2-contact", ABOVE),
+        Move(2, EdictOfTheGraves, Telegraph, 0, 60, Windup, None),
+        Shot("edict-telegraph-60", ABOVE),
+        Move(2, EdictOfTheGraves, Channel, 0, 50, Windup, None),
+        Shot("edict-pulse1-50", ABOVE),
+        Move(2, EdictOfTheGraves, Channel, 1, 50, Windup, None),
+        Shot("edict-pulse2-50", ABOVE),
+        Move(2, EdictOfTheGraves, Channel, 2, 50, Windup, None),
+        Shot("edict-pulse3-50", ABOVE),
+        Move(2, EdictOfTheGraves, Channel, 1, 100, Windup, None),
+        Shot("edict-pulse2-contact", ABOVE),
+        Move(
             2,
             EdictOfTheGraves,
-            MovePhase::Channel,
-            pulse,
+            Channel,
+            1,
             50,
             Windup,
-            None,
-        );
-        capture(&mut app, &format!("edict-pulse{}-50", pulse + 1));
+            Some(MoveEnd::Cancelled),
+        ),
+        Shot("edict-cancelled", ABOVE),
+        // The transition is the first final-stage announcement for a body seen before it.
+        Move(2, SepulchreSpear, HOLD, 0, 50, OPEN, None),
+        Wait(50, 4),
+        Shot("regalia-stage2-front", ([1.0, 2.5, -3.3], [0.0, 1.9, 0.0])),
+        Move(3, RequiemOfTheBuried, Telegraph, 0, 10, Windup, None),
+        Wait(16, 16),
+        Shot("regalia-mask-falling", ([1.4, 2.2, -3.6], [0.0, 1.3, -0.2])),
+        Wait(50, 30),
+        Move(3, KingsSentence, HOLD, 0, 50, OPEN, None),
+        Wait(50, 2),
+        Shot("regalia-mask-floor", ([0.4, 1.5, -2.3], [-0.3, 0.05, -0.4])),
+        Shot("regalia-final-front", FACE),
+        Shot("regalia-final-side", ([3.4, 2.4, 0.0], [0.0, 1.6, 0.0])),
+        Shot("regalia-final-rear", ([0.0, 2.6, 3.6], [0.0, 1.8, 0.0])),
+        Shot("regalia-final-13", ([0.0, 1.7, -13.0], [0.0, 1.8, 0.0])),
+        Shot("regalia-final-25", ([0.0, 1.7, -25.0], [0.0, 1.8, 0.0])),
+        Move(3, RequiemOfTheBuried, Channel, 0, 50, Windup, None),
+        Shot("requiem-pulse1-50", ABOVE),
+        Move(3, RequiemOfTheBuried, Channel, 1, 50, Windup, None),
+        Shot("requiem-pulse2-50", ABOVE),
+        Move(3, RequiemOfTheBuried, Channel, 2, 50, Windup, None),
+        Shot("requiem-pulse3-50", ABOVE),
+        Move(3, RequiemOfTheBuried, Channel, 2, 100, Windup, None),
+        Shot("requiem-pulse3-contact", ABOVE),
+        Shot("regalia-core-flare", ([0.9, 2.3, -2.6], [0.0, 1.8, 0.0])),
+        // Late visibility: a new body already in the final stage replays no fall.
+        Vanish,
+        Move(3, KingsSentence, Telegraph, 0, 40, Windup, None),
+        Wait(50, 3),
+        Shot("regalia-late-final", FACE),
+        // Death after a witnessed fall: the mask stays where it landed, the core goes out.
+        Vanish,
+        Move(2, KingsSentence, Telegraph, 0, 40, Windup, None),
+        Wait(50, 3),
+        Move(3, KingsSentence, Telegraph, 0, 60, Windup, None),
+        Wait(50, 30),
+        Move(3, KingsSentence, HOLD, 0, 50, Corpse, None),
+        Wait(50, 30),
+        Shot("regalia-corpse", ([3.0, 2.6, -3.4], [0.0, 0.4, 0.0])),
+    ];
+    let mut tick = 1000u32;
+    for step in script {
+        match step {
+            Move(stage, kind, phase, pulse, percent, action, ended) => {
+                tick += 100;
+                let mut snapshot = tests::snapshot(tick);
+                snapshot.mobs[0].kind = MobKind::DraugrKing;
+                snapshot.mobs[0].action = action;
+                let (ticks, hazards, pulse) = announced(kind, phase, pulse);
+                let mut timeline = tests::timeline();
+                (timeline.boss, timeline.phase) = (MobKind::DraugrKing, stage);
+                let one = &mut timeline.moves[0];
+                one.move_instance_id = u64::from(tick);
+                (one.kind, one.phase, one.phase_ticks, one.pulse) = (kind, phase, ticks, pulse);
+                one.phase_started_tick = tick - percent * (ticks - 1) / 100;
+                one.hazards = if ended.is_some() { Vec::new() } else { hazards };
+                one.interruptible = kind == RequiemOfTheBuried && phase == Channel;
+                one.ended = ended;
+                app.world_mut()
+                    .resource_mut::<SnapshotBuffer>()
+                    .accept(snapshot, Instant::now() - Duration::from_millis(100));
+                app.world_mut()
+                    .resource_mut::<EncounterTimelineInbox>()
+                    .push(timeline);
+            }
+            Wait(millis, frames) => {
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                    millis,
+                )));
+                for _ in 0..frames {
+                    app.update();
+                }
+            }
+            Vanish => {
+                tick += 1;
+                let mut absent = tests::snapshot(tick);
+                absent.mobs.clear();
+                app.world_mut()
+                    .resource_mut::<SnapshotBuffer>()
+                    .accept(absent, Instant::now());
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+                    50,
+                )));
+                for _ in 0..3 {
+                    app.update();
+                }
+            }
+            Shot(name, (from, at)) => {
+                *app.world_mut().get_mut::<Transform>(camera).unwrap() =
+                    Transform::from_translation(Vec3::from_array(from))
+                        .looking_at(Vec3::from_array(at), Vec3::Y);
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+                let output = std::env::temp_dir().join(format!("spells-1034-{name}.png"));
+                let _ = std::fs::remove_file(&output);
+                for _ in 0..8 {
+                    app.update();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                app.world_mut()
+                    .spawn(Screenshot::image(target.clone()))
+                    .observe(save_to_disk(output.clone()));
+                // Pipelines compile asynchronously: wait for the file, not a frame count.
+                for _ in 0..400 {
+                    if output.exists() {
+                        break;
+                    }
+                    app.update();
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(output.exists(), "missing capture {name}");
+            }
+        }
     }
-    deliver(
-        &mut app,
-        2,
-        EdictOfTheGraves,
-        MovePhase::Channel,
-        1,
-        100,
-        Windup,
-        None,
-    );
-    capture(&mut app, "edict-pulse2-contact");
-    deliver(
-        &mut app,
-        2,
-        EdictOfTheGraves,
-        MovePhase::Channel,
-        1,
-        50,
-        Windup,
-        Some(MoveEnd::Cancelled),
-    );
-    capture(&mut app, "edict-cancelled");
-
-    // The transition is the first final-stage announcement for a body seen before it.
-    deliver(
-        &mut app,
-        2,
-        SepulchreSpear,
-        MovePhase::Recovery,
-        0,
-        50,
-        Recovery,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 4);
-    aim(
-        &mut app,
-        Vec3::new(1.0, 2.5, -3.3),
-        Vec3::new(0.0, 1.9, 0.0),
-    );
-    capture(&mut app, "regalia-stage2-front");
-    deliver(
-        &mut app,
-        3,
-        RequiemOfTheBuried,
-        MovePhase::Telegraph,
-        0,
-        10,
-        Windup,
-        None,
-    );
-    run(&mut app, Duration::from_millis(16), 16);
-    aim(
-        &mut app,
-        Vec3::new(1.4, 2.2, -3.6),
-        Vec3::new(0.0, 1.3, -0.2),
-    );
-    capture(&mut app, "regalia-mask-falling");
-    run(&mut app, Duration::from_millis(50), 30);
-    deliver(
-        &mut app,
-        3,
-        KingsSentence,
-        MovePhase::Recovery,
-        0,
-        50,
-        Recovery,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 2);
-    for (name, from, at) in [
-        (
-            "regalia-mask-floor",
-            Vec3::new(0.4, 1.5, -2.3),
-            Vec3::new(-0.3, 0.05, -0.4),
-        ),
-        (
-            "regalia-final-front",
-            Vec3::new(1.0, 2.5, -3.3),
-            Vec3::new(0.0, 1.6, 0.0),
-        ),
-        (
-            "regalia-final-side",
-            Vec3::new(3.4, 2.4, 0.0),
-            Vec3::new(0.0, 1.6, 0.0),
-        ),
-        (
-            "regalia-final-rear",
-            Vec3::new(0.0, 2.6, 3.6),
-            Vec3::new(0.0, 1.8, 0.0),
-        ),
-        (
-            "regalia-final-13",
-            Vec3::new(0.0, 1.7, -13.0),
-            Vec3::new(0.0, 1.8, 0.0),
-        ),
-        (
-            "regalia-final-25",
-            Vec3::new(0.0, 1.7, -25.0),
-            Vec3::new(0.0, 1.8, 0.0),
-        ),
-    ] {
-        aim(&mut app, from, at);
-        capture(&mut app, name);
-    }
-    for pulse in 0..3 {
-        deliver(
-            &mut app,
-            3,
-            RequiemOfTheBuried,
-            MovePhase::Channel,
-            pulse,
-            50,
-            Windup,
-            None,
-        );
-        aim(&mut app, above.0, above.1);
-        capture(&mut app, &format!("requiem-pulse{}-50", pulse + 1));
-    }
-    deliver(
-        &mut app,
-        3,
-        RequiemOfTheBuried,
-        MovePhase::Channel,
-        2,
-        100,
-        Windup,
-        None,
-    );
-    capture(&mut app, "requiem-pulse3-contact");
-    aim(
-        &mut app,
-        Vec3::new(0.9, 2.3, -2.6),
-        Vec3::new(0.0, 1.8, 0.0),
-    );
-    capture(&mut app, "regalia-core-flare");
-
-    // Late visibility: a new body already in the final stage replays no fall.
-    let mut absent = tests::snapshot(tick.get() + 1);
-    absent.mobs.clear();
-    app.world_mut()
-        .resource_mut::<SnapshotBuffer>()
-        .accept(absent, Instant::now());
-    run(&mut app, Duration::from_millis(50), 3);
-    deliver(
-        &mut app,
-        3,
-        KingsSentence,
-        MovePhase::Telegraph,
-        0,
-        40,
-        Windup,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 3);
-    aim(
-        &mut app,
-        Vec3::new(1.0, 2.5, -3.3),
-        Vec3::new(0.0, 1.6, 0.0),
-    );
-    capture(&mut app, "regalia-late-final");
-
-    // Death after a witnessed fall: the corpse keeps it and the core goes out.
-    let mut seen = tests::snapshot(tick.get() + 1);
-    seen.mobs.clear();
-    app.world_mut()
-        .resource_mut::<SnapshotBuffer>()
-        .accept(seen, Instant::now());
-    run(&mut app, Duration::from_millis(50), 3);
-    deliver(
-        &mut app,
-        2,
-        KingsSentence,
-        MovePhase::Telegraph,
-        0,
-        40,
-        Windup,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 3);
-    deliver(
-        &mut app,
-        3,
-        KingsSentence,
-        MovePhase::Telegraph,
-        0,
-        60,
-        Windup,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 30);
-    deliver(
-        &mut app,
-        3,
-        KingsSentence,
-        MovePhase::Recovery,
-        0,
-        50,
-        MobAction::Corpse,
-        None,
-    );
-    run(&mut app, Duration::from_millis(50), 30);
-    aim(
-        &mut app,
-        Vec3::new(3.0, 2.6, -3.4),
-        Vec3::new(0.0, 0.4, 0.0),
-    );
-    capture(&mut app, "regalia-corpse");
 }
