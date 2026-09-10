@@ -504,7 +504,7 @@ func (p *Player) refreshWornLocked() {
 
 // spendShieldDurabilityLocked tries one point once; the caller holds sim.mu.
 func (p *Player) spendShieldDurabilityLocked() {
-	if p.wornShield.fraction == 0 || !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || p.wornShield.fraction == 0 || !p.inventory.mu.TryLock() {
 		return
 	}
 	defer p.inventory.mu.Unlock()
@@ -666,6 +666,13 @@ func (p *Player) chargeDeathPenaltyLocked() {
 	if p.penaltyApplied {
 		return
 	}
+	if p.rewardWearDeferredLocked() {
+		// The pack is frozen at the reserved baseline. Publication spends this on the
+		// image and abort spends it on the pack, so it is charged exactly once either way.
+		p.rewardDeathDebt.add(p.inventory.slots)
+		p.penaltyApplied = true
+		return
+	}
 	if p.inventory.applyDeathPenaltyLocked() {
 		// The durable path, not a snapshot: an inventory state is not superseded by the
 		// next tick's, so a full outbound queue must not be able to leave the client
@@ -703,7 +710,7 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 	if err := p.cannotActLocked(); err != nil {
 		return protocol.InventoryState{}, err
 	}
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return protocol.InventoryState{}, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()

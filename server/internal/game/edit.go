@@ -140,6 +140,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 	// position it was about to be compared against.
 	reach := p.reachLocked()
 	actErr := p.cannotActLocked()
+	if actErr == nil && p.rewardInventoryBusyLocked() {
+		actErr = ErrBossRewardBusy
+	}
 	if actErr == nil {
 		_, actErr = p.mountedActionLocked()
 	}
@@ -205,6 +208,9 @@ func (p *Player) Edit(ctx context.Context, req protocol.BlockEditRequest) (EditR
 		// sim.mu -> inventory.mu order; the reverse order would deadlock.
 		p.sim.mu.Lock()
 		actErr := p.cannotActLocked()
+		if actErr == nil && p.rewardInventoryBusyLocked() {
+			actErr = ErrBossRewardBusy
+		}
 		if actErr == nil {
 			_, actErr = p.mountedActionLocked()
 		}

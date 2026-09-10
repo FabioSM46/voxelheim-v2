@@ -769,6 +769,8 @@ type Player struct {
 
 	protectionTicks uint32
 	penaltyApplied  bool
+	rewardClaim     *BossRewardClaim
+	rewardDeathDebt rewardDeathDebt
 	spawn           [3]float64
 
 	// immortal is a development toggle, set only by /immortal and therefore only

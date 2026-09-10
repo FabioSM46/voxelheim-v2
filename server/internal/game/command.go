@@ -145,7 +145,7 @@ func (p *Player) addItemCommandLocked(args []string) (ChatOutcome, bool) {
 		return privateCommand(fmt.Sprintf("/additem count %d exceeds this pack's capacity of %d for item id %d.", rawCount, maxCount, rawID)), false
 	}
 
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return privateCommand("/additem refused: the inventory is busy."), false
 	}
 	defer p.inventory.mu.Unlock()
@@ -186,7 +186,7 @@ func (p *Player) addSilverCommandLocked(argument string) (ChatOutcome, bool) {
 		return privateCommand("/additem count must be greater than zero."), false
 	}
 
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return privateCommand("/additem refused: the inventory is busy."), false
 	}
 	defer p.inventory.mu.Unlock()

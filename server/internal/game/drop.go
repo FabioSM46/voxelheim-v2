@@ -385,7 +385,7 @@ func (s *Sim) collectDropsLocked(players []*Player, drops []*itemDrop) []*itemDr
 // ordering — a contended inventory simply leaves the drop on the ground, and the next
 // tick tries again fifty milliseconds later.
 func (p *Player) collect(stack inventoryStack) (uint16, bool) {
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return stack.count, false
 	}
 	defer p.inventory.mu.Unlock()
@@ -553,7 +553,7 @@ func (p *Player) releaseSlot(slot uint8) (protocol.InventoryState, droppedStack,
 	// TryLock, never Lock, and the same argument Craft and Repair record: every other holder
 	// of this inventory is either this session's own read goroutine or the tick, and the tick
 	// only ever takes it under the lock this function is holding.
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return protocol.InventoryState{}, droppedStack{}, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()

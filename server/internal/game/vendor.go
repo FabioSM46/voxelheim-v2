@@ -298,7 +298,7 @@ func (p *Player) Trade(req protocol.TradeRequest) (vnet.RefusalReason, error) {
 	// the shape of a free purchase: 65536 arrows at one silver would total zero.
 	total := uint32(price) * uint32(req.Count)
 
-	if !p.inventory.mu.TryLock() {
+	if p.rewardInventoryBusyLocked() || !p.inventory.mu.TryLock() {
 		return vnet.RefusalReasonInventoryBusy, errors.New("the inventory is busy")
 	}
 	defer p.inventory.mu.Unlock()

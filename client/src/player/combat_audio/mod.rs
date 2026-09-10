@@ -1,4 +1,5 @@
 //! Server outcomes and visible action transitions only. No input, swings or health deltas.
+mod guardian;
 mod sounds;
 
 use super::{AimCamera, ApplySnapshots, SnapshotBuffer, WorldCamera};
@@ -20,12 +21,15 @@ use std::{
 /// One close encounter is audible across a small room or clearing, not across the valley.
 /// Visibility binding remains mandatory even inside this presentation-only distance.
 const COMBAT_RANGE: f32 = 32.0;
-/// Every cue is shorter than half a second. Allow another half for scheduling, then
-/// cancel even an undrained ring so an unavailable device cannot replay an old fight.
+/// Generic contacts expire even if the output device stops draining its ring.
+/// Guardian cues use their bounded recipe duration plus a half-second scheduling tail.
 const MAX_PLAYBACK_AGE: Duration = Duration::from_secs(1);
 
 #[derive(Resource, Default)]
 struct CombatAudio {
+    #[cfg(test)]
+    started: Vec<(u64, Cue, Vec3)>,
+    guardian: guardian::State,
     tick: Option<u32>,
     previous: HashMap<u64, (MobKind, MobAction)>,
     palette: Vec<(Cue, Baked)>,
@@ -39,7 +43,10 @@ struct Active {
     target: BlowTarget,
     origin: Vec3,
     follows: bool,
+    offset: Option<Vec3>,
+    owner: Option<guardian::Owner>,
     expires: Duration,
+    priority: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -49,11 +56,18 @@ struct Pending {
     target: BlowTarget,
     origin: Vec3,
     follows: bool,
+    offset: Option<Vec3>,
+    owner: Option<guardian::Owner>,
 }
 
 pub(super) fn register(app: &mut App) {
-    app.init_resource::<CombatAudio>()
-        .add_systems(Update, update.after(ApplySnapshots).after(AimCamera));
+    app.init_resource::<CombatAudio>().add_systems(
+        Update,
+        update
+            .after(ApplySnapshots)
+            .after(AimCamera)
+            .after(super::encounters::reconcile),
+    );
 }
 
 pub(super) fn reset_world(world: &mut World) {
@@ -103,11 +117,16 @@ struct Inputs<'w, 's> {
     mixer: Option<Res<'w, AudioMixer>>,
     blows: Option<ResMut<'w, BlowInbox>>,
     store: Option<Res<'w, ChunkStore>>,
+    timelines: Option<Res<'w, crate::net::EncounterTimelineInbox>>,
+    presentation: Option<Res<'w, super::encounters::EncounterPresentation>>,
+    mobs: Query<'w, 's, &'static super::mobs::Mob>,
     eyes: Query<'w, 's, &'static Transform, With<WorldCamera>>,
 }
 
 fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
     let state = &mut *state;
+    #[cfg(test)]
+    state.started.clear();
     let now = Instant::now();
     let snapshot = inputs
         .snapshots
@@ -129,6 +148,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         *state = CombatAudio::default();
     }
     let Some(snapshot) = snapshot else {
+        state.guardian = guardian::State::default();
         state.previous.clear();
         state.tick = None;
         state.playing.clear();
@@ -142,6 +162,8 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             target: blow.target,
             origin: Vec3::from_array(blow.position),
             follows: false,
+            offset: None,
+            owner: None,
         })
         .collect();
     if state.tick != Some(snapshot.server_tick) {
@@ -157,6 +179,8 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
                     target: BlowTarget::Mob(mob.kind),
                     origin: mouth(mob.kind, Vec3::from_array(mob.pos)),
                     follows: true,
+                    offset: None,
+                    owner: None,
                 });
             }
         }
@@ -167,6 +191,16 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             .collect();
         state.tick = Some(snapshot.server_tick);
     }
+    state.guardian.sample(
+        snapshot,
+        inputs.timelines.as_deref(),
+        inputs.presentation.as_deref(),
+        session.0.tick_rate,
+        &mut pending,
+    );
+    state
+        .guardian
+        .footfalls(&inputs.mobs, snapshot, &mut pending);
     // Events/transitions are consumed even without a mixer or camera. Availability later
     // is never permission to replay earlier blows or an old pursuit transition.
     let Some((mixer, eye)) = inputs.mixer.as_deref().zip(inputs.eyes.iter().next()) else {
@@ -178,11 +212,13 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         state.playing.clear();
         state.palette = CUES
             .iter()
+            .copied()
+            .chain(guardian::sounds::CUES.into_iter().map(Cue::Guardian))
             .filter_map(|cue| {
                 cue.describe()
                     .bake(cue.seconds(), rate, 19)
                     .ok()
-                    .map(|baked| (*cue, baked))
+                    .map(|baked| (cue, baked))
             })
             .collect();
         state.rate = rate;
@@ -205,7 +241,11 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         )
     };
     state.playing.retain_mut(|active| {
-        if inputs.time.elapsed() >= active.expires {
+        if inputs.time.elapsed() >= active.expires
+            || active
+                .owner
+                .is_some_and(|owner| !state.guardian.valid(active.id, owner))
+        {
             return false;
         }
         let Some(position) = visible_position(snapshot, active.id, active.target) else {
@@ -216,21 +256,71 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
         {
             active.origin = mouth(kind, position);
         }
-        let placed = placement(active.origin);
+        if let Some(offset) = active.offset {
+            let yaw = snapshot
+                .mobs
+                .iter()
+                .find(|mob| mob.entity_id == active.id)
+                .map_or(0.0, |mob| mob.yaw);
+            active.origin = position + Quat::from_rotation_y(yaw) * offset;
+        }
+        let mut placed = placement(active.origin);
+        if active.owner.is_some() {
+            placed.gain *= guardian::SOURCE_GAIN;
+        }
         if placed.gain <= 0.0 {
             return false;
         }
         active.playback.place(placed);
         active.playback.pump() == Status::Playing
     });
+    pending.sort_by_key(|pending| {
+        std::cmp::Reverse(match pending.cue {
+            Cue::Guardian(cue) => cue.priority(),
+            _ => 3,
+        })
+    });
     for cue in pending {
-        let placed = placement(cue.origin);
+        let mut placed = placement(cue.origin);
+        if cue.owner.is_some() {
+            placed.gain *= guardian::SOURCE_GAIN;
+        }
         if placed.gain <= 0.0 {
             continue;
         }
         let Some((_, baked)) = state.palette.iter().find(|(kind, _)| *kind == cue.cue) else {
             continue;
         };
+        if let Cue::Guardian(guardian_cue) = cue.cue {
+            let count = state
+                .playing
+                .iter()
+                .filter(|active| active.owner.is_some())
+                .count();
+            let per_boss = state
+                .playing
+                .iter()
+                .filter(|active| active.owner.is_some() && active.id == cue.id)
+                .count();
+            if count >= guardian::MAX_GUARDIAN_SOURCES || per_boss >= guardian::MAX_PER_BOSS {
+                // Admission can discard our own low-priority texture, never another bus.
+                let victim = state
+                    .playing
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, active)| {
+                        active.owner.is_some()
+                            && (per_boss < guardian::MAX_PER_BOSS || active.id == cue.id)
+                            && active.priority < guardian_cue.priority()
+                    })
+                    .min_by_key(|(_, active)| active.priority)
+                    .map(|(index, _)| index);
+                let Some(victim) = victim else {
+                    continue;
+                };
+                state.playing.remove(victim);
+            }
+        }
         // One claim per actual cue. No retry after refusal, including a claim which revokes
         // ambience: the existing policy discards that one-shot. Only granted sources enter
         // the vector, so the mixer itself bounds it and protects Voice/Master.
@@ -238,13 +328,26 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
             Playback::start(mixer, Bus::Sfx, Rendering::Baked(baked.clone()), placed)
             && playback.pump() == Status::Playing
         {
+            #[cfg(test)]
+            state.started.push((cue.id, cue.cue, cue.origin));
             state.playing.push(Active {
                 playback,
                 id: cue.id,
                 target: cue.target,
                 origin: cue.origin,
                 follows: cue.follows,
-                expires: inputs.time.elapsed() + MAX_PLAYBACK_AGE,
+                offset: cue.offset,
+                owner: cue.owner,
+                priority: match cue.cue {
+                    Cue::Guardian(cue) => cue.priority(),
+                    _ => 3,
+                },
+                expires: inputs.time.elapsed()
+                    + if cue.owner.is_some() {
+                        Duration::from_secs_f32(cue.cue.seconds() + 0.5)
+                    } else {
+                        MAX_PLAYBACK_AGE
+                    },
             });
         }
     }

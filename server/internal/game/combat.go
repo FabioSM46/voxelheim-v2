@@ -326,6 +326,12 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 	}
 
 	if definition.launches != vnet.ProjectileKindUnknown {
+		// A launch spends ammunition and wear, so a pending boss reward postpones it
+		// exactly as a contended inventory does. A melee swing spends nothing and is
+		// judged as usual.
+		if p.rewardInventoryBusyLocked() {
+			return armedAttack{}, false
+		}
 		if definition.ammunition != ItemNone {
 			ammunitionSlot := -1
 			for candidate := range p.inventory.slots[:equipmentFirst] {
