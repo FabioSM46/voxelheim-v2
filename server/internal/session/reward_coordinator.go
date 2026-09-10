@@ -63,6 +63,15 @@ type rewardCoordinator struct {
 	retryMin, retryMax time.Duration
 	// step is a test seam called before each stage, with no lock held. Nil in production.
 	step func(stage string)
+
+	// syncMu serialises SyncRewardRuns, which reads the journal's next generation before
+	// allocating it.
+	syncMu sync.Mutex
+	// pendingRunWrite is the run write that last failed, retried verbatim before any other.
+	// Guarded by syncMu.
+	pendingRunWrite func() error
+	// assignRun is a test seam for the manager's generation assignment. Nil in production.
+	assignRun func(run game.SavedSession, generation uint64) bool
 }
 
 // rewardTask is one claim's ownership. Its mutex orders the claim's live steps against a

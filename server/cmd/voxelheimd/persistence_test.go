@@ -79,7 +79,9 @@ func persistentServer(t *testing.T, tr transport.Transport, dir string, cfg sess
 	}
 	restoreStructures(sim, camp, discard())
 	restoreClock(sim, clock, discard())
-	restoreSessions(instances, runs, discard())
+	if err := restoreSessions(instances, runs, nil, time.Now(), discard()); err != nil {
+		t.Fatalf("restoreSessions: %v", err)
+	}
 
 	return &server{
 		instances:  instances,
@@ -1231,7 +1233,9 @@ func TestAnEphemeralWorldKeepsItsDungeonRunsInMemoryOnly(t *testing.T) {
 
 	// Startup: the restore reads a store that is not there and starts the world with
 	// every ruin free.
-	restoreSessions(instances, runs, log)
+	if err := restoreSessions(instances, runs, nil, time.Now(), log); err != nil {
+		t.Fatalf("restoreSessions: %v", err)
+	}
 	if instances.Count() != 0 {
 		t.Fatalf("an ephemeral restore built %d sessions", instances.Count())
 	}
