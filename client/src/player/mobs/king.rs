@@ -3,6 +3,13 @@
 use super::*;
 use bosses::boxes;
 
+#[cfg(test)]
+mod capture;
+pub(super) mod choreography;
+#[cfg(test)]
+mod choreography_tests;
+pub(super) mod motion;
+
 const IRON: Color = Color::srgb(0.22, 0.27, 0.30);
 const EDGE: Color = Color::srgb(0.39, 0.44, 0.45);
 const RUST: Color = Color::srgb(0.42, 0.29, 0.23);
@@ -26,9 +33,9 @@ pub(crate) enum Segment {
     ShinLeft,
     ShinRight,
     Blade,
-    CloakLeft,
-    CloakMiddle,
-    CloakRight,
+    BootLeft,
+    BootRight,
+    Cloak,
 }
 
 pub(super) const SEGMENTS: [Segment; 15] = [
@@ -44,9 +51,9 @@ pub(super) const SEGMENTS: [Segment; 15] = [
     Segment::ShinLeft,
     Segment::ShinRight,
     Segment::Blade,
-    Segment::CloakLeft,
-    Segment::CloakMiddle,
-    Segment::CloakRight,
+    Segment::BootLeft,
+    Segment::BootRight,
+    Segment::Cloak,
 ];
 
 type Part = (Vec3, Vec3, Color);
@@ -129,13 +136,12 @@ fn geometry(segment: Segment) -> Mesh {
         ShinLeft | ShinRight => {
             let x = if segment == ShinLeft { -0.17 } else { 0.17 };
             parts.push(part([0.25, 0.48, 0.31], [x, 0.32, 0.0], IRON));
-            parts.push(part([0.28, 0.17, 0.43], [x, 0.085, -0.035], IRON));
             parts.push(part([0.23, 0.08, 0.035], [x, 0.51, -0.177], EDGE));
             parts.push(part([0.04, 0.27, 0.025], [x, 0.29, -0.171], RUST));
         }
         Blade => {
-            // Entire blade stays outside the chest's X extent through the sword
-            // poses. Grip overlaps the right palm. The silhouette reads as a
+            // At rest the blade stays outside the chest. Choreography keeps the
+            // grip attached to the right palm. The silhouette reads as a
             // long funeral blade, with a broad fuller and a broken square tip.
             parts.push(part([0.055, 0.29, 0.07], [0.42, 1.39, -0.115], CLOTH));
             parts.push(part([0.16, 0.05, 0.12], [0.42, 1.235, -0.115], RUST));
@@ -146,27 +152,30 @@ fn geometry(segment: Segment) -> Mesh {
                 parts.push(part([0.035, 0.028, 0.01], [0.42, y, -0.150], ICE));
             }
         }
-        CloakLeft | CloakMiddle | CloakRight => {
-            let (x, h) = match segment {
-                CloakLeft => (-0.25, 1.58),
-                CloakMiddle => (0.0, 1.73),
-                _ => (0.25, 1.49),
-            };
-            // The strip wraps over the armour at its hinge instead of floating behind it.
-            parts.push(part([0.22, 0.10, 0.19], [x, 2.09, 0.295], CLOTH));
-            parts.push(part([0.22, h, 0.065], [x, 2.10 - h / 2.0, 0.36], CLOTH));
-            for dx in [-0.075, 0.065] {
+        BootLeft | BootRight => {
+            let x = if segment == BootLeft { -0.17 } else { 0.17 };
+            parts.push(part([0.28, 0.17, 0.43], [x, 0.085, -0.035], IRON));
+        }
+        Cloak => {
+            // All three rigid strips share the torso transform. Their geometry is
+            // unchanged; sharing one segment frees two joints for planted boots.
+            for (x, h) in [(-0.25, 1.58), (0.0, 1.73), (0.25, 1.49)] {
+                // The strip wraps over the armour at its hinge instead of floating behind it.
+                parts.push(part([0.22, 0.10, 0.19], [x, 2.09, 0.295], CLOTH));
+                parts.push(part([0.22, h, 0.065], [x, 2.10 - h / 2.0, 0.36], CLOTH));
+                for dx in [-0.075, 0.065] {
+                    parts.push(part(
+                        [0.035, h - 0.12, 0.025],
+                        [x + dx, 2.05 - h / 2.0, 0.402],
+                        ICE,
+                    ));
+                }
                 parts.push(part(
-                    [0.035, h - 0.12, 0.025],
-                    [x + dx, 2.05 - h / 2.0, 0.402],
+                    [0.10, 0.13, 0.08],
+                    [x - 0.035, 2.10 - h + 0.025, 0.365],
                     ICE,
                 ));
             }
-            parts.push(part(
-                [0.10, 0.13, 0.08],
-                [x - 0.035, 2.10 - h + 0.025, 0.365],
-                ICE,
-            ));
         }
     }
     boxes(&parts)
@@ -279,39 +288,21 @@ fn joint(segment: Segment, p: Pose) -> Transform {
         ForeRight | Blade => elbow(false),
         ThighLeft => leg(true),
         ThighRight => leg(false),
-        ShinLeft => {
+        ShinLeft | BootLeft => {
             leg(true)
                 * around(
                     Vec3::new(-0.17, 0.55, 0.0),
                     Quat::from_rotation_x(p.stride.max(0.0) * 0.4),
                 )
         }
-        ShinRight => {
+        ShinRight | BootRight => {
             leg(false)
                 * around(
                     Vec3::new(0.17, 0.55, 0.0),
                     Quat::from_rotation_x((-p.stride).max(0.0) * 0.4),
                 )
         }
-        CloakLeft | CloakMiddle | CloakRight => {
-            let x = match segment {
-                CloakLeft => -0.25,
-                CloakMiddle => 0.0,
-                _ => 0.25,
-            };
-            torso
-                * around(
-                    Vec3::new(x, 2.10, 0.36),
-                    Quat::from_rotation_x(
-                        p.cloak
-                            * match segment {
-                                CloakMiddle => 0.65,
-                                CloakRight => -0.8,
-                                _ => 1.0,
-                            },
-                    ),
-                )
-        }
+        Cloak => torso * around(Vec3::new(0.0, 2.10, 0.36), Quat::from_rotation_x(p.cloak)),
     };
     Transform::from_matrix(matrix)
 }
@@ -332,47 +323,6 @@ pub(super) fn posed_meshes(action: MobAction, elapsed: Duration) -> Vec<Mesh> {
         .into_iter()
         .map(|(segment, mesh)| mesh.transformed_by(transform(segment, action, elapsed, arm)))
         .collect()
-}
-
-/// Use the same articulated joints as the body renderer, sampled directly from the
-/// announced phase. A cast raises the free arm, a channel plants the blade and a
-/// physical preparation raises the weapon arm. No timer restarts on late arrival.
-pub(super) fn encounter_transform(
-    segment: Segment,
-    one: Option<&crate::player::encounters::PresentedMove>,
-) -> Transform {
-    use crate::net::MovePhase;
-    let mut p = Pose {
-        breath: 0.0,
-        head: 0.0,
-        left: 0.0,
-        right: 0.0,
-        elbow: 0.0,
-        stride: 0.0,
-        cloak: 0.0,
-    };
-    if let Some(one) = one {
-        let strength = match one.announced.phase {
-            MovePhase::Telegraph => 0.4 + 0.6 * one.progress,
-            MovePhase::Release => -0.2,
-            MovePhase::Channel => 0.9,
-            MovePhase::Recovery => -0.3 * (1.0 - one.progress),
-        };
-        if crate::player::encounters::is_spell(one.announced.kind) {
-            p.left = strength * 1.35;
-            p.right = if one.announced.phase == MovePhase::Channel {
-                0.25
-            } else {
-                0.0
-            };
-            p.elbow = strength * 0.4;
-        } else {
-            p.right = strength * DRAUGR_ARM_RAISED;
-            p.left = p.right * 0.72;
-        }
-        p.head = strength * -0.12;
-    }
-    joint(segment, p)
 }
 
 #[cfg(test)]
@@ -460,7 +410,7 @@ mod tests {
             }
         }
         assert!(triangles <= 12_000);
-        assert!(triangles > 500, "the authored ornament disappeared");
+        assert_eq!(triangles, 1464, "the approved geometry changed");
     }
 
     #[test]
