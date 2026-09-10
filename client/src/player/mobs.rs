@@ -36,6 +36,8 @@ use super::interpolate::{InterpolatedMob, SnapshotBuffer};
 use super::{InputMode, merge_all};
 use crate::net::{MobAction, MobKind, Session};
 
+#[cfg(test)]
+mod arena_capture;
 mod bosses;
 mod guardian;
 mod king;
@@ -1381,8 +1383,11 @@ fn leg_splay(kind: MobKind, fallen: f32) -> Vec3 {
 /// there rather than relied on: the fall this advances is started by the action that system
 /// writes, so a frame that ran the two the other way round would begin every death one
 /// frame late.
+#[allow(clippy::too_many_arguments)] // Terrain joined the snapshot, timeline and asset inputs.
 pub(super) fn animate(
     time: Res<Time>,
+    session: Option<Res<Session>>,
+    terrain: Option<Res<crate::world::ChunkStore>>,
     timelines: Option<Res<crate::net::EncounterTimelineInbox>>,
     snapshots: Option<Res<SnapshotBuffer>>,
     visuals: Option<Res<MobVisuals>>,
@@ -1464,6 +1469,25 @@ pub(super) fn animate(
         });
         if let Some(motion) = mob.king_motion.as_mut() {
             motion.regalia.observe(stage);
+            if down > 0.0 {
+                // A body falls away from terrain it would lie in; the root never moves.
+                let solid = |voxel: IVec3| {
+                    session
+                        .as_ref()
+                        .zip(terrain.as_ref())
+                        .is_some_and(|(session, terrain)| {
+                            terrain.solid_at(
+                                crate::net::BlockCoord {
+                                    x: voxel.x,
+                                    y: voxel.y,
+                                    z: voxel.z,
+                                },
+                                session.0.chunk_size as usize,
+                            )
+                        })
+                };
+                motion.choose_fall(transform.translation, yaw, solid);
+            }
             motion.sample(
                 transform.translation,
                 yaw,
