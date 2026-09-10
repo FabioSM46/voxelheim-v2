@@ -61,7 +61,7 @@ fn envelope(attack: f32, decay: f32) -> Envelope {
         release: 0.018,
     }
 }
-fn tone(hz: f32, gain: f32, attack: f32, decay: f32) -> Layer {
+pub(in super::super) fn tone(hz: f32, gain: f32, attack: f32, decay: f32) -> Layer {
     Layer {
         exciter: Exciter::Oscillator {
             wave: Wave::Sine,
@@ -72,7 +72,7 @@ fn tone(hz: f32, gain: f32, attack: f32, decay: f32) -> Layer {
         filter: None,
     }
 }
-fn grit(hz: f32, gain: f32, attack: f32, decay: f32, q: f32) -> Layer {
+pub(in super::super) fn grit(hz: f32, gain: f32, attack: f32, decay: f32, q: f32) -> Layer {
     Layer {
         exciter: Exciter::Noise(Noise::White),
         gain,
@@ -84,7 +84,7 @@ fn grit(hz: f32, gain: f32, attack: f32, decay: f32, q: f32) -> Layer {
         }),
     }
 }
-fn breath(chest: f32, seconds: f32, attack: f32) -> Vec<Layer> {
+pub(in super::super) fn breath(chest: f32, seconds: f32, attack: f32) -> Vec<Layer> {
     vec![
         tone(chest, 0.19, attack, seconds),
         tone(chest * 1.07, 0.11, attack, seconds * 0.8),
@@ -92,7 +92,7 @@ fn breath(chest: f32, seconds: f32, attack: f32) -> Vec<Layer> {
         grit(930.0, 0.10, attack * 1.3, seconds * 0.7, 1.2),
     ]
 }
-fn iron(attack: f32, decay: f32, gain: f32) -> Vec<Layer> {
+pub(in super::super) fn iron(attack: f32, decay: f32, gain: f32) -> Vec<Layer> {
     // Inharmonic ringing rather than a musical chord; all frequencies also fit 8 kHz.
     vec![
         tone(713.0, gain, attack, decay),
@@ -101,7 +101,7 @@ fn iron(attack: f32, decay: f32, gain: f32) -> Vec<Layer> {
         grit(2300.0, gain, attack, 0.07, 0.8),
     ]
 }
-fn weight(hz: f32, gain: f32, decay: f32) -> Vec<Layer> {
+pub(in super::super) fn weight(hz: f32, gain: f32, decay: f32) -> Vec<Layer> {
     vec![
         tone(hz, gain, 0.004, decay),
         tone(hz * 1.61, gain * 0.35, 0.003, decay * 0.4),
