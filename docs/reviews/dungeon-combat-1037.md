@@ -77,27 +77,35 @@ in 900 s: 39 deaths and 39 wipes against the Vargr, 38 and 38 against the Draugr
 **The approved design asks for 3–4 minutes against the Vargr and 5–6 against the Draugr,
 and every measured fight is shorter by a factor of 5 or more.** The design also says the
 length must not come from inflating health, and the server has no party-size adaptation.
-No health, damage or scaling was changed. This is the owner's decision, and part 2 does not
-make it.
+No health, damage or scaling was changed. The repository owner decided that #1037 records this
+gap and no #1037 part tunes fight length; balance is #1099, where the boss scales with the
+levels of the party members at the pull, measured with this harness.
 
 ## Telegraphs precede damage
 
-Every stander blow, measured from the tick the struck player first perceived that region.
-The promise is the telegraph, or for a pulse the last tick of its shown interval.
+Every stander blow, measured from the tick the struck player first perceived that region and
+checked against the promise of its own phase: the telegraph for a release, or the last tick of
+the shown interval for a pulse. A blow is charged to a move only when that move's own hit
+ledger gained the struck player on that tick — including the blow that wipes the pull, which
+the server's reset replaces the boss inside. No health loss in any measured fight was left
+unaccounted for.
 
 | Move | Blows | Fewest ticks perceived before the blow | Promised |
 | --- | ---: | ---: | ---: |
-| Vargr bite and tear | 128 | 19 | 18 |
+| Vargr bite and tear | 166 | 19 | 18 |
 | Vargr prisoner claws | 45 | 21 | 20 |
 | Vargr predator leap | 12 | 32 | 20 |
-| Vargr bonebreaker jaws | 16 | 31 | 30 |
-| Draugr king's sentence | 44 | 25 | 24 |
-| Draugr three tolls | 113 | 19 | 18 |
+| Vargr bonebreaker jaws | 17 | 31 | 30 |
+| Draugr king's sentence | 65 | 25 | 24 |
+| Draugr three tolls | 114 | 19 | 18 |
 | Draugr sepulchre spear | 12 | 30 | 28 |
-| Draugr burial pulse | 15 | 13 | 13 |
+| Draugr burial pulse | 31 | 13 | 13 |
 
 No blow came sooner than its promise, which
-`TestFirstDungeonDamageNeverPrecedesItsPerceivedAnnouncement` pins. No stander was struck by a
+`TestFirstDungeonDamageNeverPrecedesItsPerceivedAnnouncement` pins, and
+`TestFirstDungeonPlaytestRefereeCatchesWhatItClaims` proves the check can fail: a telegraph or
+pulse cut short after its announcement is reported as premature, and a loss no ledger accounts
+for is kept out of every move. No stander was struck by a
 collar charge, an edict or a requiem pulse in these natural fights; the coverage fights below
 measure those against evaders.
 
@@ -194,7 +202,7 @@ The farthest a struck stander's nearest damage sample lay from the boss's centre
 | --- | ---: | ---: | ---: |
 | Vargr bite and tear | 2.955 | 0.885 / 0.893 | 3.0 |
 | Vargr prisoner claws | 2.727 | 0.978 | 3.4 |
-| Vargr bonebreaker jaws | 2.707 | 0.834 | 3.6 |
+| Vargr bonebreaker jaws | 2.727 | 0.834 | 3.6 |
 | Draugr king's sentence | 2.493 | 1.520 | 5.0 |
 | Draugr three tolls | 2.493 | 1.567 / 1.560 / 1.740 | 3.8 |
 
@@ -205,7 +213,7 @@ third toll's thrust) and 2.07 blocks (the Vargr bite) past the visible strike.
 ## Findings handed on
 
 1. **Kill times** are 5 or more times shorter than the design's targets in every configuration.
-   This needs an owner decision, not a tuning pass.
+   Recorded here and delivered by #1099, not by any #1037 part.
 2. **Burial pulses** have no slack at zero delay and fail at 400 ms. Edict and requiem pulses
    degrade from 250 ms. Part 2.
 3. **Contact distance**: blows land 0.75–2.07 blocks past the visible strike at melee gap.

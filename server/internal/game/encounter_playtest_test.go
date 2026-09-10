@@ -168,8 +168,12 @@ type playtestMoveStats struct {
 
 	hits, damage int
 
-	// minWarning is the fewest ticks between a player first perceiving a region and that
-	// region striking them; required is the announcement the server promises for it.
+	// Every blow is checked against the announcement its own phase promises: the telegraph
+	// for a release, or the last tick of the shown interval for a pulse. premature counts the
+	// blows that landed sooner after the player perceived their region than that promise.
+	// minWarning is the smallest margin's warning and required that same blow's promise, so
+	// the pair printed together always describes one blow.
+	premature            int
 	minWarning, required int64
 
 	// contactMax is the farthest a struck body's nearest damage sample lay from the boss's
@@ -193,7 +197,13 @@ type playtestResult struct {
 	hits          int
 	damageTaken   int
 	unperceived   int
-	moves         map[vnet.EncounterMoveKind]*playtestMoveStats
+
+	// unattributed counts player health losses the running move's own hit ledger does not
+	// account for. The server records every target a release or pulse window strikes in that
+	// window's ledger, so a loss with no new ledger entry is not that move's blow, and a
+	// non-zero count means one this referee would otherwise have charged to the wrong move.
+	unattributed int
+	moves        map[vnet.EncounterMoveKind]*playtestMoveStats
 
 	// bossDamage is the health the party took from the boss, by what the boss was doing.
 	bossDamage map[string]int
@@ -201,7 +211,7 @@ type playtestResult struct {
 
 func (r *playtestResult) move(kind vnet.EncounterMoveKind) *playtestMoveStats {
 	if r.moves[kind] == nil {
-		r.moves[kind] = &playtestMoveStats{minWarning: math.MaxInt64, contactMax: -1, recoveries: map[uint32]int{}}
+		r.moves[kind] = &playtestMoveStats{minWarning: math.MaxInt64, required: math.MaxInt64, contactMax: -1, recoveries: map[uint32]int{}}
 	}
 	return r.moves[kind]
 }
@@ -248,6 +258,10 @@ type playtest struct {
 	// escapeTicks is the longest walk a reader needed, per move kind, from first finding
 	// itself inside a believed region to standing clear of every one.
 	escapeTicks map[vnet.EncounterMoveKind]uint64
+
+	// beforeStep, when set, runs before every simulation step. A test seam for mutations
+	// that prove the referee catches what it claims to.
+	beforeStep func()
 }
 
 func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
@@ -372,6 +386,15 @@ func (pt *playtest) run() playtestResult {
 		stage      uint8
 		health     = map[*Player]uint16{}
 		alive      = map[*Player]bool{}
+
+		// attributed is every (instance, pulse, player) blow already charged to its window.
+		attributed = map[[3]uint64]bool{}
+
+		// held is the move running after the previous step, and heldBoss the boss performing
+		// it. The step that deals a blow may also end the boss that dealt it: the last
+		// player's death wipes the pull, and the reset replaces the boss inside that step.
+		held     *runningMove
+		heldBoss *mob
 	)
 	closeWindow := func() {
 		if !inWindow {
@@ -387,6 +410,52 @@ func (pt *playtest) run() playtestResult {
 		inWindow = false
 		clear(threatened)
 		clear(struck)
+	}
+
+	// settleLosses charges this tick's health losses. A blow is charged to a move only when a
+	// window's own hit ledger gained this player: the server writes that entry in the call
+	// that deals the damage, and a window strikes each player once. The window is the move
+	// running now or the one that was running before this step, which is the only other
+	// instance that can have acted in it. A loss neither ledger accounts for is not charged
+	// to whichever move happens to be running. The caller holds Sim.mu.
+	settleLosses := func(running *runningMove, boss *mob) {
+		struckBy := func(p *Player) (*runningMove, *mob) {
+			for _, candidate := range []struct {
+				r *runningMove
+				m *mob
+			}{{running, boss}, {held, heldBoss}} {
+				r := candidate.r
+				if r == nil || (r.phase != vnet.MovePhaseRelease && r.phase != vnet.MovePhaseChannel) {
+					continue
+				}
+				key := [3]uint64{r.instanceID, uint64(r.pulseIndex), p.entityID}
+				if _, hit := r.hit[p.entityID]; !hit || attributed[key] {
+					continue
+				}
+				attributed[key] = true
+				return r, candidate.m
+			}
+			return nil, nil
+		}
+		for _, b := range pt.bots {
+			p := b.p
+			if alive[p] && p.health < health[p] {
+				r, m := struckBy(p)
+				if r == nil {
+					result.unattributed++
+					result.damageTaken += int(health[p] - p.health)
+				} else {
+					pt.recordHitLocked(&result, b, m, r, health[p]-p.health)
+					if inWindow && current == (playtestWindow{r.instanceID, r.pulseIndex}) {
+						struck[p] = true
+					}
+				}
+			}
+			if alive[p] && !p.alive() {
+				result.deaths++
+			}
+			health[p], alive[p] = p.health, p.alive()
+		}
 	}
 
 	s.mu.Lock()
@@ -407,13 +476,19 @@ func (pt *playtest) run() playtestResult {
 			pt.perceive(b)
 			pt.act(b)
 		}
+		if pt.beforeStep != nil {
+			pt.beforeStep()
+		}
 		pt.step()
 
 		s.mu.Lock()
 		if id := pt.bossIDLocked(); id != bossID {
-			// Every participant was down, and the wipe put a fresh boss at its home.
+			// Every participant was down, and the wipe put a fresh boss at its home. The blow
+			// that caused it belongs to the boss that was just replaced.
 			result.wipes++
+			settleLosses(nil, nil)
 			closeWindow()
+			held, heldBoss = nil, nil
 			bossID, stage = id, 0
 			bossHealth = s.mobs[bossID].health
 			for _, b := range pt.bots {
@@ -421,6 +496,7 @@ func (pt *playtest) run() playtestResult {
 				clear(b.fleeing)
 				clear(b.perceived)
 			}
+			clear(attributed)
 		}
 		boss := s.mobs[bossID]
 		if boss == nil {
@@ -473,23 +549,12 @@ func (pt *playtest) run() playtestResult {
 			}
 		}
 
-		for _, b := range pt.bots {
-			p := b.p
-			if alive[p] && p.health < health[p] && running != nil {
-				pt.recordHitLocked(&result, b, boss, running, health[p]-p.health)
-				if inWindow && current == (playtestWindow{running.instanceID, running.pulseIndex}) {
-					struck[p] = true
-				}
-			}
-			if alive[p] && !p.alive() {
-				result.deaths++
-			}
-			health[p], alive[p] = p.health, p.alive()
-		}
+		settleLosses(running, boss)
 
 		if inWindow && (running == nil || running.instanceID != current.instance || running.phase == vnet.MovePhaseRecovery) {
 			closeWindow()
 		}
+		held, heldBoss = running, boss
 		s.mu.Unlock()
 	}
 	for kind, ticks := range pt.escapeTicks {
@@ -512,11 +577,18 @@ func (pt *playtest) recordHitLocked(result *playtestResult, b *playtestBot, boss
 		// A pulse fires on the last tick of its own shown interval.
 		required = int64(ticks.channelPulse) - 1
 	}
-	stats.required = required
 	if seen, ok := b.perceived[[2]uint64{running.instanceID, uint64(running.pulseIndex)}]; ok {
-		stats.minWarning = min(stats.minWarning, int64(pt.tick)-int64(seen))
+		warning := int64(pt.tick) - int64(seen)
+		if warning < required {
+			stats.premature++
+		}
+		if stats.required == math.MaxInt64 || warning-required < stats.minWarning-stats.required {
+			stats.minWarning, stats.required = warning, required
+		}
 	} else {
+		// Struck before the region ever reached the player: sooner than any promise.
 		result.unperceived++
+		stats.premature++
 	}
 	if running.def.travel == travelNone && running.def.flightSpeed == 0 && running.def.hazard.pulse == pulseNone {
 		best := math.Inf(1)
@@ -762,8 +834,9 @@ func TestFirstDungeonReadersEscapeEveryAnnouncedRegion(t *testing.T) {
 				cfg := playtestConfig{boss: boss, party: setup.party, kit: setup.kit, network: network}
 				t.Run(cfg.String(), func(t *testing.T) {
 					r := newPlaytest(t, cfg).run()
-					if !r.killed || r.hits != 0 || r.deaths != 0 || r.wipes != 0 {
-						t.Fatalf("killed=%v hits=%d deaths=%d wipes=%d; want a clean kill\n%s", r.killed, r.hits, r.deaths, r.wipes, r)
+					if !r.killed || r.hits != 0 || r.unattributed != 0 || r.deaths != 0 || r.wipes != 0 {
+						t.Fatalf("killed=%v hits=%d unattributed=%d deaths=%d wipes=%d; want a clean kill\n%s",
+							r.killed, r.hits, r.unattributed, r.deaths, r.wipes, r)
 					}
 					for kind, stats := range r.moves {
 						if stats.threatened != stats.escaped {
@@ -791,8 +864,9 @@ func TestFirstDungeonEveryStageRepertoireIsEscapable(t *testing.T) {
 					policy: policyEvader, stage: stage, seconds: 90}
 				t.Run(cfg.String(), func(t *testing.T) {
 					r := newPlaytest(t, cfg).run()
-					if r.hits != 0 || r.deaths != 0 || r.wipes != 0 {
-						t.Fatalf("hits=%d deaths=%d wipes=%d; want every announced region left in time\n%s", r.hits, r.deaths, r.wipes, r)
+					if r.hits != 0 || r.unattributed != 0 || r.deaths != 0 || r.wipes != 0 {
+						t.Fatalf("hits=%d unattributed=%d deaths=%d wipes=%d; want every announced region left in time\n%s",
+							r.hits, r.unattributed, r.deaths, r.wipes, r)
 					}
 					moves := 0
 					for _, stats := range r.moves {
@@ -808,29 +882,99 @@ func TestFirstDungeonEveryStageRepertoireIsEscapable(t *testing.T) {
 }
 
 // TestFirstDungeonDamageNeverPrecedesItsPerceivedAnnouncement is the negative control. A
-// stander ignores what it is shown, so it is struck, and every blow lands no sooner after
-// the player perceived that region than the whole announcement the server promises: the
-// telegraph for a blow, the shown interval for a pulse.
+// stander ignores what it is shown, so it is struck, and no blow lands sooner after the player
+// perceived that region than the announcement its own phase promises: the telegraph for a
+// release, the shown interval for a pulse. Every health loss is a new entry in the running
+// window's hit ledger, so none is charged to the wrong move. The stage-two king adds burial
+// and edict pulses, so one move kind's promise is never compared with another's.
 func TestFirstDungeonDamageNeverPrecedesItsPerceivedAnnouncement(t *testing.T) {
-	for _, boss := range []vnet.MobKind{vnet.MobKindVargrGuardian, vnet.MobKindDraugrKing} {
-		for _, setup := range []struct {
-			party int
-			kit   playtestKit
-		}{{1, kitIron}, {3, kitRusty}} {
-			cfg := playtestConfig{boss: boss, party: setup.party, kit: setup.kit, policy: policyStander}
-			t.Run(cfg.String(), func(t *testing.T) {
-				r := newPlaytest(t, cfg).run()
-				if r.hits == 0 || r.unperceived != 0 {
-					t.Fatalf("hits=%d unperceived=%d; want struck players who had every region\n%s", r.hits, r.unperceived, r)
-				}
-				for kind, stats := range r.moves {
-					if stats.hits > 0 && stats.minWarning < stats.required {
-						t.Errorf("%s struck %d ticks after its region was perceived; the announcement is %d", kind, stats.minWarning, stats.required)
-					}
-				}
-			})
+	for _, cfg := range []playtestConfig{
+		{boss: vnet.MobKindVargrGuardian, party: 1, kit: kitIron, policy: policyStander},
+		{boss: vnet.MobKindVargrGuardian, party: 3, kit: kitRusty, policy: policyStander},
+		{boss: vnet.MobKindDraugrKing, party: 1, kit: kitIron, policy: policyStander},
+		{boss: vnet.MobKindDraugrKing, party: 3, kit: kitRusty, policy: policyStander},
+		{boss: vnet.MobKindDraugrKing, party: 2, kit: kitIron, policy: policyStander, ranged: 1, stage: 2, seconds: 60},
+	} {
+		t.Run(cfg.String(), func(t *testing.T) {
+			r := newPlaytest(t, cfg).run()
+			assertPlaytestBlowsAnnounced(t, r)
+		})
+	}
+}
+
+func assertPlaytestBlowsAnnounced(t *testing.T, r playtestResult) {
+	t.Helper()
+	if r.hits == 0 || r.unattributed != 0 {
+		t.Fatalf("hits=%d unattributed=%d; want struck players and every loss charged to its window\n%s", r.hits, r.unattributed, r)
+	}
+	for _, kind := range r.sortedKinds() {
+		if stats := r.moves[kind]; stats.premature != 0 {
+			t.Errorf("%s: %d of %d blows landed sooner after their region was perceived than their phase promises, "+
+				"%d of them before it was perceived at all", kind, stats.premature, stats.hits, r.unperceived)
 		}
 	}
+	if r.unperceived != 0 {
+		t.Errorf("%d blows struck a region the player had not perceived\n%s", r.unperceived, r)
+	}
+}
+
+// TestFirstDungeonPlaytestRefereeCatchesWhatItClaims mutates the running fight to prove the two
+// checks above can fail. Cutting a telegraph or a pulse short after it was announced makes its
+// blow land sooner than the frames promised; health lost that no window's hit ledger accounts
+// for must not be charged to the move that happens to be running.
+func TestFirstDungeonPlaytestRefereeCatchesWhatItClaims(t *testing.T) {
+	// shorten cuts the announced phase short once, on the tick it begins, leaving the published
+	// length untouched: exactly a server that damages before its own announcement.
+	shorten := func(pt *playtest, phase vnet.MovePhase) func() {
+		return func() {
+			pt.s.mu.Lock()
+			defer pt.s.mu.Unlock()
+			boss := pt.s.mobs[pt.bossIDLocked()]
+			if boss == nil || boss.encounter == nil || boss.encounter.running == nil {
+				return
+			}
+			if r := boss.encounter.running; r.phase == phase && r.remaining+1 == r.phaseTicks {
+				r.remaining = 2
+			}
+		}
+	}
+	for _, c := range []struct {
+		name  string
+		cfg   playtestConfig
+		phase vnet.MovePhase
+	}{
+		{"telegraph", playtestConfig{boss: vnet.MobKindVargrGuardian, party: 1, kit: kitIron, policy: policyStander}, vnet.MovePhaseTelegraph},
+		{"pulse", playtestConfig{boss: vnet.MobKindDraugrKing, party: 2, kit: kitIron, policy: policyStander, ranged: 1, stage: 2, seconds: 60}, vnet.MovePhaseChannel},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pt := newPlaytest(t, c.cfg)
+			pt.beforeStep = shorten(pt, c.phase)
+			r := pt.run()
+			premature := 0
+			for _, stats := range r.moves {
+				premature += stats.premature
+			}
+			if premature == 0 {
+				t.Fatalf("a %s cut short after its announcement was not reported as premature\n%s", c.name, r)
+			}
+		})
+	}
+	t.Run("unattributed", func(t *testing.T) {
+		pt := newPlaytest(t, playtestConfig{boss: vnet.MobKindVargrGuardian, party: 1, kit: kitIron, policy: policyEvader})
+		pt.beforeStep = func() {
+			pt.s.mu.Lock()
+			defer pt.s.mu.Unlock()
+			boss := pt.s.mobs[pt.bossIDLocked()]
+			if boss != nil && boss.encounter != nil && boss.encounter.running != nil &&
+				boss.encounter.running.phase == vnet.MovePhaseTelegraph && boss.encounter.running.remaining > 3 {
+				pt.bots[0].p.damageLocked(1)
+			}
+		}
+		r := pt.run()
+		if r.unattributed == 0 || r.hits != 0 {
+			t.Fatalf("health lost during a telegraph: unattributed=%d hits=%d; want it kept out of every move\n%s", r.unattributed, r.hits, r)
+		}
+	})
 }
 
 // TestFirstDungeonPlaytest is the full measurement matrix: every party size from one to
@@ -904,14 +1048,14 @@ func (r playtestResult) sortedKinds() []vnet.EncounterMoveKind {
 
 func (r playtestResult) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "killed=%v after %.2fs stages=%v deaths=%d wipes=%d hits=%d damage-taken=%d unperceived=%d boss-damage=%v",
-		r.killed, r.killSeconds, r.stageSeconds, r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.bossDamage)
+	fmt.Fprintf(&b, "killed=%v after %.2fs stages=%v deaths=%d wipes=%d hits=%d damage-taken=%d unperceived=%d unattributed=%d boss-damage=%v",
+		r.killed, r.killSeconds, r.stageSeconds, r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.unattributed, r.bossDamage)
 	for _, kind := range r.sortedKinds() {
 		s := r.moves[kind]
 		fmt.Fprintf(&b, "\n  %-20s moves=%d windows=%d threatened=%d escaped=%d hits=%d damage=%d",
 			kind, s.moves, s.windows, s.threatened, s.escaped, s.hits, s.damage)
 		if s.hits > 0 {
-			fmt.Fprintf(&b, " warning>=%d/%d", s.minWarning, s.required)
+			fmt.Fprintf(&b, " warning>=%d/%d premature=%d", s.minWarning, s.required, s.premature)
 		}
 		if s.contactMax >= 0 {
 			fmt.Fprintf(&b, " contact<=%.3f", s.contactMax)
@@ -924,7 +1068,7 @@ func (r playtestResult) String() string {
 func writePlaytestCSV(t *testing.T, path string, results []playtestResult) {
 	t.Helper()
 	var b strings.Builder
-	b.WriteString("boss,party,ranged,kit,policy,network,stage,killed,kill_seconds,stage_seconds,deaths,wipes,hits,damage_taken,unperceived_hits,boss_damage_recovery,boss_damage_telegraph,boss_damage_release,boss_damage_pursuit,boss_damage_other\n")
+	b.WriteString("boss,party,ranged,kit,policy,network,stage,killed,kill_seconds,stage_seconds,deaths,wipes,hits,damage_taken,unperceived_hits,unattributed_losses,boss_damage_recovery,boss_damage_telegraph,boss_damage_release,boss_damage_pursuit,boss_damage_other\n")
 	for _, r := range results {
 		c := r.config
 		stages := make([]string, len(r.stageSeconds))
@@ -932,9 +1076,9 @@ func writePlaytestCSV(t *testing.T, path string, results []playtestResult) {
 			stages[i] = fmt.Sprintf("%.2f", v)
 		}
 		other := r.bossDamage["killing blow"] + r.bossDamage["interrupt opening"] + r.bossDamage["before the pull"]
-		fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%v,%.2f,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+		fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%v,%.2f,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 			playtestBossName(c.boss), c.party, c.ranged, c.kit.name, c.policy, c.network, c.stage, r.killed, r.killSeconds,
-			strings.Join(stages, ";"), r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.bossDamage["recovery"], r.bossDamage["telegraph"],
+			strings.Join(stages, ";"), r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.unattributed, r.bossDamage["recovery"], r.bossDamage["telegraph"],
 			r.bossDamage["release or pulse"], r.bossDamage["pursuit"], other)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
@@ -945,14 +1089,14 @@ func writePlaytestCSV(t *testing.T, path string, results []playtestResult) {
 func writePlaytestMoveCSV(t *testing.T, path string, results []playtestResult) {
 	t.Helper()
 	var b strings.Builder
-	b.WriteString("boss,party,ranged,kit,policy,network,stage,move,moves,windows,threatened,escaped,hits,damage,min_warning_ticks,required_ticks,max_contact,max_escape_ticks,recoveries\n")
+	b.WriteString("boss,party,ranged,kit,policy,network,stage,move,moves,windows,threatened,escaped,hits,damage,premature,min_warning_ticks,required_ticks,max_contact,max_escape_ticks,recoveries\n")
 	for _, r := range results {
 		c := r.config
 		for _, kind := range r.sortedKinds() {
 			s := r.moves[kind]
-			warning := ""
-			if s.hits > 0 {
-				warning = fmt.Sprint(s.minWarning)
+			warning, required := "", ""
+			if s.required != math.MaxInt64 {
+				warning, required = fmt.Sprint(s.minWarning), fmt.Sprint(s.required)
 			}
 			contact := ""
 			if s.contactMax >= 0 {
@@ -969,9 +1113,9 @@ func writePlaytestMoveCSV(t *testing.T, path string, results []playtestResult) {
 			for i, length := range lengths {
 				recoveries[i] = fmt.Sprintf("%dx%d", length, s.recoveries[length])
 			}
-			fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%s,%d,%d,%d,%d,%d,%d,%s,%d,%s,%d,%s\n",
+			fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%s,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%d,%s\n",
 				playtestBossName(c.boss), c.party, c.ranged, c.kit.name, c.policy, c.network, c.stage, kind, s.moves, s.windows,
-				s.threatened, s.escaped, s.hits, s.damage, warning, s.required, contact, s.escapeTicks, strings.Join(recoveries, ";"))
+				s.threatened, s.escaped, s.hits, s.damage, s.premature, warning, required, contact, s.escapeTicks, strings.Join(recoveries, ";"))
 		}
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
