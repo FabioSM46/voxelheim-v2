@@ -30,7 +30,11 @@ func restoreHeldRun(t *testing.T, held ...BossRewardDefeat) (*InstanceManager, e
 func TestARestoreOffersHeldBossLootAgainAsAClaimedCorpse(t *testing.T) {
 	bones := protocol.InventoryStack{ItemID: uint16(ItemBone), Count: 2}
 	pelt := protocol.InventoryStack{ItemID: uint16(ItemVargrPelt), Count: 3}
-	held := BossRewardDefeat{Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{{Owner: instanceTestCharacter(1), Entries: []protocol.InventoryStack{bones, pelt}, Silver: 30}}}
+	partner := instanceTestCharacter(2)
+	held := BossRewardDefeat{Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{
+		{Owner: instanceTestCharacter(1), Entries: []protocol.InventoryStack{bones, pelt}, Silver: 30},
+		{Owner: partner, Entries: []protocol.InventoryStack{bones, pelt}, Silver: 30, Taken: 0b01, SilverTaken: true},
+	}}
 	m, err := restoreHeldRun(t, held)
 	if err != nil {
 		t.Fatal(err)
@@ -47,10 +51,19 @@ func TestARestoreOffersHeldBossLootAgainAsAClaimedCorpse(t *testing.T) {
 	for id, c := range s.corpses {
 		corpseID, rewards, pos = id, c.rewards, c.pos
 	}
+	var remainder corpseContainer
+	if c := s.corpses[corpseID]; c != nil {
+		if owed := c.personal[corpseOwner{playerID: partner.PlayerID, characterID: partner.CharacterID}]; owed != nil {
+			remainder = corpseContainer{entries: slices.Clone(owed.entries), silver: owed.silver}
+		}
+	}
 	count := len(s.corpses)
 	s.mu.Unlock()
 	if count != 1 || rewards != bossRewardsClaimed || pos != home {
 		t.Fatalf("restored corpses = %d, hold %d at %v; want one claimed corpse at %v", count, rewards, pos, home)
+	}
+	if len(remainder.entries) != 1 || remainder.entries[0].entryID != 2 || stacksOf(remainder.entries)[0] != pelt || remainder.silver != 0 {
+		t.Fatalf("the partly taking owner's container = %+v; want only the pelt at its roll index and no silver", remainder)
 	}
 
 	spawn := [3]float32{float32(pos[0]), float32(pos[1]), float32(pos[2] + 1.5)}
@@ -90,6 +103,8 @@ func TestARestoreRefusesHeldLootItCannotRebuild(t *testing.T) {
 		"an item no pack could hold":    {Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{{Owner: owner, Entries: []protocol.InventoryStack{{ItemID: 65535, Count: 1}}}}},
 		"one owner named twice":         {Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{{Owner: owner, Entries: bones}, {Owner: owner, Entries: bones}}},
 		"no loot at all":                {Kind: vnet.MobKindVargrGuardian},
+		"a taken index past the roll":   {Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{{Owner: owner, Entries: bones, Taken: 0b10}}},
+		"taken silver never rolled":     {Kind: vnet.MobKindVargrGuardian, Personal: []BossPersonalReward{{Owner: owner, Entries: bones, SilverTaken: true}}},
 	} {
 		m, err := restoreHeldRun(t, held)
 		if !errors.Is(err, ErrInvalidSession) || m.Count() != 0 {

@@ -874,9 +874,9 @@ func restoreSessions(instances *game.InstanceManager, store *persist.SessionStor
 		}
 		for _, run := range overlaid {
 			restored := savedSessionOf(run.Session, run.Generation)
-			// Loot the journal still owes untouched is offered again; see
-			// persist.RewardJournal.UntouchedLoot for what qualifies.
-			restored.HeldRewards = heldRewardsOf(journal.UntouchedLoot(run.Generation))
+			// Loot the journal still owes is offered again; see persist.RewardJournal.OwedLoot
+			// for what qualifies.
+			restored.HeldRewards = heldRewardsOf(journal.OwedLoot(run.Generation))
 			saved = append(saved, restored)
 		}
 	}
@@ -917,7 +917,7 @@ func savedSessionOf(rec persist.SessionRecord, generation uint64) game.SavedSess
 	}
 }
 
-// heldRewardsOf is the journal's untouched loot as a restore rebuilds it.
+// heldRewardsOf is the journal's owed loot as a restore rebuilds it.
 func heldRewardsOf(defeats []persist.RewardDefeat) []game.BossRewardDefeat {
 	var held []game.BossRewardDefeat
 	for _, d := range defeats {
@@ -925,7 +925,7 @@ func heldRewardsOf(defeats []persist.RewardDefeat) []game.BossRewardDefeat {
 		for _, p := range d.Personal {
 			defeat.Personal = append(defeat.Personal, game.BossPersonalReward{
 				Owner:   game.InstanceCharacter{PlayerID: p.Owner.PlayerID, CharacterID: p.Owner.CharacterID},
-				Entries: p.Entries, Silver: p.Silver,
+				Entries: p.Entries, Silver: p.Silver, Taken: p.Taken, SilverTaken: p.SilverTaken,
 			})
 		}
 		held = append(held, defeat)

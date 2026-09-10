@@ -42,6 +42,11 @@ type BossPersonalReward struct {
 	Owner   InstanceCharacter
 	Entries []protocol.InventoryStack
 	Silver  uint32
+	// Taken and SilverTaken are what the journal records this owner has already taken: roll
+	// indices, and the silver. A frozen defeat has none. Only a restore reads them, to rebuild
+	// what is still owed.
+	Taken       uint64
+	SilverTaken bool
 }
 
 // BossRewardDefeat is what one dungeon boss's death owes, frozen at the kill. Personal is

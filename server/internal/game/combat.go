@@ -243,6 +243,9 @@ func (s *Sim) creditMobDamageLocked(p *Player, target *mob, damage uint16) {
 	owner := s.currentTapOwnerLocked(target.firstHit)
 	amount := uint32(target.species().experience)
 	if owner == nil {
+		// An offline first hitter's share is frozen for that owner too. The journal delivers it
+		// when the owner is inside the run again, as the live path below applies it only when the
+		// owner joins this simulation again.
 		if frozen != nil {
 			frozen.addExperience(InstanceCharacter{target.firstHit.playerID, target.firstHit.characterID}, amount)
 			return

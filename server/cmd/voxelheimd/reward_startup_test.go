@@ -165,10 +165,10 @@ func journalWithLoot(t *testing.T, item uint16) string {
 	return dir
 }
 
-// Startup hands the restore the loot the journal still owes untouched. The proof needs nothing
+// Startup hands the restore the loot the journal still owes. The proof needs nothing
 // but the restore's own verdict: loot a pack could hold comes back with its run, and loot no
 // pack could hold refuses the whole startup restore, which it could only do if it was handed.
-func TestStartupRebuildsTheBossLootTheJournalStillOwesUntouched(t *testing.T) {
+func TestStartupRebuildsTheBossLootTheJournalStillOwes(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		item    uint16

@@ -11,8 +11,8 @@ import (
 )
 
 // validHeldRewards refuses held loot a restore could not rebuild exactly: a defeat the run does
-// not record, a species with no home anchor, a second defeat of one boss, an owner named twice,
-// or a roll no pack could hold.
+// not record, a species with no home anchor, a second defeat of one boss, an owner named twice, a
+// taken index past the roll or taken silver that was never rolled, or a roll no pack could hold.
 func validHeldRewards(rec SavedSession) error {
 	seen := make(map[vnet.MobKind]bool, len(rec.HeldRewards))
 	for _, d := range rec.HeldRewards {
@@ -23,7 +23,8 @@ func validHeldRewards(rec SavedSession) error {
 		seen[d.Kind] = true
 		owners := make(map[InstanceCharacter]bool, len(d.Personal))
 		for _, reward := range d.Personal {
-			if owners[reward.Owner] || len(reward.Entries) > maxBossRewardEntries {
+			if owners[reward.Owner] || len(reward.Entries) > maxBossRewardEntries ||
+				reward.Taken&^heldRollMask(len(reward.Entries)) != 0 || (reward.SilverTaken && reward.Silver == 0) {
 				return refuse
 			}
 			owners[reward.Owner] = true
@@ -39,13 +40,22 @@ func validHeldRewards(rec SavedSession) error {
 	return nil
 }
 
+// heldRollMask is the taken bits a roll of n entries can have.
+func heldRollMask(n int) uint64 {
+	if n >= 64 {
+		return ^uint64(0)
+	}
+	return uint64(1)<<n - 1
+}
+
 func heldStack(entry protocol.InventoryStack) inventoryStack {
 	return inventoryStack{item: ItemID(entry.ItemID), count: entry.Count, durability: entry.Durability, maxDurability: entry.MaxDurability}
 }
 
 // restoreHeldBossRewards rebuilds each held defeat as a boss corpse whose loot is delivered only
-// through claims. The corpse lies at its boss's home anchor and holds every owner's frozen roll
-// in roll order, so a claim names the same indices the journal does.
+// through claims. The corpse lies at its boss's home anchor and holds what each owner is still
+// owed: the entries it has not taken, each at its original roll index, and the silver unless it
+// was taken. A claim therefore names the same indices the journal records.
 //
 // It does not expire. The journal owes the loot until the run resets, and the run's removal is
 // what takes the corpse away.
@@ -71,8 +81,14 @@ func (s *Sim) restoreHeldBossRewards(seed int64, held []BossRewardDefeat) {
 			rewards:     bossRewardsClaimed,
 		}
 		for _, reward := range d.Personal {
-			container := &corpseContainer{silver: reward.Silver, revision: 1}
+			container := &corpseContainer{revision: 1}
+			if !reward.SilverTaken {
+				container.silver = reward.Silver
+			}
 			for k, entry := range reward.Entries {
+				if reward.Taken&(uint64(1)<<k) != 0 {
+					continue
+				}
 				container.entries = append(container.entries, corpseEntry{entryID: uint64(k + 1), stack: heldStack(entry)})
 			}
 			c.personal[corpseOwner{playerID: reward.Owner.PlayerID, characterID: reward.Owner.CharacterID}] = container
