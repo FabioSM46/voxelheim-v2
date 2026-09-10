@@ -298,7 +298,7 @@ fn flight(one: &PresentedMove, volume: &HazardVolume, solid: &dyn Fn(IVec3) -> b
     reached
 }
 
-fn polar(angle: f32, radius: f32) -> Vec2 {
+pub(super) fn polar(angle: f32, radius: f32) -> Vec2 {
     Vec2::new(angle.cos(), angle.sin()) * radius
 }
 
@@ -306,21 +306,22 @@ fn shard_height(height: f32) -> f32 {
     (height * 0.5).min(0.9)
 }
 
+/// Flat floor strips and raised quads, shared with the strike layer.
 #[derive(Default)]
-struct Builder {
+pub(super) struct Builder {
     positions: Vec<[f32; 3]>,
     indices: Vec<u32>,
 }
 
 impl Builder {
-    fn quad(&mut self, corners: [Vec3; 4]) {
+    pub(super) fn quad(&mut self, corners: [Vec3; 4]) {
         let start = self.positions.len() as u32;
         self.positions.extend(corners.map(|v| v.to_array()));
         self.indices
             .extend([start, start + 2, start + 1, start, start + 3, start + 2]);
     }
 
-    fn strip(&mut self, a: Vec2, b: Vec2, width: f32) {
+    pub(super) fn strip(&mut self, a: Vec2, b: Vec2, width: f32) {
         let side = (b - a).normalize_or_zero().perp() * width / 2.0;
         self.quad([a - side, b - side, b + side, a + side].map(|p| Vec3::new(p.x, 0.0, p.y)));
     }
@@ -349,7 +350,7 @@ impl Builder {
         }
     }
 
-    fn build(self) -> Mesh {
+    pub(super) fn build(self) -> Mesh {
         let count = self.positions.len();
         Mesh::new(
             PrimitiveTopology::TriangleList,

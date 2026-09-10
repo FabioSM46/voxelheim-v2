@@ -11,6 +11,7 @@ use bevy::prelude::*;
 mod capture;
 mod cues;
 pub(super) mod spells;
+mod strikes;
 
 pub(crate) fn is_spell(kind: crate::net::EncounterMoveKind) -> bool {
     use crate::net::EncounterMoveKind::*;
@@ -83,6 +84,7 @@ pub(crate) struct EncounterPresentation(pub Vec<PresentedMove>);
 pub(super) fn register(app: &mut App) {
     cues::register(app);
     spells::register(app);
+    strikes::register(app);
     app.init_resource::<EncounterTimelineInbox>()
         .init_resource::<EncounterPresentation>()
         .add_systems(Update, reconcile.after(ApplySnapshots));
