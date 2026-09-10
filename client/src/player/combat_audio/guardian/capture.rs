@@ -15,9 +15,9 @@ impl Sink for Buffer {
         &mut self.0
     }
 }
-const RATE: u32 = 48_000;
+pub(in super::super) const RATE: u32 = 48_000;
 
-fn wav(path: &Path, samples: &[f32]) {
+pub(in super::super) fn wav(path: &Path, samples: &[f32]) {
     assert!(
         samples
             .iter()
@@ -43,55 +43,84 @@ fn wav(path: &Path, samples: &[f32]) {
     }
 }
 
-#[test]
-#[ignore = "writes an offline production-mixer WAV for manual listening; no audio device"]
-fn export_guardian_audio_catalogue() {
+pub(in super::super) fn review_directory() -> std::path::PathBuf {
     let directory =
         std::env::var("VOXELHEIM_AUDIO_REVIEW_DIR").expect("explicit review output directory");
-    let directory = Path::new(&directory);
-    std::fs::create_dir_all(directory).unwrap();
+    std::fs::create_dir_all(&directory).unwrap();
+    directory.into()
+}
+
+/// Every recipe of one boss catalogue, spaced, through real playback and the mixer.
+pub(in super::super) fn catalogue(
+    directory: &Path,
+    name: &str,
+    cues: &[(String, f32, crate::audio::synth::Sound)],
+) {
     let mixer = Arc::new(Mixer::new());
     mixer.set_format(RATE, 2);
     let audio = AudioMixer::from_shared_for_test(Arc::clone(&mixer));
     let mut output = Vec::new();
     let mut manifest = String::from("start_seconds,end_seconds,cue\n");
-    for cue in sounds::CUES {
+    for (label, seconds, sound) in cues {
         let start = output.len() as f64 / f64::from(RATE * 2);
-        let baked = cue.describe().bake(cue.seconds(), RATE, 19).unwrap();
+        let baked = sound.bake(*seconds, RATE, 19).unwrap();
         let mut placement = spatial::place(Vec3::ZERO, 0.0, Vec3::new(0.0, 0.0, -3.0), 32.0, 0.0);
         placement.gain *= SOURCE_GAIN;
         let mut playback =
             Playback::start(&audio, Bus::Sfx, Rendering::Baked(baked), placement).unwrap();
-        for _ in 0..((cue.seconds() + 0.35) * 100.0).ceil() as usize {
+        for _ in 0..((seconds + 0.35) * 100.0).ceil() as usize {
             playback.pump();
             let mut block = Buffer(vec![0.0; (RATE / 100 * 2) as usize]);
             mixer.render(&mut block);
             output.extend(block.0);
         }
         manifest.push_str(&format!(
-            "{start:.3},{:.3},{cue:?}\n",
-            start + f64::from(cue.seconds())
+            "{start:.3},{:.3},{label}\n",
+            start + f64::from(*seconds)
         ));
     }
-    wav(&directory.join("guardian-catalogue.wav"), &output);
-    std::fs::write(directory.join("guardian-catalogue.csv"), manifest).unwrap();
+    wav(&directory.join(format!("{name}.wav")), &output);
+    std::fs::write(directory.join(format!("{name}.csv")), manifest).unwrap();
     let peak = output.iter().copied().map(f32::abs).fold(0.0, f32::max);
     assert!(peak > 0.05 && peak < 0.99, "catalogue peak {peak}");
     println!(
-        "Exported {} cues at {RATE} Hz, stereo, PCM16; peak {peak:.4}. Manual listening is a separate review.",
-        sounds::CUES.len()
+        "{name}: {} cues at {RATE} Hz, stereo, PCM16; peak {peak:.4}. Manual listening is a separate review.",
+        cues.len()
     );
 }
 
-struct Recording {
-    app: App,
+#[test]
+#[ignore = "writes an offline production-mixer WAV for manual listening; no audio device"]
+fn export_guardian_audio_catalogue() {
+    let cues = sounds::CUES.map(|cue| (format!("{cue:?}"), cue.seconds(), cue.describe()));
+    catalogue(&review_directory(), "guardian-catalogue", &cues);
+}
+
+/// A four-block stone wall one block in front of the boss, between it and the listener.
+pub(in super::super) fn stone_wall(world: &mut World) {
+    world.init_resource::<crate::world::ChunkStore>();
+    for cx in [-1, 0] {
+        let mut chunk = crate::world::VoxelChunk::all_air(32);
+        for x in 0..32 {
+            for y in 0..4 {
+                chunk.set(x, y, 1, crate::world::palette::STONE);
+            }
+        }
+        world
+            .resource_mut::<crate::world::ChunkStore>()
+            .insert(crate::net::ChunkCoord { cx, cy: 0, cz: 0 }, chunk);
+    }
+}
+
+pub(in super::super) struct Recording {
+    pub(in super::super) app: App,
     mixer: Arc<Mixer>,
     samples: Vec<f32>,
     manifest: String,
     peak_sources: usize,
 }
 impl Recording {
-    fn new(distance: f32, mute: bool) -> Self {
+    pub(in super::super) fn new(distance: f32, mute: bool) -> Self {
         let (mut app, mixer) = tests::rig_fixture(RATE);
         mixer.set_gain(Bus::Sfx, if mute { 0.0 } else { 1.0 });
         let world = app.world_mut();
@@ -134,7 +163,7 @@ impl Recording {
         }
         self.mix(tick);
     }
-    fn mix(&mut self, tick: u32) {
+    pub(in super::super) fn mix(&mut self, tick: u32) {
         self.app.update();
         let state = self.app.world().resource::<super::super::CombatAudio>();
         let seconds = self.samples.len() as f64 / f64::from(RATE * 2);
@@ -155,7 +184,7 @@ impl Recording {
         self.mixer.render(&mut buffer);
         self.samples.extend(buffer.0);
     }
-    fn save(&self, directory: &Path, name: &str) {
+    pub(in super::super) fn save(&self, directory: &Path, name: &str) {
         wav(&directory.join(format!("{name}.wav")), &self.samples);
         std::fs::write(directory.join(format!("{name}.csv")), &self.manifest).unwrap();
         let peak = self
@@ -168,9 +197,9 @@ impl Recording {
             / self.samples.len() as f64)
             .sqrt();
         assert!(peak < 0.99, "clipped {name}");
-        assert!(self.peak_sources <= MAX_GUARDIAN_SOURCES);
+        assert!(self.peak_sources <= MAX_BOSS_SOURCES);
         println!(
-            "{name}: peak={peak:.4} rms={rms:.5} guardian_sources={}",
+            "{name}: peak={peak:.4} rms={rms:.5} boss_sources={}",
             self.peak_sources
         );
     }
@@ -367,18 +396,7 @@ fn review_spatial_and_party(directory: &Path) {
             eye.translation.x = eye_x;
         }
         if wall {
-            world.init_resource::<crate::world::ChunkStore>();
-            for cx in [-1, 0] {
-                let mut chunk = crate::world::VoxelChunk::all_air(32);
-                for x in 0..32 {
-                    for y in 0..4 {
-                        chunk.set(x, y, 1, crate::world::palette::STONE);
-                    }
-                }
-                world
-                    .resource_mut::<crate::world::ChunkStore>()
-                    .insert(crate::net::ChunkCoord { cx, cy: 0, cz: 0 }, chunk);
-            }
+            stone_wall(world);
         }
         for tick in 100..220 {
             recording.frame(

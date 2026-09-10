@@ -11,14 +11,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Buffer(pub Vec<f32>);
+pub(in super::super) struct Buffer(pub Vec<f32>);
 impl Sink for Buffer {
     fn block(&mut self) -> &mut [f32] {
         &mut self.0
     }
 }
 
-pub(super) fn fixture(rate: u32) -> (App, Arc<Mixer>) {
+pub(in super::super) fn fixture(rate: u32) -> (App, Arc<Mixer>) {
     let mixer = Arc::new(Mixer::new());
     mixer.set_format(rate, 2);
     let mut app = App::new();
@@ -451,7 +451,7 @@ fn party_gestures_are_capped_and_leave_all_eight_reserved_voice_slots() {
         .resource_mut::<SnapshotBuffer>()
         .accept(snap, Instant::now());
     app.update();
-    assert_eq!(count(&app), MAX_GUARDIAN_SOURCES);
+    assert_eq!(count(&app), MAX_BOSS_SOURCES);
     for id in 9..13 {
         assert!(
             app.world()
@@ -592,7 +592,7 @@ fn muting_leaves_the_same_announced_hazard_meshes_and_authoritative_state() {
 
 /// The production rig systems supply the actual Mob and guardian Motion sampler.
 /// This is shared with the offline walking/charge export, not a replacement gait.
-pub(super) fn rig_fixture(rate: u32) -> (App, Arc<Mixer>) {
+pub(in super::super) fn rig_fixture(rate: u32) -> (App, Arc<Mixer>) {
     let (mut app, mixer) = fixture(rate);
     app.insert_resource(crate::player::InputMode::Playing)
         .add_systems(Startup, crate::player::mobs::create_visuals)
