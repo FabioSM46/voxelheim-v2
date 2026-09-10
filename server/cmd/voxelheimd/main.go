@@ -1451,6 +1451,7 @@ func (s *server) syncRewardRunsLoop(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			s.syncRewardRuns()
+			s.deliverBossExperience()
 		}
 	}
 }
@@ -1461,6 +1462,17 @@ func (s *server) syncRewardRuns() {
 	}
 	if err := s.identities.SyncRewardRuns(time.Now()); err != nil {
 		s.log.Error("the boss reward journal could not be brought up to date; it will be retried", "error", err)
+	}
+}
+
+// deliverBossExperience claims the boss experience the journal owes characters inside its run.
+// It runs only in the loop: at shutdown the coordinator is draining and would refuse a claim.
+func (s *server) deliverBossExperience() {
+	if s.identities == nil {
+		return
+	}
+	if err := s.identities.DeliverBossExperience(); err != nil {
+		s.log.Error("boss experience could not be offered; it will be retried", "error", err)
 	}
 }
 

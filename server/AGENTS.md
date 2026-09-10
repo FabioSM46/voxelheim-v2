@@ -1268,6 +1268,24 @@ dungeon boss's personal loot is delivered only through the journal.
     drives that routing through `Serve`. Only the corpse is replaced, through the
     `PutBossLootBehind` test seam.
 
+### Boss experience is delivered only through claims
+
+A durable dungeon boss's experience follows its loot into the journal (#1036).
+
+- **Frozen or awarded, never both.** `Sim.creditMobDamageLocked` looks up the defeat this corpse's
+  death froze (`frozenBossDefeatLocked`). When there is one, every share goes into
+  `BossRewardDefeat.Experience` and nothing is awarded live. When there is none, every share is
+  awarded live as before. The split is the same either way: the online owner or its nearby party,
+  or the offline tap. The recipients are a group of their own, distinct from the loot roster and
+  the bindings.
+- **Journaled with the defeat.** The sync writes the shares with the defeat's loot and releases the
+  corpse only when the journal owes both exactly (`sameEntitlements`).
+- **Claimed on a dungeon visit.** `Identities.DeliverBossExperience`, run by `voxelheimd` after each
+  sync pass, claims every untaken share whose owner is playing and inside the run
+  (`InstanceManager.PlayerInside`). `ReserveBossReward` additionally requires that character's
+  portal entry. The pass reads only the journal, so a share still owed after a restart is offered
+  again the same way. One claim per character at a time, through the shared journal write gate.
+
 ## Waking up with no tent, and the wall the offset does not clear
 
 `respawnPositionLocked` in `internal/game/vitals.go` resolves three tiers in order, and #460

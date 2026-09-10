@@ -45,12 +45,69 @@ type BossPersonalReward struct {
 }
 
 // BossRewardDefeat is what one dungeon boss's death owes, frozen at the kill. Personal is
-// the encounter's loot roster in roll order.
+// the encounter's loot roster in roll order. Experience is the kill's experience recipients,
+// split exactly as a live kill splits it. The roster, the recipients and the run's bindings
+// are three different groups, and none is derived from another.
 type BossRewardDefeat struct {
-	Kind     vnet.MobKind
-	Personal []BossPersonalReward
+	Kind       vnet.MobKind
+	Personal   []BossPersonalReward
+	Experience []BossExperienceReward
 
 	corpseID uint64
+}
+
+// BossExperienceReward is one recipient's frozen share of a boss kill's experience.
+type BossExperienceReward struct {
+	Owner  InstanceCharacter
+	Amount uint32
+}
+
+// frozenBossDefeatLocked is the pending defeat this corpse's death froze, or nil when the
+// kill's rewards stay live. The caller holds Sim.mu.
+func (s *Sim) frozenBossDefeatLocked(corpseID uint64) *BossRewardDefeat {
+	for i := range s.bossRewards {
+		if s.bossRewards[i].corpseID == corpseID {
+			return &s.bossRewards[i]
+		}
+	}
+	return nil
+}
+
+// addExperience freezes one recipient's share. A zero share owes nothing, and a recipient
+// named twice keeps one row.
+func (d *BossRewardDefeat) addExperience(owner InstanceCharacter, amount uint32) {
+	if amount == 0 {
+		return
+	}
+	for i := range d.Experience {
+		if d.Experience[i].Owner == owner {
+			d.Experience[i].Amount = experienceAfter(d.Experience[i].Amount, amount)
+			return
+		}
+	}
+	d.Experience = append(d.Experience, BossExperienceReward{Owner: owner, Amount: amount})
+}
+
+// PlayerInside is the live player of a character currently inside the run with this runtime
+// id, or nil. Boss experience the journal owes reaches a character only through it, so only
+// on a dungeon visit into that run.
+func (m *InstanceManager) PlayerInside(run uint64, character InstanceCharacter) *Player {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := m.sessions[run]
+	if s == nil {
+		return nil
+	}
+	if _, inside := s.members[character]; !inside {
+		return nil
+	}
+	s.sim.mu.Lock()
+	defer s.sim.mu.Unlock()
+	p := s.sim.byIdentity[character.PlayerID]
+	if p == nil || p.characterID != character.CharacterID {
+		return nil
+	}
+	return p
 }
 
 type bossRewardHold uint8
@@ -97,6 +154,7 @@ func clonePendingRewards(pending []BossRewardDefeat) []BossRewardDefeat {
 			out[i].Personal[k] = reward
 			out[i].Personal[k].Entries = slices.Clone(reward.Entries)
 		}
+		out[i].Experience = slices.Clone(defeat.Experience)
 	}
 	return out
 }

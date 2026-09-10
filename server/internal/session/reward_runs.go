@@ -182,7 +182,7 @@ func (i *Identities) syncRewardRun(c *rewardCoordinator, pass *rewardRunPass, ru
 		}
 		// The loot is released only when the journal owes exactly what was frozen. A defeat
 		// journaled with anything else keeps its corpse held rather than risk a second roll.
-		if !samePersonalRewards(stored.Defeats[at].Personal, defeat.Personal) {
+		if !sameEntitlements(stored.Defeats[at], defeat) {
 			errs = append(errs, fmt.Errorf("%w: boss %s is journaled with other entitlements", persist.ErrRewardJournalConflict, kind))
 			continue
 		}
@@ -219,9 +219,23 @@ func journalDefeatOf(run game.SavedSession, kind vnet.MobKind) persist.RewardDef
 				Entries: slices.Clone(reward.Entries), Silver: reward.Silver,
 			})
 		}
+		for _, xp := range pending.Experience {
+			defeat.Experience = append(defeat.Experience, persist.BossExperienceReward{
+				Owner: persist.SessionCharacter{PlayerID: xp.Owner.PlayerID, CharacterID: xp.Owner.CharacterID}, Amount: xp.Amount,
+			})
+		}
 		break
 	}
 	return defeat
+}
+
+// sameEntitlements reports whether the journal owes exactly the loot and experience a defeat
+// froze, ignoring what has been taken since.
+func sameEntitlements(stored, frozen persist.RewardDefeat) bool {
+	return samePersonalRewards(stored.Personal, frozen.Personal) &&
+		slices.EqualFunc(stored.Experience, frozen.Experience, func(a, b persist.BossExperienceReward) bool {
+			return a.Owner == b.Owner && a.Amount == b.Amount
+		})
 }
 
 func samePersonalRewards(stored, frozen []persist.PersonalReward) bool {
