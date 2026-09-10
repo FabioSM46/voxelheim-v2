@@ -31,33 +31,47 @@ pub(in super::super) fn timeline(
     let mut state = encounters::tests::timeline();
     state.boss = MobKind::DraugrKing;
     state.phase = 1;
-    let sentence = kind == Move::KingsSentence;
     let one = &mut state.moves[0];
     one.kind = kind;
     one.phase = phase;
     one.phase_started_tick = start;
     one.combo = combo;
-    one.phase_ticks = match (sentence, phase) {
-        (true, Phase::Telegraph) => 24,
-        (true, Phase::Release) => 5,
-        (true, _) => 36,
-        (false, Phase::Telegraph) => 18,
-        (false, Phase::Release) => 4,
-        _ if combo.is_some_and(|(step, total)| step < total) => 8,
-        _ => 44,
+    one.phase_ticks = match (kind, phase) {
+        (Move::KingsSentence, Phase::Telegraph) => 24,
+        (Move::KingsSentence, Phase::Release) => 5,
+        (Move::KingsSentence, _) => 36,
+        (Move::ThreeTolls, Phase::Telegraph) => 18,
+        (Move::ThreeTolls, Phase::Release) => 4,
+        (Move::ThreeTolls, _) if combo.is_some_and(|(step, total)| step < total) => 8,
+        (Move::ThreeTolls, _) => 44,
+        (Move::SepulchreSpear, Phase::Telegraph) => 28,
+        (Move::SepulchreSpear, Phase::Release) => 16,
+        (Move::SepulchreSpear, _) => 32,
+        (_, Phase::Telegraph) => 30,
+        (Move::Burial, Phase::Channel) => 14,
+        (Move::EdictOfTheGraves, Phase::Channel) => 16,
+        (_, Phase::Channel) => 18,
+        (Move::EdictOfTheGraves, _) => 36,
+        _ => 40,
     };
-    let cone = !sentence && combo.is_some_and(|(step, _)| step < 3);
+    let pulses = if kind == Move::Burial { 4 } else { 3 };
+    one.pulse = (phase == Phase::Channel).then_some((0, pulses));
+    one.interruptible = kind == Move::RequiemOfTheBuried && phase == Phase::Channel;
+    let (shape, radius) = match kind {
+        Move::KingsSentence => (HazardShape::Line { half_width: 1.1 }, 5.0),
+        Move::ThreeTolls if combo.is_some_and(|(step, _)| step < 3) => {
+            (HazardShape::Cone { half_angle: 0.95 }, 3.8)
+        }
+        Move::ThreeTolls => (HazardShape::Line { half_width: 0.65 }, 3.8),
+        Move::SepulchreSpear => (HazardShape::Line { half_width: 0.9 }, 17.6),
+        Move::Burial => (HazardShape::Ring { inner_radius: 0.0 }, 2.0),
+        _ => (HazardShape::Disc, 3.0),
+    };
     one.hazards = vec![HazardVolume {
-        shape: if cone {
-            HazardShape::Cone { half_angle: 0.95 }
-        } else {
-            HazardShape::Line {
-                half_width: if sentence { 1.1 } else { 0.65 },
-            }
-        },
+        shape,
         origin: [0.0, 1.4, 0.0],
         direction: [0.0, 0.0, -1.0],
-        radius: if sentence { 5.0 } else { 3.8 },
+        radius,
         height: 3.0,
     }];
     state
@@ -452,5 +466,186 @@ fn king_recipes_are_finite_bounded_distinct_and_claim_no_audition() {
                 assert!(difference > 0.01, "{a:?} and {b:?} collapsed at {rate}");
             }
         }
+    }
+}
+
+fn channel(kind: Move, pulse: u8, start: u32) -> EncounterTimeline {
+    let mut state = timeline(kind, Phase::Channel, None, start);
+    let one = &mut state.moves[0];
+    one.pulse = one.pulse.map(|(_, count)| (pulse, count));
+    state
+}
+
+#[test]
+fn casts_and_every_channel_pulse_voice_their_announced_ticks_once() {
+    use Cue::*;
+    let cast = |kind, phase| timeline(kind, phase, None, 100);
+    let cases = [
+        (
+            cast(Move::SepulchreSpear, Phase::Telegraph),
+            0,
+            vec![SpearGather],
+        ),
+        (
+            cast(Move::SepulchreSpear, Phase::Release),
+            0,
+            vec![SpearLoose],
+        ),
+        (
+            cast(Move::SepulchreSpear, Phase::Recovery),
+            0,
+            vec![Recovery],
+        ),
+        (cast(Move::Burial, Phase::Telegraph), 0, vec![Plant]),
+        (
+            cast(Move::EdictOfTheGraves, Phase::Telegraph),
+            0,
+            vec![EdictCall],
+        ),
+        (
+            cast(Move::RequiemOfTheBuried, Phase::Telegraph),
+            0,
+            vec![Plant],
+        ),
+        (cast(Move::Burial, Phase::Recovery), 0, vec![Recovery]),
+        (channel(Move::Burial, 3, 100), 0, vec![CracksRun]),
+        (channel(Move::Burial, 3, 100), 13, vec![BurialErupt]),
+        (channel(Move::EdictOfTheGraves, 0, 100), 0, vec![RuneFirst]),
+        (channel(Move::EdictOfTheGraves, 1, 100), 0, vec![RuneSecond]),
+        (channel(Move::EdictOfTheGraves, 2, 100), 0, vec![RuneThird]),
+        (
+            channel(Move::EdictOfTheGraves, 2, 100),
+            15,
+            vec![GravesErupt],
+        ),
+        (
+            channel(Move::RequiemOfTheBuried, 0, 100),
+            0,
+            vec![NoteFirst],
+        ),
+        (
+            channel(Move::RequiemOfTheBuried, 1, 100),
+            0,
+            vec![NoteSecond],
+        ),
+        (
+            channel(Move::RequiemOfTheBuried, 2, 100),
+            0,
+            vec![NoteThird],
+        ),
+        (
+            channel(Move::RequiemOfTheBuried, 2, 100),
+            17,
+            vec![RequiemToll],
+        ),
+        (channel(Move::RequiemOfTheBuried, 1, 100), 9, vec![]),
+    ];
+    for (state, elapsed, expected) in cases {
+        let (mut app, _) = king_fixture();
+        let one = &state.moves[0];
+        let label = format!("{:?} {:?} {:?} +{elapsed}", one.kind, one.phase, one.pulse);
+        assert_eq!(
+            advance(&mut app, 100 + elapsed, Action::Windup, Some(state)),
+            expected,
+            "{label}"
+        );
+        assert_eq!(
+            advance(&mut app, 100 + elapsed, Action::Windup, None),
+            [],
+            "replayed {label}"
+        );
+    }
+}
+
+#[test]
+fn a_pulse_contact_rings_into_the_next_pulse_and_a_late_pulse_keeps_only_its_contact() {
+    let (mut app, mixer) = king_fixture();
+    let requiem = Move::RequiemOfTheBuried;
+    let first = channel(requiem, 0, 100);
+    assert_eq!(
+        advance(&mut app, 100, Action::Windup, Some(first)),
+        [Cue::NoteFirst]
+    );
+    assert_eq!(
+        advance(&mut app, 117, Action::Windup, None),
+        [Cue::RequiemToll]
+    );
+    let second = channel(requiem, 1, 118);
+    assert_eq!(
+        advance(&mut app, 118, Action::Windup, Some(second)),
+        [Cue::NoteSecond]
+    );
+    assert_eq!(
+        app.world().resource::<CombatAudio>().playing.len(),
+        3,
+        "the first pulse's note and contact ring on beside the second pulse"
+    );
+    // The 1.15 s between ticks 118 and 141 pass on the output too, so those rings end.
+    energy(&mut app, &mixer, 115);
+    let late = channel(requiem, 2, 136);
+    assert_eq!(
+        advance(&mut app, 141, Action::Windup, Some(late)),
+        [],
+        "a pulse first seen five ticks late plays no note"
+    );
+    assert_eq!(
+        advance(&mut app, 153, Action::Windup, None),
+        [Cue::RequiemToll]
+    );
+}
+
+#[test]
+fn only_an_observed_authoritative_interrupt_breaks_the_chant_and_only_once() {
+    let requiem = Move::RequiemOfTheBuried;
+    let ended = |how, start| {
+        let mut state = channel(requiem, 1, start);
+        state.moves[0].ended = Some(how);
+        state.moves[0].hazards.clear();
+        state
+    };
+    let (mut app, _) = king_fixture();
+    let pulse = channel(requiem, 1, 100);
+    assert_eq!(
+        advance(&mut app, 100, Action::Windup, Some(pulse)),
+        [Cue::NoteSecond]
+    );
+    let interrupted = ended(MoveEnd::Interrupted, 100);
+    assert_eq!(
+        advance(&mut app, 106, Action::Recovery, Some(interrupted.clone())),
+        [Cue::ChantBroken]
+    );
+    assert_eq!(
+        app.world().resource::<CombatAudio>().playing.len(),
+        1,
+        "the broken note stops and only the break rings"
+    );
+    assert_eq!(advance(&mut app, 107, Action::Recovery, None), []);
+    assert_eq!(
+        advance(&mut app, 108, Action::Recovery, Some(interrupted)),
+        []
+    );
+
+    // Withdrawn or completed moves, a channel never watched and a stale ending are silent.
+    for (how, watched, tick) in [
+        (MoveEnd::Cancelled, true, 106),
+        (MoveEnd::Completed, true, 106),
+        (MoveEnd::Interrupted, false, 106),
+        (MoveEnd::Interrupted, true, 140),
+    ] {
+        let (mut app, mixer) = king_fixture();
+        if watched {
+            advance(
+                &mut app,
+                100,
+                Action::Windup,
+                Some(channel(requiem, 1, 100)),
+            );
+        }
+        assert_eq!(
+            advance(&mut app, tick, Action::Recovery, Some(ended(how, 100))),
+            [],
+            "{how:?} watched={watched} at {tick}"
+        );
+        assert_eq!(energy(&mut app, &mixer, 5), [0.0; 2]);
     }
 }

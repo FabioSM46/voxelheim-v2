@@ -1,7 +1,8 @@
-//! The king's grave-iron blade, hollow voice and fallen regalia as bounded synthesis
-//! layers. Gestures only: a blade can bite the floor without touching anybody.
+//! The king's grave-iron blade, hollow voice, casts and fallen regalia as bounded
+//! synthesis layers. Gestures only: a blade can bite the floor without touching anybody,
+//! and an eruption sounds whether or not anybody stood in it. No sound is speech.
 use super::super::guardian::sounds::{breath, grit, iron, tone, weight};
-use crate::audio::synth::{Layer, Sound};
+use crate::audio::synth::{Envelope, Exciter, Filter, FilterKind, Layer, Sound, Wave};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in super::super) enum Cue {
@@ -20,9 +21,24 @@ pub(in super::super) enum Cue {
     Recovery,
     MaskFall,
     Death,
+    SpearGather,
+    SpearLoose,
+    Plant,
+    CracksRun,
+    BurialErupt,
+    EdictCall,
+    RuneFirst,
+    RuneSecond,
+    RuneThird,
+    GravesErupt,
+    NoteFirst,
+    NoteSecond,
+    NoteThird,
+    RequiemToll,
+    ChantBroken,
 }
 
-pub(in super::super) const CUES: [Cue; 15] = [
+pub(in super::super) const CUES: [Cue; 30] = [
     Cue::Notice,
     Cue::SentenceRaise,
     Cue::SentenceClang,
@@ -38,6 +54,21 @@ pub(in super::super) const CUES: [Cue; 15] = [
     Cue::Recovery,
     Cue::MaskFall,
     Cue::Death,
+    Cue::SpearGather,
+    Cue::SpearLoose,
+    Cue::Plant,
+    Cue::CracksRun,
+    Cue::BurialErupt,
+    Cue::EdictCall,
+    Cue::RuneFirst,
+    Cue::RuneSecond,
+    Cue::RuneThird,
+    Cue::GravesErupt,
+    Cue::NoteFirst,
+    Cue::NoteSecond,
+    Cue::NoteThird,
+    Cue::RequiemToll,
+    Cue::ChantBroken,
 ];
 
 /// Inharmonic bell partials. The three tolls differ by fundamental, so each blow of the
@@ -51,6 +82,43 @@ fn bell(hz: f32, gain: f32) -> Vec<Layer> {
     ]
 }
 
+/// Rune groups: a struck fundamental with a tritone and an octave, one pitch per pulse.
+fn rune(hz: f32) -> Vec<Layer> {
+    vec![
+        tone(hz, 0.16, 0.004, 0.45),
+        tone(hz * 1.414, 0.09, 0.004, 0.35),
+        tone(hz * 2.01, 0.06, 0.004, 0.20),
+        grit(2800.0, 0.06, 0.002, 0.05, 2.0),
+    ]
+}
+
+/// An intoned note: a filtered triangle with breath, sustained like a held chant, never a
+/// word. Its pitch is the pulse the server announced.
+fn note(hz: f32) -> Vec<Layer> {
+    vec![
+        Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Triangle,
+                hz,
+            },
+            gain: 0.24,
+            envelope: Envelope {
+                attack: 0.08,
+                decay: 0.62,
+                sustain: 0.0,
+                release: 0.018,
+            },
+            filter: Some(Filter {
+                kind: FilterKind::Low,
+                hz: 900.0,
+                q: 0.7,
+            }),
+        },
+        tone(hz * 2.0, 0.05, 0.10, 0.55),
+        grit(hz * 4.0, 0.08, 0.06, 0.60, 1.4),
+    ]
+}
+
 impl Cue {
     pub fn seconds(self) -> f32 {
         use Cue::*;
@@ -59,23 +127,29 @@ impl Cue {
             SentenceRaise => 0.75,
             SentenceClang => 0.65,
             SentenceCut | SweepLeft | SweepRight => 0.30,
-            BladeBite => 0.55,
+            BladeBite | BurialErupt | RuneFirst | RuneSecond | RuneThird => 0.55,
             BladeFree => 0.45,
             TollFirst | TollSecond | TollThird => 0.85,
             Thrust => 0.28,
             Recovery => 0.95,
-            MaskFall => 0.60,
+            MaskFall | Plant | GravesErupt => 0.60,
             Death => 1.20,
+            SpearGather => 1.30,
+            SpearLoose => 0.40,
+            CracksRun => 0.50,
+            EdictCall | NoteFirst | NoteSecond | NoteThird => 0.80,
+            RequiemToll => 0.75,
+            ChantBroken => 0.70,
         }
     }
-    /// The signals a player reads before a blow outrank its whoosh and its settling.
+    /// The signals a player reads before a blow or pulse outrank its whoosh and settling.
     pub fn priority(self) -> u8 {
         use Cue::*;
         match self {
             BladeFree | Recovery => 1,
-            Notice | SentenceRaise => 2,
-            SentenceClang | TollFirst | TollSecond | TollThird | BladeBite | MaskFall | Death => 4,
-            _ => 3,
+            Notice | SentenceRaise | CracksRun => 2,
+            SentenceCut | SweepLeft | SweepRight | Thrust | Plant | EdictCall => 3,
+            _ => 4,
         }
     }
     pub fn describe(self) -> Sound {
@@ -147,6 +221,68 @@ impl Cue {
                 let mut v = breath(37.0, 0.92, 0.03);
                 v.extend(weight(41.0, 0.28, 0.62));
                 v.extend(iron(0.012, 0.50, 0.05));
+                v
+            }
+            // The crystal forms: staggered long attacks climb in pitch and loudness over
+            // the telegraph, the design's rising sound, and stop before the release.
+            SpearGather => vec![
+                tone(659.0, 0.08, 0.80, 0.45),
+                tone(1318.0, 0.06, 1.00, 0.25),
+                tone(1760.0, 0.05, 1.10, 0.18),
+                tone(2637.0, 0.04, 1.20, 0.09),
+                grit(3000.0, 0.10, 1.05, 0.22, 2.0),
+            ],
+            SpearLoose => vec![
+                grit(2600.0, 0.34, 0.010, 0.30, 1.5),
+                tone(1975.0, 0.10, 0.003, 0.18),
+                grit(700.0, 0.20, 0.020, 0.25, 0.8),
+            ],
+            Plant => {
+                let mut v = weight(55.0, 0.30, 0.45);
+                v.extend(iron(0.003, 0.35, 0.09));
+                v.push(grit(240.0, 0.25, 0.010, 0.50, 0.6));
+                v
+            }
+            CracksRun => vec![
+                grit(1900.0, 0.30, 0.004, 0.06, 1.8),
+                grit(900.0, 0.28, 0.050, 0.40, 1.0),
+                grit(3100.0, 0.12, 0.002, 0.03, 2.0),
+            ],
+            BurialErupt => {
+                let mut v = weight(38.0, 0.36, 0.45);
+                v.push(grit(420.0, 0.30, 0.004, 0.40, 0.6));
+                v
+            }
+            EdictCall => {
+                let mut v = breath(48.0, 0.60, 0.08);
+                v.push(tone(880.0, 0.06, 0.02, 0.50));
+                v
+            }
+            RuneFirst => rune(392.0),
+            RuneSecond => rune(523.0),
+            RuneThird => rune(698.0),
+            GravesErupt => {
+                let mut v = weight(61.0, 0.32, 0.40);
+                v.push(grit(1300.0, 0.30, 0.003, 0.20, 1.0));
+                v.extend(iron(0.004, 0.20, 0.05));
+                v
+            }
+            // Three descending notes: the chant is readable without a word being sung.
+            NoteFirst => note(147.0),
+            NoteSecond => note(131.0),
+            NoteThird => note(98.0),
+            RequiemToll => {
+                let mut v = bell(82.0, 0.30);
+                v.push(grit(2400.0, 0.12, 0.003, 0.10, 1.4));
+                v
+            }
+            // A choked note and shattering ice: the server broke the channel.
+            ChantBroken => {
+                let mut v = vec![
+                    tone(131.0, 0.15, 0.003, 0.12),
+                    grit(2200.0, 0.36, 0.003, 0.35, 1.2),
+                ];
+                v.extend(iron(0.003, 0.30, 0.10));
                 v
             }
         };
