@@ -1803,17 +1803,17 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
 }
 
 #[test]
-fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
+fn full_rusty_is_six_moving_segments_in_three_slots_that_strip_in_place() {
     let mut app = headless_player();
     let appearance = an_appearance(HairModel::Braided);
-    let full_iron = [
-        crafting::ITEM_IRON_HELM,
-        crafting::ITEM_IRON_CUIRASS,
-        crafting::ITEM_IRON_GREAVES,
+    let full_rusty = [
+        crafting::ITEM_RUSTY_HELM,
+        crafting::ITEM_RUSTY_CUIRASS,
+        crafting::ITEM_RUSTY_GREAVES,
         0,
     ];
-    describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
-    describe_wearing(&mut app, 99, appearance, full_iron);
+    describe_wearing(&mut app, LOCAL_ID, appearance, full_rusty);
+    describe_wearing(&mut app, 99, appearance, full_rusty);
     deliver(
         &mut app,
         1,
@@ -1846,8 +1846,8 @@ fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
             .resource::<Assets<StandardMaterial>>()
             .get(handle)
             .expect("the overlay material exists");
-        assert_eq!(material.perceptual_roughness, BodyFinish::Iron.roughness());
-        assert_eq!(material.metallic, BodyFinish::Iron.metallic());
+        assert_eq!(material.perceptual_roughness, BodyFinish::Rusty.roughness());
+        assert_eq!(material.metallic, BodyFinish::Rusty.metallic());
     }
     assert_eq!(
         child_count(&mut app, 99),
@@ -1862,7 +1862,7 @@ fn full_iron_is_six_moving_segments_in_three_slots_that_strip_in_place() {
     assert_eq!(parts_of(&mut app, 99).len(), BodyPiece::ALL.len());
     assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
 
-    describe_wearing(&mut app, 99, appearance, full_iron);
+    describe_wearing(&mut app, 99, appearance, full_rusty);
     app.update();
     assert_eq!(armour_of(&mut app, 99).len(), ArmourSegment::ALL.len());
     assert_eq!(
@@ -1917,14 +1917,14 @@ fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
     let mut app = headless_player();
     let start = Instant::now() - INTERVAL;
     let appearance = an_appearance(HairModel::Braided);
-    let full_iron = [
-        crafting::ITEM_IRON_HELM,
-        crafting::ITEM_IRON_CUIRASS,
-        crafting::ITEM_IRON_GREAVES,
+    let full_rusty = [
+        crafting::ITEM_RUSTY_HELM,
+        crafting::ITEM_RUSTY_CUIRASS,
+        crafting::ITEM_RUSTY_GREAVES,
         0,
     ];
-    describe_wearing(&mut app, LOCAL_ID, appearance, full_iron);
-    describe_wearing(&mut app, 99, appearance, full_iron);
+    describe_wearing(&mut app, LOCAL_ID, appearance, full_rusty);
+    describe_wearing(&mut app, 99, appearance, full_rusty);
     deliver(
         &mut app,
         1,

@@ -73,7 +73,7 @@ var (
 	kitLeather = playtestKit{name: "iron-leather", sword: ItemIronSword,
 		armour: []ItemID{ItemLeatherCap, ItemLeatherJerkin, ItemLeatherLeggings}}
 	kitIron = playtestKit{name: "iron-armoured", sword: ItemIronSword,
-		armour: []ItemID{ItemIronHelm, ItemIronCuirass, ItemIronGreaves}}
+		armour: []ItemID{ItemRustyHelm, ItemRustyCuirass, ItemRustyGreaves}}
 )
 
 type playtestPolicy uint8

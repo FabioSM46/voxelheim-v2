@@ -102,7 +102,7 @@ func TestBossHealthFitsTheWireAtEveryScale(t *testing.T) {
 	}
 }
 
-// The scale reads levels and nothing else: the same levels in the starter kit and in iron
+// The scale reads levels and nothing else: the same levels in the starter kit and in rusty armour
 // produce the same boss.
 func TestBossScaleDoesNotReadEquipment(t *testing.T) {
 	t.Parallel()
@@ -115,9 +115,9 @@ func TestBossScaleDoesNotReadEquipment(t *testing.T) {
 		return scale
 	}
 	bare := pull()
-	armoured := pull(fullTestArmour(ItemIronHelm), fullTestArmour(ItemIronCuirass), fullTestArmour(ItemIronGreaves))
+	armoured := pull(fullTestArmour(ItemRustyHelm), fullTestArmour(ItemRustyCuirass), fullTestArmour(ItemRustyGreaves))
 	if bare != armoured {
-		t.Fatalf("unarmoured party scaled to %+v, the same levels in iron to %+v", bare, armoured)
+		t.Fatalf("unarmoured party scaled to %+v, the same levels in rusty armour to %+v", bare, armoured)
 	}
 	if want := bossScaleFor(mobRegistry[vnet.MobKindVargrGuardian], []uint16{12, 12}); bare != want {
 		t.Fatalf("a party of two at level twelve scaled to %+v, want %+v", bare, want)

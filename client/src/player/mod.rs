@@ -672,7 +672,7 @@ impl PlayerVisuals {
 
 /// One material per colour and finish, rather than one per player.
 ///
-/// Two people in the same walnut tunic share one `StandardMaterial`; two iron overlays
+/// Two people in the same walnut tunic share one `StandardMaterial`; two rusty overlays
 /// share another. Finish belongs in the key because identical colours with matte and
 /// metallic surfaces are not the same material.
 ///
@@ -714,7 +714,7 @@ impl BodyColour {
 enum BodyFinish {
     Matte,
     Leather,
-    Iron,
+    Rusty,
 }
 
 impl BodyFinish {
@@ -723,9 +723,9 @@ impl BodyFinish {
             crafting::ITEM_LEATHER_CAP
             | crafting::ITEM_LEATHER_JERKIN
             | crafting::ITEM_LEATHER_LEGGINGS => Self::Leather,
-            crafting::ITEM_IRON_HELM
-            | crafting::ITEM_IRON_CUIRASS
-            | crafting::ITEM_IRON_GREAVES => Self::Iron,
+            crafting::ITEM_RUSTY_HELM
+            | crafting::ITEM_RUSTY_CUIRASS
+            | crafting::ITEM_RUSTY_GREAVES => Self::Rusty,
             // A newer server's item is still drawn in the registry's loud fallback
             // colour, but this build does not guess that it is metal.
             _ => Self::Matte,
@@ -735,14 +735,14 @@ impl BodyFinish {
     const fn roughness(self) -> f32 {
         match self {
             Self::Matte | Self::Leather => 0.9,
-            Self::Iron => 0.55,
+            Self::Rusty => 0.55,
         }
     }
 
     const fn metallic(self) -> f32 {
         match self {
             Self::Matte | Self::Leather => 0.0,
-            Self::Iron => 0.35,
+            Self::Rusty => 0.35,
         }
     }
 }

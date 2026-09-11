@@ -939,9 +939,9 @@ pub enum RecipeId {
     LeatherCap,
     LeatherJerkin,
     LeatherLeggings,
-    IronHelm,
-    IronCuirass,
-    IronGreaves,
+    RustyHelm,
+    RustyCuirass,
+    RustyGreaves,
     WoodenShield,
     Bow,
     Arrows,
@@ -976,9 +976,9 @@ impl RecipeId {
             Self::LeatherCap => fb::RecipeID::LeatherCap,
             Self::LeatherJerkin => fb::RecipeID::LeatherJerkin,
             Self::LeatherLeggings => fb::RecipeID::LeatherLeggings,
-            Self::IronHelm => fb::RecipeID::IronHelm,
-            Self::IronCuirass => fb::RecipeID::IronCuirass,
-            Self::IronGreaves => fb::RecipeID::IronGreaves,
+            Self::RustyHelm => fb::RecipeID::RustyHelm,
+            Self::RustyCuirass => fb::RecipeID::RustyCuirass,
+            Self::RustyGreaves => fb::RecipeID::RustyGreaves,
             Self::WoodenShield => fb::RecipeID::WoodenShield,
             Self::Bow => fb::RecipeID::Bow,
             Self::Arrows => fb::RecipeID::Arrows,
@@ -13075,9 +13075,9 @@ mod tests {
         assert_eq!(fb::RecipeID::LeatherCap.0, 11);
         assert_eq!(fb::RecipeID::LeatherJerkin.0, 12);
         assert_eq!(fb::RecipeID::LeatherLeggings.0, 13);
-        assert_eq!(fb::RecipeID::IronHelm.0, 14);
-        assert_eq!(fb::RecipeID::IronCuirass.0, 15);
-        assert_eq!(fb::RecipeID::IronGreaves.0, 16);
+        assert_eq!(fb::RecipeID::RustyHelm.0, 14);
+        assert_eq!(fb::RecipeID::RustyCuirass.0, 15);
+        assert_eq!(fb::RecipeID::RustyGreaves.0, 16);
         assert_eq!(fb::RecipeID::WoodenShield.0, 17);
         assert_eq!(fb::RecipeID::Bow.0, 18);
         assert_eq!(fb::RecipeID::Arrows.0, 19);
@@ -16007,9 +16007,9 @@ mod tests {
             (RecipeId::LeatherCap, fb::RecipeID::LeatherCap),
             (RecipeId::LeatherJerkin, fb::RecipeID::LeatherJerkin),
             (RecipeId::LeatherLeggings, fb::RecipeID::LeatherLeggings),
-            (RecipeId::IronHelm, fb::RecipeID::IronHelm),
-            (RecipeId::IronCuirass, fb::RecipeID::IronCuirass),
-            (RecipeId::IronGreaves, fb::RecipeID::IronGreaves),
+            (RecipeId::RustyHelm, fb::RecipeID::RustyHelm),
+            (RecipeId::RustyCuirass, fb::RecipeID::RustyCuirass),
+            (RecipeId::RustyGreaves, fb::RecipeID::RustyGreaves),
             (RecipeId::WoodenShield, fb::RecipeID::WoodenShield),
             (RecipeId::Bow, fb::RecipeID::Bow),
             (RecipeId::Arrows, fb::RecipeID::Arrows),
