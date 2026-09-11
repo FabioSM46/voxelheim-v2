@@ -176,7 +176,7 @@ snapshot, animation, regalia, encounter and effect systems.
 - **Pacing:** snapshots arrive at 20 Hz and each phase is announced on the tick it begins, at the
   catalogue's durations.
 - **Runs:** three consecutive runs with no other build or capture running; the host's one-minute
-  load average was 1.8–3.0. A PNG of each boss scene was inspected after run 1 to confirm the boss
+  load average was 1.8–2.3. A PNG of each boss scene was inspected after run 3 to confirm the boss
   and its effects were drawn.
 - **Reference:** no frame-time budget was set. These numbers are the baseline for later comparison,
   not a pass or fail.
@@ -186,22 +186,22 @@ Across the three runs ([run 1](dungeon-acceptance-1037/render-cost-run1.csv),
 
 | Scene | Mean | p50 | p99 | Max |
 | --- | ---: | ---: | ---: | ---: |
-| Empty courtyard | 4.75–4.82 ms | 4.64–4.70 ms | 5.57–5.73 ms | 6.00–7.38 ms |
-| Empty hall | 4.75–4.78 ms | 4.64–4.68 ms | 5.45–5.55 ms | 5.89–6.22 ms |
-| Vargr idle | 4.89–4.96 ms | 4.76–4.83 ms | 5.57–5.80 ms | 6.05–7.45 ms |
-| Vargr paired claws | 5.08–5.16 ms | 4.97–5.08 ms | 5.85–5.97 ms | 6.26–7.45 ms |
-| Vargr leap | 5.05–5.10 ms | 4.90–5.01 ms | 5.81–5.87 ms | 6.18–6.26 ms |
-| Draugr idle | 4.69–4.94 ms | 4.73–4.83 ms | 5.67–5.75 ms | 6.03–11.23 ms |
-| Draugr Spear | 4.98–5.11 ms | 4.88–5.03 ms | 5.61–6.04 ms | 5.74–6.66 ms |
-| Draugr Burial | 4.99–5.14 ms | 4.93–5.06 ms | 5.67–5.95 ms | 5.87–7.63 ms |
-| Draugr Requiem, final stage | 4.92–5.14 ms | 4.97–5.06 ms | 5.75–6.07 ms | 6.23–8.22 ms |
+| Empty courtyard | 4.66–4.80 ms | 4.61–4.75 ms | 5.52–6.08 ms | 5.73–10.29 ms |
+| Empty hall | 4.51–4.67 ms | 4.51–4.58 ms | 5.35–5.83 ms | 5.63–6.67 ms |
+| Vargr idle | 4.81–4.87 ms | 4.72–4.79 ms | 5.61–5.92 ms | 6.20–7.42 ms |
+| Vargr paired claws | 4.85–4.98 ms | 4.91 ms | 5.86–6.00 ms | 6.52–13.14 ms |
+| Vargr leap | 5.01–5.06 ms | 4.92–4.98 ms | 5.85–5.93 ms | 6.13–10.23 ms |
+| Draugr idle | 4.81–4.85 ms | 4.72–4.80 ms | 5.70–6.14 ms | 5.91–9.11 ms |
+| Draugr Spear | 4.74–5.20 ms | 4.81–5.10 ms | 5.61–6.35 ms | 5.99–12.95 ms |
+| Draugr Burial | 4.98–5.03 ms | 4.95–4.98 ms | 5.75–5.87 ms | 6.02–6.34 ms |
+| Draugr Requiem, final stage | 4.96–5.07 ms | 4.89–4.97 ms | 5.88–6.08 ms | 6.29–8.98 ms |
 
-- **Mean cost of a boss:** an idle boss is within run-to-run variation of the empty chamber; one
-  Draugr idle run averaged 4.69 ms, below the empty chamber. A boss looping a move adds up to 0.4 ms
-  mean.
-- **p99:** stays within 5.4–6.1 ms in every scene.
-- **Max:** the single slowest frames, up to 11.23 ms once in a Draugr idle run, did not recur across
-  runs; this is a shared workstation.
+- **Mean cost of a boss:** against the empty chamber in the same run, an idle boss adds 0.07–0.15 ms
+  mean for the Vargr and 0.18–0.30 ms for the Draugr. A boss looping a move adds up to 0.35 ms
+  (Vargr) and 0.53 ms (Draugr). The empty chamber itself varies by up to 0.16 ms mean between runs.
+- **p99:** stays within 5.3–6.4 ms in every scene.
+- **Max:** the single slowest frames, up to 13.14 ms once in a Vargr paired-claws run, did not recur
+  across runs and also occur in the empty courtyard (10.29 ms once); this is a shared workstation.
 - **Scope:** one boss in view with its effects. No party of players, other mobs, shadows or the
   dungeon's own lighting are included, and nothing here predicts frame rate on other hardware.
 
