@@ -1,12 +1,15 @@
 //! The crafting station panel and the world prompt that teaches the key opening it.
 //!
-//! Both are pictures of `player::station` and neither originates anything. The prompt says
-//! which station the interact key would open this frame; the panel says which station is
-//! open. What a player may make there — and whether it works — is the recipe mirror's and
-//! the server's respectively.
+//! Both are pictures of `player::station`. The prompt says which station the interact key
+//! would open this frame; the panel says which station is open and lists exactly the
+//! recipes made there. A row is the pack's own row — built by `ui/inventory.rs`, greyed by
+//! its `refresh_recipe_rows` and reported by its `craft_clicks` — so a press becomes the same
+//! `CraftRequest` and changes nothing locally. What a player may make there is the recipe
+//! mirror's; whether it works is the server's.
 
 use bevy::prelude::*;
 
+use super::inventory::spawn_recipe_rows_at;
 use crate::net::Session;
 use crate::player::{InputMode, StationHint, StationWindow, station_title};
 
@@ -33,6 +36,10 @@ struct StationTitle;
 #[derive(Component)]
 struct StationPrompt;
 
+/// The column the open station's recipe rows are built into, under the title.
+#[derive(Component)]
+struct StationRecipeList;
+
 pub(super) struct StationUiPlugin;
 
 impl Plugin for StationUiPlugin {
@@ -41,7 +48,29 @@ impl Plugin for StationUiPlugin {
             .init_resource::<StationHint>()
             .init_resource::<InputMode>()
             .add_systems(Startup, spawn_station_ui)
-            .add_systems(Update, (show_panel, show_prompt));
+            .add_systems(Update, (rebuild_recipe_rows, show_panel, show_prompt));
+    }
+}
+
+/// Rebuilds the rows when the open station changes, and clears them when it closes.
+///
+/// Rows are rebuilt rather than filtered because a panel shows one station at a time, and
+/// the set of rows that station makes is static for as long as it is open.
+fn rebuild_recipe_rows(
+    window: Res<StationWindow>,
+    lists: Query<Entity, With<StationRecipeList>>,
+    mut commands: Commands,
+) {
+    if !window.is_changed() {
+        return;
+    }
+    for list in &lists {
+        commands.entity(list).despawn_related::<Children>();
+        if let Some(kind) = window.station() {
+            commands
+                .entity(list)
+                .with_children(|list| spawn_recipe_rows_at(list, Some(kind)));
+        }
     }
 }
 
@@ -67,15 +96,28 @@ fn spawn_station_ui(mut commands: Commands) {
             GlobalZIndex(30),
             Visibility::Hidden,
         ))
-        .with_child((
-            StationTitle,
-            Text::new(""),
-            TextFont {
-                font_size: FontSize::Px(22.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        ));
+        .with_children(|panel| {
+            panel.spawn((
+                StationTitle,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(22.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+            panel.spawn((
+                StationRecipeList,
+                Node {
+                    display: Display::Flex,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    min_height: Val::Px(0.0),
+                    overflow: Overflow::scroll_y(),
+                    ..default()
+                },
+            ));
+        });
 
     commands.spawn((
         StationPrompt,
@@ -165,6 +207,7 @@ fn prompt_line(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::inventory::CraftRow;
     use super::*;
     use crate::net::{ANY_TOKEN, SessionParams, StructureKind};
 
@@ -247,5 +290,101 @@ mod tests {
             .single(world)
             .expect("one title");
         assert_eq!(title.0, "Armour bench");
+    }
+
+    fn panel_rows(app: &mut App) -> Vec<(Entity, crate::net::RecipeId)> {
+        let world = app.world_mut();
+        world
+            .query::<(Entity, &CraftRow)>()
+            .iter(world)
+            .map(|(entity, row)| (entity, row.0.id))
+            .collect()
+    }
+
+    /// Exactly the open station's recipes, greyed by what the pack holds, and a press on an
+    /// affordable row asks for that craft while a short one asks for nothing.
+    ///
+    /// The inventory's own `refresh_recipe_rows` and `craft_clicks` run here, because they
+    /// are what the game runs for these rows: the panel reuses them rather than copying them.
+    #[test]
+    fn the_panel_lists_that_stations_recipes_greys_the_short_ones_and_a_press_asks_to_craft() {
+        use super::super::BUTTON;
+        use super::super::inventory::{RECIPE_ROW_SHORT, craft_clicks, refresh_recipe_rows};
+        use crate::net::{InventoryStack, RecipeId};
+        use crate::player::{CraftClick, Inventory, recipes_made_at};
+
+        let cap = recipes_made_at(Some(StructureKind::LeatherBench))
+            .find(|recipe| recipe.id == RecipeId::LeatherCap)
+            .expect("the leather bench makes a cap");
+        let pelts = cap.ingredients[0];
+
+        let mut app = app();
+        app.add_message::<CraftClick>()
+            .insert_resource(Inventory::from_stacks(vec![InventoryStack {
+                item_id: pelts.item_id,
+                count: pelts.count,
+                ..Default::default()
+            }]))
+            .add_systems(Update, (refresh_recipe_rows, craft_clicks))
+            .insert_resource(StationWindow::at(900, StructureKind::LeatherBench))
+            .insert_resource(InputMode::Station);
+        app.update();
+        app.update();
+
+        let rows = panel_rows(&mut app);
+        let expected: Vec<RecipeId> = recipes_made_at(Some(StructureKind::LeatherBench))
+            .map(|recipe| recipe.id)
+            .collect();
+        assert_eq!(rows.iter().map(|(_, id)| *id).collect::<Vec<_>>(), expected);
+
+        let row = |id: RecipeId| {
+            rows.iter()
+                .find(|(_, row)| *row == id)
+                .map(|(entity, _)| *entity)
+                .unwrap_or_else(|| panic!("{id:?} has a row"))
+        };
+        let colour =
+            |app: &App, id: RecipeId| app.world().get::<BackgroundColor>(row(id)).unwrap().0;
+        assert_eq!(colour(&app, RecipeId::LeatherCap), BUTTON);
+        assert_eq!(
+            colour(&app, RecipeId::LeatherJerkin),
+            RECIPE_ROW_SHORT,
+            "three pelts drew a five-pelt jerkin as available"
+        );
+
+        let press = |app: &mut App, id: RecipeId| -> Vec<CraftClick> {
+            *app.world_mut().get_mut::<Interaction>(row(id)).unwrap() = Interaction::Pressed;
+            app.update();
+            app.world_mut()
+                .resource_mut::<Messages<CraftClick>>()
+                .drain()
+                .collect()
+        };
+        assert_eq!(
+            press(&mut app, RecipeId::LeatherCap),
+            vec![CraftClick {
+                recipe: RecipeId::LeatherCap
+            }]
+        );
+        assert!(press(&mut app, RecipeId::LeatherJerkin).is_empty());
+        assert_eq!(
+            app.world().resource::<Inventory>().count(pelts.item_id),
+            u32::from(pelts.count),
+            "a press spent a material locally"
+        );
+
+        // Another station replaces the rows wholesale.
+        app.insert_resource(StationWindow::at(901, StructureKind::Forge));
+        app.update();
+        let forge: Vec<RecipeId> = recipes_made_at(Some(StructureKind::Forge))
+            .map(|recipe| recipe.id)
+            .collect();
+        assert_eq!(
+            panel_rows(&mut app)
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>(),
+            forge
+        );
     }
 }
