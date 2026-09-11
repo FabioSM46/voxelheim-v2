@@ -100,6 +100,14 @@ func ruinCell() (cellX, cellZ int64) {
 	return RuinCellOf(originColumnX), RuinCellOf(originColumnZ)
 }
 
+// PortalRuin is the world's one ruin: the ruin of [ruinCell]. It composes no terrain,
+// and the ranked search behind it is memoised per seed.
+func PortalRuin(seed int64) Ruin {
+	cx, cz := ruinCell()
+	r, _ := RuinAt(seed, cx, cz)
+	return r
+}
+
 // isRuinCell reports whether a lattice cell is that one.
 func isRuinCell(cellX, cellZ int64) bool {
 	cx, cz := ruinCell()

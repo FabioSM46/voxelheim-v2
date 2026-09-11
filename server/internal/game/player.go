@@ -329,6 +329,10 @@ type Sim struct {
 	// near that seam. See station.go.
 	worldSeed int64
 
+	// portalSheets are the veils a body in this world can walk into; see WithPortals.
+	// Fixed at construction, so the tick measures them without asking anybody anything.
+	portalSheets []portalSheet
+
 	// structures is every placed tent and forge, keyed by identity for the reason the
 	// three maps above are: a snapshot names them by id, and a removal has to find one
 	// without scanning. Unlike the three, nothing in the tick advances them — a
@@ -430,6 +434,7 @@ type simOptions struct {
 	devCommands        bool
 	voiceRange         float64
 	durableBossRewards bool
+	portals            []world.PortalThreshold
 }
 
 // SimOption is one startup-only simulation choice.
@@ -507,7 +512,12 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	if configured.group == nil {
 		configured.group = NewWorldGroup()
 	}
+	sheets := make([]portalSheet, 0, len(configured.portals))
+	for _, threshold := range configured.portals {
+		sheets = append(sheets, newPortalSheet(threshold))
+	}
 	return &Sim{
+		portalSheets:       sheets,
 		mu:                 &configured.group.mu,
 		group:              configured.group,
 		dt:                 1 / float64(tickRate),
@@ -655,7 +665,15 @@ type Player struct {
 	audible   map[uint64]struct{}
 	chunks    *chunkFeed
 	mineReady chan MiningCompletion
-	inventory inventory
+	// portalContacts is the tick's one-slot handoff of a crossing attempt, and the four
+	// fields after it are the contact episode it is decided from; see portal_contact.go.
+	// The episode is guarded by sim.mu.
+	portalContacts  chan PortalContact
+	portalObserved  bool
+	portalLastPos   [3]float64
+	portalInside    [3]int64
+	portalInsideAny bool
+	inventory       inventory
 
 	// appearance is what this player looks like: the character's own, handed in at Join
 	// and never changed afterwards. **It is read from the stored character and from
@@ -1074,6 +1092,7 @@ func (s *Sim) joinCharacter(
 		audible:         make(map[uint64]struct{}),
 		chunks:          newChunkFeed(),
 		mineReady:       make(chan MiningCompletion, 1),
+		portalContacts:  make(chan PortalContact, 1),
 
 		// A composite literal for the reason newStarterInventory returns one: the struct
 		// carries a mutex, which `go vet`'s copylocks check refuses to see assigned from
@@ -1428,7 +1447,11 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 		// to their spawn and publishes the chunk they arrived in.
 		p.advanceVitalsLocked()
 		p.advanceCastLocked()
+		// Captured after every relocation this tick makes and before the body walks, so the
+		// contact settled below is measured along walking and nothing else.
+		from, fromPos := p.box(), p.pos
 		p.step(s.dt, s.terrain)
+		p.advancePortalContactLocked(from, fromPos)
 		p.advanceMining(tick, s.terrain)
 
 		if coord := chunkAt(p.pos); coord != p.chunk {

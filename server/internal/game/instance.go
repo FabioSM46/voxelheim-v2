@@ -225,6 +225,9 @@ func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceR
 	if err != nil {
 		return nil, err
 	}
+	// Whatever portals the manager's options named belong to the open world. The one arch
+	// a body can walk into here is this copy's own return.
+	sim.portalSheets = []portalSheet{newPortalSheet(world.InstanceExitThreshold(seed))}
 	if err := sim.placeDungeonEncounters(seed, gate, progress); err != nil {
 		return nil, err
 	}

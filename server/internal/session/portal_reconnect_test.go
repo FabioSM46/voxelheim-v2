@@ -16,7 +16,7 @@ import (
 func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 	for _, mode := range []string{"live", "expired", "restart", "ephemeral", "welcome-write", "transition-write"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg, chunks, open, peers, request := portalSession(t, 2)
+			cfg, chunks, open, peers, _ := portalSession(t, 2)
 			identities, store := knownIdentities(t)
 			if mode == "ephemeral" {
 				store = persist.NewMemoryStore()
@@ -46,11 +46,17 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			conn, done := start()
 			welcomeFrom(t, vnet.GetRootAsEnvelope(nextFrame(t, conn), 0))
 			frames := collect(t, conn)
-			conn.in <- protocol.EncodePortalRequest(request)
-			waitUntil(t, "entry", func() bool { return len(frames.transitions()) == 1 })
+			walkIntoVeil(t, conn, open, "entry", func() bool { return len(frames.transitions()) == 1 })
 			change := frames.transitions()[0]
 			instance, _ := cfg.Instances.Lookup(change.WorldID)
-			conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: 1, MoveX: .5})
+			// From here on the open-world position this character is kept at is the spot it
+			// walked into the veil at, not the spawn it started from.
+			seeded := fallback
+			fallback = cfg.Instances.Records(open)[game.InstanceCharacter{PlayerID: character.Owner, CharacterID: uint64(character.ID)}].Pos
+			if fallback == seeded {
+				t.Fatal("fixture: the crossing kept the spawn as its return point")
+			}
+			conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: walkClientTicks.Add(1), MoveX: .5})
 			conn.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "walking"})
 			waitUntil(t, "movement accepted", func() bool { return len(frames.chatMessages()) == 1 })
 			for range 3 {

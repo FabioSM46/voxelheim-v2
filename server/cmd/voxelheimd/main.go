@@ -415,7 +415,9 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// than of this process. See game.NewSim.
 	worldGroup := game.NewWorldGroup()
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log,
-		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup),
+		// The one ruin's veil is the only threshold a body can walk into out here.
+		game.WithPortals(world.PortalRuin(cfg.WorldSeed).Threshold()))
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}
