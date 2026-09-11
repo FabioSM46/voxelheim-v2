@@ -3,7 +3,7 @@
 //!
 //! Two panels on one screen, and neither of them changes a count. The cells are the last
 //! complete `InventoryState` the server sent; the recipe rows are the hand recipes of the
-//! display-only mirror in [`crate::player::RECIPES`], which spells out what a craft costs so
+//! display-only mirror in [`crate::player::recipes_made_at`], which spells out what a craft costs so
 //! that crafting is a plan instead of a guess. A row that is short of materials draws
 //! disabled — a courtesy read from [`Inventory::count`]. A recipe made at a station is not
 //! listed here at all: it lives on that station's own panel, opened by the interact key at
