@@ -41,6 +41,8 @@ mod arena_capture;
 mod bosses;
 mod guardian;
 mod king;
+#[cfg(test)]
+mod reduced_effects;
 
 pub(super) use king::regalia::{present as present_regalia, setup as setup_regalia};
 

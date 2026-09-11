@@ -2,7 +2,9 @@
 //! Edict's rune groups, the Requiem's closing notes and the thrown Sepulchre Spear.
 //! Each is sampled from the newest authoritative tick and never leaves its volume.
 //! None carries information the boundary cues and readings lack, so without this layer
-//! every essential cue remains; nothing here moves a camera or decides contact.
+//! every essential cue remains; nothing here moves a camera or decides contact. That is
+//! why [`ReducedEffects`] withholds the whole layer, and why switching it takes effect on
+//! the next frame without waiting for a new announcement.
 
 use std::f32::consts::TAU;
 
@@ -11,7 +13,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::cues::placement;
-use super::{EncounterPresentation, MoveKey, PresentedMove, Window, reconcile};
+use super::{EncounterPresentation, MoveKey, PresentedMove, ReducedEffects, Window, reconcile};
 use crate::net::{
     BlockCoord, EncounterMoveKind, HazardShape, HazardVolume, MobKind, MovePhase, Session,
 };
@@ -125,9 +127,11 @@ fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>
 }
 
 #[allow(clippy::type_complexity)] // One query per effect, matching the boundary cues.
+#[allow(clippy::too_many_arguments)] // A system's inputs are its parameters; each is read here.
 fn refresh(
     mut commands: Commands,
     presentation: Res<EncounterPresentation>,
+    reduced: Option<Res<ReducedEffects>>,
     materials: Res<SpellMaterials>,
     session: Option<Res<Session>>,
     store: Option<Res<ChunkStore>>,
@@ -140,9 +144,11 @@ fn refresh(
         &mut Transform,
     )>,
 ) {
-    if !presentation.is_changed() {
+    // A switched setting is a change too: the encounter must not have to announce again.
+    if !presentation.is_changed() && !reduced.as_ref().is_some_and(|reduced| reduced.is_changed()) {
         return;
     }
+    let reduced = reduced.is_some_and(|reduced| reduced.0);
     let solid = |voxel: IVec3| {
         session
             .as_ref()
@@ -159,7 +165,8 @@ fn refresh(
             })
     };
     let mut wanted = Vec::new();
-    for one in &presentation.0 {
+    // Withheld means wanting nothing, so the loop below releases every drawn mesh.
+    for one in presentation.0.iter().filter(|_| !reduced) {
         for (index, volume) in one.hazards().iter().enumerate() {
             if let Some((shape, transform)) = effect_for(one, volume, &solid) {
                 wanted.push((one.key, index, shape, transform));

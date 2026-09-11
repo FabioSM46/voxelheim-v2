@@ -1,5 +1,6 @@
 //! Essential hazard boundaries. No particles, flashing, audio or optional effects
-//! carry information: reduced effects therefore preserve the entire cue surface.
+//! carry information: reduced effects therefore preserve the entire cue surface, and
+//! this layer deliberately never reads [`super::ReducedEffects`].
 //! Dashed means announced; continuous double lines mean contact on this tick.
 
 use bevy::asset::RenderAssetUsages;
@@ -25,6 +26,22 @@ struct HazardCue {
     index: usize,
     volume: HazardVolume,
     contact: bool,
+}
+
+/// Test-only: one drawn boundary, as its move, hazard index, volume, contact and placement.
+#[cfg(test)]
+pub(crate) type Drawn = (MoveKey, usize, HazardVolume, bool, Transform, Entity);
+
+/// Test-only: every drawn boundary, ordered by move instance and hazard index.
+#[cfg(test)]
+pub(super) fn drawn(world: &mut World) -> Vec<Drawn> {
+    let mut drawn: Vec<Drawn> = world
+        .query::<(Entity, &HazardCue, &Transform)>()
+        .iter(world)
+        .map(|(entity, cue, placed)| (cue.key, cue.index, cue.volume, cue.contact, *placed, entity))
+        .collect();
+    drawn.sort_by_key(|(key, index, ..)| (key.encounter, key.boss, key.instance, *index));
+    drawn
 }
 
 pub(super) fn register(app: &mut App) {
