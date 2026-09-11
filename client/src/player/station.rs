@@ -348,6 +348,8 @@ mod tests {
                 pos: [0.5 + x, 0.5 - PLAYER_HEIGHT / 2.0, 0.5],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             structures,
             ..Default::default()
@@ -473,6 +475,8 @@ mod tests {
                 pos: [0.0, 64.0, 0.0],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             ..Default::default()
         }
