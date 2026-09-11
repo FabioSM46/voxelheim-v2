@@ -31,7 +31,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
-use crate::net::{InventoryStack, MountKind, Session};
+use crate::net::{InventoryStack, MountKind, Session, StructureKind};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
@@ -201,16 +201,16 @@ struct CraftScrollbarThumb;
 /// static: there is no state to go stale between the row being built and being read, and
 /// the only thing that ever leaves this client is [`Recipe::id`].
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct CraftRow(Recipe);
+pub(super) struct CraftRow(pub(super) Recipe);
 
 /// The heading of one recipe row. It carries the recipe so the dimmed state is read from
 /// the same value the row itself is, with no walk up the hierarchy to get there.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct CraftTitle(Recipe);
+pub(super) struct CraftTitle(pub(super) Recipe);
 
 /// One ingredient's `held/needed` label inside a recipe row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct CraftCost(Ingredient);
+pub(super) struct CraftCost(pub(super) Ingredient);
 
 /// Which recipe shelf is visible inside the crafting tab.
 ///
@@ -251,7 +251,7 @@ impl CraftFilter {
 
 /// A recipe whose materials are short. Flat and unlit by hover, so the row reads as inert
 /// rather than as one that did not respond.
-const RECIPE_ROW_SHORT: Color = Color::srgb(0.085, 0.095, 0.115);
+pub(super) const RECIPE_ROW_SHORT: Color = Color::srgb(0.085, 0.095, 0.115);
 
 const RECIPE_TITLE: Color = Color::WHITE;
 const RECIPE_TITLE_SHORT: Color = Color::srgb(0.50, 0.53, 0.58);
@@ -691,7 +691,20 @@ fn spawn_craft_filter_strip(panel: &mut ChildSpawnerCommands<'_>) {
 /// nothing to rebuild when a server state arrives. Only the `held/needed` labels and the
 /// enabled colours change, and [`refresh_recipe_rows`] owns both.
 fn spawn_recipe_rows(panel: &mut ChildSpawnerCommands<'_>) {
-    for recipe in recipes_made_at(None).copied() {
+    spawn_recipe_rows_at(panel, None);
+}
+
+/// Builds one row per recipe made at `station` — `None` for the pack's hand recipes, a kind
+/// for that station's panel (`ui/station.rs`).
+///
+/// One builder for both surfaces, so a station row is the same [`CraftRow`], [`CraftTitle`]
+/// and [`CraftCost`] as a pack row: [`refresh_recipe_rows`] greys both from the one predicate
+/// and [`craft_clicks`] reports both through the one message.
+pub(super) fn spawn_recipe_rows_at(
+    panel: &mut ChildSpawnerCommands<'_>,
+    station: Option<StructureKind>,
+) {
+    for recipe in recipes_made_at(station).copied() {
         panel
             .spawn((
                 CraftRow(recipe),
@@ -1064,7 +1077,10 @@ fn refresh_inventory_cells(
 /// [`Inventory::count`] — the same predicate the sender in `player::crafting` re-reads
 /// before a request leaves, which is what makes the drawn state and the sent state agree
 /// by construction rather than by two places remembering the same rule.
-fn refresh_recipe_rows(
+///
+/// Every row, the station panel's included: registered once, here, because two copies of
+/// this system would paint the same rows twice a frame.
+pub(super) fn refresh_recipe_rows(
     inventory: Option<Res<Inventory>>,
     mut rows: Query<(&CraftRow, &Interaction, &mut BackgroundColor)>,
     mut titles: Query<(&CraftTitle, &mut TextColor), Without<CraftCost>>,
@@ -1299,6 +1315,11 @@ fn switch_craft_filters(
 /// Takes rows outside the selected shelf out of layout entirely.
 fn show_filtered_recipes(active: Res<CraftFilter>, mut rows: Query<(&CraftRow, &mut Node)>) {
     for (row, mut node) in &mut rows {
+        // A station panel's rows are not on the pack's shelves, and the pack's filter must
+        // never take one out of that panel's layout.
+        if row.0.station.is_some() {
+            continue;
+        }
         let next = if active.includes(row.0.category) {
             Display::Flex
         } else {
@@ -1736,13 +1757,16 @@ fn inventory_clicks(
 /// **Nothing is decided here.** A reported row becomes a `CraftRequest` and then silence
 /// or a complete `InventoryState`; no material is spent and no product appears on this
 /// side either way.
-fn craft_clicks(
+///
+/// Registered once, here, for the pack's rows and a station panel's alike — a second copy
+/// would report every press twice and send two crafts.
+pub(super) fn craft_clicks(
     mode: Res<InputMode>,
     inventory: Option<Res<Inventory>>,
     rows: Query<(&Interaction, &CraftRow), Changed<Interaction>>,
     mut clicks: MessageWriter<CraftClick>,
 ) {
-    if *mode != InputMode::Inventory {
+    if !matches!(*mode, InputMode::Inventory | InputMode::Station) {
         return;
     }
     let Some(inventory) = inventory else {

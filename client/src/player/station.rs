@@ -14,14 +14,97 @@
 
 use bevy::prelude::*;
 
-use super::constants::MAX_REACH;
+use super::constants::{MAX_REACH, MOUNTED_HEIGHT, PLAYER_HEIGHT};
 use super::crafting::{RECIPES, Recipe};
 use super::loot::OriginateInteract;
 use super::set_if_changed;
 use super::structures::{AimStructures, StationTarget};
-use super::{ApplyInputMode, ApplySnapshots, InputGate, InputMode, SelfVitals, SnapshotBuffer};
+use super::{
+    ApplyInputMode, ApplySnapshots, InputGate, InputMode, LocalMount, SelfVitals, SnapshotBuffer,
+};
 use crate::net::{Session, StructureKind};
 use crate::settings::{Control, Settings};
+
+/// How close a player must stand to each station to work at it, in blocks, mirrored from
+/// `ForgeCraftRadius`, `CampfireCookRadius`, `LeatherBenchCraftRadius`,
+/// `ArmourBenchCraftRadius` and `EnchantingTableCraftRadius` in
+/// `server/internal/game/craft.go`.
+///
+/// **This closes a panel and decides nothing else.** No request is gated on it — the server
+/// re-measures its own distance to its own station on every craft — so a drift between the
+/// copies costs a panel that closes a step early or late, never a craft granted or refused.
+const FORGE_CRAFT_RADIUS: f64 = 5.0;
+const CAMPFIRE_COOK_RADIUS: f64 = 5.0;
+const LEATHER_BENCH_CRAFT_RADIUS: f64 = 5.0;
+const ARMOUR_BENCH_CRAFT_RADIUS: f64 = 5.0;
+const ENCHANTING_TABLE_CRAFT_RADIUS: f64 = 5.0;
+
+/// The mirrored radius for one kind, or `None` for a kind that is not a station — the same
+/// fail-closed shape as the server's `craftRadius`.
+const fn station_radius(kind: StructureKind) -> Option<f64> {
+    match kind {
+        StructureKind::Forge => Some(FORGE_CRAFT_RADIUS),
+        StructureKind::Campfire => Some(CAMPFIRE_COOK_RADIUS),
+        StructureKind::LeatherBench => Some(LEATHER_BENCH_CRAFT_RADIUS),
+        StructureKind::ArmourBench => Some(ARMOUR_BENCH_CRAFT_RADIUS),
+        StructureKind::EnchantingTable => Some(ENCHANTING_TABLE_CRAFT_RADIUS),
+        StructureKind::Tent | StructureKind::Runestone => None,
+    }
+}
+
+/// Whether the open station still stands in the newest snapshot, as the same kind, within its
+/// radius of this player's body.
+///
+/// Measured the way `distanceToVoxel` measures it: from the centre of the body's box — the
+/// standing position plus half the body's height — to the centre of the anchor voxel, in
+/// `f64` because the anchor is a number an untrusted server chose.
+///
+/// **Absence of evidence keeps the panel open.** No snapshot yet, or one that does not name
+/// this player, says nothing about where they stand; closing on it would shut a panel on a
+/// stream hiccup. A snapshot that does not name the *structure* is different: the newest
+/// snapshot is the existence set, and a station it omits is gone.
+fn still_at_station(
+    buffer: &SnapshotBuffer,
+    player_id: u64,
+    open: OpenStation,
+    body_height: f32,
+) -> bool {
+    let Some(latest) = buffer.latest_snapshot() else {
+        return true;
+    };
+    let Some(structure) = latest
+        .structures
+        .iter()
+        .find(|structure| structure.structure_id == open.structure_id)
+    else {
+        return false;
+    };
+    let Some(radius) = station_radius(structure.kind).filter(|_| structure.kind == open.kind)
+    else {
+        return false;
+    };
+    let Some(me) = latest
+        .entities
+        .iter()
+        .find(|entity| entity.entity_id == player_id)
+    else {
+        return true;
+    };
+    let centre = [
+        f64::from(me.pos[0]),
+        f64::from(me.pos[1]) + f64::from(body_height) / 2.0,
+        f64::from(me.pos[2]),
+    ];
+    let voxel = [
+        f64::from(structure.anchor.x) + 0.5,
+        f64::from(structure.anchor.y) + 0.5,
+        f64::from(structure.anchor.z) + 0.5,
+    ];
+    let squared: f64 = (0..3)
+        .map(|axis| (voxel[axis] - centre[axis]).powi(2))
+        .sum();
+    squared.sqrt() <= radius
+}
 
 /// `ui/mod.rs`'s `set_mode` rule, which `vendor.rs` also restates for the same reason: a mode
 /// is written only when it is a different mode, so `InputMode`'s change flag stays honest.
@@ -164,8 +247,8 @@ fn open_station(
     set_mode(&mut mode, InputMode::Station);
 }
 
-/// Takes the panel down when the mode has left it, and takes the mode back on death or a
-/// lost session.
+/// Takes the panel down when the mode has left it, and takes the mode back on death, a lost
+/// session, a walk out of the station's radius, or the station leaving the snapshot.
 ///
 /// `Escape` leaves the mode in `ui/mod.rs`, and the window goes with it here. Death is
 /// presentation rather than a rule — the server refuses a craft from a corpse whatever is on
@@ -175,10 +258,24 @@ fn open_station(
 fn close_what_the_player_left(
     session: Option<Res<Session>>,
     vitals: Res<SelfVitals>,
+    buffer: Res<SnapshotBuffer>,
+    mount: Option<Res<LocalMount>>,
     mut window: ResMut<StationWindow>,
     mut mode: ResMut<InputMode>,
 ) {
-    if (session.is_none() || vitals.dead()) && *mode == InputMode::Station {
+    let body_height = if mount.is_some_and(|mount| mount.kind().is_some()) {
+        MOUNTED_HEIGHT
+    } else {
+        PLAYER_HEIGHT
+    };
+    let left = match (session.as_deref(), window.current) {
+        (None, _) => true,
+        (Some(session), Some(open)) => {
+            !still_at_station(&buffer, session.0.entity_id, open, body_height)
+        }
+        (Some(_), None) => false,
+    };
+    if (left || vitals.dead()) && *mode == InputMode::Station {
         set_mode(&mut mode, InputMode::Playing);
     }
     if window.current.is_some() && *mode != InputMode::Station {
@@ -222,8 +319,110 @@ mod tests {
     use super::super::structures::StructurePick;
     use super::*;
     use crate::net::{
-        ANY_TOKEN, EntityState, MobAction, MobKind, MobState, RecipeId, SessionParams, Snapshot,
+        ANY_TOKEN, BlockCoord, EntityState, Facing, MobAction, MobKind, MobState, RecipeId,
+        SessionParams, Snapshot, StructureState,
     };
+
+    fn station_at(structure_id: u64, kind: StructureKind, anchor: [i32; 3]) -> StructureState {
+        StructureState {
+            structure_id,
+            kind,
+            anchor: BlockCoord {
+                x: anchor[0],
+                y: anchor[1],
+                z: anchor[2],
+            },
+            facing: Facing::North,
+            owner_entity_id: 99,
+            lit: true,
+        }
+    }
+
+    /// Where this player stands so that the body's centre sits `x` blocks along from the
+    /// centre of a voxel anchored at the origin, level with it.
+    fn standing_at(server_tick: u32, x: f32, structures: Vec<StructureState>) -> Snapshot {
+        Snapshot {
+            server_tick,
+            entities: vec![EntityState {
+                entity_id: PLAYER,
+                pos: [0.5 + x, 0.5 - PLAYER_HEIGHT / 2.0, 0.5],
+                vel: [0.0; 3],
+                yaw: 0.0,
+            }],
+            structures,
+            ..Default::default()
+        }
+    }
+
+    fn open_at(app: &mut App, structure_id: u64, kind: StructureKind) {
+        app.world_mut()
+            .write_message(OpenStation { structure_id, kind });
+        app.update();
+    }
+
+    fn see(app: &mut App, snapshot: Snapshot) {
+        assert!(
+            app.world_mut()
+                .resource_mut::<SnapshotBuffer>()
+                .accept(snapshot, Instant::now())
+        );
+        app.update();
+    }
+
+    /// Walking out of the mirrored radius closes the panel; standing just inside it does not.
+    #[test]
+    fn the_panel_closes_when_the_player_walks_out_of_the_station_radius() {
+        let forge = || vec![station_at(900, StructureKind::Forge, [0, 0, 0])];
+        let mut app = app(standing_at(1, 4.9, forge()));
+        open_at(&mut app, 900, StructureKind::Forge);
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Station);
+
+        see(&mut app, standing_at(2, 5.0, forge()));
+        assert_eq!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Station,
+            "the radius is inclusive, as `stationWithinLocked`'s `<=` is"
+        );
+
+        see(&mut app, standing_at(3, 5.1, forge()));
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(app.world().resource::<StationWindow>().station(), None);
+    }
+
+    /// A station the newest snapshot no longer names is gone, and its panel goes with it.
+    #[test]
+    fn the_panel_closes_when_the_station_leaves_the_snapshot() {
+        let mut app = app(standing_at(
+            1,
+            1.0,
+            vec![station_at(900, StructureKind::LeatherBench, [0, 0, 0])],
+        ));
+        open_at(&mut app, 900, StructureKind::LeatherBench);
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Station);
+
+        see(&mut app, standing_at(2, 1.0, Vec::new()));
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(app.world().resource::<StationWindow>().station(), None);
+    }
+
+    #[test]
+    fn every_station_has_a_radius_and_nothing_else_does() {
+        for kind in [
+            StructureKind::Forge,
+            StructureKind::Campfire,
+            StructureKind::LeatherBench,
+            StructureKind::ArmourBench,
+            StructureKind::EnchantingTable,
+            StructureKind::Tent,
+            StructureKind::Runestone,
+        ] {
+            assert_eq!(
+                station_radius(kind).is_some(),
+                is_craft_station(kind),
+                "{kind:?}"
+            );
+        }
+    }
 
     const PLAYER: u64 = 7;
 
@@ -337,7 +536,14 @@ mod tests {
     /// it — each without a single frame on the wire, because there is nothing to send.
     #[test]
     fn a_chosen_station_opens_from_play_and_closes_on_the_key_and_on_death() {
-        let mut app = app(me());
+        let mut app = app(standing_at(
+            1,
+            1.0,
+            vec![
+                station_at(900, StructureKind::LeatherBench, [0, 0, 0]),
+                station_at(901, StructureKind::Forge, [0, 0, 1]),
+            ],
+        ));
         app.world_mut().write_message(OpenStation {
             structure_id: 900,
             kind: StructureKind::LeatherBench,
@@ -358,7 +564,7 @@ mod tests {
 
         app.insert_resource(ButtonInput::<KeyCode>::default());
         app.world_mut().write_message(OpenStation {
-            structure_id: 900,
+            structure_id: 901,
             kind: StructureKind::Forge,
         });
         app.update();

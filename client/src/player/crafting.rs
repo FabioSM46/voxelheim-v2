@@ -663,11 +663,12 @@ fn request_craft(
     outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
 ) {
-    // The screen these rows live on is closed while the server says this player is dead,
-    // and the toggle that would reopen it is refused in `ui/mod.rs`. This is the wire half
-    // of that rule rather than a second copy of it: a row activated on the frame they died
-    // must not be replayed into a craft when they come back.
-    if gate.dead() || gate.mode() != InputMode::Inventory {
+    // The screens these rows live on — the pack's hand recipes and a station's panel — are
+    // closed while the server says this player is dead, and the toggles that would reopen
+    // them are refused in `ui/mod.rs`. This is the wire half of that rule rather than a
+    // second copy of it: a row activated on the frame they died must not be replayed into a
+    // craft when they come back.
+    if gate.dead() || !matches!(gate.mode(), InputMode::Inventory | InputMode::Station) {
         clicks.read().for_each(drop);
         return;
     }
@@ -1132,6 +1133,16 @@ mod tests {
             crafted(&sent).is_empty(),
             "a row was activated with the screen closed"
         );
+    }
+
+    /// A station panel crafts through the same request, and still decides nothing: the row
+    /// leaves as a bare `RecipeID`, because proximity is measured on the server.
+    #[test]
+    fn a_row_activated_on_a_station_panel_sends_the_same_request() {
+        let (mut app, sent) = app(vec![stack(ITEM_VARGR_PELT, 3)]);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Station;
+        activate(&mut app, RecipeId::LeatherCap);
+        assert_eq!(crafted(&sent), vec![fb::RecipeID::LeatherCap]);
     }
 
     #[test]
