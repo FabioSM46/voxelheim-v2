@@ -8,7 +8,8 @@
 # became http://archive.ubuntu.com. When that port stopped answering from the runners
 # (#1107), the dependency step timed out exactly as it had before the repair. https to
 # the same host was degraded as well, and every Ubuntu entry in the file was that one
-# host, so the step now also adds a second host at the lowest priority.
+# host, so the step now also adds a second host at priority 2, which APT reaches
+# after one or two failed attempts instead of after every Ubuntu entry.
 #
 # A sed expression reads as correct whichever scheme it writes, and an append reads as
 # idempotent whether or not it is. Only running the block on the image's file shows
@@ -35,7 +36,7 @@ work = Path(sys.argv[2])
 STEP = "Prefer the canonical Ubuntu archive over the Azure mirror"
 MIRRORS = "/etc/apt/apt-mirrors.txt"
 WORKFLOWS = ("ci.yml", "integration.yml", "client-cache.yml")
-KERNEL = "https://mirrors.edge.kernel.org/ubuntu/\tpriority:4\n"
+KERNEL = "https://mirrors.edge.kernel.org/ubuntu/\tpriority:2\n"
 
 
 def exactly_one(pattern, text, label):
@@ -106,7 +107,7 @@ assert repaired == (
     "https://security.ubuntu.com/ubuntu/\tpriority:3\n" + KERNEL
 ), (
     "the image's mirrorlist must start on https://archive.ubuntu.com and end on the "
-    f"kernel.org mirror at priority 4; got {repaired!r}"
+    f"kernel.org mirror at priority 2; got {repaired!r}"
 )
 assert "http://" not in repaired, (
     f"no plain-http mirror may survive the repair of the image's file; got {repaired!r}"

@@ -283,9 +283,16 @@ jobs:
         #
         # mirrors.edge.kernel.org carries the full Ubuntu archive with Ubuntu's
         # signed InRelease files, so APT still verifies every package against
-        # Ubuntu's key and the mirror adds a route, not trust. It goes in at
-        # priority 4, after every entry the image writes, and only once. APT's
-        # mirror method moves to the next mirror when a file fails.
+        # Ubuntu's key and the mirror adds a route, not trust. It goes in once,
+        # at priority 2: after the repointed archive entry at priority 1, and
+        # level with the image's own archive entry, which APT orders at random.
+        # APT's mirror method moves to the next mirror when a file fails.
+        #
+        # Priority 4, after every image entry, was too late. A failing file costs
+        # 15 seconds per attempt (Acquire::https::Timeout), and three attempts on
+        # degraded hosts per file, across four index suites and four packages,
+        # spend the step's five minutes before the mirror is reached. At
+        # priority 2 a file fails over after one or two attempts.
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
@@ -293,7 +300,7 @@ jobs:
               if [ -n "$(tail -c1 /etc/apt/apt-mirrors.txt)" ]; then
                 echo | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
               fi
-              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:4\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
             fi
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
