@@ -12,9 +12,9 @@ import (
 // **Contact is with the opening, not with the arch and not with a radius.** A body
 // standing beside the arch, pressed against a jamb or ducking under a shoulder is not
 // in any veil cell's face and does not touch it; a body whose box reaches the plane
-// inside the opening does, even by a hundredth of a block. That is a different question
-// from [Player.portalReachLocked], which measures how far a body is from the heart and
-// is still what admission asks — this is only what makes a crossing begin.
+// inside the opening does, even by a hundredth of a block. It makes a crossing begin, and
+// [Player.portalReachLocked] asks it again at admission: a body touching the veil is at
+// the portal even when a sandstorm has shortened its reach to the heart.
 type portalSheet struct {
 	heart  [3]int64
 	normal int

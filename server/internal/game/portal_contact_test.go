@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -234,4 +235,75 @@ func TestAnInstanceManagerRefusesPortalsItWouldDrop(t *testing.T) {
 		t.Fatalf("an instance manager with no portals was refused: %v", err)
 	}
 	m.Close()
+}
+
+// A heavy sandstorm halves reach to 2.25 blocks, and reach is measured to the heart. A body
+// touching the outermost column of the opening is about 2.9 blocks from it, so before this
+// the tick started a crossing that admission refused as "not at a portal". Touching the
+// anchor's own veil now settles it; a body that is not in the opening is judged by reach
+// exactly as before, so nobody outside the drawn threshold is admitted.
+func TestABodyInTheVeilIsAtThePortalInASandstorm(t *testing.T) {
+	storm := protocol.WeatherState{Kind: vnet.WeatherKindSandstorm, Intensity: WeatherHeavy}
+	for name, threshold := range contactThresholds() {
+		t.Run(name, func(t *testing.T) {
+			w := newContactWorld(t, threshold, NewWorldGroup())
+			heart := w.sheet.heart
+			request := protocol.PortalRequest{HasArch: true, Arch: [3]int32{int32(heart[0]), int32(heart[1]), int32(heart[2])}}
+			edge := w.join(t, 2.7, 0)
+			front := w.join(t, 2.7, -.5)
+			beside := w.join(t, 4.4, 0)
+			at := func(p *Player, weather protocol.WeatherState) bool {
+				w.sim.mu.Lock()
+				defer w.sim.mu.Unlock()
+				p.weather = weather
+				return p.portalReachLocked(request)
+			}
+			w.sim.mu.Lock()
+			edgeTouches, frontTouches := w.sheet.touches(edge.box()), w.sheet.touches(front.box())
+			edgeHeart := distanceToVoxel(edge.box(), heart)
+			w.sim.mu.Unlock()
+			if !edgeTouches || frontTouches || edgeHeart <= EditReach*SandstormReachScale {
+				t.Fatalf("fixture: edge touches=%v front touches=%v, edge is %.2f from the heart", edgeTouches, frontTouches, edgeHeart)
+			}
+
+			if !at(edge, storm) {
+				t.Fatal("a body touching the edge of the veil in a sandstorm is not at the portal")
+			}
+			if at(front, storm) {
+				t.Fatal("a body half a block in front of the veil's edge was admitted in a sandstorm")
+			}
+			if !at(front, protocol.WeatherState{}) || !at(beside, protocol.WeatherState{}) {
+				t.Fatal("clear-weather reach to the heart no longer admits what it did")
+			}
+			if at(beside, storm) {
+				t.Fatal("a body beside the arch, outside the opening, was admitted in a sandstorm")
+			}
+
+			w.sim.mu.Lock()
+			edge.mounted = vnet.MountKindBlackHorse
+			w.sim.mu.Unlock()
+			if at(edge, protocol.WeatherState{}) {
+				t.Fatal("touching the veil admitted a mounted rider")
+			}
+		})
+	}
+
+	// A world told of no threshold keeps the heart rule alone.
+	sim, err := NewSim(20, 1, 1, dropTerrain{groundTop: 0}, refusedEdits{}, testEntityIDs(), slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sheet := newPortalSheet(world.InstanceExitThreshold(0))
+	pos := sheet.at(2.7, 0, 0)
+	p, err := sim.JoinCharacter(9, testPlayerID(9), 9, "Unmarked", [3]float32{float32(pos[0]), float32(pos[1]), float32(pos[2])}, testAppearance(), nil, func([]byte) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sim.mu.Lock()
+	p.weather = storm
+	admitted := p.portalReachLocked(protocol.PortalRequest{HasArch: true, Arch: [3]int32{int32(sheet.heart[0]), int32(sheet.heart[1]), int32(sheet.heart[2])}})
+	sim.mu.Unlock()
+	if admitted {
+		t.Fatal("a world with no thresholds admitted by touch")
+	}
 }
