@@ -40,8 +40,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use super::appearance::{ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
-use super::items::{Livery, armour_styles, item_armour_style, item_livery};
+use super::appearance::{ArmourPiece, ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
+use super::inventory::EQUIPMENT_ROUTES;
+use super::items::{ITEMS, Livery, armour_styles, item_armour_style, item_livery};
 use super::{livery, merge_all};
 
 /// The sculpted set one armour item is drawn as.
@@ -114,6 +115,95 @@ pub(super) fn looks() -> Vec<ArmourLook> {
         .into_iter()
         .map(|(style, livery)| ArmourLook { style, livery })
         .collect()
+}
+
+/// The piece of the rig one armour item covers, read off the equipment slot it routes to.
+///
+/// **Not a second table**: `inventory::EQUIPMENT_ROUTES` already answers which slot an item
+/// fits. Each piece looks up its own slot by [`slot`] rather than by the table's order, and the
+/// off-hand is no piece.
+pub(super) fn piece_of(item_id: u16) -> Option<ArmourPiece> {
+    ArmourPiece::ALL.into_iter().find(|piece| {
+        EQUIPMENT_ROUTES
+            .get(slot(*piece))
+            .is_some_and(|accepted| accepted.contains(&item_id))
+    })
+}
+
+/// The offset of the equipment slot one piece is worn in, as `inventory::EQUIPMENT_ROUTES`
+/// numbers them: head `0`, chest `1`, legs `2`.
+///
+/// **Named per piece and wildcard-free**, so which route stands for which piece is stated once
+/// here rather than inferred from the table's order, and
+/// `every_armour_item_covers_the_piece_its_equipment_slot_names` pins it against the real items.
+const fn slot(piece: ArmourPiece) -> usize {
+    match piece {
+        ArmourPiece::Head => 0,
+        ArmourPiece::Chest => 1,
+        ArmourPiece::Legs => 2,
+    }
+}
+
+/// One sculpted armour item as an object of its own: the look it is worn in and the piece it
+/// covers. `None` for anything the body would draw as the plain overlay.
+pub(super) fn sculpted_piece(item_id: u16) -> Option<(ArmourLook, ArmourPiece)> {
+    Some((look(item_id)?, piece_of(item_id)?))
+}
+
+/// What a cell draws a sculpted armour item as: its set and its piece.
+///
+/// The livery is not in it, because a cell's picture does not change with the metal.
+pub(crate) fn sculpted_icon(item_id: u16) -> Option<(ArmourStyle, ArmourPiece)> {
+    sculpted_piece(item_id).map(|(look, piece)| (look.style, piece))
+}
+
+/// Every sculpted piece an item in this build is, for the drop's shared mesh cache.
+pub(super) fn sculpted_pieces() -> Vec<(ArmourLook, ArmourPiece)> {
+    let mut found: Vec<(ArmourLook, ArmourPiece)> = Vec::new();
+    for row in ITEMS {
+        if let Some(piece) = sculpted_piece(row.item_id)
+            && !found.contains(&piece)
+        {
+            found.push(piece);
+        }
+    }
+    found
+}
+
+/// A sculpted piece taken off the rig: the segments it is worn as, merged in their resting
+/// places, centred on their own origin and scaled so the longest side is `longest` blocks.
+///
+/// **The same meshes the body wears, not a second drawing of them**, which is what keeps a
+/// dropped helm and a worn one from becoming two objects that drift apart. A cuirass is its
+/// torso and both vambraces; greaves are both legs.
+pub(super) fn piece_mesh(look: ArmourLook, piece: ArmourPiece, longest: f32) -> Mesh {
+    let mut segments = ArmourSegment::ALL
+        .into_iter()
+        .filter(|segment| segment.piece() == piece)
+        .map(|segment| {
+            segment_mesh(Some(look), segment).translated_by(segment.body_piece().pivot())
+        });
+    // Unreachable: every piece is covered by at least one segment.
+    let Some(mut merged) = segments.next() else {
+        return Mesh::from(Cuboid::from_length(longest));
+    };
+    merge_all(&mut merged, segments, "dropped sculpted armour");
+
+    let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+        merged.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return merged;
+    };
+    let (low, high) = positions
+        .iter()
+        .fold((Vec3::MAX, Vec3::MIN), |(low, high), position| {
+            let position = Vec3::from_array(*position);
+            (low.min(position), high.max(position))
+        });
+    let size = (high - low).max_element().max(f32::EPSILON);
+    merged
+        .translated_by(-(low + high) / 2.0)
+        .scaled_by(Vec3::splat(longest / size))
 }
 
 /// How dark a recess is drawn, as a multiplier of the material's colour.
@@ -764,6 +854,42 @@ mod tests {
             }
         }
         assert_eq!(look(4242), None, "an unknown id wears no style");
+    }
+
+    /// **Every armour item covers the piece its equipment slot names**, asserted item by item
+    /// against the real routing table — so a route inserted or reordered in
+    /// `EQUIPMENT_ROUTES` fails here instead of silently handing a helm the chest's meshes.
+    #[test]
+    fn every_armour_item_covers_the_piece_its_equipment_slot_names() {
+        use super::super::crafting::{
+            ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_RUSTY_CUIRASS,
+            ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM, ITEM_WOODEN_SHIELD,
+        };
+
+        for (item_id, piece) in [
+            (ITEM_LEATHER_CAP, ArmourPiece::Head),
+            (ITEM_LEATHER_JERKIN, ArmourPiece::Chest),
+            (ITEM_LEATHER_LEGGINGS, ArmourPiece::Legs),
+            (ITEM_RUSTY_HELM, ArmourPiece::Head),
+            (ITEM_RUSTY_CUIRASS, ArmourPiece::Chest),
+            (ITEM_RUSTY_GREAVES, ArmourPiece::Legs),
+        ] {
+            assert_eq!(piece_of(item_id), Some(piece), "item {item_id}");
+        }
+        assert_eq!(
+            piece_of(ITEM_WOODEN_SHIELD),
+            None,
+            "the off-hand is no piece of the rig"
+        );
+
+        // And no armour row routes to two pieces, which a lookup by `find` would hide.
+        for row in ITEMS.iter().filter(|row| row.shape == ItemShape::Armour) {
+            let pieces = ArmourPiece::ALL
+                .into_iter()
+                .filter(|piece| EQUIPMENT_ROUTES[slot(*piece)].contains(&row.item_id))
+                .count();
+            assert_eq!(pieces, 1, "item {} routes to {pieces} pieces", row.item_id);
+        }
     }
 
     #[test]
