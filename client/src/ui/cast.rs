@@ -1,4 +1,4 @@
-//! The cast bar: the fourth vital bar, stacked above health.
+//! The cast bar: the top vital bar, stacked above health.
 //!
 //! **Nothing here decides anything.** The fill, the visibility and the reading are all
 //! [`SnapshotBuffer::self_cast`] — the server's progress byte, drawn as it arrives. There
@@ -8,11 +8,11 @@
 //! This module joins the bar vocabulary [`super::health`] exports rather than keeping a
 //! second set of numbers that happens to agree with it: [`vital_bar_root`],
 //! [`vital_bar_track`], [`vital_bar_label`] and [`vital_bar_label_transform`] give this bar
-//! the same width, height, border, corner radius and horizontal centring as health, hunger
-//! and experience by construction. It is the top of the stack —
+//! the same width, height, border, corner radius and horizontal centring as health, energy,
+//! hunger and experience by construction. It is the top of the stack —
 //! [`CAST_BAR_BOTTOM`] sits one bar and the shared gap above [`HEALTH_BAR_BOTTOM`] — which
 //! is what lets it appear and disappear without moving anything below it: every bar is
-//! positioned by its own absolute `bottom`, so the three vitals never read this module at
+//! positioned by its own absolute `bottom`, so the vitals below never read this module at
 //! all.
 
 use bevy::prelude::*;
@@ -30,9 +30,9 @@ use crate::player::SnapshotBuffer;
 /// literal, so a change to any bar beneath it moves this one with no edit here.
 const CAST_BAR_BOTTOM: f32 = HEALTH_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
 
-/// The layer the other three vital bars draw on (`ui/health.rs`, `ui/hunger.rs`,
-/// `ui/experience.rs`), and not a lane of its own: this is the fourth bar in the same
-/// stack, not a separate overlay.
+/// The layer the other vital bars draw on (`ui/health.rs`, `ui/energy.rs`, `ui/hunger.rs`,
+/// `ui/experience.rs`), and not a lane of its own: this is the top bar in the same stack,
+/// not a separate overlay.
 const CAST_LAYER: i32 = 12;
 
 /// The empty part of the track, shared visually with the other three vital bars.
@@ -231,7 +231,8 @@ mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, CastState, SessionParams, Snapshot};
     use crate::ui::health::{
-        BAR_BORDER, BAR_CORNER_RADIUS, BAR_WIDTH, EXPERIENCE_BAR_BOTTOM, HUNGER_BAR_BOTTOM,
+        BAR_BORDER, BAR_CORNER_RADIUS, BAR_WIDTH, ENERGY_BAR_BOTTOM, EXPERIENCE_BAR_BOTTOM,
+        HUNGER_BAR_BOTTOM,
     };
 
     fn session() -> Session {
@@ -402,14 +403,18 @@ mod tests {
     }
 
     #[test]
-    fn the_cast_bar_sits_above_health_and_the_three_vitals_are_unmoved() {
+    fn the_cast_bar_sits_above_health_and_the_four_vitals_are_unmoved() {
         assert_eq!(
             HUNGER_BAR_BOTTOM,
             EXPERIENCE_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
         );
         assert_eq!(
-            HEALTH_BAR_BOTTOM,
+            ENERGY_BAR_BOTTOM,
             HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
+        );
+        assert_eq!(
+            HEALTH_BAR_BOTTOM,
+            ENERGY_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
         );
         assert_eq!(
             CAST_BAR_BOTTOM,
