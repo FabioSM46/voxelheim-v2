@@ -414,8 +414,15 @@ func run(ctx context.Context, opts options, log *slog.Logger) error {
 	// one generator, so where the dark puts creatures is a property of this world rather
 	// than of this process. See game.NewSim.
 	worldGroup := game.NewWorldGroup()
+	// The one ruin's veil is the only threshold a body can walk into out here. A seed with
+	// no ruin is refused at startup rather than served with a portal at the origin.
+	portalRuin, found := world.PortalRuin(cfg.WorldSeed)
+	if !found {
+		return fmt.Errorf("world seed %d has no dungeon ruin in its ruin cell", cfg.WorldSeed)
+	}
 	sim, err := game.NewSim(cfg.TickRate, cfg.ViewDistance, cfg.WorldSeed, game.NewCacheTerrain(chunks), chunks, registry.NextID, log,
-		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup))
+		game.WithDevCommands(opts.devCommands), game.WithVoiceRange(opts.voiceRange), game.WithWorldGroup(worldGroup),
+		game.WithPortals(portalRuin.Threshold()))
 	if err != nil {
 		return fmt.Errorf("invalid simulation: %w", err)
 	}

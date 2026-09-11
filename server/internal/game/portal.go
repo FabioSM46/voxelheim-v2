@@ -181,7 +181,19 @@ func (p *Player) portalReachLocked(request protocol.PortalRequest) bool {
 			return false
 		}
 	}
-	return distanceToVoxel(p.box(), anchor) <= p.reachLocked()
+	// **A body standing in the anchor's own veil is at that portal**, whatever the weather.
+	// Reach is measured to the heart, one point in a five-wide opening, so a heavy sandstorm
+	// halving it refused a body the tick had just seen walk into the outermost column:
+	// contact would have started a crossing that admission then called "not at a portal".
+	// Touching is asked of the sheet itself, so it admits nobody who is not inside the
+	// opening this world actually draws. Everyone else is still judged by reach.
+	box := p.box()
+	for _, sheet := range p.sim.portalSheets {
+		if sheet.heart == anchor && sheet.touches(box) {
+			return true
+		}
+	}
+	return distanceToVoxel(box, anchor) <= p.reachLocked()
 }
 
 // RestoreRespawn completes an exit after the live binding has returned. The arch

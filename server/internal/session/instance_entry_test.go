@@ -125,6 +125,13 @@ type portalConn struct {
 	conn   *fakeConn
 	frames *collector
 	done   chan error
+	open   *game.Sim
+}
+
+// walkIn walks this character forward from the fixture spawn into the ruin's veil until done.
+func (c portalConn) walkIn(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	walkIntoVeil(t, c.conn, c.open, what, done)
 }
 
 // playPortalCharacter connects one already-minted character and waits for it to enter the
@@ -143,7 +150,7 @@ func playPortalCharacter(t *testing.T, cfg session.Config, chunks *world.Cache, 
 	_ = nextFrameOfKind(t, conn, vnet.PayloadServerWelcome)
 	frames := collect(t, conn)
 	waitUntil(t, "the character to enter the simulation", func() bool { return sim.Count() == expectedLive })
-	live := portalConn{conn: conn, frames: frames, done: done}
+	live := portalConn{conn: conn, frames: frames, done: done, open: sim}
 	t.Cleanup(func() { _ = conn.Close(); <-done })
 	return live
 }
@@ -182,8 +189,7 @@ func TestABoundCharacterCrossesTheirOwnRunWithNoPrompt(t *testing.T) {
 	restoreRuns(t, cfg, savedRun(request, 7001, 0x51EED, owner.character))
 	live := playPortalCharacter(t, cfg, chunks, open, peers, identities, 1, owner, 1)
 
-	live.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "world change", func() bool { return len(live.frames.transitions()) == 1 })
+	live.walkIn(t, "world change", func() bool { return len(live.frames.transitions()) == 1 })
 	if got := live.frames.transitions()[0].WorldID; got != 7001 {
 		t.Fatalf("crossed into world %d, want the run this character owes (7001)", got)
 	}
@@ -232,8 +238,7 @@ func halfClearedParty(t *testing.T) (session.Config, protocol.PortalRequest, por
 	party(t, open, live, other, "Bjorn")
 
 	// The owner goes in first, which is what points the party's route at their run.
-	live.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the owner to cross", func() bool { return len(live.frames.transitions()) == 1 })
+	live.walkIn(t, "the owner to cross", func() bool { return len(live.frames.transitions()) == 1 })
 	if got := live.frames.transitions()[0].WorldID; got != 7001 {
 		t.Fatalf("the owner crossed into %d, not their own run", got)
 	}
@@ -244,8 +249,7 @@ func halfClearedParty(t *testing.T) (session.Config, protocol.PortalRequest, por
 func TestASavedRunIsOfferedBeforeItBinds(t *testing.T) {
 	cfg, request, _, other, friend := halfClearedParty(t)
 
-	other.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
+	other.walkIn(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
 	offer := other.frames.crossingOffers()[0]
 	if offer.OfferID == 0 {
 		t.Fatal("an offer with no id can never be answered")
@@ -276,37 +280,39 @@ func TestASavedRunIsOfferedBeforeItBinds(t *testing.T) {
 
 // Refusing is an answer: nothing crosses, nothing binds, and nothing is refused either.
 func TestRefusingAnOfferOverTheWireIsAnsweredWithSilence(t *testing.T) {
-	cfg, request, _, other, friend := halfClearedParty(t)
+	cfg, _, _, other, friend := halfClearedParty(t)
 
-	other.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
+	other.walkIn(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
 	offer := other.frames.crossingOffers()[0]
 
 	other.conn.in <- protocol.EncodeInstanceEntryAnswer(protocol.InstanceEntryAnswer{OfferID: offer.OfferID})
-	// A refusal produces no frame at all, so the assertion has to be made against
-	// something that does: a second crossing, whose offer can only arrive after the
-	// answer ahead of it in this connection's queue was processed.
-	other.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "a second offer", func() bool { return len(other.frames.crossingOffers()) == 2 })
-	if got := len(other.frames.transitions()); got != 0 {
-		t.Fatalf("a refused offer moved the session: %d world changes", got)
-	}
-	if got := len(other.frames.actionRefusals()); got != 0 {
-		t.Fatalf("refusing an offer was itself refused: %+v", other.frames.actionRefusals())
-	}
-	saved, _ := cfg.Instances.Lookup(7001)
-	if _, bound := cfg.Instances.Bound(saved.Ruin, friend); bound {
-		t.Fatal("refusing an offer bound the character")
-	}
-
-	// And the first offer is spent: the id cannot be used to change one's mind.
+	// A refusal produces no frame at all. What proves it was read — and that it spent the offer
+	// rather than leaving it standing — is the same id sent behind it as an acceptance, which the
+	// id can no longer be used for: one refusal saying the server holds no such offer.
 	other.conn.in <- protocol.EncodeInstanceEntryAnswer(protocol.InstanceEntryAnswer{OfferID: offer.OfferID, Accept: true})
 	waitUntil(t, "the replay refusal", func() bool { return len(other.frames.actionRefusals()) == 1 })
 	if got := other.frames.actionRefusals()[0]; got.Action != vnet.RefusedActionCrossPortal || got.Reason != vnet.RefusalReasonEntryOfferUnknown {
 		t.Fatalf("a spent offer was answered with %+v", got)
 	}
+	if got := len(other.frames.crossingOffers()); got != 1 {
+		t.Fatalf("declining reopened the offer: %d offers", got)
+	}
+
+	// Asking again is walking out of the veil and back into it, and it is a fresh offer.
+	walkUntil(t, other.conn, 0, -1, stepOpen(other.open), "walking out", ticks(30))
+	other.walkIn(t, "a second offer", func() bool { return len(other.frames.crossingOffers()) == 2 })
+	if second := other.frames.crossingOffers()[1]; second.OfferID == offer.OfferID {
+		t.Fatal("the second contact restated the spent offer")
+	}
 	if got := len(other.frames.transitions()); got != 0 {
-		t.Fatalf("a spent offer moved the session: %d world changes", got)
+		t.Fatalf("a refused offer moved the session: %d world changes", got)
+	}
+	if got := len(other.frames.actionRefusals()); got != 1 {
+		t.Fatalf("refusing an offer was itself refused: %+v", other.frames.actionRefusals())
+	}
+	saved, _ := cfg.Instances.Lookup(7001)
+	if _, bound := cfg.Instances.Bound(saved.Ruin, friend); bound {
+		t.Fatal("refusing an offer bound the character")
 	}
 }
 
@@ -314,8 +320,7 @@ func TestRefusingAnOfferOverTheWireIsAnsweredWithSilence(t *testing.T) {
 func TestAcceptingAnOfferOverTheWireCrossesAndBinds(t *testing.T) {
 	cfg, request, _, other, friend := halfClearedParty(t)
 
-	other.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
+	other.walkIn(t, "the entry offer", func() bool { return len(other.frames.crossingOffers()) == 1 })
 	offer := other.frames.crossingOffers()[0]
 
 	other.conn.in <- protocol.EncodeInstanceEntryAnswer(protocol.InstanceEntryAnswer{OfferID: offer.OfferID, Accept: true})
@@ -361,11 +366,9 @@ func TestAMismatchedBindingIsRefusedAndExplainedInChat(t *testing.T) {
 	other := playPortalCharacter(t, cfg, chunks, open, peers, identities, 2, stranger, 2)
 	party(t, open, live, other, "Bjorn")
 
-	live.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the owner to cross", func() bool { return len(live.frames.transitions()) == 1 })
+	live.walkIn(t, "the owner to cross", func() bool { return len(live.frames.transitions()) == 1 })
 
-	other.conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the mismatch refusal", func() bool { return len(other.frames.actionRefusals()) == 1 })
+	other.walkIn(t, "the mismatch refusal", func() bool { return len(other.frames.actionRefusals()) == 1 })
 	refused := other.frames.actionRefusals()[0]
 	if refused.Action != vnet.RefusedActionCrossPortal || refused.Reason != vnet.RefusalReasonSessionMismatch {
 		t.Fatalf("the mismatch was refused with %+v", refused)
@@ -390,11 +393,10 @@ func TestAMismatchedBindingIsRefusedAndExplainedInChat(t *testing.T) {
 // An answer sent from inside an instance names an offer that could not have been made
 // from where the character is standing, and crosses nothing.
 func TestAnEntryAnswerFromInsideAnInstanceIsRefused(t *testing.T) {
-	cfg, chunks, open, peers, request := portalSession(t, 2)
+	cfg, chunks, open, peers, _ := portalSession(t, 2)
 	conn, frames := admit(t, cfg, chunks, open, peers, 1)
 
-	conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "the crossing", func() bool { return len(frames.transitions()) == 1 })
+	walkIntoVeil(t, conn, open, "the crossing", func() bool { return len(frames.transitions()) == 1 })
 	inside := frames.transitions()[0].WorldID
 
 	conn.in <- protocol.EncodeInstanceEntryAnswer(protocol.InstanceEntryAnswer{OfferID: inside, Accept: true})

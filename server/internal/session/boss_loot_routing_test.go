@@ -50,7 +50,7 @@ func (h heldBossCorpse) ConsumeClaimedBossLoot(_ uint64, indices []uint8, silver
 // that boss's run. The same take is refused before the character enters and again after it
 // has left, through the frames a client sends and the session's own idea of where it stands.
 func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T) {
-	cfg, chunks, open, peers, request := portalSession(t, 2)
+	cfg, chunks, open, peers, _ := portalSession(t, 2)
 	identities, store := knownIdentities(t)
 	var fallback [3]float64
 	for axis, value := range cfg.Spawn {
@@ -136,8 +136,7 @@ func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T)
 	waitUntil(t, "the take before entering to be refused", func() bool { return refused(vnet.RefusedActionTakeLoot) == 1 })
 	noClaim("before entering")
 
-	conn.in <- protocol.EncodePortalRequest(request)
-	waitUntil(t, "entry", func() bool { return len(frames.transitions()) == 1 })
+	walkIntoVeil(t, conn, open, "entry", func() bool { return len(frames.transitions()) == 1 })
 	change := frames.transitions()[0]
 	if change.WorldID != runID {
 		t.Fatalf("entered world %d, want the owed run %d", change.WorldID, runID)
@@ -159,21 +158,8 @@ func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T)
 		t.Fatalf("journal personal = %+v, want the pelt and silver taken", personal)
 	}
 
-	// Leave by walking to the exit arch. Both walk ends are made resident first, and the
-	// input is known to be read through a loot-open refusal, which the blocking queue carries.
-	instance, _ := cfg.Instances.Lookup(change.WorldID)
-	arrival, exit := world.InstanceAnchors(instance.Seed)
-	for _, anchor := range []world.PlacedAnchor{arrival, exit} {
-		generateAround(t, instance.Chunks, [3]float32{float32(anchor.X), float32(anchor.Y), float32(anchor.Z)}, 1)
-	}
-	conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: 2, MoveX: float32(exit.X-arrival.X) / 6, MoveZ: -float32(exit.Z-arrival.Z) / 6})
-	conn.in <- protocol.EncodeLootOpenRequest(protocol.LootOpenRequest{CorpseID: corpseID + 1, ClientTick: 1})
-	waitUntil(t, "the movement to be read", func() bool { return refused(vnet.RefusedActionOpenLoot) == 1 })
-	for range 10 {
-		cfg.Instances.Step()
-	}
-	conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
-	waitUntil(t, "exit", func() bool { return len(frames.transitions()) == 2 })
+	// Leave by walking into the exit arch.
+	walkToExit(t, cfg, conn, change, "exit", func() bool { return len(frames.transitions()) == 2 })
 	if frames.transitions()[1].WorldID != 0 {
 		t.Fatal("the exit did not return to the open world")
 	}

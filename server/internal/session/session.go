@@ -1109,6 +1109,79 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		}
 		return self, player, run
 	}}
+	// crossPortal is the whole of one crossing attempt from where this character stands:
+	// the return through an instance's own exit, or an entry decided by the manager.
+	//
+	// **Its only caller is a contact**, and that is why it takes a request rather than
+	// reading one: the tick observed the veil, [game.PortalContact.Request] names its
+	// anchor, and every rule a PortalRequest used to be judged by — the anchor, reach,
+	// life, mount and leaving checks, the party route, binding and consent — judges it
+	// here unchanged.
+	crossPortal := func(request protocol.PortalRequest) error {
+		if portalVisit != nil {
+			_, exit := world.InstanceAnchors(portalVisit.Session.Seed)
+			if !player.AtPortal(request, exit) {
+				return refusePortal(vnet.RefusalReasonNotAtPortal)
+			}
+			binding := openBinding
+			binding.Spawn = portalVisit.Return
+			arrival, encodeErr := protocol.EncodeWorldChange(protocol.WorldChange{WorldSeed: cfg.WorldSeed, Arrival: binding.Spawn})
+			if encodeErr != nil {
+				return encodeErr
+			}
+			binding.Arrival = arrival
+			transitionErr := changeWorld(binding)
+			if chunks == openBinding.Chunks {
+				portalVisit.RestoreRespawn(player)
+				cfg.Instances.Leave(portalVisit.Session.ID, portalVisit.Character)
+				portalVisit = nil
+				// WorldChange discarded the client's open-world map knowledge.
+				// Streaming rediscovers nearby columns only, so restore the full
+				// durable ledger and personal marks on returning too.
+				if transitionErr == nil {
+					if e := sendExplored(enqueue, self.Explored.Snapshot()); e != nil {
+						return e
+					}
+					if e := enqueue(protocol.EncodeMarkerList(self.Marks.List())); e != nil {
+						return e
+					}
+					if warning, active := sim.StormWarning(); active {
+						if e := enqueue(protocol.EncodeStormWarning(warning)); e != nil {
+							return e
+						}
+					}
+				}
+			}
+			if transitionErr != nil {
+				// Failure after switching means the socket failed; membership
+				// follows the actual binding even when output cannot complete.
+				if portalVisit == nil {
+					return transitionErr
+				}
+				return refusePortal(vnet.RefusalReasonInstanceUnavailable)
+			}
+			return nil
+		}
+		if cfg.Instances == nil || chunks != openBinding.Chunks {
+			return refusePortal(vnet.RefusalReasonInstanceUnavailable)
+		}
+		return settleCrossing(cfg.Instances.EnterPortal(player, request))
+	}
+
+	// crossOnContact answers one contact the tick handed over.
+	//
+	// **A contact from another world is not a crossing here.** It was observed before a
+	// world change this owner has since made, so the veil it touched is not in front of
+	// the body any more; the simulation also discards one still waiting when it transfers
+	// the body, and this is the half that holds for one already received. A leaving body
+	// crosses nothing, exactly as its PortalRequest was inert.
+	crossOnContact := func(contact game.PortalContact) error {
+		if player == nil || !leavingAt.IsZero() || !contact.In(sim) {
+			return nil
+		}
+		return crossPortal(contact.Request())
+	}
+
 	lastFrame := time.Now()
 	for {
 		// Armed before every read, which is the same thing as re-armed after every
@@ -1136,6 +1209,13 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			return aErr
 		}
 
+		// A body that walked into a veil is answered here, between frames, by the same owner
+		// that answers a frame — which is what lets a crossing change worlds without a lock
+		// or a socket write ever happening on the tick.
+		var contacts <-chan game.PortalContact
+		if player != nil && leavingAt.IsZero() {
+			contacts = player.PortalContacts()
+		}
 		readRequests <- worldEpoch
 		var incoming sessionRead
 	readNext:
@@ -1155,6 +1235,10 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 				break readNext
 			case request := <-control.changes:
 				request.result <- changeWorld(request.binding)
+			case contact := <-contacts:
+				if cErr := crossOnContact(contact); cErr != nil {
+					return cErr
+				}
 			}
 		}
 
@@ -1513,65 +1597,16 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 			continue
 		}
 
+		// **A request is no longer a crossing.** The body walking into a veil is what asks
+		// (see crossOnContact and game/portal_contact.go), so a PortalRequest is decoded, is
+		// inert while leaving like every other intent, and is otherwise answered with the
+		// one refusal that is true of it: nothing about sending it put this body at a portal.
+		// A client that still binds a key to crossing learns that without being disconnected.
 		if msg.Kind == vnet.PayloadPortalRequest {
 			if msg.Portal == nil {
 				return fmt.Errorf("session: %w: absent portal payload", protocol.ErrMalformed)
 			}
-			if portalVisit != nil {
-				_, exit := world.InstanceAnchors(portalVisit.Session.Seed)
-				if !player.AtPortal(*msg.Portal, exit) {
-					if err := refusePortal(vnet.RefusalReasonNotAtPortal); err != nil {
-						return err
-					}
-					continue
-				}
-				binding := openBinding
-				binding.Spawn = portalVisit.Return
-				binding.Arrival, err = protocol.EncodeWorldChange(protocol.WorldChange{WorldSeed: cfg.WorldSeed, Arrival: binding.Spawn})
-				if err != nil {
-					return err
-				}
-				transitionErr := changeWorld(binding)
-				if chunks == openBinding.Chunks {
-					portalVisit.RestoreRespawn(player)
-					cfg.Instances.Leave(portalVisit.Session.ID, portalVisit.Character)
-					portalVisit = nil
-					// WorldChange discarded the client's open-world map knowledge.
-					// Streaming rediscovers nearby columns only, so restore the full
-					// durable ledger and personal marks on returning too.
-					if transitionErr == nil {
-						if e := sendExplored(enqueue, self.Explored.Snapshot()); e != nil {
-							return e
-						}
-						if e := enqueue(protocol.EncodeMarkerList(self.Marks.List())); e != nil {
-							return e
-						}
-						if warning, active := sim.StormWarning(); active {
-							if e := enqueue(protocol.EncodeStormWarning(warning)); e != nil {
-								return e
-							}
-						}
-					}
-				}
-				if transitionErr != nil {
-					// Failure after switching means the socket failed; membership
-					// follows the actual binding even when output cannot complete.
-					if portalVisit == nil {
-						return transitionErr
-					}
-					if err := refusePortal(vnet.RefusalReasonInstanceUnavailable); err != nil {
-						return err
-					}
-				}
-				continue
-			}
-			if cfg.Instances == nil || chunks != openBinding.Chunks {
-				if err := refusePortal(vnet.RefusalReasonInstanceUnavailable); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := settleCrossing(cfg.Instances.EnterPortal(player, *msg.Portal)); err != nil {
+			if err := refusePortal(vnet.RefusalReasonNotAtPortal); err != nil {
 				return err
 			}
 			continue
@@ -1590,7 +1625,7 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 		// assumed**: removing it changes no observable answer, because crossing forgets this
 		// character's offer (`forgetOfferLocked` in `joinLocked`) and `crossLocked` refuses
 		// anyone already inside. It is kept because it states this layer's own precondition
-		// beside the `PortalRequest` block's identical one, not because it is what decides —
+		// beside crossPortal's identical one, not because it is what decides —
 		// recorded here so the next reader does not go looking for a test that pins it.
 		if msg.Kind == vnet.PayloadInstanceEntryAnswer {
 			if msg.EntryAnswer == nil {

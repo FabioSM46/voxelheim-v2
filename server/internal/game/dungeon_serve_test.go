@@ -145,6 +145,8 @@ type serveWorld struct {
 	identities *session.Identities
 	cfg        session.Config
 	request    protocol.PortalRequest
+	tick       uint64
+	input      uint32
 }
 
 func bootServeWorld(t *testing.T, dir string, pair *ticket.Pair, worldID ticket.WorldID) *serveWorld {
@@ -165,7 +167,7 @@ func bootServeWorld(t *testing.T, dir string, pair *ticket.Pair, worldID ticket.
 	group := game.NewWorldGroup()
 	chunks := world.NewCache(serveSeed, 4, 512)
 	peers := session.NewRegistry(session.DefaultConcurrentSessions)
-	open, err := game.NewSim(20, 1, serveSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, log, game.WithWorldGroup(group))
+	open, err := game.NewSim(20, 1, serveSeed, game.NewCacheTerrain(chunks), chunks, peers.NextID, log, game.WithWorldGroup(group), game.WithPortals(ruin.Threshold()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +224,7 @@ func bootServeWorld(t *testing.T, dir string, pair *ticket.Pair, worldID ticket.
 	w := &serveWorld{dir: dir, pair: pair, worldID: worldID, players: players, journal: journal, chunks: chunks, open: open, peers: peers,
 		manager: manager, identities: identities,
 		cfg: session.Config{Instances: manager, WorldSeed: serveSeed, TickRate: 20, ChunkSize: 32, ViewDistance: 1,
-			Spawn: [3]float32{float32(ruin.Arch.X) + 1.5, float32(ruin.Arch.Y) - 1, float32(ruin.Arch.Z) + .5}, VoiceRange: game.VoiceRangeDefault},
+			Spawn: [3]float32{float32(ruin.Arch.X) + 1.5, float32(ruin.Arch.Y) - 1, float32(ruin.Arch.Z) + 2.5}, VoiceRange: game.VoiceRangeDefault},
 		request: protocol.PortalRequest{HasArch: true, Arch: [3]int32{int32(ruin.Arch.X), int32(ruin.Arch.Y), int32(ruin.Arch.Z)}},
 	}
 	return w
@@ -296,11 +298,45 @@ func (w *serveWorld) autosave(t *testing.T) {
 	}
 }
 
-// cross sends the portal request and waits for the session to change worlds into a run.
+// cross walks the character into the ruin's veil, as a player does — one input a tick with the
+// open world stepped between them — and waits for the session to change worlds into a run.
+//
+// A new character starts two blocks in front of the veil; a returning one rejoins at the spot it
+// crossed at, which is in the veil or just beyond it and is an arrival rather than an entry. So the
+// walk turns round every 30 ticks: forward from the spawn reaches the veil at once, and from a
+// return point it passes out of the veil and then back through it, which is a contact.
 func (w *serveWorld) cross(t *testing.T, c *serveClient) game.InstanceSession {
 	t.Helper()
-	c.conn.send(protocol.EncodePortalRequest(w.request))
-	w.awaitFrames(t, c, "the crossing", func(f *serveFrames) bool { return len(f.worlds) > 0 })
+	generate := func(coord world.Coord) {
+		if _, _, err := w.chunks.Get(context.Background(), coord); err != nil {
+			t.Fatal(err)
+		}
+	}
+	centre := world.ContainingChunk(w.cfg.Spawn[0], w.cfg.Spawn[1], w.cfg.Spawn[2])
+	for dz := int32(-1); dz <= 1; dz++ {
+		for dx := int32(-1); dx <= 1; dx++ {
+			generate(world.Coord{X: centre.X + dx, Y: centre.Y, Z: centre.Z + dz})
+		}
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	moveZ := float32(1)
+	for !c.frames.read(func(f *serveFrames) bool { return len(f.worlds) > 0 }) {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out walking into the veil")
+		}
+		w.input++
+		if w.input%30 == 0 {
+			moveZ = -moveZ
+		}
+		select {
+		case c.conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: w.input, MoveZ: moveZ}):
+		default:
+		}
+		w.tick++
+		w.open.Step(w.tick)
+		w.manager.Step()
+		time.Sleep(time.Millisecond)
+	}
 	var id uint64
 	c.frames.read(func(f *serveFrames) bool { id = f.worlds[len(f.worlds)-1]; return true })
 	run, found := w.manager.Lookup(id)

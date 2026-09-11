@@ -94,6 +94,7 @@ func (s *Sim) Transfer(p *Player, target *Sim, spawn [3]float32) error {
 	p.chunks = newChunkFeed()
 	p.chunks.publish(p.chunk)
 	p.mineReady = make(chan MiningCompletion, 1)
+	p.forgetPortalContactLocked()
 	target.players[p.entityID] = p
 	target.byIdentity[p.playerID] = p
 	target.byName[foldPlayerName(p.name)] = p
