@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DeepSeek V4 Flash Automated PR Reviewer — review-only, no commits, no file changes.
+"""DeepSeek V4.1 Flash Automated PR Reviewer — review-only, no commits, no file changes.
 
 Ported from the clinic-deck Kimi reviewer; clinic-deck PR numbers in comments refer
 to the incidents there that shaped these rules.
@@ -304,7 +304,7 @@ DEEPSEEK_MAX_RETRIES = int(os.environ.get("DEEPSEEK_MAX_RETRIES", "1"))
 
 # High reasoning is the deliberate default: it trades some review depth for lower latency
 # and a lower risk of exhausting the shared reasoning/verdict output budget.
-DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_REASONING_EFFORT = os.environ.get("DEEPSEEK_REASONING_EFFORT", "high")
 
 # Stamped into every Mode A review body; round accounting counts only reviews

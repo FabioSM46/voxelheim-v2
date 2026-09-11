@@ -12,7 +12,7 @@ here.
 | Scrum Master | Claude/OpenCode (`/scrum-master`) or Codex (`$scrum-master`) | Runs ceremonies, drafts specs, creates issues |
 | Developer | Claude/OpenCode (`/dev-issue`) or Codex (`$dev-issue`) | Implements issues, opens PRs, resolves feedback |
 | Iteration Orchestrator | Claude/OpenCode (`/develop-iteration`) or Codex (`$develop-iteration`) | Parallelizes committed issues, remediates PRs, merges non-main bases |
-| Reviewer | DeepSeek `deepseek-v4-flash` with high reasoning (auto) + You | Automated code review on every PR |
+| Reviewer | DeepSeek `deepseek-flash` (V4.1) with high reasoning (auto) + You | Automated code review on every PR |
 
 ## The Completion-Driven Cycle
 

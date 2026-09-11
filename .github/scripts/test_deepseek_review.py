@@ -425,7 +425,7 @@ class CallDeepSeekContractTests(unittest.TestCase):
         result = deepseek_review.call_deepseek(client, "system", "user", json_mode=True)
 
         self.assertIn('"review_complete": true', result)
-        self.assertEqual("deepseek-v4-flash", completions.kwargs["model"])
+        self.assertEqual("deepseek-flash", completions.kwargs["model"])
         self.assertEqual({"type": "json_object"}, completions.kwargs["response_format"])
         self.assertEqual(
             deepseek_review.DEEPSEEK_MAX_OUTPUT_TOKENS,
@@ -451,7 +451,7 @@ class CallDeepSeekContractTests(unittest.TestCase):
             deepseek_review.call_deepseek(client, "system", "user", json_mode=True)
 
         diagnostic = str(raised.exception)
-        self.assertIn("model=deepseek-v4-flash", diagnostic)
+        self.assertIn("model=deepseek-flash", diagnostic)
         self.assertIn(
             f"output_ceiling_tokens={deepseek_review.DEEPSEEK_MAX_OUTPUT_TOKENS}",
             diagnostic,
