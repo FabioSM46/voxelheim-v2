@@ -198,6 +198,9 @@ jobs:
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            if ! grep -q '^https://mirrors\.edge\.kernel\.org/ubuntu/' /etc/apt/apt-mirrors.txt; then
+              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:4\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+            fi
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
           fi

@@ -271,17 +271,27 @@ jobs:
         # Matched on the host, so no other mirror in the file (security.ubuntu.com,
         # ports.ubuntu.com) is touched.
         #
-        # **And repointed to https, whatever scheme it had** (#1107). The image
-        # writes the Azure entry as plain http, and the first version of this step
-        # moved the host and kept the scheme, leaving http://archive.ubuntu.com at
-        # priority 1. On 2026-09-11 that port stopped answering from the runners:
-        # three client jobs spent their five minutes in 33-second index timeouts on
-        # it, and https://archive.ubuntu.com, one line below, answered in the same
-        # logs seconds before the step expired. https is the transport the
-        # image's own fallback entries already use.
+        # **Repointed to https, and given a second host** (#1107). The first
+        # version of this step moved the host and kept the image's http scheme,
+        # leaving http://archive.ubuntu.com at priority 1. On 2026-09-11 that port
+        # stopped answering from the runners and three client jobs spent their five
+        # minutes in 33-second index timeouts on it. Moving to https was not enough
+        # on its own: the next run's indexes took four minutes of retries over
+        # https, and every package download from archive.ubuntu.com then timed out.
+        # After this repoint every Ubuntu entry is that one host, so there was
+        # nothing to fail over to.
+        #
+        # mirrors.edge.kernel.org carries the full Ubuntu archive with Ubuntu's
+        # signed InRelease files, so APT still verifies every package against
+        # Ubuntu's key and the mirror adds a route, not trust. It goes in at
+        # priority 4, after every entry the image writes, and only once. APT's
+        # mirror method moves to the next mirror when a file fails.
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
             sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            if ! grep -q '^https://mirrors\.edge\.kernel\.org/ubuntu/' /etc/apt/apt-mirrors.txt; then
+              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:4\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+            fi
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
           fi
