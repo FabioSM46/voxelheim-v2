@@ -633,8 +633,15 @@ func (m *mob) stepWindup(s *Sim, target *Player) {
 // The caller holds Sim.mu.
 func (s *Sim) landMobBlowLocked(m *mob, target *Player, rawDamage uint16) {
 	damage := uint16(uint32(rawDamage) * uint32(ArmourScale-target.worn.armour) / uint32(ArmourScale))
-	blocked := target.blocking && target.wornShield.fraction > 0 && shieldFacesMob(target, m)
+	// The parry costs energy, and only here: at the moment the shield actually reduces a
+	// blow, never for holding it up. A starved guard absorbs nothing — the blow lands at
+	// full damage, the shield keeps its durability, the reserve keeps what little it has,
+	// and the mob earns no block threat, because no block happened.
+	parryCost := uint32(ParryEnergyCost) * energyScale
+	blocked := target.blocking && target.wornShield.fraction > 0 && shieldFacesMob(target, m) &&
+		target.energy >= parryCost
 	if blocked {
+		target.energy -= parryCost
 		damage = uint16(uint32(damage) * uint32(100-target.wornShield.fraction) / 100)
 		target.spendShieldDurabilityLocked()
 		s.creditBlockThreatLocked(target, m)

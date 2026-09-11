@@ -1008,6 +1008,8 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 
@@ -1024,6 +1026,8 @@ mod tests {
             respawn_ticks,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 
@@ -1206,6 +1210,8 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         };
         let longest = PlayerVitals {
             health: u16::MAX,
@@ -1219,6 +1225,8 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         };
 
         let mut app = App::new();

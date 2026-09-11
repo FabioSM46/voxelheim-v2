@@ -384,10 +384,26 @@ func (w *serveWorld) record(t *testing.T, owner identity.PlayerID) persist.Recor
 
 // awaitClaim waits for a claim to finish: the character record and the journal both show it,
 // and no intent is left prepared. Both are durable state a finished claim always leaves.
-func (w *serveWorld) awaitClaim(t *testing.T, c *serveClient, owner identity.PlayerID, what string, done func(persist.Record, persist.RewardDefeat) bool) persist.Record {
+//
+// pass, when not nil, runs on every iteration before the check, the way voxelheimd's reward
+// loop runs DeliverBossExperience on every tick. **It is a retry, not a convenience.** The
+// journal acknowledges a claim, which clears its intent and marks its entries taken, before
+// finishReward releases the character. A delivery pass in that window finds the character
+// still owned, skips it with ErrRewardOwned, and a single call is never repeated: the wait
+// then times out with epoch and experience unchanged and no intent prepared, which is exactly
+// how the experience claim failed on an assembled head in CI. The server retries a second
+// later; the test now retries too. Exactly-once is unaffected: a pass skips a share already
+// taken and an owner whose claim is running, and callers assert the epoch and totals moved by
+// exactly one claim.
+func (w *serveWorld) awaitClaim(t *testing.T, c *serveClient, owner identity.PlayerID, what string, pass func() error, done func(persist.Record, persist.RewardDefeat) bool) persist.Record {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
+		if pass != nil {
+			if err := pass(); err != nil {
+				t.Fatal(err)
+			}
+		}
 		rec := w.record(t, owner)
 		snapshot, err := w.journal.Snapshot()
 		if err != nil {
@@ -493,16 +509,15 @@ func TestTheFirstDungeonProgressesAcrossRestartsWithEveryRewardDeliveredOnce(t *
 		t.Fatalf("the released corpse offers %+v, want both rolled entries", loot)
 	}
 	c.conn.send(protocol.EncodeLootTakeRequest(protocol.LootTakeRequest{CorpseID: loot.CorpseID, EntryID: 1, Revision: loot.Revision, ClientTick: 2}))
-	afterTake := w.awaitClaim(t, c, owner, "the first entry's claim", func(r persist.Record, d persist.RewardDefeat) bool {
+	afterTake := w.awaitClaim(t, c, owner, "the first entry's claim", nil, func(r persist.Record, d persist.RewardDefeat) bool {
 		return r.BossRewardEpoch == base.BossRewardEpoch+1 && d.Personal[0].Taken != 0
 	})
 	if got := w.guardianDefeat(t).Personal[0]; got.Taken != 0b01 {
 		t.Fatalf("after taking entry 1 the journal records taken %b, want only index 0", got.Taken)
 	}
-	if err := w.identities.DeliverBossExperience(); err != nil {
-		t.Fatal(err)
-	}
-	delivered := w.awaitClaim(t, c, owner, "the experience claim", func(r persist.Record, d persist.RewardDefeat) bool {
+	// Offered by the same pass voxelheimd repeats, repeated until the claim lands: the take above
+	// may still own the character when the first pass runs.
+	delivered := w.awaitClaim(t, c, owner, "the experience claim", w.identities.DeliverBossExperience, func(r persist.Record, d persist.RewardDefeat) bool {
 		return d.Experience[0].Taken
 	})
 	if delivered.Experience != afterTake.Experience+share || delivered.BossRewardEpoch != afterTake.BossRewardEpoch+1 {
@@ -531,7 +546,7 @@ func TestTheFirstDungeonProgressesAcrossRestartsWithEveryRewardDeliveredOnce(t *
 		t.Fatalf("the rebuilt corpse offers %+v, want only entry 2 at its roll index", remainder)
 	}
 	c.conn.send(protocol.EncodeLootTakeAllRequest(protocol.LootTakeAllRequest{CorpseID: remainder.CorpseID, Revision: remainder.Revision, ClientTick: 2}))
-	final := w.awaitClaim(t, c, owner, "the remainder's claim", func(r persist.Record, d persist.RewardDefeat) bool {
+	final := w.awaitClaim(t, c, owner, "the remainder's claim", nil, func(r persist.Record, d persist.RewardDefeat) bool {
 		return r.BossRewardEpoch == delivered.BossRewardEpoch+1 && d.Personal[0].Taken == 0b11
 	})
 	if final.Experience != delivered.Experience {

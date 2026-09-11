@@ -17,7 +17,7 @@ pub const ENUM_MAX_REFUSAL_REASON: u8 = 67;
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 57] = [
+pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 58] = [
     RefusalReason::Unknown,
     RefusalReason::GroundNotGenerated,
     RefusalReason::GroundIsAir,
@@ -71,6 +71,7 @@ pub const ENUM_VALUES_REFUSAL_REASON: [RefusalReason; 57] = [
     RefusalReason::InstanceUnavailable,
     RefusalReason::SessionMismatch,
     RefusalReason::EntryOfferUnknown,
+    RefusalReason::NotEnoughEnergy,
     RefusalReason::MalformedNoAnchor,
     RefusalReason::MalformedFacing,
     RefusalReason::MalformedSlot,
@@ -252,6 +253,10 @@ impl RefusalReason {
     /// are the same sentence, which is what keeps a guess from learning anything — the
     /// same call `MarkerUnknown` makes for a mark that belongs to somebody else.
     pub const EntryOfferUnknown: Self = Self(52);
+    /// The player's energy is below what the action costs. Paired with
+    /// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
+    /// the answer, so no amount is carried here.
+    pub const NotEnoughEnergy: Self = Self(53);
     /// The request carried no anchor at all. The origin is a real place, so an absent
     /// struct field is refused rather than read as (0, 0, 0).
     pub const MalformedNoAnchor: Self = Self(64);
@@ -321,6 +326,7 @@ impl RefusalReason {
         Self::InstanceUnavailable,
         Self::SessionMismatch,
         Self::EntryOfferUnknown,
+        Self::NotEnoughEnergy,
         Self::MalformedNoAnchor,
         Self::MalformedFacing,
         Self::MalformedSlot,
@@ -382,6 +388,7 @@ impl RefusalReason {
             Self::InstanceUnavailable => Some("InstanceUnavailable"),
             Self::SessionMismatch => Some("SessionMismatch"),
             Self::EntryOfferUnknown => Some("EntryOfferUnknown"),
+            Self::NotEnoughEnergy => Some("NotEnoughEnergy"),
             Self::MalformedNoAnchor => Some("MalformedNoAnchor"),
             Self::MalformedFacing => Some("MalformedFacing"),
             Self::MalformedSlot => Some("MalformedSlot"),
