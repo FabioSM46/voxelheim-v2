@@ -402,7 +402,22 @@ pub(super) const CANTER: Gait = Gait {
     nod: 3.0 * DEGREE,
 };
 
+/// The gait a horse is drawn with: a ridden horse canters, a paddock horse walks.
+///
+/// The one place that choice is made. [`animate_gait`] poses the legs with it and
+/// `mount_audio` reads the hoofbeats from it, so the legs and the hooves cannot disagree
+/// about which gait a horse is in.
+pub(super) const fn gait(ridden: bool) -> &'static Gait {
+    if ridden { &CANTER } else { &WALK }
+}
+
 impl Gait {
+    /// Where in the cycle each leg lands, in [`Leg::ALL`] order — the same instants the
+    /// legs are posed from, read by `mount_audio` so a hoofbeat is heard where one is seen.
+    pub(super) const fn beats(&self) -> [f32; 4] {
+        self.beats
+    }
+
     /// Where in this gait's cycle the horse is, or `None` standing.
     pub(super) fn cycle(&self, walk: WalkPose) -> Option<f32> {
         walk.moving
@@ -920,10 +935,10 @@ pub(super) fn animate_gait(
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
-        pose_horse(horse, *walk, &CANTER, &children, &mut joints);
+        pose_horse(horse, *walk, gait(true), &children, &mut joints);
     }
     for (horse, walk) in &paddock_horses {
-        pose_horse(horse, *walk, &WALK, &children, &mut joints);
+        pose_horse(horse, *walk, gait(false), &children, &mut joints);
     }
 }
 
