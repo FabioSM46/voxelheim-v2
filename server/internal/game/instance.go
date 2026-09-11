@@ -159,6 +159,16 @@ func NewInstanceManager(tickRate, viewDistance uint8, maxSessions int, mintEntit
 	if _, err := NewSim(tickRate, viewDistance, 0, NewCacheTerrain(probe), probe, mintEntityID, log, options...); err != nil {
 		return nil, err
 	}
+	// Every copy is given its own exit and nothing else (see newSessionLocked), so a
+	// threshold named here could only ever be dropped. Refused rather than ignored, so the
+	// policy cannot be broken by a caller who passes the open world's options through.
+	var configured simOptions
+	for _, option := range options {
+		option(&configured)
+	}
+	if len(configured.portals) != 0 {
+		return nil, errors.New("game: an instance manager places each copy's own exit; WithPortals is for the open world")
+	}
 	return &InstanceManager{
 		tickRate: tickRate, viewDistance: viewDistance, maxSessions: maxSessions,
 		mintEntityID: mintEntityID, now: time.Now, log: log, options: append([]SimOption(nil), options...),
@@ -225,8 +235,8 @@ func (m *InstanceManager) newSessionLocked(id uint64, seed int64, ruin InstanceR
 	if err != nil {
 		return nil, err
 	}
-	// Whatever portals the manager's options named belong to the open world. The one arch
-	// a body can walk into here is this copy's own return.
+	// The one arch a body can walk into here is this copy's own return. NewInstanceManager
+	// refuses WithPortals, so there is no configured threshold for this to replace.
 	sim.portalSheets = []portalSheet{newPortalSheet(world.InstanceExitThreshold(seed))}
 	if err := sim.placeDungeonEncounters(seed, gate, progress); err != nil {
 		return nil, err

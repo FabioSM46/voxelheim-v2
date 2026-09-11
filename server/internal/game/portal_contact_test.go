@@ -219,3 +219,19 @@ func TestContactIsBoundedToTheWorldsOwnPortals(t *testing.T) {
 		}
 	}
 }
+
+// An instance manager gives every copy its own exit and no other threshold, so one handed
+// WithPortals would silently drop it. It refuses instead, and still accepts the options an
+// instance does use.
+func TestAnInstanceManagerRefusesPortalsItWouldDrop(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	threshold := world.InstanceExitThreshold(1)
+	if _, err := NewInstanceManager(20, 1, 2, testEntityIDs(), log, WithWorldGroup(NewWorldGroup()), WithPortals(threshold)); err == nil {
+		t.Fatal("an instance manager accepted a portal it would never place")
+	}
+	m, err := NewInstanceManager(20, 1, 2, testEntityIDs(), log, WithWorldGroup(NewWorldGroup()))
+	if err != nil {
+		t.Fatalf("an instance manager with no portals was refused: %v", err)
+	}
+	m.Close()
+}

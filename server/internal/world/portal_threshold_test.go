@@ -127,3 +127,22 @@ func TestTheWorldRuinThresholdIsTheVeilItsChunksHold(t *testing.T) {
 		}
 	}
 }
+
+// The world's one ruin is always present in its own cell, and PortalRuin says so rather
+// than handing back a zero ruin whose threshold would stand at the origin.
+func TestPortalRuinIsTheRuinOfItsOwnCell(t *testing.T) {
+	cx, cz := ruinCell()
+	for _, seed := range []int64{0x5EED, 1, -7, 424242} {
+		got, found := PortalRuin(seed)
+		want, wantFound := RuinAt(seed, cx, cz)
+		if !found || !wantFound {
+			t.Fatalf("seed %d: the ruin cell holds no ruin", seed)
+		}
+		if got.Arch != want.Arch || got.Building.Facing != want.Building.Facing || got.Building.Variant != want.Building.Variant {
+			t.Fatalf("seed %d: PortalRuin %+v is not the ruin of its cell %+v", seed, got.Arch, want.Arch)
+		}
+		if heart := got.Threshold().Heart; heart != [3]int64{got.Arch.X, got.Arch.Y, got.Arch.Z} || heart == [3]int64{} {
+			t.Fatalf("seed %d: the portal threshold stands at %v, not at the arch %+v", seed, heart, got.Arch)
+		}
+	}
+}
