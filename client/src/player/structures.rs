@@ -110,15 +110,26 @@ const CAMPFIRE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 
 const RUNESTONE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
 
+/// The three benches, mirroring `leatherBenchFootprint`, `armourBenchFootprint` and
+/// `enchantingTableFootprint`: the two tables take the forge's two cells along the facing,
+/// the lectern one.
+const LEATHER_BENCH_FOOTPRINT: [[i32; 2]; 2] = [[0, 0], [0, -1]];
+const ARMOUR_BENCH_FOOTPRINT: [[i32; 2]; 2] = [[0, 0], [0, -1]];
+const ENCHANTING_TABLE_FOOTPRINT: [[i32; 2]; 1] = [[0, 0]];
+
 /// How many cells of air each kind needs above every cell of its footprint.
 ///
 /// Two for a tent, because a player has to be able to stand up inside the thing they
 /// respawn in; one for a forge, which is waist-high furniture nobody stands inside, and
-/// one for a campfire, which is lower still.
+/// one for a campfire, which is lower still. One for a leather bench, a low table; two for
+/// an armour bench, whose cuirass form stands chest-high, and two for the lectern's glow.
 const TENT_HEADROOM: i32 = 2;
 const FORGE_HEADROOM: i32 = 1;
 const CAMPFIRE_HEADROOM: i32 = 1;
 const RUNESTONE_HEADROOM: i32 = 3;
+const LEATHER_BENCH_HEADROOM: i32 = 1;
+const ARMOUR_BENCH_HEADROOM: i32 = 2;
+const ENCHANTING_TABLE_HEADROOM: i32 = 2;
 
 /// Every kind this module draws, so a fold over the whole contract has one place to read.
 ///
@@ -128,11 +139,14 @@ const RUNESTONE_HEADROOM: i32 = 3;
 /// admits a member only in the commit that teaches this module to draw it, so whoever adds
 /// one is already standing here. A member missing from this list costs preview cells and
 /// nothing worse; [`MAX_FOOTPRINT_CELLS`] is where that bound is kept.
-const ALL_STRUCTURE_KINDS: [StructureKind; 4] = [
+const ALL_STRUCTURE_KINDS: [StructureKind; 7] = [
     StructureKind::Tent,
     StructureKind::Forge,
     StructureKind::Campfire,
     StructureKind::Runestone,
+    StructureKind::LeatherBench,
+    StructureKind::ArmourBench,
+    StructureKind::EnchantingTable,
 ];
 
 /// The footprint offsets for one kind, in the canonical North orientation.
@@ -145,6 +159,9 @@ const fn footprint_offsets(kind: StructureKind) -> &'static [[i32; 2]] {
         StructureKind::Forge => &FORGE_FOOTPRINT,
         StructureKind::Campfire => &CAMPFIRE_FOOTPRINT,
         StructureKind::Runestone => &RUNESTONE_FOOTPRINT,
+        StructureKind::LeatherBench => &LEATHER_BENCH_FOOTPRINT,
+        StructureKind::ArmourBench => &ARMOUR_BENCH_FOOTPRINT,
+        StructureKind::EnchantingTable => &ENCHANTING_TABLE_FOOTPRINT,
     }
 }
 
@@ -155,6 +172,9 @@ fn headroom(kind: StructureKind) -> i32 {
         StructureKind::Forge => FORGE_HEADROOM,
         StructureKind::Campfire => CAMPFIRE_HEADROOM,
         StructureKind::Runestone => RUNESTONE_HEADROOM,
+        StructureKind::LeatherBench => LEATHER_BENCH_HEADROOM,
+        StructureKind::ArmourBench => ARMOUR_BENCH_HEADROOM,
+        StructureKind::EnchantingTable => ENCHANTING_TABLE_HEADROOM,
     }
 }
 
@@ -1424,6 +1444,13 @@ fn spawn_structure(
                 part(visuals.rune.clone(), visuals.rune_stone[own].clone());
                 false
             }
+            // The three benches stand in the world and their footprints are mirrored above,
+            // so aiming and removal already work on them — but nothing draws them yet: their
+            // models are #1129. Accepted undrawn on `MobKind::VargrGuardian`'s precedent,
+            // because refusing a kind the server really places would end the session.
+            StructureKind::LeatherBench
+            | StructureKind::ArmourBench
+            | StructureKind::EnchantingTable => false,
         };
 
         if lit {

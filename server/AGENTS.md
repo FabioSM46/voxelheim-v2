@@ -1019,10 +1019,11 @@ parts of it were already decided by the registry and by the slot invariants abov
   `TestTheStoneAndThePatchAreTheOnlyRepairKits` — the sweep exists so that a *third* one is
   a decision somebody makes in that list rather than an accident.
 - **The two kits differ in where they come from, not in a multiplier.** A stone restores 50
-  and is made at a forge out of stone and coal; a patch restores 40 and is made anywhere out
-  of two vargr pelts. GDD §4 asks for a pair of field kits, and a patch worth a quarter of a
-  stone would not be a second answer — it would be a worse one nobody carries. What a player
-  chooses between is a walk home and a hunt.
+  and is made at a forge out of stone and coal; a patch restores 40 and is made at a leather
+  bench out of two vargr pelts (#1119 moved it there with the rest of the leatherwork). GDD
+  §4 asks for a pair of field kits — the *mend* needs nowhere to stand — and a patch worth a
+  quarter of a stone would not be a second answer, it would be a worse one nobody carries.
+  What a player chooses between is ore and a hunt.
 - **It is a flat amount, never a fraction of the target's maximum.** A fraction would cost
   the same number of stones to keep either blade alive, so the reward for forging the
   better one would silently include a cheaper upkeep, and the number would stop being

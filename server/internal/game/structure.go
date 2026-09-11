@@ -47,6 +47,15 @@ const (
 	// the tent — which is what makes "whose ground is this" a question you can answer by
 	// looking rather than by digging and finding out.
 	runestoneHeadroom = 3
+
+	// The three benches. A leather bench is a low table, furniture on the forge's terms,
+	// so one cell. An armour bench carries a cuirass form standing on it, which reaches a
+	// player's chest, so two. An enchanting table is a lectern whose glow hangs over the
+	// slab, so two as well: a ceiling at one would put the light inside whatever was built
+	// over it.
+	leatherBenchHeadroom    = 1
+	armourBenchHeadroom     = 2
+	enchantingTableHeadroom = 2
 )
 
 // MaxRunestonesPerPlayer permits a camp and an outpost per identity. The cap shares
@@ -91,6 +100,16 @@ var (
 	// with three cells of nothing above it; the ward it casts is measured from the chunk
 	// column the anchor falls in and owes nothing to how much ground the stone covers.
 	runestoneFootprint = [][2]int64{{0, 0}}
+
+	// Both benches are long tables: the anchor and one step along the facing, the forge's
+	// own two cells. A bench faces the way its worker stands, which is why the second cell
+	// is along the facing rather than across it.
+	leatherBenchFootprint = [][2]int64{{0, 0}, {0, -1}}
+	armourBenchFootprint  = [][2]int64{{0, 0}, {0, -1}}
+
+	// A lectern is one block of ground, and facing is computed on it rather than
+	// special-cased, for the campfire's reason.
+	enchantingTableFootprint = [][2]int64{{0, 0}}
 )
 
 // structure is one placed tent, forge or campfire.
@@ -179,6 +198,12 @@ func knownStructureKind(item ItemID) (vnet.StructureKind, bool) {
 		return vnet.StructureKindCampfire, true
 	case ItemRunestone:
 		return vnet.StructureKindRunestone, true
+	case ItemLeatherBench:
+		return vnet.StructureKindLeatherBench, true
+	case ItemArmourBench:
+		return vnet.StructureKindArmourBench, true
+	case ItemEnchantingTable:
+		return vnet.StructureKindEnchantingTable, true
 	default:
 		return vnet.StructureKindUnknown, false
 	}
@@ -200,6 +225,12 @@ func structureItem(kind vnet.StructureKind) (ItemID, bool) {
 		return ItemCampfire, true
 	case vnet.StructureKindRunestone:
 		return ItemRunestone, true
+	case vnet.StructureKindLeatherBench:
+		return ItemLeatherBench, true
+	case vnet.StructureKindArmourBench:
+		return ItemArmourBench, true
+	case vnet.StructureKindEnchantingTable:
+		return ItemEnchantingTable, true
 	default:
 		return ItemNone, false
 	}
@@ -265,6 +296,12 @@ func footprintOf(kind vnet.StructureKind, facing vnet.Facing, anchor [3]int64) (
 		offsets, clear = campfireFootprint, campfireHeadroom
 	case vnet.StructureKindRunestone:
 		offsets, clear = runestoneFootprint, runestoneHeadroom
+	case vnet.StructureKindLeatherBench:
+		offsets, clear = leatherBenchFootprint, leatherBenchHeadroom
+	case vnet.StructureKindArmourBench:
+		offsets, clear = armourBenchFootprint, armourBenchHeadroom
+	case vnet.StructureKindEnchantingTable:
+		offsets, clear = enchantingTableFootprint, enchantingTableHeadroom
 	default:
 		return nil, 0, false
 	}

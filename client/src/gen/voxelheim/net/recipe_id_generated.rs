@@ -11,13 +11,13 @@ pub const ENUM_MIN_RECIPE_ID: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_RECIPE_ID: u8 = 21;
+pub const ENUM_MAX_RECIPE_ID: u8 = 24;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 22] = [
+pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 25] = [
     RecipeID::Unknown,
     RecipeID::Forge,
     RecipeID::IronSword,
@@ -40,6 +40,9 @@ pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 22] = [
     RecipeID::Arrows,
     RecipeID::WoodenSceptre,
     RecipeID::Runestone,
+    RecipeID::LeatherBench,
+    RecipeID::ArmourBench,
+    RecipeID::EnchantingTable,
 ];
 
 /// Which recipe a `CraftRequest` names.
@@ -84,9 +87,12 @@ impl RecipeID {
     pub const Arrows: Self = Self(19);
     pub const WoodenSceptre: Self = Self(20);
     pub const Runestone: Self = Self(21);
+    pub const LeatherBench: Self = Self(22);
+    pub const ArmourBench: Self = Self(23);
+    pub const EnchantingTable: Self = Self(24);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 21;
+    pub const ENUM_MAX: u8 = 24;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Forge,
@@ -110,6 +116,9 @@ impl RecipeID {
         Self::Arrows,
         Self::WoodenSceptre,
         Self::Runestone,
+        Self::LeatherBench,
+        Self::ArmourBench,
+        Self::EnchantingTable,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -136,6 +145,9 @@ impl RecipeID {
             Self::Arrows => Some("Arrows"),
             Self::WoodenSceptre => Some("WoodenSceptre"),
             Self::Runestone => Some("Runestone"),
+            Self::LeatherBench => Some("LeatherBench"),
+            Self::ArmourBench => Some("ArmourBench"),
+            Self::EnchantingTable => Some("EnchantingTable"),
             _ => None,
         }
     }

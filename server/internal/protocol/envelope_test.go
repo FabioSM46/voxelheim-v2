@@ -317,8 +317,10 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	t.Parallel()
 
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 38 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 38", got)
+	// V39 appends StructureKind's three benches: the runestone's argument at V26, an enum
+	// member inside StructureState.kind whose decoder refuses what it cannot name.
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 39 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 39", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -3344,6 +3346,15 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// authoritative server as an ordinary answer.
 		"StructureKind.Runestone": {byte(vnet.StructureKindRunestone), 4},
 		"RecipeID.Runestone":      {byte(vnet.RecipeIDRunestone), 21},
+
+		// V39's six. The three StructureKind members move the version, for the runestone's
+		// reason; the three RecipeID members that build them owe nothing, for its recipe's.
+		"StructureKind.LeatherBench":    {byte(vnet.StructureKindLeatherBench), 5},
+		"StructureKind.ArmourBench":     {byte(vnet.StructureKindArmourBench), 6},
+		"StructureKind.EnchantingTable": {byte(vnet.StructureKindEnchantingTable), 7},
+		"RecipeID.LeatherBench":         {byte(vnet.RecipeIDLeatherBench), 22},
+		"RecipeID.ArmourBench":          {byte(vnet.RecipeIDArmourBench), 23},
+		"RecipeID.EnchantingTable":      {byte(vnet.RecipeIDEnchantingTable), 24},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -3358,8 +3369,8 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		// moved ProtocolVersion.Current on its own — until V34 appended two more that
 		// did it together.
 		"MobKind":       {len(vnet.EnumNamesMobKind), 8},
-		"StructureKind": {len(vnet.EnumNamesStructureKind), 5},
-		"RecipeID":      {len(vnet.EnumNamesRecipeID), 22},
+		"StructureKind": {len(vnet.EnumNamesStructureKind), 8},
+		"RecipeID":      {len(vnet.EnumNamesRecipeID), 25},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s has %d members, want %d — a new one needs a decision, not a test edit", name, pair[0], pair[1])

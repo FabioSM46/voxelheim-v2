@@ -22,22 +22,35 @@ const (
 	/// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
 	/// cannot name it, and refusing ends the session. See `common.fbs`.
 	StructureKindRunestone StructureKind = 4
+	/// Where hides are worked into leather gear. V39, and a break on the runestone's
+	/// argument: a receiver that cannot name it refuses the `StructureState` carrying it.
+	StructureKindLeatherBench StructureKind = 5
+	/// Where forged plate is fitted into armour. V39, on the same terms as `LeatherBench`.
+	StructureKindArmourBench StructureKind = 6
+	/// Where a sceptre is carved and bound. V39, on the same terms as `LeatherBench`.
+	StructureKindEnchantingTable StructureKind = 7
 )
 
 var EnumNamesStructureKind = map[StructureKind]string{
-	StructureKindUnknown:   "Unknown",
-	StructureKindTent:      "Tent",
-	StructureKindForge:     "Forge",
-	StructureKindCampfire:  "Campfire",
-	StructureKindRunestone: "Runestone",
+	StructureKindUnknown:         "Unknown",
+	StructureKindTent:            "Tent",
+	StructureKindForge:           "Forge",
+	StructureKindCampfire:        "Campfire",
+	StructureKindRunestone:       "Runestone",
+	StructureKindLeatherBench:    "LeatherBench",
+	StructureKindArmourBench:     "ArmourBench",
+	StructureKindEnchantingTable: "EnchantingTable",
 }
 
 var EnumValuesStructureKind = map[string]StructureKind{
-	"Unknown":   StructureKindUnknown,
-	"Tent":      StructureKindTent,
-	"Forge":     StructureKindForge,
-	"Campfire":  StructureKindCampfire,
-	"Runestone": StructureKindRunestone,
+	"Unknown":         StructureKindUnknown,
+	"Tent":            StructureKindTent,
+	"Forge":           StructureKindForge,
+	"Campfire":        StructureKindCampfire,
+	"Runestone":       StructureKindRunestone,
+	"LeatherBench":    StructureKindLeatherBench,
+	"ArmourBench":     StructureKindArmourBench,
+	"EnchantingTable": StructureKindEnchantingTable,
 }
 
 func (v StructureKind) String() string {

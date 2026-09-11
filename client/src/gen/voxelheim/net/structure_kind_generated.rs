@@ -11,18 +11,21 @@ pub const ENUM_MIN_STRUCTURE_KIND: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_STRUCTURE_KIND: u8 = 4;
+pub const ENUM_MAX_STRUCTURE_KIND: u8 = 7;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_STRUCTURE_KIND: [StructureKind; 5] = [
+pub const ENUM_VALUES_STRUCTURE_KIND: [StructureKind; 8] = [
     StructureKind::Unknown,
     StructureKind::Tent,
     StructureKind::Forge,
     StructureKind::Campfire,
     StructureKind::Runestone,
+    StructureKind::LeatherBench,
+    StructureKind::ArmourBench,
+    StructureKind::EnchantingTable,
 ];
 
 /// What kind of thing a `StructureState` describes.
@@ -45,15 +48,25 @@ impl StructureKind {
     /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
     /// cannot name it, and refusing ends the session. See `common.fbs`.
     pub const Runestone: Self = Self(4);
+    /// Where hides are worked into leather gear. V39, and a break on the runestone's
+    /// argument: a receiver that cannot name it refuses the `StructureState` carrying it.
+    pub const LeatherBench: Self = Self(5);
+    /// Where forged plate is fitted into armour. V39, on the same terms as `LeatherBench`.
+    pub const ArmourBench: Self = Self(6);
+    /// Where a sceptre is carved and bound. V39, on the same terms as `LeatherBench`.
+    pub const EnchantingTable: Self = Self(7);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 4;
+    pub const ENUM_MAX: u8 = 7;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::Tent,
         Self::Forge,
         Self::Campfire,
         Self::Runestone,
+        Self::LeatherBench,
+        Self::ArmourBench,
+        Self::EnchantingTable,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -63,6 +76,9 @@ impl StructureKind {
             Self::Forge => Some("Forge"),
             Self::Campfire => Some("Campfire"),
             Self::Runestone => Some("Runestone"),
+            Self::LeatherBench => Some("LeatherBench"),
+            Self::ArmourBench => Some("ArmourBench"),
+            Self::EnchantingTable => Some("EnchantingTable"),
             _ => None,
         }
     }
