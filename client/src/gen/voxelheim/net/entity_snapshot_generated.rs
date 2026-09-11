@@ -339,12 +339,13 @@ impl<'a> EntitySnapshot<'a> {
     /// Every **other** member of the recipient's party, in authoritative party order.
     /// Empty when the recipient is in no party.
     ///
-    /// **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
-    /// state only for bodies already present in `entities`, and `PlayerVitals` exposes one
-    /// player's health only to that player. Party membership is explicit consent to share
-    /// position and health with the other members, including outside the streamed view, so
-    /// this vector is the narrow exception rather than a field on `EntityState` paid by every
-    /// visible player. For everyone outside a party it is absent and costs zero bytes.
+    /// **Why this widens a snapshot beyond ordinary visibility.** Since V41 every visible
+    /// player's health is public and rides on `EntityState` itself, so what this vector adds
+    /// is not health but reach: `entities` holds only the bodies inside the streamed view,
+    /// and party membership is explicit consent to share position and health with the other
+    /// members **outside** it too. A member standing in view is therefore described twice,
+    /// once in each place, from the same authoritative value. For everyone outside a party
+    /// this vector is absent and costs zero bytes.
     ///
     /// Decoder invariants:
     ///   - no `entity_id` appears twice

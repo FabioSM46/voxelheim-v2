@@ -1215,11 +1215,17 @@ type ChunkResendRequest struct {
 // non-finite position would poison the client's interpolation and, through the
 // entity's transform, its renderer. game.Sim is what guarantees that; this type
 // only carries it.
+//
+// Health and MaxHealth (V41) are the same authoritative pair PlayerVitals carries for
+// the recipient, public for every visible player: MaxHealth is non-zero, Health never
+// exceeds it, and a dead player's Health is zero.
 type EntityState struct {
-	EntityID uint64
-	Pos      [3]float32
-	Vel      [3]float32
-	Yaw      float32
+	EntityID  uint64
+	Pos       [3]float32
+	Vel       [3]float32
+	Yaw       float32
+	Health    uint16
+	MaxHealth uint16
 }
 
 // ItemDropState is one authoritative dropped item beside the player entities in
@@ -2326,6 +2332,9 @@ func ValidateEntitySnapshot(frame []byte) (err error) {
 		if _, duplicate := entities[entityID]; duplicate {
 			return fmt.Errorf("%w: EntitySnapshot names player %d twice", ErrMalformed, entityID)
 		}
+		if health, maxHealth := state.Health(), state.MaxHealth(); maxHealth == 0 || health > maxHealth {
+			return fmt.Errorf("%w: EntitySnapshot player %d is at %d/%d health, want a non-zero maximum and no more health than it", ErrMalformed, entityID, health, maxHealth)
+		}
 		entities[entityID] = struct{}{}
 	}
 
@@ -2880,6 +2889,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 			e.Pos[0], e.Pos[1], e.Pos[2],
 			e.Vel[0], e.Vel[1], e.Vel[2],
 			e.Yaw,
+			e.Health, e.MaxHealth,
 		)
 	}
 	entitiesOffset := b.EndVector(len(s.Entities))

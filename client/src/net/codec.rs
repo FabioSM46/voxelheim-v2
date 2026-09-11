@@ -1112,6 +1112,12 @@ pub struct EntityState {
     pub vel: [f32; 3],
     /// Facing, in radians, wrapped into (-π, π] by the server.
     pub yaw: f32,
+    /// V41. The server's health for this player — public for every visible player, and
+    /// for the local player equal to `PlayerVitals::health`. Zero for a dead player.
+    /// Never exceeds `max_health`.
+    pub health: u16,
+    /// V41. Guaranteed non-zero: the denominator of every health bar drawn over a body.
+    pub max_health: u16,
 }
 
 /// One projectile's authoritative state in a snapshot.
@@ -3426,6 +3432,15 @@ pub enum DecodeError {
         field: &'static str,
         value: f32,
     },
+    /// A snapshot carries a player whose health has no denominator or exceeds it.
+    ///
+    /// Refused with the frame, as `PartyMemberHealth` is: a bar drawn as
+    /// `health / max_health` divides by zero or overflows its frame otherwise.
+    EntityHealth {
+        entity_id: u64,
+        health: u16,
+        max_health: u16,
+    },
     /// A snapshot carries a drop with a NaN or infinite position component.
     NonFiniteDrop {
         entity_id: u64,
@@ -4176,6 +4191,14 @@ impl fmt::Display for DecodeError {
                 field,
                 value,
             } => write!(f, "entity {entity_id} has a non-finite {field}: {value}"),
+            Self::EntityHealth {
+                entity_id,
+                health,
+                max_health,
+            } => write!(
+                f,
+                "entity {entity_id} is {health}/{max_health}, want a non-zero maximum and no more health than it"
+            ),
             Self::NonFiniteDrop {
                 entity_id,
                 field,
@@ -7094,15 +7117,27 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
     })
 }
 
-/// Copies one entity out of a snapshot, refusing a non-finite component.
+/// Copies one entity out of a snapshot, refusing a non-finite component or a health pair
+/// the contract forbids.
 ///
 /// A finiteness test, never a clamp. NaN compares false against every bound, so a clamp
 /// would pass one through untouched — into the interpolation, then into a `Transform`,
-/// and from there into every child of it.
+/// and from there into every child of it. Health is refused rather than clamped for the
+/// same reason `PlayerVitals` is: a zero maximum or an overfull bar is a server bug
+/// reporting itself, and repairing it here would hide the only evidence.
 fn entity_state(state: &fb::EntityState) -> Result<EntityState, DecodeError> {
     let entity_id = state.entity_id();
     if entity_id == 0 {
         return Err(DecodeError::EntityWithoutIdentity);
+    }
+    let health = state.health();
+    let max_health = state.max_health();
+    if max_health == 0 || health > max_health {
+        return Err(DecodeError::EntityHealth {
+            entity_id,
+            health,
+            max_health,
+        });
     }
     let pos = state.pos();
     let vel = state.vel();
@@ -7132,6 +7167,8 @@ fn entity_state(state: &fb::EntityState) -> Result<EntityState, DecodeError> {
             checked("vel.z", vel.z())?,
         ],
         yaw: checked("yaw", state.yaw())?,
+        health,
+        max_health,
     })
 }
 
@@ -8586,16 +8623,21 @@ pub(super) mod server_side {
         pub pos: [f32; 3],
         pub vel: [f32; 3],
         pub yaw: f32,
+        pub health: u16,
+        pub max_health: u16,
     }
 
     impl EntityStateWire {
-        /// An entity standing still at the origin, for a test to break one field of.
+        /// An entity standing still at the origin at full health, for a test to break one
+        /// field of.
         pub fn at(entity_id: u64, x: f32) -> Self {
             Self {
                 entity_id,
                 pos: [x, 64.0, 0.0],
                 vel: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }
         }
     }
@@ -8799,6 +8841,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -8970,6 +9014,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -9023,6 +9069,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -9160,6 +9208,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -10707,7 +10757,9 @@ mod tests {
         // enum member inside a table field whose decoder refuses what it cannot name.
         // V40 appends energy to `PlayerVitals`: a non-zero `max_energy` this client
         // refuses to go without, which a V39 server never sends.
-        assert_eq!(fb::ProtocolVersion::Current.0, 40);
+        // V41 puts health on `EntityState`: a non-zero `max_health` this client refuses to
+        // go without, where a V40 server's snapshot carries only padding.
+        assert_eq!(fb::ProtocolVersion::Current.0, 41);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -13232,6 +13284,9 @@ mod tests {
     /// catches somebody quietly adding a field later, which a FlatBuffers struct can
     /// never take back. `TestEntityStateIsStillFortyBytesOnTheWire` is the other side's
     /// half, measured from an encoded frame because Go has no `size_of` for one.
+    ///
+    /// V41's `health` and `max_health` are the one addition that left it at 40: two `u16`s
+    /// in the padding the `u64` already forced after `yaw`.
     #[test]
     fn entity_state_is_still_forty_bytes_on_the_wire() {
         assert_eq!(
@@ -14662,12 +14717,16 @@ mod tests {
                 pos: [0.5, 64.0, -0.5],
                 vel: [4.3, 0.0, 0.0],
                 yaw: 0.25,
+                health: 100,
+                max_health: 100,
             },
             EntityStateWire {
                 entity_id: 4096,
                 pos: [-100.0, 44.25, 7.0],
                 vel: [0.0, -60.0, 0.0],
                 yaw: -3.0,
+                health: 100,
+                max_health: 100,
             },
         ];
 
@@ -14685,12 +14744,16 @@ mod tests {
                         pos: [0.5, 64.0, -0.5],
                         vel: [4.3, 0.0, 0.0],
                         yaw: 0.25,
+                        health: 100,
+                        max_health: 100,
                     },
                     EntityState {
                         entity_id: 4096,
                         pos: [-100.0, 44.25, 7.0],
                         vel: [0.0, -60.0, 0.0],
                         yaw: -3.0,
+                        health: 100,
+                        max_health: 100,
                     },
                 ],
                 drops: Vec::new(),
@@ -15367,6 +15430,71 @@ mod tests {
             decode(&frame),
             Err(DecodeError::NonFiniteEntity { entity_id: 2, .. })
         ));
+    }
+
+    /// V41: every visible player's health rides on `EntityState`, and the decoder hands
+    /// it over untouched — including a dead player's zero, which is legal.
+    #[test]
+    fn every_entity_carries_its_health_and_a_dead_one_carries_zero() {
+        let hurt = EntityStateWire {
+            health: 73,
+            max_health: 120,
+            ..EntityStateWire::at(1, 0.0)
+        };
+        let dead = EntityStateWire {
+            health: 0,
+            max_health: 100,
+            ..EntityStateWire::at(2, 4.0)
+        };
+        let full = EntityStateWire {
+            health: u16::MAX,
+            max_health: u16::MAX,
+            ..EntityStateWire::at(3, 8.0)
+        };
+
+        let Ok(Message::Snapshot(snapshot)) =
+            decode(&encode_entity_snapshot(5, &[hurt, dead, full]))
+        else {
+            panic!("a snapshot with three legal health pairs did not decode");
+        };
+        let health: Vec<_> = snapshot
+            .entities
+            .iter()
+            .map(|entity| (entity.entity_id, entity.health, entity.max_health))
+            .collect();
+        assert_eq!(
+            health,
+            [(1, 73, 120), (2, 0, 100), (3, u16::MAX, u16::MAX)],
+            "each entity's pair must arrive as sent, in order and unswapped"
+        );
+    }
+
+    /// `PlayerVitals`' invariants, on every visible player: a zero denominator or an
+    /// overfull bar refuses the whole frame, as a non-finite position does.
+    #[test]
+    fn an_entity_health_the_contract_forbids_refuses_the_snapshot() {
+        for (health, max_health) in [(0, 0), (1, 0), (101, 100), (u16::MAX, 1)] {
+            let frame = encode_entity_snapshot(
+                1,
+                &[
+                    EntityStateWire::at(1, 0.0),
+                    EntityStateWire {
+                        health,
+                        max_health,
+                        ..EntityStateWire::at(7, 2.0)
+                    },
+                ],
+            );
+            assert_eq!(
+                decode(&frame),
+                Err(DecodeError::EntityHealth {
+                    entity_id: 7,
+                    health,
+                    max_health,
+                }),
+                "{health}/{max_health} must be refused"
+            );
+        }
     }
 
     #[test]
