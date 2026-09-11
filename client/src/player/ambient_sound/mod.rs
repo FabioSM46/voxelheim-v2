@@ -22,8 +22,7 @@ use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
 use sounds::{Bed, CALLS};
 
-const BEDS: [Bed; 6] = [
-    Bed::Crickets,
+const BEDS: [Bed; 5] = [
     Bed::Rain,
     Bed::DrivingRain,
     Bed::Snowfall,
@@ -33,12 +32,11 @@ const BEDS: [Bed; 6] = [
 
 #[derive(Resource, Default)]
 struct Country {
-    beds: [BedVoice; 6],
-    wildlife: [Calls; 4],
-    wildlife_gains: [f32; 4],
+    beds: [BedVoice; 5],
+    wildlife: [Calls; 5],
+    wildlife_gains: [f32; 5],
     calls: Calls,
     day_gain: f32,
-    elapsed: f64,
 }
 
 pub(super) fn register(app: &mut App) {
@@ -53,8 +51,8 @@ pub(super) fn register(app: &mut App) {
 
 #[derive(Debug, PartialEq)]
 struct Targets {
-    beds: [f32; 6],
-    wildlife: [f32; 4],
+    beds: [f32; 5],
+    wildlife: [f32; 5],
     day: f32,
 }
 
@@ -83,22 +81,17 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
         }
     });
     Targets {
-        beds: [green * night, rain, rain * rain, snow, sand_wind, ice_wind],
+        beds: [rain, rain * rain, snow, sand_wind, ice_wind],
         wildlife: [
             sand * (1.0 - night),
             sand * night,
             snow_country * (1.0 - night),
             snow_country * night,
+            // The same green-ground night the cricket bed was gated on, now a sparse call.
+            green * night,
         ],
         day: green * (1.0 - night) * f32::from(u8::from(parrot)),
     }
-}
-
-/// Pulsed rasp with a slower phrase contour. The phase never resets at a loop edge.
-fn cricket_trill(seconds: f64) -> f32 {
-    let phase = seconds * std::f64::consts::TAU;
-    (0.12 + 0.88 * (0.5 + 0.5 * (phase * 5.7).sin()).powi(3) * (0.7 + 0.3 * (phase * 0.37).sin()))
-        as f32
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
@@ -127,7 +120,6 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         *country = Country::default();
     }
     let dt = input.time.delta_secs().min(0.25);
-    country.elapsed += f64::from(dt);
     let target = targets(
         &input.ambience,
         sky::night_now(&input.clock, session).unwrap_or(0.0),
@@ -143,14 +135,7 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         ..Placement::UNPOSITIONED
     };
     let seed = session.0.world_seed as u64;
-    // Narrow cricket noise is heard in trills. Two incommensurate periods avoid a
-    // metronome; the underlying noise stream never wraps or restarts between trills.
-    let trill = cricket_trill(country.elapsed);
     for (index, (voice, bed)) in country.beds.iter_mut().zip(BEDS).enumerate() {
-        let mut placement = placement;
-        if bed == Bed::Crickets {
-            placement.gain *= trill;
-        }
         voice.update(
             mixer,
             BedFrame {

@@ -21,6 +21,7 @@
 
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::ITEM_WOODEN_SHIELD;
+use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
 use super::crafting::{
     ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES,
     ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
@@ -417,7 +418,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 43] = [
+pub(super) const ITEMS: [ItemDisplay; 46] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -783,6 +784,29 @@ pub(super) const ITEMS: [ItemDisplay; 43] = [
         colour: ItemColour::Horse(MountKind::GreyHorse),
         livery: None,
     },
+    // The three benches, carried as bundles the way every other structure item is, each in
+    // the colour of what it is mostly made of. Their own silhouettes are #1129.
+    ItemDisplay {
+        item_id: ITEM_LEATHER_BENCH,
+        name: "leather bench",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::PLANKS),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_ARMOUR_BENCH,
+        name: "armour bench",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::COBBLESTONE),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_ENCHANTING_TABLE,
+        name: "enchanting table",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::BASALT),
+        livery: None,
+    },
 ];
 
 /// The stablemaster item whose canonical label belongs to one wire mount kind.
@@ -1035,6 +1059,9 @@ mod tests {
             ITEM_BLACK_HORSE,
             ITEM_BROWN_HORSE,
             ITEM_GREY_HORSE,
+            ITEM_LEATHER_BENCH,
+            ITEM_ARMOUR_BENCH,
+            ITEM_ENCHANTING_TABLE,
         ];
         for item_id in declared {
             assert!(
@@ -1125,6 +1152,19 @@ mod tests {
             assert_eq!(row.shape, ItemShape::Block);
             assert_eq!(row.colour, ItemColour::Block(swatch));
             assert_eq!(row.livery, livery);
+        }
+    }
+
+    #[test]
+    fn the_three_benches_have_their_appended_ids_labels_and_bundle_icons() {
+        for (item_id, id, name) in [
+            (ITEM_LEATHER_BENCH, 44, "leather bench"),
+            (ITEM_ARMOUR_BENCH, 45, "armour bench"),
+            (ITEM_ENCHANTING_TABLE, 46, "enchanting table"),
+        ] {
+            assert_eq!(item_id, id);
+            assert_eq!(item_label(item_id), name);
+            assert_eq!(item_shape(item_id), ItemShape::Bundle);
         }
     }
 

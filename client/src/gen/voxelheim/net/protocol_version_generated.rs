@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 38;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 39;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -319,10 +319,17 @@ impl ProtocolVersion {
     /// Appending fields is layout-compatible, but a V37 client silently drops the
     /// position and a V38 client cannot recover it from a V37 server. Both directions
     /// must reject the handshake rather than disagree about the final opening.
-    pub const Current: Self = Self(38);
+    ///
+    /// V39: `StructureKind.LeatherBench`, `ArmourBench` and `EnchantingTable`. The
+    /// runestone's argument at V26: each travels server -> client inside
+    /// `StructureState.kind`, whose decoder refuses a member it cannot name, so a V38
+    /// client would handshake cleanly and lose the session the first time somebody put a
+    /// bench down in view. The three `RecipeID` members that build them ride along and
+    /// owe nothing alone — an unknown recipe is an ordinary silence from the server.
+    pub const Current: Self = Self(39);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 38;
+    pub const ENUM_MAX: u16 = 39;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

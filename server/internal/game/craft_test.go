@@ -63,8 +63,25 @@ func (h *structureHarness) plantCraftingStation(p *Player, kind vnet.StructureKi
 		h.plantForge(p, anchor)
 	case vnet.StructureKindCampfire:
 		h.plantCampfire(p, 0, anchor)
+	case vnet.StructureKindLeatherBench:
+		h.plantBench(p, ItemLeatherBench, anchor)
+	case vnet.StructureKindArmourBench:
+		h.plantBench(p, ItemArmourBench, anchor)
+	case vnet.StructureKindEnchantingTable:
+		h.plantBench(p, ItemEnchantingTable, anchor)
 	default:
 		h.t.Fatalf("no test fixture for crafting station %s", kind)
+	}
+}
+
+// plantBench puts one of the three benches at the anchor through the authoritative path,
+// spending slot 0, on plantForge's terms.
+func (h *structureHarness) plantBench(p *Player, item ItemID, anchor [3]int32) {
+	h.t.Helper()
+
+	h.give(p, 0, item, 1)
+	if _, _, err := p.PlaceStructure(placeRequest(0, anchor, vnet.FacingNorth)); err != nil {
+		h.t.Fatalf("planting item %d at %v: %v", item, anchor, err)
 	}
 }
 
@@ -198,9 +215,9 @@ func TestEveryRecipeCraftsWithExactMaterialsAndRefusesOneShort(t *testing.T) {
 	}
 }
 
-// The recipe table is the twenty-one this branch owns, with the costs they agreed on. A
+// The recipe table is the twenty-four this branch owns, with the costs they agreed on. A
 // balance pass edits this test and the table together; a typo edits only one of them.
-func TestTheRecipeTableIsTheTwentyOneAgreedRecipes(t *testing.T) {
+func TestTheRecipeTableIsTheAgreedRecipes(t *testing.T) {
 	t.Parallel()
 
 	want := map[vnet.RecipeID]recipe{
@@ -226,7 +243,7 @@ func TestTheRecipeTableIsTheTwentyOneAgreedRecipes(t *testing.T) {
 		},
 		vnet.RecipeIDLeatherPatch: {
 			ingredients: []ingredient{{ItemVargrPelt, 2}},
-			product:     ItemLeatherPatch, productCount: 1,
+			product:     ItemLeatherPatch, productCount: 1, station: vnet.StructureKindLeatherBench, experience: 10,
 		},
 
 		// The three implements, added by #185. One price, three times: that issue ruled
@@ -249,39 +266,45 @@ func TestTheRecipeTableIsTheTwentyOneAgreedRecipes(t *testing.T) {
 			ingredients: []ingredient{{ItemRawMeat, 1}},
 			product:     ItemCookedMeat, productCount: 1, station: vnet.StructureKindCampfire, experience: 3,
 		},
+		// #1119 reassigned the war gear to the station the GDD names for it.
 		vnet.RecipeIDLeatherCap: {
 			ingredients: []ingredient{{ItemVargrPelt, 3}}, product: ItemLeatherCap, productCount: 1,
+			station: vnet.StructureKindLeatherBench, experience: 10,
 		},
 		vnet.RecipeIDLeatherJerkin: {
 			ingredients: []ingredient{{ItemVargrPelt, 5}}, product: ItemLeatherJerkin, productCount: 1,
+			station: vnet.StructureKindLeatherBench, experience: 10,
 		},
 		vnet.RecipeIDLeatherLeggings: {
 			ingredients: []ingredient{{ItemVargrPelt, 4}}, product: ItemLeatherLeggings, productCount: 1,
+			station: vnet.StructureKindLeatherBench, experience: 10,
 		},
 		vnet.RecipeIDIronHelm: {
 			ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
-			station: vnet.StructureKindForge, experience: 10,
+			station: vnet.StructureKindArmourBench, experience: 10,
 		},
 		vnet.RecipeIDIronCuirass: {
 			ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
-			station: vnet.StructureKindForge, experience: 10,
+			station: vnet.StructureKindArmourBench, experience: 10,
 		},
 		vnet.RecipeIDIronGreaves: {
 			ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
-			station: vnet.StructureKindForge, experience: 10,
+			station: vnet.StructureKindArmourBench, experience: 10,
 		},
 		vnet.RecipeIDWoodenShield: {
 			ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemWoodenShield, productCount: 1,
 		},
 		vnet.RecipeIDBow: {
 			ingredients: []ingredient{{ItemLog, 3}, {ItemVargrPelt, 2}}, product: ItemBow, productCount: 1,
+			station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDArrows: {
 			ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
+			station: vnet.StructureKindForge, experience: 10,
 		},
 		vnet.RecipeIDWoodenSceptre: {
 			ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
-			product:     ItemWoodenSceptre, productCount: 1,
+			product:     ItemWoodenSceptre, productCount: 1, station: vnet.StructureKindEnchantingTable, experience: 10,
 		},
 
 		// The runestone, added by #467. The forge's own eight stone with the coal
@@ -290,6 +313,18 @@ func TestTheRecipeTableIsTheTwentyOneAgreedRecipes(t *testing.T) {
 		vnet.RecipeIDRunestone: {
 			ingredients: []ingredient{{ItemStone, 8}, {ItemRawIron, 2}}, product: ItemRunestone, productCount: 1,
 			station: vnet.StructureKindForge, experience: 10,
+		},
+
+		// The three benches, added by #1119. Built by hand, like the forge they stand
+		// beside, and so earning nothing.
+		vnet.RecipeIDLeatherBench: {
+			ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemLeatherBench, productCount: 1,
+		},
+		vnet.RecipeIDArmourBench: {
+			ingredients: []ingredient{{ItemLog, 4}, {ItemStone, 4}, {ItemRawIron, 2}}, product: ItemArmourBench, productCount: 1,
+		},
+		vnet.RecipeIDEnchantingTable: {
+			ingredients: []ingredient{{ItemStone, 8}, {ItemRawCoal, 2}, {ItemLog, 2}}, product: ItemEnchantingTable, productCount: 1,
 		},
 	}
 
@@ -530,6 +565,121 @@ func TestCraftingStationRadiiFailClosed(t *testing.T) {
 	}
 }
 
+// Each bench is a station with its own pinned five-block radius, and the scan finds only
+// the kind it was asked for: a player standing at a forge is not standing at a bench.
+func TestEachBenchIsAStationInsideItsOwnRadius(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		kind   vnet.StructureKind
+		pinned float64
+		radius float64
+	}{
+		{vnet.StructureKindLeatherBench, 5.0, LeatherBenchCraftRadius},
+		{vnet.StructureKindArmourBench, 5.0, ArmourBenchCraftRadius},
+		{vnet.StructureKindEnchantingTable, 5.0, EnchantingTableCraftRadius},
+	} {
+		t.Run(tc.kind.String(), func(t *testing.T) {
+			t.Parallel()
+
+			if tc.radius != tc.pinned {
+				t.Fatalf("%s radius constant = %.1f, want the pinned %.1f", tc.kind, tc.radius, tc.pinned)
+			}
+			if radius, configured := craftRadius(tc.kind); !configured || radius != tc.pinned {
+				t.Fatalf("craftRadius(%s) = %.1f (configured %v), want %.1f", tc.kind, radius, configured, tc.pinned)
+			}
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.plantForge(player, [3]int32{0, 63, 0})
+			at := func(distance float64) bool {
+				h.standAt(player, [3]float64{0.5, 63.5 + distance - PlayerHeight/2, 0.5})
+				h.sim.mu.Lock()
+				defer h.sim.mu.Unlock()
+				return h.sim.stationWithinLocked(tc.kind, player.box(), tc.pinned)
+			}
+			if at(0.5) {
+				t.Fatalf("a forge answered for a %s", tc.kind)
+			}
+
+			h.plantCraftingStation(player, tc.kind, [3]int32{3, 63, 0})
+			for _, step := range []struct {
+				distance float64
+				within   bool
+			}{{4.9, true}, {5.1, false}} {
+				h.standAt(player, [3]float64{3.5, 63.5 + step.distance - PlayerHeight/2, 0.5})
+				h.sim.mu.Lock()
+				got := h.sim.stationWithinLocked(tc.kind, player.box(), tc.pinned)
+				h.sim.mu.Unlock()
+				if got != step.within {
+					t.Errorf("%.1f blocks above a %s: within = %v, want %v", step.distance, tc.kind, got, step.within)
+				}
+			}
+		})
+	}
+}
+
+// Every recipe #1119 reassigned is refused with no station in the world and refused beside
+// the wrong one — silently and without touching the pack, exactly like a forge recipe
+// today — and accepted beside its own.
+func TestEachReassignedRecipeIsMadeOnlyAtItsOwnStation(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		id      vnet.RecipeID
+		station vnet.StructureKind
+		wrong   vnet.StructureKind
+	}{
+		{vnet.RecipeIDLeatherPatch, vnet.StructureKindLeatherBench, vnet.StructureKindForge},
+		{vnet.RecipeIDLeatherCap, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
+		{vnet.RecipeIDLeatherJerkin, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
+		{vnet.RecipeIDLeatherLeggings, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
+		{vnet.RecipeIDIronHelm, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDIronCuirass, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDIronGreaves, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDWoodenSceptre, vnet.StructureKindEnchantingTable, vnet.StructureKindForge},
+		{vnet.RecipeIDBow, vnet.StructureKindForge, vnet.StructureKindLeatherBench},
+		{vnet.RecipeIDArrows, vnet.StructureKindForge, vnet.StructureKindEnchantingTable},
+	} {
+		t.Run(tc.id.String(), func(t *testing.T) {
+			t.Parallel()
+
+			r := recipeTable[tc.id]
+			if r.station != tc.station {
+				t.Fatalf("%s is made at a %s, want a %s", tc.id, r.station, tc.station)
+			}
+
+			h := newStructureHarness(t)
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			refused := func(where string) {
+				t.Helper()
+				h.stockPack(player, r.ingredients...)
+				before := h.pack(player)
+				if _, err := h.craft(player, tc.id); err == nil {
+					t.Fatalf("%s was crafted %s", tc.id, where)
+				}
+				if after := h.pack(player); after != before {
+					t.Errorf("the refused craft %s changed the pack", where)
+				}
+			}
+
+			refused("with no station in the world")
+			h.plantCraftingStation(player, tc.wrong, [3]int32{0, 63, 0})
+			refused("beside a " + tc.wrong.String())
+
+			h.plantCraftingStation(player, tc.station, [3]int32{3, 63, 0})
+			h.stockPack(player, r.ingredients...)
+			state, err := h.craft(player, tc.id)
+			if err != nil {
+				t.Fatalf("crafting %s beside a %s: %v", tc.id, tc.station, err)
+			}
+			if got := heldCount(state, r.product); got != r.productCount {
+				t.Errorf("the pack holds %d of item %d, want %d", got, r.product, r.productCount)
+			}
+		})
+	}
+}
+
 // A station-less recipe needs nothing built, which is what makes the chain startable: the
 // forge is the thing you make before you have one.
 func TestTheStationlessRecipesNeedNothingBuilt(t *testing.T) {
@@ -543,15 +693,13 @@ func TestTheStationlessRecipesNeedNothingBuilt(t *testing.T) {
 		{vnet.RecipeIDForge, ItemForge, 1},
 		{vnet.RecipeIDTent, ItemTent, 1},
 		{vnet.RecipeIDCampfire, ItemCampfire, 1},
-		// The fourth, and the one whose absent station is a design decision rather than a
-		// bootstrapping one: a patch is mended-in-the-field kit, so a forge requirement
-		// would mean walking home to make the thing that saves the walk.
-		{vnet.RecipeIDLeatherPatch, ItemLeatherPatch, 1},
-		{vnet.RecipeIDLeatherCap, ItemLeatherCap, 1},
-		{vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin, 1},
-		{vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings, 1},
-		{vnet.RecipeIDBow, ItemBow, 1},
-		{vnet.RecipeIDArrows, ItemArrow, 4},
+		// The one hand recipe that is not a structure: a shield is a frame and a hide.
+		{vnet.RecipeIDWoodenShield, ItemWoodenShield, 1},
+		// The three benches, for the forge's own reason: each is the thing you build
+		// before you have one.
+		{vnet.RecipeIDLeatherBench, ItemLeatherBench, 1},
+		{vnet.RecipeIDArmourBench, ItemArmourBench, 1},
+		{vnet.RecipeIDEnchantingTable, ItemEnchantingTable, 1},
 	} {
 		h := newStructureHarness(t)
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})

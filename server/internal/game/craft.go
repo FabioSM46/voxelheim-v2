@@ -32,6 +32,14 @@ import (
 const (
 	ForgeCraftRadius   = 5.0
 	CampfireCookRadius = 5.0
+
+	// The three benches, each its own constant for the reason the campfire's is: the
+	// value is the forge's argument read again — standing at a table is looser than
+	// reaching a voxel — and it happens to land on the same five. A radius shared through
+	// one name would let a later balance pass move every station by editing one of them.
+	LeatherBenchCraftRadius    = 5.0
+	ArmourBenchCraftRadius     = 5.0
+	EnchantingTableCraftRadius = 5.0
 )
 
 // craftRadius is the complete station-to-radius policy. Unknown and future station
@@ -42,6 +50,12 @@ func craftRadius(kind vnet.StructureKind) (float64, bool) {
 		return ForgeCraftRadius, true
 	case vnet.StructureKindCampfire:
 		return CampfireCookRadius, true
+	case vnet.StructureKindLeatherBench:
+		return LeatherBenchCraftRadius, true
+	case vnet.StructureKindArmourBench:
+		return ArmourBenchCraftRadius, true
+	case vnet.StructureKindEnchantingTable:
+		return EnchantingTableCraftRadius, true
 	default:
 		return 0, false
 	}
@@ -130,11 +144,10 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		experience:   10,
 	},
 
-	// The other half of that job, and the fourth recipe that needs nowhere to stand —
-	// which is the whole difference between it and the stone above. Both mend a blade;
-	// one is made at a forge out of what you dug, the other is made where you are
-	// standing out of what you killed. A station here would mean walking home to make the
-	// kit whose point is not having to.
+	// The other half of that job. Both mend a blade, and the mend itself is still a field
+	// action wherever the player stands; what differs is where each kit is made. The
+	// stone is made at a forge out of what you dug, the patch at a leather bench out of
+	// what you killed — #1119 gave leatherwork its own station, and the patch is leather.
 	//
 	// Two pelts and nothing else. A vargr leaves one, so a patch costs two hunts — the
 	// price is the hunting rather than anything in this row.
@@ -142,6 +155,8 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		ingredients:  []ingredient{{ItemVargrPelt, 2}},
 		product:      ItemLeatherPatch,
 		productCount: 1,
+		station:      vnet.StructureKindLeatherBench,
+		experience:   10,
 	},
 
 	// The three implements, and they are the same recipe three times on purpose: one raw
@@ -186,48 +201,58 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		experience:   3,
 	},
 
-	// Three field recipes, like the leather patch: a hunt can be worked into protection
-	// where it ends, without inventing a tanning station this batch deliberately excludes.
+	// The leather set is made at the leather bench, which is the station #1119 added for
+	// exactly this work. Station recipes earn experience, so each earns the ten every other
+	// worked piece does.
 	vnet.RecipeIDLeatherCap: {
 		ingredients: []ingredient{{ItemVargrPelt, 3}}, product: ItemLeatherCap, productCount: 1,
+		station: vnet.StructureKindLeatherBench, experience: 10,
 	},
 	vnet.RecipeIDLeatherJerkin: {
 		ingredients: []ingredient{{ItemVargrPelt, 5}}, product: ItemLeatherJerkin, productCount: 1,
+		station: vnet.StructureKindLeatherBench, experience: 10,
 	},
 	vnet.RecipeIDLeatherLeggings: {
 		ingredients: []ingredient{{ItemVargrPelt, 4}}, product: ItemLeatherLeggings, productCount: 1,
+		station: vnet.StructureKindLeatherBench, experience: 10,
 	},
 
-	// The iron set earns the forge's existing ten experience and spends raw ore plus coal
-	// directly, on the same no-smelting-chain terms as the iron sword.
+	// The iron set is fitted at the armour bench rather than beaten out at the forge, and
+	// keeps its ten experience. It still spends raw ore plus coal directly, on the same
+	// no-smelting-chain terms as the iron sword.
 	vnet.RecipeIDIronHelm: {
 		ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
-		station: vnet.StructureKindForge, experience: 10,
+		station: vnet.StructureKindArmourBench, experience: 10,
 	},
 	vnet.RecipeIDIronCuirass: {
 		ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
-		station: vnet.StructureKindForge, experience: 10,
+		station: vnet.StructureKindArmourBench, experience: 10,
 	},
 	vnet.RecipeIDIronGreaves: {
 		ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
-		station: vnet.StructureKindForge, experience: 10,
+		station: vnet.StructureKindArmourBench, experience: 10,
 	},
 
 	vnet.RecipeIDWoodenShield: {
 		ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemWoodenShield, productCount: 1,
 	},
 
-	// Ranged combat starts in the field: neither the bow nor its bone-tipped arrows
-	// needs a station. productCount is what makes one arrow craft produce a bundle of four.
+	// The bow and its bone-tipped arrows are war gear, and war gear is made at a station:
+	// both are the forge's, with its ten experience. The wooden shield above stays a hand
+	// recipe. productCount is what makes one arrow craft produce a bundle of four.
 	vnet.RecipeIDBow: {
 		ingredients: []ingredient{{ItemLog, 3}, {ItemVargrPelt, 2}}, product: ItemBow, productCount: 1,
+		station: vnet.StructureKindForge, experience: 10,
 	},
 	vnet.RecipeIDArrows: {
 		ingredients: []ingredient{{ItemLog, 1}, {ItemBone, 1}}, product: ItemArrow, productCount: 4,
+		station: vnet.StructureKindForge, experience: 10,
 	},
+	// The sceptre is bound at the enchanting table, the one thing that station makes today.
 	vnet.RecipeIDWoodenSceptre: {
 		ingredients: []ingredient{{ItemLog, 3}, {ItemBone, 2}, {ItemRawCoal, 1}},
 		product:     ItemWoodenSceptre, productCount: 1,
+		station: vnet.StructureKindEnchantingTable, experience: 10,
 	},
 
 	// The runestone, and the forge is what makes it: eight stone and two raw iron, which
@@ -238,6 +263,30 @@ var recipeTable = map[vnet.RecipeID]recipe{
 	vnet.RecipeIDRunestone: {
 		ingredients: []ingredient{{ItemStone, 8}, {ItemRawIron, 2}}, product: ItemRunestone, productCount: 1,
 		station: vnet.StructureKindForge, experience: 10,
+	},
+
+	// The three benches, and they need no station for the forge's reason: a bench is the
+	// thing you build before you have one. Assembly rather than progression, so no
+	// experience, which is what TestOnlyStationRecipesAwardExperience holds every
+	// station-less row to.
+	//
+	// Each is priced in what its own work consumes, so the bench is a promise about the
+	// materials that come after it. The leather bench is timber and two pelts — the
+	// wooden shield's price, because both are a frame with a hide stretched over it. The
+	// armour bench is timber, stone and two raw iron: the heaviest of the three, and the
+	// only one that asks for ore, because it is where ore goes. The enchanting table is
+	// stone, coal and timber — a lectern cut from stone and blackened with coal. **No
+	// bone**, deliberately: arrows and the sceptre are bone's only sinks, which is what
+	// TestOnlyArrowsAndTheSceptreConsumeBones pins, and a station competing with them for
+	// every hunt would be a price nobody chose.
+	vnet.RecipeIDLeatherBench: {
+		ingredients: []ingredient{{ItemLog, 6}, {ItemVargrPelt, 2}}, product: ItemLeatherBench, productCount: 1,
+	},
+	vnet.RecipeIDArmourBench: {
+		ingredients: []ingredient{{ItemLog, 4}, {ItemStone, 4}, {ItemRawIron, 2}}, product: ItemArmourBench, productCount: 1,
+	},
+	vnet.RecipeIDEnchantingTable: {
+		ingredients: []ingredient{{ItemStone, 8}, {ItemRawCoal, 2}, {ItemLog, 2}}, product: ItemEnchantingTable, productCount: 1,
 	},
 }
 

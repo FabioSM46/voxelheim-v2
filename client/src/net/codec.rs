@@ -575,17 +575,28 @@ pub enum StructureKind {
     Forge,
     Campfire,
     Runestone,
+    LeatherBench,
+    ArmourBench,
+    EnchantingTable,
 }
 
 impl StructureKind {
-    /// The same rule [`MobKind::from_wire`] carries: a member is accepted here in the
-    /// commit that teaches [`crate::player::structures`] to draw it, never before.
+    /// The same rule [`MobKind::from_wire`] carries, including its exception.
+    ///
+    /// The first four were accepted in the commit that taught [`crate::player::structures`]
+    /// to draw them. V39's three benches are accepted before they have models, on the
+    /// precedent `MobKind::VargrGuardian` set: the server really places them from V39 on,
+    /// and refusing a member it really sends would end the session the first time somebody
+    /// put a bench down in view. Their footprints are mirrored and their models are #1129.
     fn from_wire(value: fb::StructureKind) -> Option<Self> {
         match value {
             fb::StructureKind::Tent => Some(Self::Tent),
             fb::StructureKind::Forge => Some(Self::Forge),
             fb::StructureKind::Campfire => Some(Self::Campfire),
             fb::StructureKind::Runestone => Some(Self::Runestone),
+            fb::StructureKind::LeatherBench => Some(Self::LeatherBench),
+            fb::StructureKind::ArmourBench => Some(Self::ArmourBench),
+            fb::StructureKind::EnchantingTable => Some(Self::EnchantingTable),
             _ => None,
         }
     }
@@ -936,6 +947,9 @@ pub enum RecipeId {
     Arrows,
     WoodenSceptre,
     Runestone,
+    LeatherBench,
+    ArmourBench,
+    EnchantingTable,
 }
 
 impl RecipeId {
@@ -970,6 +984,9 @@ impl RecipeId {
             Self::Arrows => fb::RecipeID::Arrows,
             Self::WoodenSceptre => fb::RecipeID::WoodenSceptre,
             Self::Runestone => fb::RecipeID::Runestone,
+            Self::LeatherBench => fb::RecipeID::LeatherBench,
+            Self::ArmourBench => fb::RecipeID::ArmourBench,
+            Self::EnchantingTable => fb::RecipeID::EnchantingTable,
         }
     }
 }
@@ -10630,7 +10647,9 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 38);
+        // V39 appends the three benches to `StructureKind`: the runestone's argument, an
+        // enum member inside a table field whose decoder refuses what it cannot name.
+        assert_eq!(fb::ProtocolVersion::Current.0, 39);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -13227,7 +13246,30 @@ mod tests {
             StructureKind::from_wire(fb::StructureKind::Runestone),
             Some(StructureKind::Runestone)
         );
-        assert_eq!(StructureKind::from_wire(fb::StructureKind(5)), None);
+        // V39's three benches, appended after Runestone = 4 and accepted before their
+        // models exist — see [`StructureKind::from_wire`] for why.
+        for (wire, value, kind) in [
+            (
+                fb::StructureKind::LeatherBench,
+                5,
+                StructureKind::LeatherBench,
+            ),
+            (
+                fb::StructureKind::ArmourBench,
+                6,
+                StructureKind::ArmourBench,
+            ),
+            (
+                fb::StructureKind::EnchantingTable,
+                7,
+                StructureKind::EnchantingTable,
+            ),
+        ] {
+            assert_eq!(wire.0, value);
+            assert_eq!(StructureKind::from_wire(wire), Some(kind));
+        }
+        // One past the contract, which is 8 since V39.
+        assert_eq!(StructureKind::from_wire(fb::StructureKind(8)), None);
         assert_eq!(StructureKind::from_wire(fb::StructureKind(200)), None);
     }
 
@@ -15973,6 +16015,9 @@ mod tests {
             (RecipeId::Arrows, fb::RecipeID::Arrows),
             (RecipeId::WoodenSceptre, fb::RecipeID::WoodenSceptre),
             (RecipeId::Runestone, fb::RecipeID::Runestone),
+            (RecipeId::LeatherBench, fb::RecipeID::LeatherBench),
+            (RecipeId::ArmourBench, fb::RecipeID::ArmourBench),
+            (RecipeId::EnchantingTable, fb::RecipeID::EnchantingTable),
         ];
 
         for (recipe, wire) in named {

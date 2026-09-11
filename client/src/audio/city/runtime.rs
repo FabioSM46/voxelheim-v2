@@ -13,10 +13,14 @@ use crate::{
 };
 use bevy::prelude::*;
 
-/// A hammer carries across a small square; a fire belongs to the camp gathered around it.
-/// These presentation ranges stop at the courtyard, not at the valley or gameplay safe radius.
-const FORGE_RANGE: f32 = 28.0;
+/// A hammer is heard at the smithy, not across the settlement; a fire belongs to the camp
+/// gathered around it. A village is 28 blocks in radius, so at twelve a forge on its far
+/// side is silent from its edge. These presentation ranges are not the gameplay safe radius.
+const FORGE_RANGE: f32 = 12.0;
 const FIRE_RANGE: f32 = 12.0;
+/// The hammer is a bright transient over silence; below unity it stays in the yard it is in.
+const FORGE_GAIN: f32 = 0.6;
+const FIRE_GAIN: f32 = 1.0;
 /// Half the world's eight slots leaves room for wilderness beds and effects. At most two
 /// of each kind prevents a row of forges from erasing the fires. The mixer may grant fewer,
 /// always protects its Voice/Master reserve, and may revoke this lower-priority ambience.
@@ -52,19 +56,42 @@ impl Candidate {
             anchor.z as f32 + 0.5,
         );
         let distance = eye.distance(origin);
-        (distance.is_finite() && distance < range(kind)).then_some(Self {
+        (distance.is_finite() && distance < carry(kind).range).then_some(Self {
             id: structure.structure_id,
             kind,
             origin,
             distance,
         })
     }
+
+    /// The one placement every city source is given: the distance curve at its kind's
+    /// range, then its kind's gain. Nothing scales a source up after this.
+    fn place(&self, eye: Vec3, yaw: f32, occlusion: f32) -> spatial::Placement {
+        let carry = carry(self.kind);
+        let mut placement = spatial::place(eye, yaw, self.origin, carry.range, occlusion);
+        placement.gain *= carry.gain;
+        placement
+    }
 }
 
-fn range(kind: Kind) -> f32 {
+/// How far one kind carries and how loud it is at the source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Carry {
+    range: f32,
+    gain: f32,
+}
+
+/// One row per audible kind.
+fn carry(kind: Kind) -> Carry {
     match kind {
-        Kind::Forge => FORGE_RANGE,
-        Kind::Fire => FIRE_RANGE,
+        Kind::Forge => Carry {
+            range: FORGE_RANGE,
+            gain: FORGE_GAIN,
+        },
+        Kind::Fire => Carry {
+            range: FIRE_RANGE,
+            gain: FIRE_GAIN,
+        },
     }
 }
 
@@ -268,13 +295,11 @@ fn play_city(
                 )
             });
         }
-        emitter.source.place(spatial::place(
-            eye.translation,
-            yaw,
-            emitter.candidate.origin,
-            range(emitter.candidate.kind),
-            emitter.occlusion,
-        ));
+        emitter.source.place(
+            emitter
+                .candidate
+                .place(eye.translation, yaw, emitter.occlusion),
+        );
         emitter.pump()
     });
 }
