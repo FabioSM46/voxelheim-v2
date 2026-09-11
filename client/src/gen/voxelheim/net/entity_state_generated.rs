@@ -25,8 +25,24 @@ use super::*;
 /// dead. A fifth field here would have charged every visible player those bytes on
 /// every tick to say "no", and could never have been taken back.
 ///
-/// Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
-/// snapshot, because only that complete vector can answer whether an id occurs twice.
+/// **V41 added `health` and `max_health`, and the struct is still 40 bytes.** Every
+/// visible player's health is public: the repository owner decided on 2026-09-11 that
+/// a player sees how hurt everyone around them is, not only their party. Unlike a life
+/// state, health is a value almost every entry has something to say about on almost
+/// every tick, so it belongs beside the transform rather than in a sparse vector. The
+/// two `ushort`s occupy the four bytes of alignment padding the `ulong` already forced
+/// after `yaw`, so the stride of the entity array did not move — which is why the size
+/// test on both sides still reads 40 rather than being edited to a new number.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero. Uniqueness belongs to the containing snapshot, because
+///     only that complete vector can answer whether an id occurs twice
+///   - `max_health` is non-zero and `health` never exceeds it — `PlayerVitals`' own
+///     invariants, for the same division a health bar performs
+///
+/// A dead player carries `health = 0`, because the server's health for a dead player is
+/// zero. The decoder does not cross-check that against `EntitySnapshot.dead_players`:
+/// whether a body is down is that vector's statement, and never inferred from this number.
 // struct EntityState, aligned to 8
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq)]
@@ -43,6 +59,8 @@ impl ::core::fmt::Debug for EntityState {
             .field("pos", &self.pos())
             .field("vel", &self.vel())
             .field("yaw", &self.yaw())
+            .field("health", &self.health())
+            .field("max_health", &self.max_health())
             .finish()
     }
 }
@@ -92,12 +110,21 @@ impl<'a> ::flatbuffers::Verifiable for EntityState {
 
 impl<'a> EntityState {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(entity_id: u64, pos: &Vec3, vel: &Vec3, yaw: f32) -> Self {
+    pub fn new(
+        entity_id: u64,
+        pos: &Vec3,
+        vel: &Vec3,
+        yaw: f32,
+        health: u16,
+        max_health: u16,
+    ) -> Self {
         let mut s = Self([0; 40]);
         s.set_entity_id(entity_id);
         s.set_pos(pos);
         s.set_vel(vel);
         s.set_yaw(yaw);
+        s.set_health(health);
+        s.set_max_health(max_health);
         s
     }
 
@@ -181,6 +208,69 @@ impl<'a> EntityState {
                 &x_le as *const _ as *const u8,
                 self.0[32..].as_mut_ptr(),
                 ::core::mem::size_of::<<f32 as ::flatbuffers::EndianScalar>::Scalar>(),
+            );
+        }
+    }
+
+    /// V41. Current health, in the same units as `max_health` — the value the server
+    /// holds, which for the recipient's own entity equals `self_vitals.health`.
+    pub fn health(&self) -> u16 {
+        let mut mem =
+            ::core::mem::MaybeUninit::<<u16 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+        // Safety:
+        // Created from a valid Table for this object
+        // Which contains a valid value in this slot
+        ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                self.0[36..].as_ptr(),
+                mem.as_mut_ptr() as *mut u8,
+                ::core::mem::size_of::<<u16 as ::flatbuffers::EndianScalar>::Scalar>(),
+            );
+            mem.assume_init()
+        })
+    }
+
+    pub fn set_health(&mut self, x: u16) {
+        let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+        // Safety:
+        // Created from a valid Table for this object
+        // Which contains a valid value in this slot
+        unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                &x_le as *const _ as *const u8,
+                self.0[36..].as_mut_ptr(),
+                ::core::mem::size_of::<<u16 as ::flatbuffers::EndianScalar>::Scalar>(),
+            );
+        }
+    }
+
+    /// V41. Maximum health. Non-zero, always: it is the denominator of every health bar.
+    pub fn max_health(&self) -> u16 {
+        let mut mem =
+            ::core::mem::MaybeUninit::<<u16 as ::flatbuffers::EndianScalar>::Scalar>::uninit();
+        // Safety:
+        // Created from a valid Table for this object
+        // Which contains a valid value in this slot
+        ::flatbuffers::EndianScalar::from_little_endian(unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                self.0[38..].as_ptr(),
+                mem.as_mut_ptr() as *mut u8,
+                ::core::mem::size_of::<<u16 as ::flatbuffers::EndianScalar>::Scalar>(),
+            );
+            mem.assume_init()
+        })
+    }
+
+    pub fn set_max_health(&mut self, x: u16) {
+        let x_le = ::flatbuffers::EndianScalar::to_little_endian(x);
+        // Safety:
+        // Created from a valid Table for this object
+        // Which contains a valid value in this slot
+        unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                &x_le as *const _ as *const u8,
+                self.0[38..].as_mut_ptr(),
+                ::core::mem::size_of::<<u16 as ::flatbuffers::EndianScalar>::Scalar>(),
             );
         }
     }

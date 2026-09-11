@@ -942,7 +942,15 @@ enum RefusedAction : ubyte {
   PlayerTrade = 20,
 
   /// PortalRequest refused without a destination, session id or remote world state.
-  CrossPortal = 21
+  CrossPortal = 21,
+
+  // -- V40. Appended so every shipped action keeps its number.
+
+  /// An `AttackRequest` refused because the swing's energy was not there to spend.
+  /// A member of its own rather than `Attack` with a reason, because the answering
+  /// surface is the energy display rather than the weapon: `Attack` keeps meaning a
+  /// refusal about what is in the hand. Nothing was queued and nothing was spent.
+  Energy = 22
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1161,6 +1169,14 @@ enum RefusalReason : ubyte {
   /// same call `MarkerUnknown` makes for a mark that belongs to somebody else.
   EntryOfferUnknown = 52,
 
+  // -- V40. Appended inside the low group: a player out of energy asked a legal question
+  //    and the answer is to wait.
+
+  /// The player's energy is below what the action costs. Paired with
+  /// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
+  /// the answer, so no amount is carried here.
+  NotEnoughEnergy = 53,
+
   // -- The request said something no correct client sends. A defect in the peer.
 
   /// The request carried no anchor at all. The origin is a real place, so an absent
@@ -1249,13 +1265,36 @@ table ActionRefused {
 /// dead. A fifth field here would have charged every visible player those bytes on
 /// every tick to say "no", and could never have been taken back.
 ///
-/// Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
-/// snapshot, because only that complete vector can answer whether an id occurs twice.
+/// **V41 added `health` and `max_health`, and the struct is still 40 bytes.** Every
+/// visible player's health is public: the repository owner decided on 2026-09-11 that
+/// a player sees how hurt everyone around them is, not only their party. Unlike a life
+/// state, health is a value almost every entry has something to say about on almost
+/// every tick, so it belongs beside the transform rather than in a sparse vector. The
+/// two `ushort`s occupy the four bytes of alignment padding the `ulong` already forced
+/// after `yaw`, so the stride of the entity array did not move — which is why the size
+/// test on both sides still reads 40 rather than being edited to a new number.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero. Uniqueness belongs to the containing snapshot, because
+///     only that complete vector can answer whether an id occurs twice
+///   - `max_health` is non-zero and `health` never exceeds it — `PlayerVitals`' own
+///     invariants, for the same division a health bar performs
+///
+/// A dead player carries `health = 0`, because the server's health for a dead player is
+/// zero. The decoder does not cross-check that against `EntitySnapshot.dead_players`:
+/// whether a body is down is that vector's statement, and never inferred from this number.
 struct EntityState {
   entity_id: ulong;
   pos: Vec3;
   vel: Vec3;
   yaw: float;
+
+  /// V41. Current health, in the same units as `max_health` — the value the server
+  /// holds, which for the recipient's own entity equals `self_vitals.health`.
+  health: ushort;
+
+  /// V41. Maximum health. Non-zero, always: it is the denominator of every health bar.
+  max_health: ushort;
 }
 
 /// Which settled projectile presentation the authoritative server is streaming.
@@ -1513,6 +1552,8 @@ enum MobAction : ubyte {
 ///     reason one fact is stated twice is argued
 ///   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
 ///     entity id is in that vector exactly when this is true
+///   - `max_energy` is non-zero and `energy` never exceeds it — the health invariant,
+///     for the same division
 table PlayerVitals {
   /// Current health, in the same units as `max_health`. Zero is legal and means the
   /// player is dead — the server's transition to `Dead` is what makes it so, not the
@@ -1556,6 +1597,17 @@ table PlayerVitals {
   /// Whether the authoritative server currently holds this recipient's off-hand raised.
   /// Intent alone never makes this true; the server's equipment and durability rules do.
   blocking: bool;
+
+  /// V40. Current energy, in the same units as `max_energy`, rounded down to a whole
+  /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
+  /// the blow through the shield at full damage, and nothing else changes. Attacks and
+  /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
+  /// locally**: a client that drew its own regeneration would show a swing as ready the
+  /// tick before the server refuses it.
+  energy: ushort;
+
+  /// V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+  max_energy: ushort;
 }
 
 /// One mob's authoritative state in a snapshot.
@@ -2081,12 +2133,13 @@ table EntitySnapshot {
   /// Every **other** member of the recipient's party, in authoritative party order.
   /// Empty when the recipient is in no party.
   ///
-  /// **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
-  /// state only for bodies already present in `entities`, and `PlayerVitals` exposes one
-  /// player's health only to that player. Party membership is explicit consent to share
-  /// position and health with the other members, including outside the streamed view, so
-  /// this vector is the narrow exception rather than a field on `EntityState` paid by every
-  /// visible player. For everyone outside a party it is absent and costs zero bytes.
+  /// **Why this widens a snapshot beyond ordinary visibility.** Since V41 every visible
+  /// player's health is public and rides on `EntityState` itself, so what this vector adds
+  /// is not health but reach: `entities` holds only the bodies inside the streamed view,
+  /// and party membership is explicit consent to share position and health with the other
+  /// members **outside** it too. A member standing in view is therefore described twice,
+  /// once in each place, from the same authoritative value. For everyone outside a party
+  /// this vector is absent and costs zero bytes.
   ///
   /// Decoder invariants:
   ///   - no `entity_id` appears twice

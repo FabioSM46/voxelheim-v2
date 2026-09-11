@@ -1863,6 +1863,8 @@ mod tests {
                     pos: SPAWN,
                     vel: [0.0, 0.0, 0.0],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 }],
                 drops: vec![],
                 ..Default::default()
@@ -2863,6 +2865,8 @@ mod tests {
             respawn_ticks: if dead { 60 } else { 0 },
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }));
     }
 

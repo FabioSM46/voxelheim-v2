@@ -27,6 +27,7 @@ use crate::player::{PlayerStats, PlayerTradeEnded};
 use crate::settings::{Corner, Settings};
 use crate::world::MeshStats;
 
+use super::energy::EnergyRefused;
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// Distance from the top-left corner, in logical pixels.
@@ -76,6 +77,7 @@ impl Plugin for StatusUiPlugin {
             .init_resource::<Settings>()
             .add_message::<PlayerTradeEnded>()
             .add_message::<PlayerMessage>()
+            .add_message::<EnergyRefused>()
             .add_systems(Startup, spawn_status_text)
             .add_systems(
                 Update,
@@ -430,6 +432,7 @@ fn publish_gameplay_messages(
     endings: Option<ResMut<SessionEndingInbox>>,
     mut trade_ended: MessageReader<PlayerTradeEnded>,
     mut messages: MessageWriter<PlayerMessage>,
+    mut energy_refusals: MessageWriter<EnergyRefused>,
 ) {
     // One sanitized sentence per ending that interrupted a game, however many the net
     // thread queued — see `SessionEndingInbox` for why the detail itself never reaches
@@ -445,6 +448,12 @@ fn publish_gameplay_messages(
     }
     if let Some(mut inbox) = inbox {
         for refused in inbox.take() {
+            // A refusal with a surface of its own goes there and nowhere else: a chat line
+            // beside the energy bar's flash would be a second answer to one swing.
+            if answered_by_the_energy_bar(&refused) {
+                energy_refusals.write(EnergyRefused);
+                continue;
+            }
             match describe_refusal(&refused) {
                 Some(line) => {
                     messages.write(PlayerMessage::new(PlayerMessageKind::Warn, line));
@@ -532,12 +541,28 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
 /// stall on screen, and a refused trade is answered beside it.
 ///
+/// `NotEnoughEnergy` was here on the same terms until #1134 landed the surface that answers
+/// it, and it left for [`answered_by_the_energy_bar`] rather than for a sentence.
+///
 /// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
         RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
     )
+}
+
+/// Whether this refusal is answered by the energy bar's flash instead of by a line.
+///
+/// **A fourth silence, and not a widening of the third.** [`has_no_sentence_yet`] names
+/// reasons nothing answers yet; this names one that *is* answered, somewhere other than the
+/// chat log — `ui/energy.rs` lights its track, and a sentence here would be the second
+/// answer to one swing. The server names that surface itself: a starved swing arrives as
+/// `RefusedAction::Energy` rather than `Attack` (`attackRefusal` in the session), so the
+/// pair is matched exactly. `NotEnoughEnergy` under any other action is not something this
+/// build has been told the bar explains, and falls through to the ordinary path.
+fn answered_by_the_energy_bar(refused: &ActionRefused) -> bool {
+    refused.action == RefusedAction::Energy && refused.reason == RefusalReason::NotEnoughEnergy
 }
 
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
@@ -633,6 +658,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::InstanceUnavailable
         | RefusalReason::SessionMismatch
         | RefusalReason::EntryOfferUnknown
+        | RefusalReason::NotEnoughEnergy
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1330,7 +1356,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 57] = [
+    const EVERY_REASON: [RefusalReason; 58] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1389,6 +1415,8 @@ mod tests {
         RefusalReason::InstanceUnavailable,
         RefusalReason::SessionMismatch,
         RefusalReason::EntryOfferUnknown,
+        // V40's energy reason.
+        RefusalReason::NotEnoughEnergy,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1409,6 +1437,7 @@ mod tests {
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
             RefusalReason::NoAmmunition => RefusedAction::Attack,
+            RefusalReason::NotEnoughEnergy => RefusedAction::Energy,
             RefusalReason::MountNotLearned
             | RefusalReason::AlreadyMounted
             | RefusalReason::MountNotGrounded
@@ -1502,10 +1531,12 @@ mod tests {
     #[test]
     fn every_reason_is_either_a_sentence_or_a_deliberate_silence() {
         for reason in EVERY_REASON {
-            let shown = describe_refusal(&refusal(reason));
+            let refused = refusal(reason);
+            let shown = describe_refusal(&refused);
             let silent = reason == RefusalReason::Unknown
                 || reason.is_client_defect()
-                || has_no_sentence_yet(reason);
+                || has_no_sentence_yet(reason)
+                || answered_by_the_energy_bar(&refused);
             assert_eq!(
                 shown.is_none(),
                 silent,
@@ -1554,7 +1585,26 @@ mod tests {
                 !(has_no_sentence_yet(reason) && reason == RefusalReason::Unknown),
                 "Unknown is silent because it cannot be read, not because nobody wrote it"
             );
+            // Answered elsewhere is not the same as answered by nobody, and neither is a
+            // defect or a code this build cannot read.
+            let refused = refusal(reason);
+            if answered_by_the_energy_bar(&refused) {
+                assert!(
+                    !has_no_sentence_yet(reason)
+                        && !reason.is_client_defect()
+                        && reason != RefusalReason::Unknown,
+                    "{reason:?} is answered by the energy bar and also filed as another silence"
+                );
+            }
         }
+        // The energy bar answers exactly one pair, and it is the pair the sweep sends.
+        assert_eq!(
+            EVERY_REASON
+                .iter()
+                .filter(|reason| answered_by_the_energy_bar(&refusal(**reason)))
+                .collect::<Vec<_>>(),
+            [&RefusalReason::NotEnoughEnergy]
+        );
         // At least one named reason still deliberately has no status sentence. When the
         // final one acquires a surface, this test says so rather than leaving a decorative
         // exception category behind.
@@ -2108,6 +2158,64 @@ mod tests {
             0,
             "the inbox was drained rather than left to grow"
         );
+    }
+
+    fn energy_refusals(app: &App) -> usize {
+        let messages = app.world().resource::<Messages<EnergyRefused>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).count()
+    }
+
+    /// A starved swing reaches the energy bar and not the chat log, and it is drained like
+    /// every other refusal.
+    #[test]
+    fn a_starved_swing_is_handed_to_the_energy_bar_instead_of_chat() {
+        let mut app = headless_messages_ui();
+        {
+            let mut inbox = app.world_mut().resource_mut::<RefusalInbox>();
+            inbox.push(ActionRefused {
+                action: RefusedAction::Energy,
+                reason: RefusalReason::NotEnoughEnergy,
+                anchor: None,
+            });
+            inbox.push(refusal(RefusalReason::GroundIsAir));
+            inbox.push(ActionRefused {
+                action: RefusedAction::Energy,
+                reason: RefusalReason::NotEnoughEnergy,
+                anchor: None,
+            });
+        }
+        app.update();
+
+        assert_eq!(energy_refusals(&app), 2, "one flash request per refusal");
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Warn,
+                "Cannot build here: there is nothing solid to build on"
+            )],
+            "the energy refusals wrote no line; the placement one still did"
+        );
+        assert_eq!(app.world().resource::<RefusalInbox>().pending(), 0);
+    }
+
+    /// The reason alone is not the bar's to answer: only the action the server names it
+    /// under. Anything else is the ordinary no-sentence path, and no flash.
+    #[test]
+    fn not_enough_energy_under_another_action_does_not_flash_the_bar() {
+        for action in [RefusedAction::Attack, RefusedAction::Unknown] {
+            let mut app = headless_messages_ui();
+            app.world_mut()
+                .resource_mut::<RefusalInbox>()
+                .push(ActionRefused {
+                    action,
+                    reason: RefusalReason::NotEnoughEnergy,
+                    anchor: None,
+                });
+            app.update();
+            assert_eq!(energy_refusals(&app), 0, "{action:?}");
+            assert!(player_messages(&app).is_empty(), "{action:?}");
+        }
     }
 
     #[test]

@@ -3,9 +3,11 @@
 mod cast;
 mod character;
 mod chat;
+mod clipboard;
 mod compass;
 mod crosshair;
 pub(crate) mod encounters;
+mod energy;
 mod experience;
 mod health;
 mod hunger;
@@ -188,6 +190,9 @@ impl Plugin for UiPlugin {
             // the app down rather than reading a default.
             .init_resource::<SelfVitals>()
             .init_resource::<ViewMode>()
+            // The one clipboard every text field shares. It connects to nothing until a
+            // shortcut asks, which is what lets every headless test build this plugin.
+            .insert_resource(clipboard::TextClipboard::system())
             .add_message::<InventoryClick>()
             .add_message::<CraftClick>()
             .add_message::<crate::player::LootTakeClick>()
@@ -212,6 +217,9 @@ impl Plugin for UiPlugin {
             .add_message::<AppExit>()
             .add_message::<ChooseCharacter>()
             .add_message::<PlayerMessage>()
+            // Written by the status module and read by the energy bar; registered here as
+            // well as by both, for the reason every message above is.
+            .add_message::<energy::EnergyRefused>()
             .add_plugins((
                 character::CharacterUiPlugin,
                 chat::ChatUiPlugin,
@@ -234,7 +242,10 @@ impl Plugin for UiPlugin {
                     encounters::EncounterUiPlugin,
                     voice::VoiceUiPlugin,
                 ),
-                hunger::HungerUiPlugin,
+                // Nested for the reason the groups around it are: the tuple is at
+                // `add_plugins`' fifteen-plugin ceiling, and energy sits beside the bar it
+                // is stacked on.
+                (hunger::HungerUiPlugin, energy::EnergyUiPlugin),
                 experience::ExperienceUiPlugin,
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
@@ -1636,6 +1647,8 @@ mod tests {
             respawn_ticks: if life_state == LifeState::Dead { 40 } else { 0 },
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 
@@ -2485,6 +2498,7 @@ mod tests {
 pub(crate) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<storm::Storm>(world);
     health::reset_world(world);
+    energy::reset_world(world);
     trade::reset_world(world);
 }
 

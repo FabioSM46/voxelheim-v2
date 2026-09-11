@@ -28,6 +28,8 @@ pub enum PlayerVitalsOffset {}
 ///     reason one fact is stated twice is argued
 ///   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
 ///     entity id is in that vector exactly when this is true
+///   - `max_energy` is non-zero and `energy` never exceeds it — the health invariant,
+///     for the same division
 pub struct PlayerVitals<'a> {
     pub _tab: ::flatbuffers::Table<'a>,
 }
@@ -54,6 +56,8 @@ impl<'a> PlayerVitals<'a> {
     pub const VT_EXPERIENCE: ::flatbuffers::VOffsetT = 20;
     pub const VT_EXPERIENCE_TO_NEXT: ::flatbuffers::VOffsetT = 22;
     pub const VT_BLOCKING: ::flatbuffers::VOffsetT = 24;
+    pub const VT_ENERGY: ::flatbuffers::VOffsetT = 26;
+    pub const VT_MAX_ENERGY: ::flatbuffers::VOffsetT = 28;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -73,6 +77,8 @@ impl<'a> PlayerVitals<'a> {
         builder.add_experience_to_next(args.experience_to_next);
         builder.add_experience(args.experience);
         builder.add_respawn_ticks(args.respawn_ticks);
+        builder.add_max_energy(args.max_energy);
+        builder.add_energy(args.energy);
         builder.add_level(args.level);
         builder.add_max_hunger(args.max_hunger);
         builder.add_hunger(args.hunger);
@@ -226,6 +232,35 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
+    /// V40. Current energy, in the same units as `max_energy`, rounded down to a whole
+    /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
+    /// the blow through the shield at full damage, and nothing else changes. Attacks and
+    /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
+    /// locally**: a client that drew its own regeneration would show a swing as ready the
+    /// tick before the server refuses it.
+    #[inline]
+    pub fn energy(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerVitals::VT_ENERGY, Some(0))
+                .unwrap()
+        }
+    }
+    /// V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+    #[inline]
+    pub fn max_energy(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerVitals::VT_MAX_ENERGY, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
@@ -246,6 +281,8 @@ impl ::flatbuffers::Verifiable for PlayerVitals<'_> {
             .visit_field::<u32>("experience", Self::VT_EXPERIENCE, false)?
             .visit_field::<u32>("experience_to_next", Self::VT_EXPERIENCE_TO_NEXT, false)?
             .visit_field::<bool>("blocking", Self::VT_BLOCKING, false)?
+            .visit_field::<u16>("energy", Self::VT_ENERGY, false)?
+            .visit_field::<u16>("max_energy", Self::VT_MAX_ENERGY, false)?
             .finish();
         Ok(())
     }
@@ -262,6 +299,8 @@ pub struct PlayerVitalsArgs {
     pub experience: u32,
     pub experience_to_next: u32,
     pub blocking: bool,
+    pub energy: u16,
+    pub max_energy: u16,
 }
 impl<'a> Default for PlayerVitalsArgs {
     #[inline]
@@ -278,6 +317,8 @@ impl<'a> Default for PlayerVitalsArgs {
             experience: 0,
             experience_to_next: 0,
             blocking: false,
+            energy: 0,
+            max_energy: 0,
         }
     }
 }
@@ -345,6 +386,16 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerVitalsBuilder<'a, 'b, A
             .push_slot::<bool>(PlayerVitals::VT_BLOCKING, blocking, false);
     }
     #[inline]
+    pub fn add_energy(&mut self, energy: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerVitals::VT_ENERGY, energy, 0);
+    }
+    #[inline]
+    pub fn add_max_energy(&mut self, max_energy: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerVitals::VT_MAX_ENERGY, max_energy, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerVitalsBuilder<'a, 'b, A> {
@@ -375,6 +426,8 @@ impl ::core::fmt::Debug for PlayerVitals<'_> {
         ds.field("experience", &self.experience());
         ds.field("experience_to_next", &self.experience_to_next());
         ds.field("blocking", &self.blocking());
+        ds.field("energy", &self.energy());
+        ds.field("max_energy", &self.max_energy());
         ds.finish()
     }
 }

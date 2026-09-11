@@ -86,12 +86,34 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	// A launcher with no ammunition gets the one actionable refusal this attack path
 	// carries. This is a session-goroutine admission check, so waiting for this player's
 	// inventory is safe; the tick repeats it with TryLock before spending anything.
+	//
+	// The same read asks whether the slot holds a weapon at all. An empty slot or a stack
+	// of stone is refused here in silence, as the tick would have dropped it — but before
+	// energy is asked, so a hand holding nothing that attacks costs nothing, exactly as a
+	// launcher with no ammunition costs nothing. A worn-through weapon is still a weapon
+	// and is admitted (see slotHoldsAWeaponLocked). The tick still re-reads the slot,
+	// because the inventory can change between this admission and that judgement.
 	p.inventory.mu.Lock()
-	missingAmmunition := !p.launcherHasAmmunitionLocked(req.Slot)
+	weapon := p.slotHoldsAWeaponLocked(req.Slot)
+	missingAmmunition := weapon && !p.launcherHasAmmunitionLocked(req.Slot)
 	p.inventory.mu.Unlock()
+	if !weapon {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("slot %d holds nothing that attacks", req.Slot)
+	}
 	if missingAmmunition {
 		return vnet.RefusalReasonNoAmmunition, errors.New("the launcher has no ammunition")
 	}
+
+	// Energy is the last admission question and the only one that spends anything, so
+	// every refusal above leaves the reserve untouched. Paid here rather than when the
+	// tick resolves the swing, beside the cooldown it paces: a swing that was admitted
+	// has been made with a weapon, and a miss or a death before the tick costs what a
+	// hit does — swinging at nothing to learn whether anything is there is never free.
+	cost := uint32(AttackEnergyCost) * energyScale
+	if p.energy < cost {
+		return vnet.RefusalReasonNotEnoughEnergy, fmt.Errorf("energy %d thousandths is below the %d an attack costs", p.energy, cost)
+	}
+	p.energy -= cost
 
 	p.pendingSwing = &pendingSwing{slot: req.Slot}
 	return vnet.RefusalReasonUnknown, nil
@@ -107,6 +129,21 @@ func (p *Player) Block(active bool) {
 	if p.blocking {
 		p.pendingSwing = nil
 	}
+}
+
+// slotHoldsAWeaponLocked reports whether the slot holds a kind of item that swings or
+// launches: a registered item with melee damage or a projectile. **Its condition is not
+// asked.** A worn-through weapon is still a weapon in the hand, and its swing is admitted
+// and judged on the tick, where armedForAttackLocked finds it unusable — the contract the
+// repair and worn-launcher tests pin, so a broken blade pays for its swing like a miss. The
+// caller holds inventory.mu.
+func (p *Player) slotHoldsAWeaponLocked(slot uint8) bool {
+	stack, held := p.inventory.stackAtLocked(slot)
+	if !held {
+		return false
+	}
+	definition, registered := itemByID(stack.item)
+	return registered && (definition.meleeDamage != 0 || definition.launches != vnet.ProjectileKindUnknown)
 }
 
 // launcherHasAmmunitionLocked reports whether admission may queue this slot. Non-launchers,

@@ -890,6 +890,8 @@ mod tests {
             pos: [x, 64.0, 0.0],
             vel: [0.0, 0.0, 0.0],
             yaw,
+            health: 100,
+            max_health: 100,
         }
     }
 
@@ -1003,6 +1005,8 @@ mod tests {
                     pos: [0.0, 64.0, 0.0],
                     vel: [3.0, -1.0, 0.0],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 }],
             ),
             now,
@@ -1102,6 +1106,8 @@ mod tests {
             pos: [3.0, 64.0, -2.0],
             vel: [0.0; 3],
             yaw: 0.0,
+            health: 100,
+            max_health: 100,
         };
         let airborne = EntityState {
             pos: [3.0, 70.0, -2.0],

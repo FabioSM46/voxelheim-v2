@@ -84,6 +84,8 @@ type Sim struct {
 	regenDelayTicks    uint32
 	regenIntervalTicks uint32
 	hungerDrainTicks   uint32
+	// energyRefill is EnergyRegenPerSecond in the thousandths of a point one tick adds.
+	energyRefill uint32
 
 	// mobTimings is every registered species' windup and recovery in the ticks Step
 	// counts, derived from the configured rate for the reason every other duration here
@@ -540,6 +542,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 
 		regenIntervalTicks:   ticksFor(HealthRegenInterval, tickRate),
 		hungerDrainTicks:     ticksFor(HungerDrainInterval, tickRate),
+		energyRefill:         energyRegenPerTick(tickRate),
 		mobTimings:           mobTimingsFor(tickRate),
 		encounterMoves:       encounterMoveTimingsFor(tickRate),
 		spawnEvery:           ticksFor(SpawnDirectorInterval, tickRate),
@@ -782,6 +785,9 @@ type Player struct {
 	regenPoints      uint16
 	hunger           uint16
 	experience       uint32
+	// energy is the combat reserve in thousandths of a point (energyScale). Session
+	// state like the clocks above: never persisted, full on join and on respawn.
+	energy uint32
 
 	// learnedMounts is the character's permanent mount set. Unlike cast and mounted
 	// state it outlives this session, so Join restores it and Record writes it back.
@@ -1107,6 +1113,7 @@ func (s *Sim) joinCharacter(
 		current:         intent{yaw: yaw},
 		health:          health,
 		hunger:          hunger,
+		energy:          uint32(MaxEnergy) * energyScale,
 		experience:      experience,
 		learnedMounts:   learnedMounts,
 		bossRewardEpoch: bossRewardEpoch,
@@ -1541,13 +1548,19 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// offered the tick's bundle.
 	s.advanceEncounterPhasesLocked()
 
+	// Health rides on every state since V41 and is read from the same two places
+	// vitalsLocked reads it, so a player's own bar and every other viewer's bar over them
+	// are one authoritative number. dieLocked zeroes p.health, which is how a dead body
+	// streams zero without a rule of its own here.
 	states := make([]protocol.EntityState, len(players))
 	for i, p := range players {
 		states[i] = protocol.EntityState{
-			EntityID: p.entityID,
-			Pos:      toWire(p.pos),
-			Vel:      toWire(p.vel),
-			Yaw:      float32(p.yaw),
+			EntityID:  p.entityID,
+			Pos:       toWire(p.pos),
+			Vel:       toWire(p.vel),
+			Yaw:       float32(p.yaw),
+			Health:    p.health,
+			MaxHealth: p.maxHealthLocked(),
 		}
 	}
 	// The structures, read rather than advanced: nothing about a tent changes with a

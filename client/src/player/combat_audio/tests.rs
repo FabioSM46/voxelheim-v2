@@ -72,6 +72,8 @@ fn snapshot(app: &mut App, mobs: Vec<MobState>) -> u32 {
                 pos: [4.0, 0.0, 4.0],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             ..Snapshot::default()
         },

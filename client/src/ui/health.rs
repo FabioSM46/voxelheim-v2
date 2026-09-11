@@ -63,9 +63,9 @@ pub(super) const BAR_LABEL_SIZE: f32 = 14.0;
 /// format — so the size has a documented bottom and the width does not.
 const BAR_LABEL_MIN_SIZE: f32 = 14.0;
 
-/// The longest reading any of the three bars can be asked to draw, in characters:
+/// The longest reading any of the vital bars can be asked to draw, in characters:
 /// `Lv 65535 | 4294967295 / 4294967295`, a `u16` level and two `u32` progression values
-/// at their wire maxima. Health and hunger top out at `65535 / 65535`, thirteen.
+/// at their wire maxima. Health, energy and hunger top out at `65535 / 65535`, thirteen.
 const LONGEST_READING_CHARS: f32 = 34.0;
 
 /// The advance of Bevy's embedded default font, in ems. FiraMono is monospace, so every
@@ -120,23 +120,33 @@ pub(super) const BAR_CORNER_RADIUS: f32 = 3.0;
 /// clears the hotbar, which is [`CELL_SIZE`] tall and sits 18 px up.
 pub(super) const EXPERIENCE_BAR_BOTTOM: f32 = 18.0 + CELL_SIZE + 14.0;
 
-/// Vertical space between the three vital bars.
+/// Vertical space between the vital bars.
 pub(super) const VITAL_BAR_GAP: f32 = 8.0;
 
 /// Distance from the bottom of the window to the hunger bar. Experience takes the lower
 /// position nearest the hotbar; hunger moves up by one bar and the documented gap.
 pub(super) const HUNGER_BAR_BOTTOM: f32 = EXPERIENCE_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
 
+/// Distance from the bottom of the window to the energy bar (`ui/energy.rs`), directly
+/// under health: one bar and the documented gap above hunger.
+///
+/// Inserting it moved health, and the cast bar above it, up by one bar and the gap rather
+/// than pushing hunger and experience down. Relative to health the two lower bars are one
+/// step further away either way; in the window only this direction is available, because
+/// experience already sits as low as the hotbar allows.
+pub(super) const ENERGY_BAR_BOTTOM: f32 = HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
+
 /// Distance from the bottom of the window to this health bar. Health sits one bar and
-/// the documented gap above hunger.
-pub(super) const HEALTH_BAR_BOTTOM: f32 = HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
+/// the documented gap above energy.
+pub(super) const HEALTH_BAR_BOTTOM: f32 = ENERGY_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP;
 
 /// The empty part of the bar. The same near-black the empty inventory cells use, so the
 /// HUD reads as one surface.
 const BAR_TRACK: Color = Color::srgba(0.055, 0.065, 0.080, 0.94);
 
-/// What health is drawn in.
-const BAR_FILL: Color = Color::srgb(0.72, 0.16, 0.16);
+/// What health is drawn in. `pub(super)` so `ui/energy.rs` can hold its own fill apart
+/// from this one in a test rather than in a sentence.
+pub(super) const BAR_FILL: Color = Color::srgb(0.72, 0.16, 0.16);
 
 /// The bar's edge while the server is refusing damage. Ice against the blood, and the one
 /// place this colour appears — a player should never have to compare two shades to know
@@ -970,6 +980,7 @@ mod tests {
     use super::*;
     use crate::net::SessionParams;
     use crate::player::NIGHT_SKY;
+    use crate::ui::energy::{EnergyLabel, EnergyRoot, EnergyTrack, EnergyUiPlugin};
     use crate::ui::experience::{
         ExperienceLabel, ExperienceRoot, ExperienceTrack, ExperienceUiPlugin,
     };
@@ -1008,6 +1019,8 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 
@@ -1024,6 +1037,8 @@ mod tests {
             respawn_ticks,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 
@@ -1206,6 +1221,8 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 0,
+            max_energy: 1,
         };
         let longest = PlayerVitals {
             health: u16::MAX,
@@ -1219,18 +1236,30 @@ mod tests {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: u16::MAX,
+            max_energy: u16::MAX,
         };
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(session())
             .insert_resource(SelfVitals::from_server(shortest))
-            .add_plugins((HealthUiPlugin, HungerUiPlugin, ExperienceUiPlugin));
+            .add_plugins((
+                HealthUiPlugin,
+                EnergyUiPlugin,
+                HungerUiPlugin,
+                ExperienceUiPlugin,
+            ));
         app.update();
 
         let health_root = node::<HealthRoot>(&mut app);
+        let energy_root = node::<EnergyRoot>(&mut app);
         let hunger_root = node::<HungerRoot>(&mut app);
         let experience_root = node::<ExperienceRoot>(&mut app);
+        assert_eq!(
+            horizontal_root_contract(&health_root),
+            horizontal_root_contract(&energy_root)
+        );
         assert_eq!(
             horizontal_root_contract(&health_root),
             horizontal_root_contract(&hunger_root)
@@ -1241,8 +1270,10 @@ mod tests {
         );
 
         let health_track = node::<HealthTrack>(&mut app);
+        let energy_track = node::<EnergyTrack>(&mut app);
         let hunger_track = node::<HungerTrack>(&mut app);
         let experience_track = node::<ExperienceTrack>(&mut app);
+        assert_eq!(health_track, energy_track);
         assert_eq!(health_track, hunger_track);
         assert_eq!(health_track, experience_track);
         assert!(
@@ -1251,8 +1282,10 @@ mod tests {
         );
 
         let health_label = node::<HealthLabel>(&mut app);
+        let energy_label = node::<EnergyLabel>(&mut app);
         let hunger_label = node::<HungerLabel>(&mut app);
         let experience_label = node::<ExperienceLabel>(&mut app);
+        assert_eq!(health_label, energy_label);
         assert_eq!(health_label, hunger_label);
         assert_eq!(health_label, experience_label);
         // The reading spans its track's interior and carries no width of its own, so a
@@ -1268,6 +1301,7 @@ mod tests {
         assert_eq!(health_label.top, Val::Percent(50.0));
         for transform in [
             ui_transform::<HealthLabel>(&mut app),
+            ui_transform::<EnergyLabel>(&mut app),
             ui_transform::<HungerLabel>(&mut app),
             ui_transform::<ExperienceLabel>(&mut app),
         ] {
@@ -1275,6 +1309,7 @@ mod tests {
         }
         for layout in [
             text_layout::<HealthLabel>(&mut app),
+            text_layout::<EnergyLabel>(&mut app),
             text_layout::<HungerLabel>(&mut app),
             text_layout::<ExperienceLabel>(&mut app),
         ] {
@@ -1283,6 +1318,7 @@ mod tests {
         }
         // Legible over the fill at every ratio, which is what the shadow is for.
         assert!(has_shadow::<HealthLabel>(&mut app));
+        assert!(has_shadow::<EnergyLabel>(&mut app));
         assert!(has_shadow::<HungerLabel>(&mut app));
         assert!(has_shadow::<ExperienceLabel>(&mut app));
 
@@ -1290,6 +1326,10 @@ mod tests {
             (
                 entity::<HealthTrack>(&mut app),
                 entity::<HealthLabel>(&mut app),
+            ),
+            (
+                entity::<EnergyTrack>(&mut app),
+                entity::<EnergyLabel>(&mut app),
             ),
             (
                 entity::<HungerTrack>(&mut app),
@@ -1316,17 +1356,19 @@ mod tests {
 
         let hotbar_root = hotbar_root_node();
 
-        // The taller bars still stack experience, hunger, health from the bottom, still
-        // keep the documented gap, and the lowest of them still clears the hotbar.
+        // The taller bars stack experience, hunger, energy, health from the bottom, keep
+        // the documented gap, and the lowest of them still clears the hotbar.
         let [
             Val::Px(hotbar_bottom),
             Val::Px(experience_bottom),
             Val::Px(hunger_bottom),
+            Val::Px(energy_bottom),
             Val::Px(health_bottom),
         ] = [
             hotbar_root.bottom,
             experience_root.bottom,
             hunger_root.bottom,
+            energy_root.bottom,
             health_root.bottom,
         ]
         else {
@@ -1340,7 +1382,8 @@ mod tests {
             hunger_bottom - experience_bottom,
             BAR_HEIGHT + VITAL_BAR_GAP
         );
-        assert_eq!(health_bottom - hunger_bottom, BAR_HEIGHT + VITAL_BAR_GAP);
+        assert_eq!(energy_bottom - hunger_bottom, BAR_HEIGHT + VITAL_BAR_GAP);
+        assert_eq!(health_bottom - energy_bottom, BAR_HEIGHT + VITAL_BAR_GAP);
 
         // Each reading's line, at the height the text pipeline will lay it out at rather
         // than the one the compile-time bound assumes.
@@ -1349,6 +1392,11 @@ mod tests {
                 &health_label,
                 ui_transform::<HealthLabel>(&mut app),
                 reading_line_height::<HealthLabel>(&mut app),
+            ),
+            (
+                &energy_label,
+                ui_transform::<EnergyLabel>(&mut app),
+                reading_line_height::<EnergyLabel>(&mut app),
             ),
             (
                 &hunger_label,
@@ -1364,6 +1412,10 @@ mod tests {
 
         for viewport_width in [800.0, 1024.0, 1920.0] {
             let expected = track_edges(viewport_width, &health_root, &health_track);
+            assert_eq!(
+                track_edges(viewport_width, &energy_root, &energy_track),
+                expected
+            );
             assert_eq!(
                 track_edges(viewport_width, &hunger_root, &hunger_track),
                 expected
@@ -1417,6 +1469,9 @@ mod tests {
             node::<HealthRoot>(&mut app),
             node::<HealthTrack>(&mut app),
             node::<HealthLabel>(&mut app),
+            node::<EnergyRoot>(&mut app),
+            node::<EnergyTrack>(&mut app),
+            node::<EnergyLabel>(&mut app),
             node::<HungerRoot>(&mut app),
             node::<HungerTrack>(&mut app),
             node::<HungerLabel>(&mut app),
@@ -1426,6 +1481,14 @@ mod tests {
         );
         deliver(&mut app, longest);
         assert_eq!(label(&mut app), "65535 / 65535");
+        assert_eq!(
+            {
+                let world = app.world_mut();
+                let mut query = world.query_filtered::<&Text, With<EnergyLabel>>();
+                query.single(world).expect("one energy label").0.clone()
+            },
+            "65535 / 65535"
+        );
         assert_eq!(
             {
                 let world = app.world_mut();
@@ -1448,6 +1511,9 @@ mod tests {
                 node::<HealthRoot>(&mut app),
                 node::<HealthTrack>(&mut app),
                 node::<HealthLabel>(&mut app),
+                node::<EnergyRoot>(&mut app),
+                node::<EnergyTrack>(&mut app),
+                node::<EnergyLabel>(&mut app),
                 node::<HungerRoot>(&mut app),
                 node::<HungerTrack>(&mut app),
                 node::<HungerLabel>(&mut app),

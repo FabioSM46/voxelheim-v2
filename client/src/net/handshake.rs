@@ -64,6 +64,10 @@ pub enum Phase {
 
 /// What a message did to the handshake.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Snapshot is the hot-path transition and remains inline, as SessionEvent keeps it; V40 energy in PlayerVitals crossed the lint's ratio"
+)]
 pub enum Transition {
     /// The characters this account owns here, and the number it may hold. The player
     /// chooses one; nothing about that choice is decided in this module.
@@ -922,6 +926,8 @@ mod tests {
                 pos: [0.5, 64.0, 0.5],
                 vel: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             drops: vec![],
             ..Default::default()
@@ -1137,6 +1143,8 @@ mod tests {
             respawn_ticks: 40,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         };
 
         // The last row is the one that keeps this from being written as "dead_players must be
@@ -1179,12 +1187,16 @@ mod tests {
                         pos: [0.5, 64.0, 0.5],
                         vel: [0.0, 0.0, 0.0],
                         yaw: 0.0,
+                        health: 100,
+                        max_health: 100,
                     },
                     super::super::codec::EntityState {
                         entity_id: 9,
                         pos: [4.5, 64.0, 0.5],
                         vel: [0.0, 0.0, 0.0],
                         yaw: 0.0,
+                        health: 100,
+                        max_health: 100,
                     },
                 ],
                 ..snapshot()
@@ -1228,12 +1240,16 @@ mod tests {
                         pos: [0.0; 3],
                         vel: [0.0; 3],
                         yaw: 0.0,
+                        health: 100,
+                        max_health: 100,
                     },
                     super::super::codec::EntityState {
                         entity_id: 9,
                         pos: [0.0; 3],
                         vel: [0.0; 3],
                         yaw: 0.0,
+                        health: 100,
+                        max_health: 100,
                     },
                 ],
                 ..snapshot()
@@ -1370,6 +1386,8 @@ mod tests {
             respawn_ticks: 40,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         };
         let frame = |self_vitals: PlayerVitals, dead_players: Vec<u64>| Snapshot {
             self_vitals,
@@ -1380,12 +1398,16 @@ mod tests {
                     pos: [0.5, 64.0, 0.5],
                     vel: [0.0, 0.0, 0.0],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 },
                 super::super::codec::EntityState {
                     entity_id: 9,
                     pos: [4.5, 64.0, 0.5],
                     vel: [0.0, 0.0, 0.0],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 },
             ],
             ..snapshot()

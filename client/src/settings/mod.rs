@@ -660,6 +660,86 @@ impl Knob {
             | Self::VoiceAudience => Tab::Audio,
         }
     }
+
+    /// Whether this knob's value is one of a list rather than a number on a scale — a closed
+    /// enum, or a list the machine offers through [`Choices`].
+    ///
+    /// **The statement the settings screen draws a select from**, and
+    /// [`Settings::options_with_choices`] answers `Some` for exactly these knobs;
+    /// `the_multiple_choice_knobs_are_exactly_the_ones_with_options` holds the two together.
+    /// No wildcard arm, for [`Self::tab`]'s reason: a new knob says which it is before it builds.
+    pub const fn is_choice(self) -> bool {
+        match self {
+            Self::WindowMode
+            | Self::Monitor
+            | Self::OutputDevice
+            | Self::InputDevice
+            | Self::VoiceMode
+            | Self::VoiceAudience => true,
+            Self::LookSensitivity
+            | Self::RenderDistance
+            | Self::FieldOfView
+            | Self::Brightness
+            | Self::FogStart
+            | Self::FrameCap
+            | Self::MasterVolume
+            | Self::MusicVolume
+            | Self::SfxVolume
+            | Self::AmbienceVolume
+            | Self::VoiceDucking
+            | Self::VoiceVolume
+            | Self::VoiceActivationThreshold => false,
+        }
+    }
+}
+
+/// What a multiple-choice knob offers, in the order [`Settings::adjust_with_choices`] steps
+/// through it, and which of those the setting holds now.
+///
+/// **A reading, never a setter.** A select turns a chosen index into a number of steps with
+/// [`Self::steps_to`] and hands that to `adjust_with_choices`, so the bound, the clamp and the
+/// file all stay where every other press already reaches them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnobOptions {
+    /// What each option says in an open list.
+    pub labels: Vec<String>,
+    /// The option the setting holds, or `None` when it holds a value the list no longer
+    /// offers — a monitor or a device that is saved and not attached.
+    pub selected: Option<usize>,
+}
+
+impl KnobOptions {
+    /// How many steps from the current value reach option `index`, or `None` when there is no
+    /// such option.
+    ///
+    /// Counted from the first option when nothing is selected, because that is where stepping
+    /// counts from too (`MonitorChoices::moved`, `DeviceList::moved`). A count of zero is still
+    /// worth applying there: stepping by nothing lands on the first option, which is how an
+    /// unavailable value is replaced by the first entry in the list.
+    pub fn steps_to(&self, index: usize) -> Option<i32> {
+        if index >= self.labels.len() {
+            return None;
+        }
+        let from = self.selected.unwrap_or(0);
+        i32::try_from(index as i64 - from as i64).ok()
+    }
+
+    /// A closed enum's options: every value, labelled, with `current` among them.
+    fn closed<T: Copy + PartialEq>(all: &[T], current: T, label: fn(T) -> &'static str) -> Self {
+        Self {
+            labels: all.iter().map(|value| label(*value).to_owned()).collect(),
+            selected: all.iter().position(|value| *value == current),
+        }
+    }
+
+    /// A device knob's options: the system default, then every device the host named.
+    fn devices(list: &DeviceList, current: &DeviceChoice) -> Self {
+        let choices = list.choices();
+        Self {
+            labels: choices.iter().map(|choice| list.label(choice)).collect(),
+            selected: choices.iter().position(|choice| choice == current),
+        }
+    }
 }
 
 /// The two window modes this client offers. The closed enum is the bound,
@@ -1928,12 +2008,13 @@ impl Settings {
         }
     }
 
-    /// Applies one of `monitors.preferences()` directly, replacing whatever was selected.
+    /// Puts a monitor preference in place directly — including one no display answers to,
+    /// which no press can reach.
     ///
-    /// The Monitor row is a select, not a stepper: a player picks a display rather than
-    /// moving relative to whichever one is current, so this assigns instead of stepping
-    /// through [`Self::adjust_with_choices`]. It replaces an unavailable saved preference
-    /// exactly as it replaces a live one — there is no other way to leave one behind.
+    /// Test-only since #1126: the Monitor select steps through
+    /// [`Self::adjust_with_choices`] like every other row, and this is how a test stands up the
+    /// saved-but-unplugged state that stepping can leave but never enter.
+    #[cfg(test)]
     pub fn set_monitor(&mut self, preference: MonitorPreference) {
         self.monitor = preference;
     }
@@ -1969,6 +2050,61 @@ impl Settings {
                 format!("{:.0} dB", self.voice_activation_threshold)
             }
             Knob::VoiceAudience => self.voice_audience.label().to_owned(),
+        }
+    }
+
+    /// What a multiple-choice `knob` offers and which option it holds, or `None` for a knob
+    /// that is a number on a scale — see [`Knob::is_choice`].
+    pub fn options_with_choices(&self, knob: Knob, choices: Choices<'_>) -> Option<KnobOptions> {
+        match knob {
+            Knob::WindowMode => Some(KnobOptions::closed(
+                &WINDOW_MODES,
+                self.window_mode,
+                DisplayMode::name,
+            )),
+            Knob::Monitor => {
+                let preferences = choices.monitors.preferences();
+                Some(KnobOptions {
+                    labels: preferences
+                        .iter()
+                        .map(|preference| choices.monitors.option_label(preference))
+                        .collect(),
+                    selected: preferences
+                        .iter()
+                        .position(|preference| *preference == self.monitor),
+                })
+            }
+            Knob::OutputDevice => Some(KnobOptions::devices(
+                choices.devices.outputs(),
+                &self.output_device,
+            )),
+            Knob::InputDevice => Some(KnobOptions::devices(
+                choices.devices.inputs(),
+                &self.input_device,
+            )),
+            Knob::VoiceMode => Some(KnobOptions::closed(
+                &VOICE_MODES,
+                self.voice_mode,
+                VoiceMode::label,
+            )),
+            Knob::VoiceAudience => Some(KnobOptions::closed(
+                &VOICE_AUDIENCES,
+                self.voice_audience,
+                VoiceAudience::label,
+            )),
+            Knob::LookSensitivity
+            | Knob::RenderDistance
+            | Knob::FieldOfView
+            | Knob::Brightness
+            | Knob::FogStart
+            | Knob::FrameCap
+            | Knob::MasterVolume
+            | Knob::MusicVolume
+            | Knob::SfxVolume
+            | Knob::AmbienceVolume
+            | Knob::VoiceDucking
+            | Knob::VoiceVolume
+            | Knob::VoiceActivationThreshold => None,
         }
     }
 
@@ -3437,24 +3573,127 @@ mod tests {
         assert_eq!(monitors.option_label(&vanished), "");
     }
 
-    /// The select assigns directly; it does not step. And it is the only way to leave an
-    /// unavailable saved preference behind — the model has no other setter for this field.
+    /// A select is drawn for a knob exactly when the model has a list for it — the two
+    /// statements the screen reads, held to each other.
     #[test]
-    fn set_monitor_replaces_the_preference_directly_including_an_unavailable_one() {
+    fn the_multiple_choice_knobs_are_exactly_the_ones_with_options() {
         let monitors = MonitorChoices::named(&["Main display", "Side display"]);
-        let mut settings = Settings::default();
-        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
+        let devices = AudioDevices::named(&["Built-in speakers"], &["Built-in microphone"]);
+        let choices = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        for knob in KNOBS {
+            assert_eq!(
+                Settings::default()
+                    .options_with_choices(knob, choices)
+                    .is_some(),
+                knob.is_choice(),
+                "{knob:?}"
+            );
+        }
+    }
 
-        let side = monitors.preferences()[1].clone();
-        settings.set_monitor(side.clone());
-        assert_eq!(settings.monitor(), &side);
+    /// **Each select's options are its knob's step list, by name and in order**, and reaching
+    /// option `to` from option `from` by [`KnobOptions::steps_to`] lands on it — for every pair,
+    /// and from a value the list no longer offers. That last start is the one a device or a
+    /// monitor that went away leaves behind, and the only way out of it is a press.
+    #[test]
+    fn every_select_offers_its_knobs_values_and_steps_onto_any_of_them() {
+        let monitors = MonitorChoices::named(&["Main display", "Side display"]);
+        let devices = AudioDevices::named(
+            &["Built-in speakers", "USB headset"],
+            &["Built-in microphone", "USB headset mic"],
+        );
+        let choices = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        let expected: [(Knob, &[&str]); 6] = [
+            (Knob::WindowMode, &["borderless", "windowed"]),
+            (
+                Knob::Monitor,
+                &["Primary", "Side display (1920x1080 at 1920,0)"],
+            ),
+            (
+                Knob::OutputDevice,
+                &["system default", "Built-in speakers", "USB headset"],
+            ),
+            (
+                Knob::InputDevice,
+                &["system default", "Built-in microphone", "USB headset mic"],
+            ),
+            (
+                Knob::VoiceMode,
+                &["off", "push to talk", "voice activation"],
+            ),
+            (Knob::VoiceAudience, &["everyone", "party only"]),
+        ];
+        assert_eq!(
+            expected.len(),
+            KNOBS.iter().filter(|knob| knob.is_choice()).count(),
+            "a multiple-choice knob has no expectation here"
+        );
 
-        let unavailable = MonitorPreference::Specific("name:6c6f7374".to_owned());
-        settings.set_monitor(unavailable.clone());
-        assert_eq!(settings.monitor(), &unavailable);
+        for (knob, labels) in expected {
+            let options = |settings: &Settings| {
+                settings
+                    .options_with_choices(knob, choices)
+                    .expect("a multiple-choice knob has options")
+            };
+            assert_eq!(options(&Settings::default()).labels, labels, "{knob:?}");
 
-        settings.set_monitor(MonitorPreference::Primary);
-        assert_eq!(settings.monitor(), &MonitorPreference::Primary);
+            // Stepping from the bottom visits the options in the order the list names them,
+            // and stops at the end of it.
+            let mut settings = Settings::default();
+            settings.adjust_with_choices(knob, -1_000, choices);
+            for at in 0..labels.len() {
+                assert_eq!(options(&settings).selected, Some(at), "{knob:?} step {at}");
+                settings.adjust_with_choices(knob, 1, choices);
+            }
+            assert_eq!(options(&settings).selected, Some(labels.len() - 1));
+
+            for from in 0..labels.len() {
+                for to in 0..labels.len() {
+                    let mut settings = Settings::default();
+                    let steps = options(&settings).steps_to(from).expect("an option");
+                    settings.adjust_with_choices(knob, steps, choices);
+                    let steps = options(&settings).steps_to(to).expect("an option");
+                    settings.adjust_with_choices(knob, steps, choices);
+                    assert_eq!(
+                        options(&settings).selected,
+                        Some(to),
+                        "{knob:?} {from}->{to}"
+                    );
+                }
+            }
+            assert_eq!(options(&Settings::default()).steps_to(labels.len()), None);
+        }
+
+        // From a saved value nothing offers, every option is still reachable.
+        for to in 0..3 {
+            for knob in [Knob::Monitor, Knob::OutputDevice] {
+                let mut settings = Settings::default();
+                settings.set_monitor(MonitorPreference::Specific("name:6c6f7374".to_owned()));
+                settings.output_device = DeviceChoice::Named("Unplugged".to_owned());
+                let before = settings
+                    .options_with_choices(knob, choices)
+                    .expect("options");
+                assert_eq!(before.selected, None, "{knob:?} offered an absent value");
+                let Some(steps) = before.steps_to(to) else {
+                    continue;
+                };
+                settings.adjust_with_choices(knob, steps, choices);
+                assert_eq!(
+                    settings
+                        .options_with_choices(knob, choices)
+                        .expect("options")
+                        .selected,
+                    Some(to),
+                    "{knob:?} could not leave an absent value for option {to}"
+                );
+            }
+        }
     }
 
     #[test]

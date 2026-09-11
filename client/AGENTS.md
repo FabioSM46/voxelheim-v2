@@ -104,7 +104,7 @@ keeps meaning "everything the client is".
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the two overlays with lifecycles of their own — the Monitor dropdown and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the overlays with lifecycles of their own — one select dropdown per multiple-choice knob (at most one open) and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1530,9 +1530,20 @@ owns `Tab::Audio`, `Knob::MasterVolume` and the `master-volume` line in the file
 step and a default, like every other knob. What crosses the seam is
 `Settings::master_gain()`, the single conversion from the 0-100 a player reads to the 0.0-1.0
 a sample is multiplied by, and it crosses **one way**: `follow_the_settings` reads the
-setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
-"Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
+setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. The
+`TEST` in each volume row — the Master row's included, which replaced the "Test speakers" row
+in #1126 — sets `AudioControls::tone_test` to its bus; this module takes that request back on
 the frame it starts the tone, so the screen never has to remember to clear it.
+
+**A multiple-choice knob is a select, and the select has no setter.** `Knob::is_choice` names
+them (window mode, monitor, both devices, voice mode, audience) and
+`Settings::options_with_choices` lists each one's options in the order stepping walks them.
+Choosing an option turns its index into a step count with `KnobOptions::steps_to` and hands it
+to `adjust_with_choices`, so a select reaches the same bound, clamp and file a `+` does. A
+saved device or monitor that is not attached is held with nothing selected; stepping counts
+from the first option there, which is why choosing any option — the first included — replaces
+it. A new multiple-choice knob gets a dropdown by saying it is a choice; `ui/settings.rs`
+names no knob.
 
 **The four bus volumes below it are the same statement again, and their defaults are an
 ordering rather than four numbers.** `Knob::MusicVolume`, `Knob::SfxVolume` and
@@ -1648,7 +1659,7 @@ it something the embedded font can draw.
 
 **The signal processing is hand-written, and the dependency budget is why.** `audio/dsp.rs`
 holds a resampler, a noise gate, a slow automatic gain control and a level meter — two
-hundred lines of arithmetic that would otherwise be a sixth crate, which
+hundred lines of arithmetic that would otherwise be a seventh crate, which
 `docs/adr/0001-voice-transport.md` declines. Two rules bind it. It runs on the Bevy schedule
 and never in a callback, so it may allocate, and it is still written to reuse its buffers
 rather than allocate sixty times a second. And a level is presentation like everything else
@@ -1732,9 +1743,9 @@ disappear from, and that is the same rule read the other way — that line says 
 is *hearing*.
 
 **The Voices panel is an overlay, and it is rebuilt on a *set* rather than on a change.** It
-takes the Monitor dropdown's shape for the Monitor dropdown's reasons — absolutely positioned,
+takes a select dropdown's shape for a select dropdown's reasons — absolutely positioned,
 its own `GlobalZIndex`, its own open/close lifecycle, closed by a tab change and by Escape
-before Escape reaches the screen. What differs is the trap: `Voices` is marked changed on
+before Escape reaches the screen (an open select goes first, then the panel). What differs is the trap: `Voices` is marked changed on
 **every frame anybody is speaking**, so a rebuild driven by `Res::is_changed` would despawn and
 respawn a row under a pointer sixty times a second. `rebuild_voice_rows` therefore compares
 what is drawn against what should be — and it compares **two** things, the set of speakers and
@@ -2000,7 +2011,7 @@ and the `go` directive in `server/go.mod`. CI pins the matching
 the channel and every workflow action pin together. `Cargo.lock` is committed and every gate
 runs `--locked`.
 
-**Five dependencies: `bevy`, `flatbuffers`, `rustls`, `cpal` and `audiopus`.** Each is
+**Six dependencies: `bevy`, `flatbuffers`, `rustls`, `cpal`, `audiopus` and `arboard`.** Each is
 GDD-level architecture, and each gets the sentence that justifies it:
 
 - **`bevy`** — the engine. ECS, windowing and the wgpu renderer the whole client is built on.
@@ -2012,10 +2023,15 @@ GDD-level architecture, and each gets the sentence that justifies it:
   and `bevy_audio` cannot open one at all.
 - **`audiopus`** — libopus, for the proximity voice codec, linked against the system
   `libopus-dev` through `pkg-config` rather than compiled from vendored source with cmake.
+- **`arboard`** — the system clipboard, for `Control+C` / `X` / `V` in text fields. winit has no
+  clipboard, and it is reached only through the `Clipboard` trait in `ui/clipboard.rs`, so a test
+  pastes from memory in the same build the game ships. Decided in
+  `docs/adr/0003-system-clipboard.md`; on the Linux target it adds one package and no system
+  library.
 
-The last two are **declared and not yet consumed**: #851 lands them ahead of the audio module
-that uses them, so the lockfile and the CI package list move once rather than once per pull
-request. The budget is spent when the decision is taken and not when the line is added, which
+`cpal` and `audiopus` were **declared before they were consumed**: #851 landed them ahead of the
+audio module that now uses them (`audio/device.rs` and `audio/codec.rs`), so the lockfile and the
+CI package list moved once rather than once per pull request. The budget is spent when the decision is taken and not when the line is added, which
 is the whole point of asking for a discussion first — and the decision is
 `docs/adr/0001-voice-transport.md`.
 
@@ -2029,14 +2045,14 @@ client is not built for. On this target the graph grows by **six** — `cpal`, `
 build dependencies included, goes from 315 to 330; the extra nine are `audiopus_sys`'s build
 scripts, `cmake` among them as a *crate* even on the path that never invokes the binary.
 
-A sixth needs a discussion before a commit — in particular there is still no async runtime and
+A seventh needs a discussion before a commit — in particular there is still no async runtime and
 no networking framework here, by design: `std::net` plus `std::sync::mpsc` on one thread is the
 whole netcode substrate, and it is enough. That rule is why the two audio crates were argued on
 the record before either was added: **`docs/adr/0001-voice-transport.md`** is that argument. It decides that voice rides the existing TLS stream instead of an SFU beside the
 server — which is what keeps the count at five rather than at five plus a WebRTC stack and the
 async runtime under it — names `cpal` and `audiopus` as the two this costs, says why
 `bevy_audio` is not one of them, and carries the measurement the decision rests on. Read it
-before proposing a sixth crate for audio; it probably already says no, and says why.
+before proposing another crate for audio; it probably already says no, and says why.
 
 That budget is also why signing in brought no crate with it: opening a browser is `xdg-open`
 through `std::process::Command`, the loopback listener is `std::net`, and the HTTP, JSON,

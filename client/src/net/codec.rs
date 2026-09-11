@@ -1029,6 +1029,12 @@ pub struct PlayerVitals {
     /// the timer; this is its answer.
     pub invulnerable: bool,
     pub blocking: bool,
+    /// Current energy, rounded down to a whole point by the server. Never exceeds
+    /// `max_energy`. **The server's number**: the client never predicts a cost or a
+    /// refill, so a presentation holds this value between snapshots.
+    pub energy: u16,
+    /// Maximum energy. Guaranteed non-zero.
+    pub max_energy: u16,
 }
 
 impl PlayerVitals {
@@ -1052,6 +1058,8 @@ impl PlayerVitals {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 }
@@ -1104,6 +1112,12 @@ pub struct EntityState {
     pub vel: [f32; 3],
     /// Facing, in radians, wrapped into (-π, π] by the server.
     pub yaw: f32,
+    /// V41. The server's health for this player — public for every visible player, and
+    /// for the local player equal to `PlayerVitals::health`. Zero for a dead player.
+    /// Never exceeds `max_health`.
+    pub health: u16,
+    /// V41. Guaranteed non-zero: the denominator of every health bar drawn over a body.
+    pub max_health: u16,
 }
 
 /// One projectile's authoritative state in a snapshot.
@@ -1456,6 +1470,9 @@ pub enum RefusedAction {
     PlayerTrade,
     /// Portal crossing; the answering surface is supplied by #974.
     CrossPortal,
+    /// V40. An attack refused because its energy was not there to spend. Nothing was
+    /// queued and nothing was spent.
+    Energy,
 }
 
 impl RefusedAction {
@@ -1483,6 +1500,7 @@ impl RefusedAction {
             fb::RefusedAction::Mount => Self::Mount,
             fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
             fb::RefusedAction::CrossPortal => Self::CrossPortal,
+            fb::RefusedAction::Energy => Self::Energy,
             _ => Self::Unknown,
         }
     }
@@ -1563,6 +1581,8 @@ pub enum RefusalReason {
     InstanceUnavailable,
     SessionMismatch,
     EntryOfferUnknown,
+    /// V40. The player's energy is below what the action costs.
+    NotEnoughEnergy,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1628,6 +1648,7 @@ impl RefusalReason {
             fb::RefusalReason::InstanceUnavailable => Self::InstanceUnavailable,
             fb::RefusalReason::SessionMismatch => Self::SessionMismatch,
             fb::RefusalReason::EntryOfferUnknown => Self::EntryOfferUnknown,
+            fb::RefusalReason::NotEnoughEnergy => Self::NotEnoughEnergy,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -3158,6 +3179,10 @@ impl BlowLanded {
 /// `Message::Deferred`"; by Protocol V4 five did, and nothing said so, because a
 /// number nobody can vary is a number nobody can see go wrong.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Snapshot is the hot-path message and remains inline, as SessionEvent keeps it; V40 energy in PlayerVitals crossed the lint's ratio"
+)]
 pub enum Message {
     /// The session is accepted, and the parameters have already been validated.
     Welcome(SessionParams),
@@ -3407,6 +3432,15 @@ pub enum DecodeError {
         field: &'static str,
         value: f32,
     },
+    /// A snapshot carries a player whose health has no denominator or exceeds it.
+    ///
+    /// Refused with the frame, as `PartyMemberHealth` is: a bar drawn as
+    /// `health / max_health` divides by zero or overflows its frame otherwise.
+    EntityHealth {
+        entity_id: u64,
+        health: u16,
+        max_health: u16,
+    },
     /// A snapshot carries a drop with a NaN or infinite position component.
     NonFiniteDrop {
         entity_id: u64,
@@ -3494,6 +3528,12 @@ pub enum DecodeError {
         level: u16,
         experience: u32,
         experience_to_next: u32,
+    },
+    /// `max_energy` is zero, or `energy` exceeds it. A spent reserve is legal; a zero
+    /// denominator is not.
+    VitalsEnergy {
+        energy: u16,
+        max_energy: u16,
     },
     /// An `Alive` player with no health left. Zero health is what the server's own
     /// transition to `Dead` means, so this is a server that has lost track of one of its
@@ -4151,6 +4191,14 @@ impl fmt::Display for DecodeError {
                 field,
                 value,
             } => write!(f, "entity {entity_id} has a non-finite {field}: {value}"),
+            Self::EntityHealth {
+                entity_id,
+                health,
+                max_health,
+            } => write!(
+                f,
+                "entity {entity_id} is {health}/{max_health}, want a non-zero maximum and no more health than it"
+            ),
             Self::NonFiniteDrop {
                 entity_id,
                 field,
@@ -4247,6 +4295,10 @@ impl fmt::Display for DecodeError {
                 "progression is level {level} at {experience}/{experience_to_next}, want a non-zero level and denominator and no more experience than it"
             ),
             Self::AliveWithoutHealth => write!(f, "vitals say alive with no health left"),
+            Self::VitalsEnergy { energy, max_energy } => write!(
+                f,
+                "energy is {energy}/{max_energy}, want a non-zero maximum and no more energy than it"
+            ),
             Self::RespawnWhileAlive { respawn_ticks } => write!(
                 f,
                 "vitals count {respawn_ticks} ticks to a respawn for a player who is not dead"
@@ -7035,6 +7087,10 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
             experience_to_next,
         });
     }
+    let (energy, max_energy) = (vitals.energy(), vitals.max_energy());
+    if max_energy == 0 || energy > max_energy {
+        return Err(DecodeError::VitalsEnergy { energy, max_energy });
+    }
     if life_state == LifeState::Alive && health == 0 {
         return Err(DecodeError::AliveWithoutHealth);
     }
@@ -7056,18 +7112,32 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         respawn_ticks,
         invulnerable: vitals.invulnerable(),
         blocking: vitals.blocking(),
+        energy,
+        max_energy,
     })
 }
 
-/// Copies one entity out of a snapshot, refusing a non-finite component.
+/// Copies one entity out of a snapshot, refusing a non-finite component or a health pair
+/// the contract forbids.
 ///
 /// A finiteness test, never a clamp. NaN compares false against every bound, so a clamp
 /// would pass one through untouched — into the interpolation, then into a `Transform`,
-/// and from there into every child of it.
+/// and from there into every child of it. Health is refused rather than clamped for the
+/// same reason `PlayerVitals` is: a zero maximum or an overfull bar is a server bug
+/// reporting itself, and repairing it here would hide the only evidence.
 fn entity_state(state: &fb::EntityState) -> Result<EntityState, DecodeError> {
     let entity_id = state.entity_id();
     if entity_id == 0 {
         return Err(DecodeError::EntityWithoutIdentity);
+    }
+    let health = state.health();
+    let max_health = state.max_health();
+    if max_health == 0 || health > max_health {
+        return Err(DecodeError::EntityHealth {
+            entity_id,
+            health,
+            max_health,
+        });
     }
     let pos = state.pos();
     let vel = state.vel();
@@ -7097,6 +7167,8 @@ fn entity_state(state: &fb::EntityState) -> Result<EntityState, DecodeError> {
             checked("vel.z", vel.z())?,
         ],
         yaw: checked("yaw", state.yaw())?,
+        health,
+        max_health,
     })
 }
 
@@ -8551,16 +8623,21 @@ pub(super) mod server_side {
         pub pos: [f32; 3],
         pub vel: [f32; 3],
         pub yaw: f32,
+        pub health: u16,
+        pub max_health: u16,
     }
 
     impl EntityStateWire {
-        /// An entity standing still at the origin, for a test to break one field of.
+        /// An entity standing still at the origin at full health, for a test to break one
+        /// field of.
         pub fn at(entity_id: u64, x: f32) -> Self {
             Self {
                 entity_id,
                 pos: [x, 64.0, 0.0],
                 vel: [0.0, 0.0, 0.0],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }
         }
     }
@@ -8717,6 +8794,8 @@ pub(super) mod server_side {
         pub respawn_ticks: u32,
         pub invulnerable: bool,
         pub blocking: bool,
+        pub energy: u16,
+        pub max_energy: u16,
     }
 
     impl Default for PlayerVitalsWire {
@@ -8734,6 +8813,8 @@ pub(super) mod server_side {
                 respawn_ticks: 0,
                 invulnerable: false,
                 blocking: false,
+                energy: 100,
+                max_energy: 100,
             }
         }
     }
@@ -8760,6 +8841,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -8787,6 +8870,7 @@ pub(super) mod server_side {
                 max_health: 100,
                 hunger: 100,
                 max_hunger: 100,
+                max_energy: 100,
                 level: 1,
                 experience_to_next: 50,
                 life_state: fb::LifeState::Alive,
@@ -8863,6 +8947,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -8928,6 +9014,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -8940,6 +9028,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -8979,6 +9069,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -8991,6 +9083,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9114,6 +9208,8 @@ pub(super) mod server_side {
                     &fb::Vec3::new(state.pos[0], state.pos[1], state.pos[2]),
                     &fb::Vec3::new(state.vel[0], state.vel[1], state.vel[2]),
                     state.yaw,
+                    state.health,
+                    state.max_health,
                 )
             })
             .collect();
@@ -9200,6 +9296,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9247,6 +9345,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9303,6 +9403,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9912,6 +10014,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10310,6 +10414,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10649,7 +10755,11 @@ mod tests {
         // handshake cleanly and end the session the first time a boss entered view.
         // V39 appends the three benches to `StructureKind`: the runestone's argument, an
         // enum member inside a table field whose decoder refuses what it cannot name.
-        assert_eq!(fb::ProtocolVersion::Current.0, 39);
+        // V40 appends energy to `PlayerVitals`: a non-zero `max_energy` this client
+        // refuses to go without, which a V39 server never sends.
+        // V41 puts health on `EntityState`: a non-zero `max_health` this client refuses to
+        // go without, where a V40 server's snapshot carries only padding.
+        assert_eq!(fb::ProtocolVersion::Current.0, 41);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -12850,6 +12960,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::Mount.0, 19);
         assert_eq!(fb::RefusedAction::PlayerTrade.0, 20);
         assert_eq!(fb::RefusedAction::CrossPortal.0, 21);
+        assert_eq!(fb::RefusedAction::Energy.0, 22);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -12860,7 +12971,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            22,
+            23,
             "a removal is refused in silence by design"
         );
 
@@ -12925,6 +13036,9 @@ mod tests {
             // question no, and a player can act on either.
             (fb::RefusalReason::SessionMismatch, 51),
             (fb::RefusalReason::EntryOfferUnknown, 52),
+            // V40's one, appended inside the low group: the player's own reserve answered
+            // a legal swing no, and waiting is what they can do about it.
+            (fb::RefusalReason::NotEnoughEnergy, 53),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -12934,7 +13048,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            57,
+            58,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -13170,6 +13284,9 @@ mod tests {
     /// catches somebody quietly adding a field later, which a FlatBuffers struct can
     /// never take back. `TestEntityStateIsStillFortyBytesOnTheWire` is the other side's
     /// half, measured from an encoded frame because Go has no `size_of` for one.
+    ///
+    /// V41's `health` and `max_health` are the one addition that left it at 40: two `u16`s
+    /// in the padding the `u64` already forced after `yaw`.
     #[test]
     fn entity_state_is_still_forty_bytes_on_the_wire() {
         assert_eq!(
@@ -14600,12 +14717,16 @@ mod tests {
                 pos: [0.5, 64.0, -0.5],
                 vel: [4.3, 0.0, 0.0],
                 yaw: 0.25,
+                health: 100,
+                max_health: 100,
             },
             EntityStateWire {
                 entity_id: 4096,
                 pos: [-100.0, 44.25, 7.0],
                 vel: [0.0, -60.0, 0.0],
                 yaw: -3.0,
+                health: 100,
+                max_health: 100,
             },
         ];
 
@@ -14623,12 +14744,16 @@ mod tests {
                         pos: [0.5, 64.0, -0.5],
                         vel: [4.3, 0.0, 0.0],
                         yaw: 0.25,
+                        health: 100,
+                        max_health: 100,
                     },
                     EntityState {
                         entity_id: 4096,
                         pos: [-100.0, 44.25, 7.0],
                         vel: [0.0, -60.0, 0.0],
                         yaw: -3.0,
+                        health: 100,
+                        max_health: 100,
                     },
                 ],
                 drops: Vec::new(),
@@ -15305,6 +15430,71 @@ mod tests {
             decode(&frame),
             Err(DecodeError::NonFiniteEntity { entity_id: 2, .. })
         ));
+    }
+
+    /// V41: every visible player's health rides on `EntityState`, and the decoder hands
+    /// it over untouched — including a dead player's zero, which is legal.
+    #[test]
+    fn every_entity_carries_its_health_and_a_dead_one_carries_zero() {
+        let hurt = EntityStateWire {
+            health: 73,
+            max_health: 120,
+            ..EntityStateWire::at(1, 0.0)
+        };
+        let dead = EntityStateWire {
+            health: 0,
+            max_health: 100,
+            ..EntityStateWire::at(2, 4.0)
+        };
+        let full = EntityStateWire {
+            health: u16::MAX,
+            max_health: u16::MAX,
+            ..EntityStateWire::at(3, 8.0)
+        };
+
+        let Ok(Message::Snapshot(snapshot)) =
+            decode(&encode_entity_snapshot(5, &[hurt, dead, full]))
+        else {
+            panic!("a snapshot with three legal health pairs did not decode");
+        };
+        let health: Vec<_> = snapshot
+            .entities
+            .iter()
+            .map(|entity| (entity.entity_id, entity.health, entity.max_health))
+            .collect();
+        assert_eq!(
+            health,
+            [(1, 73, 120), (2, 0, 100), (3, u16::MAX, u16::MAX)],
+            "each entity's pair must arrive as sent, in order and unswapped"
+        );
+    }
+
+    /// `PlayerVitals`' invariants, on every visible player: a zero denominator or an
+    /// overfull bar refuses the whole frame, as a non-finite position does.
+    #[test]
+    fn an_entity_health_the_contract_forbids_refuses_the_snapshot() {
+        for (health, max_health) in [(0, 0), (1, 0), (101, 100), (u16::MAX, 1)] {
+            let frame = encode_entity_snapshot(
+                1,
+                &[
+                    EntityStateWire::at(1, 0.0),
+                    EntityStateWire {
+                        health,
+                        max_health,
+                        ..EntityStateWire::at(7, 2.0)
+                    },
+                ],
+            );
+            assert_eq!(
+                decode(&frame),
+                Err(DecodeError::EntityHealth {
+                    entity_id: 7,
+                    health,
+                    max_health,
+                }),
+                "{health}/{max_health} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -16863,6 +17053,8 @@ mod tests {
                 respawn_ticks: 60,
                 invulnerable: false,
                 blocking: false,
+                energy: 37,
+                max_energy: 100,
             },
         ) else {
             panic!("a valid dead player's snapshot did not decode");
@@ -16882,6 +17074,8 @@ mod tests {
                 respawn_ticks: 60,
                 invulnerable: false,
                 blocking: false,
+                energy: 37,
+                max_energy: 100,
             }
         );
     }
@@ -17035,6 +17229,30 @@ mod tests {
                     ..PlayerVitalsWire::default()
                 },
                 DecodeError::AliveWithoutHealth,
+            ),
+            (
+                "a zero energy maximum, which is what a V39 server's absent field decodes as",
+                PlayerVitalsWire {
+                    energy: 0,
+                    max_energy: 0,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsEnergy {
+                    energy: 0,
+                    max_energy: 0,
+                },
+            ),
+            (
+                "more energy than the maximum",
+                PlayerVitalsWire {
+                    energy: 101,
+                    max_energy: 100,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsEnergy {
+                    energy: 101,
+                    max_energy: 100,
+                },
             ),
             (
                 "a respawn countdown for someone who is not dead",

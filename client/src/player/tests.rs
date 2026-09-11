@@ -51,6 +51,8 @@ fn state(entity_id: u64, pos: [f32; 3], yaw: f32) -> EntityState {
         pos,
         vel: [0.0, 0.0, 0.0],
         yaw,
+        health: 100,
+        max_health: 100,
     }
 }
 
@@ -3748,6 +3750,8 @@ fn the_overlay_reports_the_speed_the_server_sent() {
                 pos: [0.0, 64.0, 0.0],
                 vel: [3.0, 0.0, 4.0],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             drops: vec![],
             ..Default::default()
@@ -3778,6 +3782,8 @@ fn vitals(health: u16, life_state: LifeState, respawn_ticks: u32) -> PlayerVital
         respawn_ticks,
         invulnerable: false,
         blocking: false,
+        energy: 100,
+        max_energy: 100,
     }
 }
 

@@ -329,6 +329,8 @@ mod tests {
             pos: [0.0, 64.0, 0.0],
             vel: [0.0; 3],
             yaw: 0.0,
+            health: 100,
+            max_health: 100,
         }
     }
 

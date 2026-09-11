@@ -136,6 +136,8 @@ mod tests {
                     pos: [8.5, 1.0, 10.0],
                     vel: [0.0; 3],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 }],
                 ..default()
             },
