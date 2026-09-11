@@ -314,13 +314,19 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // the version: it travels server -> client, an older client drops the tag, and an older
 // server sends none — which reads to a newer client as a character who owes nothing, and
 // a server with no saved runs is exactly that.
+//
+// **V40 appends energy to PlayerVitals**, V15's and V17's argument a third time: a V40
+// client requires the non-zero max_energy denominator a V39 server never sends, so the
+// peers would otherwise fail on the first snapshot after a clean handshake. The two
+// refusal members that ride with it, RefusedAction.Energy and
+// RefusalReason.NotEnoughEnergy, owe nothing on their own: both decoders are total.
 func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	t.Parallel()
 
 	// V39 appends StructureKind's three benches: the runestone's argument at V26, an enum
 	// member inside StructureState.kind whose decoder refuses what it cannot name.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 39 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 39", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 40 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 40", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1973,6 +1979,7 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		Health: 35, MaxHealth: 100, LifeState: vnet.LifeStateAlive,
 		RespawnTicks: 0, Invulnerable: true, Hunger: 47, MaxHunger: 100,
 		Level: 4, Experience: 23, ExperienceToNext: 200,
+		Energy: 37, MaxEnergy: 100,
 	}
 
 	frame := EncodeEntitySnapshot(EntitySnapshot{
@@ -2119,6 +2126,8 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		Level:            vitals.Level(),
 		Experience:       vitals.Experience(),
 		ExperienceToNext: vitals.ExperienceToNext(),
+		Energy:           vitals.Energy(),
+		MaxEnergy:        vitals.MaxEnergy(),
 	}
 	if gotVitals != wantVitals {
 		t.Errorf("self_vitals decoded as %+v, want %+v", gotVitals, wantVitals)
@@ -2803,6 +2812,7 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"RefusedAction.Mount":       {byte(vnet.RefusedActionMount), 19},
 		"RefusedAction.PlayerTrade": {byte(vnet.RefusedActionPlayerTrade), 20},
 		"RefusedAction.CrossPortal": {byte(vnet.RefusedActionCrossPortal), 21},
+		"RefusedAction.Energy":      {byte(vnet.RefusedActionEnergy), 22},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2817,8 +2827,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 22 {
-		t.Errorf("RefusedAction has %d members, want 22 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 23 {
+		t.Errorf("RefusedAction has %d members, want 23 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2881,17 +2891,20 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"InstanceUnavailable":         {byte(vnet.RefusalReasonInstanceUnavailable), 50},
 		"SessionMismatch":             {byte(vnet.RefusalReasonSessionMismatch), 51},
 		"EntryOfferUnknown":           {byte(vnet.RefusalReasonEntryOfferUnknown), 52},
-		"MalformedNoAnchor":           {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
-		"MalformedFacing":             {byte(vnet.RefusalReasonMalformedFacing), 65},
-		"MalformedSlot":               {byte(vnet.RefusalReasonMalformedSlot), 66},
-		"MalformedKind":               {byte(vnet.RefusalReasonMalformedKind), 67},
+		// V40's one, appended inside the low group: out of energy is the player's own
+		// state answering a legal swing no, and waiting is the thing they can do.
+		"NotEnoughEnergy":   {byte(vnet.RefusalReasonNotEnoughEnergy), 53},
+		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
+		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
+		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
+		"MalformedKind":     {byte(vnet.RefusalReasonMalformedKind), 67},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 57 {
-		t.Errorf("RefusalReason has %d members, want 57 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 58 {
+		t.Errorf("RefusalReason has %d members, want 58 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -3166,6 +3179,7 @@ func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 		Health: 0, MaxHealth: 100, LifeState: vnet.LifeStateDead, RespawnTicks: 60,
 		Hunger: 17, MaxHunger: 100,
 		Level: 6, Experience: 17, ExperienceToNext: 300,
+		Energy: 100, MaxEnergy: 100,
 	}
 
 	env := vnet.GetRootAsEnvelope(EncodeEntitySnapshot(EntitySnapshot{Tick: 9, Vitals: want}), 0)
@@ -3188,6 +3202,8 @@ func TestEntitySnapshotCarriesADeadPlayersCountdown(t *testing.T) {
 		Level:            vitals.Level(),
 		Experience:       vitals.Experience(),
 		ExperienceToNext: vitals.ExperienceToNext(),
+		Energy:           vitals.Energy(),
+		MaxEnergy:        vitals.MaxEnergy(),
 	}
 	if got != want {
 		t.Errorf("self_vitals decoded as %+v, want %+v", got, want)
@@ -3331,9 +3347,9 @@ func TestV6AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 		"RecipeID.LeatherCap":      {byte(vnet.RecipeIDLeatherCap), 11},
 		"RecipeID.LeatherJerkin":   {byte(vnet.RecipeIDLeatherJerkin), 12},
 		"RecipeID.LeatherLeggings": {byte(vnet.RecipeIDLeatherLeggings), 13},
-		"RecipeID.IronHelm":        {byte(vnet.RecipeIDIronHelm), 14},
-		"RecipeID.IronCuirass":     {byte(vnet.RecipeIDIronCuirass), 15},
-		"RecipeID.IronGreaves":     {byte(vnet.RecipeIDIronGreaves), 16},
+		"RecipeID.RustyHelm":       {byte(vnet.RecipeIDRustyHelm), 14},
+		"RecipeID.RustyCuirass":    {byte(vnet.RecipeIDRustyCuirass), 15},
+		"RecipeID.RustyGreaves":    {byte(vnet.RecipeIDRustyGreaves), 16},
 		"RecipeID.WoodenShield":    {byte(vnet.RecipeIDWoodenShield), 17},
 		"RecipeID.Bow":             {byte(vnet.RecipeIDBow), 18},
 		"RecipeID.Arrows":          {byte(vnet.RecipeIDArrows), 19},

@@ -71,7 +71,33 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		Experience:       experience,
 		ExperienceToNext: experienceToNext,
 		Blocking:         p.blocking,
+		// Rounded down, so the wire never shows a swing as affordable a fraction of a
+		// point before the server would admit it.
+		Energy:    uint16(p.energy / energyScale),
+		MaxEnergy: MaxEnergy,
 	}
+}
+
+// energyRegenPerTick converts EnergyRegenPerSecond into the thousandths one tick adds.
+//
+// Exact at every rate that divides 12,500 — the default 20 Hz among them, where eight
+// seconds is 160 ticks of 625. Never zero, on the rule deathDurationTicks follows: a rate
+// that rounded the refill away would leave a spent reserve spent for ever.
+func energyRegenPerTick(tickRate uint8) uint32 {
+	return max(uint32(EnergyRegenPerSecond*energyScale)/uint32(max(tickRate, 1)), 1)
+}
+
+// regenerateEnergyLocked refills one tick's energy, capped at MaxEnergy.
+//
+// **It never pauses.** Blocking, swinging, being hit, leaving and even lying dead all
+// refill it, because nothing about energy asks for quiet the way health regeneration
+// does: the cost is what paces a fight, and a refill that stopped under pressure would
+// make the next swing cost more than 25. A corpse's refill is harmless — respawn sets the
+// reserve full anyway.
+//
+// The caller holds sim.mu.
+func (p *Player) regenerateEnergyLocked() {
+	p.energy = min(p.energy+p.sim.energyRefill, uint32(MaxEnergy)*energyScale)
 }
 
 // damageLocked takes health away and kills the player if it runs out.
@@ -183,6 +209,7 @@ func (p *Player) advanceVitalsLocked() {
 	// players still present in Sim.players, under the same lock Sim.Leave takes; once
 	// Leave returns an unfinished countdown cannot fire later and cannot reinsert the
 	// player. This is especially load-bearing for a body killed during leave linger.
+	p.regenerateEnergyLocked()
 	if p.protectionTicks > 0 {
 		p.protectionTicks--
 	}
@@ -303,6 +330,9 @@ func (p *Player) respawnLocked() {
 	p.lifeState = vnet.LifeStateAlive
 	p.health = p.maxHealthLocked()
 	p.hunger = max(p.hunger, RespawnHungerFloor)
+	// A new life starts with a full reserve, like its health: what the last one spent
+	// belonged to a fight that is over.
+	p.energy = uint32(MaxEnergy) * energyScale
 	p.respawnTicks = 0
 	p.protectionTicks = p.sim.protectionTicks
 

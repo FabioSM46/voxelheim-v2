@@ -1443,9 +1443,10 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 	// added without a decision fails here. V21's four loot members have their client
 	// vocabulary now and receive producers in the dependent authoritative loot issue;
 	// V22's ammunition refusal follows the same staged-contract pattern for the bow.
-	// The count includes Unknown.
-	if got := len(vnet.EnumNamesRefusalReason); got != 57 {
-		t.Errorf("RefusalReason has %d members, want 57 — a new one needs a producer and client handling, not a test edit", got)
+	// V40's NotEnoughEnergy does too: the contract part carries the member and its
+	// client silence, and the attack-cost part is its producer. The count includes Unknown.
+	if got := len(vnet.EnumNamesRefusalReason); got != 58 {
+		t.Errorf("RefusalReason has %d members, want 58 — a new one needs a producer and client handling, not a test edit", got)
 	}
 }
 

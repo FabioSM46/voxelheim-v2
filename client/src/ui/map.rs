@@ -75,7 +75,9 @@ use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
-use super::text_input::{TextEdit, apply_key};
+use super::text_input::{
+    FieldInput, FieldSpan, TextEdit, TextField, paint_span, spawn_field_spans,
+};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, Landmark, LandmarkList, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn,
@@ -2171,7 +2173,7 @@ struct MarkerDraft {
     /// Where in the window it was clicked, so the form is anchored where the player pointed.
     cursor: Vec2,
     kind: MarkerKind,
-    note: String,
+    note: TextField,
 }
 
 /// How far the pointer may travel between press and release and still be a click.
@@ -2206,8 +2208,8 @@ struct MarkerFormTitle;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct MarkerKindButton(MarkerKind);
 
-/// The note as it has been typed.
-#[derive(Component)]
+/// One of the spans the note is drawn in, caret and selection included.
+#[derive(Component, Clone)]
 struct MarkerNoteText;
 
 /// The two buttons that end the form.
@@ -2298,16 +2300,21 @@ fn spawn_marker_form(overlay: &mut ChildSpawnerCommands<'_>) {
                 FocusPolicy::Pass,
             ))
             .with_children(|field| {
-                field.spawn((
-                    MarkerNoteText,
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(READING_SIZE),
-                        ..default()
-                    },
-                    TextColor(READING),
-                    FocusPolicy::Pass,
-                ));
+                let font = TextFont {
+                    font_size: FontSize::Px(READING_SIZE),
+                    ..default()
+                };
+                field
+                    .spawn((
+                        Text::new(String::new()),
+                        font.clone(),
+                        TextColor(READING),
+                        FocusPolicy::Pass,
+                    ))
+                    .with_children(|note| {
+                        let pieces = TextField::default().pieces(false);
+                        spawn_field_spans(note, &pieces, &font, READING, MarkerNoteText);
+                    });
             });
             form.spawn((
                 Node {
@@ -2410,7 +2417,7 @@ fn click_the_map(
         // The mark that is only its note, because it is the one a player can mean without
         // having read the row of pictures first.
         kind: MarkerKind::Note,
-        note: String::new(),
+        note: TextField::default(),
     });
 }
 
@@ -2419,9 +2426,11 @@ fn click_the_map(
 /// The reading is `ui/text_input.rs`'s, shared with chat; the bound is the server's, mirrored
 /// so a note that could not be stored is one the field would not take rather than one the
 /// server has to refuse.
+#[allow(clippy::too_many_arguments)] // The field's keys and clipboard are the eighth input.
 fn type_the_note(
     current: Option<Res<crate::world::transition::CurrentWorld>>,
     mut typed: MessageReader<KeyboardInput>,
+    mut field: FieldInput,
     screen: Res<MapScreen>,
     mut form: ResMut<MarkerForm>,
     mut ticks: ResMut<MarkerTick>,
@@ -2446,7 +2455,7 @@ fn type_the_note(
         let Some(draft) = form.0.as_mut() else {
             break;
         };
-        match apply_key(key, &mut draft.note, MARKER_NOTE_MAX_BYTES) {
+        match field.apply(&mut draft.note, key, MARKER_NOTE_MAX_BYTES) {
             Some(TextEdit::Cancelled) => {
                 form.0 = None;
                 return;
@@ -2522,7 +2531,7 @@ fn ask_to_place(
         kind: draft.kind,
         // Trimmed, because leading and trailing space is not a note and the tooltip would
         // draw it as an indent.
-        note: draft.note.trim().to_owned(),
+        note: draft.note.text().trim().to_owned(),
         client_tick,
     }));
     if sent == Sent::Dropped {
@@ -2605,7 +2614,15 @@ fn refresh_the_form(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut roots: Query<(&mut Node, &mut Visibility), With<MarkerFormRoot>>,
     mut titles: Query<&mut Text, (With<MarkerFormTitle>, Without<MarkerNoteText>)>,
-    mut notes: Query<&mut Text, With<MarkerNoteText>>,
+    mut notes: Query<
+        (
+            &FieldSpan,
+            &mut TextSpan,
+            &mut TextColor,
+            &mut TextBackgroundColor,
+        ),
+        With<MarkerNoteText>,
+    >,
     mut kinds: Query<(
         &MarkerKindButton,
         &Interaction,
@@ -2644,9 +2661,12 @@ fn refresh_the_form(
             text.0 = title.clone();
         }
     }
-    for mut text in &mut notes {
-        if text.0 != draft.note {
-            text.0.clone_from(&draft.note);
+    // The note is always the field being typed into while the form is up, so it is drawn
+    // focused: the caret and the selection are where the next key will land.
+    let pieces = draft.note.pieces(true);
+    for (slot, span, colour, background) in &mut notes {
+        if let Some(piece) = pieces.get(slot.0) {
+            paint_span(piece, READING, span, colour, background);
         }
     }
     for (button, interaction, mut background, mut border) in &mut kinds {
@@ -5069,7 +5089,7 @@ mod tests {
             "floored, and the click's"
         );
         assert_eq!(open.kind, MarkerKind::Note);
-        assert!(open.note.is_empty());
+        assert!(open.note.text().is_empty());
 
         // And the pointer beside the picture opens nothing: there is no block there to name.
         app.world_mut().resource_mut::<MarkerForm>().0 = None;
@@ -5104,27 +5124,40 @@ mod tests {
         typing(&mut app, Key::Character("cold".into()));
         typing(&mut app, Key::Space);
         typing(&mut app, Key::Character("here".into()));
-        assert_eq!(draft(&mut app).expect("open").note, "cold here");
+        assert_eq!(draft(&mut app).expect("open").note.text(), "cold here");
 
         for _ in 0..MARKER_NOTE_MAX_BYTES {
             typing(&mut app, Key::Character("a".into()));
         }
-        let note = draft(&mut app).expect("open").note;
+        let note = draft(&mut app).expect("open").note.text().to_owned();
         assert_eq!(
             note.len(),
             MARKER_NOTE_MAX_BYTES,
             "the field refuses the byte past the server's bound"
         );
 
-        // And the drawn field says what the note is.
-        let drawn = app
-            .world_mut()
-            .query_filtered::<&Text, With<MarkerNoteText>>()
-            .iter(app.world())
-            .next()
-            .map(|text| text.0.clone())
-            .expect("the form has a note field");
-        assert_eq!(drawn, note);
+        // And the drawn field says what the note is, with the caret where the cursor is.
+        let drawn = |app: &mut App| {
+            let mut spans: Vec<(usize, String)> = app
+                .world_mut()
+                .query_filtered::<(&FieldSpan, &TextSpan), With<MarkerNoteText>>()
+                .iter(app.world())
+                .map(|(slot, span)| (slot.0, span.0.clone()))
+                .collect();
+            spans.sort_by_key(|span| span.0);
+            spans.into_iter().map(|span| span.1).collect::<String>()
+        };
+        assert_eq!(
+            drawn(&mut app),
+            format!("{note}{}", crate::ui::text_input::CARET)
+        );
+        typing(&mut app, Key::Home);
+        app.update();
+        assert_eq!(
+            drawn(&mut app),
+            format!("{}{note}", crate::ui::text_input::CARET),
+            "a cursor the player moves is a cursor the player can see"
+        );
     }
 
     #[test]
@@ -5231,7 +5264,7 @@ mod tests {
             block: IVec2::new(12, -4),
             cursor: Vec2::new(300.0, 200.0),
             kind: MarkerKind::Note,
-            note: String::new(),
+            note: TextField::default(),
         });
     }
 

@@ -23,9 +23,10 @@ use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
 use super::crafting::{
-    ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES,
-    ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
-    ITEM_LEATHER_PATCH, ITEM_PICKAXE, ITEM_SHARPENING_STONE, ITEM_SHOVEL, ITEM_WOODEN_SCEPTRE,
+    ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_CAP,
+    ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_PICKAXE,
+    ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM, ITEM_SHARPENING_STONE, ITEM_SHOVEL,
+    ITEM_WOODEN_SCEPTRE,
 };
 use super::structures::{ITEM_CAMPFIRE, ITEM_FORGE, ITEM_RUNESTONE, ITEM_TENT};
 use crate::net::MountKind;
@@ -326,8 +327,8 @@ impl ItemColour {
 /// **A livery belongs to a material, not to an item**, which is the whole reason the second
 /// one costs a row here rather than a generator. There are about thirty item ids below and
 /// roughly five materials among them; a haft, a bow stave, a shield plate and a sceptre
-/// shaft are the same wood, and a helm, a cuirass, greaves and the iron sword are the same
-/// forged iron. So the set of liveries is small and closed, each row names one or names
+/// shaft are the same wood, and the rusty sword, helm, cuirass and greaves are the same
+/// worn steel. So the set of liveries is small and closed, each row names one or names
 /// `None`, and a new item costs a row.
 ///
 /// **A vocabulary of *kinds* with no wildcard arm in the generator**, exactly as
@@ -616,26 +617,31 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         colour: ItemColour::Leather,
         livery: None,
     },
+    // The rusty set: the starter blade's metal, worn. Both the colour and the livery are the
+    // rusty sword's, and **the colour is what reaches the screen** — an armour mesh and an
+    // armour cell sample the livery image's neutral band, so the body overlay, the icon and
+    // the drop all show rust through `ItemColour::WornSteel`. The livery names the material
+    // honestly for whatever later draws an armour surface against it.
     ItemDisplay {
-        item_id: ITEM_IRON_HELM,
-        name: "iron helm",
+        item_id: ITEM_RUSTY_HELM,
+        name: "rusty helm",
         shape: ItemShape::Armour,
-        colour: ItemColour::ForgedSteel,
-        livery: Some(Livery::ForgedSteel),
+        colour: ItemColour::WornSteel,
+        livery: Some(Livery::WornSteel),
     },
     ItemDisplay {
-        item_id: ITEM_IRON_CUIRASS,
-        name: "iron cuirass",
+        item_id: ITEM_RUSTY_CUIRASS,
+        name: "rusty cuirass",
         shape: ItemShape::Armour,
-        colour: ItemColour::ForgedSteel,
-        livery: Some(Livery::ForgedSteel),
+        colour: ItemColour::WornSteel,
+        livery: Some(Livery::WornSteel),
     },
     ItemDisplay {
-        item_id: ITEM_IRON_GREAVES,
-        name: "iron greaves",
+        item_id: ITEM_RUSTY_GREAVES,
+        name: "rusty greaves",
         shape: ItemShape::Armour,
-        colour: ItemColour::ForgedSteel,
-        livery: Some(Livery::ForgedSteel),
+        colour: ItemColour::WornSteel,
+        livery: Some(Livery::WornSteel),
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SHIELD,
@@ -853,7 +859,7 @@ pub(crate) fn item_linear_rgba(item_id: u16) -> [f32; 4] {
 
 /// The forged iron an implement's head is drawn in, as a linear colour.
 ///
-/// **The iron sword's and the iron armour's own swatch**, read from [`ItemColour`] rather than
+/// **The iron sword's own swatch**, read from [`ItemColour`] rather than
 /// copied, so a pickaxe head and a forged blade cannot drift into two irons. It is exposed as
 /// a colour rather than as an item because the head is a *part* of an item whose row names
 /// the haft — see the implement rows in [`ITEMS`].
@@ -1039,9 +1045,9 @@ mod tests {
             ITEM_LEATHER_CAP,
             ITEM_LEATHER_JERKIN,
             ITEM_LEATHER_LEGGINGS,
-            ITEM_IRON_HELM,
-            ITEM_IRON_CUIRASS,
-            ITEM_IRON_GREAVES,
+            ITEM_RUSTY_HELM,
+            ITEM_RUSTY_CUIRASS,
+            ITEM_RUSTY_GREAVES,
             ITEM_WOODEN_SHIELD,
             ITEM_BOW,
             ITEM_ARROW,
@@ -1358,15 +1364,15 @@ mod tests {
             );
         }
         for (item_id, name) in [
-            (ITEM_IRON_HELM, "iron helm"),
-            (ITEM_IRON_CUIRASS, "iron cuirass"),
-            (ITEM_IRON_GREAVES, "iron greaves"),
+            (ITEM_RUSTY_HELM, "rusty helm"),
+            (ITEM_RUSTY_CUIRASS, "rusty cuirass"),
+            (ITEM_RUSTY_GREAVES, "rusty greaves"),
         ] {
             assert_eq!(item_label(item_id), name);
             assert_eq!(item_shape(item_id), ItemShape::Armour);
             assert_eq!(
                 display(item_id).map(|row| row.colour),
-                Some(ItemColour::ForgedSteel)
+                Some(ItemColour::WornSteel)
             );
         }
         assert_eq!(
@@ -1374,16 +1380,49 @@ mod tests {
                 ITEM_LEATHER_CAP,
                 ITEM_LEATHER_JERKIN,
                 ITEM_LEATHER_LEGGINGS,
-                ITEM_IRON_HELM,
-                ITEM_IRON_CUIRASS,
-                ITEM_IRON_GREAVES,
+                ITEM_RUSTY_HELM,
+                ITEM_RUSTY_CUIRASS,
+                ITEM_RUSTY_GREAVES,
             ],
             [21, 22, 23, 24, 25, 26]
         );
         assert_ne!(
             item_linear_rgba(ITEM_LEATHER_CAP),
-            item_linear_rgba(ITEM_IRON_HELM)
+            item_linear_rgba(ITEM_RUSTY_HELM)
         );
+    }
+
+    /// **The rusty set wears the rusty sword's rust**, both halves of it (#1120).
+    ///
+    /// The colour and the livery are pinned *to the sword's row* rather than to a named
+    /// variant, because "the same rust the sword uses" is the requirement: a later edit that
+    /// moved the sword to another livery without moving the set would leave the two base-tier
+    /// pieces a player starts beside visibly different metals. The colour half is the one a
+    /// player sees today — armour meshes and cells sample the neutral band — so it is asserted
+    /// through `item_linear_rgba`, the function the body overlay, the icon and the drop read,
+    /// and not merely through the row. And the set is no longer the iron sword's forged steel,
+    /// which is what it wore before the rename.
+    #[test]
+    fn the_rusty_armour_rows_resolve_the_rusty_swords_rust() {
+        let sword_livery = item_livery(ITEM_RUSTY_SWORD);
+        assert_eq!(sword_livery, Some(Livery::WornSteel));
+        for item_id in [ITEM_RUSTY_HELM, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES] {
+            assert_eq!(
+                item_livery(item_id),
+                sword_livery,
+                "item {item_id} does not wear the rusty sword's livery"
+            );
+            assert_eq!(
+                item_linear_rgba(item_id),
+                item_linear_rgba(ITEM_RUSTY_SWORD),
+                "item {item_id} does not present as the rusty sword's worn steel"
+            );
+            assert_ne!(
+                item_linear_rgba(item_id),
+                item_linear_rgba(ITEM_IRON_SWORD),
+                "item {item_id} still presents as the iron sword's forged steel"
+            );
+        }
     }
 
     /// **Three implements, three silhouettes, and the two new ones in the colour of what they

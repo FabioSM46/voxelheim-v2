@@ -308,7 +308,14 @@ const (
 	/// client would handshake cleanly and lose the session the first time somebody put a
 	/// bench down in view. The three `RecipeID` members that build them ride along and
 	/// owe nothing alone — an unknown recipe is an ordinary silence from the server.
-	ProtocolVersionCurrent ProtocolVersion = 39
+	///
+	/// V40: `PlayerVitals` appends `energy` and `max_energy`, and the refusal enums gain
+	/// `RefusedAction.Energy` and `RefusalReason.NotEnoughEnergy`. The two enum members owe
+	/// nothing on their own — both decoders read an unknown member as `Unknown`. The
+	/// vitals append owes the bump: a V40 client requires a non-zero `max_energy` that a
+	/// V39 server never sends, so without it the peers would handshake cleanly and the
+	/// client would refuse the first snapshot — V15's and V17's argument again.
+	ProtocolVersionCurrent ProtocolVersion = 40
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

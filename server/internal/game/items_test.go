@@ -186,9 +186,9 @@ func TestTheSixArmourPiecesCarryTheirPinnedIDsAndStats(t *testing.T) {
 		{ItemLeatherCap, 21, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornHead, armour: 5, maxDurability: LeatherArmourMaxDurability}},
 		{ItemLeatherJerkin, 22, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornChest, armour: 5, maxDurability: LeatherArmourMaxDurability}},
 		{ItemLeatherLeggings, 23, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 5, maxDurability: LeatherArmourMaxDurability}},
-		{ItemIronHelm, 24, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
-		{ItemIronCuirass, 25, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
-		{ItemIronGreaves, 26, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability}},
+		{ItemRustyHelm, 24, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability}},
+		{ItemRustyCuirass, 25, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability}},
+		{ItemRustyGreaves, 26, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability}},
 	} {
 		if tc.item != tc.id {
 			t.Errorf("armour item id = %d, want appended wire id %d", tc.item, tc.id)

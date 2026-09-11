@@ -213,7 +213,7 @@ func TestArmourUsesTheExistingRepairRule(t *testing.T) {
 		restore uint16
 	}{
 		{"a leather cap with a leather patch", ItemLeatherPatch, ItemLeatherCap, 40, LeatherArmourMaxDurability, LeatherPatchRestore},
-		{"an iron helm with a sharpening stone", ItemSharpeningStone, ItemIronHelm, 90, IronArmourMaxDurability, SharpeningStoneRestore},
+		{"a rusty helm with a sharpening stone", ItemSharpeningStone, ItemRustyHelm, 90, RustyArmourMaxDurability, SharpeningStoneRestore},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

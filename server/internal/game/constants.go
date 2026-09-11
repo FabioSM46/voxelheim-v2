@@ -281,7 +281,7 @@ const (
 	ArmourScale uint16 = 100
 
 	// ThreatScale is the denominator for the tenths of hostile attention a worn
-	// item records. Full iron contributes fifteen, so its weight is 2.5: ten damage
+	// item records. The full rusty set contributes fifteen, so its weight is 2.5: ten damage
 	// generates twenty-five threat. The distance / weight comparison uses the same
 	// number only when no player in range has positive ledger threat, preserving how
 	// an untouched creature acquires its first target.
@@ -316,6 +316,29 @@ const (
 	// display. Zero remains a living state: it stops regeneration and does nothing
 	// else by itself.
 	PlayerMaxHunger = 100
+
+	// MaxEnergy is a full energy reserve and the denominator of every energy display.
+	//
+	// Energy is what paces a fight rather than the cooldown alone: four swings from
+	// full, then the reserve decides. It is not persisted and it is never predicted by
+	// the client; see vitals.go.
+	MaxEnergy uint16 = 100
+
+	// AttackEnergyCost is what one admitted swing or launch spends, whatever the weapon.
+	// There is no per-weapon table: a bow and a blade cost the same.
+	AttackEnergyCost uint16 = 25
+
+	// ParryEnergyCost is what a raised shield spends when it actually absorbs a blow.
+	// Holding the shield up costs nothing.
+	ParryEnergyCost uint16 = 25
+
+	// EnergyRegenPerSecond refills the reserve from zero to MaxEnergy in eight seconds.
+	// It is converted to thousandths per tick once by NewSim, and it never pauses.
+	EnergyRegenPerSecond = 12.5
+
+	// energyScale is how many stored units make one point of energy. Thousandths, so
+	// the 20 Hz refill of 0.625 points a tick is an exact integer.
+	energyScale = 1000
 
 	// deathDurabilityKept over deathDurabilityScale is the approved death penalty on
 	// equipment: a player who dies keeps four fifths of the remaining condition of every

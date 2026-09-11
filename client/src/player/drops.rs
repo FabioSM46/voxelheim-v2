@@ -1179,7 +1179,7 @@ mod tests {
             let mut images = world.query::<&ImageNode>();
             let drawn = images.iter(world).count();
             // **A cell draws a livery only where its picture has a rectangle for one.** An
-            // iron helm names `ForgedSteel` and its cell is a plate and two shoulders with
+            // rusty helm names `WornSteel` and its cell is a plate and two shoulders with
             // no edge to mark — see `ui::icon::draws_a_livery`, which is the drawing
             // decision this reads rather than a second opinion about it.
             let reachable =

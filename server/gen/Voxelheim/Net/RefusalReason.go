@@ -177,6 +177,10 @@ const (
 	/// are the same sentence, which is what keeps a guess from learning anything — the
 	/// same call `MarkerUnknown` makes for a mark that belongs to somebody else.
 	RefusalReasonEntryOfferUnknown RefusalReason = 52
+	/// The player's energy is below what the action costs. Paired with
+	/// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
+	/// the answer, so no amount is carried here.
+	RefusalReasonNotEnoughEnergy RefusalReason = 53
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -245,6 +249,7 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonInstanceUnavailable:         "InstanceUnavailable",
 	RefusalReasonSessionMismatch:             "SessionMismatch",
 	RefusalReasonEntryOfferUnknown:           "EntryOfferUnknown",
+	RefusalReasonNotEnoughEnergy:             "NotEnoughEnergy",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -305,6 +310,7 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"InstanceUnavailable":         RefusalReasonInstanceUnavailable,
 	"SessionMismatch":             RefusalReasonSessionMismatch,
 	"EntryOfferUnknown":           RefusalReasonEntryOfferUnknown,
+	"NotEnoughEnergy":             RefusalReasonNotEnoughEnergy,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,

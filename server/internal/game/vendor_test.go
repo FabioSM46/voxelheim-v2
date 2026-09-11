@@ -868,18 +868,18 @@ func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
 	t.Parallel()
 
 	var slots slotTable
-	slots[0] = stackOf(ItemIronHelm, 1)
-	slots[equipmentHead] = stackOf(ItemIronHelm, 1)
+	slots[0] = stackOf(ItemRustyHelm, 1)
+	slots[equipmentHead] = stackOf(ItemRustyHelm, 1)
 
-	if held := slots.heldInPack(ItemIronHelm); held != 1 {
-		t.Errorf("the pack is counted as holding %d iron helms, want the 1 that is in it rather than the one on the player's head", held)
+	if held := slots.heldInPack(ItemRustyHelm); held != 1 {
+		t.Errorf("the pack is counted as holding %d rusty helms, want the 1 that is in it rather than the one on the player's head", held)
 	}
 
 	// A copy per attempt, because consumeWithin does not unwind a partial spend — the
 	// discipline every caller of it keeps, and the reason Player.Trade runs the whole
 	// transaction on a copy of the table.
 	short := slots
-	if short.consumePack(ItemIronHelm, 2) {
+	if short.consumePack(ItemRustyHelm, 2) {
 		t.Error("selling two helms took the one the player was wearing")
 	}
 	if short[equipmentHead] != slots[equipmentHead] {
@@ -887,7 +887,7 @@ func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
 	}
 
 	one := slots
-	if !one.consumePack(ItemIronHelm, 1) {
+	if !one.consumePack(ItemRustyHelm, 1) {
 		t.Fatal("the one helm in the pack could not be spent")
 	}
 	if one[equipmentHead] != slots[equipmentHead] {
@@ -896,7 +896,7 @@ func TestSpendingFromThePackNeverReachesWhatIsWorn(t *testing.T) {
 
 	// And the unbounded form still reaches everything, which is what craft relies on.
 	all := slots
-	if !all.consume(ItemIronHelm, 2) {
+	if !all.consume(ItemRustyHelm, 2) {
 		t.Error("consume could not reach both helms")
 	}
 }
@@ -950,7 +950,7 @@ func TestThePurseIsNotAnInventorySlot(t *testing.T) {
 	if held := h.purse(player); held != 45 {
 		t.Fatalf("the purse holds %d, want 45", held)
 	}
-	if _, err := player.Trade(tradeFor(r, ItemIronCuirass, 1, true, 1, 2)); err != nil {
+	if _, err := player.Trade(tradeFor(r, ItemRustyCuirass, 1, true, 1, 2)); err != nil {
 		t.Fatalf("forty-five silver did not buy a forty-five-silver cuirass: %v", err)
 	}
 	if held := h.purse(player); held != 0 {

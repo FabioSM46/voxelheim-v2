@@ -36,9 +36,9 @@ const (
 	RecipeIDLeatherCap      RecipeID = 11
 	RecipeIDLeatherJerkin   RecipeID = 12
 	RecipeIDLeatherLeggings RecipeID = 13
-	RecipeIDIronHelm        RecipeID = 14
-	RecipeIDIronCuirass     RecipeID = 15
-	RecipeIDIronGreaves     RecipeID = 16
+	RecipeIDRustyHelm       RecipeID = 14
+	RecipeIDRustyCuirass    RecipeID = 15
+	RecipeIDRustyGreaves    RecipeID = 16
 	RecipeIDWoodenShield    RecipeID = 17
 	RecipeIDBow             RecipeID = 18
 	RecipeIDArrows          RecipeID = 19
@@ -64,9 +64,9 @@ var EnumNamesRecipeID = map[RecipeID]string{
 	RecipeIDLeatherCap:      "LeatherCap",
 	RecipeIDLeatherJerkin:   "LeatherJerkin",
 	RecipeIDLeatherLeggings: "LeatherLeggings",
-	RecipeIDIronHelm:        "IronHelm",
-	RecipeIDIronCuirass:     "IronCuirass",
-	RecipeIDIronGreaves:     "IronGreaves",
+	RecipeIDRustyHelm:       "RustyHelm",
+	RecipeIDRustyCuirass:    "RustyCuirass",
+	RecipeIDRustyGreaves:    "RustyGreaves",
 	RecipeIDWoodenShield:    "WoodenShield",
 	RecipeIDBow:             "Bow",
 	RecipeIDArrows:          "Arrows",
@@ -92,9 +92,9 @@ var EnumValuesRecipeID = map[string]RecipeID{
 	"LeatherCap":      RecipeIDLeatherCap,
 	"LeatherJerkin":   RecipeIDLeatherJerkin,
 	"LeatherLeggings": RecipeIDLeatherLeggings,
-	"IronHelm":        RecipeIDIronHelm,
-	"IronCuirass":     RecipeIDIronCuirass,
-	"IronGreaves":     RecipeIDIronGreaves,
+	"RustyHelm":       RecipeIDRustyHelm,
+	"RustyCuirass":    RecipeIDRustyCuirass,
+	"RustyGreaves":    RecipeIDRustyGreaves,
 	"WoodenShield":    RecipeIDWoodenShield,
 	"Bow":             RecipeIDBow,
 	"Arrows":          RecipeIDArrows,

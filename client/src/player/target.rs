@@ -2863,6 +2863,8 @@ mod tests {
             respawn_ticks: if dead { 60 } else { 0 },
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }));
     }
 

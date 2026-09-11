@@ -32,9 +32,9 @@ pub const ENUM_VALUES_RECIPE_ID: [RecipeID; 25] = [
     RecipeID::LeatherCap,
     RecipeID::LeatherJerkin,
     RecipeID::LeatherLeggings,
-    RecipeID::IronHelm,
-    RecipeID::IronCuirass,
-    RecipeID::IronGreaves,
+    RecipeID::RustyHelm,
+    RecipeID::RustyCuirass,
+    RecipeID::RustyGreaves,
     RecipeID::WoodenShield,
     RecipeID::Bow,
     RecipeID::Arrows,
@@ -79,9 +79,9 @@ impl RecipeID {
     pub const LeatherCap: Self = Self(11);
     pub const LeatherJerkin: Self = Self(12);
     pub const LeatherLeggings: Self = Self(13);
-    pub const IronHelm: Self = Self(14);
-    pub const IronCuirass: Self = Self(15);
-    pub const IronGreaves: Self = Self(16);
+    pub const RustyHelm: Self = Self(14);
+    pub const RustyCuirass: Self = Self(15);
+    pub const RustyGreaves: Self = Self(16);
     pub const WoodenShield: Self = Self(17);
     pub const Bow: Self = Self(18);
     pub const Arrows: Self = Self(19);
@@ -108,9 +108,9 @@ impl RecipeID {
         Self::LeatherCap,
         Self::LeatherJerkin,
         Self::LeatherLeggings,
-        Self::IronHelm,
-        Self::IronCuirass,
-        Self::IronGreaves,
+        Self::RustyHelm,
+        Self::RustyCuirass,
+        Self::RustyGreaves,
         Self::WoodenShield,
         Self::Bow,
         Self::Arrows,
@@ -137,9 +137,9 @@ impl RecipeID {
             Self::LeatherCap => Some("LeatherCap"),
             Self::LeatherJerkin => Some("LeatherJerkin"),
             Self::LeatherLeggings => Some("LeatherLeggings"),
-            Self::IronHelm => Some("IronHelm"),
-            Self::IronCuirass => Some("IronCuirass"),
-            Self::IronGreaves => Some("IronGreaves"),
+            Self::RustyHelm => Some("RustyHelm"),
+            Self::RustyCuirass => Some("RustyCuirass"),
+            Self::RustyGreaves => Some("RustyGreaves"),
             Self::WoodenShield => Some("WoodenShield"),
             Self::Bow => Some("Bow"),
             Self::Arrows => Some("Arrows"),
