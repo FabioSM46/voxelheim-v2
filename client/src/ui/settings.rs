@@ -34,12 +34,15 @@ pub(super) struct SettingsScreen {
     capturing: Option<Control>,
     /// The line under the panel: what was refused, or what is being waited for.
     notice: String,
-    /// Whether the Monitor row's dropdown is open. [`Self::open`] and [`Self::close`] both
-    /// start it shut; `switch_settings_tabs` closes it on a tab change, `settings_actions`
-    /// on a graphics reset, and `read_settings_keys` gives Escape to it before Escape can
-    /// close the screen.
-    monitor_dropdown_open: bool,
-    /// Whether the Voices panel is open. Its own lifecycle, exactly as the Monitor dropdown
+    /// The select whose dropdown is open, if one is.
+    ///
+    /// **One field for every select, and that is what "only one open at a time" is**: a second
+    /// dropdown cannot be open because there is nowhere to write that it is. [`Self::open`]
+    /// and [`Self::close`] both start it shut; `switch_settings_tabs` closes it on a tab
+    /// change, `settings_actions` on a reset, `select_toggle` on a click anywhere outside it,
+    /// and `read_settings_keys` gives Escape to it before Escape can close the screen.
+    open_select: Option<Knob>,
+    /// Whether the Voices panel is open. Its own lifecycle, exactly as a select's dropdown
     /// has one: opened from its row, closed by that row, by a tab change, and by Escape.
     voices_open: bool,
 }
@@ -50,7 +53,7 @@ impl SettingsScreen {
         self.open = true;
         self.capturing = None;
         self.notice.clear();
-        self.monitor_dropdown_open = false;
+        self.open_select = None;
         self.voices_open = false;
     }
 
@@ -65,7 +68,7 @@ impl SettingsScreen {
         self.open = false;
         self.capturing = None;
         self.notice.clear();
-        self.monitor_dropdown_open = false;
+        self.open_select = None;
         self.voices_open = false;
     }
 }
@@ -98,14 +101,14 @@ impl Plugin for SettingsScreenPlugin {
                     switch_settings_tabs,
                     show_the_active_settings_tab,
                     settings_actions,
-                    monitor_select_toggle,
-                    monitor_dropdown_actions,
+                    select_toggle,
+                    select_actions,
                     // After the input mode, so the frame that closes this screen is a
                     // frame `choose_input_mode` has already declined to read.
                     read_settings_keys.after(crate::player::ApplyInputMode),
-                    rebuild_monitor_options,
-                    show_monitor_dropdown,
-                    colour_monitor_controls,
+                    rebuild_select_options,
+                    show_select_dropdowns,
+                    colour_select_controls,
                     close_the_microphone_test_with_the_screen,
                     show_the_microphone_meter,
                     voice_row_actions,
@@ -150,15 +153,21 @@ struct RowLabel;
 #[derive(Component)]
 struct RowControls;
 
-/// The Monitor row's closed control. Pressing it opens or closes [`MonitorDropdownPanel`].
-#[derive(Component)]
-struct MonitorSelectButton;
+/// A select row's closed control, naming the knob it chooses for. Pressing it opens or closes
+/// that knob's [`SelectPanel`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectButton(Knob);
 
-/// The Monitor row's dropdown: an absolutely positioned overlay anchored under
-/// [`MonitorSelectButton`], with its own stacking position ([`MONITOR_DROPDOWN_LAYER`]) and
-/// its own open/close lifecycle rather than the panel's.
-#[derive(Component)]
-struct MonitorDropdownPanel;
+/// A select row's dropdown: an absolutely positioned overlay anchored under its
+/// [`SelectButton`], with its own stacking position ([`SELECT_LAYER`]) and its own open/close
+/// lifecycle rather than the panel's.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectPanel(Knob);
+
+/// The option labels a [`SelectPanel`] was last **built with**, so [`rebuild_select_options`]
+/// rebuilds a list when what it says changes and not merely because a resource was written.
+#[derive(Component, Debug, Default)]
+struct SelectLabels(Vec<String>);
 
 /// The microphone test's meter, its filled part, and the threshold drawn across it.
 #[derive(Component)]
@@ -207,11 +216,14 @@ enum VoiceControl {
     Nudge(u64, i32),
 }
 
-/// One option inside the open dropdown, naming its index into
-/// [`MonitorChoices::preferences`]. Rebuilt whenever the live choices change, so an index
-/// here always names [`rebuild_monitor_options`]'s current row.
+/// One option inside a select's dropdown: whose it is, and its index into that knob's
+/// `KnobOptions`. Rebuilt whenever the list changes, so an index here always names
+/// [`rebuild_select_options`]'s current row.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-struct MonitorOption(usize);
+struct SelectOption {
+    knob: Knob,
+    index: usize,
+}
 
 /// What pressing a control on this screen means.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +247,8 @@ enum SettingsAction {
     ///
     /// Carries a `Bus` since #982, where "Test speakers" stopped being the only row that
     /// plays one: each bus knob has its own, so a level can be set by ear against the others
-    /// rather than by going to find something in the world that makes that noise.
+    /// rather than by going to find something in the world that makes that noise. Since #1126
+    /// the master's test is in the Master volume row too, and "Test speakers" is gone.
     TestBus(Bus),
     /// Show or hide the Voices panel.
     ToggleVoices,
@@ -259,10 +272,10 @@ enum Reading {
     /// Whether the stereo image is folded, as the word on its own button.
     MonoAudio,
     Binding(Control),
-    /// The Monitor row's closed control: the current monitor plus the open indicator, as
-    /// one centred string. Distinct from `Knob(Knob::Monitor)`, which nothing spawns a
-    /// text node for any more — Monitor draws as [`MonitorSelectButton`], not a stepper.
-    MonitorControl,
+    /// A select row's closed control: the knob's current value plus the open indicator, as
+    /// one centred string. Distinct from `Knob(knob)`, which nothing spawns a text node for on
+    /// a select row — those draw as a [`SelectButton`], not a stepper.
+    SelectControl(Knob),
     /// Whether the Voices panel is showing, as the word on its own button.
     VoicesPanel,
     /// Whether the microphone test is running, as the word on its own button.
@@ -302,7 +315,26 @@ const STEPPER_WIDTH: f32 = 2.0 * STEP_BUTTON + 2.0 * CONTROL_GAP + READING_WIDTH
 /// The separation between the label and control columns.
 const ROW_COLUMN_GAP: f32 = COLUMN - ROW_LABEL_WIDTH - STEPPER_WIDTH;
 
+/// The width of the tone test at the end of a bus knob's row.
+const TEST_BUTTON: f32 = 3.0 * STEP_BUTTON;
+
+/// The reading between a bus knob's `-` and `+`.
+///
+/// **Narrower than [`READING_WIDTH`] by exactly the test and its gap**, so the four controls
+/// fill [`STEPPER_WIDTH`] and nothing has to shrink. Until #1126 the row asked for the full
+/// reading plus the test, which is 96 pixels more than the column holds, and flexbox took them
+/// from the `-` and `+` — the two buttons a player aims at most. A percentage has room to spare.
+const BUS_READING_WIDTH: f32 = READING_WIDTH - TEST_BUTTON - CONTROL_GAP;
+
 const _: () = {
+    // The four controls filling the column is the definition of `BUS_READING_WIDTH`, so an
+    // assert of that sum could never fail. What can fail is the narrowing leaving the reading
+    // no room at all; whether the row fits is measured on the spawned nodes by
+    // `every_rows_controls_fit_the_column_at_their_own_widths`. Found in review on #1139.
+    assert!(
+        BUS_READING_WIDTH > 0.0,
+        "a bus knob's reading has no room left once its test is drawn"
+    );
     assert!(ROW_COLUMN_GAP > 0.0, "the two row columns must not overlap");
     assert!(
         COLUMN + 2.0 * PANEL_PADDING <= MIN_VIEWPORT_WIDTH,
@@ -330,6 +362,15 @@ const WIDE_BUTTON: f32 = 40.0;
 /// as every other row on the tab.
 const METER_WIDTH: f32 = STEPPER_WIDTH - STEP_BUTTON * 4.0 - CONTROL_GAP;
 
+// `METER_WIDTH` is defined as what the column has left after the button, so an assert that
+// button, gap and meter fill the column could never fail; the row's sum is measured on the
+// spawned nodes by `every_rows_controls_fit_the_column_at_their_own_widths`. What the
+// constant can get wrong is leaving the meter no room.
+const _: () = assert!(
+    METER_WIDTH > 0.0,
+    "the microphone test's meter has no room left"
+);
+
 /// The height of the meter's bar.
 const METER_HEIGHT: f32 = 12.0;
 
@@ -350,8 +391,9 @@ const METER_MARK: Color = Color::linear_rgb(1.0, 0.72, 0.25);
 /// The width of the threshold marker, in logical pixels.
 const METER_MARK_WIDTH: f32 = 2.0;
 
-/// The Voices panel's stacking position, and the Monitor dropdown's reasoning verbatim: a
-/// child of the row it belongs to would paint behind every row spawned after it.
+/// The Voices panel's stacking position, and a select dropdown's reasoning verbatim: a
+/// child of the row it belongs to would paint behind every row spawned after it. One under
+/// [`SELECT_LAYER`], because a select on the Audio tab can be open over it.
 const VOICES_PANEL_LAYER: i32 = 46;
 
 /// The most speakers the Voices panel draws at once.
@@ -371,12 +413,23 @@ const VOICE_MUTE_WIDTH: f32 = 90.0;
 /// And of the reading between its `-` and `+`.
 const VOICE_LEVEL_WIDTH: f32 = 70.0;
 
-/// The Monitor dropdown's stacking position. Without a `GlobalZIndex` of its own it would
-/// paint inside the Monitor row's slot in the panel's tree order — behind every row spawned
-/// after it, exactly where it must appear above all of them. One more than `SettingsRoot`'s
-/// own 45 (see [`spawn_settings_screen`]) is enough, the same margin `ui/mod.rs`'s
-/// `GlobalZIndex(31)` keeps over the HUD overlays it sits above.
-const MONITOR_DROPDOWN_LAYER: i32 = 46;
+/// Every select dropdown's stacking position. Without a `GlobalZIndex` of its own one would
+/// paint inside its row's slot in the panel's tree order — behind every row spawned after it,
+/// exactly where it must appear above all of them. Above `SettingsRoot`'s own 45 (see
+/// [`spawn_settings_screen`]), and one layer serves every select, because only one is ever
+/// open.
+///
+/// **And above [`VOICES_PANEL_LAYER`], which is a decision rather than a margin.** A select on
+/// the Audio tab can be open while the Voices panel is, and `read_settings_keys` closes the
+/// select first because it is the overlay on top. On an equal layer Bevy breaks the tie by tree
+/// order, the Voices row is spawned last on the tab, and the panel would paint over the list
+/// Escape is about to close. Found in review on #1141.
+const SELECT_LAYER: i32 = 47;
+
+const _: () = assert!(
+    SELECT_LAYER > VOICES_PANEL_LAYER,
+    "a select must paint over the Voices panel it can be open beside"
+);
 
 /// The most rows any one tab may draw.
 ///
@@ -581,26 +634,27 @@ enum Row {
     Toggle(&'static str, SettingsAction, Reading),
     /// A rebindable control, whose button face is the key it answers to.
     Binding(Control),
-    /// The Monitor row: a select rather than a stepper, drawn by [`spawn_monitor_select`].
-    /// Not `Knob(Knob::Monitor)` — [`rows_of`] gives Monitor this variant instead, which is
-    /// what keeps the generic stepper out of its row while every other knob still gets one.
-    MonitorSelect,
+    /// A multiple-choice knob: one control naming the value, and the list it opens, drawn by
+    /// [`spawn_select`]. [`rows_of`] gives every knob [`Knob::is_choice`] names this variant
+    /// rather than [`Self::Knob`], so choosing a device or a mode is one press on its name
+    /// rather than a walk through the list with `+`. A new knob gets one by saying it is a
+    /// choice in `crate::settings` — nothing here names a knob.
+    Select(Knob),
     /// The Voices row: one button that opens the panel, plus the panel it opens. Its own
     /// variant rather than a [`Self::Toggle`] because it spawns an overlay beside the button.
     VoicesToggle,
     /// The microphone test row: one button, and the level meter beside it.
     MicTest,
-    /// A row whose control *does* something rather than showing something: one button with
-    /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
-    /// this is the shape for a press with no state behind it at all.
-    Action(&'static str, SettingsAction, &'static str),
     /// A volume knob with the tone test for its bus beside it: `-`, the reading, `+`, `TEST`.
     ///
     /// **A fourth control in the row rather than a row of its own**, and the reason is the
     /// panel's height rather than tidiness: four buses each needing a test would have been
     /// four more rows on the tallest tab, and [`CONTENT_ROWS`] sizes every tab from the
     /// tallest. It reads better besides — the button that proves a level sits in the row that
-    /// sets it, which is where the "Test speakers" row's own comment says a test belongs.
+    /// sets it. The master joined them in #1126, which retired the "Test speakers" row.
+    ///
+    /// The steppers are the same [`STEP_BUTTON`] every other knob draws; the reading is what
+    /// gives up the room, see [`BUS_READING_WIDTH`].
     BusKnob(Knob, Bus),
 }
 
@@ -611,10 +665,9 @@ impl Row {
             Self::Knob(knob) => knob.label(),
             Self::Toggle(label, _, _) => label,
             Self::Binding(control) => control.label(),
-            Self::MonitorSelect => Knob::Monitor.label(),
+            Self::Select(knob) => knob.label(),
             Self::VoicesToggle => "Voices",
             Self::MicTest => "Test microphone",
-            Self::Action(label, _, _) => label,
             Self::BusKnob(knob, _) => knob.label(),
         }
     }
@@ -624,14 +677,15 @@ impl Row {
 ///
 /// **The mapping lives here and not in `settings/`**, which is a leaf and may not name a type
 /// from `audio/` — a knob is a number with a bound, and which bus it happens to reach is this
-/// screen's business. `Knob::MasterVolume` is deliberately `None`: the master's test is the
-/// "Test speakers" row, which is a question about the device as much as about a level and
-/// keeps its own row and its own wording.
+/// screen's business. `Knob::MasterVolume` reaches `Bus::Master` since #1126: its test used
+/// to be a "Test speakers" row of its own, which cost a row to say what a `TEST` beside the
+/// master level says.
 ///
 /// No wildcard arm, for [`Knob::tab`]'s reason — a twentieth knob has to say whether a tone
 /// test belongs beside it before this compiles.
 const fn bus_of(knob: Knob) -> Option<Bus> {
     match knob {
+        Knob::MasterVolume => Some(Bus::Master),
         Knob::MusicVolume => Some(Bus::Music),
         Knob::SfxVolume => Some(Bus::Sfx),
         Knob::AmbienceVolume => Some(Bus::Ambience),
@@ -644,7 +698,6 @@ const fn bus_of(knob: Knob) -> Option<Bus> {
         | Knob::Brightness
         | Knob::FogStart
         | Knob::FrameCap
-        | Knob::MasterVolume
         | Knob::OutputDevice
         | Knob::InputDevice
         | Knob::VoiceDucking
@@ -661,16 +714,16 @@ const fn bus_of(knob: Knob) -> Option<Bus> {
 /// [`Knob::tab`], which is the same statement [`Settings::reset`] scopes itself by — a knob
 /// cannot appear on one tab and be reset by the other.
 fn rows_of(tab: Tab) -> Vec<Row> {
-    // Every other knob gets the generic stepper; Monitor gets its own select in the exact
-    // slot `KNOBS`' order already puts it in, rather than a filter-then-append that would
-    // move it to the end of the tab.
+    // A choice gets a select and a number gets a stepper, each in the exact slot `KNOBS`'
+    // order already puts it in, rather than a filter-then-append that would move the selects
+    // to the end of the tab.
     let mut rows: Vec<Row> = KNOBS
         .into_iter()
         .filter(|knob| knob.tab() == tab)
-        .map(|knob| match (knob, bus_of(knob)) {
-            (Knob::Monitor, _) => Row::MonitorSelect,
-            (_, Some(bus)) => Row::BusKnob(knob, bus),
-            (_, None) => Row::Knob(knob),
+        .map(|knob| match (knob.is_choice(), bus_of(knob)) {
+            (true, _) => Row::Select(knob),
+            (false, Some(bus)) => Row::BusKnob(knob, bus),
+            (false, None) => Row::Knob(knob),
         })
         .collect();
     match tab {
@@ -703,17 +756,9 @@ fn rows_of(tab: Tab) -> Vec<Row> {
             // Beside it because they are the two Audio settings that are not a level, and it
             // is the one that changes what every other row on the tab sounds like.
             Row::Toggle("Mono audio", SettingsAction::ToggleMono, Reading::MonoAudio),
-            // Under the knob it proves, because that is the order a player uses them in: set
-            // the volume, then find out whether anything comes out. The other four buses
-            // carry their test inside their own row — see `Row::BusKnob` — but this one is a
-            // question about the device as much as about a level, and it keeps its wording.
-            Row::Action(
-                "Test speakers",
-                SettingsAction::TestBus(Bus::Master),
-                "PLAY A TONE",
-            ),
-            // Beside the speaker test, because they are the same errand pointed the two ways,
-            // and above Voices, which is about other people rather than about this machine.
+            // The speaker test is the `TEST` in the Master volume row — see `Row::BusKnob`.
+            // This is the same errand pointed the other way, and above Voices, which is about
+            // other people rather than about this machine.
             Row::MicTest,
             // Last, and a `Toggle` rather than an `Action`: the button's face *is* the state,
             // so a player can tell an open panel from a closed one without looking at it.
@@ -734,7 +779,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                     Val::Px(STEP_BUTTON),
                     Face::Fixed("-"),
                 );
-                spawn_reading(controls, Reading::Knob(knob));
+                spawn_reading(controls, Reading::Knob(knob), READING_WIDTH);
                 spawn_button(
                     controls,
                     SettingsAction::Nudge(knob, 1),
@@ -765,7 +810,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                     Val::Px(STEP_BUTTON),
                     Face::Fixed("-"),
                 );
-                spawn_reading(controls, Reading::Knob(knob));
+                spawn_reading(controls, Reading::Knob(knob), BUS_READING_WIDTH);
                 spawn_button(
                     controls,
                     SettingsAction::Nudge(knob, 1),
@@ -775,21 +820,13 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                 spawn_button(
                     controls,
                     SettingsAction::TestBus(bus),
-                    Val::Px(STEP_BUTTON * 3.0),
+                    Val::Px(TEST_BUTTON),
                     Face::Fixed("TEST"),
                 );
             }
-            Row::MonitorSelect => spawn_monitor_select(controls),
+            Row::Select(knob) => spawn_select(controls, knob),
             Row::VoicesToggle => spawn_voices_control(controls),
             Row::MicTest => spawn_mic_test_control(controls),
-            Row::Action(_, action, face) => {
-                spawn_button(
-                    controls,
-                    action,
-                    Val::Px(STEP_BUTTON * 4.0),
-                    Face::Fixed(face),
-                );
-            }
         });
     }
 
@@ -853,8 +890,8 @@ fn spawn_row(
         });
 }
 
-/// The number between a `-` and a `+`.
-fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
+/// The number between a `-` and a `+`, `width` wide.
+fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading, width: f32) {
     parent.spawn((
         reading,
         Text::new(String::new()),
@@ -865,7 +902,7 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
         TextColor(Color::WHITE),
         TextLayout::no_wrap().with_justify(Justify::Center),
         Node {
-            width: Val::Px(READING_WIDTH),
+            width: Val::Px(width),
             flex_shrink: 0.0,
             overflow: Overflow::clip(),
             ..default()
@@ -873,15 +910,15 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
     ));
 }
 
-/// The Monitor row: one control occupying the whole stepper column, rather than the three
-/// a numeric knob draws. Pressing it is [`monitor_select_toggle`]'s job; the value is
-/// [`describe`]'s, through [`Reading::MonitorControl`]; the option list is built and torn
-/// down by [`rebuild_monitor_options`] — this only spawns the empty [`MonitorDropdownPanel`]
-/// those options are added to.
-fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
+/// A select row: one control occupying the whole stepper column, rather than the three a
+/// numeric knob draws. Pressing it is [`select_toggle`]'s job; the value is [`describe`]'s,
+/// through [`Reading::SelectControl`]; the option list is built and torn down by
+/// [`rebuild_select_options`] — this only spawns the empty [`SelectPanel`] those options are
+/// added to. Nothing in it names a knob, so a new multiple-choice setting costs this nothing.
+fn spawn_select(parent: &mut ChildSpawnerCommands<'_>, knob: Knob) {
     parent
         .spawn((
-            MonitorSelectButton,
+            SelectButton(knob),
             Button,
             Node {
                 width: Val::Px(STEPPER_WIDTH),
@@ -899,7 +936,7 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
             // (`Justify::Center` here, `AlignItems::Center` on the button) rather than two
             // children whose combined width would need centring separately.
             button.spawn((
-                Reading::MonitorControl,
+                Reading::SelectControl(knob),
                 Text::new(String::new()),
                 TextFont {
                     font_size: ROW_FONT,
@@ -918,11 +955,12 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
             // Anchored directly below the control, at its exact width. `GlobalZIndex` —
             // not a plain `ZIndex` — is what lets it paint over every row beneath it rather
             // than stacking inside this row's own slot in the panel's tree order; see
-            // [`MONITOR_DROPDOWN_LAYER`]. Closed by default; [`show_monitor_dropdown`] is
-            // the only writer of its `Display`.
+            // [`SELECT_LAYER`]. Closed by default; [`show_select_dropdowns`] is the only
+            // writer of its `Display`.
             button.spawn((
-                MonitorDropdownPanel,
-                GlobalZIndex(MONITOR_DROPDOWN_LAYER),
+                SelectPanel(knob),
+                SelectLabels::default(),
+                GlobalZIndex(SELECT_LAYER),
                 Node {
                     position_type: PositionType::Absolute,
                     top: Val::Px(CONTROL_BUTTON_HEIGHT),
@@ -941,7 +979,7 @@ fn spawn_monitor_select(parent: &mut ChildSpawnerCommands<'_>) {
 
 /// The Voices row's control and the panel it opens.
 ///
-/// [`spawn_monitor_select`]'s shape, for its reasons: an absolutely positioned overlay
+/// [`spawn_select`]'s shape, for its reasons: an absolutely positioned overlay
 /// anchored under the button, with a `GlobalZIndex` of its own so it paints over the rows
 /// below rather than inside this row's slot in the panel's tree order. It starts empty —
 /// [`rebuild_voice_rows`] fills it, and only when the set of speakers changes.
@@ -1196,12 +1234,17 @@ fn spawn_voice_button(
     });
 }
 
-/// One option inside the open Monitor dropdown, at `index` in
-/// [`MonitorChoices::preferences`]. Pressing it is [`monitor_dropdown_actions`]'s job.
-fn spawn_monitor_option(parent: &mut ChildSpawnerCommands<'_>, index: usize, label: String) {
+/// One option inside `knob`'s dropdown, at `index` in its `KnobOptions`. Pressing it is
+/// [`select_actions`]'s job.
+fn spawn_select_option(
+    parent: &mut ChildSpawnerCommands<'_>,
+    knob: Knob,
+    index: usize,
+    label: String,
+) {
     parent
         .spawn((
-            MonitorOption(index),
+            SelectOption { knob, index },
             Button,
             Node {
                 width: Val::Percent(100.0),
@@ -1255,6 +1298,10 @@ fn spawn_button(
         Node {
             width,
             height: Val::Px(height),
+            // A fixed width is a width and not a suggestion: a row that asked for more than its
+            // column holds used to take the difference out of its `-` and `+` (#1126), so the
+            // row's arithmetic is what has to be right rather than the buttons that absorb it.
+            flex_shrink: if full_width { 1.0 } else { 0.0 },
             // A full-width control sits at the foot of its column: the auto margin takes
             // whatever space the rows above did not, which is what puts a tab's reset in the
             // same place whether that tab drew eight rows or three. In a column with no free
@@ -1364,11 +1411,11 @@ fn switch_settings_tabs(
             if screen.capturing.is_some() {
                 screen.capturing = None;
             }
-            // The Monitor dropdown is the same trap one row over: leaving Graphics has to
-            // close it explicitly, or it goes on floating over whichever rows Controls
-            // draws in its place. The Voices panel is the third of them, on the third tab.
-            if screen.monitor_dropdown_open {
-                screen.monitor_dropdown_open = false;
+            // An open select is the same trap one row over: leaving its tab has to close it
+            // explicitly, or it goes on floating over whichever rows the next tab draws in
+            // its place. The Voices panel is the third of them, on the third tab.
+            if screen.open_select.is_some() {
+                screen.open_select = None;
             }
             if screen.voices_open {
                 screen.voices_open = false;
@@ -1449,9 +1496,9 @@ fn settings_actions(
                 // binding that has just been replaced, so the next key press would answer a
                 // question the player can no longer see the state of.
                 screen.capturing = None;
-                // A graphics reset puts the Monitor preference back too, so the dropdown
-                // closes rather than floating over the value it just replaced.
-                screen.monitor_dropdown_open = false;
+                // A reset puts a select's value back too, so an open dropdown closes rather
+                // than floating over the value it just replaced.
+                screen.open_select = None;
             }
             SettingsAction::Capture(control) => {
                 // A second press on the row that is already waiting takes the request
@@ -1528,11 +1575,11 @@ fn read_settings_keys(
     let Some(control) = screen.capturing else {
         if keys.just_pressed(KeyCode::Escape) {
             // An overlay answers to Escape before the screen does: the first press closes
-            // what was most recently opened, not the whole screen behind it. The two are
-            // never open together — they are on different tabs, and a tab change closes
-            // both — so the order between them decides nothing.
-            if screen.monitor_dropdown_open {
-                screen.monitor_dropdown_open = false;
+            // what was most recently opened, not the whole screen behind it. A select and
+            // the Voices panel can be open together — both live on Audio — and the select
+            // goes first, because it is the one drawn over the other's rows.
+            if screen.open_select.is_some() {
+                screen.open_select = None;
             } else if screen.voices_open {
                 screen.voices_open = false;
             } else {
@@ -1557,118 +1604,196 @@ fn read_settings_keys(
     }
 }
 
-/// Opens or closes the Monitor dropdown from its own control.
+/// Opens or closes a select from its own control, and closes an open one on a click
+/// anywhere else.
 ///
 /// Not a [`SettingsAction`]: that enum's buttons are all painted by `settings_actions`'s
 /// unconditional `button_colour(interaction)`, which has no notion of a *selected* colour —
 /// the same reason tabs are not `SettingsAction` either. Folding this in would mean
-/// [`colour_monitor_controls`] and `settings_actions` both writing this entity's
+/// [`colour_select_controls`] and `settings_actions` both writing this entity's
 /// `BackgroundColor` in the same frame, in an order nothing pins.
-fn monitor_select_toggle(
-    mut buttons: Query<&Interaction, (With<MonitorSelectButton>, Changed<Interaction>)>,
+///
+/// **"Outside" is read from the mouse, because it has no node to be pressed.** A press on an
+/// option is inside — [`select_actions`] answers it — and a press on another select's own
+/// control opens that one in place of this, which is the other half of only one being open.
+/// A press that lands on some other control still does what that control does: the list
+/// closes, it does not swallow the click.
+fn select_toggle(
+    buttons: Query<(&SelectButton, &Interaction), Changed<Interaction>>,
+    options: Query<&Interaction, With<SelectOption>>,
+    mouse: Option<Res<ButtonInput<MouseButton>>>,
     mut screen: ResMut<SettingsScreen>,
 ) {
-    for interaction in &mut buttons {
-        if *interaction == Interaction::Pressed {
-            screen.monitor_dropdown_open = !screen.monitor_dropdown_open;
-        }
+    let toggled = buttons
+        .iter()
+        .filter(|(_, interaction)| **interaction == Interaction::Pressed)
+        .map(|(button, _)| button.0)
+        .last();
+    let clicked_elsewhere = mouse.is_some_and(|mouse| mouse.just_pressed(MouseButton::Left))
+        && !options
+            .iter()
+            .any(|interaction| *interaction == Interaction::Pressed);
+    let next = next_open_select(screen.open_select, toggled, clicked_elsewhere);
+    // Guarded, for `switch_settings_tabs`' reason: a `ResMut` deref marks the screen changed.
+    if screen.open_select != next {
+        screen.open_select = next;
     }
 }
 
-/// Applies a press inside the open Monitor dropdown, and closes it either way.
+/// Which select is open after one frame's input.
 ///
-/// `monitors.preferences()` is read fresh rather than cached from spawn time: an index that
-/// no longer names a live preference — the operating system dropped a display between the
-/// click and this system running — is answered by doing nothing, the same refusal a missing
-/// chunk or an unheld item answers elsewhere in this client.
-fn monitor_dropdown_actions(
-    mut options: Query<(&MonitorOption, &Interaction), Changed<Interaction>>,
+/// `toggled` is the select whose own control was pressed, if one was; `clicked_elsewhere` is a
+/// click that landed on neither a select's control nor an option. A pure function, so the state
+/// machine is testable without a pointer.
+fn next_open_select(
+    open: Option<Knob>,
+    toggled: Option<Knob>,
+    clicked_elsewhere: bool,
+) -> Option<Knob> {
+    match toggled {
+        Some(knob) if open == Some(knob) => None,
+        Some(knob) => Some(knob),
+        None if clicked_elsewhere => None,
+        None => open,
+    }
+}
+
+/// Applies a press inside an open dropdown, and closes it either way.
+///
+/// **Through [`Settings::adjust_with_choices`], as every other press on this screen is**: the
+/// option's index becomes a number of steps from the current value, so the bound, the clamp
+/// and the file are the model's and the select has no setter of its own. The options are read
+/// fresh rather than cached from spawn time: an index that no longer names an option — the
+/// operating system dropped a display between the click and this system running — is answered
+/// by doing nothing, the same refusal a missing chunk or an unheld item answers elsewhere.
+///
+/// Choosing the option already held writes nothing, so a press that changes nothing does not
+/// mark the settings changed and rewrite the file. A value the list no longer offers is never
+/// "already held", which is what lets choosing any option replace it.
+fn select_actions(
+    options: Query<(&SelectOption, &Interaction), Changed<Interaction>>,
     monitors: Res<MonitorChoices>,
+    devices: Res<AudioDevices>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
-    for (option, interaction) in &mut options {
+    let choices = Choices {
+        monitors: &monitors,
+        devices: &devices,
+    };
+    for (option, interaction) in &options {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        if let Some(preference) = monitors.preferences().get(option.0).cloned() {
-            settings.set_monitor(preference);
+        if let Some(offered) = settings.options_with_choices(option.knob, choices)
+            && offered.selected != Some(option.index)
+            && let Some(steps) = offered.steps_to(option.index)
+        {
+            settings.adjust_with_choices(option.knob, steps, choices);
         }
-        screen.monitor_dropdown_open = false;
+        screen.open_select = None;
     }
 }
 
-/// Rebuilds the dropdown's options whenever the live monitors change, and only then —
+/// Rebuilds a dropdown's options when what they say changes, and only then —
 /// `ui/servers.rs`'s `rebuild_rows` gives the same reason one screen over: rebuilding every
-/// frame would despawn and respawn the entity under a pointer mid-press. The panel starts
-/// with no children — [`spawn_monitor_select`] builds it empty — so the first change
-/// `MonitorChoices` reports, real or a test's initial insert, is what populates it.
-fn rebuild_monitor_options(
+/// frame would despawn and respawn the entity under a pointer mid-press.
+///
+/// The lists that can change are the machine's — monitors and audio devices — so those two
+/// resources are what wake this; a closed enum's list is built once, on the frame its panel
+/// first exists. Each panel is compared against the labels it was built with
+/// ([`SelectLabels`]), so a new device list rebuilds the two device lists and not the monitor
+/// list beside them, and a re-enumeration that found the same devices rebuilds nothing.
+fn rebuild_select_options(
+    settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
-    panels: Query<Entity, With<MonitorDropdownPanel>>,
-    options: Query<Entity, With<MonitorOption>>,
+    devices: Res<AudioDevices>,
+    added: Query<(), Added<SelectPanel>>,
+    mut panels: Query<(Entity, &SelectPanel, &mut SelectLabels)>,
+    options: Query<(Entity, &SelectOption)>,
     mut commands: Commands,
 ) {
-    if !monitors.is_changed() {
+    if !monitors.is_changed() && !devices.is_changed() && added.is_empty() {
         return;
     }
-    for option in &options {
-        commands.entity(option).despawn();
-    }
-    for panel in &panels {
+    let choices = Choices {
+        monitors: &monitors,
+        devices: &devices,
+    };
+    for (panel, select, mut drawn) in &mut panels {
+        let wanted = settings
+            .options_with_choices(select.0, choices)
+            .map(|offered| offered.labels)
+            .unwrap_or_default();
+        if drawn.0 == wanted {
+            continue;
+        }
+        for (entity, option) in &options {
+            if option.knob == select.0 {
+                commands.entity(entity).despawn();
+            }
+        }
         commands.entity(panel).with_children(|list| {
-            for (index, preference) in monitors.preferences().into_iter().enumerate() {
-                spawn_monitor_option(list, index, monitors.option_label(&preference));
+            for (index, label) in wanted.iter().enumerate() {
+                spawn_select_option(list, select.0, index, label.clone());
             }
         });
+        drawn.0 = wanted;
     }
 }
 
-/// Gives the dropdown panel a `Display` and takes it away — never a `Visibility`, the same
-/// reason [`show_the_active_settings_tab`] gives `TabPanel` one: a hidden node still
-/// occupies its layout box. `Display::None` also keeps a closed dropdown out of
-/// hit-testing, so a row it used to cover is clickable again the moment it closes.
-fn show_monitor_dropdown(
+/// Gives the open select's panel a `Display` and takes it from every other — never a
+/// `Visibility`, the same reason [`show_the_active_settings_tab`] gives `TabPanel` one: a
+/// hidden node still occupies its layout box. `Display::None` also keeps a closed dropdown out
+/// of hit-testing, so a row it used to cover is clickable again the moment it closes.
+fn show_select_dropdowns(
     screen: Res<SettingsScreen>,
-    mut panels: Query<&mut Node, With<MonitorDropdownPanel>>,
+    mut panels: Query<(&SelectPanel, &mut Node)>,
 ) {
-    let next = if screen.monitor_dropdown_open {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    for mut node in &mut panels {
+    for (panel, mut node) in &mut panels {
+        let next = if screen.open_select == Some(panel.0) {
+            Display::Flex
+        } else {
+            Display::None
+        };
         if node.display != next {
             node.display = next;
         }
     }
 }
 
-/// Paints the closed control and every open option — the pointer's three states for both,
-/// plus the one extra state [`button_colour`] has no arm for: the applied preference,
-/// coloured exactly as the active tab is.
-fn colour_monitor_controls(
+/// Paints every select's closed control and the open list's options — the pointer's three
+/// states for both, plus the one extra state [`button_colour`] has no arm for: the option the
+/// setting holds, coloured exactly as the active tab is.
+///
+/// Only the open list is asked what it holds, because only one list is ever drawn.
+fn colour_select_controls(
     settings: Res<Settings>,
     monitors: Res<MonitorChoices>,
-    mut button: Query<(&Interaction, &mut BackgroundColor), With<MonitorSelectButton>>,
-    mut options: Query<
-        (&MonitorOption, &Interaction, &mut BackgroundColor),
-        Without<MonitorSelectButton>,
-    >,
+    devices: Res<AudioDevices>,
+    screen: Res<SettingsScreen>,
+    mut buttons: Query<(&Interaction, &mut BackgroundColor), With<SelectButton>>,
+    mut options: Query<(&SelectOption, &Interaction, &mut BackgroundColor), Without<SelectButton>>,
 ) {
-    for (interaction, mut colour) in &mut button {
+    for (interaction, mut colour) in &mut buttons {
         let next = button_colour(interaction);
         if colour.0 != next {
             colour.0 = next;
         }
     }
 
-    let selected = monitors
-        .preferences()
-        .iter()
-        .position(|preference| preference == settings.monitor());
+    let held = screen.open_select.and_then(|knob| {
+        let choices = Choices {
+            monitors: &monitors,
+            devices: &devices,
+        };
+        settings
+            .options_with_choices(knob, choices)?
+            .selected
+            .map(|index| SelectOption { knob, index })
+    });
     for (option, interaction, mut colour) in &mut options {
-        let next = if Some(option.0) == selected {
+        let next = if Some(*option) == held {
             TAB_SELECTED
         } else {
             button_colour(interaction)
@@ -1777,7 +1902,7 @@ fn voice_row_actions(
 
 /// Rebuilds the panel's rows when the set of speakers changes, and **only** then.
 ///
-/// `ui/servers.rs`'s `rebuild_rows` and [`rebuild_monitor_options`] give the same reason:
+/// `ui/servers.rs`'s `rebuild_rows` and [`rebuild_select_options`] give the same reason:
 /// rebuilding every frame would despawn and respawn the entity under a pointer mid-press. The
 /// trap here is sharper than theirs, because `Voices` is marked changed on **every frame
 /// anybody speaks** — so the comparison is against the set of speakers actually drawn, not
@@ -1854,7 +1979,7 @@ fn rebuild_voice_rows(
 
 /// Gives the Voices panel a `Display` and takes it away.
 ///
-/// `Display`, never `Visibility`, for [`show_monitor_dropdown`]'s reason: a hidden node still
+/// `Display`, never `Visibility`, for [`show_select_dropdowns`]' reason: a hidden node still
 /// occupies its layout box, and a closed panel must be out of hit-testing so the rows it
 /// covered are pressable again.
 fn show_voices_panel(screen: Res<SettingsScreen>, mut panels: Query<&mut Node, With<VoicesPanel>>) {
@@ -1925,11 +2050,8 @@ fn describe(
         Reading::ReducedEffects => on_or_off(settings.reduced_effects()),
         // "v" stands in for a down chevron: `ascii_guard` in `ui/mod.rs` holds every
         // string here to the 95 codepoints Bevy's embedded font can draw.
-        Reading::MonitorControl => {
-            format!(
-                "{} v",
-                settings.reading_with_choices(Knob::Monitor, choices)
-            )
+        Reading::SelectControl(knob) => {
+            format!("{} v", settings.reading_with_choices(knob, choices))
         }
         Reading::VoicesPanel => if screen.voices_open { "HIDE" } else { "SHOW" }.to_owned(),
         Reading::MicTestButton => if mic_test.open { "STOP" } else { "LISTEN" }.to_owned(),
@@ -1957,7 +2079,9 @@ fn on_or_off(flag: bool) -> String {
 mod tests {
     use super::*;
     use crate::audio::{HEARD_FOR, MAX_VOICE};
-    use crate::settings::{Corner, DeviceChoice, Knob, MonitorPreference, VoiceAudience};
+    use crate::settings::{
+        Corner, DeviceChoice, Knob, KnobOptions, MonitorPreference, VoiceAudience,
+    };
     use crate::ui::health::DEFAULT_FONT_ADVANCE_EM;
 
     fn screen_app() -> App {
@@ -1965,6 +2089,7 @@ mod tests {
         app.add_plugins(MinimalPlugins)
             .init_resource::<InputMode>()
             .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
             .insert_resource(MonitorChoices::named(&["Main display", "Side display"]))
             // Two of each, so a knob whose bound is the machine's has somewhere to step.
             // No `AudioPlugin` and therefore no device anywhere: this is the list
@@ -2120,16 +2245,8 @@ mod tests {
         query.iter(world).map(|row| row.entity_id).collect()
     }
 
-    /// Presses the Monitor row's closed control, opening or closing the dropdown.
-    fn press_monitor_toggle(app: &mut App) {
-        let button = {
-            let world = app.world_mut();
-            let mut query = world.query_filtered::<Entity, With<MonitorSelectButton>>();
-            query
-                .iter(world)
-                .next()
-                .expect("the monitor select control exists")
-        };
+    /// Presses one entity's button for a frame and lets go of it.
+    fn press_entity(app: &mut App, button: Entity) {
         *app.world_mut()
             .entity_mut(button)
             .get_mut::<Interaction>()
@@ -2141,49 +2258,125 @@ mod tests {
             .expect("a button has an interaction") = Interaction::None;
     }
 
-    /// Presses the dropdown option at `index` into [`MonitorChoices::preferences`].
-    fn press_monitor_option(app: &mut App, index: usize) {
+    /// Presses one select's closed control, opening or closing its dropdown.
+    fn press_select(app: &mut App, knob: Knob) {
         let button = {
             let world = app.world_mut();
-            let mut query = world.query::<(Entity, &MonitorOption)>();
+            let mut query = world.query::<(Entity, &SelectButton)>();
             query
                 .iter(world)
-                .find(|(_, option)| option.0 == index)
+                .find(|(_, button)| button.0 == knob)
                 .map(|(entity, _)| entity)
-                .unwrap_or_else(|| panic!("no dropdown option at index {index}"))
+                .unwrap_or_else(|| panic!("no select control for {knob:?}"))
         };
-        *app.world_mut()
-            .entity_mut(button)
-            .get_mut::<Interaction>()
-            .expect("a button has an interaction") = Interaction::Pressed;
-        app.update();
-        *app.world_mut()
-            .entity_mut(button)
-            .get_mut::<Interaction>()
-            .expect("a button has an interaction") = Interaction::None;
+        press_entity(app, button);
     }
 
-    /// Whether the dropdown panel is currently drawn, read from `Display` — what
-    /// [`show_monitor_dropdown`] actually writes — rather than the resource flag alone.
-    fn monitor_dropdown_shown(app: &mut App) -> bool {
+    /// Every option `knob`'s dropdown currently holds, in index order.
+    fn select_option_entities(app: &mut App, knob: Knob) -> Vec<Entity> {
         let world = app.world_mut();
-        let mut query = world.query_filtered::<&Node, With<MonitorDropdownPanel>>();
+        let mut query = world.query::<(Entity, &SelectOption)>();
+        let mut found: Vec<(usize, Entity)> = query
+            .iter(world)
+            .filter(|(_, option)| option.knob == knob)
+            .map(|(entity, option)| (option.index, entity))
+            .collect();
+        found.sort_by_key(|(index, _)| *index);
+        found.into_iter().map(|(_, entity)| entity).collect()
+    }
+
+    /// Presses the option at `index` in `knob`'s dropdown.
+    fn press_select_option(app: &mut App, knob: Knob, index: usize) {
+        let option = select_option_entities(app, knob)
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| panic!("no {knob:?} option at index {index}"));
+        press_entity(app, option);
+    }
+
+    /// Whether `knob`'s dropdown is currently drawn, read from `Display` — what
+    /// [`show_select_dropdowns`] actually writes — rather than the resource flag alone.
+    fn select_shown(app: &mut App, knob: Knob) -> bool {
+        let world = app.world_mut();
+        let mut query = world.query::<(&SelectPanel, &Node)>();
         query
             .iter(world)
-            .next()
-            .map(|node| node.display != Display::None)
-            .unwrap_or(false)
+            .find(|(panel, _)| panel.0 == knob)
+            .is_some_and(|(_, node)| node.display != Display::None)
     }
 
-    /// The dropdown options currently drawn, in ascending index order, as `(index, label)`.
-    fn monitor_options(app: &mut App) -> Vec<(usize, String)> {
+    /// The node of `knob`'s closed control.
+    fn select_button_node(app: &mut App, knob: Knob) -> Node {
         let world = app.world_mut();
-        let mut rows = world.query::<(&MonitorOption, &Children)>();
+        let mut query = world.query::<(&SelectButton, &Node)>();
+        query
+            .iter(world)
+            .find(|(button, _)| button.0 == knob)
+            .map(|(_, node)| node.clone())
+            .unwrap_or_else(|| panic!("no select control for {knob:?}"))
+    }
+
+    /// The node of `knob`'s dropdown.
+    fn select_panel_node(app: &mut App, knob: Knob) -> Node {
+        let world = app.world_mut();
+        let mut query = world.query::<(&SelectPanel, &Node)>();
+        query
+            .iter(world)
+            .find(|(panel, _)| panel.0 == knob)
+            .map(|(_, node)| node.clone())
+            .unwrap_or_else(|| panic!("no dropdown for {knob:?}"))
+    }
+
+    /// Whether each of `knob`'s options is painted as the one the setting holds, in index order.
+    fn option_highlights(app: &mut App, knob: Knob) -> Vec<bool> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&SelectOption, &BackgroundColor)>();
+        let mut painted: Vec<(usize, bool)> = query
+            .iter(world)
+            .filter(|(option, _)| option.knob == knob)
+            .map(|(option, colour)| (option.index, colour.0 == TAB_SELECTED))
+            .collect();
+        painted.sort_by_key(|(index, _)| *index);
+        painted.into_iter().map(|(_, held)| held).collect()
+    }
+
+    /// What `knob` offers now, answered by the model the screen draws from.
+    fn options_of(app: &App, knob: Knob) -> KnobOptions {
+        let world = app.world();
+        world
+            .resource::<Settings>()
+            .options_with_choices(
+                knob,
+                Choices {
+                    monitors: world.resource::<MonitorChoices>(),
+                    devices: world.resource::<AudioDevices>(),
+                },
+            )
+            .unwrap_or_else(|| panic!("{knob:?} is not a choice"))
+    }
+
+    /// One left click with nothing under the pointer, then let go.
+    fn click_nowhere(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
+    }
+
+    /// The options `knob`'s dropdown currently draws, in ascending index order, as
+    /// `(index, label)`.
+    fn select_options(app: &mut App, knob: Knob) -> Vec<(usize, String)> {
+        let world = app.world_mut();
+        let mut rows = world.query::<(&SelectOption, &Children)>();
         let labelled: Vec<(usize, Entity)> = rows
             .iter(world)
+            .filter(|(option, _)| option.knob == knob)
             .map(|(option, children)| {
                 (
-                    option.0,
+                    option.index,
                     children.iter().next().expect("an option has a label"),
                 )
             })
@@ -2213,11 +2406,11 @@ mod tests {
     fn every_knob_has_a_control_at_each_end_and_a_reading_between_them() {
         let mut app = screen_app();
         for knob in KNOBS {
-            // Monitor draws as `Row::MonitorSelect` now, not `Row::Knob` — it has no `-`
-            // or `+` button and no `Reading::Knob(Knob::Monitor)` node to read.
-            // `the_window_rows_offer_the_modes_and_the_attached_monitors_by_name` and the
-            // dropdown-specific tests below cover it instead.
-            if knob == Knob::Monitor {
+            // A choice draws as `Row::Select`, not a stepper — it has no `-` or `+` button and
+            // no `Reading::Knob` node to read.
+            // `every_select_row_offers_its_knobs_options_and_each_option_lands_on_it` covers
+            // those instead.
+            if knob.is_choice() {
                 continue;
             }
             let before = app.world().resource::<Settings>().clone();
@@ -2257,41 +2450,42 @@ mod tests {
     fn the_window_rows_offer_the_modes_and_the_attached_monitors_by_name() {
         let mut app = screen_app();
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
-            "borderless"
+            reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
+            "borderless v"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::MonitorControl),
+            reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
             "primary - Main display (1920x1080 at 0,0) v"
         );
 
-        press(&mut app, SettingsAction::Nudge(Knob::WindowMode, 1));
-        press_monitor_toggle(&mut app);
+        press_select(&mut app, Knob::WindowMode);
+        press_select_option(&mut app, Knob::WindowMode, 1);
+        press_select(&mut app, Knob::Monitor);
         assert!(
-            monitor_dropdown_shown(&mut app),
+            select_shown(&mut app, Knob::Monitor),
             "the dropdown did not open"
         );
-        press_monitor_option(&mut app, 1);
+        press_select_option(&mut app, Knob::Monitor, 1);
         assert!(
-            !monitor_dropdown_shown(&mut app),
+            !select_shown(&mut app, Knob::Monitor),
             "selecting an option left the dropdown open"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
-            "windowed"
+            reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
+            "windowed v"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::MonitorControl),
+            reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
             "Side display (1920x1080 at 1920,0) v"
         );
 
         press(&mut app, SettingsAction::Reset(Tab::Graphics));
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::WindowMode)),
-            "borderless"
+            reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
+            "borderless v"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::MonitorControl),
+            reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
             "primary - Main display (1920x1080 at 0,0) v"
         );
     }
@@ -2595,8 +2789,13 @@ mod tests {
                 continue;
             }
             assert_eq!(layout.linebreak, LineBreak::NoWrap, "{reading:?} may wrap");
-            if matches!(reading, Reading::Knob(_)) {
-                assert_eq!(node.width, Val::Px(READING_WIDTH));
+            if let Reading::Knob(knob) = reading {
+                let width = if bus_of(*knob).is_some() {
+                    BUS_READING_WIDTH
+                } else {
+                    READING_WIDTH
+                };
+                assert_eq!(node.width, Val::Px(width), "{reading:?}");
                 assert_eq!(node.overflow, Overflow::clip());
             }
         }
@@ -2609,7 +2808,10 @@ mod tests {
     fn monitor_readings_are_complete_normally_and_clip_unbounded_names_on_one_line() {
         let mut app = screen_app();
         let normal = "primary - Main display (1920x1080 at 0,0) v";
-        assert_eq!(reading_of(&mut app, Reading::MonitorControl), normal);
+        assert_eq!(
+            reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
+            normal
+        );
         assert!(row_text_width(normal) <= STEPPER_WIDTH);
 
         let long_name = "External-monitor-name-".repeat(32);
@@ -2621,7 +2823,7 @@ mod tests {
         let mut readings = world.query::<(&Reading, &Text, &Node, &TextLayout)>();
         let (_, text, node, layout) = readings
             .iter(world)
-            .find(|(reading, _, _, _)| **reading == Reading::MonitorControl)
+            .find(|(reading, _, _, _)| **reading == Reading::SelectControl(Knob::Monitor))
             .expect("the monitor control has a reading");
         assert!(
             text.0.contains(&long_name),
@@ -2640,7 +2842,7 @@ mod tests {
         // And the control itself, not only its text node, kept the stepper column's exact
         // width — a long name is clipped inside the control rather than widening the row.
         assert_eq!(
-            marker_node::<MonitorSelectButton>(&mut app).width,
+            select_button_node(&mut app, Knob::Monitor).width,
             Val::Px(STEPPER_WIDTH)
         );
     }
@@ -2650,17 +2852,13 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Closed by default, and the closed control names both the current monitor and an
-    /// open indicator through one `Reading::MonitorControl` string.
+    /// open indicator through one `Reading::SelectControl(Knob::Monitor)` string.
     #[test]
     fn the_monitor_dropdown_starts_closed() {
         let mut app = screen_app();
-        assert!(!monitor_dropdown_shown(&mut app));
-        assert!(
-            !app.world()
-                .resource::<SettingsScreen>()
-                .monitor_dropdown_open
-        );
-        let closed = reading_of(&mut app, Reading::MonitorControl);
+        assert!(!select_shown(&mut app, Knob::Monitor));
+        assert_eq!(app.world().resource::<SettingsScreen>().open_select, None);
+        let closed = reading_of(&mut app, Reading::SelectControl(Knob::Monitor));
         assert!(closed.contains("Main display"), "{closed}");
         assert!(closed.ends_with(" v"), "no open indicator in {closed:?}");
     }
@@ -2670,15 +2868,14 @@ mod tests {
     #[test]
     fn clicking_the_closed_control_opens_a_list_of_primary_and_every_live_monitor() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
-        assert!(monitor_dropdown_shown(&mut app));
-        assert!(
-            app.world()
-                .resource::<SettingsScreen>()
-                .monitor_dropdown_open
+        press_select(&mut app, Knob::Monitor);
+        assert!(select_shown(&mut app, Knob::Monitor));
+        assert_eq!(
+            app.world().resource::<SettingsScreen>().open_select,
+            Some(Knob::Monitor)
         );
         assert_eq!(
-            monitor_options(&mut app),
+            select_options(&mut app, Knob::Monitor),
             vec![
                 (0, "Primary".to_owned()),
                 (1, "Side display (1920x1080 at 1920,0)".to_owned()),
@@ -2686,25 +2883,24 @@ mod tests {
         );
 
         // And it toggles: the same control closes what it opened.
-        press_monitor_toggle(&mut app);
-        assert!(!monitor_dropdown_shown(&mut app));
+        press_select(&mut app, Knob::Monitor);
+        assert!(!select_shown(&mut app, Knob::Monitor));
     }
 
     /// Selecting an option applies it to [`Settings`] and closes the list — the AC by name.
     #[test]
     fn selecting_an_option_applies_it_and_closes_the_list() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
+        press_select(&mut app, Knob::Monitor);
         let side = app.world().resource::<MonitorChoices>().preferences()[1].clone();
 
-        press_monitor_option(&mut app, 1);
+        press_select_option(&mut app, Knob::Monitor, 1);
 
-        assert!(!monitor_dropdown_shown(&mut app), "the list did not close");
         assert!(
-            !app.world()
-                .resource::<SettingsScreen>()
-                .monitor_dropdown_open
+            !select_shown(&mut app, Knob::Monitor),
+            "the list did not close"
         );
+        assert_eq!(app.world().resource::<SettingsScreen>().open_select, None);
         assert_eq!(*app.world().resource::<Settings>().monitor(), side);
     }
 
@@ -2720,21 +2916,21 @@ mod tests {
             .set_monitor(vanished.clone());
         app.update();
 
-        let closed = reading_of(&mut app, Reading::MonitorControl);
+        let closed = reading_of(&mut app, Reading::SelectControl(Knob::Monitor));
         assert!(closed.contains("(unavailable)"), "{closed}");
 
-        press_monitor_toggle(&mut app);
+        press_select(&mut app, Knob::Monitor);
         // Exactly the two live entries — the unavailable saved preference is not a third
         // option, "(unavailable)" or otherwise, because there is nothing live behind it.
         assert_eq!(
-            monitor_options(&mut app),
+            select_options(&mut app, Knob::Monitor),
             vec![
                 (0, "Primary".to_owned()),
                 (1, "Side display (1920x1080 at 1920,0)".to_owned()),
             ]
         );
 
-        press_monitor_option(&mut app, 0);
+        press_select_option(&mut app, Knob::Monitor, 0);
         assert_eq!(
             *app.world().resource::<Settings>().monitor(),
             MonitorPreference::Primary,
@@ -2747,12 +2943,12 @@ mod tests {
     #[test]
     fn escape_closes_the_dropdown_before_it_closes_the_screen() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
-        assert!(monitor_dropdown_shown(&mut app));
+        press_select(&mut app, Knob::Monitor);
+        assert!(select_shown(&mut app, Knob::Monitor));
 
         press_key(&mut app, KeyCode::Escape);
         assert!(
-            !monitor_dropdown_shown(&mut app),
+            !select_shown(&mut app, Knob::Monitor),
             "escape did not close the dropdown"
         );
         assert!(
@@ -2777,19 +2973,15 @@ mod tests {
         // otherwise switching *to* Controls, the tab already showing, would be the no-op
         // `pressing_the_tab_already_showing_leaves_a_capture_armed` exists to name.
         press_tab(&mut app, Tab::Graphics);
-        press_monitor_toggle(&mut app);
-        assert!(monitor_dropdown_shown(&mut app));
+        press_select(&mut app, Knob::Monitor);
+        assert!(select_shown(&mut app, Knob::Monitor));
 
         press_tab(&mut app, Tab::Controls);
         assert!(
-            !monitor_dropdown_shown(&mut app),
+            !select_shown(&mut app, Knob::Monitor),
             "the dropdown survived a tab switch"
         );
-        assert!(
-            !app.world()
-                .resource::<SettingsScreen>()
-                .monitor_dropdown_open
-        );
+        assert_eq!(app.world().resource::<SettingsScreen>().open_select, None);
     }
 
     /// Resetting graphics puts the Monitor preference itself back, and leaves no dropdown
@@ -2797,14 +2989,14 @@ mod tests {
     #[test]
     fn resetting_graphics_closes_an_open_monitor_dropdown() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
-        press_monitor_option(&mut app, 1);
-        press_monitor_toggle(&mut app);
-        assert!(monitor_dropdown_shown(&mut app));
+        press_select(&mut app, Knob::Monitor);
+        press_select_option(&mut app, Knob::Monitor, 1);
+        press_select(&mut app, Knob::Monitor);
+        assert!(select_shown(&mut app, Knob::Monitor));
 
         press(&mut app, SettingsAction::Reset(Tab::Graphics));
         assert!(
-            !monitor_dropdown_shown(&mut app),
+            !select_shown(&mut app, Knob::Monitor),
             "the dropdown survived a graphics reset"
         );
         assert_eq!(
@@ -2818,16 +3010,16 @@ mod tests {
     #[test]
     fn closing_settings_closes_an_open_monitor_dropdown() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
-        assert!(monitor_dropdown_shown(&mut app));
+        press_select(&mut app, Knob::Monitor);
+        assert!(select_shown(&mut app, Knob::Monitor));
 
         press(&mut app, SettingsAction::Back);
-        assert!(!monitor_dropdown_shown(&mut app));
+        assert!(!select_shown(&mut app, Knob::Monitor));
 
         // And reopening the screen finds it shut, not wherever it was left.
         app.world_mut().resource_mut::<SettingsScreen>().open();
         app.update();
-        assert!(!monitor_dropdown_shown(&mut app));
+        assert!(!select_shown(&mut app, Knob::Monitor));
     }
 
     /// The geometry the acceptance criteria name: the closed control fills the stepper
@@ -2836,11 +3028,11 @@ mod tests {
     #[test]
     fn the_dropdown_is_anchored_below_the_control_at_the_same_width_and_above_other_rows() {
         let mut app = screen_app();
-        let control = marker_node::<MonitorSelectButton>(&mut app);
+        let control = select_button_node(&mut app, Knob::Monitor);
         assert_eq!(control.width, Val::Px(STEPPER_WIDTH));
         assert_eq!(control.align_items, AlignItems::Center);
 
-        let panel = marker_node::<MonitorDropdownPanel>(&mut app);
+        let panel = select_panel_node(&mut app, Knob::Monitor);
         assert_eq!(panel.position_type, PositionType::Absolute);
         assert_eq!(panel.left, Val::Px(0.0));
         assert_eq!(
@@ -2853,14 +3045,33 @@ mod tests {
         );
 
         let world = app.world_mut();
-        let mut layers = world.query_filtered::<&GlobalZIndex, With<MonitorDropdownPanel>>();
-        let layer = layers
+        // The layer the Voices panel is actually spawned on, read from the tree rather than
+        // from the constant, so a panel moved to another layer is still compared against.
+        let mut voices = world.query_filtered::<&GlobalZIndex, With<VoicesPanel>>();
+        let voices_layer = voices
             .iter(world)
             .next()
-            .expect("the dropdown panel carries a stacking layer");
-        assert!(
-            layer.0 > 45,
-            "the dropdown does not outrank the settings screen it overlays: {layer:?}"
+            .map(|layer| layer.0)
+            .expect("the Voices panel carries a stacking layer");
+        let mut layers = world.query::<(&GlobalZIndex, &SelectPanel)>();
+        let mut seen = 0;
+        for (layer, panel) in layers.iter(world) {
+            seen += 1;
+            assert!(
+                layer.0 > 45,
+                "{panel:?} does not outrank the settings screen it overlays: {layer:?}"
+            );
+            // Equal would be decided by tree order, and the Voices row is spawned after every
+            // select on the Audio tab — see `SELECT_LAYER`.
+            assert!(
+                layer.0 > voices_layer,
+                "{panel:?} can be drawn under the Voices panel on layer {voices_layer}: {layer:?}"
+            );
+        }
+        assert_eq!(
+            seen,
+            KNOBS.iter().filter(|knob| knob.is_choice()).count(),
+            "a select has no dropdown, or a dropdown has no stacking layer"
         );
     }
 
@@ -2869,17 +3080,284 @@ mod tests {
     #[test]
     fn dropdown_options_are_left_aligned_and_vertically_centred() {
         let mut app = screen_app();
-        press_monitor_toggle(&mut app);
+        press_select(&mut app, Knob::Monitor);
 
         let world = app.world_mut();
-        let mut options = world.query_filtered::<&Node, With<MonitorOption>>();
+        let mut options = world.query::<(&Node, &SelectOption)>();
         let mut seen = 0;
-        for node in options.iter(world) {
+        for (node, _) in options
+            .iter(world)
+            .filter(|(_, option)| option.knob == Knob::Monitor)
+        {
             seen += 1;
             assert_eq!(node.justify_content, JustifyContent::FlexStart);
             assert_eq!(node.align_items, AlignItems::Center);
         }
         assert_eq!(seen, 2, "expected exactly the two live options");
+    }
+
+    /// **Every multiple-choice knob is a select, its list is its knob's choice list, and each
+    /// option lands on the value it names** — driven through the assembled screen, one knob and
+    /// one option at a time, so a select wired to the wrong knob or an index that steps one
+    /// short fails here by name.
+    #[test]
+    fn every_select_row_offers_its_knobs_options_and_each_option_lands_on_it() {
+        let mut app = screen_app();
+        for knob in KNOBS.into_iter().filter(|knob| knob.is_choice()) {
+            press_tab(&mut app, knob.tab());
+            let offered = options_of(&app, knob);
+            assert!(
+                offered.labels.len() > 1,
+                "{knob:?} offers nothing to choose between"
+            );
+            for index in 0..offered.labels.len() {
+                press_select(&mut app, knob);
+                assert!(select_shown(&mut app, knob), "{knob:?} did not open");
+                let drawn: Vec<String> = select_options(&mut app, knob)
+                    .into_iter()
+                    .map(|(_, label)| label)
+                    .collect();
+                assert_eq!(drawn, offered.labels, "{knob:?} lists something else");
+
+                press_select_option(&mut app, knob, index);
+                assert!(!select_shown(&mut app, knob), "choosing left {knob:?} open");
+                assert_eq!(
+                    options_of(&app, knob).selected,
+                    Some(index),
+                    "{knob:?} option {index} landed elsewhere"
+                );
+                let reading = {
+                    let world = app.world();
+                    world.resource::<Settings>().reading_with_choices(
+                        knob,
+                        Choices {
+                            monitors: world.resource::<MonitorChoices>(),
+                            devices: world.resource::<AudioDevices>(),
+                        },
+                    )
+                };
+                assert_eq!(
+                    reading_of(&mut app, Reading::SelectControl(knob)),
+                    format!("{reading} v")
+                );
+            }
+        }
+    }
+
+    /// The held option is painted as held, and opening a second select closes the first —
+    /// there is one open select or none.
+    #[test]
+    fn the_held_option_is_highlighted_and_only_one_select_is_open_at_a_time() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+
+        press_select(&mut app, Knob::VoiceMode);
+        // Push to talk is the default, and the middle of the three.
+        assert_eq!(
+            option_highlights(&mut app, Knob::VoiceMode),
+            vec![false, true, false]
+        );
+
+        press_select(&mut app, Knob::VoiceAudience);
+        assert!(
+            !select_shown(&mut app, Knob::VoiceMode),
+            "opening a second select left the first open"
+        );
+        assert!(select_shown(&mut app, Knob::VoiceAudience));
+        assert_eq!(
+            option_highlights(&mut app, Knob::VoiceAudience),
+            vec![true, false]
+        );
+
+        press_select_option(&mut app, Knob::VoiceAudience, 1);
+        press_select(&mut app, Knob::VoiceAudience);
+        assert_eq!(
+            option_highlights(&mut app, Knob::VoiceAudience),
+            vec![false, true],
+            "the highlight did not follow the choice"
+        );
+    }
+
+    /// The open/close rules, stated once as a table: its own control opens and closes a
+    /// select, another select's control swaps rather than opening a second, and a click
+    /// anywhere else closes it.
+    #[test]
+    fn the_open_select_follows_its_control_other_controls_and_clicks_elsewhere() {
+        let (one, other) = (Knob::Monitor, Knob::WindowMode);
+        assert_eq!(next_open_select(None, Some(one), true), Some(one));
+        assert_eq!(next_open_select(Some(one), Some(one), true), None);
+        assert_eq!(next_open_select(Some(one), Some(other), true), Some(other));
+        assert_eq!(next_open_select(Some(one), None, true), None);
+        assert_eq!(next_open_select(Some(one), None, false), Some(one));
+        assert_eq!(next_open_select(None, None, true), None);
+    }
+
+    /// A click outside closes an open select and chooses nothing; a click that lands on an
+    /// option is that option's, and a click on another select's control opens that one.
+    #[test]
+    fn a_click_outside_an_open_select_closes_it_and_chooses_nothing() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Graphics);
+        press_select(&mut app, Knob::WindowMode);
+        assert!(select_shown(&mut app, Knob::WindowMode));
+        let before = app.world().resource::<Settings>().clone();
+
+        click_nowhere(&mut app);
+        assert!(
+            !select_shown(&mut app, Knob::WindowMode),
+            "a click outside left the select open"
+        );
+        assert_eq!(*app.world().resource::<Settings>(), before);
+
+        press_select(&mut app, Knob::WindowMode);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        press_select(&mut app, Knob::Monitor);
+        assert!(
+            select_shown(&mut app, Knob::Monitor),
+            "a click on another select's control was read as a click outside"
+        );
+        assert!(!select_shown(&mut app, Knob::WindowMode));
+
+        press_select_option(&mut app, Knob::Monitor, 1);
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .reset_all();
+        assert_eq!(
+            options_of(&app, Knob::Monitor).selected,
+            Some(1),
+            "a click on an option was read as a click outside it"
+        );
+    }
+
+    /// Escape closes an open select before the Voices panel it can sit beside on Audio, and
+    /// the panel before the screen — one press, one overlay.
+    #[test]
+    fn escape_closes_a_select_then_the_voices_panel_then_the_screen() {
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Audio);
+        press(&mut app, SettingsAction::ToggleVoices);
+        press_select(&mut app, Knob::InputDevice);
+
+        press_key(&mut app, KeyCode::Escape);
+        let screen = app.world().resource::<SettingsScreen>().clone();
+        assert_eq!(screen.open_select, None, "escape did not close the select");
+        assert!(screen.voices_open, "the first escape also closed the panel");
+
+        release_keys(&mut app);
+        press_key(&mut app, KeyCode::Escape);
+        let screen = app.world().resource::<SettingsScreen>().clone();
+        assert!(!screen.voices_open);
+        assert!(screen.is_open(), "the second escape closed the screen");
+
+        release_keys(&mut app);
+        press_key(&mut app, KeyCode::Escape);
+        assert!(!app.world().resource::<SettingsScreen>().is_open());
+    }
+
+    /// **A bus knob's `-` and `+` are the stepper's own size**, and the narrowed reading still
+    /// holds every value a bus knob can show. Whether the row fits its column is measured on the
+    /// spawned nodes by `every_rows_controls_fit_the_column_at_their_own_widths`, not restated
+    /// here from the constants that define it.
+    #[test]
+    fn every_stepper_button_is_full_size_and_a_bus_row_fits_its_column() {
+        // The widest a bus reading gets, at both ends of every bus knob.
+        for knob in KNOBS.into_iter().filter(|knob| bus_of(*knob).is_some()) {
+            for steps in [-10_000, 10_000] {
+                let mut settings = Settings::default();
+                settings.adjust(knob, steps);
+                let value = settings.reading(knob);
+                assert!(
+                    row_text_width(&value) <= BUS_READING_WIDTH,
+                    "{knob:?} reads {value:?}, wider than its reading"
+                );
+            }
+        }
+
+        let mut app = screen_app();
+        let world = app.world_mut();
+        let mut buttons = world.query::<(&SettingsAction, &Node)>();
+        let (mut steppers, mut tests) = (0, 0);
+        for (action, node) in buttons.iter(world) {
+            let width = match action {
+                SettingsAction::Nudge(..) => {
+                    steppers += 1;
+                    STEP_BUTTON
+                }
+                SettingsAction::TestBus(_) => {
+                    tests += 1;
+                    TEST_BUTTON
+                }
+                _ => continue,
+            };
+            assert_eq!(node.width, Val::Px(width), "{action:?}");
+            assert_eq!(node.flex_shrink, 0.0, "{action:?} can be squeezed");
+        }
+        assert_eq!(
+            steppers,
+            2 * KNOBS.iter().filter(|knob| !knob.is_choice()).count()
+        );
+        assert_eq!(tests, 5, "one tone test per bus, the master's included");
+    }
+
+    /// **Every row's controls fit its column at their own widths**, not only the bus rows.
+    ///
+    /// `spawn_button` stopped letting a fixed-width control shrink in #1126, so a row that asks
+    /// for more than the column holds now pokes out of it rather than squeezing a button — and
+    /// the stepper test above only looks at `-`, `+` and `TEST`. This walks every row on every
+    /// tab, the microphone test's button and meter included: each control in the row's flow has
+    /// a pixel width and cannot shrink, and those widths plus the gaps between them fit
+    /// [`STEPPER_WIDTH`]. An absolutely positioned child — a select's dropdown, the Voices panel
+    /// — is out of the flow and takes no width from the row. Found in review on #1139.
+    ///
+    /// `flex_shrink: 0` is required of every control in a row because every control in a row is
+    /// fixed width: a full-width control lives at the foot of its column (see `spawn_button`),
+    /// never inside a row's flow, so a row that wants one is a new layout and not a regression.
+    #[test]
+    fn every_rows_controls_fit_the_column_at_their_own_widths() {
+        let mut app = screen_app();
+        let world = app.world_mut();
+        let rows: Vec<(Entity, Vec<Entity>)> = world
+            .query_filtered::<(Entity, &Children), With<RowControls>>()
+            .iter(world)
+            .map(|(row, children)| (row, children.iter().collect()))
+            .collect();
+        let expected: usize = Tab::ALL.into_iter().map(|tab| rows_of(tab).len()).sum();
+        assert_eq!(
+            rows.len(),
+            expected,
+            "a row drew no controls, or controls were drawn outside a row"
+        );
+
+        for (row, children) in rows {
+            let mut used = 0.0;
+            let mut in_flow = 0;
+            for child in children {
+                let node = world.get::<Node>(child).expect("a row's control is a node");
+                if node.position_type == PositionType::Absolute {
+                    continue;
+                }
+                let Val::Px(width) = node.width else {
+                    panic!(
+                        "{child:?} in row {row:?} has no pixel width: {:?}",
+                        node.width
+                    );
+                };
+                assert_eq!(
+                    node.flex_shrink, 0.0,
+                    "{child:?} in row {row:?} can be squeezed"
+                );
+                used += width;
+                in_flow += 1;
+            }
+            assert!(in_flow > 0, "row {row:?} draws no control");
+            let used = used + CONTROL_GAP * (in_flow - 1) as f32;
+            assert!(
+                used <= STEPPER_WIDTH,
+                "row {row:?} needs {used} px in a {STEPPER_WIDTH} px column"
+            );
+        }
     }
 
     /// The consume control has one row on the Controls tab, and the screen rebinds it and
@@ -2954,29 +3432,22 @@ mod tests {
     fn every_setting_the_model_offers_has_a_row_somewhere() {
         let all: Vec<Row> = Tab::ALL.into_iter().flat_map(rows_of).collect();
         for knob in KNOBS {
-            // Monitor is drawn as `Row::MonitorSelect`, not `Row::Knob` — asserted on its
-            // own just below, the same way the toggles get their own count beneath this
-            // loop rather than being folded into it.
-            if knob == Knob::Monitor {
-                continue;
-            }
             // A bus level is drawn as `Row::BusKnob`, which is the same stepper with the
-            // tone test for its bus beside it. Both shapes count here, because what this
-            // loop is about is whether a knob is reachable at all.
+            // tone test for its bus beside it, and a choice as `Row::Select`. Every shape
+            // counts here, because what this loop is about is whether a knob is reachable at
+            // all — and which shape is asserted too, so a choice cannot slip back to a stepper.
             let drawn = all
                 .iter()
                 .filter(|row| match row {
-                    Row::Knob(drawn) | Row::BusKnob(drawn, _) => *drawn == knob,
+                    Row::Knob(drawn) | Row::BusKnob(drawn, _) => {
+                        *drawn == knob && !knob.is_choice()
+                    }
+                    Row::Select(drawn) => *drawn == knob && knob.is_choice(),
                     _ => false,
                 })
                 .count();
-            assert_eq!(drawn, 1, "{knob:?} has {drawn} rows");
+            assert_eq!(drawn, 1, "{knob:?} has {drawn} rows of its shape");
         }
-        let monitor_rows = all
-            .iter()
-            .filter(|row| matches!(row, Row::MonitorSelect))
-            .count();
-        assert_eq!(monitor_rows, 1, "Monitor has {monitor_rows} rows");
         for control in CONTROLS {
             let drawn = all
                 .iter()
@@ -3017,19 +3488,9 @@ mod tests {
              this number"
         );
 
-        // The same for the action rows, which are the other half `rows_of` writes by hand.
-        let actions: Vec<&Row> = all
-            .iter()
-            .filter(|row| matches!(row, Row::Action(..)))
-            .collect();
-        assert_eq!(actions.len(), 1, "{actions:?}");
-        assert!(matches!(
-            actions[0],
-            Row::Action(_, SettingsAction::TestBus(Bus::Master), _)
-        ));
-
-        // And the bus rows, which are the third thing `rows_of` decides by hand — through
+        // And the bus rows, which are the other thing `rows_of` decides by hand — through
         // `bus_of`, so a knob that stopped being a bus level would silently lose its test.
+        // The master is first since #1126, when its test moved into its row.
         let tested: Vec<Bus> = all
             .iter()
             .filter_map(|row| match row {
@@ -3039,8 +3500,8 @@ mod tests {
             .collect();
         assert_eq!(
             tested,
-            vec![Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice],
-            "every bus but the master carries its own tone test, in the order the tab lists them"
+            vec![Bus::Master, Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice],
+            "every bus carries its own tone test, in the order the tab lists them"
         );
     }
 
@@ -3050,12 +3511,12 @@ mod tests {
 
     /// **The audience knob is reachable by a player, and this says so by name.**
     ///
-    /// It is a generic stepper, so `rows_of` gives it `-`/`+` and `settings_actions` moves it
-    /// through `Settings::adjust_with_choices` — the production setter, not the `#[cfg(test)]`
-    /// `adjust`. `every_knob_has_a_control_at_each_end_and_a_reading_between_them` already
-    /// covers it, but only as one iteration of a loop over `KNOBS`, and a reader checking
-    /// whether *this* knob is wired has to reconstruct that. Raised in review on #937, where
-    /// the answer was yes and the evidence was hard to find; this is the evidence.
+    /// It is a select, so `select_actions` moves it through `Settings::adjust_with_choices` —
+    /// the production setter, not the `#[cfg(test)]` `adjust`.
+    /// `every_select_row_offers_its_knobs_options_and_each_option_lands_on_it` already covers
+    /// it, but only as one iteration of a loop over `KNOBS`, and a reader checking whether
+    /// *this* knob is wired has to reconstruct that. Raised in review on #937, where the answer
+    /// was yes and the evidence was hard to find; this is the evidence.
     #[test]
     fn the_audience_row_moves_the_setting_a_player_can_reach() {
         let mut app = screen_app();
@@ -3066,22 +3527,24 @@ mod tests {
             VoiceAudience::Everyone
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
-            "everyone"
+            reading_of(&mut app, Reading::SelectControl(Knob::VoiceAudience)),
+            "everyone v"
         );
 
-        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, 1));
+        press_select(&mut app, Knob::VoiceAudience);
+        press_select_option(&mut app, Knob::VoiceAudience, 1);
         assert_eq!(
             app.world().resource::<Settings>().voice_audience(),
             VoiceAudience::Party,
-            "the Heard by row's + button reached nothing"
+            "the Heard by row's party option reached nothing"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::VoiceAudience)),
-            "party only"
+            reading_of(&mut app, Reading::SelectControl(Knob::VoiceAudience)),
+            "party only v"
         );
 
-        press(&mut app, SettingsAction::Nudge(Knob::VoiceAudience, -1));
+        press_select(&mut app, Knob::VoiceAudience);
+        press_select_option(&mut app, Knob::VoiceAudience, 0);
         assert_eq!(
             app.world().resource::<Settings>().voice_audience(),
             VoiceAudience::Everyone
@@ -3094,9 +3557,10 @@ mod tests {
     /// **The order is the assertion, not just the membership.** The two devices sit under
     /// the volume they feed; the three world buses and the ducking amount that is about both
     /// halves sit between them and voice; and the voice rows read as one sentence downwards:
-    /// what the microphone is for, what opens it, and who hears the result. The two switches
-    /// and the three tests come last, in that order, because they are what a player reaches
-    /// for after the levels rather than while setting them.
+    /// what the microphone is for, what opens it, and who hears the result. The two switches,
+    /// the microphone test and the Voices panel come last, in that order, because they are
+    /// what a player reaches for after the levels rather than while setting them. The speaker
+    /// test is not a row since #1126: it is the `TEST` in the Master volume row.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -3118,7 +3582,6 @@ mod tests {
                 "Heard by",
                 "Music",
                 "Mono audio",
-                "Test speakers",
                 "Test microphone",
                 "Voices"
             ]
@@ -3127,7 +3590,7 @@ mod tests {
             assert!(
                 !rows_of(other)
                     .iter()
-                    .any(|row| row.label() == "Test speakers"),
+                    .any(|row| row.label() == "Test microphone"),
                 "an audio row landed on {other:?}"
             );
         }
@@ -3140,8 +3603,8 @@ mod tests {
             "80%"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
-            "system default"
+            reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
+            "system default v"
         );
 
         // The knob moves, the reading follows, and the reset that owns it puts it back
@@ -3165,31 +3628,34 @@ mod tests {
         );
     }
 
-    /// The device row steps through what the machine offers, the reading follows, the
+    /// The device row lists what the machine offers, the reading follows a choice, the
     /// audio-scoped reset puts it back — and a device that goes away keeps its place in the
-    /// row rather than being silently replaced by one that is present.
+    /// row rather than being silently replaced by one that is present, while the list is
+    /// rebuilt to what is there now.
     #[test]
     fn the_output_device_row_offers_the_machines_devices_and_marks_an_absent_one() {
         let mut app = screen_app();
         press_tab(&mut app, Tab::Audio);
 
-        // One press per button, because that is what the row spawns: the steppers are
-        // `Nudge(knob, -1)` and `Nudge(knob, 1)` and nothing else.
-        press(&mut app, SettingsAction::Nudge(Knob::OutputDevice, 1));
-        press(&mut app, SettingsAction::Nudge(Knob::OutputDevice, 1));
+        press_select(&mut app, Knob::OutputDevice);
+        press_select_option(&mut app, Knob::OutputDevice, 2);
         assert_eq!(
             app.world().resource::<Settings>().output_device(),
             &DeviceChoice::Named("USB headset".to_owned()),
-            "the row stepped somewhere the machine does not offer"
+            "the row chose something the machine does not offer"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
-            "USB headset"
+            reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
+            "USB headset v"
         );
+        let microphones = select_option_entities(&mut app, Knob::InputDevice);
+        let monitors = select_option_entities(&mut app, Knob::Monitor);
 
         // The headset is unplugged. The choice stands, and the row says why it is silent.
-        *app.world_mut().resource_mut::<AudioDevices>() =
-            AudioDevices::named(&["Built-in speakers"], &["Built-in microphone"]);
+        *app.world_mut().resource_mut::<AudioDevices>() = AudioDevices::named(
+            &["Built-in speakers"],
+            &["Built-in microphone", "USB headset mic"],
+        );
         app.update();
         assert_eq!(
             app.world().resource::<Settings>().output_device(),
@@ -3197,9 +3663,39 @@ mod tests {
             "the choice was rewritten by the device going away"
         );
         assert_eq!(
-            reading_of(&mut app, Reading::Knob(Knob::OutputDevice)),
-            "USB headset (unavailable)"
+            reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
+            "USB headset (unavailable) v"
         );
+
+        // The list is what is attached now, and nothing in it is held.
+        press_select(&mut app, Knob::OutputDevice);
+        assert_eq!(
+            select_options(&mut app, Knob::OutputDevice),
+            vec![
+                (0, "system default".to_owned()),
+                (1, "Built-in speakers".to_owned()),
+            ]
+        );
+        assert_eq!(
+            option_highlights(&mut app, Knob::OutputDevice),
+            vec![false, false]
+        );
+        // The lists whose contents did not change were left alone, not rebuilt with them.
+        assert_eq!(
+            select_option_entities(&mut app, Knob::InputDevice),
+            microphones
+        );
+        assert_eq!(select_option_entities(&mut app, Knob::Monitor), monitors);
+
+        // Any option replaces the absent device, the first one included.
+        press_select_option(&mut app, Knob::OutputDevice, 0);
+        assert_eq!(
+            app.world().resource::<Settings>().output_device(),
+            &DeviceChoice::SystemDefault,
+            "choosing the system default did not replace the absent device"
+        );
+        press_select(&mut app, Knob::OutputDevice);
+        press_select_option(&mut app, Knob::OutputDevice, 1);
 
         // And the reset that owns the row puts it back without reaching the tab beside it.
         press(&mut app, SettingsAction::Nudge(Knob::RenderDistance, -1));
@@ -3394,7 +3890,7 @@ mod tests {
     /// setting and not the other's.
     ///
     /// **The button's face *is* the state**, which is the reason both are `Row::Toggle`
-    /// rather than `Row::Action`: a player has to be able to tell a muted music bus from a
+    /// rather than a button whose face never changes: a player has to be able to tell a muted music bus from a
     /// playing one without pressing anything.
     #[test]
     fn the_audio_switches_read_back_what_pressing_them_did() {
@@ -3691,7 +4187,7 @@ mod tests {
     /// **The rows are rebuilt when the set of speakers changes and never merely because
     /// somebody spoke.** `Voices` is marked changed on every frame anybody is talking, so a
     /// rebuild driven by `Res::is_changed` would despawn and respawn the row under a pointer
-    /// mid-press — the trap `rebuild_monitor_options` and `ui/servers.rs` both record.
+    /// mid-press — the trap `rebuild_select_options` and `ui/servers.rs` both record.
     #[test]
     fn a_speaker_still_talking_does_not_have_their_row_rebuilt() {
         let mut app = screen_app();
