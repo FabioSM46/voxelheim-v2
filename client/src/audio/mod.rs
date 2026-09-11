@@ -104,7 +104,7 @@ const fn test_tone_hz(bus: Bus) -> f32 {
         Bus::Ambience => 220.0,
         // D4, a fifth under the reference: music sits under the world.
         Bus::Music => 293.66,
-        // A4, the reference, and the note the "Test speakers" row has always played. It is
+        // A4, the reference, and the note the speaker test has always played. It is
         // the device test as much as a level, so it keeps the pitch a player already knows.
         Bus::Master => TEST_TONE_HZ,
         // C5, up where speech carries.

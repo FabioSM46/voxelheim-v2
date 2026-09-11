@@ -235,7 +235,8 @@ enum SettingsAction {
     ///
     /// Carries a `Bus` since #982, where "Test speakers" stopped being the only row that
     /// plays one: each bus knob has its own, so a level can be set by ear against the others
-    /// rather than by going to find something in the world that makes that noise.
+    /// rather than by going to find something in the world that makes that noise. Since #1126
+    /// the master's test is in the Master volume row too, and "Test speakers" is gone.
     TestBus(Bus),
     /// Show or hide the Voices panel.
     ToggleVoices,
@@ -302,7 +303,22 @@ const STEPPER_WIDTH: f32 = 2.0 * STEP_BUTTON + 2.0 * CONTROL_GAP + READING_WIDTH
 /// The separation between the label and control columns.
 const ROW_COLUMN_GAP: f32 = COLUMN - ROW_LABEL_WIDTH - STEPPER_WIDTH;
 
+/// The width of the tone test at the end of a bus knob's row.
+const TEST_BUTTON: f32 = 3.0 * STEP_BUTTON;
+
+/// The reading between a bus knob's `-` and `+`.
+///
+/// **Narrower than [`READING_WIDTH`] by exactly the test and its gap**, so the four controls
+/// fill [`STEPPER_WIDTH`] and nothing has to shrink. Until #1126 the row asked for the full
+/// reading plus the test, which is 96 pixels more than the column holds, and flexbox took them
+/// from the `-` and `+` — the two buttons a player aims at most. A percentage has room to spare.
+const BUS_READING_WIDTH: f32 = READING_WIDTH - TEST_BUTTON - CONTROL_GAP;
+
 const _: () = {
+    assert!(
+        2.0 * STEP_BUTTON + BUS_READING_WIDTH + TEST_BUTTON + 3.0 * CONTROL_GAP == STEPPER_WIDTH,
+        "a bus knob's four controls must fill the stepper column exactly"
+    );
     assert!(ROW_COLUMN_GAP > 0.0, "the two row columns must not overlap");
     assert!(
         COLUMN + 2.0 * PANEL_PADDING <= MIN_VIEWPORT_WIDTH,
@@ -590,17 +606,16 @@ enum Row {
     VoicesToggle,
     /// The microphone test row: one button, and the level meter beside it.
     MicTest,
-    /// A row whose control *does* something rather than showing something: one button with
-    /// a face that never changes. [`Self::Toggle`] is the shape for a value being cycled;
-    /// this is the shape for a press with no state behind it at all.
-    Action(&'static str, SettingsAction, &'static str),
     /// A volume knob with the tone test for its bus beside it: `-`, the reading, `+`, `TEST`.
     ///
     /// **A fourth control in the row rather than a row of its own**, and the reason is the
     /// panel's height rather than tidiness: four buses each needing a test would have been
     /// four more rows on the tallest tab, and [`CONTENT_ROWS`] sizes every tab from the
     /// tallest. It reads better besides — the button that proves a level sits in the row that
-    /// sets it, which is where the "Test speakers" row's own comment says a test belongs.
+    /// sets it. The master joined them in #1126, which retired the "Test speakers" row.
+    ///
+    /// The steppers are the same [`STEP_BUTTON`] every other knob draws; the reading is what
+    /// gives up the room, see [`BUS_READING_WIDTH`].
     BusKnob(Knob, Bus),
 }
 
@@ -614,7 +629,6 @@ impl Row {
             Self::MonitorSelect => Knob::Monitor.label(),
             Self::VoicesToggle => "Voices",
             Self::MicTest => "Test microphone",
-            Self::Action(label, _, _) => label,
             Self::BusKnob(knob, _) => knob.label(),
         }
     }
@@ -624,14 +638,15 @@ impl Row {
 ///
 /// **The mapping lives here and not in `settings/`**, which is a leaf and may not name a type
 /// from `audio/` — a knob is a number with a bound, and which bus it happens to reach is this
-/// screen's business. `Knob::MasterVolume` is deliberately `None`: the master's test is the
-/// "Test speakers" row, which is a question about the device as much as about a level and
-/// keeps its own row and its own wording.
+/// screen's business. `Knob::MasterVolume` reaches `Bus::Master` since #1126: its test used
+/// to be a "Test speakers" row of its own, which cost a row to say what a `TEST` beside the
+/// master level says.
 ///
 /// No wildcard arm, for [`Knob::tab`]'s reason — a twentieth knob has to say whether a tone
 /// test belongs beside it before this compiles.
 const fn bus_of(knob: Knob) -> Option<Bus> {
     match knob {
+        Knob::MasterVolume => Some(Bus::Master),
         Knob::MusicVolume => Some(Bus::Music),
         Knob::SfxVolume => Some(Bus::Sfx),
         Knob::AmbienceVolume => Some(Bus::Ambience),
@@ -644,7 +659,6 @@ const fn bus_of(knob: Knob) -> Option<Bus> {
         | Knob::Brightness
         | Knob::FogStart
         | Knob::FrameCap
-        | Knob::MasterVolume
         | Knob::OutputDevice
         | Knob::InputDevice
         | Knob::VoiceDucking
@@ -703,17 +717,9 @@ fn rows_of(tab: Tab) -> Vec<Row> {
             // Beside it because they are the two Audio settings that are not a level, and it
             // is the one that changes what every other row on the tab sounds like.
             Row::Toggle("Mono audio", SettingsAction::ToggleMono, Reading::MonoAudio),
-            // Under the knob it proves, because that is the order a player uses them in: set
-            // the volume, then find out whether anything comes out. The other four buses
-            // carry their test inside their own row — see `Row::BusKnob` — but this one is a
-            // question about the device as much as about a level, and it keeps its wording.
-            Row::Action(
-                "Test speakers",
-                SettingsAction::TestBus(Bus::Master),
-                "PLAY A TONE",
-            ),
-            // Beside the speaker test, because they are the same errand pointed the two ways,
-            // and above Voices, which is about other people rather than about this machine.
+            // The speaker test is the `TEST` in the Master volume row — see `Row::BusKnob`.
+            // This is the same errand pointed the other way, and above Voices, which is about
+            // other people rather than about this machine.
             Row::MicTest,
             // Last, and a `Toggle` rather than an `Action`: the button's face *is* the state,
             // so a player can tell an open panel from a closed one without looking at it.
@@ -734,7 +740,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                     Val::Px(STEP_BUTTON),
                     Face::Fixed("-"),
                 );
-                spawn_reading(controls, Reading::Knob(knob));
+                spawn_reading(controls, Reading::Knob(knob), READING_WIDTH);
                 spawn_button(
                     controls,
                     SettingsAction::Nudge(knob, 1),
@@ -765,7 +771,7 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                     Val::Px(STEP_BUTTON),
                     Face::Fixed("-"),
                 );
-                spawn_reading(controls, Reading::Knob(knob));
+                spawn_reading(controls, Reading::Knob(knob), BUS_READING_WIDTH);
                 spawn_button(
                     controls,
                     SettingsAction::Nudge(knob, 1),
@@ -775,21 +781,13 @@ fn spawn_tab_rows(column: &mut ChildSpawnerCommands<'_>, tab: Tab) {
                 spawn_button(
                     controls,
                     SettingsAction::TestBus(bus),
-                    Val::Px(STEP_BUTTON * 3.0),
+                    Val::Px(TEST_BUTTON),
                     Face::Fixed("TEST"),
                 );
             }
             Row::MonitorSelect => spawn_monitor_select(controls),
             Row::VoicesToggle => spawn_voices_control(controls),
             Row::MicTest => spawn_mic_test_control(controls),
-            Row::Action(_, action, face) => {
-                spawn_button(
-                    controls,
-                    action,
-                    Val::Px(STEP_BUTTON * 4.0),
-                    Face::Fixed(face),
-                );
-            }
         });
     }
 
@@ -853,8 +851,8 @@ fn spawn_row(
         });
 }
 
-/// The number between a `-` and a `+`.
-fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
+/// The number between a `-` and a `+`, `width` wide.
+fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading, width: f32) {
     parent.spawn((
         reading,
         Text::new(String::new()),
@@ -865,7 +863,7 @@ fn spawn_reading(parent: &mut ChildSpawnerCommands<'_>, reading: Reading) {
         TextColor(Color::WHITE),
         TextLayout::no_wrap().with_justify(Justify::Center),
         Node {
-            width: Val::Px(READING_WIDTH),
+            width: Val::Px(width),
             flex_shrink: 0.0,
             overflow: Overflow::clip(),
             ..default()
@@ -1255,6 +1253,10 @@ fn spawn_button(
         Node {
             width,
             height: Val::Px(height),
+            // A fixed width is a width and not a suggestion: a row that asked for more than its
+            // column holds used to take the difference out of its `-` and `+` (#1126), so the
+            // row's arithmetic is what has to be right rather than the buttons that absorb it.
+            flex_shrink: if full_width { 1.0 } else { 0.0 },
             // A full-width control sits at the foot of its column: the auto margin takes
             // whatever space the rows above did not, which is what puts a tab's reset in the
             // same place whether that tab drew eight rows or three. In a column with no free
@@ -2595,8 +2597,13 @@ mod tests {
                 continue;
             }
             assert_eq!(layout.linebreak, LineBreak::NoWrap, "{reading:?} may wrap");
-            if matches!(reading, Reading::Knob(_)) {
-                assert_eq!(node.width, Val::Px(READING_WIDTH));
+            if let Reading::Knob(knob) = reading {
+                let width = if bus_of(*knob).is_some() {
+                    BUS_READING_WIDTH
+                } else {
+                    READING_WIDTH
+                };
+                assert_eq!(node.width, Val::Px(width), "{reading:?}");
                 assert_eq!(node.overflow, Overflow::clip());
             }
         }
@@ -2882,6 +2889,51 @@ mod tests {
         assert_eq!(seen, 2, "expected exactly the two live options");
     }
 
+    /// **A bus knob's `-` and `+` are the stepper's own size**, and the four controls fill the
+    /// column exactly rather than asking flexbox to find the difference somewhere.
+    #[test]
+    fn every_stepper_button_is_full_size_and_a_bus_row_fits_its_column() {
+        assert_eq!(
+            2.0 * STEP_BUTTON + BUS_READING_WIDTH + TEST_BUTTON + 3.0 * CONTROL_GAP,
+            STEPPER_WIDTH
+        );
+        // The widest a bus reading gets, at both ends of every bus knob.
+        for knob in KNOBS.into_iter().filter(|knob| bus_of(*knob).is_some()) {
+            for steps in [-10_000, 10_000] {
+                let mut settings = Settings::default();
+                settings.adjust(knob, steps);
+                let value = settings.reading(knob);
+                assert!(
+                    row_text_width(&value) <= BUS_READING_WIDTH,
+                    "{knob:?} reads {value:?}, wider than its reading"
+                );
+            }
+        }
+
+        let mut app = screen_app();
+        let world = app.world_mut();
+        let mut buttons = world.query::<(&SettingsAction, &Node)>();
+        let (mut steppers, mut tests) = (0, 0);
+        for (action, node) in buttons.iter(world) {
+            let width = match action {
+                SettingsAction::Nudge(..) => {
+                    steppers += 1;
+                    STEP_BUTTON
+                }
+                SettingsAction::TestBus(_) => {
+                    tests += 1;
+                    TEST_BUTTON
+                }
+                _ => continue,
+            };
+            assert_eq!(node.width, Val::Px(width), "{action:?}");
+            assert_eq!(node.flex_shrink, 0.0, "{action:?} can be squeezed");
+        }
+        // Every knob but Monitor, which is a select, draws a `-` and a `+`.
+        assert_eq!(steppers, 2 * (KNOBS.len() - 1));
+        assert_eq!(tests, 5, "one tone test per bus, the master's included");
+    }
+
     /// The consume control has one row on the Controls tab, and the screen rebinds it and
     /// resets it exactly as it does any other.
     ///
@@ -3017,19 +3069,9 @@ mod tests {
              this number"
         );
 
-        // The same for the action rows, which are the other half `rows_of` writes by hand.
-        let actions: Vec<&Row> = all
-            .iter()
-            .filter(|row| matches!(row, Row::Action(..)))
-            .collect();
-        assert_eq!(actions.len(), 1, "{actions:?}");
-        assert!(matches!(
-            actions[0],
-            Row::Action(_, SettingsAction::TestBus(Bus::Master), _)
-        ));
-
-        // And the bus rows, which are the third thing `rows_of` decides by hand — through
+        // And the bus rows, which are the other thing `rows_of` decides by hand — through
         // `bus_of`, so a knob that stopped being a bus level would silently lose its test.
+        // The master is first since #1126, when its test moved into its row.
         let tested: Vec<Bus> = all
             .iter()
             .filter_map(|row| match row {
@@ -3039,8 +3081,8 @@ mod tests {
             .collect();
         assert_eq!(
             tested,
-            vec![Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice],
-            "every bus but the master carries its own tone test, in the order the tab lists them"
+            vec![Bus::Master, Bus::Music, Bus::Sfx, Bus::Ambience, Bus::Voice],
+            "every bus carries its own tone test, in the order the tab lists them"
         );
     }
 
@@ -3094,9 +3136,10 @@ mod tests {
     /// **The order is the assertion, not just the membership.** The two devices sit under
     /// the volume they feed; the three world buses and the ducking amount that is about both
     /// halves sit between them and voice; and the voice rows read as one sentence downwards:
-    /// what the microphone is for, what opens it, and who hears the result. The two switches
-    /// and the three tests come last, in that order, because they are what a player reaches
-    /// for after the levels rather than while setting them.
+    /// what the microphone is for, what opens it, and who hears the result. The two switches,
+    /// the microphone test and the Voices panel come last, in that order, because they are
+    /// what a player reaches for after the levels rather than while setting them. The speaker
+    /// test is not a row since #1126: it is the `TEST` in the Master volume row.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
         assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
@@ -3118,7 +3161,6 @@ mod tests {
                 "Heard by",
                 "Music",
                 "Mono audio",
-                "Test speakers",
                 "Test microphone",
                 "Voices"
             ]
@@ -3127,7 +3169,7 @@ mod tests {
             assert!(
                 !rows_of(other)
                     .iter()
-                    .any(|row| row.label() == "Test speakers"),
+                    .any(|row| row.label() == "Test microphone"),
                 "an audio row landed on {other:?}"
             );
         }
@@ -3394,7 +3436,7 @@ mod tests {
     /// setting and not the other's.
     ///
     /// **The button's face *is* the state**, which is the reason both are `Row::Toggle`
-    /// rather than `Row::Action`: a player has to be able to tell a muted music bus from a
+    /// rather than a button whose face never changes: a player has to be able to tell a muted music bus from a
     /// playing one without pressing anything.
     #[test]
     fn the_audio_switches_read_back_what_pressing_them_did() {

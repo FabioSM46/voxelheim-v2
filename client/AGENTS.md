@@ -1513,8 +1513,9 @@ owns `Tab::Audio`, `Knob::MasterVolume` and the `master-volume` line in the file
 step and a default, like every other knob. What crosses the seam is
 `Settings::master_gain()`, the single conversion from the 0-100 a player reads to the 0.0-1.0
 a sample is multiplied by, and it crosses **one way**: `follow_the_settings` reads the
-setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. A
-"Test speakers" row sets `AudioControls::speaker_test`; this module takes that flag back on
+setting and writes `AudioControls`, and nothing under `audio/` ever writes a setting back. The
+`TEST` in each volume row — the Master row's included, which replaced the "Test speakers" row
+in #1126 — sets `AudioControls::tone_test` to its bus; this module takes that request back on
 the frame it starts the tone, so the screen never has to remember to clear it.
 
 **The four bus volumes below it are the same statement again, and their defaults are an
