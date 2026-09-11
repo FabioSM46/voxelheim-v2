@@ -5,7 +5,7 @@
 use super::choreography::smooth;
 use super::*;
 use crate::net::{EncounterMoveKind, MovePhase};
-use crate::player::encounters::{EncounterPresentation, Window, is_spell};
+use crate::player::encounters::{EncounterPresentation, ReducedEffects, Window, is_spell};
 
 /// The encounter stage the approved design calls final, counted from one as the wire is.
 pub(super) const FINAL_STAGE: u8 = 3;
@@ -226,11 +226,17 @@ pub(in crate::player) fn setup(
 }
 
 /// Dresses each king once, then presents mask, core and crystal from server state.
+///
+/// With [`ReducedEffects`] on, the hand crystal is withheld and a contact never brightens
+/// the core; the mask, crown and the final stage's steady light are the stage itself and
+/// stay. Read every frame, so switching it needs no new announcement.
 #[allow(clippy::type_complexity)] // Disjoint child queries keep every mutable access provable.
+#[allow(clippy::too_many_arguments)] // A system's inputs are its parameters; each is read here.
 pub(in crate::player) fn present(
     mut commands: Commands,
     visuals: Option<Res<RegaliaVisuals>>,
     presentation: Res<EncounterPresentation>,
+    reduced: Option<Res<ReducedEffects>>,
     mobs: Query<&Mob>,
     mut parts: Query<
         (Entity, &MobVisual, Option<&mut Visibility>),
@@ -252,6 +258,7 @@ pub(in crate::player) fn present(
     let Some(visuals) = visuals else {
         return;
     };
+    let flourish = !reduced.is_some_and(|reduced| reduced.0);
     // One guard per child type, so a king missing either part never respawns the other.
     let cored: Vec<Entity> = cores.iter().map(|(core, ..)| core.owner).collect();
     let held: Vec<Entity> = crystals.iter().map(|(crystal, ..)| crystal.owner).collect();
@@ -322,7 +329,8 @@ pub(in crate::player) fn present(
                 .as_ref()
                 .is_some_and(|motion| motion.regalia.final_stage());
         // A spell's authoritative release or pulse contact, and nothing locally counted.
-        let pulse = alive
+        let pulse = flourish
+            && alive
             && current(mob.entity_id).any(|one| is_spell(one.announced.kind) && one.damaging());
         visibility.set_if_neq(if lit || pulse {
             Visibility::Inherited
@@ -336,7 +344,7 @@ pub(in crate::player) fn present(
     }
     for (crystal, mut visibility, mut transform) in &mut crystals {
         let forming = mobs.get(crystal.owner).ok().and_then(|mob| {
-            mob.falling.is_none().then_some(())?;
+            (flourish && mob.falling.is_none()).then_some(())?;
             current(mob.entity_id).find(|one| {
                 one.announced.kind == EncounterMoveKind::SepulchreSpear
                     && one.announced.phase == MovePhase::Telegraph
@@ -355,6 +363,34 @@ pub(in crate::player) fn present(
             }
         }
     }
+}
+
+/// Test-only: the one king's core as `hidden`, `lit` or `flare`, whether its hand crystal
+/// is shown and at what scale; `None` unless exactly one of each exists.
+#[cfg(test)]
+pub(in crate::player) fn flourishes(world: &mut World) -> Option<(&'static str, bool, f32)> {
+    let visuals = world.get_resource::<RegaliaVisuals>()?;
+    let (lit, flare) = (visuals.lit.clone(), visuals.flare.clone());
+    let (core_visible, material) = world
+        .query::<(&CoreGlow, &Visibility, &MeshMaterial3d<StandardMaterial>)>()
+        .single(world)
+        .map(|(_, v, m)| (*v == Visibility::Inherited, m.0.clone()))
+        .ok()?;
+    let (crystal_visible, scale) = world
+        .query::<(&HandCrystal, &Visibility, &Transform)>()
+        .single(world)
+        .map(|(_, v, t)| (*v == Visibility::Inherited, t.scale.x))
+        .ok()?;
+    let core = if !core_visible {
+        "hidden"
+    } else if material == flare {
+        "flare"
+    } else if material == lit {
+        "lit"
+    } else {
+        "other"
+    };
+    Some((core, crystal_visible, scale))
 }
 
 #[cfg(test)]
@@ -519,31 +555,7 @@ mod tests {
                 .resource_mut::<EncounterTimelineInbox>()
                 .push(timeline);
         };
-        let read = |app: &mut App| {
-            let world = app.world_mut();
-            let visuals = world.resource::<RegaliaVisuals>();
-            let (lit, flare) = (visuals.lit.clone(), visuals.flare.clone());
-            let (core_visible, material) = world
-                .query::<(&CoreGlow, &Visibility, &MeshMaterial3d<StandardMaterial>)>()
-                .single(world)
-                .map(|(_, v, m)| (*v == Visibility::Inherited, m.0.clone()))
-                .unwrap();
-            let (crystal_visible, scale) = world
-                .query::<(&HandCrystal, &Visibility, &Transform)>()
-                .single(world)
-                .map(|(_, v, t)| (*v == Visibility::Inherited, t.scale.x))
-                .unwrap();
-            let state = if !core_visible {
-                "hidden"
-            } else if material == flare {
-                "flare"
-            } else if material == lit {
-                "lit"
-            } else {
-                "other"
-            };
-            (state, crystal_visible, scale)
-        };
+        let read = |app: &mut App| flourishes(app.world_mut()).expect("one core and one crystal");
 
         push(&mut app, 2, SepulchreSpear, Telegraph, 100, 20);
         deliver(&mut app, 110, vec![state]);

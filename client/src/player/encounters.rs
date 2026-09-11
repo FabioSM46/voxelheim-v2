@@ -81,12 +81,21 @@ impl PresentedMove {
 #[derive(Resource, Debug, Default, PartialEq)]
 pub(crate) struct EncounterPresentation(pub Vec<PresentedMove>);
 
+/// Whether optional boss flourishes are withheld: the spell layer's cracks, runes, notes
+/// and thrown crystal, the hand crystal and the core's brightening on contact. It removes
+/// decoration and never information — hazard boundaries, readings and poses do not read
+/// it — and it is presentation only: nothing that predicts, sends or decides reads it.
+/// Absent means off, so a system run without it draws everything.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReducedEffects(pub bool);
+
 pub(super) fn register(app: &mut App) {
     cues::register(app);
     spells::register(app);
     strikes::register(app);
     app.init_resource::<EncounterTimelineInbox>()
         .init_resource::<EncounterPresentation>()
+        .init_resource::<ReducedEffects>()
         .add_systems(Update, reconcile.after(ApplySnapshots));
 }
 
@@ -177,6 +186,12 @@ pub(crate) fn effect_groups(world: &mut World) -> Vec<MoveKey> {
     let mut groups: Vec<MoveKey> = spells::drawn(world).into_iter().collect();
     groups.extend(strikes::drawn(world));
     groups
+}
+
+/// Test-only: the essential boundary cues, in a stable order.
+#[cfg(test)]
+pub(crate) fn boundary_cues(world: &mut World) -> Vec<cues::Drawn> {
+    cues::drawn(world)
 }
 
 #[cfg(test)]
