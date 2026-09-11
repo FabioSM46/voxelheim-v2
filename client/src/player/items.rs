@@ -652,10 +652,10 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         armour_style: None,
     },
     // The rusty set: the starter blade's metal, worn. Both the colour and the livery are the
-    // rusty sword's. On a body the set is sculpted (#1130) and its plates carry coordinates in
-    // the livery's own band, so the worn helm, cuirass and greaves wear the sword's oxide; the
-    // cell and the drop still sample the neutral band and show rust through
-    // `ItemColour::WornSteel`.
+    // rusty sword's. The set is sculpted (#1130), and on a body and on the ground its plates
+    // carry coordinates in the livery's own band — a drop is built from the same segment meshes
+    // — so the worn and dropped helm, cuirass and greaves wear the sword's oxide. Only the cell
+    // still samples the neutral band and shows rust through `ItemColour::WornSteel`.
     ItemDisplay {
         item_id: ITEM_RUSTY_HELM,
         name: "rusty helm",
@@ -1480,10 +1480,11 @@ mod tests {
     /// The colour and the livery are pinned *to the sword's row* rather than to a named
     /// variant, because "the same rust the sword uses" is the requirement: a later edit that
     /// moved the sword to another livery without moving the set would leave the two base-tier
-    /// pieces a player starts beside visibly different metals. The colour half is the one a
-    /// player sees today — armour meshes and cells sample the neutral band — so it is asserted
-    /// through `item_linear_rgba`, the function the body overlay, the icon and the drop read,
-    /// and not merely through the row. And the set is no longer the iron sword's forged steel,
+    /// pieces a player starts beside visibly different metals. The colour half is the one every
+    /// surface shows — the cell samples only the neutral band, while the sculpted body and drop
+    /// meshes add the livery on top of it — so it is asserted through `item_linear_rgba`, the
+    /// function the body overlay, the icon and the drop read, and not merely through the row.
+    /// And the set is no longer the iron sword's forged steel,
     /// which is what it wore before the rename.
     #[test]
     fn the_rusty_armour_rows_resolve_the_rusty_swords_rust() {

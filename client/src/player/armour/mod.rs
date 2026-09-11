@@ -41,7 +41,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::appearance::{ArmourPiece, ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
-use super::inventory::EQUIPMENT_ROUTES;
+use super::inventory::{EQUIPMENT_ROUTES, equipment_offset};
 use super::items::{ITEMS, Livery, armour_styles, item_armour_style, item_livery};
 use super::{livery, merge_all};
 
@@ -120,28 +120,14 @@ pub(super) fn looks() -> Vec<ArmourLook> {
 /// The piece of the rig one armour item covers, read off the equipment slot it routes to.
 ///
 /// **Not a second table**: `inventory::EQUIPMENT_ROUTES` already answers which slot an item
-/// fits. Each piece looks up its own slot by [`slot`] rather than by the table's order, and the
-/// off-hand is no piece.
+/// fits, and `inventory::equipment_offset` — defined beside that table, so the two cannot drift
+/// apart — names which of its routes each piece is. The off-hand is no piece.
 pub(super) fn piece_of(item_id: u16) -> Option<ArmourPiece> {
     ArmourPiece::ALL.into_iter().find(|piece| {
         EQUIPMENT_ROUTES
-            .get(slot(*piece))
+            .get(equipment_offset(*piece))
             .is_some_and(|accepted| accepted.contains(&item_id))
     })
-}
-
-/// The offset of the equipment slot one piece is worn in, as `inventory::EQUIPMENT_ROUTES`
-/// numbers them: head `0`, chest `1`, legs `2`.
-///
-/// **Named per piece and wildcard-free**, so which route stands for which piece is stated once
-/// here rather than inferred from the table's order, and
-/// `every_armour_item_covers_the_piece_its_equipment_slot_names` pins it against the real items.
-const fn slot(piece: ArmourPiece) -> usize {
-    match piece {
-        ArmourPiece::Head => 0,
-        ArmourPiece::Chest => 1,
-        ArmourPiece::Legs => 2,
-    }
 }
 
 /// One sculpted armour item as an object of its own: the look it is worn in and the piece it
@@ -755,26 +741,51 @@ mod tests {
         }
     }
 
-    /// Every triangle's winding agrees with its normal, so back-face culling keeps the
+    /// **Every face of every part points out of that part**, so back-face culling keeps the
     /// outside of every plate rather than drawing a segment inside out.
+    ///
+    /// Read per part against the part's own interior: a lofted part is convex, so each outward
+    /// normal leans away from its centre. Checking the winding against the normal alone would
+    /// prove nothing, because `part_mesh` derives the winding *from* that normal — an outward
+    /// test flipped in `part_mesh` would turn every plate inside out and still agree with it.
     #[test]
-    fn every_sculpted_triangle_faces_the_way_its_normal_says() {
+    fn every_sculpted_face_points_out_of_its_part() {
         for look in every_look() {
             for segment in ArmourSegment::ALL {
-                let mesh = segment_mesh(Some(look), segment);
-                let points = positions(&mesh);
-                let Some(VertexAttributeValues::Float32x3(normals)) =
-                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
-                else {
-                    panic!("a segment carries normals");
-                };
-                for (index, triangle) in points.chunks(3).enumerate() {
-                    let facing = (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
-                    let normal = Vec3::from_array(normals[index * 3]);
+                let cell = placed_armour(segment.piece(), segment.cell());
+                let pivot = segment.body_piece().pivot();
+                for part in look.style.parts(segment) {
+                    let rings = part.rings();
+                    let centre = sheet_to_body(
+                        (part.x.0 + part.x.1) / 2.0,
+                        (rings[0].y + rings[rings.len() - 1].y) / 2.0,
+                        (part.z.0 + part.z.1) / 2.0,
+                    ) - pivot;
+                    let mesh = part_mesh(*part, cell, pivot, look.livery);
+                    let points = positions(&mesh);
+                    let Some(VertexAttributeValues::Float32x3(normals)) =
+                        mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+                    else {
+                        panic!("a part carries normals");
+                    };
                     assert!(
-                        facing.dot(normal) > 0.0,
-                        "{look:?} {segment:?} triangle {index} is wound against its normal"
+                        !points.is_empty(),
+                        "{look:?} {segment:?} drew an empty part"
                     );
+                    for (index, triangle) in points.chunks(3).enumerate() {
+                        let normal = Vec3::from_array(normals[index * 3]);
+                        let middle = (triangle[0] + triangle[1] + triangle[2]) / 3.0;
+                        assert!(
+                            normal.dot(middle - centre) > 0.0,
+                            "{look:?} {segment:?} part {part:?} triangle {index} faces into \
+                             its part"
+                        );
+                        let facing = (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
+                        assert!(
+                            facing.dot(normal) > 0.0,
+                            "{look:?} {segment:?} triangle {index} is wound against its normal"
+                        );
+                    }
                 }
             }
         }
@@ -886,7 +897,7 @@ mod tests {
         for row in ITEMS.iter().filter(|row| row.shape == ItemShape::Armour) {
             let pieces = ArmourPiece::ALL
                 .into_iter()
-                .filter(|piece| EQUIPMENT_ROUTES[slot(*piece)].contains(&row.item_id))
+                .filter(|piece| EQUIPMENT_ROUTES[equipment_offset(*piece)].contains(&row.item_id))
                 .count();
             assert_eq!(pieces, 1, "item {} routes to {pieces} pieces", row.item_id);
         }

@@ -716,6 +716,21 @@ pub(crate) const EQUIPMENT_ROUTES: [&[u16]; 4] = [
     &[ITEM_WOODEN_SHIELD],
 ];
 
+/// Which route of [`EQUIPMENT_ROUTES`] one piece of the rig is worn through.
+///
+/// **Beside the table, and wildcard-free**, so the offset a piece stands for is written next to
+/// the offsets it indexes: a route inserted or reordered above is in view of this, and
+/// `armour::tests::every_armour_item_covers_the_piece_its_equipment_slot_names` pins both
+/// against the real items. The off-hand is no piece of the rig and has no arm here.
+pub(crate) const fn equipment_offset(piece: super::appearance::ArmourPiece) -> usize {
+    use super::appearance::ArmourPiece;
+    match piece {
+        ArmourPiece::Head => 0,
+        ArmourPiece::Chest => 1,
+        ArmourPiece::Legs => 2,
+    }
+}
+
 pub(crate) fn equipment_item_fits(item_id: u16, offset: u8) -> bool {
     EQUIPMENT_ROUTES
         .get(usize::from(offset))
