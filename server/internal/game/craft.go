@@ -217,19 +217,19 @@ var recipeTable = map[vnet.RecipeID]recipe{
 		station: vnet.StructureKindLeatherBench, experience: 10,
 	},
 
-	// The iron set is fitted at the armour bench rather than beaten out at the forge, and
+	// The rusty set is fitted at the armour bench rather than beaten out at the forge, and
 	// keeps its ten experience. It still spends raw ore plus coal directly, on the same
 	// no-smelting-chain terms as the iron sword.
-	vnet.RecipeIDIronHelm: {
-		ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
+	vnet.RecipeIDRustyHelm: {
+		ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemRustyHelm, productCount: 1,
 		station: vnet.StructureKindArmourBench, experience: 10,
 	},
-	vnet.RecipeIDIronCuirass: {
-		ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
+	vnet.RecipeIDRustyCuirass: {
+		ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemRustyCuirass, productCount: 1,
 		station: vnet.StructureKindArmourBench, experience: 10,
 	},
-	vnet.RecipeIDIronGreaves: {
-		ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
+	vnet.RecipeIDRustyGreaves: {
+		ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemRustyGreaves, productCount: 1,
 		station: vnet.StructureKindArmourBench, experience: 10,
 	},
 

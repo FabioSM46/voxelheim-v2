@@ -69,9 +69,9 @@ var vendorTable = map[vnet.ResidentRole]vendorStock{
 			{ItemPickaxe, 25},
 			{ItemShovel, 12},
 			{ItemSharpeningStone, 6},
-			{ItemIronHelm, 30},
-			{ItemIronCuirass, 45},
-			{ItemIronGreaves, 35},
+			{ItemRustyHelm, 30},
+			{ItemRustyCuirass, 45},
+			{ItemRustyGreaves, 35},
 		},
 		buys: []vendorEntry{
 			{ItemRawIron, 3},

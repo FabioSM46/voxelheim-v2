@@ -281,7 +281,7 @@ const (
 	ArmourScale uint16 = 100
 
 	// ThreatScale is the denominator for the tenths of hostile attention a worn
-	// item records. Full iron contributes fifteen, so its weight is 2.5: ten damage
+	// item records. The full rusty set contributes fifteen, so its weight is 2.5: ten damage
 	// generates twenty-five threat. The distance / weight comparison uses the same
 	// number only when no player in range has positive ledger threat, preserving how
 	// an untouched creature acquires its first target.

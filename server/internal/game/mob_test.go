@@ -204,17 +204,17 @@ func TestHeavyArmourDrawsADraugrPastANearerUnarmouredPlayer(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	id := h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
 	farPos := [3]float32{10.5, 64, 0.5}
-	fullIron := lifeWearing(t, farPos,
-		fullTestArmour(ItemIronHelm),
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+	fullRusty := lifeWearing(t, farPos,
+		fullTestArmour(ItemRustyHelm),
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	)
-	tank, _ := h.joinLife(7, farPos, &fullIron)
+	tank, _ := h.joinLife(7, farPos, &fullRusty)
 	near, _ := h.join(9, [3]float32{5.5, 64, 0.5})
 
 	h.step()
 	if got := h.mob(id).target; got != tank.entityID {
-		t.Errorf("target = %d, want the farther full-iron player %d", got, tank.entityID)
+		t.Errorf("target = %d, want the farther full-rusty player %d", got, tank.entityID)
 	}
 
 	// Take every piece off through the authoritative move path. The next pursuit tick
@@ -239,12 +239,12 @@ func TestThreatNeverExtendsADraugrsAggroRange(t *testing.T) {
 	h.keepNight()
 	id := h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
 	outside := [3]float32{float32(draugrRow.aggroRange + 2), 64, 0.5}
-	fullIron := lifeWearing(t, outside,
-		fullTestArmour(ItemIronHelm),
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+	fullRusty := lifeWearing(t, outside,
+		fullTestArmour(ItemRustyHelm),
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	)
-	h.joinLife(1, outside, &fullIron)
+	h.joinLife(1, outside, &fullRusty)
 	h.step()
 
 	got := h.mob(id)
@@ -260,12 +260,12 @@ func TestADeerStillFleesFromTheNearestPlayerRegardlessOfArmour(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	id := h.spawnMobAt(vnet.MobKindDeer, [3]float32{0.5, 64, 0.5})
 	farPos := [3]float32{-9.5, 64, 0.5}
-	fullIron := lifeWearing(t, farPos,
-		fullTestArmour(ItemIronHelm),
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+	fullRusty := lifeWearing(t, farPos,
+		fullTestArmour(ItemRustyHelm),
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	)
-	h.joinLife(1, farPos, &fullIron)
+	h.joinLife(1, farPos, &fullRusty)
 	h.join(2, [3]float32{5.5, 64, 0.5})
 	h.step()
 
@@ -529,24 +529,24 @@ func TestWornArmourSoftensADraugrBlow(t *testing.T) {
 		fullTestArmour(ItemLeatherJerkin),
 		fullTestArmour(ItemLeatherLeggings),
 	}
-	iron := []testArmourPiece{
-		fullTestArmour(ItemIronHelm),
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+	rusty := []testArmourPiece{
+		fullTestArmour(ItemRustyHelm),
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	}
 	mixed := []testArmourPiece{
-		fullTestArmour(ItemIronHelm),
+		fullTestArmour(ItemRustyHelm),
 		fullTestArmour(ItemLeatherJerkin),
-		fullTestArmour(ItemIronGreaves),
+		fullTestArmour(ItemRustyGreaves),
 	}
 	wornThrough := []testArmourPiece{
-		{item: ItemIronHelm, durability: 0},
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+		{item: ItemRustyHelm, durability: 0},
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	}
-	mixedArmour := itemRegistry[ItemIronHelm].armour +
+	mixedArmour := itemRegistry[ItemRustyHelm].armour +
 		itemRegistry[ItemLeatherJerkin].armour +
-		itemRegistry[ItemIronGreaves].armour
+		itemRegistry[ItemRustyGreaves].armour
 
 	for _, tc := range []struct {
 		name   string
@@ -554,9 +554,9 @@ func TestWornArmourSoftensADraugrBlow(t *testing.T) {
 		want   uint16
 	}{
 		{name: "full leather", pieces: leather, want: 8},
-		{name: "full iron", pieces: iron, want: 7},
+		{name: "full rusty", pieces: rusty, want: 7},
 		{name: "mixed", pieces: mixed, want: uint16(uint32(draugrRow.damage) * uint32(ArmourScale-mixedArmour) / uint32(ArmourScale))},
-		{name: "one iron piece worn through", pieces: wornThrough, want: 8},
+		{name: "one rusty piece worn through", pieces: wornThrough, want: 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := draugrBlowAgainst(t, tc.pieces...); got != tc.want {
@@ -585,9 +585,9 @@ func TestAnArmourReducedBlowStillRestartsRegeneration(t *testing.T) {
 	h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
 	pos := [3]float32{1.5, 64, 0.5}
 	life := lifeWearing(t, pos,
-		fullTestArmour(ItemIronHelm),
-		fullTestArmour(ItemIronCuirass),
-		fullTestArmour(ItemIronGreaves),
+		fullTestArmour(ItemRustyHelm),
+		fullTestArmour(ItemRustyCuirass),
+		fullTestArmour(ItemRustyGreaves),
 	)
 	player, _ := h.joinLife(1, pos, &life)
 	h.step()

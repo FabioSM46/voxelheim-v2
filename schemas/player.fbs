@@ -190,12 +190,16 @@ enum RecipeID : ubyte {
   // Six wearable pieces, appended in V19. These travel client -> server in a
   // CraftRequest, so an older server must be rejected at the handshake rather than
   // on the first attempt to make armour.
+  //
+  // The metal three were `IronHelm`, `IronCuirass` and `IronGreaves` until #1120 renamed
+  // them the rusty set. A member's name is not on the wire — only its value is — so the
+  // rename kept 14, 15 and 16 and moved no protocol version.
   LeatherCap = 11,
   LeatherJerkin = 12,
   LeatherLeggings = 13,
-  IronHelm = 14,
-  IronCuirass = 15,
-  IronGreaves = 16,
+  RustyHelm = 14,
+  RustyCuirass = 15,
+  RustyGreaves = 16,
 
   // V22 already reserves shield intent/state; this append ships on both V22 peers before
   // release, so there is no released same-version peer and no second bump is needed.

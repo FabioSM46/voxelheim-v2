@@ -72,9 +72,9 @@ pub(super) const ITEM_COOKED_MEAT: u16 = 20;
 pub(super) const ITEM_LEATHER_CAP: u16 = 21;
 pub(super) const ITEM_LEATHER_JERKIN: u16 = 22;
 pub(super) const ITEM_LEATHER_LEGGINGS: u16 = 23;
-pub(super) const ITEM_IRON_HELM: u16 = 24;
-pub(super) const ITEM_IRON_CUIRASS: u16 = 25;
-pub(super) const ITEM_IRON_GREAVES: u16 = 26;
+pub(super) const ITEM_RUSTY_HELM: u16 = 24;
+pub(super) const ITEM_RUSTY_CUIRASS: u16 = 25;
+pub(super) const ITEM_RUSTY_GREAVES: u16 = 26;
 pub(crate) const ITEM_WOODEN_SHIELD: u16 = 27;
 
 /// The launcher and ammunition appended after the wooden shield.
@@ -354,7 +354,7 @@ pub const RECIPES: [Recipe; 24] = [
         station: Some(StructureKind::LeatherBench),
     },
     Recipe {
-        id: RecipeId::IronHelm,
+        id: RecipeId::RustyHelm,
         category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
@@ -367,13 +367,13 @@ pub const RECIPES: [Recipe; 24] = [
             },
         ],
         product: Ingredient {
-            item_id: ITEM_IRON_HELM,
+            item_id: ITEM_RUSTY_HELM,
             count: 1,
         },
         station: Some(StructureKind::ArmourBench),
     },
     Recipe {
-        id: RecipeId::IronCuirass,
+        id: RecipeId::RustyCuirass,
         category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
@@ -386,13 +386,13 @@ pub const RECIPES: [Recipe; 24] = [
             },
         ],
         product: Ingredient {
-            item_id: ITEM_IRON_CUIRASS,
+            item_id: ITEM_RUSTY_CUIRASS,
             count: 1,
         },
         station: Some(StructureKind::ArmourBench),
     },
     Recipe {
-        id: RecipeId::IronGreaves,
+        id: RecipeId::RustyGreaves,
         category: RecipeCategory::Armour,
         ingredients: &[
             Ingredient {
@@ -405,7 +405,7 @@ pub const RECIPES: [Recipe; 24] = [
             },
         ],
         product: Ingredient {
-            item_id: ITEM_IRON_GREAVES,
+            item_id: ITEM_RUSTY_GREAVES,
             count: 1,
         },
         station: Some(StructureKind::ArmourBench),
@@ -850,15 +850,15 @@ mod tests {
         assert_eq!(cost(RecipeId::LeatherJerkin), vec![(ITEM_VARGR_PELT, 5)]);
         assert_eq!(cost(RecipeId::LeatherLeggings), vec![(ITEM_VARGR_PELT, 4)]);
         assert_eq!(
-            cost(RecipeId::IronHelm),
+            cost(RecipeId::RustyHelm),
             vec![(ITEM_RAW_IRON, 3), (ITEM_RAW_COAL, 1)]
         );
         assert_eq!(
-            cost(RecipeId::IronCuirass),
+            cost(RecipeId::RustyCuirass),
             vec![(ITEM_RAW_IRON, 5), (ITEM_RAW_COAL, 2)]
         );
         assert_eq!(
-            cost(RecipeId::IronGreaves),
+            cost(RecipeId::RustyGreaves),
             vec![(ITEM_RAW_IRON, 4), (ITEM_RAW_COAL, 2)]
         );
         assert_eq!(
@@ -934,18 +934,18 @@ mod tests {
                 Some(StructureKind::LeatherBench),
             ),
             (
-                RecipeId::IronHelm,
-                ITEM_IRON_HELM,
+                RecipeId::RustyHelm,
+                ITEM_RUSTY_HELM,
                 Some(StructureKind::ArmourBench),
             ),
             (
-                RecipeId::IronCuirass,
-                ITEM_IRON_CUIRASS,
+                RecipeId::RustyCuirass,
+                ITEM_RUSTY_CUIRASS,
                 Some(StructureKind::ArmourBench),
             ),
             (
-                RecipeId::IronGreaves,
-                ITEM_IRON_GREAVES,
+                RecipeId::RustyGreaves,
+                ITEM_RUSTY_GREAVES,
                 Some(StructureKind::ArmourBench),
             ),
             (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),

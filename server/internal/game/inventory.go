@@ -285,7 +285,7 @@ func (t *slotTable) consume(itemID ItemID, count uint32) bool {
 //
 // **Selling is what needed the distinction, and it is a rule rather than a nicety.** #459
 // puts no worn item on the wire — the trade takes what the player is carrying and leaves
-// what they have on — so a vendor buying iron greaves must not be able to take the pair
+// what they have on — so a vendor buying rusty greaves must not be able to take the pair
 // on the player's legs because the pack ran out.
 func (t *slotTable) consumePack(itemID ItemID, count uint32) bool {
 	return t.consumeWithin(itemID, count, equipmentFirst)

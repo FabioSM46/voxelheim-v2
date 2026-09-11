@@ -251,7 +251,7 @@ func TestPlayerTradeOffersSnapshotSlotsAndResetBothConfirmations(t *testing.T) {
 func TestPlayerTradeOfferRefusalsChangeNothing(t *testing.T) {
 	h := newPlayerTradeHarness(t)
 	h.stock(h.players[0], 3, ItemRawIron, 4)
-	h.stock(h.players[0], uint8(equipmentHead), ItemIronHelm, 1)
+	h.stock(h.players[0], uint8(equipmentHead), ItemRustyHelm, 1)
 	h.open()
 	h.setItem(0, 0, 3)
 	revision := h.revision()
