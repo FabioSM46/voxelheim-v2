@@ -81,7 +81,7 @@ https://mirrors.mit.edu/ubuntu/"
 PROBE_SECONDS=5
 UPDATE_SECONDS=45
 DOWNLOAD_SECONDS=30
-NETWORK_BUDGET="${APT_FALLBACK_BUDGET:-240}"
+NETWORK_BUDGET=240
 APT_OPTIONS=(
   -o Acquire::Retries=0
   -o Acquire::http::Timeout=10
@@ -99,6 +99,18 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+# Seconds since this script started. The budget is counted from here, probe included,
+# because the step's timeout is. APT_FALLBACK_CLOCK names a file holding that number
+# instead, so scripts/test/apt-install-fallback.test.sh can drive the budget without
+# depending on how fast its host runs the script.
+elapsed() {
+  if [ -n "${APT_FALLBACK_CLOCK:-}" ]; then
+    cat "$APT_FALLBACK_CLOCK"
+  else
+    printf '%s' "$SECONDS"
+  fi
+}
 
 host_of() {
   local rest="${1#*://}"
@@ -222,7 +234,7 @@ fi
 # ── 2 and 3. attempts, each led by the next host that answered ───────────────
 count=${#responders[@]}
 for ((a = 0; a < count; a++)); do
-  remaining=$((NETWORK_BUDGET - SECONDS))
+  remaining=$((NETWORK_BUDGET - $(elapsed)))
   if [ "$remaining" -lt $((UPDATE_SECONDS + DOWNLOAD_SECONDS)) ]; then
     fail_summary "${remaining}s of the ${NETWORK_BUDGET}s network budget left, too little for another attempt"
   fi

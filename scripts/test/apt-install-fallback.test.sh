@@ -196,7 +196,10 @@ if [ -f "$APT_MIRRORLIST" ]; then
   lead="${lead#https://}"; lead="${lead%%/*}"
 fi
 listed() { for h in $1; do [ "$h" = "$lead" ] && return 0; done; return 1; }
-[ -n "${FAKE_APT_SLEEP:-}" ] && sleep "$FAKE_APT_SLEEP"
+# Each apt call spends FAKE_APT_ADVANCE seconds of the script's clock, deterministically.
+if [ -n "${FAKE_APT_ADVANCE:-}" ]; then
+  echo $(( $(cat "$APT_FALLBACK_CLOCK") + FAKE_APT_ADVANCE )) > "$APT_FALLBACK_CLOCK"
+fi
 case " $* " in
   *" update "*)
     if listed "${FAKE_UPDATE_STALL:-}"; then exit 124; fi
@@ -314,12 +317,23 @@ assert_not_contains "and never runs dpkg" "$LOG" "--no-download"
 
 echo
 echo "installer — the budget cannot hold another attempt"
-FAKE_APT_SLEEP=2 FAKE_UPDATE_STALL="$AZ $KO $AR $SE $MIT" APT_FALLBACK_BUDGET=76 run_installer
+# Driven by the script's injectable clock rather than by sleeping: the outcome may not
+# depend on how long the host takes to start the script and run the probe (#1118 review).
+CLOCK="$WORK/clock"
+echo 0 > "$CLOCK"
+APT_FALLBACK_CLOCK="$CLOCK" FAKE_APT_ADVANCE=100 FAKE_UPDATE_STALL="$AZ $KO $AR $SE $MIT" run_installer
 assert_eq "fails" "1" "$([ "$RC" -ne 0 ] && echo 1 || echo 0)"
-assert_eq "after one attempt instead of spending the step" "1" "$(grep -c '^apt-get .* update$' <<<"$LOG")"
-assert_contains "saying how much budget was left" "$OUT" "s of the 76s network budget left, too little for another attempt"
-assert_contains "and naming the host it tried" "$OUT" "::error::  $AZ: attempt 1/5: apt-get update did not finish"
-assert_contains "and the hosts it never reached" "$OUT" "::error::  $KO: answered the probe and never led an attempt"
+assert_eq "after the attempts a 240s budget holds, instead of spending the step" "2" "$(grep -c '^apt-get .* update$' <<<"$LOG")"
+assert_contains "saying how much budget was left" "$OUT" "40s of the 240s network budget left, too little for another attempt"
+assert_contains "naming each host it tried" "$OUT" "::error::  $KO: attempt 2/5: apt-get update did not finish"
+assert_contains "and the hosts it never reached" "$OUT" "::error::  $AR: answered the probe and never led an attempt"
+
+echo
+echo "installer — exactly one attempt's worth of budget still starts that attempt"
+echo 165 > "$CLOCK"
+APT_FALLBACK_CLOCK="$CLOCK" FAKE_APT_ADVANCE=100 FAKE_UPDATE_STALL="$AZ $KO $AR $SE $MIT" run_installer
+assert_eq "one attempt at 75s remaining" "1" "$(grep -c '^apt-get .* update$' <<<"$LOG")"
+assert_contains "and none after it" "$OUT" "-25s of the 240s network budget left"
 
 echo
 echo "installer — a failure after the network is not retried"
