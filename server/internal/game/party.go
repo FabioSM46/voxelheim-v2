@@ -363,6 +363,22 @@ func (s *Sim) startBossEncounterLocked(m *mob, first *Player) {
 		// before: an encounter that exists has a repertoire ledger, empty or not.
 		cooldowns: make(map[vnet.EncounterMoveKind]uint32),
 		lastUsed:  make(map[vnet.EncounterMoveKind]uint64),
+		scale:     bossScaleFor(m.species(), s.bossScaleLevelsLocked()),
+	}
+	// The boss grows to the party once, in proportion, so a creature somehow hurt before its
+	// pull keeps the share of its health it had lost and the stage that share put it in. See
+	// boss_scale.go for the rule and for why nothing ever recomputes it.
+	//
+	// **Only health still measured against the registry is multiplied.** Health above the
+	// registry's ceiling was already scaled by an earlier pull, and multiplying it again would
+	// overflow the uint16 it is written back into: a four-member king at 65,532 wraps to
+	// 65,520. Today an encounter ends only with the creature (a kill or a wipe's replacement),
+	// so that branch is defensive; it keeps the health and clamps it to this pull's ceiling.
+	ceiling := uint32(m.encounter.scale.maxHealth)
+	if base := uint32(m.species().maxHealth); base > 0 && uint32(m.health) <= base {
+		m.health = uint16(max(uint32(m.health)*ceiling/base, 1))
+	} else {
+		m.health = uint16(min(uint32(m.health), ceiling))
 	}
 }
 

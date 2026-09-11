@@ -151,6 +151,8 @@ contain. A capture is not a claim about what a player perceives in play.
   - The server lets him stand there and announces the blow along its locked aim.
   - Retracting the blade at terrain would present a blow the server did not announce.
   - A terrain-aware weapon pose would be a new presentation system, not a correction.
+  - Corrected since by #1103, which gives a planted blow a terrain-clear wrist variant along the
+    same aim; see [the blade-terrain review](blade-terrain-1103.md).
 - **The strike stroke is drawn under terrain.** Part 3a's strike stroke follows the announced region
   across the floor, so beside a monolith it runs under the monolith's base, as the region does.
 - **The chamber's lighting, rotation and runtime gate** are not reproduced, as described above.

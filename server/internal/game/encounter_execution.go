@@ -692,11 +692,12 @@ func (r *runningMove) remainingTravel(pos [3]float64) float64 {
 // Every player the announced region reaches and that this window has not already hit,
 // through the one path a creature's blow has ever taken — armour, shield, threat and the
 // landed-blow projection are [Sim.landMobBlowLocked]'s, not a second copy of them here.
+// The blow is the move's share of the registry's, under the scale the pull fixed.
 //
 // The caller holds Sim.mu.
 func (s *Sim) resolveMoveDamageLocked(m *mob, players []*Player) {
 	r := m.encounter.running
-	raw := moveDamage(m.species(), r.def)
+	raw := m.encounter.scale.blow(moveDamage(m.species(), r.def))
 	if raw == 0 {
 		return
 	}
