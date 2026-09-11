@@ -447,3 +447,50 @@ fn switching_mid_channel_neither_duplicates_nor_loses_a_cue() {
     assert_eq!(meshes(&pair.on), drawn);
     assert_eq!(optional(&mut pair.on), optional(&mut pair.off));
 }
+
+/// The saved setting reaches every reader on the frame it changes. The readers are ordered
+/// after `SyncReducedEffects` by name, so a single update after switching `Settings`
+/// already draws the result. A reader that ran before the copy would see it one frame late,
+/// and this test would fail.
+#[test]
+fn a_switched_setting_is_drawn_on_the_frame_it_is_made() {
+    use crate::settings::Settings;
+    let mut pair = Pair::new(false);
+    pair.on.insert_resource(Settings::default());
+    let king = boss(MobKind::DraugrKing);
+    pair.announce(&timeline(
+        MobKind::DraugrKing,
+        3,
+        RequiemOfTheBuried,
+        Channel,
+        1100,
+        18,
+        Some((1, 3)),
+    ));
+    // The pulse's contact tick: spell shapes drawn and the core flaring.
+    pair.step(1117, king);
+    assert_eq!(optional(&mut pair.on).groups.len(), 1);
+    assert_eq!(
+        flourishes(pair.on.world_mut()).map(|state| state.0),
+        Some("flare")
+    );
+
+    for (reduced, groups, core) in [(true, 0, "lit"), (false, 1, "flare"), (true, 0, "lit")] {
+        pair.on
+            .world_mut()
+            .resource_mut::<Settings>()
+            .toggle_reduced_effects();
+        pair.on.update();
+        assert_eq!(pair.on.world().resource::<ReducedEffects>().0, reduced);
+        assert_eq!(
+            optional(&mut pair.on).groups.len(),
+            groups,
+            "switched to {reduced}: the spell layer read the gate a frame late"
+        );
+        assert_eq!(
+            flourishes(pair.on.world_mut()).map(|state| state.0),
+            Some(core),
+            "switched to {reduced}: the regalia read the gate a frame late"
+        );
+    }
+}

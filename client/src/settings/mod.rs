@@ -1448,6 +1448,10 @@ const DEFAULT_MUSIC_ON: bool = true;
 /// fold is there for the player who needs it rather than the other way round.
 const DEFAULT_MONO_AUDIO: bool = false;
 
+/// Whether optional boss flourishes are withheld, by default. Off: the effects are drawn
+/// for everyone, and the switch is there for the player who finds them uncomfortable.
+const DEFAULT_REDUCED_EFFECTS: bool = false;
+
 /// Silence, for the same reason [`MIN_MASTER_VOLUME`] is a real value: a player who wants
 /// voice muted has to be able to say so with this knob. It is not the same as
 /// [`VoiceMode::Off`] two rows down — that closes the microphone, this only stops the
@@ -1487,6 +1491,7 @@ pub struct Settings {
     frame_cap: u16,
     brightness: f32,
     fog_start: f32,
+    reduced_effects: bool,
     master_volume: u8,
     output_device: DeviceChoice,
     input_device: DeviceChoice,
@@ -1518,6 +1523,7 @@ impl Default for Settings {
             frame_cap: NO_FRAME_CAP,
             brightness: 1.0,
             fog_start: DEFAULT_FOG_START,
+            reduced_effects: DEFAULT_REDUCED_EFFECTS,
             master_volume: DEFAULT_MASTER_VOLUME,
             output_device: DeviceChoice::SystemDefault,
             input_device: DeviceChoice::SystemDefault,
@@ -1702,6 +1708,12 @@ impl Settings {
     /// Whether the stereo image is folded to one.
     pub const fn mono_audio(&self) -> bool {
         self.mono_audio
+    }
+
+    /// Whether optional boss flourishes are withheld. Presentation only: every essential
+    /// cue is drawn either way, and nothing that predicts, sends or decides reads it.
+    pub const fn reduced_effects(&self) -> bool {
+        self.reduced_effects
     }
 
     /// How loud the voice bus is, from 0 to 100.
@@ -1976,6 +1988,11 @@ impl Settings {
         self.mono_audio = !self.mono_audio;
     }
 
+    /// Withholds optional boss flourishes, or draws them again.
+    pub const fn toggle_reduced_effects(&mut self) {
+        self.reduced_effects = !self.reduced_effects;
+    }
+
     /// Shows or hides the frame-rate readout.
     pub const fn toggle_readout(&mut self) {
         self.readout_shown = !self.readout_shown;
@@ -2026,6 +2043,7 @@ impl Settings {
                 self.frame_cap = defaults.frame_cap;
                 self.brightness = defaults.brightness;
                 self.fog_start = defaults.fog_start;
+                self.reduced_effects = defaults.reduced_effects;
             }
             Tab::Audio => {
                 self.master_volume = defaults.master_volume;
@@ -2690,6 +2708,24 @@ mod tests {
         assert!(!settings.mono_audio(), "the audio reset left the fold on");
     }
 
+    /// Reduced effects is off until a player asks for it, and only the Graphics reset,
+    /// the tab its row is on, puts it back.
+    #[test]
+    fn reduced_effects_are_off_until_asked_for_and_reset_with_graphics() {
+        let mut settings = Settings::default();
+        assert!(!settings.reduced_effects());
+        settings.toggle_reduced_effects();
+        assert!(settings.reduced_effects());
+        settings.reset(Tab::Audio);
+        settings.reset(Tab::Controls);
+        assert!(
+            settings.reduced_effects(),
+            "another tab's reset turned it off"
+        );
+        settings.reset(Tab::Graphics);
+        assert_eq!(settings.reduced_effects(), DEFAULT_REDUCED_EFFECTS);
+    }
+
     /// **A hand-edited file cannot put a new volume outside the bound this module promises.**
     ///
     /// `store` hands whatever it read to `clamp`, so the four values that arrive as numbers
@@ -2994,6 +3030,7 @@ mod tests {
             settings.adjust(Knob::VoiceAudience, 1);
             settings.toggle_vsync();
             settings.toggle_readout();
+            settings.toggle_reduced_effects();
             settings.cycle_readout_corner();
             settings.set_default_mount(DefaultMount::Brown);
             settings
@@ -3009,6 +3046,7 @@ mod tests {
         assert_eq!(after.frame_cap(), NO_FRAME_CAP);
         assert!(after.vsync());
         assert!(!after.readout_shown());
+        assert!(!after.reduced_effects());
         assert_eq!(after.readout_corner(), Corner::default());
         assert!((after.field_of_view() - DEFAULT_FIELD_OF_VIEW).abs() < f32::EPSILON);
         assert!((after.fog_start() - DEFAULT_FOG_START).abs() < f32::EPSILON);
@@ -3065,6 +3103,7 @@ mod tests {
         assert_eq!(after.music_on(), before.music_on());
         assert_eq!(after.mono_audio(), before.mono_audio());
         assert_eq!(after.vsync(), before.vsync());
+        assert_eq!(after.reduced_effects(), before.reduced_effects());
         assert_eq!(after.readout_shown(), before.readout_shown());
         assert_eq!(after.readout_corner(), before.readout_corner());
         assert_eq!(after.window_mode(), before.window_mode());
@@ -3089,6 +3128,11 @@ mod tests {
         assert_eq!(after.voice_ducking(), DEFAULT_VOICE_DUCKING);
         assert_eq!(after.music_on(), DEFAULT_MUSIC_ON, "the music switch");
         assert_eq!(after.mono_audio(), DEFAULT_MONO_AUDIO, "the mono fold");
+        assert_eq!(
+            after.reduced_effects(),
+            before.reduced_effects(),
+            "resetting audio moved reduced effects"
+        );
         assert_eq!(after.voice_volume(), DEFAULT_VOICE_VOLUME);
         assert_eq!(after.voice_mode(), DEFAULT_VOICE_MODE);
         assert_eq!(after.voice_audience(), DEFAULT_VOICE_AUDIENCE);

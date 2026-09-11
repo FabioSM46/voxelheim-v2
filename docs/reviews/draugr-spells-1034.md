@@ -68,10 +68,11 @@ Sheets: [spear](draugr-spells-1034/spear.png), [burial](draugr-spells-1034/buria
 
 ## Limitations
 
-- **No reduced-effects setting exists**, so that part of the acceptance criterion is not
-  claimed. This layer adds no particles, sound, light source or camera motion; its one
-  brightness change is the core on an announced contact tick, and it carries nothing the
-  boundary cues and readings lack.
+- **Reduced effects arrived with #1093**, after this record: see
+  [reduced-effects-1093](reduced-effects-1093.md). This layer adds no particles, sound, light
+  source or camera motion; its one brightness change is the core on an announced contact
+  tick, and it carries nothing the boundary cues and readings lack, which is why that
+  setting can withhold it whole.
 - The wall stop reads streamed terrain; with no impact point in the contract, a missing
   chunk lets the crystal continue to the end of the lane.
 - No audio, contact-distance fairness or dungeon collision is claimed; #1037 owns distance.

@@ -105,8 +105,10 @@ pub(super) fn drawn(world: &mut World) -> std::collections::HashSet<MoveKey> {
 }
 
 pub(super) fn register(app: &mut App) {
-    app.add_systems(Startup, setup)
-        .add_systems(Update, refresh.after(reconcile));
+    app.add_systems(Startup, setup).add_systems(
+        Update,
+        refresh.after(reconcile).after(super::SyncReducedEffects),
+    );
 }
 
 fn setup(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {

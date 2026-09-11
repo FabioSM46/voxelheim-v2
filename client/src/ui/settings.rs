@@ -221,6 +221,8 @@ enum SettingsAction {
     ToggleVsync,
     ToggleReadout,
     CycleCorner,
+    /// Withhold optional boss flourishes, or draw them again.
+    ToggleReducedEffects,
     /// Turn music generation on or off. Not the music volume: see `Settings::music_on`.
     ToggleMusic,
     /// Fold the stereo image to one, or stop folding it.
@@ -250,6 +252,8 @@ enum Reading {
     Vsync,
     Readout,
     ReadoutCorner,
+    /// Whether optional boss flourishes are withheld, as the word on its own button.
+    ReducedEffects,
     /// Whether music is generated at all, as the word on its own button.
     Music,
     /// Whether the stereo image is folded, as the word on its own button.
@@ -682,6 +686,13 @@ fn rows_of(tab: Tab) -> Vec<Row> {
                 "Readout corner",
                 SettingsAction::CycleCorner,
                 Reading::ReadoutCorner,
+            ),
+            // A visual switch, so it lives with what the screen draws. It removes optional
+            // boss flourishes and never a cue: see `player::encounters::ReducedEffects`.
+            Row::Toggle(
+                "Reduced effects",
+                SettingsAction::ToggleReducedEffects,
+                Reading::ReducedEffects,
             ),
         ]),
         Tab::Audio => rows.extend([
@@ -1429,6 +1440,7 @@ fn settings_actions(
             SettingsAction::ToggleVsync => settings.toggle_vsync(),
             SettingsAction::ToggleReadout => settings.toggle_readout(),
             SettingsAction::CycleCorner => settings.cycle_readout_corner(),
+            SettingsAction::ToggleReducedEffects => settings.toggle_reduced_effects(),
             SettingsAction::ToggleMusic => settings.toggle_music(),
             SettingsAction::ToggleMono => settings.toggle_mono_audio(),
             SettingsAction::Reset(tab) => {
@@ -1910,6 +1922,7 @@ fn describe(
         Reading::Music => on_or_off(settings.music_on()),
         Reading::MonoAudio => on_or_off(settings.mono_audio()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
+        Reading::ReducedEffects => on_or_off(settings.reduced_effects()),
         // "v" stands in for a down chevron: `ascii_guard` in `ui/mod.rs` holds every
         // string here to the 95 codepoints Bevy's embedded font can draw.
         Reading::MonitorControl => {
@@ -2982,6 +2995,7 @@ mod tests {
             Reading::Vsync,
             Reading::Readout,
             Reading::ReadoutCorner,
+            Reading::ReducedEffects,
             Reading::Music,
             Reading::MonoAudio,
         ] {
@@ -2998,7 +3012,7 @@ mod tests {
             .filter(|row| matches!(row, Row::Toggle(..)))
             .count();
         assert_eq!(
-            toggles, 5,
+            toggles, 6,
             "the screen draws {toggles} toggles; name the new one above rather than widening \
              this number"
         );
@@ -3340,13 +3354,23 @@ mod tests {
         }
     }
 
-    /// The two flags and the corner are reachable, and each says what it is.
+    /// The three flags and the corner are reachable, and each says what it is.
     #[test]
     fn the_graphics_flags_read_back_what_pressing_them_did() {
         let mut app = screen_app();
         assert_eq!(reading_of(&mut app, Reading::Vsync), "on");
         press(&mut app, SettingsAction::ToggleVsync);
         assert_eq!(reading_of(&mut app, Reading::Vsync), "off");
+
+        assert_eq!(reading_of(&mut app, Reading::ReducedEffects), "off");
+        press(&mut app, SettingsAction::ToggleReducedEffects);
+        assert_eq!(reading_of(&mut app, Reading::ReducedEffects), "on");
+        assert!(app.world().resource::<Settings>().reduced_effects());
+        assert_eq!(
+            reading_of(&mut app, Reading::Vsync),
+            "off",
+            "reduced effects moved vertical sync"
+        );
 
         assert_eq!(reading_of(&mut app, Reading::Readout), "off");
         press(&mut app, SettingsAction::ToggleReadout);
