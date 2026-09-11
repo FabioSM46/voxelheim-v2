@@ -71,10 +71,12 @@ leap 60/36, jaws 90/18 Telegraph/Release ticks; recovery 24 between blows, 108 a
 bite/claw combos, 84 for single claw, 96 leap, 150 jaws. Charge travels at 11 blocks/s;
 leap at 12 to its locked 6.5-block target. Production reads announced durations.
 
-**Manual listening is pending.** The agent's audio-input path explicitly rejected
-input. No listening or perceived acoustic quality is claimed; actual listener feedback
-or an explicit user decision remains required. The corrected catalogue supersedes
-its initial level. Signal metrics and manifests do not substitute for audition.
+**No listening pass was performed.** The agent's audio-input path explicitly rejected
+input. At closure the owner folded the manual listening pass into #1037. That issue's
+[acceptance record](dungeon-acceptance-1037.md#audio) re-exports these takes and measures
+them against their manifests, and it still makes no listening claim. No perceived acoustic
+quality is claimed here. The corrected catalogue supersedes its initial level. Signal
+metrics and manifests do not substitute for audition.
 
 ## Validation
 

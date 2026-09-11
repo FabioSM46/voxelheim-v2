@@ -1,0 +1,11 @@
+# AMD Radeon RX 5700 XT (RADV NAVI10) (radv Mesa 25.2.8-0ubuntu0.24.04.2), Vulkan, 1280x720, 900 timed frames per scene after 120 warm-up frames
+scene,frames,mean_ms,p50_ms,p95_ms,p99_ms,max_ms,segments,segment_cap,triangles,triangle_cap,materials,material_cap,effect_groups,effect_group_cap
+empty-courtyard,900,4.798,4.746,5.610,6.082,10.291,0,0,0,0,0,0,0,0
+empty-hall,900,4.511,4.575,5.456,5.825,6.674,0,0,0,0,0,0,0,0
+vargr-idle,900,4.870,4.789,5.575,5.919,7.129,19,19,648,12000,1,2,0,2
+vargr-paired-claws,900,4.851,4.910,5.603,5.855,6.519,19,19,648,12000,1,2,1,2
+vargr-leap,900,5.063,4.979,5.677,5.846,6.130,19,19,648,12000,1,2,0,2
+draugr-idle,900,4.808,4.756,5.476,6.139,9.108,17,17,1464,12000,1,2,0,4
+draugr-spear,900,4.744,4.806,5.451,5.605,5.990,17,17,1464,12000,2,2,2,4
+draugr-burial,900,5.032,4.983,5.559,5.745,6.057,17,17,1464,12000,2,2,2,4
+draugr-requiem-final-stage,900,4.960,4.941,5.544,6.077,7.909,17,17,1464,12000,2,2,2,4
