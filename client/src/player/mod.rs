@@ -461,7 +461,9 @@ impl Plugin for PlayerPlugin {
                         .in_set(ApplySnapshots),
                     log_the_players_progress.after(ApplySnapshots),
                     mobs::pose_encounters.after(encounters::reconcile),
-                    mobs::present_regalia.after(mobs::pose_encounters),
+                    mobs::present_regalia
+                        .after(mobs::pose_encounters)
+                        .after(encounters::SyncReducedEffects),
                     forget_vitals_without_a_session.after(ApplySnapshots),
                     forget_weather_without_a_session.after(ApplySnapshots),
                     ambience::forget_ambience_without_a_session.after(ApplySnapshots),

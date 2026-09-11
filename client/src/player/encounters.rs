@@ -100,12 +100,17 @@ pub(super) fn register(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Before the layers read it, so a switch is drawn on the frame it is made.
-                follow_the_setting.before(reconcile),
+                follow_the_setting.in_set(SyncReducedEffects),
                 reconcile.after(ApplySnapshots),
             ),
         );
 }
+
+/// Where the saved setting reaches [`ReducedEffects`]. Every system that reads the gate is
+/// ordered after this set by name, so a switch is drawn on the frame it is made. Bevy does
+/// not infer that order from the resource access alone.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SyncReducedEffects;
 
 /// Carries the player's saved choice onto the gate. Only a changed [`Settings`] writes it,
 /// so an app without settings keeps whatever value it was given.
