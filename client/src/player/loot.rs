@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
+use super::station::OpenStation;
+use super::structures::{AimStructures, StationTarget};
 use super::{
     Appearances, ApplyInputMode, ApplySnapshots, InputCadence, InputGate, InputMode,
     PlayerTradePromptRequest, SelfVitals, SnapshotBuffer,
@@ -66,6 +68,7 @@ impl Plugin for LootPlugin {
             .init_resource::<Appearances>()
             .add_message::<LootTakeClick>()
             .add_message::<PlayerTradePromptRequest>()
+            .add_message::<OpenStation>()
             .add_systems(
                 Update,
                 reconcile_loot
@@ -78,6 +81,9 @@ impl Plugin for LootPlugin {
                 send_loot_intents
                     .after(ApplyInputMode)
                     .after(ApplySnapshots)
+                    // After this frame's station pick, so the key is resolved against what
+                    // the crosshair is on now rather than a frame ago.
+                    .after(AimStructures)
                     .in_set(OriginateInteract),
             );
     }
@@ -157,9 +163,11 @@ struct LootIntent<'w> {
     session: Option<Res<'w, Session>>,
     buffer: Res<'w, SnapshotBuffer>,
     appearances: Option<Res<'w, Appearances>>,
+    station: Option<Res<'w, StationTarget>>,
     cadence: Res<'w, InputCadence>,
     outbound: Option<ResMut<'w, Outbound>>,
     trade_prompts: MessageWriter<'w, PlayerTradePromptRequest>,
+    station_opens: MessageWriter<'w, OpenStation>,
 }
 
 fn send_loot_intents(
@@ -174,9 +182,11 @@ fn send_loot_intents(
         session,
         buffer,
         appearances,
+        station,
         cadence,
         mut outbound,
         mut trade_prompts,
+        mut station_opens,
     } = intent;
     if window.current.is_some() && gate.mode() != InputMode::Loot {
         window.dismiss_current();
@@ -244,12 +254,23 @@ fn send_loot_intents(
         return;
     }
 
-    // **Corpse, then player, then resident — categories before distance.** A player who
-    // has just killed something is standing over it deliberately, so loot keeps the key
-    // even when somebody stands nearer. With no corpse, addressing a person is the next
-    // least surprising meaning: it opens only a local prompt and costs that person nothing
-    // until Yes. A resident's stall is therefore the final meaning. Distance and entity-id
-    // ties choose only within each category; the server rechecks every request.
+    // **Corpse, then station, then player, then resident — categories before distance.** A
+    // player who has just killed something is standing over it deliberately, so loot keeps
+    // the key even when somebody stands nearer. A station is next because it is *aimed at*:
+    // the crosshair is on the forge, where a person merely has to be within reach, so a
+    // villager wandering past a bench cannot take the key from it. Opening one is a local
+    // panel and sends nothing (`station.rs`). With neither, addressing a person opens only a
+    // local prompt and costs that person nothing until Yes, and a resident's stall is the
+    // final meaning. Distance and entity-id ties choose only within each category; the
+    // server rechecks every request.
+    if let Some(pick) = station.as_deref().and_then(|target| target.0) {
+        station_opens.write(OpenStation {
+            structure_id: pick.structure_id,
+            kind: pick.kind,
+        });
+        return;
+    }
+
     if let Some(entity_id) = buffer.nearest_player(session.0.entity_id, MAX_REACH) {
         // Appearance and snapshot streams are unordered. Without the server-owned name
         // there is no honest value for the prompt's X, so keep the priority and send
@@ -628,6 +649,86 @@ mod tests {
                 client_tick: 0,
             })],
             "the corpse lost its key to somebody standing nearer"
+        );
+    }
+
+    /// The station stamps the four-way priority: a station in the crosshair outranks a
+    /// player and a resident both standing nearer, and loses to a corpse in reach.
+    fn forge_in_sight() -> StationTarget {
+        StationTarget(Some(super::super::structures::StructurePick {
+            structure_id: 900,
+            kind: crate::net::StructureKind::Forge,
+            distance: 3.0,
+        }))
+    }
+
+    fn station_opens(app: &mut App) -> Vec<OpenStation> {
+        app.world_mut()
+            .resource_mut::<Messages<OpenStation>>()
+            .drain()
+            .collect()
+    }
+
+    #[test]
+    fn a_corpse_in_reach_keeps_the_key_from_a_station_in_sight() {
+        let (mut app, frames) = held_key_app();
+        app.insert_resource(forge_in_sight());
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert_eq!(
+            sent,
+            vec![encode_loot_open_request(&LootOpenRequest {
+                corpse_id: CORPSE,
+                client_tick: 0,
+            })]
+        );
+        assert!(
+            station_opens(&mut app).is_empty(),
+            "the press meant two things"
+        );
+    }
+
+    #[test]
+    fn a_station_in_sight_outranks_a_player_and_a_resident_and_sends_nothing() {
+        let (mut app, frames) = held_key_app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![
+                me(),
+                EntityState {
+                    entity_id: OTHER_PLAYER,
+                    pos: [1.0, 64.0, 0.0],
+                    ..me()
+                },
+            ],
+            mobs: vec![villager(RESIDENT, 1.0)],
+            ..Default::default()
+        });
+        app.insert_resource(forge_in_sight());
+
+        let sent = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert!(
+            sent.is_empty(),
+            "opening a station reached the wire: {sent:?}"
+        );
+        assert_eq!(
+            station_opens(&mut app),
+            vec![OpenStation {
+                structure_id: 900,
+                kind: crate::net::StructureKind::Forge,
+            }]
+        );
+        assert_eq!(
+            *app.world().resource::<InputMode>(),
+            InputMode::Playing,
+            "a player behind the station was offered a trade"
         );
     }
 

@@ -2,12 +2,12 @@
 //! both originate.
 //!
 //! Two panels on one screen, and neither of them changes a count. The cells are the last
-//! complete `InventoryState` the server sent; the recipe rows are the display-only mirror
-//! in [`crate::player::RECIPES`], which spells out what a craft costs so that crafting is
-//! a plan instead of a guess. A row that is short of materials draws disabled — a courtesy
-//! read from [`Inventory::count`] — and a row whose recipe needs a forge says so and stays
-//! clickable, because how close the player is standing to one is the server's answer and
-//! not this client's.
+//! complete `InventoryState` the server sent; the recipe rows are the hand recipes of the
+//! display-only mirror in [`crate::player::RECIPES`], which spells out what a craft costs so
+//! that crafting is a plan instead of a guess. A row that is short of materials draws
+//! disabled — a courtesy read from [`Inventory::count`]. A recipe made at a station is not
+//! listed here at all: it lives on that station's own panel, opened by the interact key at
+//! the station (`ui/station.rs`).
 //!
 //! Hovering a filled cell names what is in it. That is one reader of the one display
 //! registry in [`crate::player`]; the picture drawn in the cell under the pointer is
@@ -31,13 +31,13 @@ use super::{
 };
 #[cfg(test)]
 use super::{TOOLTIP_GAP, TooltipAnchor};
-use crate::net::{InventoryStack, MountKind, Session, StructureKind};
+use crate::net::{InventoryStack, MountKind, Session};
 #[cfg(test)]
 use crate::player::EQUIPMENT_ROUTES;
 use crate::player::{
     ApplyInventory, CraftClick, Ingredient, InputMode, Inventory, InventoryClick,
-    InventoryClickKind, LearnedMounts, Liveries, PickedStack, RECIPES, Recipe, RecipeCategory,
-    equipment_item_fits, item_label, mount_label, preference_from_mount,
+    InventoryClickKind, LearnedMounts, Liveries, PickedStack, Recipe, RecipeCategory,
+    equipment_item_fits, item_label, mount_label, preference_from_mount, recipes_made_at,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -214,25 +214,27 @@ struct CraftCost(Ingredient);
 
 /// Which recipe shelf is visible inside the crafting tab.
 ///
-/// `All` preserves the complete mirror and is the default; the other three are purely
+/// `All` preserves every hand recipe and is the default; the other two are purely
 /// presentational sub-inventories over the same static rows.
+///
+/// **No `TOOLS` shelf, because no tool is made by hand** — every tool is a forge recipe and
+/// lives on the forge's panel. A shelf that could only ever be empty is a button that does
+/// nothing, so `every_shelf_holds_a_hand_recipe` fails when one is left behind.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum CraftFilter {
     #[default]
     All,
     Survival,
-    Tools,
     Armour,
 }
 
 impl CraftFilter {
-    const ALL: [Self; 4] = [Self::All, Self::Survival, Self::Tools, Self::Armour];
+    const ALL: [Self; 3] = [Self::All, Self::Survival, Self::Armour];
 
     const fn label(self) -> &'static str {
         match self {
             Self::All => "ALL",
             Self::Survival => "SURVIVAL",
-            Self::Tools => "TOOLS",
             Self::Armour => "ARMOUR",
         }
     }
@@ -241,7 +243,7 @@ impl CraftFilter {
         match self {
             Self::All => true,
             Self::Survival => matches!(category, RecipeCategory::Survival),
-            Self::Tools => matches!(category, RecipeCategory::Tools),
+            // A category with no hand recipe has no shelf; the pack never draws its rows.
             Self::Armour => matches!(category, RecipeCategory::Armour),
         }
     }
@@ -259,9 +261,6 @@ const RECIPE_TITLE_SHORT: Color = Color::srgb(0.50, 0.53, 0.58);
 /// not fit. Both are refusal courtesies, and neither can stop a request leaving the client.
 const RECIPE_COST: Color = Color::srgb(0.72, 0.75, 0.80);
 const REFUSED_TINT: Color = Color::srgb(0.88, 0.44, 0.38);
-
-/// The station note. Amber, and never a disabled state: proximity is the server's call.
-const RECIPE_STATION: Color = Color::srgb(0.95, 0.76, 0.35);
 
 /// A fixed frame is the layout decision that keeps the tab strip stable: tab contents may
 /// differ, but neither participates in sizing this node.
@@ -685,14 +684,14 @@ fn spawn_craft_filter_strip(panel: &mut ChildSpawnerCommands<'_>) {
         });
 }
 
-/// Builds one row per mirrored recipe, once.
+/// Builds one row per hand recipe, once.
 ///
-/// The rows are static because the mirror is: one row per recipe, in the order the table
-/// declares them, with no session parameter to size them against and nothing to rebuild
-/// when a server state arrives. Only the `held/needed` labels and the enabled colours
-/// change, and [`refresh_recipe_rows`] owns both.
+/// The rows are static because the mirror is: one row per recipe made with no station, in
+/// the order the table declares them, with no session parameter to size them against and
+/// nothing to rebuild when a server state arrives. Only the `held/needed` labels and the
+/// enabled colours change, and [`refresh_recipe_rows`] owns both.
 fn spawn_recipe_rows(panel: &mut ChildSpawnerCommands<'_>) {
-    for recipe in RECIPES {
+    for recipe in recipes_made_at(None).copied() {
         panel
             .spawn((
                 CraftRow(recipe),
@@ -736,16 +735,6 @@ fn spawn_recipe_rows(panel: &mut ChildSpawnerCommands<'_>) {
                         ));
                     }
                 });
-                if let Some(station) = recipe.station {
-                    row.spawn((
-                        Text::new(station_note(station)),
-                        TextFont {
-                            font_size: FontSize::Px(14.0),
-                            ..default()
-                        },
-                        TextColor(RECIPE_STATION),
-                    ));
-                }
             });
     }
 }
@@ -758,24 +747,6 @@ fn recipe_heading(recipe: &Recipe) -> String {
     } else {
         format!("{name} x{}", recipe.product.count)
     }
-}
-
-/// What a recipe needing a station says, and it stays a label rather than becoming a gate.
-///
-/// The row remains clickable: the structures a snapshot names are the ones in view, so a
-/// client that refused to ask without one would refuse crafts the server would have
-/// granted. A craft made too far from its station is refused there, in silence.
-fn station_note(station: StructureKind) -> String {
-    let name = match station {
-        StructureKind::Forge => "forge",
-        StructureKind::Tent => "tent",
-        StructureKind::Campfire => "campfire",
-        StructureKind::Runestone => "runestone",
-        StructureKind::LeatherBench => "leather bench",
-        StructureKind::ArmourBench => "armour bench",
-        StructureKind::EnchantingTable => "enchanting table",
-    };
-    format!("requires a {name} nearby")
 }
 
 /// The line of help under a tab's contents.
@@ -1093,10 +1064,6 @@ fn refresh_inventory_cells(
 /// [`Inventory::count`] — the same predicate the sender in `player::crafting` re-reads
 /// before a request leaves, which is what makes the drawn state and the sent state agree
 /// by construction rather than by two places remembering the same rule.
-///
-/// **A station is never part of that answer.** A forge recipe with the materials in hand
-/// draws exactly like a station-less one and says what it needs in its own note, which is
-/// why that note keeps its colour here while the heading dims.
 fn refresh_recipe_rows(
     inventory: Option<Res<Inventory>>,
     mut rows: Query<(&CraftRow, &Interaction, &mut BackgroundColor)>,
@@ -3053,7 +3020,6 @@ mod tests {
     /// The mirrored ids the tests below stock a pack with, named rather than spelled.
     const STONE: u16 = 1;
     const LOG: u16 = 4;
-    const COAL: u16 = 5;
 
     /// Replaces the whole inventory, exactly as an authoritative state does.
     fn deliver(app: &mut App, stacks: &[(u16, u16)]) {
@@ -3126,28 +3092,29 @@ mod tests {
             .collect()
     }
 
-    /// One row per mirrored recipe, each headed by what it makes.
+    /// Exactly the hand recipes, each headed by what it makes, and no station recipe.
     ///
-    /// Swept over [`RECIPES`] rather than over a count and four names typed here. The
-    /// mirror gained two rows in #113 and this panel needed no edit to draw them, which is
-    /// the property worth pinning: a recipe reaches the screen by being in the mirror, and
-    /// the mirror is swept against the contract in `player::crafting`'s own tests.
+    /// Swept over the mirror rather than over a count and names typed here, so a recipe
+    /// reaches the pack by being in the mirror with no station — and leaves it by gaining
+    /// one, which is how #1119's leather patch moved to the leather bench.
     #[test]
-    fn the_panel_lists_every_mirrored_recipe_with_its_cost_and_product() {
+    fn the_panel_lists_exactly_the_hand_recipes_with_their_cost_and_product() {
         let mut app = app();
         app.update();
 
         let world = app.world_mut();
         let mut query = world.query::<&CraftRow>();
         let rows: Vec<RecipeId> = query.iter(world).map(|row| row.0.id).collect();
-        assert_eq!(
-            rows.len(),
-            RECIPES.len(),
-            "the panel drew a different number of rows than the mirror holds"
+        let hand: Vec<RecipeId> = crate::player::RECIPES
+            .iter()
+            .filter(|recipe| recipe.station.is_none())
+            .map(|recipe| recipe.id)
+            .collect();
+        assert_eq!(rows, hand, "the pack drew a recipe made at a station");
+        assert!(
+            query.iter(world).all(|row| row.0.station.is_none()),
+            "a station recipe reached the pack"
         );
-        for recipe in RECIPES {
-            assert!(rows.contains(&recipe.id), "{:?} has no row", recipe.id);
-        }
 
         // Each row is headed by what it makes, which is the product half of the mirror.
         // Read through the display registry rather than through `recipe_heading`, so this
@@ -3156,7 +3123,7 @@ mod tests {
         // asks how the heading starts.
         let mut titles = world.query::<(&CraftTitle, &Text)>();
         let headings: Vec<String> = titles.iter(world).map(|(_, text)| text.0.clone()).collect();
-        for recipe in RECIPES {
+        for recipe in recipes_made_at(None) {
             let product = item_label(recipe.product.item_id).to_uppercase();
             assert!(
                 headings.iter().any(|heading| heading.starts_with(&product)),
@@ -3202,7 +3169,10 @@ mod tests {
         app.update();
 
         assert_eq!(*app.world().resource::<CraftFilter>(), CraftFilter::All);
-        assert_eq!(visible_recipes(&mut app).len(), RECIPES.len());
+        assert_eq!(
+            visible_recipes(&mut app).len(),
+            recipes_made_at(None).count()
+        );
 
         let crafting = tab_button(&mut app, InventoryTab::Crafting);
         *app.world_mut()
@@ -3213,7 +3183,6 @@ mod tests {
 
         for (filter, category) in [
             (CraftFilter::Survival, RecipeCategory::Survival),
-            (CraftFilter::Tools, RecipeCategory::Tools),
             (CraftFilter::Armour, RecipeCategory::Armour),
         ] {
             for candidate in CraftFilter::ALL {
@@ -3230,8 +3199,7 @@ mod tests {
             app.update();
 
             let visible = visible_recipes(&mut app);
-            let expected: Vec<RecipeId> = RECIPES
-                .iter()
+            let expected: Vec<RecipeId> = recipes_made_at(None)
                 .filter(|recipe| recipe.category == category)
                 .map(|recipe| recipe.id)
                 .collect();
@@ -3242,9 +3210,33 @@ mod tests {
         let mut rows = world.query::<&CraftRow>();
         assert_eq!(
             rows.iter(world).count(),
-            RECIPES.len(),
+            recipes_made_at(None).count(),
             "filtering added or removed mirrored rows"
         );
+    }
+
+    /// Every shelf has something on it, and every hand recipe is on some shelf besides `ALL`.
+    ///
+    /// A shelf only a station recipe could fill is a button that shows nothing; that is why
+    /// `TOOLS` went when the tools moved to the forge's panel, and this is what says so the
+    /// next time a category empties out of the pack.
+    #[test]
+    fn every_shelf_holds_a_hand_recipe() {
+        for filter in CraftFilter::ALL {
+            assert!(
+                recipes_made_at(None).any(|recipe| filter.includes(recipe.category)),
+                "{filter:?} is a shelf with nothing on it"
+            );
+        }
+        for recipe in recipes_made_at(None) {
+            assert!(
+                CraftFilter::ALL
+                    .iter()
+                    .any(|filter| *filter != CraftFilter::All && filter.includes(recipe.category)),
+                "{:?} is on no shelf but ALL",
+                recipe.id
+            );
+        }
     }
 
     #[test]
@@ -3354,42 +3346,6 @@ mod tests {
         // Counted across slots, exactly as the server spends across slots.
         deliver(&mut app, &[(LOG, 5), (LOG, 3)]);
         assert_eq!(row_colour(&mut app, RecipeId::Tent), BUTTON);
-    }
-
-    /// Proximity is the server's call, so a station recipe is never grayed out for want of
-    /// its station — only for want of materials, and it says what else it needs in its note.
-    #[test]
-    fn a_station_recipe_with_the_materials_is_enabled_and_labelled() {
-        let mut app = app();
-        deliver(&mut app, &[(STONE, 2), (COAL, 1)]);
-
-        assert_eq!(
-            row_colour(&mut app, RecipeId::SharpeningStone),
-            BUTTON,
-            "a recipe this client cannot know the station for was drawn as unavailable"
-        );
-
-        let world = app.world_mut();
-        let mut query = world.query::<(&Text, &TextColor)>();
-        let mut notes: Vec<String> = query
-            .iter(world)
-            .filter(|(_, colour)| colour.0 == RECIPE_STATION)
-            .map(|(text, _)| text.0.clone())
-            .collect();
-        // Counted off the mirror rather than spelled as a literal. It was two identical
-        // strings, and #185 made it five — a number this test had no opinion about and was
-        // asserting anyway. What it is actually for is that a station note appears exactly
-        // where a station is required, and that survives a sixth recipe.
-        let mut expected: Vec<String> = RECIPES
-            .iter()
-            .filter_map(|recipe| recipe.station.map(station_note))
-            .collect();
-        notes.sort();
-        expected.sort();
-        assert_eq!(
-            notes, expected,
-            "station notes do not mirror the recipe table"
-        );
     }
 
     #[test]

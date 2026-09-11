@@ -421,6 +421,8 @@ fn ray_box_entry(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct StructurePick {
     pub(super) structure_id: u64,
+    /// What it is, so a consumer routing on the kind needs no second lookup.
+    pub(super) kind: StructureKind,
     /// How far along the aiming ray its bounds are entered, in blocks.
     pub(super) distance: f32,
 }
@@ -436,6 +438,18 @@ pub(super) struct StructurePick {
 /// recomputed every frame, and `ResMut` marks a resource changed on every `DerefMut`.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
 pub(super) struct StructureTarget(pub(super) Option<StructurePick>);
+
+/// The crafting station under the crosshair this frame, whoever built it.
+///
+/// **Not [`StructureTarget`] with a different filter, and the difference is ownership.**
+/// Removal is only ever offered on this session's own structures; a station is a place, and
+/// the server's `stationWithinLocked` deliberately does not consult who owns it. So a forge
+/// somebody else built is a candidate here and never one there. Which kinds count is
+/// [`super::station::is_craft_station`], read off the recipe mirror rather than listed here.
+///
+/// Presentation and routing only: what the interact key opens, never whether a craft works.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+pub(super) struct StationTarget(pub(super) Option<StructurePick>);
 
 /// Whether the selected slot holds a structure this client will plant, and which.
 ///
@@ -479,6 +493,7 @@ pub(super) struct PreviewFootprint;
 impl Plugin for StructuresPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StructureTarget>()
+            .init_resource::<StationTarget>()
             .init_resource::<FootprintPreview>()
             // `PlayerCameraPlugin` owns it in the game; here too, so `InputGate` resolves
             // when this module is built on its own.
@@ -542,32 +557,69 @@ fn aim_at_structures(
     standing: Query<&Structure>,
     block: Res<BlockTarget>,
     mut target: ResMut<StructureTarget>,
+    mut station: ResMut<StationTarget>,
 ) {
-    let picked = match (gate.may_aim(), cameras.iter().next()) {
-        (true, Some(eye)) => pick_structure(
-            eye.translation,
-            *eye.forward(),
-            block.0,
-            standing.iter().copied(),
+    let (picked, station_picked) = match (gate.may_aim(), cameras.iter().next()) {
+        (true, Some(eye)) => (
+            pick_structure(
+                eye.translation,
+                *eye.forward(),
+                block.0,
+                standing.iter().copied(),
+            ),
+            pick_station(
+                eye.translation,
+                *eye.forward(),
+                block.0,
+                standing.iter().copied(),
+            ),
         ),
-        _ => None,
+        _ => (None, None),
     };
 
     set_if_changed(&mut target, StructureTarget(picked));
+    set_if_changed(&mut station, StationTarget(station_picked));
 }
 
 /// The nearest own structure the ray enters within reach and in front of the block.
+fn pick_structure(
+    origin: Vec3,
+    direction: Vec3,
+    block: Option<super::target::BlockHit>,
+    candidates: impl Iterator<Item = Structure>,
+) -> Option<StructurePick> {
+    nearest_structure(origin, direction, block, candidates, |structure| {
+        structure.own
+    })
+}
+
+/// The nearest crafting station the ray enters within reach and in front of the block,
+/// whoever owns it — see [`StationTarget`] for why ownership is not asked.
+fn pick_station(
+    origin: Vec3,
+    direction: Vec3,
+    block: Option<super::target::BlockHit>,
+    candidates: impl Iterator<Item = Structure>,
+) -> Option<StructurePick> {
+    nearest_structure(origin, direction, block, candidates, |structure| {
+        super::station::is_craft_station(structure.kind)
+    })
+}
+
+/// The nearest structure `wanted` admits that the ray enters within reach and in front of
+/// the block.
 ///
 /// Two conditions, and they are deliberately different comparisons. **Reach** is inclusive
 /// — a structure entered exactly at the limit is within it, which is what the voxel
 /// traversal already promises for a block entered exactly at its own. **Nearer than the
 /// block** is strict, because a tie means the ray entered both at the same point and the
 /// voxel is the thing that was already there.
-fn pick_structure(
+fn nearest_structure(
     origin: Vec3,
     direction: Vec3,
     block: Option<super::target::BlockHit>,
     candidates: impl Iterator<Item = Structure>,
+    wanted: impl Fn(&Structure) -> bool,
 ) -> Option<StructurePick> {
     let behind = block.and_then(|hit| {
         let corner = hit.block.as_vec3();
@@ -576,7 +628,7 @@ fn pick_structure(
 
     let mut nearest: Option<StructurePick> = None;
     for structure in candidates {
-        if !structure.own {
+        if !wanted(&structure) {
             continue;
         }
         let (min, max) = bounds(structure.kind, structure.facing, structure.anchor);
@@ -589,6 +641,7 @@ fn pick_structure(
         if nearest.is_none_or(|held| distance < held.distance) {
             nearest = Some(StructurePick {
                 structure_id: structure.structure_id,
+                kind: structure.kind,
                 distance,
             });
         }
@@ -1953,6 +2006,36 @@ mod tests {
                 "the order the query happened to yield decided the answer"
             );
         }
+    }
+
+    /// A station is picked whoever built it, and a tent or runestone never is.
+    ///
+    /// The runestone and the tent stand *nearer* on the ray than the forge, so a filter that
+    /// let either through — or let a non-station shadow the station behind it — fails here.
+    /// The forge belongs to somebody else, which is the half removal's pick refuses.
+    #[test]
+    fn a_station_is_picked_whoever_owns_it_and_nothing_else_counts_as_one() {
+        let eye = Vec3::new(0.5, 81.62, 0.5);
+        let runestone = standing(&runestone_at(902, [2, 80, 0], LOCAL_ID));
+        let forge = standing(&forge_at(903, [4, 80, 0], OTHER_ID));
+
+        let picked = pick_station(eye, Vec3::X, None, [runestone, forge].into_iter())
+            .expect("the forge straight ahead is a station");
+        assert_eq!(
+            (picked.structure_id, picked.kind),
+            (903, StructureKind::Forge)
+        );
+        assert_eq!(
+            pick_structure(eye, Vec3::X, None, [forge].into_iter()),
+            None,
+            "somebody else's forge became a removal target"
+        );
+
+        let tent = standing(&tent_at(900, [3, 80, 0], LOCAL_ID));
+        assert_eq!(
+            pick_station(eye, Vec3::X, None, [tent, runestone].into_iter()),
+            None
+        );
     }
 
     // ---------------------------------------------------------------------------

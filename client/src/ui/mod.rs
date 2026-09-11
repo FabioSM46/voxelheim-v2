@@ -29,6 +29,7 @@ mod prompt;
 mod servers;
 mod sessions;
 mod settings;
+mod station;
 mod status;
 mod storm;
 mod text_input;
@@ -246,6 +247,7 @@ impl Plugin for UiPlugin {
                     map::MapUiPlugin,
                     instance_entry::EntryOfferUiPlugin,
                     prompt::ConfirmationPromptUiPlugin,
+                    station::StationUiPlugin,
                     trade::PlayerTradeUiPlugin,
                     vendor::VendorUiPlugin,
                 ),
@@ -525,6 +527,7 @@ fn choose_input_mode(
         && matches!(
             *mode,
             InputMode::Inventory
+                | InputMode::Station
                 | InputMode::Loot
                 | InputMode::Vendor
                 | InputMode::TradePrompt
@@ -599,6 +602,7 @@ fn choose_input_mode(
                 // one press it declines to act on is one made before the dialog was up.
                 InputMode::EntryOffer => modals.answer_entry_offer_with_escape(),
                 InputMode::Menu
+                | InputMode::Station
                 | InputMode::Loot
                 | InputMode::Vendor
                 | InputMode::Map
@@ -621,6 +625,7 @@ fn choose_input_mode(
         let next = match *mode {
             InputMode::Playing => InputMode::Inventory,
             InputMode::Inventory => InputMode::Playing,
+            InputMode::Station => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
@@ -649,6 +654,7 @@ fn choose_input_mode(
             InputMode::Playing => InputMode::Map,
             InputMode::Map => InputMode::Playing,
             InputMode::Inventory => return,
+            InputMode::Station => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
@@ -678,6 +684,7 @@ fn choose_input_mode(
             InputMode::Playing => InputMode::Sessions,
             InputMode::Sessions => InputMode::Playing,
             InputMode::Inventory => return,
+            InputMode::Station => return,
             InputMode::Loot => return,
             InputMode::Vendor => return,
             InputMode::TradePrompt => return,
@@ -2181,6 +2188,29 @@ mod tests {
         }
     }
 
+    /// A station panel is closed by `Escape` onto play, keeps the keyboard from the pack, the
+    /// map and the sessions window, and is taken by death — the loot window's rules, because
+    /// it is the same kind of surface: opened by the interact key at a thing in the world.
+    #[test]
+    fn a_station_panel_closes_on_escape_ignores_other_screens_and_dies_with_the_player() {
+        assert_eq!(
+            mode_after_key(InputMode::Station, KeyCode::Escape),
+            InputMode::Playing,
+            "escape opened the pause menu over a station panel"
+        );
+        for key in [KeyCode::KeyE, KeyCode::KeyM, KeyCode::KeyO] {
+            assert_eq!(
+                mode_after_key(InputMode::Station, key),
+                InputMode::Station,
+                "{key:?} replaced an open station panel"
+            );
+        }
+        assert_eq!(
+            mode_after_key_while(InputMode::Station, KeyCode::KeyM, LifeState::Dead),
+            InputMode::Playing
+        );
+    }
+
     /// Death takes the sessions window, exactly as it takes the map and the pack.
     ///
     /// Presentation and not a decision: a corpse owes exactly what it owed standing up, and
@@ -2382,6 +2412,7 @@ mod tests {
 
         for mode in [
             InputMode::Inventory,
+            InputMode::Station,
             InputMode::Loot,
             InputMode::Vendor,
             InputMode::Menu,
