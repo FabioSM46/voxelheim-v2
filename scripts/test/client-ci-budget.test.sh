@@ -95,21 +95,17 @@ for raw_line in run_body.splitlines():
     current = ""
 
 assert not current, "dependency run block ends with an unfinished continuation"
-expected_options = (
-    "-o Acquire::Retries=2 "
-    "-o Acquire::http::Timeout=15 "
-    "-o Acquire::https::Timeout=15"
-)
+# Since #1113 the bounded retry/timeout contract lives in the script, where
+# scripts/test/apt-install-fallback.test.sh executes it against stubbed mirrors and pins
+# its budgets inside this step's five minutes. What this step owes is the package list
+# and nothing that could swallow the script's exit status.
 expected_commands = [
-    f"sudo apt-get {expected_options} update",
-    (
-        f"sudo apt-get {expected_options} install -y --no-install-recommends "
-        "libasound2-dev libudev-dev libopus-dev pkg-config"
-    ),
+    "bash scripts/apt-install-with-fallback.sh "
+    "libasound2-dev libudev-dev libopus-dev pkg-config",
 ]
 assert commands == expected_commands, (
-    "APT update/install must keep the package list and use the bounded retry/timeout "
-    f"contract; got {commands!r}"
+    "the dependency step must call the fallback installer with the package list and "
+    f"nothing else; got {commands!r}"
 )
 
 for forbidden in ("continue-on-error:", "||", "set +e"):
@@ -153,6 +149,6 @@ assert automation_job.count(invocation) == 1, (
 print(
     "client CI budget — "
     f"dependencies={step_minutes}m job={job_minutes}m warm-up={cache_minutes}m "
-    "apt-retries=2 apt-network-timeout=15s"
+    "apt=scripts/apt-install-with-fallback.sh"
 )
 PY

@@ -95,7 +95,6 @@ STEPS = {
     "client": [
         "uses:actions/checkout",
         "Detect workspace presence",
-        "Prefer the canonical Ubuntu archive over the Azure mirror",
         "Install Bevy system dependencies",
         "uses:dtolnay/rust-toolchain",
         "uses:Swatinem/rust-cache",

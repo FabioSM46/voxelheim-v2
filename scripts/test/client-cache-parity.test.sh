@@ -139,6 +139,29 @@ assert len(warm_cargo) == len(owed), (
 )
 
 
+# ── 2b. The system dependencies ─────────────────────────────────────────────────
+# A warm-up that cannot install what the gate installs fails before it compiles
+# anything, and one that installs something else compiles against different headers.
+# Derived from ci.yml like the cargo commands: every executed line of the step, with
+# comments and blank lines dropped (#1113).
+def dependency_step(job, label):
+    step = exactly_one(
+        r"^      - name: Install Bevy system dependencies\s*$\n([\s\S]*?)"
+        r"(?=^      - (?:name:|uses:))",
+        job,
+        f"{label} dependency step",
+    )
+    return [
+        line for line in step.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+
+assert dependency_step(cache_client, "client-cache.yml") == dependency_step(
+    ci_client, "ci.yml"
+), "client-cache.yml must install the client's system dependencies exactly as ci.yml does"
+
+
 # ── 3. The triggers ─────────────────────────────────────────────────────────────
 push_paths = exactly_one(
     r"^    paths:\s*$\n((?:^      (?:-|#).*\n)+)", cache, "push paths list"
