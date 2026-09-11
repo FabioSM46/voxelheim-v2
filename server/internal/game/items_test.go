@@ -57,6 +57,34 @@ func TestTheRunestoneCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
 	}
 }
 
+// The three benches are appended after the horse tokens, and each is a structure item on
+// the forge's terms: no block, one to a slot, and every other column its documented zero.
+func TestTheThreeCraftingBenchesCarryTheirAppendedIDsAndRegistryRows(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		item ItemID
+		want ItemID
+	}{
+		{"leather bench", ItemLeatherBench, 44},
+		{"armour bench", ItemArmourBench, 45},
+		{"enchanting table", ItemEnchantingTable, 46},
+	} {
+		if tc.item != tc.want {
+			t.Errorf("%s item id = %d, want appended wire id %d", tc.name, tc.item, tc.want)
+		}
+		got, registered := itemByID(tc.item)
+		if !registered {
+			t.Errorf("the %s is not registered", tc.name)
+			continue
+		}
+		if want := (itemDefinition{places: world.Air, maxStack: 1}); got != want {
+			t.Errorf("%s registry row = %+v, want %+v", tc.name, got, want)
+		}
+	}
+}
+
 func TestPalmLogCarriesItsAppendedIDAndRegistryRow(t *testing.T) {
 	t.Parallel()
 

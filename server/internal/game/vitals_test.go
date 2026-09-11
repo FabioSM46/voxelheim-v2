@@ -544,6 +544,13 @@ func TestEveryInventoryMutationRefreshesTheWornSummary(t *testing.T) {
 				life := lifeWearing(t, pos, fullTestArmour(ItemLeatherCap))
 				life.Slots[1] = protocol.InventoryStack{ItemID: uint16(ItemVargrPelt), Count: 3}
 				player, _ := h.joinLife(1, pos, &life)
+				// The cap is made at a leather bench since #1119; one stands under the player.
+				h.sim.mu.Lock()
+				h.sim.structures[901] = &structure{
+					structureID: 901, kind: vnet.StructureKindLeatherBench,
+					owner: player.playerID, anchor: [3]int32{0, 63, 0},
+				}
+				h.sim.mu.Unlock()
 				poisonWornSummary(player)
 				if _, err := player.Craft(protocol.CraftRequest{Recipe: vnet.RecipeIDLeatherCap}); err != nil {
 					t.Fatalf("Craft: %v", err)

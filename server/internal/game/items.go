@@ -145,6 +145,14 @@ const (
 	ItemBlackHorse
 	ItemBrownHorse
 	ItemGreyHorse
+
+	// The three crafting benches the GDD names beside the forge: where hides become
+	// leather gear, where plate is fitted into armour, and where a sceptre is bound.
+	// Appended because item ids cross the wire and are persisted in inventories. Each
+	// plants an entity rather than a voxel, on exactly the forge's terms.
+	ItemLeatherBench
+	ItemArmourBench
+	ItemEnchantingTable
 )
 
 // What each blade is worth, and the only copy of it.
@@ -213,9 +221,9 @@ const (
 	//
 	// Forty against the stone's fifty, and the gap is deliberately small — it is not what
 	// separates them. GDD §4 gives the game two field kits and the difference between
-	// them is where they come from: a stone is made at a forge out of stone and coal,
-	// which is a walk back to camp; a patch is made anywhere out of two pelts, which is
-	// something that had to be hunted. A multiplier would make one of them the answer and
+	// them is where they come from: a stone is made at a forge out of stone and coal; a
+	// patch is made at a leather bench out of two pelts, which is something that had to be
+	// hunted. A multiplier would make one of them the answer and
 	// the other a mistake. Forty and fifty make them two answers to the same question,
 	// chosen by what the player has on them rather than by which is better.
 	LeatherPatchRestore uint16 = 40
@@ -362,6 +370,14 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemRunestone: {places: world.Air, maxStack: 1},
 	ItemPalmLog:   {places: world.PalmLog, maxStack: 64},
 
+	// The three benches, on the forge's terms: no block, one to a slot, nothing that wears
+	// out. Which recipes each one serves is the recipe table's `station` column and its
+	// working radius is craftRadius — facts about the *placed* bench, so no column here
+	// says either.
+	ItemLeatherBench:    {places: world.Air, maxStack: 1},
+	ItemArmourBench:     {places: world.Air, maxStack: 1},
+	ItemEnchantingTable: {places: world.Air, maxStack: 1},
+
 	// One token is one horse learned. They stack with nothing so buying a second is a
 	// visible second object which can survive the duplicate-learning refusal intact.
 	ItemBlackHorse: {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindBlackHorse},
@@ -387,7 +403,7 @@ var itemRegistry = map[ItemID]itemDefinition{
 	// thing separating two otherwise identical rows: a bone is a small thing to carry a
 	// lot of, and a hide is not.
 	//
-	// Bones now have their first sink: the stationless arrow recipe. They remain ordinary
+	// Bones have two sinks: the forge's arrow recipe and the enchanting table's sceptre. They remain ordinary
 	// resources here; the recipe owns how they are spent and the inventory owns the stack.
 	ItemBone:      {places: world.Air, maxStack: 64},
 	ItemVargrPelt: {places: world.Air, maxStack: 16},

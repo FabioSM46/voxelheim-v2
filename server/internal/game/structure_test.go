@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"sync"
 	"testing"
 
@@ -228,6 +229,9 @@ func TestStructureItemsCarryThePinnedIdsAndPlaceNoBlock(t *testing.T) {
 		{"Forge", ItemForge, 8},
 		{"Tent", ItemTent, 9},
 		{"Campfire", ItemCampfire, 12},
+		{"LeatherBench", ItemLeatherBench, 44},
+		{"ArmourBench", ItemArmourBench, 45},
+		{"EnchantingTable", ItemEnchantingTable, 46},
 	} {
 		if tc.item != tc.want {
 			t.Errorf("%s = %d, want %d", tc.name, tc.item, tc.want)
@@ -337,6 +341,48 @@ func TestTheCampfireRestsOnOneCellWhicheverWayItFaces(t *testing.T) {
 	}
 }
 
+// Each bench's ground and headroom, at every facing. The two tables are the forge's two
+// cells along the facing; the lectern is one cell. The headrooms are pinned by value
+// rather than by constant, so a change to one is a decision this test has to be told
+// about rather than one it follows.
+func TestEachBenchRestsOnItsOwnFootprintAndHeadroom(t *testing.T) {
+	t.Parallel()
+
+	anchor := [3]int64{4, 63, 7}
+	along := map[vnet.Facing][3]int64{
+		vnet.FacingNorth: {4, 63, 6},
+		vnet.FacingEast:  {5, 63, 7},
+		vnet.FacingSouth: {4, 63, 8},
+		vnet.FacingWest:  {3, 63, 7},
+	}
+	for _, tc := range []struct {
+		kind     vnet.StructureKind
+		headroom int64
+		long     bool
+	}{
+		{vnet.StructureKindLeatherBench, 1, true},
+		{vnet.StructureKindArmourBench, 2, true},
+		{vnet.StructureKindEnchantingTable, 2, false},
+	} {
+		for facing, second := range along {
+			cells, headroom, ok := footprintOf(tc.kind, facing, anchor)
+			if !ok {
+				t.Fatalf("%s facing %s has no footprint", tc.kind, facing)
+			}
+			if headroom != tc.headroom {
+				t.Errorf("%s facing %s: headroom %d, want %d", tc.kind, facing, headroom, tc.headroom)
+			}
+			want := [][3]int64{anchor}
+			if tc.long {
+				want = append(want, second)
+			}
+			if !slices.Equal(cells, want) {
+				t.Errorf("%s facing %s: footprint %v, want %v", tc.kind, facing, cells, want)
+			}
+		}
+	}
+}
+
 func containsCell(cells [][3]int64, want [3]int64) bool {
 	for _, cell := range cells {
 		if cell == want {
@@ -364,6 +410,9 @@ func TestAStructureIsPlantedOnGroundThatHoldsItAtEveryFacing(t *testing.T) {
 		{"forge", ItemForge, vnet.StructureKindForge},
 		{"campfire", ItemCampfire, vnet.StructureKindCampfire},
 		{"runestone", ItemRunestone, vnet.StructureKindRunestone},
+		{"leather bench", ItemLeatherBench, vnet.StructureKindLeatherBench},
+		{"armour bench", ItemArmourBench, vnet.StructureKindArmourBench},
+		{"enchanting table", ItemEnchantingTable, vnet.StructureKindEnchantingTable},
 	} {
 		for _, facing := range []vnet.Facing{vnet.FacingNorth, vnet.FacingEast, vnet.FacingSouth, vnet.FacingWest} {
 			h := newStructureHarness(t)
@@ -900,6 +949,9 @@ func TestBreakingAnySupportingBlockCollapsesTheStructure(t *testing.T) {
 		{"forge", ItemForge, vnet.StructureKindForge},
 		{"campfire", ItemCampfire, vnet.StructureKindCampfire},
 		{"runestone", ItemRunestone, vnet.StructureKindRunestone},
+		{"leather bench", ItemLeatherBench, vnet.StructureKindLeatherBench},
+		{"armour bench", ItemArmourBench, vnet.StructureKindArmourBench},
+		{"enchanting table", ItemEnchantingTable, vnet.StructureKindEnchantingTable},
 	} {
 		anchor := [3]int64{0, 63, 0}
 		cells, _, _ := footprintOf(kind.wanted, vnet.FacingNorth, anchor)

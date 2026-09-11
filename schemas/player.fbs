@@ -209,7 +209,16 @@ enum RecipeID : ubyte {
   // V26. The runestone that wards ground, appended at the tail for the reason every
   // member above was: the value is a byte on the wire, and a renumbering turns every
   // craft a client asks for into a different one.
-  Runestone = 21
+  Runestone = 21,
+
+  // V39. The three crafting stations the GDD names beside the forge, each built by hand
+  // with no station of its own — a bench is the thing you make before you have one, as
+  // the forge is. Appended at the tail for the reason every member above was. These owe
+  // no bump on their own: an unknown recipe is refused by the authoritative server as an
+  // ordinary silence. `StructureKind`'s three new members are what move the version.
+  LeatherBench = 22,
+  ArmourBench = 23,
+  EnchantingTable = 24
 }
 
 /// A player trying to craft one recipe. Client -> server, and intent only.
@@ -1629,7 +1638,17 @@ enum StructureKind : ubyte {
   /// A planted stone that wards the ground around it. V26, and **this member is what makes
   /// V26 a break**: `StructureState.kind` is refused rather than dropped when a receiver
   /// cannot name it, and refusing ends the session. See `common.fbs`.
-  Runestone = 4
+  Runestone = 4,
+
+  /// Where hides are worked into leather gear. V39, and a break on the runestone's
+  /// argument: a receiver that cannot name it refuses the `StructureState` carrying it.
+  LeatherBench = 5,
+
+  /// Where forged plate is fitted into armour. V39, on the same terms as `LeatherBench`.
+  ArmourBench = 6,
+
+  /// Where a sceptre is carved and bound. V39, on the same terms as `LeatherBench`.
+  EnchantingTable = 7
 }
 
 /// One placed structure's authoritative state in a snapshot.
