@@ -2001,9 +2001,9 @@ GDD-level architecture, and each gets the sentence that justifies it:
   `docs/adr/0003-system-clipboard.md`; on the Linux target it adds one package and no system
   library.
 
-The last two are **declared and not yet consumed**: #851 lands them ahead of the audio module
-that uses them, so the lockfile and the CI package list move once rather than once per pull
-request. The budget is spent when the decision is taken and not when the line is added, which
+`cpal` and `audiopus` were **declared before they were consumed**: #851 landed them ahead of the
+audio module that now uses them (`audio/device.rs` and `audio/codec.rs`), so the lockfile and the
+CI package list moved once rather than once per pull request. The budget is spent when the decision is taken and not when the line is added, which
 is the whole point of asking for a discussion first — and the decision is
 `docs/adr/0001-voice-transport.md`.
 
