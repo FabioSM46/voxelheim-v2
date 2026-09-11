@@ -41,7 +41,17 @@ const (
 
 	// playtestLimitSeconds ends a fight that has not finished. Far beyond the approved
 	// design's longest intended fight, so reaching it is a finding and not a budget.
-	playtestLimitSeconds = 900
+	//
+	// **It was 900 until #1127's energy economy, and the move is that finding, recorded.**
+	// Attacks cost 25 of a reserve refilling 12.5 a second, so a player swinging whenever
+	// the blade allows sustains 0.5 swings a second rather than the cooldown's 1.67. The
+	// always-run reader, solo in the starter kit, measured at no delay: the Draugr King
+	// went from 562.9 s with the costs waived to 1312.9 s with them, and the Vargr
+	// Guardian from 343.4 s to 840.8 s. Every hit, escape and wipe assertion still holds
+	// over the longer fight; only the clock ran out. Whether a solo starter-kit King
+	// should take twenty-two minutes is a balance question for the owner, not for this
+	// constant.
+	playtestLimitSeconds = 1800
 
 	// playtestMargin is the room a reader keeps between its body and a believed boundary,
 	// in blocks: a body stopped on a boundary is inside it after any non-tangential step.

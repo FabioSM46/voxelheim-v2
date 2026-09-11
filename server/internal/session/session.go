@@ -2097,8 +2097,7 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 				"client_tick", msg.Attack.ClientTick,
 			)
 			if reason != vnet.RefusalReasonUnknown {
-				refusal := protocol.ActionRefused{Action: vnet.RefusedActionAttack, Reason: reason}
-				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+				if sErr := send(protocol.EncodeActionRefused(attackRefusal(reason))); sErr != nil {
 					return fmt.Errorf("session: send attack refusal: %w", sErr)
 				}
 			}
@@ -2983,4 +2982,17 @@ func (r *Registry) CloseAll() {
 		// state we want it in.
 		_ = conn.Close()
 	}
+}
+
+// attackRefusal names the action an actionable attack refusal is answered under.
+//
+// A starved swing is `Energy` rather than `Attack`: the energy display is the surface that
+// explains it, and `Attack` keeps meaning a refusal about what is in the hand — today the
+// launcher with no ammunition. The reason travels unchanged either way.
+func attackRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
+	action := vnet.RefusedActionAttack
+	if reason == vnet.RefusalReasonNotEnoughEnergy {
+		action = vnet.RefusedActionEnergy
+	}
+	return protocol.ActionRefused{Action: action, Reason: reason}
 }
