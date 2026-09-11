@@ -157,9 +157,10 @@ impl Call {
             Self::Crow => (0.025, 0.28, 0.05, 0.12),
             Self::Eagle => (0.015, 0.4, 0.0, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
-            // The attack peaks on the second pulse and the decay closes on the null after
-            // the last counted one, so `chirps(seed)` pulses sound, each softer than the one
-            // before. The first pulse, under the attack ramp, is a faint lead-in.
+            // The tones below pulse at t = n / rate. The attack peaks on the pulse at 1 / rate
+            // and the decay reaches zero on the peak of the pulse at (chirps + 1) / rate, so
+            // `chirps(seed)` pulses sound, each softer than the one before. The pulse at t = 0
+            // rises under the attack ramp: a faint lead-in, under a tenth of the loudest.
             Self::Cricket => {
                 let rate = chirp_rate(seed);
                 (1.0 / rate, chirps(seed) as f32 / rate, 0.0, 0.02)
@@ -345,5 +346,31 @@ mod tests {
             }
         }
         assert_eq!(seen, [true; 3], "every chirp count occurs");
+    }
+
+    #[test]
+    fn the_cricket_envelope_ends_on_a_pulse_peak_inside_the_baked_call() {
+        // The longest call, three chirps at the slowest rate, reaches zero at 4 / 3.2 s.
+        // The 0.02 s release is the buffer's last, so the two must not overlap.
+        let seconds = Call::Cricket.profile().seconds;
+        assert!(4.0 / 3.2 + 0.02 <= seconds);
+        for seed in 0..60u64 {
+            let seed = super::super::controller::scramble(seed);
+            let rate = chirp_rate(seed);
+            assert!((chirps(seed) + 1) as f32 / rate + 0.02 <= seconds);
+            let call = Call::Cricket
+                .description(seed)
+                .bake(seconds, 48000, seed)
+                .unwrap();
+            let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |p, v| v.abs().max(p));
+            let loudest = peak(call.samples());
+            // The pulse at t = 0 rises under the attack ramp: x·cos⁴(πx) peaks near 0.095
+            // over its half period, so it is faint rather than silent.
+            let lead_in = peak(&call.samples()[..(0.5 / rate * 48000.0) as usize]);
+            assert!(
+                lead_in > loudest * 0.05 && lead_in < loudest * 0.15,
+                "seed {seed}: lead-in {lead_in} of {loudest}"
+            );
+        }
     }
 }
