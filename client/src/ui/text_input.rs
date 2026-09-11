@@ -15,15 +15,21 @@
 //! keyboard would have there. Modifiers are the one thing read from physical keys, because
 //! `Shift` and `Control` are held rather than typed and `ButtonInput<KeyCode>` is where held
 //! state lives.
+//!
+//! **Copy, cut and paste go through [`TextClipboard`]**, never through a platform crate, so a
+//! test types into a field against an in-memory clipboard in the same build the game ships.
 
 use std::ops::Range;
 
+use bevy::ecs::system::SystemParam;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::{ButtonInput, ButtonState};
 use bevy::prelude::{
-    Bundle, ChildSpawnerCommands, Color, Component, DetectChangesMut, KeyCode, Mut,
+    Bundle, ChildSpawnerCommands, Color, Component, DetectChangesMut, KeyCode, Mut, Res, ResMut,
     TextBackgroundColor, TextColor, TextFont, TextSpan,
 };
+
+use super::clipboard::TextClipboard;
 
 /// What one key press meant for the line it was typed into.
 ///
@@ -66,6 +72,29 @@ impl Modifiers {
             shift: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
             control: !alt && keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]),
         }
+    }
+}
+
+/// What a system reading keys into a field needs besides the keys: what is held, and the clipboard.
+///
+/// Both are optional, so an app built without `InputPlugin` or without `UiPlugin` still types:
+/// with no modifiers it has no shortcuts, and with no clipboard a paste is nothing.
+#[derive(SystemParam)]
+pub(super) struct FieldInput<'w> {
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+    clipboard: Option<ResMut<'w, TextClipboard>>,
+}
+
+impl FieldInput<'_> {
+    /// Applies one keyboard event to `field`; see [`TextField::apply_key`].
+    pub(super) fn apply(
+        &mut self,
+        field: &mut TextField,
+        key: &KeyboardInput,
+        limit: usize,
+    ) -> Option<TextEdit> {
+        let modifiers = Modifiers::held(self.keys.as_deref());
+        field.apply_key(key, modifiers, self.clipboard.as_deref_mut(), limit)
     }
 }
 
@@ -136,6 +165,7 @@ impl TextField {
         &mut self,
         key: &KeyboardInput,
         modifiers: Modifiers,
+        clipboard: Option<&mut TextClipboard>,
         limit: usize,
     ) -> Option<TextEdit> {
         if key.state != ButtonState::Pressed {
@@ -160,7 +190,9 @@ impl TextField {
             Key::End => self.move_cursor(self.text.len(), modifiers.shift),
             // A letter under `Control` is a shortcut or it is nothing: `Control+V` typing a
             // `v` is the one answer that is certainly wrong.
-            Key::Character(letter) if modifiers.control => return self.shortcut(letter),
+            Key::Character(letter) if modifiers.control => {
+                return self.shortcut(letter, clipboard, limit);
+            }
             Key::Space if modifiers.control => return None,
             Key::Space => self.insert(" ", limit),
             Key::Character(text) => self.insert(text, limit),
@@ -169,17 +201,41 @@ impl TextField {
         Some(TextEdit::Typed)
     }
 
-    /// Answers one `Control` + letter.
+    /// Answers one `Control` + letter: select-all, copy, cut and paste.
     ///
     /// The letter is compared without case, because `Shift` held as well turns the logical
     /// key upper-case and `Control+Shift+A` is still select-all.
-    fn shortcut(&mut self, letter: &str) -> Option<TextEdit> {
-        if letter.eq_ignore_ascii_case("a") {
-            self.cursor = self.text.len();
-            self.selection = (!self.text.is_empty()).then_some(0..self.text.len());
-            return Some(TextEdit::Typed);
+    ///
+    /// **A cut deletes only what reached the clipboard.** A cut whose copy failed would
+    /// otherwise throw the player's text away with nowhere to paste it back from. A paste meets
+    /// exactly the rules typing meets, because it is the same [`Self::insert`].
+    fn shortcut(
+        &mut self,
+        letter: &str,
+        clipboard: Option<&mut TextClipboard>,
+        limit: usize,
+    ) -> Option<TextEdit> {
+        match letter.to_ascii_lowercase().as_str() {
+            "a" => {
+                self.cursor = self.text.len();
+                self.selection = (!self.text.is_empty()).then_some(0..self.text.len());
+            }
+            "c" | "x" => {
+                if let (Some(selection), Some(clipboard)) = (self.selection.clone(), clipboard)
+                    && clipboard.copy(&self.text[selection])
+                    && letter.eq_ignore_ascii_case("x")
+                {
+                    self.delete_selection();
+                }
+            }
+            "v" => {
+                if let Some(text) = clipboard.and_then(TextClipboard::paste) {
+                    self.insert(&text, limit);
+                }
+            }
+            _ => return None,
         }
-        None
+        Some(TextEdit::Typed)
     }
 
     /// Inserts `typed` at the cursor, over the selection, as far as `limit` allows.
@@ -402,6 +458,8 @@ mod tests {
     use bevy::input::keyboard::NativeKeyCode;
     use bevy::prelude::*;
 
+    use crate::ui::clipboard::{FailingClipboard, MemoryClipboard};
+
     const SHIFT: Modifiers = Modifiers {
         shift: true,
         control: false,
@@ -433,7 +491,7 @@ mod tests {
         keys: &[Key],
     ) -> Vec<Option<TextEdit>> {
         keys.iter()
-            .map(|key| field.apply_key(&press(key.clone()), modifiers, limit))
+            .map(|key| field.apply_key(&press(key.clone()), modifiers, None, limit))
             .collect()
     }
 
@@ -475,7 +533,7 @@ mod tests {
         let mut line = TextField::default();
         let mut key = press(character("a"));
         key.state = ButtonState::Released;
-        assert_eq!(line.apply_key(&key, Modifiers::default(), 32), None);
+        assert_eq!(line.apply_key(&key, Modifiers::default(), None, 32), None);
         assert!(line.text().is_empty(), "a key coming back up types nothing");
     }
 
@@ -694,7 +752,7 @@ mod tests {
     #[test]
     fn a_letter_under_control_is_never_text() {
         let mut line = field("x");
-        let answers = held(&mut line, CONTROL, 32, &[character("v"), Key::Space]);
+        let answers = held(&mut line, CONTROL, 32, &[character("q"), Key::Space]);
         assert_eq!(answers, [None, None]);
         assert_eq!(line.text(), "x");
     }
@@ -737,6 +795,67 @@ mod tests {
         );
     }
 
+    fn shortcut(
+        field: &mut TextField,
+        clipboard: &mut TextClipboard,
+        limit: usize,
+        letter: &str,
+    ) -> Option<TextEdit> {
+        field.apply_key(&press(character(letter)), CONTROL, Some(clipboard), limit)
+    }
+
+    #[test]
+    fn paste_goes_in_at_the_cursor_and_over_the_selection() {
+        let mut clipboard = TextClipboard::with(MemoryClipboard::holding("X 40 | Z -12"));
+        let mut line = field("mark ");
+        assert_eq!(
+            shortcut(&mut line, &mut clipboard, 64, "v"),
+            Some(TextEdit::Typed)
+        );
+        assert_eq!(line.text(), "mark X 40 | Z -12");
+
+        held(&mut line, SHIFT, 64, &[const { Key::ArrowLeft }; 12]);
+        let mut home = TextClipboard::with(MemoryClipboard::holding("home"));
+        shortcut(&mut line, &mut home, 64, "V");
+        assert_eq!((line.text(), line.selection()), ("mark home", None));
+    }
+
+    /// The bound a paste meets is the one typing meets: bytes, whole characters, no controls.
+    #[test]
+    fn a_paste_is_cut_at_the_last_whole_character_and_loses_its_newlines() {
+        let mut clipboard =
+            TextClipboard::with(MemoryClipboard::holding("ab\ncd\u{7}\u{20ac}\u{20ac}"));
+        let mut line = field("x");
+        shortcut(&mut line, &mut clipboard, 9, "v");
+        // "xabcd" is five bytes and one euro makes eight; the second would make eleven.
+        assert_eq!(line.text(), "xabcd\u{20ac}");
+    }
+
+    #[test]
+    fn copy_and_cut_take_the_selection_and_a_cut_deletes_only_what_was_copied() {
+        let mut clipboard = TextClipboard::with(MemoryClipboard::default());
+        let mut line = field("northwest");
+        shortcut(&mut line, &mut clipboard, 32, "c");
+        assert_eq!(clipboard.paste(), None, "nothing selected, nothing copied");
+
+        held(&mut line, SHIFT, 32, &[const { Key::ArrowLeft }; 4]);
+        shortcut(&mut line, &mut clipboard, 32, "c");
+        assert_eq!(line.text(), "northwest", "a copy leaves the line alone");
+        assert_eq!(clipboard.paste().as_deref(), Some("west"));
+        shortcut(&mut line, &mut clipboard, 32, "x");
+        assert_eq!((line.text(), line.selection()), ("north", None));
+
+        let mut broken = TextClipboard::with(FailingClipboard);
+        let mut kept = field("northwest");
+        held(&mut kept, SHIFT, 32, &[const { Key::ArrowLeft }; 4]);
+        shortcut(&mut kept, &mut broken, 32, "x");
+        assert_eq!(
+            kept.text(),
+            "northwest",
+            "a cut the clipboard refused deletes nothing"
+        );
+    }
+
     fn texts(pieces: &FieldPieces) -> [&str; FIELD_SPANS] {
         [0, 1, 2, 3].map(|index| pieces[index].0.as_str())
     }
@@ -765,6 +884,29 @@ mod tests {
         assert_eq!(
             texts(&TextField::default().pieces(true)),
             ["", CARET, "", ""]
+        );
+    }
+
+    #[test]
+    fn a_failing_empty_or_missing_clipboard_changes_nothing_and_the_field_keeps_working() {
+        for mut clipboard in [
+            TextClipboard::with(FailingClipboard),
+            TextClipboard::with(MemoryClipboard::default()),
+        ] {
+            let mut line = field("cold");
+            held(&mut line, SHIFT, 32, &[Key::Home]);
+            shortcut(&mut line, &mut clipboard, 32, "v");
+            assert_eq!((line.text(), line.selection()), ("cold", Some(0..4)));
+            typed(&mut line, 32, &[character("warm")]);
+            assert_eq!(line.text(), "warm", "and the next key still types");
+        }
+
+        let mut line = field("cold");
+        line.apply_key(&press(character("v")), CONTROL, None, 32);
+        assert_eq!(
+            line.text(),
+            "cold",
+            "an app with no clipboard pastes nothing"
         );
     }
 

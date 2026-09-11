@@ -1631,7 +1631,7 @@ it something the embedded font can draw.
 
 **The signal processing is hand-written, and the dependency budget is why.** `audio/dsp.rs`
 holds a resampler, a noise gate, a slow automatic gain control and a level meter — two
-hundred lines of arithmetic that would otherwise be a sixth crate, which
+hundred lines of arithmetic that would otherwise be a seventh crate, which
 `docs/adr/0001-voice-transport.md` declines. Two rules bind it. It runs on the Bevy schedule
 and never in a callback, so it may allocate, and it is still written to reuse its buffers
 rather than allocate sixty times a second. And a level is presentation like everything else
@@ -1983,7 +1983,7 @@ and the `go` directive in `server/go.mod`. CI pins the matching
 the channel and every workflow action pin together. `Cargo.lock` is committed and every gate
 runs `--locked`.
 
-**Five dependencies: `bevy`, `flatbuffers`, `rustls`, `cpal` and `audiopus`.** Each is
+**Six dependencies: `bevy`, `flatbuffers`, `rustls`, `cpal`, `audiopus` and `arboard`.** Each is
 GDD-level architecture, and each gets the sentence that justifies it:
 
 - **`bevy`** — the engine. ECS, windowing and the wgpu renderer the whole client is built on.
@@ -1995,10 +1995,15 @@ GDD-level architecture, and each gets the sentence that justifies it:
   and `bevy_audio` cannot open one at all.
 - **`audiopus`** — libopus, for the proximity voice codec, linked against the system
   `libopus-dev` through `pkg-config` rather than compiled from vendored source with cmake.
+- **`arboard`** — the system clipboard, for `Control+C` / `X` / `V` in text fields. winit has no
+  clipboard, and it is reached only through the `Clipboard` trait in `ui/clipboard.rs`, so a test
+  pastes from memory in the same build the game ships. Decided in
+  `docs/adr/0003-system-clipboard.md`; on the Linux target it adds one package and no system
+  library.
 
-The last two are **declared and not yet consumed**: #851 lands them ahead of the audio module
-that uses them, so the lockfile and the CI package list move once rather than once per pull
-request. The budget is spent when the decision is taken and not when the line is added, which
+`cpal` and `audiopus` were **declared before they were consumed**: #851 landed them ahead of the
+audio module that now uses them (`audio/device.rs` and `audio/codec.rs`), so the lockfile and the
+CI package list moved once rather than once per pull request. The budget is spent when the decision is taken and not when the line is added, which
 is the whole point of asking for a discussion first — and the decision is
 `docs/adr/0001-voice-transport.md`.
 
@@ -2012,14 +2017,14 @@ client is not built for. On this target the graph grows by **six** — `cpal`, `
 build dependencies included, goes from 315 to 330; the extra nine are `audiopus_sys`'s build
 scripts, `cmake` among them as a *crate* even on the path that never invokes the binary.
 
-A sixth needs a discussion before a commit — in particular there is still no async runtime and
+A seventh needs a discussion before a commit — in particular there is still no async runtime and
 no networking framework here, by design: `std::net` plus `std::sync::mpsc` on one thread is the
 whole netcode substrate, and it is enough. That rule is why the two audio crates were argued on
 the record before either was added: **`docs/adr/0001-voice-transport.md`** is that argument. It decides that voice rides the existing TLS stream instead of an SFU beside the
 server — which is what keeps the count at five rather than at five plus a WebRTC stack and the
 async runtime under it — names `cpal` and `audiopus` as the two this costs, says why
 `bevy_audio` is not one of them, and carries the measurement the decision rests on. Read it
-before proposing a sixth crate for audio; it probably already says no, and says why.
+before proposing another crate for audio; it probably already says no, and says why.
 
 That budget is also why signing in brought no crate with it: opening a browser is `xdg-open`
 through `std::process::Command`, the loopback listener is `std::net`, and the HTTP, JSON,

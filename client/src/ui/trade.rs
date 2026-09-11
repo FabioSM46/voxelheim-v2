@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 use super::text_input::{
-    FieldPieces, FieldSpan, Modifiers, TextEdit, TextField, paint_span, spawn_field_spans,
+    FieldInput, FieldPieces, FieldSpan, TextEdit, TextField, paint_span, spawn_field_spans,
 };
 use super::{BUTTON, CELL_EDGE, button_colour, cell_node, icon, stack_style};
 use crate::net::{InventoryStack, PLAYER_TRADE_SLOTS, PlayerTradeSlot, Session};
@@ -388,7 +388,7 @@ fn edit_silver(
     window: Res<PlayerTradeWindow>,
     mut draft: ResMut<SilverDraft>,
     mut keys: MessageReader<KeyboardInput>,
-    held: Option<Res<ButtonInput<KeyCode>>>,
+    mut field: FieldInput,
     mut fields: Query<(&Interaction, &mut BackgroundColor), With<SilverField>>,
     mut labels: SilverSpans,
     mut clicks: MessageWriter<PlayerTradeClick>,
@@ -418,9 +418,8 @@ fn edit_silver(
 
     let mut submit = false;
     if draft.focused {
-        let modifiers = Modifiers::held(held.as_deref());
         for event in &events {
-            match draft.line.apply_key(event, modifiers, 10) {
+            match field.apply(&mut draft.line, event, 10) {
                 Some(TextEdit::Typed) => keep_digits(&mut draft.line),
                 Some(TextEdit::Submitted) => submit = true,
                 Some(TextEdit::Cancelled) | None => {}

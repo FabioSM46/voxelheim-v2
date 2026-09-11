@@ -75,7 +75,9 @@ use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
-use super::text_input::{FieldSpan, Modifiers, TextEdit, TextField, paint_span, spawn_field_spans};
+use super::text_input::{
+    FieldInput, FieldSpan, TextEdit, TextField, paint_span, spawn_field_spans,
+};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, Landmark, LandmarkList, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn,
@@ -2424,11 +2426,11 @@ fn click_the_map(
 /// The reading is `ui/text_input.rs`'s, shared with chat; the bound is the server's, mirrored
 /// so a note that could not be stored is one the field would not take rather than one the
 /// server has to refuse.
-#[allow(clippy::too_many_arguments)] // The held modifiers are the eighth input to one reader.
+#[allow(clippy::too_many_arguments)] // The field's keys and clipboard are the eighth input.
 fn type_the_note(
     current: Option<Res<crate::world::transition::CurrentWorld>>,
     mut typed: MessageReader<KeyboardInput>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut field: FieldInput,
     screen: Res<MapScreen>,
     mut form: ResMut<MarkerForm>,
     mut ticks: ResMut<MarkerTick>,
@@ -2449,12 +2451,11 @@ fn type_the_note(
         typed.clear();
         return;
     }
-    let modifiers = Modifiers::held(keys.as_deref());
     for key in typed.read() {
         let Some(draft) = form.0.as_mut() else {
             break;
         };
-        match draft.note.apply_key(key, modifiers, MARKER_NOTE_MAX_BYTES) {
+        match field.apply(&mut draft.note, key, MARKER_NOTE_MAX_BYTES) {
             Some(TextEdit::Cancelled) => {
                 form.0 = None;
                 return;
