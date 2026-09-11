@@ -116,9 +116,7 @@ pub use codec::{
 // it is allowed to spell. The answer's encoder is here too and nothing calls it yet —
 // the dialog that does is the only thing left to write.
 #[allow(unused_imports)]
-pub use codec::{
-    InstanceEntryAnswer, InstanceEntryOffer, encode_instance_entry_answer, encode_portal_request,
-};
+pub use codec::{InstanceEntryAnswer, InstanceEntryOffer, encode_instance_entry_answer};
 
 // `PlayerToken` itself is deliberately not re-exported: outside this module the
 // token is a field nobody reads, and a name nothing outside `net` can spell is a
