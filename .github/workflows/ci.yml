@@ -245,83 +245,22 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "client/ is not scaffolded at this ref — nothing to verify."
           fi
-      - name: Prefer the canonical Ubuntu archive over the Azure mirror
-        if: ${{ steps.ws.outputs.present == 'true' }}
-        # Every APT source on a hosted runner resolves through a mirrorlist, and
-        # azure.archive.ubuntu.com is the entry it reaches for first. When that
-        # host stops answering, every index fetch below waits out its timeout and
-        # the install expires with nothing fetched — three consecutive runs on
-        # legacy PR 120, on a diff that touched no workflow and no dependency, while
-        # archive.ubuntu.com answered in the same logs.
-        #
-        # **Its own step, and that is not tidiness.** The step below is a pinned
-        # contract: scripts/test/client-ci-budget.test.sh asserts its run block is
-        # exactly the two bounded apt-get commands and nothing else, comments
-        # included. That pin is worth keeping exactly as strict as it is, so the
-        # repair goes beside it rather than inside it.
-        #
-        # **Repointed rather than deleted**, which is the safe half. The
-        # mirrorlist's shape belongs to the runner image: one URI per line today,
-        # and a line-wise delete silently does nothing if that ever becomes
-        # several to a line. Rewriting the host works on either shape and can
-        # never leave APT with no source at all, which would be a worse failure
-        # than the one being fixed. A repeated URI is the only cost, and the
-        # mirror method tolerates one.
-        #
-        # Matched on the host, so no other mirror in the file (security.ubuntu.com,
-        # ports.ubuntu.com) is touched.
-        #
-        # **Repointed to https, and given a second host** (#1107). The first
-        # version of this step moved the host and kept the image's http scheme,
-        # leaving http://archive.ubuntu.com at priority 1. On 2026-09-11 that port
-        # stopped answering from the runners and three client jobs spent their five
-        # minutes in 33-second index timeouts on it. Moving to https was not enough
-        # on its own: the next run's indexes took four minutes of retries over
-        # https, and every package download from archive.ubuntu.com then timed out.
-        # After this repoint every Ubuntu entry is that one host, so there was
-        # nothing to fail over to.
-        #
-        # mirrors.edge.kernel.org carries the full Ubuntu archive with Ubuntu's
-        # signed InRelease files, so APT still verifies every package against
-        # Ubuntu's key and the mirror adds a route, not trust. It goes in once,
-        # at priority 2: after the repointed archive entry at priority 1, and
-        # level with the image's own archive entry, which APT orders at random.
-        # APT's mirror method moves to the next mirror when a file fails.
-        #
-        # Priority 4, after every image entry, was too late. A failing file costs
-        # 15 seconds per attempt (Acquire::https::Timeout), and three attempts on
-        # degraded hosts per file, across four index suites and four packages,
-        # spend the step's five minutes before the mirror is reached. At
-        # priority 2 a file fails over after one or two attempts.
-        run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
-            if ! grep -q '^https://mirrors\.edge\.kernel\.org/ubuntu/' /etc/apt/apt-mirrors.txt; then
-              if [ -n "$(tail -c1 /etc/apt/apt-mirrors.txt)" ]; then
-                echo | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-              fi
-              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-            fi
-            echo "APT mirrors after repointing the Azure entry:"
-            cat /etc/apt/apt-mirrors.txt
-          fi
       - name: Install Bevy system dependencies
         if: ${{ steps.ws.outputs.present == 'true' }}
-        # Bound both the whole step and each APT network operation: an
-        # unresponsive hosted-runner mirror must fail before consuming the
-        # separate budget reserved for the Rust gates.
+        # One script, called identically by every workflow that installs these packages
+        # (ci.yml, integration.yml, client-cache.yml). It probes the Ubuntu mirrors,
+        # lists only the ones that answer, rotates which one leads when an attempt
+        # times out, and fails well inside this step's five minutes naming every host
+        # it tried and why. Its header records the three ways the mirrorlist failed on
+        # 2026-09-11 and why the in-place repoint before it (#1107) could not fail over
+        # in time (#1113). Packages stay verified against Ubuntu's archive key: a mirror
+        # adds a route, not trust. scripts/test/apt-install-fallback.test.sh pins the
+        # script's behaviour and this step's identity across the three workflows, and
+        # scripts/test/client-ci-budget.test.sh pins the five minutes.
+        working-directory: ${{ github.workspace }}
         timeout-minutes: 5
         run: |
-          sudo apt-get \
-            -o Acquire::Retries=2 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            update
-          sudo apt-get \
-            -o Acquire::Retries=2 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            install -y --no-install-recommends libasound2-dev libudev-dev libopus-dev pkg-config
+          bash scripts/apt-install-with-fallback.sh libasound2-dev libudev-dev libopus-dev pkg-config
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         if: ${{ steps.ws.outputs.present == 'true' }}
         with:
@@ -437,7 +376,7 @@ jobs:
           bash scripts/test/split-sizing-docs.test.sh
           bash scripts/test/client-ci-budget.test.sh
           bash scripts/test/client-cache-parity.test.sh
-          bash scripts/test/apt-mirror-repoint.test.sh
+          bash scripts/test/apt-install-fallback.test.sh
           bash scripts/test/client-data-home-isolation.test.sh
           bash scripts/test/auth-dir-docs.test.sh
           bash scripts/test/helpers-selector-docs.test.sh

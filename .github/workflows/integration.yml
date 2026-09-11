@@ -193,34 +193,12 @@ jobs:
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "client/ is not scaffolded at this ref — nothing to verify."
           fi
-      - name: Prefer the canonical Ubuntu archive over the Azure mirror
-        if: ${{ steps.ws.outputs.present == 'true' }}
-        run: |
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
-            if ! grep -q '^https://mirrors\.edge\.kernel\.org/ubuntu/' /etc/apt/apt-mirrors.txt; then
-              if [ -n "$(tail -c1 /etc/apt/apt-mirrors.txt)" ]; then
-                echo | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-              fi
-              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
-            fi
-            echo "APT mirrors after repointing the Azure entry:"
-            cat /etc/apt/apt-mirrors.txt
-          fi
       - name: Install Bevy system dependencies
         if: ${{ steps.ws.outputs.present == 'true' }}
+        working-directory: ${{ github.workspace }}
         timeout-minutes: 5
         run: |
-          sudo apt-get \
-            -o Acquire::Retries=2 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            update
-          sudo apt-get \
-            -o Acquire::Retries=2 \
-            -o Acquire::http::Timeout=15 \
-            -o Acquire::https::Timeout=15 \
-            install -y --no-install-recommends libasound2-dev libudev-dev libopus-dev pkg-config
+          bash scripts/apt-install-with-fallback.sh libasound2-dev libudev-dev libopus-dev pkg-config
       - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         if: ${{ steps.ws.outputs.present == 'true' }}
         with:
