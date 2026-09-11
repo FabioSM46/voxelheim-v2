@@ -374,7 +374,7 @@ pub(super) struct Gait {
 
 /// The walk: a lateral four-beat sequence — left rear, left front, right rear, right
 /// front — each a quarter of a cycle behind the last, one cycle per 1.7 blocks.
-const WALK: Gait = Gait {
+pub(super) const WALK: Gait = Gait {
     stride: 1.7,
     beats: [FRAC_PI_2, 3.0 * FRAC_PI_2, 0.0, PI],
     swing: 0.32,
@@ -403,6 +403,12 @@ pub(super) const CANTER: Gait = Gait {
 };
 
 impl Gait {
+    /// Where in the cycle each leg lands, in [`Leg::ALL`] order — the same instants the
+    /// legs are posed from, read by `mount_audio` so a hoofbeat is heard where one is seen.
+    pub(super) const fn beats(&self) -> [f32; 4] {
+        self.beats
+    }
+
     /// Where in this gait's cycle the horse is, or `None` standing.
     pub(super) fn cycle(&self, walk: WalkPose) -> Option<f32> {
         walk.moving

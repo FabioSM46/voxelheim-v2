@@ -66,6 +66,7 @@ mod items;
 mod livery;
 mod loot;
 mod mobs;
+mod mount_audio;
 mod mounts;
 mod portal;
 mod precipitation;
@@ -342,6 +343,7 @@ impl Plugin for PlayerPlugin {
         horse::register(app);
         ambient_sound::register(app);
         tool_audio::register(app);
+        mount_audio::register(app);
         combat_audio::register(app);
         encounters::register(app);
         // Guarded, because `CharacterUiPlugin` builds it too and the two are independent —
@@ -3238,6 +3240,7 @@ pub(crate) fn reset_world(world: &mut World) {
     hands::reset_world(world);
     combat::reset_world(world);
     tool_audio::reset_world(world);
+    mount_audio::reset_world(world);
     combat_audio::reset_world(world);
     trade::reset_world(world);
     use crate::world::transition::clear_messages;
