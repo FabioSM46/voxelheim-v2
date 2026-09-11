@@ -805,15 +805,32 @@ const SHADE_FLOOR: f32 = 0.45;
 /// stackable cube.
 const BUNDLE_SIZE: Vec3 = Vec3::new(0.075, 0.042, 0.048);
 
-/// An implement's haft: longer and thicker than a blade, because what tells a shovel from
+/// An implement's haft: longer and thicker than a blade, because what tells an axe from
 /// a sword at a glance is that one is a handle with weight on the end and the other is
 /// mostly edge.
 const TOOL_HAFT_SIZE: Vec3 = Vec3::new(0.014, 0.130, 0.014);
 
 /// And its head, across the top of that haft. Wider than the haft in x and z and short in
-/// y, which is the T a shovel, a pickaxe and an axe all share — and the whole of what
-/// distinguishes the silhouette from [`sword_mesh`]'s guard, grip and tapering blade.
+/// y, which is the T the axe is drawn as — and the whole of what distinguishes the
+/// silhouette from [`sword_mesh`]'s guard, grip and tapering blade.
 const TOOL_HEAD_SIZE: Vec3 = Vec3::new(0.052, 0.020, 0.026);
+
+/// The length the pickaxe and the shovel are authored at, end to end, in the view model's
+/// metres.
+///
+/// **The axe's haft length, so the three implements are the same size in the hand** and
+/// only their heads tell them apart. [`pickaxe_mesh`] and [`shovel_mesh`] scale from it, the
+/// way [`sceptre_mesh`] and [`bow_mesh`] do, so the ground drop and the body's fist get the
+/// same silhouette at world scale rather than a second authoring of it.
+const IMPLEMENT_LENGTH: f32 = TOOL_HAFT_SIZE.y;
+
+/// The square section of a pickaxe's or a shovel's wooden haft.
+///
+/// **Thirteen millimetres rather than twelve, and the millimetre is a plane.** At twelve the
+/// haft's side faces sit at `±0.006`, which is exactly the wrist's, and the two overlap where
+/// the haft passes the wrist — skin and wood on one plane, the depth fight
+/// `no_two_colours_share_a_plane_in_the_hand` exists for.
+const IMPLEMENT_HAFT: f32 = 0.013;
 
 /// A carried armour plate: broad enough to read as clothing and shallow enough not to
 /// become another block in the hand.
@@ -835,7 +852,8 @@ const SCEPTRE_GREEN: [f32; 4] = [0.16, 0.82, 0.28, 1.0];
 /// `animate_view_model` drives, and a second entity under it would be a second thing to
 /// keep in step with a swing.
 ///
-/// The three implements share it and are told apart by colour — see [`ItemShape::Tool`].
+/// Only the axe is drawn from it since #1121 — see [`ItemShape::Tool`]. The pickaxe and the
+/// shovel have silhouettes of their own in [`pickaxe_mesh`] and [`shovel_mesh`].
 fn tool_mesh() -> Mesh {
     let mut merged = Mesh::from(Cuboid::from_size(TOOL_HAFT_SIZE));
     let head = Mesh::from(Cuboid::from_size(TOOL_HEAD_SIZE)).translated_by(Vec3::new(
@@ -845,6 +863,156 @@ fn tool_mesh() -> Mesh {
     ));
     merge_all(&mut merged, [head], "held tool");
     merged
+}
+
+/// The two colours a pickaxe and a shovel are made of: a wooden haft and an iron head.
+///
+/// **What the implement is made of, not the ground it digs.** Until #1121 the shovel wore
+/// dirt and the pickaxe stone, which was a colour standing in for a silhouette they did not
+/// have. Now that they have one, the colour can say what the thing is: the log's own swatch
+/// for the wood, and the forged steel the iron sword and the iron armour already wear for
+/// the head. Both are absolute, the arrangement the shield and the sceptre use, so the hand
+/// skips the item-colour multiply for these shapes and the world draws them under a white
+/// material.
+fn implement_colours() -> ([f32; 4], [f32; 4]) {
+    (
+        palette::linear_rgba(palette::LOG),
+        items::forged_iron_linear_rgba(),
+    )
+}
+
+/// A pickaxe: a wooden haft with a curved, two-pointed iron head across its top.
+///
+/// The head is an iron eye closed around the haft's end and two arms leaving it, each in two
+/// tapering segments that rise a little and then fall away to a point — the curve that makes
+/// a pick a pick rather than a hammer. Merged into one mesh for the reason [`tool_mesh`] is.
+///
+/// Authored at [`IMPLEMENT_LENGTH`] and scaled to `length`, so the hand and the ground draw
+/// the same pick.
+pub(super) fn pickaxe_mesh(length: f32) -> Mesh {
+    let (wood, iron) = implement_colours();
+    let half = IMPLEMENT_LENGTH / 2.0;
+    // The haft stops four millimetres short of the top and the eye closes over its end, so the
+    // whole pick is exactly `IMPLEMENT_LENGTH` and no face of the wood shares a plane with a
+    // face of the iron.
+    let haft_top = half - 0.004;
+    let mut pickaxe = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(
+            IMPLEMENT_HAFT,
+            haft_top + half,
+            IMPLEMENT_HAFT,
+        )))
+        .translated_by(Vec3::Y * (haft_top - half) / 2.0),
+        wood,
+    );
+
+    // The eye's top face is the pick's top, at `half`; it is twenty millimetres tall.
+    let head_y = half - 0.010;
+    let eye = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(0.020, 0.020, 0.018)))
+            .translated_by(Vec3::Y * head_y),
+        iron,
+    );
+    const HEAD_DEPTH: f32 = 0.010;
+    let centre = Vec2::new(0.0, head_y);
+    let arms = [-1.0_f32, 1.0].map(|side| {
+        let bend = Vec2::new(side * 0.024, head_y + 0.002);
+        let point = Vec2::new(side * 0.046, head_y - 0.012);
+        let mut arm = tapered_prism(centre, bend, 0.016, 0.011, HEAD_DEPTH);
+        merge_all(
+            &mut arm,
+            [tapered_prism(bend, point, 0.011, 0.002, HEAD_DEPTH)],
+            "pickaxe arm",
+        );
+        tinted(arm, iron)
+    });
+    let [left, right] = arms;
+    merge_all(&mut pickaxe, [eye, left, right], "pickaxe");
+    pickaxe.scaled_by(Vec3::splat(length / IMPLEMENT_LENGTH))
+}
+
+/// A shovel: a wooden haft ending in a small D-grip, under a flat iron blade.
+///
+/// From the bottom: the grip's crossbar and the two cheeks that carry it into the haft, the
+/// haft, an iron socket flaring out of it, and the blade — thin, broad, and closing to a
+/// shallow point. The blade is the flattest thing in the vocabulary, which is what tells it
+/// from the pick's arms and the axe's block at a glance. Merged into one mesh for the reason
+/// [`tool_mesh`] is.
+///
+/// Authored at [`IMPLEMENT_LENGTH`] and scaled to `length`, so the hand and the ground draw
+/// the same shovel.
+pub(super) fn shovel_mesh(length: f32) -> Mesh {
+    let (wood, iron) = implement_colours();
+    let half = IMPLEMENT_LENGTH / 2.0;
+
+    // The haft stops short of both ends: the grip is below it and the socket closes over it.
+    let haft_bottom = -half + 0.017;
+    let haft_top = 0.024;
+    let mut shovel = tinted(
+        Mesh::from(Cuboid::from_size(Vec3::new(
+            IMPLEMENT_HAFT,
+            haft_top - haft_bottom,
+            IMPLEMENT_HAFT,
+        )))
+        .translated_by(Vec3::Y * (haft_top + haft_bottom) / 2.0),
+        wood,
+    );
+
+    // The D-grip: a crossbar at the very end, and two cheeks from inside the haft out to its
+    // ends. Their depths differ from the haft's and the socket's, so no wooden face shares a
+    // plane with an iron one.
+    let crossbar_y = -half + 0.003;
+    let crossbar = Mesh::from(Cuboid::from_size(Vec3::new(0.028, 0.006, 0.010)))
+        .translated_by(Vec3::Y * crossbar_y);
+    let cheeks = [-1.0_f32, 1.0].map(|side| {
+        tapered_prism(
+            Vec2::new(0.0, haft_bottom + 0.004),
+            Vec2::new(side * 0.012, crossbar_y),
+            0.005,
+            0.004,
+            0.007,
+        )
+    });
+    let [left_cheek, right_cheek] = cheeks;
+    let mut grip = crossbar;
+    merge_all(&mut grip, [left_cheek, right_cheek], "shovel grip");
+
+    let socket = tapered_prism(
+        Vec2::new(0.0, haft_top - 0.006),
+        Vec2::new(0.0, haft_top + 0.006),
+        0.014,
+        0.030,
+        0.008,
+    );
+    let blade_root = haft_top + 0.004;
+    let shoulder = half - 0.008;
+    let mut blade = tapered_prism(
+        Vec2::new(0.0, blade_root),
+        Vec2::new(0.0, shoulder),
+        0.034,
+        0.030,
+        0.004,
+    );
+    merge_all(
+        &mut blade,
+        [tapered_prism(
+            Vec2::new(0.0, shoulder),
+            Vec2::new(0.0, half),
+            0.030,
+            0.012,
+            0.004,
+        )],
+        "shovel blade",
+    );
+    let mut head = socket;
+    merge_all(&mut head, [blade], "shovel head");
+
+    merge_all(
+        &mut shovel,
+        [tinted(grip, wood), tinted(head, iron)],
+        "shovel",
+    );
+    shovel.scaled_by(Vec3::splat(length / IMPLEMENT_LENGTH))
 }
 
 /// One body plate and two shoulders, merged into the single view-model entity.
@@ -861,18 +1029,27 @@ fn armour_mesh() -> Mesh {
     armour
 }
 
-/// One tapered rectangular limb between two points in the bow's XY silhouette.
-fn bow_limb(from: Vec2, to: Vec2, from_width: f32, to_width: f32) -> Mesh {
+/// One tapered rectangular bar between two points in an XY silhouette, `depth` thick in Z.
+///
+/// Written for the bow's limbs and shared since #1121 by the pickaxe's arms and the shovel's
+/// blade, grip and socket: every one of them is a flat piece that narrows along its length.
+fn tapered_prism(from: Vec2, to: Vec2, from_width: f32, to_width: f32, depth: f32) -> Mesh {
     let along = (to - from).normalize();
-    let across = Vec2::new(-along.y, along.x);
+    // **To the right of the direction of travel**, and the handedness is the winding. With the
+    // left-hand perpendicular this used until #1121 every face below came out inside out — the
+    // bow's limbs included, which nothing measured until the pickaxe's arms reached
+    // `every_solid_in_the_sword_is_wound_outward` through this same function. The faces are
+    // symmetric about the bar's axis, so mirroring the corners changes the winding and nothing
+    // else about the geometry.
+    let across = Vec2::new(along.y, -along.x);
     let [from_left, from_right] = [
         from + across * from_width / 2.0,
         from - across * from_width / 2.0,
     ];
     let [to_left, to_right] = [to + across * to_width / 2.0, to - across * to_width / 2.0];
     let point = |xy: Vec2, z: f32| Vec3::new(xy.x, xy.y, z);
-    let near = -BOW_DEPTH / 2.0;
-    let far = BOW_DEPTH / 2.0;
+    let near = -depth / 2.0;
+    let far = depth / 2.0;
     let fln = point(from_left, near);
     let frn = point(from_right, near);
     let tln = point(to_left, near);
@@ -891,7 +1068,7 @@ fn bow_limb(from: Vec2, to: Vec2, from_width: f32, to_width: f32) -> Mesh {
         [fln, flf, frf, frn],
         [tln, trn, trf, tlf],
     ] {
-        // The bow wears no livery, so every corner of it points at the neutral band.
+        // Nothing built from this wears a livery, so every corner points at the neutral band.
         build.quad(face, [livery::neutral_uv(); 4]);
     }
     build.finish()
@@ -902,8 +1079,8 @@ pub(super) fn bow_mesh(length: f32) -> Mesh {
     let centre = Vec2::new(-BOW_LENGTH * 0.24, 0.0);
     let lower_tip = Vec2::new(0.0, -BOW_LENGTH / 2.0);
     let upper_tip = Vec2::new(0.0, BOW_LENGTH / 2.0);
-    let mut bow = bow_limb(centre, lower_tip, BOW_STAVE, BOW_STAVE * 0.55);
-    let upper = bow_limb(centre, upper_tip, BOW_STAVE, BOW_STAVE * 0.55);
+    let mut bow = tapered_prism(centre, lower_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
+    let upper = tapered_prism(centre, upper_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
     let string = Mesh::from(Cuboid::from_size(Vec3::new(
         BOW_STAVE * 0.22,
         BOW_LENGTH,
@@ -1793,6 +1970,8 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
             neutral(roll)
         }
         ItemShape::Tool => neutral(tool_mesh()),
+        ItemShape::Pickaxe => neutral(pickaxe_mesh(IMPLEMENT_LENGTH)),
+        ItemShape::Shovel => neutral(shovel_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Armour => neutral(armour_mesh()),
         ItemShape::Shield => neutral(shield_mesh(0.065)),
         ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
@@ -1838,7 +2017,8 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         ItemShape::Blade => -sword_grip_centre(SWORD_LENGTH).y,
         ItemShape::Bundle => hand_top + BUNDLE_SIZE.y / 2.0 - HOLD_OVERLAP,
         // The head stays above the hand and most of the haft remains visible below it.
-        ItemShape::Tool => HAND_SIZE.y * 0.35,
+        // The pickaxe and the shovel are the axe's length and are held the way it is.
+        ItemShape::Tool | ItemShape::Pickaxe | ItemShape::Shovel => HAND_SIZE.y * 0.35,
         ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
         // Cross the top of the fist so the carried shield is gripped, not floating.
         ItemShape::Shield => hand_top + 0.024,
@@ -1904,7 +2084,12 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
 
     let item = if shape == ItemShape::Bundle {
         neutral(coloured_bundle_mesh(item_colour))
-    } else if matches!(shape, ItemShape::Shield | ItemShape::Sceptre) {
+    } else if matches!(
+        shape,
+        ItemShape::Shield | ItemShape::Sceptre | ItemShape::Pickaxe | ItemShape::Shovel
+    ) {
+        // Built in the absolute colours of what they are made of — see
+        // [`implement_colours`] — so the item colour must not multiply over them.
         item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
@@ -2923,7 +3108,9 @@ mod tests {
             (ItemShape::Material, ITEM_RAW_COAL),
             (ItemShape::Blade, ITEM_IRON_SWORD),
             (ItemShape::Bundle, structures::ITEM_TENT),
-            (ItemShape::Tool, crafting::ITEM_SHOVEL),
+            (ItemShape::Tool, crafting::ITEM_AXE),
+            (ItemShape::Pickaxe, crafting::ITEM_PICKAXE),
+            (ItemShape::Shovel, crafting::ITEM_SHOVEL),
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
             (ItemShape::Bow, crafting::ITEM_BOW),
@@ -5579,6 +5766,117 @@ mod tests {
         }
     }
 
+    /// **The pickaxe and the shovel stay inside the envelope an implement is held in**, and
+    /// each is a wooden haft under an iron head rather than one colour borrowed from the ground
+    /// it digs (#1121).
+    ///
+    /// The envelope is the axe's: as long as its haft, since all three implements are held at
+    /// the same [`item_translation`], no wider than the bow is long, and no deeper than the axe's
+    /// head, so neither new silhouette reaches anywhere of the view model's space that an
+    /// implement did not already occupy. [`every_held_arrangement_clears_the_near_plane_through_every_swing`]
+    /// is what measures that space against the camera; this pins the two meshes to it.
+    #[test]
+    fn the_pickaxe_and_the_shovel_are_wood_under_iron_inside_the_hold_envelope() {
+        let envelope = Vec3::new(BOW_LENGTH, IMPLEMENT_LENGTH, TOOL_HEAD_SIZE.z);
+        let (wood, iron) = implement_colours();
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+
+        for (shape, item_id) in [
+            (ItemShape::Pickaxe, crafting::ITEM_PICKAXE),
+            (ItemShape::Shovel, crafting::ITEM_SHOVEL),
+        ] {
+            let mesh = item_mesh(item_id, shape);
+            let points = positions(&mesh);
+            for axis in 0..3 {
+                let (low, high) = extent(&points, axis);
+                assert!(
+                    high - low <= envelope[axis] + 1e-6,
+                    "{shape:?} spans {} on axis {axis}, outside the {} an implement is held in",
+                    high - low,
+                    envelope[axis]
+                );
+            }
+
+            // Exactly two materials, and the right one at each end: iron at the top, where
+            // the head is, and wood at the bottom, where the hand is.
+            let mut expected = vec![quantise(wood), quantise(iron)];
+            expected.sort_unstable();
+            assert_eq!(
+                tints(&mesh),
+                expected,
+                "{shape:?} is not drawn in exactly the wood and the iron it is made of"
+            );
+            let Some(VertexAttributeValues::Float32x4(colours)) =
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("{shape:?} must carry per-vertex colour");
+            };
+            let (low, high) = extent(&points, 1);
+            let topmost = points
+                .iter()
+                .zip(colours)
+                .filter(|(point, _)| point[1] > high - 1e-6)
+                .all(|(_, colour)| quantise(*colour) == quantise(iron));
+            let lowest = points
+                .iter()
+                .zip(colours)
+                .filter(|(point, _)| point[1] < low + 1e-6)
+                .all(|(_, colour)| quantise(*colour) == quantise(wood));
+            assert!(topmost, "{shape:?}'s highest point is not its iron head");
+            assert!(lowest, "{shape:?}'s lowest point is not its wooden haft");
+
+            // And the hand draws those absolute colours rather than multiplying the row's
+            // colour over them: the held composition carries the iron, shaded or not.
+            let held = held_mesh(
+                TEST_SKIN,
+                selected_appearance(Some(InventoryStack {
+                    item_id,
+                    count: 1,
+                    ..Default::default()
+                })),
+            );
+            let unshaded_iron = quantise(iron);
+            let Some(VertexAttributeValues::Float32x4(held_colours)) =
+                held.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("{shape:?}: the held composition must carry per-vertex colour");
+            };
+            assert!(
+                held_colours.iter().any(|colour| {
+                    let lit = quantise(*colour);
+                    // A shade only takes light away and never shifts the hue, so the iron
+                    // reached the hand when some vertex is a uniform fraction of it.
+                    (0..3).all(|channel| lit[channel] <= unshaded_iron[channel]) && lit[2] > lit[0]
+                }),
+                "{shape:?} reaches the hand without its cool iron head"
+            );
+        }
+
+        // Three different silhouettes for three implements, which is the whole issue: the axe,
+        // the pick and the shovel no longer share one held bounding box.
+        let boxes: Vec<[f32; 3]> = [
+            (ItemShape::Tool, crafting::ITEM_AXE),
+            (ItemShape::Pickaxe, crafting::ITEM_PICKAXE),
+            (ItemShape::Shovel, crafting::ITEM_SHOVEL),
+        ]
+        .map(|(shape, item_id)| {
+            let points = positions(&item_mesh(item_id, shape));
+            [0, 1, 2].map(|axis| {
+                let (low, high) = extent(&points, axis);
+                high - low
+            })
+        })
+        .to_vec();
+        for (index, one) in boxes.iter().enumerate() {
+            for two in &boxes[index + 1..] {
+                assert!(
+                    one.iter().zip(two).any(|(a, b)| (a - b).abs() > 1e-4),
+                    "two implements are held as the same silhouette: {one:?} and {two:?}"
+                );
+            }
+        }
+    }
+
     /// A blade is held by its grip, never by concealing the furniture around it.
     ///
     /// Read from the real merged vertices for both sword variants: part constants alone would
@@ -5958,6 +6256,9 @@ mod tests {
             ),
             ("a dropped sword", world_sword(0.05)),
             ("a dropped grip", sword_grip_mesh(0.05)),
+            ("the pickaxe", pickaxe_mesh(IMPLEMENT_LENGTH)),
+            ("the shovel", shovel_mesh(IMPLEMENT_LENGTH)),
+            ("the bow", bow_mesh(BOW_LENGTH)),
         ] {
             let solids = solid_volumes(&mesh, false);
             // **The count says which surface this is**, which is the property #435 added and
@@ -5966,9 +6267,17 @@ mod tests {
             // weapon in two pieces, three solids and one, because its grip is wood and is
             // drawn in a material of its own. A part that welded into its neighbour, or one
             // that went missing, changes this before any volume does.
+            //
+            // The pickaxe is a haft, an eye and two arms of two segments each; the shovel is
+            // a haft, a crossbar, two cheeks, a socket and a blade whose two segments share
+            // their shoulder and weld into one solid.
             let want = match name {
                 "a dropped sword" => 3,
                 "a dropped grip" => 1,
+                "the pickaxe" | "the shovel" => 6,
+                // Two limbs and the string. It is here because its limbs are built by the same
+                // `tapered_prism` as the pick's arms, and were wound inside out until #1121.
+                "the bow" => 3,
                 _ => 4,
             };
             assert_eq!(
