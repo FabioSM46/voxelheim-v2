@@ -35,8 +35,8 @@ const BLINK_PULSES: u32 = 4;
 /// The empty part of the bar, shared visually with the health and inventory tracks.
 const BAR_TRACK: Color = Color::srgba(0.055, 0.065, 0.080, 0.94);
 
-/// The ordinary hunger fill.
-const BAR_FILL: Color = Color::srgb(0.78, 0.55, 0.10);
+/// The ordinary hunger fill. `pub(super)` for the same distinctness test health's is.
+pub(super) const BAR_FILL: Color = Color::srgb(0.78, 0.55, 0.10);
 
 /// The bright half of each low-hunger pulse.
 const LOW_HUNGER_FLASH: Color = Color::srgb(1.0, 0.88, 0.34);
@@ -288,7 +288,9 @@ mod tests {
 
     use super::*;
     use crate::net::{LifeState, SessionParams};
-    use crate::ui::health::{BAR_HEIGHT, EXPERIENCE_BAR_BOTTOM, HEALTH_BAR_BOTTOM, VITAL_BAR_GAP};
+    use crate::ui::health::{
+        BAR_HEIGHT, ENERGY_BAR_BOTTOM, EXPERIENCE_BAR_BOTTOM, HEALTH_BAR_BOTTOM, VITAL_BAR_GAP,
+    };
 
     fn session() -> Session {
         Session(SessionParams {
@@ -391,14 +393,18 @@ mod tests {
     }
 
     #[test]
-    fn all_three_vital_bars_have_explicit_non_overlapping_positions() {
+    fn all_four_vital_bars_have_explicit_non_overlapping_positions() {
         assert_eq!(
             HUNGER_BAR_BOTTOM,
             EXPERIENCE_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
         );
         assert_eq!(
-            HEALTH_BAR_BOTTOM,
+            ENERGY_BAR_BOTTOM,
             HUNGER_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
+        );
+        assert_eq!(
+            HEALTH_BAR_BOTTOM,
+            ENERGY_BAR_BOTTOM + BAR_HEIGHT + VITAL_BAR_GAP
         );
 
         let mut app = hud(Some(vitals(100, 100)), Duration::from_millis(100));

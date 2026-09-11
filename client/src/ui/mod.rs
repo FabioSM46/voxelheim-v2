@@ -7,6 +7,7 @@ mod clipboard;
 mod compass;
 mod crosshair;
 pub(crate) mod encounters;
+mod energy;
 mod experience;
 mod health;
 mod hunger;
@@ -217,6 +218,9 @@ impl Plugin for UiPlugin {
             .add_message::<AppExit>()
             .add_message::<ChooseCharacter>()
             .add_message::<PlayerMessage>()
+            // Written by the status module and read by the energy bar; registered here as
+            // well as by both, for the reason every message above is.
+            .add_message::<energy::EnergyRefused>()
             .add_plugins((
                 character::CharacterUiPlugin,
                 chat::ChatUiPlugin,
@@ -239,7 +243,10 @@ impl Plugin for UiPlugin {
                     encounters::EncounterUiPlugin,
                     voice::VoiceUiPlugin,
                 ),
-                hunger::HungerUiPlugin,
+                // Nested for the reason the groups around it are: the tuple is at
+                // `add_plugins`' fifteen-plugin ceiling, and energy sits beside the bar it
+                // is stacked on.
+                (hunger::HungerUiPlugin, energy::EnergyUiPlugin),
                 experience::ExperienceUiPlugin,
                 hotbar::HotbarPlugin,
                 inventory::InventoryUiPlugin,
@@ -2519,6 +2526,7 @@ mod tests {
 pub(crate) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<storm::Storm>(world);
     health::reset_world(world);
+    energy::reset_world(world);
     trade::reset_world(world);
 }
 
