@@ -985,7 +985,7 @@ children; sleeves and greaves reuse the matching limb pivots, and changing worn 
 re-materialises them without replacing the body. The helmet and cuirass occupy a second
 half-notch wrapping tier where hair can cross them, while greaves occupy the first tier over the
 trousers, so different materials never share a plane. Materials are keyed on colour plus finish:
-the ordinary rig and leather stay rough, while iron is smoother and slightly metallic. The map is
+the ordinary rig and leather stay rough, while the rusty set is smoother and slightly metallic. The map is
 swept against the appearances and worn ids still in view, because a server may describe colours this
 client cannot choose and a cache filled by the wire must remain a cache rather than a history.
 
@@ -3164,8 +3164,8 @@ Recorded here so the next reader does not mistake them for oversights:
 
   **A livery belongs to a material, not to an item**, which is what keeps the second one a row
   rather than a generator. Roughly thirty item ids and about six materials among them: a haft, a
-  bow stave, a shield plate and a sceptre shaft are the same wood; a helm, a cuirass, greaves and
-  the iron sword are the same forged iron. `Livery` names materials, every row in the item table
+  bow stave, a shield plate and a sceptre shaft are the same wood; the rusty sword, helm, cuirass
+  and greaves are the same worn steel. `Livery` names materials, every row in the item table
   names one or names `None`, and `livery.rs` contains no item id in any match arm.
 
   **The column is explicit per row and is never derived from `ItemColour`**, which is the finding

@@ -870,8 +870,7 @@ fn tool_mesh() -> Mesh {
 /// **What the implement is made of, not the ground it digs.** Until #1121 the shovel wore
 /// dirt and the pickaxe stone, which was a colour standing in for a silhouette they did not
 /// have. Now that they have one, the colour can say what the thing is: the log's own swatch
-/// for the wood, and the forged steel the iron sword and the iron armour already wear for
-/// the head. Both are absolute, the arrangement the shield and the sceptre use, so the hand
+/// for the wood, and the forged steel the iron sword already wears for the head. Both are absolute, the arrangement the shield and the sceptre use, so the hand
 /// skips the item-colour multiply for these shapes and the world draws them under a white
 /// material.
 fn implement_colours() -> ([f32; 4], [f32; 4]) {

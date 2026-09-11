@@ -279,16 +279,16 @@ func TestTheRecipeTableIsTheAgreedRecipes(t *testing.T) {
 			ingredients: []ingredient{{ItemVargrPelt, 4}}, product: ItemLeatherLeggings, productCount: 1,
 			station: vnet.StructureKindLeatherBench, experience: 10,
 		},
-		vnet.RecipeIDIronHelm: {
-			ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemIronHelm, productCount: 1,
+		vnet.RecipeIDRustyHelm: {
+			ingredients: []ingredient{{ItemRawIron, 3}, {ItemRawCoal, 1}}, product: ItemRustyHelm, productCount: 1,
 			station: vnet.StructureKindArmourBench, experience: 10,
 		},
-		vnet.RecipeIDIronCuirass: {
-			ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemIronCuirass, productCount: 1,
+		vnet.RecipeIDRustyCuirass: {
+			ingredients: []ingredient{{ItemRawIron, 5}, {ItemRawCoal, 2}}, product: ItemRustyCuirass, productCount: 1,
 			station: vnet.StructureKindArmourBench, experience: 10,
 		},
-		vnet.RecipeIDIronGreaves: {
-			ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemIronGreaves, productCount: 1,
+		vnet.RecipeIDRustyGreaves: {
+			ingredients: []ingredient{{ItemRawIron, 4}, {ItemRawCoal, 2}}, product: ItemRustyGreaves, productCount: 1,
 			station: vnet.StructureKindArmourBench, experience: 10,
 		},
 		vnet.RecipeIDWoodenShield: {
@@ -634,9 +634,9 @@ func TestEachReassignedRecipeIsMadeOnlyAtItsOwnStation(t *testing.T) {
 		{vnet.RecipeIDLeatherCap, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
 		{vnet.RecipeIDLeatherJerkin, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
 		{vnet.RecipeIDLeatherLeggings, vnet.StructureKindLeatherBench, vnet.StructureKindArmourBench},
-		{vnet.RecipeIDIronHelm, vnet.StructureKindArmourBench, vnet.StructureKindForge},
-		{vnet.RecipeIDIronCuirass, vnet.StructureKindArmourBench, vnet.StructureKindForge},
-		{vnet.RecipeIDIronGreaves, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDRustyHelm, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDRustyCuirass, vnet.StructureKindArmourBench, vnet.StructureKindForge},
+		{vnet.RecipeIDRustyGreaves, vnet.StructureKindArmourBench, vnet.StructureKindForge},
 		{vnet.RecipeIDWoodenSceptre, vnet.StructureKindEnchantingTable, vnet.StructureKindForge},
 		{vnet.RecipeIDBow, vnet.StructureKindForge, vnet.StructureKindLeatherBench},
 		{vnet.RecipeIDArrows, vnet.StructureKindForge, vnet.StructureKindEnchantingTable},
@@ -880,9 +880,9 @@ func TestCraftedArmourArrivesWholeInThePackAndMovesToItsMatchingSlot(t *testing.
 		{"leather cap", vnet.RecipeIDLeatherCap, ItemLeatherCap, LeatherArmourMaxDurability, equipmentHead},
 		{"leather jerkin", vnet.RecipeIDLeatherJerkin, ItemLeatherJerkin, LeatherArmourMaxDurability, equipmentChest},
 		{"leather leggings", vnet.RecipeIDLeatherLeggings, ItemLeatherLeggings, LeatherArmourMaxDurability, equipmentLegs},
-		{"iron helm", vnet.RecipeIDIronHelm, ItemIronHelm, IronArmourMaxDurability, equipmentHead},
-		{"iron cuirass", vnet.RecipeIDIronCuirass, ItemIronCuirass, IronArmourMaxDurability, equipmentChest},
-		{"iron greaves", vnet.RecipeIDIronGreaves, ItemIronGreaves, IronArmourMaxDurability, equipmentLegs},
+		{"rusty helm", vnet.RecipeIDRustyHelm, ItemRustyHelm, RustyArmourMaxDurability, equipmentHead},
+		{"rusty cuirass", vnet.RecipeIDRustyCuirass, ItemRustyCuirass, RustyArmourMaxDurability, equipmentChest},
+		{"rusty greaves", vnet.RecipeIDRustyGreaves, ItemRustyGreaves, RustyArmourMaxDurability, equipmentLegs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

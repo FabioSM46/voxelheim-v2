@@ -161,29 +161,29 @@ func TestDamageThreatUsesTheCachedWornWeight(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, 0.5})
-	ironLife := lifeWearing(t, [3]float32{5.5, 64, 0.5},
-		fullTestArmour(ItemIronHelm), fullTestArmour(ItemIronCuirass), fullTestArmour(ItemIronGreaves))
+	rustyLife := lifeWearing(t, [3]float32{5.5, 64, 0.5},
+		fullTestArmour(ItemRustyHelm), fullTestArmour(ItemRustyCuirass), fullTestArmour(ItemRustyGreaves))
 	leatherLife := lifeWearing(t, [3]float32{6.5, 64, 0.5},
 		fullTestArmour(ItemLeatherCap), fullTestArmour(ItemLeatherJerkin), fullTestArmour(ItemLeatherLeggings))
-	iron, _ := h.joinLife(1, [3]float32{5.5, 64, 0.5}, &ironLife)
+	rusty, _ := h.joinLife(1, [3]float32{5.5, 64, 0.5}, &rustyLife)
 	leather, _ := h.joinLife(2, [3]float32{6.5, 64, 0.5}, &leatherLife)
 
 	h.sim.mu.Lock()
 	m := h.sim.mobs[mobID]
-	h.sim.creditDamageThreatLocked(m, iron, 10)
+	h.sim.creditDamageThreatLocked(m, rusty, 10)
 	h.sim.creditDamageThreatLocked(m, leather, 10)
-	ironWeight := 1 + float64(iron.worn.threat)/ThreatScale
+	rustyWeight := 1 + float64(rusty.worn.threat)/ThreatScale
 	leatherWeight := 1 + float64(leather.worn.threat)/ThreatScale
 	h.sim.mu.Unlock()
 
-	gotIron := threatFor(t, h, mobID, iron.entityID)
+	gotRusty := threatFor(t, h, mobID, rusty.entityID)
 	gotLeather := threatFor(t, h, mobID, leather.entityID)
-	wantRatio := ironWeight / leatherWeight
-	if gotIron != 10*ironWeight || gotLeather != 10*leatherWeight {
-		t.Fatalf("damage threat iron/leather = %v/%v, want %v/%v from registry weights",
-			gotIron, gotLeather, 10*ironWeight, 10*leatherWeight)
+	wantRatio := rustyWeight / leatherWeight
+	if gotRusty != 10*rustyWeight || gotLeather != 10*leatherWeight {
+		t.Fatalf("damage threat rusty/leather = %v/%v, want %v/%v from registry weights",
+			gotRusty, gotLeather, 10*rustyWeight, 10*leatherWeight)
 	}
-	if ratio := gotIron / gotLeather; ratio != wantRatio {
+	if ratio := gotRusty / gotLeather; ratio != wantRatio {
 		t.Errorf("damage threat ratio = %v, want registry ratio %v", ratio, wantRatio)
 	}
 }
