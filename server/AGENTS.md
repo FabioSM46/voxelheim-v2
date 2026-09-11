@@ -1612,11 +1612,17 @@ level of every character inside the simulation, computes `bossScaleFor` once and
   health (`maxHealthFor`) and nothing else. A blow is the blade's damage at the same cadence at
   every level, so a per-member share that grew with level would make the same party fight longer
   for having levelled. Each member brings `mobDefinition.maxHealth`, which on a boss row is the
-  per-member health, up to `bossScaleMaxMembers` (4). A fifth member adds nothing, and four times
-  every boss row must fit the wire's uint16 (`TestBossHealthFitsTheWireAtEveryScale`).
+  per-member health, up to `bossScaleMaxMembers` (4). A fifth member adds no health, and four
+  times every boss row must fit the wire's uint16 (`TestBossHealthFitsTheWireAtEveryScale`).
 - **Damage follows level through the same curve.** Every move's blow is multiplied by the party's
   mean of `maxHealthFor(level) / PlayerMaxHealth`, from 100% at level 1 to 245% at `MaxLevel`. A
-  boss blow therefore costs a member the same share of their health at any level.
+  boss blow therefore costs a member the same share of their health at any level. The mean is over
+  **every** member present, a fifth included: each of them is struck, so four at level 1 and one at
+  30 are hit at 129%.
+- **A pull never multiplies health twice.** Only health still measured against the registry row is
+  scaled; health already above it is kept and clamped to the new ceiling
+  (`TestAScaledBossPulledAgainIsNotScaledTwice`), so a future path that clears an encounter on a
+  surviving boss cannot wrap its uint16 health.
 - **The pull is the only moment.** A level-up, an armour change, a death, a disconnect or a
   return during the fight changes nothing. A wipe replaces the boss (`resetWipedDungeonLocked`),
   and its next pull is a new encounter that measures who is there again. Nobody new may enter

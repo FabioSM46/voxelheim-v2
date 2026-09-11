@@ -39,7 +39,10 @@ import "math"
 //
 // The approved design and the #1037 measurement both describe parties of one to four, and
 // [MaxPartySize] admits a fifth. A fifth member adds no health: the fight is shorter for
-// them, which is the direction a party that brought more people should expect. It is also
+// them, which is the direction a party that brought more people should expect. **They still
+// count toward the damage mean**, deliberately: a blow's scale answers the health of whoever
+// it lands on, and a fifth member is struck like the other four, so a party of four at level
+// one and a fifth at thirty is hit at 129% rather than at 100%. It is also
 // the bound that keeps [protocol.MobState]'s uint16 health honest —
 // `TestBossHealthFitsTheWireAtEveryScale` holds every boss row's per-member health times this
 // under the wire's ceiling.

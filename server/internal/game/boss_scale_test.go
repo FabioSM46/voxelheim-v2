@@ -60,6 +60,9 @@ func TestBossScaleForRepresentativeParties(t *testing.T) {
 		{"a level above the cap reads as the cap", king, []uint16{MaxLevel + 9}, 1, 245},
 		{"a fifth member adds no health", guardian, []uint16{1, 1, 1, 1, 1}, 4, 100},
 		{"five at the cap", king, []uint16{30, 30, 30, 30, 30}, 4, 245},
+		// A fifth member adds no health and still counts toward the damage mean, because every
+		// member present is struck: 4 × 100 + 245 = 645 over five is 129.
+		{"a fifth member moves the blows but not the health", guardian, []uint16{1, 1, 1, 1, 30}, 4, 129},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got := bossScaleFor(c.def, c.levels)
@@ -221,5 +224,37 @@ func TestAScaledBlowCostsALevelledPlayerTheSameShare(t *testing.T) {
 	}
 	if got, want := h.vitals(near).Health, start-blow; got != want {
 		t.Fatalf("the blow left a level-thirty player at %d, want %d (%d of %d)", got, want, blow, start)
+	}
+}
+
+// A boss whose encounter is cleared while it survives, and which is then pulled again, keeps
+// the health it had rather than multiplying an already scaled value a second time. Four
+// members pull the king to 65,532, which a second multiplication by the scale would wrap to
+// 65,520. No production path clears an encounter on a surviving boss today; this pins the
+// invariant before one does.
+func TestAScaledBossPulledAgainIsNotScaledTwice(t *testing.T) {
+	t.Parallel()
+
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	var party []*Player
+	for i := range uint64(4) {
+		party = append(party, joinAtLevel(t, h, i+1, 1))
+	}
+	id := pullKing(t, h, [3]float64{0.5, 64, -20.5}, party[0])
+
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	m := h.sim.mobs[id]
+	full := m.encounter.scale.maxHealth
+	if full != 65532 {
+		t.Fatalf("four members pulled the king to %d, want 65532", full)
+	}
+	for _, health := range []uint16{full, full - 1000} {
+		m.health = health
+		m.encounter = nil
+		h.sim.startBossEncounterLocked(m, party[0])
+		if m.health != health || m.health > m.maxHealth() {
+			t.Fatalf("a king at %d pulled again is at %d of %d, want it unchanged", health, m.health, m.maxHealth())
+		}
 	}
 }

@@ -16,8 +16,8 @@ from **the level of every character inside the run at that moment** and from not
 
 | Output | Rule | Range |
 | --- | --- | --- |
-| Boss health | species per-member health × members | 1–4 members; a fifth adds nothing |
-| Every boss blow | registry blow × mean over members of `maxHealthFor(level) / PlayerMaxHealth` | 100% at level 1 to 245% at level 30 |
+| Boss health | species per-member health × members | 1–4 members; a fifth adds no health |
+| Every boss blow | registry blow × mean over every member present of `maxHealthFor(level) / PlayerMaxHealth` | 100% at level 1 to 245% at level 30; a fifth member counts, since they are struck too |
 
 Why these two and no multiplier of their own:
 
