@@ -163,6 +163,68 @@ func TestARespawnClearsTheDeathForEveryViewer(t *testing.T) {
 	checkDeadPlayers(t, newestSnapshot(t, victimOut), victim.entityID)
 }
 
+// entityHealth is the health pair the newest snapshot this session was sent carries for one
+// player, and whether that player was in it at all.
+func entityHealth(t *testing.T, out *dropSink, id uint64) (health, maxHealth uint16, found bool) {
+	t.Helper()
+
+	snapshot := newestSnapshot(t, out)
+	for i := range snapshot.EntitiesLength() {
+		var state vnet.EntityState
+		if snapshot.Entities(&state, i) && state.EntityId() == id {
+			return state.Health(), state.MaxHealth(), true
+		}
+	}
+	return 0, 0, false
+}
+
+// **Every visible player's health is public (V41), and it is the server's number.** A
+// watcher who is in no party with the victim is told the victim's health on the same tick
+// the victim's own vitals say it, both while hurt and once dead — where it is zero, not the
+// last value before the killing blow.
+func TestEveryVisiblePlayerStreamsTheHealthItsOwnVitalsCarry(t *testing.T) {
+	t.Parallel()
+
+	h := newDropHarness(t, dropTerrain{groundTop: 63})
+	_, watcher := h.join(1, [3]float32{0.5, 64, 0.5})
+	victim, victimOut := h.join(2, [3]float32{2.5, 64, 0.5})
+
+	h.sim.mu.Lock()
+	victim.damageLocked(30)
+	h.sim.mu.Unlock()
+	h.step()
+
+	own := newestSnapshot(t, victimOut).SelfVitals(nil)
+	if own == nil {
+		t.Fatal("the victim's snapshot carries no self_vitals")
+	}
+	for name, out := range map[string]*dropSink{"watcher": watcher, "victim": victimOut} {
+		health, maxHealth, found := entityHealth(t, out, victim.entityID)
+		if !found {
+			t.Fatalf("the %s's snapshot does not carry the victim", name)
+		}
+		if health != own.Health() || maxHealth != own.MaxHealth() {
+			t.Errorf("the %s was sent %d/%d for the victim, want the vitals' %d/%d",
+				name, health, maxHealth, own.Health(), own.MaxHealth())
+		}
+	}
+	if own.Health() == 0 || own.Health() >= own.MaxHealth() {
+		t.Fatalf("the victim is at %d/%d, want hurt and alive, or this proves nothing", own.Health(), own.MaxHealth())
+	}
+
+	kill(h, victim)
+	h.step()
+
+	health, maxHealth, found := entityHealth(t, watcher, victim.entityID)
+	if !found {
+		t.Fatal("the watcher's snapshot does not carry the dead victim")
+	}
+	if health != 0 || maxHealth == 0 {
+		t.Errorf("a dead player streams %d/%d, want 0 over a non-zero maximum", health, maxHealth)
+	}
+	checkDeadPlayers(t, newestSnapshot(t, watcher), 1)
+}
+
 // The same visibility cube every other entity in the snapshot obeys, and the invariant that
 // keeps the two vectors from disagreeing: every id in dead_players names a player in the
 // same snapshot's entities, so a dead player nobody can see is not mentioned at all.

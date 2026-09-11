@@ -1220,6 +1220,8 @@ mod tests {
                 pos: [0.0; 3],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             }],
             ..Snapshot::default()
         };
@@ -1342,6 +1344,8 @@ mod tests {
                     pos: [feet.x, feet.y, feet.z],
                     vel: [0.0; 3],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 }],
                 ..Snapshot::default()
             },

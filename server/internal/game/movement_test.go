@@ -421,10 +421,12 @@ func decodeSnapshot(t *testing.T, frame []byte) (uint32, []protocol.EntityState)
 		entity.Pos(pos)
 		entity.Vel(vel)
 		states[i] = protocol.EntityState{
-			EntityID: entity.EntityId(),
-			Pos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
-			Vel:      [3]float32{vel.X(), vel.Y(), vel.Z()},
-			Yaw:      entity.Yaw(),
+			EntityID:  entity.EntityId(),
+			Pos:       [3]float32{pos.X(), pos.Y(), pos.Z()},
+			Vel:       [3]float32{vel.X(), vel.Y(), vel.Z()},
+			Yaw:       entity.Yaw(),
+			Health:    entity.Health(),
+			MaxHealth: entity.MaxHealth(),
 		}
 	}
 	return snapshot.ServerTick(), states

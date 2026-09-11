@@ -315,7 +315,14 @@ const (
 	/// vitals append owes the bump: a V40 client requires a non-zero `max_energy` that a
 	/// V39 server never sends, so without it the peers would handshake cleanly and the
 	/// client would refuse the first snapshot — V15's and V17's argument again.
-	ProtocolVersionCurrent ProtocolVersion = 40
+	///
+	/// V41: `EntityState` gains `health` and `max_health`, and every visible player's
+	/// health becomes public. They fill the four bytes of padding after `yaw`, so the
+	/// struct stays 40 bytes and a V40 peer would still find every entity where it looks —
+	/// and read nothing there but padding. A V41 client refuses a zero `max_health`, so
+	/// without the bump the peers would handshake cleanly and the first snapshot with a
+	/// player in it would end the session: V40's argument, on the hottest struct.
+	ProtocolVersionCurrent ProtocolVersion = 41
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

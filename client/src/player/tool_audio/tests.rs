@@ -31,12 +31,16 @@ fn snapshot(tick: u32) -> Snapshot {
                 pos: [0.0, 0.0, 4.0],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             },
             EntityState {
                 entity_id: 2,
                 pos: [4.0, 0.0, 4.0],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             },
         ],
         ..Default::default()
