@@ -41,6 +41,8 @@ mod arena_capture;
 mod bosses;
 mod guardian;
 mod king;
+#[cfg(test)]
+mod reduced_effects;
 
 pub(super) use king::regalia::{present as present_regalia, setup as setup_regalia};
 
@@ -1471,22 +1473,9 @@ pub(super) fn animate(
             motion.regalia.observe(stage);
             if down > 0.0 {
                 // A body falls away from terrain it would lie in; the root never moves.
-                let solid = |voxel: IVec3| {
-                    session
-                        .as_ref()
-                        .zip(terrain.as_ref())
-                        .is_some_and(|(session, terrain)| {
-                            terrain.solid_at(
-                                crate::net::BlockCoord {
-                                    x: voxel.x,
-                                    y: voxel.y,
-                                    z: voxel.z,
-                                },
-                                session.0.chunk_size as usize,
-                            )
-                        })
-                };
-                motion.choose_fall(transform.translation, yaw, solid);
+                motion.choose_fall(transform.translation, yaw, |voxel| {
+                    solid_voxel(session.as_deref(), terrain.as_deref(), voxel)
+                });
             }
             motion.sample(
                 transform.translation,
@@ -1587,11 +1576,32 @@ pub(super) fn animate(
     }
 }
 
+/// Whether a voxel is solid in the streamed terrain. Before a session or any terrain exists,
+/// nothing is.
+fn solid_voxel(
+    session: Option<&Session>,
+    terrain: Option<&crate::world::ChunkStore>,
+    voxel: IVec3,
+) -> bool {
+    session.zip(terrain).is_some_and(|(session, terrain)| {
+        terrain.solid_at(
+            crate::net::BlockCoord {
+                x: voxel.x,
+                y: voxel.y,
+                z: voxel.z,
+            },
+            session.0.chunk_size as usize,
+        )
+    })
+}
+
 /// Boss phase poses replace the generic MobAction animation after reconciliation.
 /// Their root translation stays entirely on the snapshot interpolation path.
 pub(super) fn pose_encounters(
     presentation: Res<super::encounters::EncounterPresentation>,
     inbox: Res<crate::net::EncounterTimelineInbox>,
+    session: Option<Res<Session>>,
+    terrain: Option<Res<crate::world::ChunkStore>>,
     mut mobs: Query<(Entity, &mut Mob, &mut Transform)>,
     mut parts: Query<(&MobVisual, &mut Transform), Without<Mob>>,
 ) {
@@ -1641,9 +1651,15 @@ pub(super) fn pose_encounters(
         if one.is_none() && !matches!(mob.action, MobAction::Windup | MobAction::Recovery) {
             continue;
         }
-        root.rotation = Quat::from_rotation_y(mob.yaw);
-        if let Some(motion) = &mob.king_motion {
-            let pose = king::choreography::sample(motion, one, mob.yaw);
+        let yaw = mob.yaw;
+        root.rotation = Quat::from_rotation_y(yaw);
+        if let Some(motion) = &mut mob.king_motion {
+            // Beside terrain a planted blow keeps its aim and timing but articulates the blade
+            // at the wrist so no vertex lies inside solid voxels; the root never moves.
+            motion.choose_blade(one, root.translation, yaw, |voxel| {
+                solid_voxel(session.as_deref(), terrain.as_deref(), voxel)
+            });
+            let pose = king::choreography::sample(motion, one, yaw);
             for (part, mut transform) in &mut parts {
                 if part.owner == entity
                     && let MobPart::King(segment) = part.part

@@ -72,6 +72,11 @@ type corpse struct {
 	yaw      float64
 	chunk    world.Coord
 
+	// maxHealth is the ceiling the creature died with, so a boss scaled at its pull does not
+	// report the registry's per-member health on the frame it falls. Zero for a corpse built
+	// without a creature, which reads the registry.
+	maxHealth uint16
+
 	owner     corpseOwner
 	container corpseContainer
 	// personal is non-nil only for boss corpses. Each stable character owns an
@@ -118,14 +123,17 @@ func (c *corpse) entryCount() int {
 }
 
 func (c *corpse) state() protocol.MobState {
-	def := mobRegistry[c.kind]
+	maxHealth := c.maxHealth
+	if maxHealth == 0 {
+		maxHealth = mobRegistry[c.kind].maxHealth
+	}
 	return protocol.MobState{
 		EntityID:  c.entityID,
 		Kind:      c.kind,
 		Pos:       toWire(c.pos),
 		Yaw:       float32(c.yaw),
 		Health:    0,
-		MaxHealth: def.maxHealth,
+		MaxHealth: maxHealth,
 		Action:    vnet.MobActionCorpse,
 	}
 }
@@ -180,6 +188,7 @@ func (s *Sim) makeCorpseLocked(m *mob) *corpse {
 		pos:         m.pos,
 		yaw:         m.yaw,
 		chunk:       m.chunk,
+		maxHealth:   m.maxHealth(),
 		expiresTick: s.currentTick + s.corpseLifetimeTicks,
 	}
 	if m.species().isBoss() {
