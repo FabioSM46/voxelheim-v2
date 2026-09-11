@@ -5,8 +5,8 @@
 //! heard on the frame the cycle passes one of [`Gait::beats`], each distinct instant once:
 //! four at a walk, three at a canter, whose diagonal pair lands together. Standing is no
 //! cycle and so no beat, and a horse with nothing solid under its feet is airborne and
-//! strikes nothing. Which gait a horse uses is `horse::animate_gait`'s selection read the
-//! same way: a ridden horse canters, a paddock horse walks.
+//! strikes nothing. Which gait a horse uses is not chosen here: [`horse::gait`] is the one
+//! selection, and `horse::animate_gait` poses the legs from the same answer.
 //!
 //! The whinny is a transition in the authoritative mount projection, observed between two
 //! snapshot ticks: a player the previous tick held unmounted whom this one holds mounted.
@@ -20,7 +20,7 @@ mod sounds;
 use super::{
     Body, SnapshotBuffer, WalkPose, WorldCamera,
     constants::MOUNTED_WIDTH,
-    horse::{CANTER, Gait, Horse, PaddockHorse, WALK},
+    horse::{self, Gait, Horse, PaddockHorse},
 };
 use crate::{
     audio::{
@@ -354,15 +354,15 @@ fn update(
         riders.insert(body.0, rider);
         horses.push(Drawn {
             key: rider,
-            gait: &CANTER,
+            gait: horse::gait(true),
             walk: *walk,
         });
     }
-    for (horse, pose, walk) in &paddock {
-        feet.insert(horse, pose.translation);
+    for (entity, pose, walk) in &paddock {
+        feet.insert(entity, pose.translation);
         horses.push(Drawn {
-            key: horse,
-            gait: &WALK,
+            key: entity,
+            gait: horse::gait(false),
             walk: *walk,
         });
     }

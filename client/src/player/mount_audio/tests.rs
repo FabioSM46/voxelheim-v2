@@ -52,7 +52,7 @@ fn key() -> Entity {
 
 #[test]
 fn a_walk_strikes_four_times_a_stride_and_a_canter_three() {
-    for (gait, stride, beats) in [(&WALK, 1.7, 4), (&CANTER, 3.4, 3)] {
+    for (gait, stride, beats) in [(horse::gait(false), 1.7, 4), (horse::gait(true), 3.4, 3)] {
         let key = key();
         let mut mounts = Mounts::default();
         // Start just past a beat so the stride holds each beat exactly once.
@@ -71,7 +71,7 @@ fn a_walk_strikes_four_times_a_stride_and_a_canter_three() {
 
 #[test]
 fn the_phase_wrap_neither_drops_nor_repeats_a_beat() {
-    for (gait, stride, beats) in [(&WALK, 1.7, 4), (&CANTER, 3.4, 3)] {
+    for (gait, stride, beats) in [(horse::gait(false), 1.7, 4), (horse::gait(true), 3.4, 3)] {
         let key = key();
         let mut mounts = Mounts::default();
         let start = WALK_PHASE_PERIOD_BLOCKS - stride / 2.0 + 0.005;
@@ -90,7 +90,7 @@ fn standing_noise_and_a_delayed_frame_strike_no_more_than_the_legs_do() {
     let mut mounts = Mounts::default();
     let standing = Drawn {
         key,
-        gait: &CANTER,
+        gait: horse::gait(true),
         walk: WalkPose::default(),
     };
     for _ in 0..50 {
@@ -100,7 +100,7 @@ fn standing_noise_and_a_delayed_frame_strike_no_more_than_the_legs_do() {
     // Starting to move lands nothing: the hooves were already down.
     let moving = |blocks| Drawn {
         key,
-        gait: &CANTER,
+        gait: horse::gait(true),
         walk: travelled(blocks),
     };
     assert!(!mounts.stride(moving(0.3)));
@@ -110,8 +110,8 @@ fn standing_noise_and_a_delayed_frame_strike_no_more_than_the_legs_do() {
     assert!(!mounts.stride(moving(0.9)));
     // A frame delayed by a stride and a half is caught up by no more than one strike a
     // beat, never replayed as every hoof it covered.
-    assert!(footfalls(&CANTER, 0.1, 0.1 + 1.5 * TAU) <= 3);
-    assert!(footfalls(&WALK, 0.1, 0.1 + 1.5 * TAU) <= 4);
+    assert!(footfalls(horse::gait(true), 0.1, 0.1 + 1.5 * TAU) <= 3);
+    assert!(footfalls(horse::gait(false), 0.1, 0.1 + 1.5 * TAU) <= 4);
 }
 
 fn snapshot(tick: u32, mounted: &[u64], present: &[u64]) -> Snapshot {
@@ -256,7 +256,7 @@ impl Fixture {
             };
             let horses = [Drawn {
                 key: self.horse,
-                gait: &CANTER,
+                gait: horse::gait(true),
                 walk,
             }];
             let whinny = if i == 0 { mounted } else { &[] };

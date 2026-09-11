@@ -374,7 +374,7 @@ pub(super) struct Gait {
 
 /// The walk: a lateral four-beat sequence — left rear, left front, right rear, right
 /// front — each a quarter of a cycle behind the last, one cycle per 1.7 blocks.
-pub(super) const WALK: Gait = Gait {
+const WALK: Gait = Gait {
     stride: 1.7,
     beats: [FRAC_PI_2, 3.0 * FRAC_PI_2, 0.0, PI],
     swing: 0.32,
@@ -401,6 +401,15 @@ pub(super) const CANTER: Gait = Gait {
     lean: -10.0 * DEGREE,
     nod: 3.0 * DEGREE,
 };
+
+/// The gait a horse is drawn with: a ridden horse canters, a paddock horse walks.
+///
+/// The one place that choice is made. [`animate_gait`] poses the legs with it and
+/// `mount_audio` reads the hoofbeats from it, so the legs and the hooves cannot disagree
+/// about which gait a horse is in.
+pub(super) const fn gait(ridden: bool) -> &'static Gait {
+    if ridden { &CANTER } else { &WALK }
+}
 
 impl Gait {
     /// Where in the cycle each leg lands, in [`Leg::ALL`] order — the same instants the
@@ -926,10 +935,10 @@ pub(super) fn animate_gait(
         let Ok(walk) = bodies.get(parent.parent()) else {
             continue;
         };
-        pose_horse(horse, *walk, &CANTER, &children, &mut joints);
+        pose_horse(horse, *walk, gait(true), &children, &mut joints);
     }
     for (horse, walk) in &paddock_horses {
-        pose_horse(horse, *walk, &WALK, &children, &mut joints);
+        pose_horse(horse, *walk, gait(false), &children, &mut joints);
     }
 }
 
