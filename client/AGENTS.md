@@ -1001,7 +1001,10 @@ vertices rather than off the tables. A sculpted look carries texture coordinates
 band and its material carries the livery image; recesses are a darker vertex colour. **A closed helm
 hides the hair**: every hair model reaches half a notch above the helmet's cell, and that cell is
 not armour's to grow, so `ArmourStyle::hides_hair` is the switch and
-`every_hair_model_reaches_above_the_helmets_cell` pins the reason for it.
+`every_hair_model_reaches_above_the_helmets_cell` pins the reason for it. The ground drop and the
+third-person fist draw a sculpted piece from the same segment meshes, merged and scaled by
+`armour::piece_mesh`, and the cell draws a per-piece picture, `icon::armour_parts`, keyed on set and
+piece the way every other picture is keyed on shape.
 
 Four rules hold the numbers together:
 

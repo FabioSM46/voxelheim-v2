@@ -92,6 +92,7 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 use armour::ArmourLook;
+pub(crate) use armour::{ArmourStyle, sculpted_icon};
 
 pub(crate) use appearance::{
     ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,

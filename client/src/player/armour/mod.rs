@@ -40,8 +40,9 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use super::appearance::{ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
-use super::items::{Livery, armour_styles, item_armour_style, item_livery};
+use super::appearance::{ArmourPiece, ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
+use super::inventory::EQUIPMENT_ROUTES;
+use super::items::{ITEMS, Livery, armour_styles, item_armour_style, item_livery};
 use super::{livery, merge_all};
 
 /// The sculpted set one armour item is drawn as.
@@ -114,6 +115,80 @@ pub(super) fn looks() -> Vec<ArmourLook> {
         .into_iter()
         .map(|(style, livery)| ArmourLook { style, livery })
         .collect()
+}
+
+/// The piece of the rig one armour item covers, read off the equipment slot it routes to.
+///
+/// **Not a second table**: `inventory::EQUIPMENT_ROUTES` already answers which slot an item
+/// fits, and its first three offsets are the head, chest and legs. The off-hand is no piece.
+pub(super) fn piece_of(item_id: u16) -> Option<ArmourPiece> {
+    EQUIPMENT_ROUTES
+        .iter()
+        .zip(ArmourPiece::ALL)
+        .find(|(accepted, _)| accepted.contains(&item_id))
+        .map(|(_, piece)| piece)
+}
+
+/// One sculpted armour item as an object of its own: the look it is worn in and the piece it
+/// covers. `None` for anything the body would draw as the plain overlay.
+pub(super) fn sculpted_piece(item_id: u16) -> Option<(ArmourLook, ArmourPiece)> {
+    Some((look(item_id)?, piece_of(item_id)?))
+}
+
+/// What a cell draws a sculpted armour item as: its set and its piece.
+///
+/// The livery is not in it, because a cell's picture does not change with the metal.
+pub(crate) fn sculpted_icon(item_id: u16) -> Option<(ArmourStyle, ArmourPiece)> {
+    sculpted_piece(item_id).map(|(look, piece)| (look.style, piece))
+}
+
+/// Every sculpted piece an item in this build is, for the drop's shared mesh cache.
+pub(super) fn sculpted_pieces() -> Vec<(ArmourLook, ArmourPiece)> {
+    let mut found: Vec<(ArmourLook, ArmourPiece)> = Vec::new();
+    for row in ITEMS {
+        if let Some(piece) = sculpted_piece(row.item_id)
+            && !found.contains(&piece)
+        {
+            found.push(piece);
+        }
+    }
+    found
+}
+
+/// A sculpted piece taken off the rig: the segments it is worn as, merged in their resting
+/// places, centred on their own origin and scaled so the longest side is `longest` blocks.
+///
+/// **The same meshes the body wears, not a second drawing of them**, which is what keeps a
+/// dropped helm and a worn one from becoming two objects that drift apart. A cuirass is its
+/// torso and both vambraces; greaves are both legs.
+pub(super) fn piece_mesh(look: ArmourLook, piece: ArmourPiece, longest: f32) -> Mesh {
+    let mut segments = ArmourSegment::ALL
+        .into_iter()
+        .filter(|segment| segment.piece() == piece)
+        .map(|segment| {
+            segment_mesh(Some(look), segment).translated_by(segment.body_piece().pivot())
+        });
+    // Unreachable: every piece is covered by at least one segment.
+    let Some(mut merged) = segments.next() else {
+        return Mesh::from(Cuboid::from_length(longest));
+    };
+    merge_all(&mut merged, segments, "dropped sculpted armour");
+
+    let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+        merged.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return merged;
+    };
+    let (low, high) = positions
+        .iter()
+        .fold((Vec3::MAX, Vec3::MIN), |(low, high), position| {
+            let position = Vec3::from_array(*position);
+            (low.min(position), high.max(position))
+        });
+    let size = (high - low).max_element().max(f32::EPSILON);
+    merged
+        .translated_by(-(low + high) / 2.0)
+        .scaled_by(Vec3::splat(longest / size))
 }
 
 /// How dark a recess is drawn, as a multiplier of the material's colour.
