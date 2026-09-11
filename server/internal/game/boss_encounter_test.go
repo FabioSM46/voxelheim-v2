@@ -12,10 +12,11 @@ import (
 // paused, then restore it before returning.
 //
 // **Two production rows are boss-rank since #1018, and this synthetic one stays anyway.**
-// The reason is the fight rather than the classification: a Vargr guardian has 720 health
-// and a Draugr king 1200, so driving these assertions through the authoritative
-// Attack-then-tick path would cost eighteen and thirty swings apiece and would measure
-// the balance rather than the encounter contract. The real species are pinned against
+// The reason is the fight rather than the classification: a Vargr guardian and a Draugr
+// king carry thousands of health for every member of the party that pulls them (#1099),
+// so driving these assertions through the authoritative Attack-then-tick path would cost
+// hundreds of swings apiece and would measure the balance rather than the encounter
+// contract. The real species are pinned against
 // that contract in boss_species_test.go, where the killing damage is applied directly.
 func withTestBoss(t *testing.T) {
 	t.Helper()

@@ -197,6 +197,10 @@ type bossEncounter struct {
 	// per-encounter and only ever rises, which is what lets a receiver holding a stale
 	// announcement tell it from a new instance of the same move.
 	nextMoveID uint64
+
+	// scale is the health and damage this boss took from the party at the pull, and is
+	// never written again. See boss_scale.go.
+	scale bossScale
 }
 
 // ticksFor is a duration in ticks at a rate, and never zero.
@@ -1018,11 +1022,12 @@ func mobStates(mobs []*mob) []protocol.MobState {
 			Vel:      toWire(m.vel),
 			Yaw:      float32(m.yaw),
 			Health:   m.health,
-			// From the registry row rather than from a constant, so a client's health
-			// bar is drawn against the maximum of the species it is looking at. The
-			// kind travels beside it, which is what lets the client size the body it
-			// draws — the numbers themselves stay here.
-			MaxHealth:      m.species().maxHealth,
+			// This creature's own ceiling rather than a constant, so a client's health
+			// bar is drawn against the maximum of what it is looking at: the registry row,
+			// or the scale an engaged boss took from its party. The kind travels beside
+			// it, which is what lets the client size the body it draws — the numbers
+			// themselves stay here.
+			MaxHealth:      m.maxHealth(),
 			Action:         m.action,
 			TargetEntityID: m.target,
 		}

@@ -270,14 +270,16 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// below is read against the draugr's 60 health and the two blades in itemRegistry,
 	// which is what every other row here is priced against.
 	//
-	// **720 health is twelve draugr, and eighteen iron swings.** An iron sword does 40
-	// and a rusty one 25, so a draugr is two swings and a field vargr is one; this is
-	// eighteen and twenty-nine. That is what buys the acceptance criterion the row exists
-	// for — a fight a party *has*, rather than a creature one player removes — and it is
-	// deliberately a multiple of a number a player already knows rather than a round
-	// thousand. It is an opening playtest value: #1036 owns balance, and the approved
-	// design says the fight's length must come from the openings its moves leave rather
-	// than from inflating this number.
+	// **10,500 health is what each member of the party brings, not what the boss has.** The
+	// pull multiplies it by the members inside the run, up to four, and never by their
+	// levels or their equipment — see boss_scale.go, which owns the rule and argues it. At 720
+	// for any party the #1037 harness measured every fight between 3.9 and 32.5 seconds
+	// against the approved design's three to four minutes (docs/reviews/dungeon-combat-1037.md).
+	// The number is calibrated with that harness rather than chosen: at 8,800 per member the
+	// iron readers of one to four averaged 176 seconds, kill time follows health almost
+	// linearly, and 210 seconds — the middle of the target — asks for 10,500.
+	// docs/reviews/boss-balance-1099.md records the result and its spread. The length still
+	// comes from the moves: no telegraph, recovery or opening was shortened to reach it.
 	//
 	// **Its 4.0 speed is under [WalkSpeed] of 4.3, and that is the criterion rather than
 	// a coincidence.** The field vargr is 5.4 — *above* a player, which is the whole
@@ -307,7 +309,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// to say about one that is placed rather than spawned.
 	vnet.MobKindVargrGuardian: {
 		rank:        mobRankBoss,
-		maxHealth:   720,
+		maxHealth:   10500,
 		experience:  120,
 		speed:       4.0,
 		aggroRange:  24.0,
@@ -335,12 +337,14 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// draugr, because the design places it second and nothing about it should read as a
 	// repeat of the first fight.
 	//
-	// **1200 health is twenty draugr and thirty iron swings**, against the guardian's
-	// twelve and eighteen. The ratio is the design's: the approved brief wants the second
-	// fight longer than the first, and says in the same breath that the length must not
-	// be *obtained* by inflating health — so this is 1.67 times the guardian rather than
-	// double it, and the rest of the difference belongs to the moves #1023 and the Draugr
-	// issues after it define.
+	// **16,383 health is what each member brings**, on the guardian's rule. It is the largest
+	// per-member health whose four-member total fits the uint16 the wire carries health in,
+	// and that bound is what decided it rather than the measurement: at 16,000 the iron
+	// readers of one to four averaged 301 seconds, and the middle of the approved design's
+	// five to six minutes would ask for about 17,550 — over the wire's ceiling for a party of
+	// four. So a full party kills the king a little under five minutes and a solo player a
+	// little under six; docs/reviews/boss-balance-1099.md records both.
+	// TestBossHealthFitsTheWireAtEveryScale holds the bound.
 	//
 	// **Its 3.0 speed is the slowest hostile row in the game**, under the field draugr's
 	// 3.2 and well under [WalkSpeed]. It is armoured and it carries a two-handed blade;
@@ -365,7 +369,7 @@ var mobRegistry = map[vnet.MobKind]mobDefinition{
 	// Not nocturnal, for the guardian's reason: a sealed hall has no sky.
 	vnet.MobKindDraugrKing: {
 		rank:        mobRankBoss,
-		maxHealth:   1200,
+		maxHealth:   16383,
 		experience:  200,
 		speed:       3.0,
 		aggroRange:  24.0,

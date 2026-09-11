@@ -64,7 +64,7 @@ func TestTheBossRowsCarryThePricedNumbers(t *testing.T) {
 
 	wantGuardian := mobDefinition{
 		rank:        mobRankBoss,
-		maxHealth:   720,
+		maxHealth:   10500,
 		experience:  120,
 		speed:       4.0,
 		aggroRange:  24.0,
@@ -87,7 +87,7 @@ func TestTheBossRowsCarryThePricedNumbers(t *testing.T) {
 
 	wantKing := mobDefinition{
 		rank:        mobRankBoss,
-		maxHealth:   1200,
+		maxHealth:   16383,
 		experience:  200,
 		speed:       3.0,
 		aggroRange:  24.0,

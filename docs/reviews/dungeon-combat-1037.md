@@ -3,6 +3,8 @@
 This record is the baseline measured before any correction. Part 2 changed the ritual pulse
 intervals, the Draugr's strike reach and move selection; its before and after numbers, and the
 values below that moved, are recorded in [dungeon-corrections-1037.md](dungeon-corrections-1037.md).
+The kill times below were delivered by #1099, which scales each boss to the levels of the party at
+the pull; its before and after numbers are recorded in [boss-balance-1099.md](boss-balance-1099.md).
 
 This part measures the assembled fights and changes no rule. Every number below comes
 from the production simulation of the shipped dungeon, at the default 20 Hz, and every
