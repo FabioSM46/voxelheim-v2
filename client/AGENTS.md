@@ -104,7 +104,7 @@ keeps meaning "everything the client is".
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
 | `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
-| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the two overlays with lifecycles of their own — the Monitor dropdown and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
+| `ui/settings.rs` | the settings screen behind the pause menu: the three tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the overlays with lifecycles of their own — one select dropdown per multiple-choice knob (at most one open) and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
 
 **`settings/` is a leaf, and the direction around it is what keeps it one.** `player` and
@@ -1518,6 +1518,16 @@ setting and writes `AudioControls`, and nothing under `audio/` ever writes a set
 in #1126 — sets `AudioControls::tone_test` to its bus; this module takes that request back on
 the frame it starts the tone, so the screen never has to remember to clear it.
 
+**A multiple-choice knob is a select, and the select has no setter.** `Knob::is_choice` names
+them (window mode, monitor, both devices, voice mode, audience) and
+`Settings::options_with_choices` lists each one's options in the order stepping walks them.
+Choosing an option turns its index into a step count with `KnobOptions::steps_to` and hands it
+to `adjust_with_choices`, so a select reaches the same bound, clamp and file a `+` does. A
+saved device or monitor that is not attached is held with nothing selected; stepping counts
+from the first option there, which is why choosing any option — the first included — replaces
+it. A new multiple-choice knob gets a dropdown by saying it is a choice; `ui/settings.rs`
+names no knob.
+
 **The four bus volumes below it are the same statement again, and their defaults are an
 ordering rather than four numbers.** `Knob::MusicVolume`, `Knob::SfxVolume` and
 `Knob::AmbienceVolume` each carry a bound, a step and a default here and cross the seam as a
@@ -1716,9 +1726,9 @@ disappear from, and that is the same rule read the other way — that line says 
 is *hearing*.
 
 **The Voices panel is an overlay, and it is rebuilt on a *set* rather than on a change.** It
-takes the Monitor dropdown's shape for the Monitor dropdown's reasons — absolutely positioned,
+takes a select dropdown's shape for a select dropdown's reasons — absolutely positioned,
 its own `GlobalZIndex`, its own open/close lifecycle, closed by a tab change and by Escape
-before Escape reaches the screen. What differs is the trap: `Voices` is marked changed on
+before Escape reaches the screen (an open select goes first, then the panel). What differs is the trap: `Voices` is marked changed on
 **every frame anybody is speaking**, so a rebuild driven by `Res::is_changed` would despawn and
 respawn a row under a pointer sixty times a second. `rebuild_voice_rows` therefore compares
 what is drawn against what should be — and it compares **two** things, the set of speakers and

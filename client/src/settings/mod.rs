@@ -668,10 +668,6 @@ impl Knob {
     /// [`Settings::options_with_choices`] answers `Some` for exactly these knobs;
     /// `the_multiple_choice_knobs_are_exactly_the_ones_with_options` holds the two together.
     /// No wildcard arm, for [`Self::tab`]'s reason: a new knob says which it is before it builds.
-    // Read by `ui/settings.rs`'s `rows_of` from #1126 part 3/3, which turns every knob this
-    // names into a select; until then only the Monitor row is one and nothing outside the tests
-    // asks. `net/codec.rs` carries the same allowance for encoders that ship before their callers.
-    #[allow(dead_code)]
     pub const fn is_choice(self) -> bool {
         match self {
             Self::WindowMode
