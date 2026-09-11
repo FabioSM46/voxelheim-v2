@@ -301,7 +301,14 @@ const (
 	/// Appending fields is layout-compatible, but a V37 client silently drops the
 	/// position and a V38 client cannot recover it from a V37 server. Both directions
 	/// must reject the handshake rather than disagree about the final opening.
-	ProtocolVersionCurrent ProtocolVersion = 38
+	///
+	/// V39: `StructureKind.LeatherBench`, `ArmourBench` and `EnchantingTable`. The
+	/// runestone's argument at V26: each travels server -> client inside
+	/// `StructureState.kind`, whose decoder refuses a member it cannot name, so a V38
+	/// client would handshake cleanly and lose the session the first time somebody put a
+	/// bench down in view. The three `RecipeID` members that build them ride along and
+	/// owe nothing alone — an unknown recipe is an ordinary silence from the server.
+	ProtocolVersionCurrent ProtocolVersion = 39
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

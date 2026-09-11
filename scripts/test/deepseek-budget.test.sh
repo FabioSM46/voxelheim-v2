@@ -90,8 +90,8 @@ request_budget = request_timeout * (max_retries + 1)
 job_budget = job_minutes * 60
 headroom = job_budget - request_budget
 
-assert model == default_model == "deepseek-v4-flash", (
-    "workflow and reviewer fallback must both select deepseek-v4-flash: "
+assert model == default_model == "deepseek-flash", (
+    "workflow and reviewer fallback must both select deepseek-flash: "
     f"workflow={model} fallback={default_model}"
 )
 assert reasoning_effort == default_reasoning_effort == "high", (

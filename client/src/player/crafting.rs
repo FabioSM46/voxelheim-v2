@@ -82,6 +82,13 @@ pub(super) const ITEM_BOW: u16 = 28;
 pub(super) const ITEM_ARROW: u16 = 29;
 pub(super) const ITEM_WOODEN_SCEPTRE: u16 = 30;
 
+/// The three benches, mirrored from `game.ItemLeatherBench`, `ItemArmourBench` and
+/// `ItemEnchantingTable`. Declared beside their recipes because this module is the one that
+/// names them as products; nothing on this side routes a press on them yet.
+pub(super) const ITEM_LEATHER_BENCH: u16 = 44;
+pub(super) const ITEM_ARMOUR_BENCH: u16 = 45;
+pub(super) const ITEM_ENCHANTING_TABLE: u16 = 46;
+
 /// One line of a recipe's cost, or the product it yields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ingredient {
@@ -148,7 +155,7 @@ impl Recipe {
 /// it. `every_recipe_the_contract_names_has_exactly_one_row` sweeps
 /// `RecipeID::ENUM_VALUES` instead, so a recipe appended to `schemas/player.fbs` is red
 /// here until this client carries its row.
-pub const RECIPES: [Recipe; 21] = [
+pub const RECIPES: [Recipe; 24] = [
     Recipe {
         id: RecipeId::Forge,
         category: RecipeCategory::Survival,
@@ -245,9 +252,8 @@ pub const RECIPES: [Recipe; 21] = [
         },
         station: None,
     },
-    // Two pelts and nothing else. Station-less on purpose, and that is the whole
-    // difference between it and the sharpening stone above: a kit whose point is not
-    // having to walk home would be pointless if making it meant walking home.
+    // Two pelts and nothing else, at the leather bench with the rest of the leatherwork
+    // (#1119). The mend it pays for is still a field action; only the making moved.
     Recipe {
         id: RecipeId::LeatherPatch,
         category: RecipeCategory::Survival,
@@ -259,7 +265,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_LEATHER_PATCH,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::LeatherBench),
     },
     // The three implements. One price three times, because #185 ruled out tiers — a
     // difference between them would be a ladder nobody chose. Cheaper than the blade the
@@ -319,7 +325,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_LEATHER_CAP,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::LeatherBench),
     },
     Recipe {
         id: RecipeId::LeatherJerkin,
@@ -332,7 +338,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_LEATHER_JERKIN,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::LeatherBench),
     },
     Recipe {
         id: RecipeId::LeatherLeggings,
@@ -345,7 +351,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_LEATHER_LEGGINGS,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::LeatherBench),
     },
     Recipe {
         id: RecipeId::IronHelm,
@@ -364,7 +370,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_IRON_HELM,
             count: 1,
         },
-        station: Some(StructureKind::Forge),
+        station: Some(StructureKind::ArmourBench),
     },
     Recipe {
         id: RecipeId::IronCuirass,
@@ -383,7 +389,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_IRON_CUIRASS,
             count: 1,
         },
-        station: Some(StructureKind::Forge),
+        station: Some(StructureKind::ArmourBench),
     },
     Recipe {
         id: RecipeId::IronGreaves,
@@ -402,7 +408,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_IRON_GREAVES,
             count: 1,
         },
-        station: Some(StructureKind::Forge),
+        station: Some(StructureKind::ArmourBench),
     },
     Recipe {
         id: RecipeId::WoodenShield,
@@ -440,7 +446,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_BOW,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::Forge),
     },
     Recipe {
         id: RecipeId::Arrows,
@@ -459,7 +465,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_ARROW,
             count: 4,
         },
-        station: None,
+        station: Some(StructureKind::Forge),
     },
     Recipe {
         id: RecipeId::WoodenSceptre,
@@ -482,7 +488,7 @@ pub const RECIPES: [Recipe; 21] = [
             item_id: ITEM_WOODEN_SCEPTRE,
             count: 1,
         },
-        station: None,
+        station: Some(StructureKind::EnchantingTable),
     },
     Recipe {
         id: RecipeId::Runestone,
@@ -502,6 +508,73 @@ pub const RECIPES: [Recipe; 21] = [
             count: 1,
         },
         station: Some(StructureKind::Forge),
+    },
+    // The three benches, built by hand like the forge they stand beside: a bench is the
+    // thing you make before you have one.
+    Recipe {
+        id: RecipeId::LeatherBench,
+        category: RecipeCategory::Survival,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 6,
+            },
+            Ingredient {
+                item_id: ITEM_VARGR_PELT,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_LEATHER_BENCH,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::ArmourBench,
+        category: RecipeCategory::Survival,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 4,
+            },
+            Ingredient {
+                item_id: ITEM_STONE,
+                count: 4,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_IRON,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_ARMOUR_BENCH,
+            count: 1,
+        },
+        station: None,
+    },
+    Recipe {
+        id: RecipeId::EnchantingTable,
+        category: RecipeCategory::Survival,
+        ingredients: &[
+            Ingredient {
+                item_id: ITEM_STONE,
+                count: 8,
+            },
+            Ingredient {
+                item_id: ITEM_RAW_COAL,
+                count: 2,
+            },
+            Ingredient {
+                item_id: ITEM_LOG,
+                count: 2,
+            },
+        ],
+        product: Ingredient {
+            item_id: ITEM_ENCHANTING_TABLE,
+            count: 1,
+        },
+        station: None,
     },
 ];
 
@@ -805,8 +878,23 @@ mod tests {
             cost(RecipeId::Runestone),
             vec![(ITEM_STONE, 8), (ITEM_RAW_IRON, 2)]
         );
+        assert_eq!(
+            cost(RecipeId::LeatherBench),
+            vec![(ITEM_LOG, 6), (ITEM_VARGR_PELT, 2)]
+        );
+        assert_eq!(
+            cost(RecipeId::ArmourBench),
+            vec![(ITEM_LOG, 4), (ITEM_STONE, 4), (ITEM_RAW_IRON, 2)]
+        );
+        assert_eq!(
+            cost(RecipeId::EnchantingTable),
+            vec![(ITEM_STONE, 8), (ITEM_RAW_COAL, 2), (ITEM_LOG, 2)]
+        );
 
         for (id, product, station) in [
+            (RecipeId::LeatherBench, ITEM_LEATHER_BENCH, None),
+            (RecipeId::ArmourBench, ITEM_ARMOUR_BENCH, None),
+            (RecipeId::EnchantingTable, ITEM_ENCHANTING_TABLE, None),
             (RecipeId::Forge, ITEM_FORGE, None),
             (
                 RecipeId::IronSword,
@@ -820,33 +908,53 @@ mod tests {
             ),
             (RecipeId::Tent, ITEM_TENT, None),
             (RecipeId::Campfire, ITEM_CAMPFIRE, None),
-            (RecipeId::LeatherPatch, ITEM_LEATHER_PATCH, None),
+            (
+                RecipeId::LeatherPatch,
+                ITEM_LEATHER_PATCH,
+                Some(StructureKind::LeatherBench),
+            ),
             (
                 RecipeId::CookedMeat,
                 ITEM_COOKED_MEAT,
                 Some(StructureKind::Campfire),
             ),
-            (RecipeId::LeatherCap, ITEM_LEATHER_CAP, None),
-            (RecipeId::LeatherJerkin, ITEM_LEATHER_JERKIN, None),
-            (RecipeId::LeatherLeggings, ITEM_LEATHER_LEGGINGS, None),
+            (
+                RecipeId::LeatherCap,
+                ITEM_LEATHER_CAP,
+                Some(StructureKind::LeatherBench),
+            ),
+            (
+                RecipeId::LeatherJerkin,
+                ITEM_LEATHER_JERKIN,
+                Some(StructureKind::LeatherBench),
+            ),
+            (
+                RecipeId::LeatherLeggings,
+                ITEM_LEATHER_LEGGINGS,
+                Some(StructureKind::LeatherBench),
+            ),
             (
                 RecipeId::IronHelm,
                 ITEM_IRON_HELM,
-                Some(StructureKind::Forge),
+                Some(StructureKind::ArmourBench),
             ),
             (
                 RecipeId::IronCuirass,
                 ITEM_IRON_CUIRASS,
-                Some(StructureKind::Forge),
+                Some(StructureKind::ArmourBench),
             ),
             (
                 RecipeId::IronGreaves,
                 ITEM_IRON_GREAVES,
-                Some(StructureKind::Forge),
+                Some(StructureKind::ArmourBench),
             ),
             (RecipeId::WoodenShield, ITEM_WOODEN_SHIELD, None),
-            (RecipeId::Bow, ITEM_BOW, None),
-            (RecipeId::WoodenSceptre, ITEM_WOODEN_SCEPTRE, None),
+            (RecipeId::Bow, ITEM_BOW, Some(StructureKind::Forge)),
+            (
+                RecipeId::WoodenSceptre,
+                ITEM_WOODEN_SCEPTRE,
+                Some(StructureKind::EnchantingTable),
+            ),
             (
                 RecipeId::Runestone,
                 ITEM_RUNESTONE,
@@ -872,7 +980,7 @@ mod tests {
                 count: 4
             }
         );
-        assert_eq!(arrows.station, None);
+        assert_eq!(arrows.station, Some(StructureKind::Forge));
     }
 
     /// Every recipe the contract names has exactly one row, and nothing has two.

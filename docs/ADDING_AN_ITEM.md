@@ -101,9 +101,14 @@ carefully it is written.
 
 ### 7. Reuse a shape before inventing one
 
-`ItemShape` is a vocabulary of *kinds*, not a picture per item: three implements share one
-`Tool` silhouette and are told apart by colour, and every wearable piece shares one `Armour`
-plate. Reach for an existing variant first.
+`ItemShape` is a vocabulary of *kinds*, not a picture per item: every wearable piece shares one
+`Armour` plate and is told apart by colour. Reach for an existing variant first.
+
+The pickaxe and the shovel are the counter-example worth knowing (#1121): they shared the axe's
+`Tool` silhouette in dirt and stone swatches until a pack holding all three read as three
+identical T shapes, and each got a `Pickaxe` and a `Shovel` variant of its own. Colour is enough
+to separate items of one kind; it is not enough when the player's question is *which tool am I
+holding*.
 
 A genuinely new shape is a larger change than it looks: both renderers match on `ItemShape`
 with no wildcard arm, so a new variant does not compile until it has a held mesh **and** a cell

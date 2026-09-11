@@ -330,3 +330,95 @@ fn disabling_and_reenabling_the_bus_returns_and_reclaims_a_fresh_source() {
     assert!(hear(&mut app, &mixer, 100)[1] > 0.0);
     assert_eq!(ids(&app), vec![1]);
 }
+
+#[test]
+fn the_forge_curve_at_its_twelve_block_range_is_pinned() {
+    assert_eq!(
+        carry(Kind::Forge),
+        Carry {
+            range: 12.0,
+            gain: 0.6
+        }
+    );
+    assert_eq!(
+        carry(Kind::Fire),
+        Carry {
+            range: 12.0,
+            gain: 1.0
+        }
+    );
+    // Flat to two blocks, then inverse distance to exactly zero at the range.
+    for (distance, expected) in [
+        (0.0, 1.0),
+        (2.0, 1.0),
+        (3.0, 0.6),
+        (4.0, 0.4),
+        (6.0, 0.2),
+        (8.0, 0.1),
+        (10.0, 0.04),
+        (12.0, 0.0),
+        (28.0, 0.0),
+    ] {
+        let gain = spatial::attenuation(distance, FORGE_RANGE);
+        assert!((gain - expected).abs() < 1e-5, "{distance} blocks: {gain}");
+    }
+}
+
+#[test]
+fn a_forge_at_eight_blocks_is_clearly_quieter_than_at_two_and_silent_at_twelve() {
+    // The eye stands at x = 4.5 and a structure at x sounds from x + 0.5, so 6, 12 and 16
+    // put the anvil 2, 8 and 12 blocks to the right. One id keeps one strike rhythm.
+    let heard = |x| {
+        let (mut app, mixer) = fixture(vec![structure(1, StructureKind::Forge, x)], None);
+        (hear(&mut app, &mixer, 1200)[1], ids(&app))
+    };
+    let (two, _) = heard(6);
+    let (eight, _) = heard(12);
+    let (twelve, live) = heard(16);
+    assert!(eight > 0.0 && eight < two * 0.02, "2: {two}, 8: {eight}");
+    assert_eq!(twelve, 0.0);
+    assert!(live.is_empty());
+}
+
+#[test]
+fn a_village_forge_across_the_settlement_is_silent_from_its_edge() {
+    // Settlement stations belong to nobody and arrive in the same snapshot rows as placed
+    // ones. From the edge of a 28-block village, the near hut ring (16 from the centre) is
+    // 12 blocks in, the centre 28 and the far hut ring 44.
+    let village = |id, x| StructureState {
+        owner_entity_id: 0,
+        ..structure(id, StructureKind::Forge, x)
+    };
+    let (mut edge, mixer) = fixture(vec![village(1, 16), village(2, 32), village(3, 48)], None);
+    assert_eq!(hear(&mut edge, &mixer, 1200), [0.0; 2]);
+    assert!(ids(&edge).is_empty());
+    let (mut inside, mixer) = fixture(vec![village(4, 15)], None);
+    assert!(hear(&mut inside, &mixer, 1200)[1] > 0.0);
+    assert_eq!(ids(&inside), vec![4]);
+}
+
+#[test]
+fn no_city_source_is_admitted_or_placed_outside_the_distance_curve() {
+    let origin = Vec3::new(0.5, 4.5, 4.5);
+    for (structure_kind, kind) in [
+        (StructureKind::Forge, Kind::Forge),
+        (StructureKind::Campfire, Kind::Fire),
+    ] {
+        let carry = carry(kind);
+        for step in 0..=160 {
+            let eye = origin - Vec3::X * (step as f32 * 0.25);
+            let curve = spatial::attenuation(eye.distance(origin), carry.range);
+            match Candidate::from_structure(&structure(1, structure_kind, 0), eye) {
+                None => assert_eq!(curve, 0.0, "{kind:?} dropped at step {step}"),
+                Some(candidate) => {
+                    assert!(curve > 0.0, "{kind:?} admitted past its range at {step}");
+                    for yaw in [0.0, 1.0, 3.0] {
+                        let placement = candidate.place(eye, yaw, 0.0);
+                        assert!((placement.gain - curve * carry.gain).abs() < 1e-6);
+                        assert!(placement.gain <= curve);
+                    }
+                }
+            }
+        }
+    }
+}

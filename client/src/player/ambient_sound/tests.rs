@@ -35,9 +35,13 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
     let day = targets(&grass(), 0.0, None);
     let dusk = targets(&grass(), 0.5, None);
     let night = targets(&grass(), 1.0, None);
-    assert_eq!((day.day, day.beds[0]), (1.0, 0.0));
-    assert_eq!((dusk.day, dusk.beds[0]), (0.5, 0.5));
-    assert_eq!((night.day, night.beds[0]), (0.0, 1.0));
+    assert_eq!((day.day, day.wildlife[4]), (1.0, 0.0));
+    assert_eq!((dusk.day, dusk.wildlife[4]), (0.5, 0.5));
+    assert_eq!((night.day, night.wildlife[4]), (0.0, 1.0));
+    assert_eq!(
+        night.beds, [0.0; 5],
+        "crickets are no longer a continuous bed"
+    );
     for look in [GroundLook::Snow, GroundLook::Sand, GroundLook::Unknown] {
         let v = targets(
             &Ambience {
@@ -48,7 +52,8 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
             None,
         );
         assert_eq!(v.day, 0.0);
-        assert_eq!(v.beds, [0.0; 6]);
+        assert_eq!(v.wildlife[4], 0.0);
+        assert_eq!(v.beds, [0.0; 5]);
     }
     let plain = Ambience {
         wooded: false,
@@ -66,14 +71,14 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
 fn rain_grows_louder_and_thicker_and_snow_has_its_own_lane() {
     let light = targets(&grass(), 0.0, weather(WeatherKind::Rain, 50));
     let heavy = targets(&grass(), 0.0, weather(WeatherKind::Rain, 220));
-    assert!(heavy.beds[1] > light.beds[1]);
-    assert!(heavy.beds[2] / heavy.beds[1] > light.beds[2] / light.beds[1]);
+    assert!(heavy.beds[0] > light.beds[0]);
+    assert!(heavy.beds[1] / heavy.beds[0] > light.beds[1] / light.beds[0]);
     let snow = targets(&grass(), 0.0, weather(WeatherKind::Snow, 220));
-    assert_eq!(snow.beds[1..3], [0.0; 2]);
-    assert!(snow.beds[3] > 0.0);
+    assert_eq!(snow.beds[0..2], [0.0; 2]);
+    assert!(snow.beds[2] > 0.0);
     assert_eq!(
         targets(&grass(), 0.0, weather(WeatherKind::Rain, 0)).beds,
-        [0.0; 6]
+        [0.0; 5]
     );
 }
 
@@ -256,22 +261,63 @@ fn session_and_camera_lifetime_bound_all_country_sources() {
 }
 
 #[test]
-fn cricket_trills_have_pulses_and_a_slow_phrase_contour() {
-    let levels: Vec<f32> = (0..1000)
-        .map(|i| cricket_trill(f64::from(i) / 100.0))
-        .collect();
-    assert!(levels.iter().all(|v| *v >= 0.12 && *v <= 1.0));
-    assert!(levels.iter().copied().fold(0.0, f32::max) > 0.95);
-    let peaks = levels
-        .windows(3)
-        .filter(|w| w[1] > w[0] && w[1] > w[2])
-        .count();
-    assert!(
-        (55..=59).contains(&peaks),
-        "insect pulses must not become a steady noise"
+fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
+    let profile = sounds::Call::Cricket.profile();
+    assert_eq!(
+        (
+            profile.interval,
+            profile.radius,
+            profile.height,
+            profile.seconds,
+            profile.range
+        ),
+        ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0)
     );
-    assert!((cricket_trill(1024.0) - cricket_trill(1024.0001)).abs() < 0.01);
-    assert_ne!(cricket_trill(0.125), cricket_trill(10.125));
+    assert!(profile.seconds < profile.interval[0]);
+    assert!(matches!(CALLS[4], sounds::Call::Cricket));
+    for night in [0.0, 0.25, 1.0] {
+        for wooded in [false, true] {
+            let green = Ambience {
+                ground: GroundLook::Grass,
+                wooded,
+            };
+            assert_eq!(targets(&green, night, None).wildlife[4], night);
+            for kind in [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Blizzard] {
+                assert_eq!(
+                    targets(&green, night, weather(kind, 255)).wildlife[4],
+                    night
+                );
+            }
+        }
+        for ground in [GroundLook::Sand, GroundLook::Snow, GroundLook::Unknown] {
+            let country = Ambience {
+                ground,
+                wooded: true,
+            };
+            assert_eq!(targets(&country, night, None).wildlife[4], 0.0);
+        }
+    }
+}
+
+#[test]
+fn a_simulated_night_hears_a_few_chirps_a_minute_rather_than_a_wall() {
+    for seed in [17, 39, 1123] {
+        let (starts, levels) = wildlife_sequence(sounds::Call::Cricket, seed, 1.0, 1.0);
+        // wildlife_sequence spans ten minutes; the seeds are the ones each call rendered.
+        let calls = starts.len() as f32 / 10.0;
+        let chirps = starts
+            .iter()
+            .map(|(_, seed, _)| sounds::chirps(*seed))
+            .sum::<u32>() as f32
+            / 10.0;
+        assert!((3.0..=10.0).contains(&calls), "{calls} calls a minute");
+        assert!(
+            (4.0..=20.0).contains(&chirps) && chirps >= calls && chirps <= calls * 3.0,
+            "{chirps} chirps a minute from {calls} calls"
+        );
+        let silent = levels.iter().filter(|energy| **energy == 0.0).count();
+        assert!(silent > 5100, "{silent} of 6000 ticks silent");
+    }
 }
 
 #[test]
@@ -325,7 +371,7 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
                 assert_eq!(&target.wildlife[first..first + 2], &expected);
                 assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0);
                 assert_eq!(
-                    target.beds, [0.0; 6],
+                    target.beds, [0.0; 5],
                     "quiet countries have no creature drone"
                 );
                 for kind in [
@@ -341,8 +387,11 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             }
         }
     }
-    assert_eq!(targets(&grass(), 0.5, None).wildlife, [0.0; 4]);
-    assert_eq!(targets(&Ambience::default(), 0.5, None).wildlife, [0.0; 4]);
+    assert_eq!(
+        targets(&grass(), 0.5, None).wildlife,
+        [0.0, 0.0, 0.0, 0.0, 0.5]
+    );
+    assert_eq!(targets(&Ambience::default(), 0.5, None).wildlife, [0.0; 5]);
     assert_eq!(
         birds::species_for(&Ambience {
             ground: GroundLook::Snow,
@@ -354,16 +403,16 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
 
 #[test]
 fn storm_winds_scale_independently_and_blizzard_keeps_the_existing_snowfall() {
-    for (kind, wind) in [(WeatherKind::Sandstorm, 4), (WeatherKind::Blizzard, 5)] {
+    for (kind, wind) in [(WeatherKind::Sandstorm, 3), (WeatherKind::Blizzard, 4)] {
         let zero = targets(&grass(), 0.0, weather(kind, 0));
         let light = targets(&grass(), 0.0, weather(kind, 64));
         let heavy = targets(&grass(), 0.0, weather(kind, 255));
         assert_eq!(zero.beds[wind], 0.0);
         assert!(light.beds[wind] > 0.0 && light.beds[wind] < heavy.beds[wind]);
         assert_eq!(heavy.beds[wind], 1.0);
-        assert_eq!(heavy.beds[9 - wind], 0.0);
+        assert_eq!(heavy.beds[7 - wind], 0.0);
         assert_eq!(
-            heavy.beds[3],
+            heavy.beds[2],
             f32::from(u8::from(kind == WeatherKind::Blizzard))
         );
         // The weather is already authoritative; wind does not wait for a ground vote.
@@ -555,7 +604,7 @@ fn crossing_countries_fades_outgoing_calls_while_incoming_calls_rise() {
     assert!(gains[0] < 0.01 && gains[2] > 0.99);
     app.world_mut().despawn(camera);
     app.update();
-    assert_eq!(app.world().resource::<Country>().wildlife_gains, [0.0; 4]);
+    assert_eq!(app.world().resource::<Country>().wildlife_gains, [0.0; 5]);
     energy(&AudioMixer::from_shared_for_test(shared.clone()), 12000);
     assert_eq!(energy(&AudioMixer::from_shared_for_test(shared), 800), 0.0);
 }

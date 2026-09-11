@@ -21,6 +21,7 @@
 
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::ITEM_WOODEN_SHIELD;
+use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
 use super::crafting::{
     ITEM_ARROW, ITEM_AXE, ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_CUIRASS, ITEM_IRON_GREAVES,
     ITEM_IRON_HELM, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
@@ -140,12 +141,13 @@ pub(crate) enum ItemShape {
     /// means something different while one is in hand — a structure rather than a voxel —
     /// and the hand is where a player sees which of the two they are about to ask for.
     Bundle,
-    /// A haft with a head on it: a shovel, a pickaxe, an axe.
+    /// A haft with a block of a head across the top of it: the axe.
     ///
-    /// **One shape for the three, and they are told apart by colour**, which is the same
-    /// answer three raw materials already get. `ItemShape` is a vocabulary of *kinds* —
-    /// four of them before this — rather than a picture per item, and three silhouettes
-    /// would be three meshes and three drawings for a difference #175 is the issue for.
+    /// **It was the shovel's and the pickaxe's too until #1121**, and the three were told
+    /// apart by the colour of the ground each digs. Three identical T shapes in dirt, stone and
+    /// bark were the one place in the pack a player had to read a swatch to know which tool
+    /// they held, so the other two have silhouettes of their own now — [`Self::Pickaxe`] and
+    /// [`Self::Shovel`] — and this variant keeps the one implement left drawn as a T.
     ///
     /// It is a shape of its own rather than a `Blade` because the difference is the one
     /// that matters in the hand: a blade is what the left button swings, and an implement
@@ -153,6 +155,13 @@ pub(crate) enum ItemShape {
     /// registry says with a zero. A shape is not a capability, and drawing them alike
     /// would be inviting the reader to think it was.
     Tool,
+    /// A wooden haft under a curved, two-pointed iron head.
+    ///
+    /// Not a capability either: what a pickaxe mines faster is the server's registry, and a
+    /// pick drawn in the hand changes nothing about a mining request.
+    Pickaxe,
+    /// A wooden haft with a small D-grip under a flat iron blade.
+    Shovel,
     /// A compact plate with shoulders: every wearable piece uses one silhouette and the
     /// registry colour distinguishes worked leather from forged iron.
     Armour,
@@ -210,12 +219,14 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Block,
         Self::Material,
         Self::Blade,
         Self::Bundle,
         Self::Tool,
+        Self::Pickaxe,
+        Self::Shovel,
         Self::Armour,
         Self::Shield,
         Self::Bow,
@@ -407,7 +418,7 @@ pub(super) struct ItemDisplay {
 /// The order is load-bearing only as documentation; [`display`] searches by id. What the
 /// sweep does insist on is that the ids form the contiguous block an append-only registry
 /// produces, so a sixteenth item cannot quietly arrive as id 20 with a hole behind it.
-pub(super) const ITEMS: [ItemDisplay; 43] = [
+pub(super) const ITEMS: [ItemDisplay; 46] = [
     ItemDisplay {
         item_id: ITEM_STONE,
         name: "stone",
@@ -536,31 +547,32 @@ pub(super) const ITEMS: [ItemDisplay; 43] = [
         colour: ItemColour::Block(palette::LOG),
         livery: None,
     },
-    // The three implements, one shape and three swatches — which is what stops them being
-    // three identical cells, exactly as it does for the bone, the pelt and the patch above.
-    // Each swatch is the ground its tool is for, so what a player reads off the colour is
-    // the thing the tool is good at: earth for the shovel, stone for the pickaxe, wood for
-    // the axe.
+    // The three implements. The shovel and the pickaxe are told apart from each other and
+    // from the axe by silhouette since #1121, so their colour is free to say what they are
+    // made of: the row names the wood of the haft, and every renderer draws the head in
+    // forged iron beside it — `hands::implement_colours` for the hand and the ground, the
+    // `iron` parts of the cell's drawing. No livery: grain on a 12 mm haft is a texture
+    // nobody will look at, which is the default answer `Livery` documents.
     ItemDisplay {
         item_id: ITEM_SHOVEL,
         name: "shovel",
-        shape: ItemShape::Tool,
-        colour: ItemColour::Block(palette::DIRT),
+        shape: ItemShape::Shovel,
+        colour: ItemColour::Block(palette::LOG),
         livery: None,
     },
     ItemDisplay {
         item_id: ITEM_PICKAXE,
         name: "pickaxe",
-        shape: ItemShape::Tool,
-        colour: ItemColour::Block(palette::STONE),
+        shape: ItemShape::Pickaxe,
+        colour: ItemColour::Block(palette::LOG),
         livery: None,
     },
     ItemDisplay {
-        // **`Block(palette::LOG)` and no livery, deliberately.** Every implement's swatch is
-        // *the ground its tool is for* rather than what it is made of — earth for the shovel,
-        // stone for the pickaxe, wood for the axe — so an axe is bark-coloured because it
-        // fells trees. Graining it would be reading the colour as a material, which is the
-        // exact mistake the livery column is explicit per row to avoid.
+        // **`Block(palette::LOG)` and no livery, deliberately.** The axe is still the T its
+        // two siblings used to share, and its swatch is still *the ground it is for* rather
+        // than what it is made of — an axe is bark-coloured because it fells trees. Graining
+        // it would be reading the colour as a material, which is the exact mistake the
+        // livery column is explicit per row to avoid.
         item_id: ITEM_AXE,
         name: "axe",
         shape: ItemShape::Tool,
@@ -772,6 +784,29 @@ pub(super) const ITEMS: [ItemDisplay; 43] = [
         colour: ItemColour::Horse(MountKind::GreyHorse),
         livery: None,
     },
+    // The three benches, carried as bundles the way every other structure item is, each in
+    // the colour of what it is mostly made of. Their own silhouettes are #1129.
+    ItemDisplay {
+        item_id: ITEM_LEATHER_BENCH,
+        name: "leather bench",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::PLANKS),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_ARMOUR_BENCH,
+        name: "armour bench",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::COBBLESTONE),
+        livery: None,
+    },
+    ItemDisplay {
+        item_id: ITEM_ENCHANTING_TABLE,
+        name: "enchanting table",
+        shape: ItemShape::Bundle,
+        colour: ItemColour::Block(palette::BASALT),
+        livery: None,
+    },
 ];
 
 /// The stablemaster item whose canonical label belongs to one wire mount kind.
@@ -814,6 +849,16 @@ pub(crate) fn item_linear_rgba(item_id: u16) -> [f32; 4] {
         || palette::linear_rgba(BlockId::MAX),
         |row| row.colour.linear_rgba(),
     )
+}
+
+/// The forged iron an implement's head is drawn in, as a linear colour.
+///
+/// **The iron sword's and the iron armour's own swatch**, read from [`ItemColour`] rather than
+/// copied, so a pickaxe head and a forged blade cannot drift into two irons. It is exposed as
+/// a colour rather than as an item because the head is a *part* of an item whose row names
+/// the haft — see the implement rows in [`ITEMS`].
+pub(crate) fn forged_iron_linear_rgba() -> [f32; 4] {
+    ItemColour::ForgedSteel.linear_rgba()
 }
 
 /// The shape one item id is drawn in.
@@ -930,6 +975,10 @@ mod tests {
         // its swatch is *the ground its tool is for*, and the leather patch because bark is
         // what a worked hide looks like. A livery inferred from the colour would grain both,
         // which is why the column is explicit per row.
+        //
+        // The shovel and the pickaxe wear the same swatch *because* their hafts are wood
+        // (#1121) and carry no livery either — see their rows — but that is a choice about
+        // grain at a haft's size, not the colour-is-not-the-material case this pins.
         for item_id in [ITEM_AXE, ITEM_LEATHER_PATCH] {
             assert_eq!(
                 display(item_id).and_then(|row| row.livery),
@@ -1010,6 +1059,9 @@ mod tests {
             ITEM_BLACK_HORSE,
             ITEM_BROWN_HORSE,
             ITEM_GREY_HORSE,
+            ITEM_LEATHER_BENCH,
+            ITEM_ARMOUR_BENCH,
+            ITEM_ENCHANTING_TABLE,
         ];
         for item_id in declared {
             assert!(
@@ -1053,7 +1105,7 @@ mod tests {
 
         // **Nothing else is a coin**, which is the whole of what earns the shape its own
         // variant: if a second item ever shares it they are told apart by colour, exactly as
-        // the three implements and the three armour pieces are, and that is a decision
+        // the armour pieces are, and that is a decision
         // somebody has to make here rather than inherit.
         let coins: Vec<u16> = ITEMS
             .iter()
@@ -1100,6 +1152,19 @@ mod tests {
             assert_eq!(row.shape, ItemShape::Block);
             assert_eq!(row.colour, ItemColour::Block(swatch));
             assert_eq!(row.livery, livery);
+        }
+    }
+
+    #[test]
+    fn the_three_benches_have_their_appended_ids_labels_and_bundle_icons() {
+        for (item_id, id, name) in [
+            (ITEM_LEATHER_BENCH, 44, "leather bench"),
+            (ITEM_ARMOUR_BENCH, 45, "armour bench"),
+            (ITEM_ENCHANTING_TABLE, 46, "enchanting table"),
+        ] {
+            assert_eq!(item_id, id);
+            assert_eq!(item_label(item_id), name);
+            assert_eq!(item_shape(item_id), ItemShape::Bundle);
         }
     }
 
@@ -1319,6 +1384,48 @@ mod tests {
             item_linear_rgba(ITEM_LEATHER_CAP),
             item_linear_rgba(ITEM_IRON_HELM)
         );
+    }
+
+    /// **Three implements, three silhouettes, and the two new ones in the colour of what they
+    /// are made of** (#1121).
+    ///
+    /// The ids are pinned for the reason every id here is. The colour is pinned to the log's
+    /// swatch because the cell draws the haft in the row's colour while the hand and the ground
+    /// draw it in `palette::LOG` directly, and the two are only the same wood while this holds.
+    #[test]
+    fn the_three_implements_have_three_shapes_and_the_new_two_are_wood_and_iron() {
+        assert_eq!([ITEM_SHOVEL, ITEM_PICKAXE, ITEM_AXE], [16, 17, 18]);
+        assert_eq!(item_shape(ITEM_SHOVEL), ItemShape::Shovel);
+        assert_eq!(item_shape(ITEM_PICKAXE), ItemShape::Pickaxe);
+        assert_eq!(item_shape(ITEM_AXE), ItemShape::Tool);
+
+        for item_id in [ITEM_SHOVEL, ITEM_PICKAXE] {
+            let row = display(item_id).expect("an implement is registered");
+            assert_eq!(
+                row.colour,
+                ItemColour::Block(palette::LOG),
+                "item {item_id}'s haft is not the log's wood"
+            );
+            // Not the ground it digs any more: the swatches #1121 replaced.
+            assert_ne!(row.colour, ItemColour::Block(palette::DIRT));
+            assert_ne!(row.colour, ItemColour::Block(palette::STONE));
+        }
+
+        // The head's iron is the forged blade's own, not a third steel.
+        assert_eq!(forged_iron_linear_rgba(), item_linear_rgba(ITEM_IRON_SWORD));
+
+        // And nothing else is drawn as either, so each silhouette names exactly one item.
+        for (shape, want) in [
+            (ItemShape::Shovel, ITEM_SHOVEL),
+            (ItemShape::Pickaxe, ITEM_PICKAXE),
+        ] {
+            let drawn: Vec<u16> = ITEMS
+                .iter()
+                .filter(|row| row.shape == shape)
+                .map(|row| row.item_id)
+                .collect();
+            assert_eq!(drawn, vec![want], "{shape:?}");
+        }
     }
 
     #[test]

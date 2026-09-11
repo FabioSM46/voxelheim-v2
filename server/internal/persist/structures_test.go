@@ -48,6 +48,24 @@ func campFixture() []StructureRecord {
 			Facing: vnet.FacingNorth,
 			Owner:  identity.PlayerID{1, 2, 3},
 		},
+		{
+			Kind:   vnet.StructureKindLeatherBench,
+			Anchor: [3]int32{-3, 62, -3},
+			Facing: vnet.FacingEast,
+			Owner:  identity.PlayerID{9, 9, 9, 9},
+		},
+		{
+			Kind:   vnet.StructureKindArmourBench,
+			Anchor: [3]int32{5, 66, -12},
+			Facing: vnet.FacingSouth,
+			Owner:  identity.PlayerID{1, 2, 3},
+		},
+		{
+			Kind:   vnet.StructureKindEnchantingTable,
+			Anchor: [3]int32{-96, 80, 40},
+			Facing: vnet.FacingWest,
+			Owner:  identity.PlayerID{9, 9, 9, 9},
+		},
 	}
 }
 

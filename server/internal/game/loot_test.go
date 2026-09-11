@@ -478,7 +478,9 @@ func TestWhatAHuntLeavesMendsABladeInTheField(t *testing.T) {
 	h := newStructureHarness(t)
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	// Two pelts and nothing built: no forge, no anvil, nowhere to stand.
+	// Two pelts at a leather bench, which is where a patch is made since #1119. The mend
+	// that follows needs nothing built, and that half is still the field action.
+	h.plantBench(player, ItemLeatherBench, [3]int32{0, 63, 0})
 	h.stockPack(player, ingredient{ItemVargrPelt, 2})
 	state, err := h.craft(player, vnet.RecipeIDLeatherPatch)
 	if err != nil {
@@ -516,6 +518,7 @@ func TestAPatchIsRefusedWhereAStoneWouldBe(t *testing.T) {
 
 		h := newStructureHarness(t)
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		h.plantBench(player, ItemLeatherBench, [3]int32{0, 63, 0})
 		h.stockPack(player, ingredient{ItemVargrPelt, 1})
 
 		before := h.pack(player)
