@@ -24,7 +24,10 @@ use std::ops::Range;
 use bevy::ecs::system::SystemParam;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::{ButtonInput, ButtonState};
-use bevy::prelude::{KeyCode, Res, ResMut};
+use bevy::prelude::{
+    Bundle, ChildSpawnerCommands, Color, Component, DetectChangesMut, KeyCode, Mut, Res, ResMut,
+    TextBackgroundColor, TextColor, TextFont, TextSpan,
+};
 
 use super::clipboard::TextClipboard;
 
@@ -120,11 +123,13 @@ impl TextField {
     }
 
     /// Where the next character goes, in bytes.
+    #[cfg(test)]
     pub(super) const fn cursor(&self) -> usize {
         self.cursor
     }
 
     /// The selected bytes, when anything is selected.
+    #[cfg(test)]
     pub(super) fn selection(&self) -> Option<Range<usize>> {
         self.selection.clone()
     }
@@ -216,7 +221,7 @@ impl TextField {
                 self.selection = (!self.text.is_empty()).then_some(0..self.text.len());
             }
             "c" | "x" => {
-                if let (Some(selection), Some(clipboard)) = (self.selection(), clipboard)
+                if let (Some(selection), Some(clipboard)) = (self.selection.clone(), clipboard)
                     && clipboard.copy(&self.text[selection])
                     && letter.eq_ignore_ascii_case("x")
                 {
@@ -320,6 +325,122 @@ impl TextField {
             .chars()
             .next()
             .map_or(self.cursor, |character| self.cursor + character.len_utf8())
+    }
+}
+
+/// How many spans a field is drawn in: text before, two middle pieces, text after.
+///
+/// Fixed, so the spans are spawned once and only their contents move. See [`TextField::pieces`].
+pub(super) const FIELD_SPANS: usize = 4;
+
+/// The caret, drawn as a character in the line.
+///
+/// A glyph and not a rectangle, because the font is monospaced and the glyph lands exactly
+/// where the cursor is without a layout query; the price is one column the line is wider by
+/// while it is being typed. `|` is in the 95 printable ASCII glyphs `default_font` carries.
+pub(super) const CARET: &str = "|";
+pub(super) const CARET_COLOUR: Color = Color::srgb(1.0, 0.72, 0.25);
+pub(super) const SELECTION_BACKGROUND: Color = Color::srgba(0.35, 0.55, 0.95, 0.6);
+
+/// How one span of a field is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldLook {
+    Plain,
+    Selected,
+    Caret,
+}
+
+/// A field cut into its [`FIELD_SPANS`] spans.
+pub(super) type FieldPieces = [(String, FieldLook); FIELD_SPANS];
+
+/// One of a field's [`FIELD_SPANS`] spans, by position. Each caller adds its own marker beside
+/// it, so the chat draft's spans and the map note's are never the same query.
+#[derive(Component)]
+pub(super) struct FieldSpan(pub(super) usize);
+
+impl TextField {
+    /// The line cut into [`FIELD_SPANS`] spans: text before, the caret and the selection in the
+    /// order the cursor puts them, text after.
+    ///
+    /// **Every field that moves a cursor draws it.** A cursor or a selection nobody can see is
+    /// a keystroke landing somewhere the player did not choose, so the caret and the highlight
+    /// are part of the field rather than something one caller remembers to add. An unfocused
+    /// field draws its text alone: no key reaches it, so there is no insertion point to show.
+    ///
+    /// The cursor is always one end of the selection, so the caret sits before the selected span
+    /// when the selection was made leftward and after it when it was made rightward.
+    pub(super) fn pieces(&self, focused: bool) -> FieldPieces {
+        let text = self.text.as_str();
+        let caret = (
+            if focused { CARET } else { "" }.to_owned(),
+            FieldLook::Caret,
+        );
+        let Some(selection) = self.selection.clone().filter(|_| focused) else {
+            let (before, after) = text.split_at(self.cursor);
+            return [
+                (before.to_owned(), FieldLook::Plain),
+                caret,
+                (String::new(), FieldLook::Plain),
+                (after.to_owned(), FieldLook::Plain),
+            ];
+        };
+        let before = (text[..selection.start].to_owned(), FieldLook::Plain);
+        let selected = (text[selection.clone()].to_owned(), FieldLook::Selected);
+        let after = (text[selection.end..].to_owned(), FieldLook::Plain);
+        if self.cursor == selection.start {
+            [before, caret, selected, after]
+        } else {
+            [before, selected, caret, after]
+        }
+    }
+}
+
+/// Spawns a field's spans under a `Text`, already showing `pieces`, each carrying `marker`.
+pub(super) fn spawn_field_spans(
+    parent: &mut ChildSpawnerCommands<'_>,
+    pieces: &FieldPieces,
+    font: &TextFont,
+    colour: Color,
+    marker: impl Bundle + Clone,
+) {
+    for (slot, piece) in pieces.iter().enumerate() {
+        parent.spawn((
+            marker.clone(),
+            FieldSpan(slot),
+            TextSpan::new(piece.0.clone()),
+            font.clone(),
+            TextColor(look_colour(piece.1, colour)),
+            TextBackgroundColor(look_background(piece.1)),
+        ));
+    }
+}
+
+/// Draws one piece into one span, writing only what changed so an idle field relays out nothing.
+pub(super) fn paint_span(
+    piece: &(String, FieldLook),
+    colour: Color,
+    mut span: Mut<'_, TextSpan>,
+    mut text_colour: Mut<'_, TextColor>,
+    mut background: Mut<'_, TextBackgroundColor>,
+) {
+    if span.0 != piece.0 {
+        span.0.clone_from(&piece.0);
+    }
+    text_colour.set_if_neq(TextColor(look_colour(piece.1, colour)));
+    background.set_if_neq(TextBackgroundColor(look_background(piece.1)));
+}
+
+const fn look_colour(look: FieldLook, colour: Color) -> Color {
+    match look {
+        FieldLook::Caret => CARET_COLOUR,
+        FieldLook::Plain | FieldLook::Selected => colour,
+    }
+}
+
+const fn look_background(look: FieldLook) -> Color {
+    match look {
+        FieldLook::Selected => SELECTION_BACKGROUND,
+        FieldLook::Plain | FieldLook::Caret => Color::NONE,
     }
 }
 
@@ -735,6 +856,37 @@ mod tests {
         );
     }
 
+    fn texts(pieces: &FieldPieces) -> [&str; FIELD_SPANS] {
+        [0, 1, 2, 3].map(|index| pieces[index].0.as_str())
+    }
+
+    #[test]
+    fn the_caret_sits_at_the_cursor_and_on_the_moving_end_of_a_selection() {
+        let mut resting = field("hello");
+        typed(&mut resting, 32, &[Key::ArrowLeft]);
+        let resting = resting.pieces(true);
+        assert_eq!(texts(&resting), ["hell", CARET, "", "o"]);
+        assert_eq!(resting[1].1, FieldLook::Caret);
+
+        let mut leftward = field("hello");
+        held(&mut leftward, SHIFT, 32, &[const { Key::ArrowLeft }; 2]);
+        let leftward = leftward.pieces(true);
+        assert_eq!(texts(&leftward), ["hel", CARET, "lo", ""]);
+        assert_eq!(leftward[2].1, FieldLook::Selected);
+
+        let mut rightward = field("hello");
+        typed(&mut rightward, 32, &[Key::Home]);
+        held(&mut rightward, SHIFT, 32, &[Key::ArrowRight]);
+        let rightward = rightward.pieces(true);
+        assert_eq!(texts(&rightward), ["", "h", CARET, "ello"]);
+        assert_eq!(rightward[1].1, FieldLook::Selected);
+
+        assert_eq!(
+            texts(&TextField::default().pieces(true)),
+            ["", CARET, "", ""]
+        );
+    }
+
     #[test]
     fn a_failing_empty_or_missing_clipboard_changes_nothing_and_the_field_keeps_working() {
         for mut clipboard in [
@@ -756,5 +908,21 @@ mod tests {
             "cold",
             "an app with no clipboard pastes nothing"
         );
+    }
+
+    #[test]
+    fn an_unfocused_field_draws_its_text_with_no_caret_and_no_highlight() {
+        let mut line = field("1234");
+        held(&mut line, SHIFT, 32, &[Key::Home]);
+        let pieces = line.pieces(false);
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| piece.0.as_str())
+                .collect::<String>(),
+            "1234"
+        );
+        assert!(pieces.iter().all(|piece| piece.1 != FieldLook::Selected));
+        assert_eq!(pieces[1], (String::new(), FieldLook::Caret));
     }
 }

@@ -351,9 +351,8 @@ const BUNDLE: [IconPart; 3] = [
 /// An implement: a haft up the cell with a head across the top of it.
 ///
 /// The T is what tells it from [`BLADE`] at a glance — a blade is one tapering box, and
-/// this is a handle with weight on the end. The three implements share the drawing and are
-/// told apart by colour, which is the same answer three raw materials already get; giving
-/// each its own silhouette is #175's business.
+/// this is a handle with weight on the end. Only the axe is drawn as it since #1121; the
+/// pickaxe and the shovel are [`PICKAXE`] and [`SHOVEL`].
 ///
 /// Drawn head-last so it sits over the haft, which is the order these arrays mean.
 const TOOL: [IconPart; 3] = [
@@ -386,6 +385,109 @@ const TOOL: [IconPart; 3] = [
         height: 7.0,
         radius: 6.0,
         shade: 0.52,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A pickaxe: a wooden haft up the cell under a curved, two-pointed iron head.
+///
+/// The head is an iron eye over the haft's end and two arms leaving it, each turned so its
+/// outer end falls — the curve the held and dropped meshes lift and drop in two segments. The
+/// haft is the row's colour, which is the log's wood; the three head parts are `iron`, the
+/// same flag the shield's boss uses. Drawn haft first, head over it.
+const PICKAXE: [IconPart; 4] = [
+    IconPart {
+        left: 45.0,
+        top: 30.0,
+        width: 10.0,
+        height: 56.0,
+        radius: 6.0,
+        shade: -0.30,
+        ..IconPart::PLAIN
+    },
+    // The left arm, turned counter-clockwise so its outer end drops.
+    IconPart {
+        left: 10.0,
+        top: 22.0,
+        width: 42.0,
+        height: 11.0,
+        radius: 45.0,
+        rotation: -0.32,
+        shade: 0.10,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+    // And the right one, mirrored.
+    IconPart {
+        left: 48.0,
+        top: 22.0,
+        width: 42.0,
+        height: 11.0,
+        radius: 45.0,
+        rotation: 0.32,
+        shade: -0.08,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+    // The eye closed over the haft's end, lit, on top of both arms.
+    IconPart {
+        left: 40.0,
+        top: 18.0,
+        width: 20.0,
+        height: 18.0,
+        radius: 12.0,
+        shade: 0.40,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+];
+
+/// A shovel: a flat iron blade over a wooden haft that ends in a small D-grip.
+///
+/// Blade up, as the hand holds it and as [`TOOL`] and [`PICKAXE`] put their heads: a cell and
+/// the hand agree about which end the work is at. The blade is the broadest, roundest-ended
+/// part of any implement drawing, which is what reads as a spade at a cell's size; the grip is
+/// a crossbar across the haft's foot. Drawn haft first, head over it.
+const SHOVEL: [IconPart; 4] = [
+    IconPart {
+        left: 45.0,
+        top: 36.0,
+        width: 10.0,
+        height: 48.0,
+        radius: 6.0,
+        shade: -0.30,
+        ..IconPart::PLAIN
+    },
+    // The D-grip's crossbar across the foot of the haft.
+    IconPart {
+        left: 34.0,
+        top: 82.0,
+        width: 32.0,
+        height: 9.0,
+        radius: 40.0,
+        shade: -0.12,
+        ..IconPart::PLAIN
+    },
+    // The blade: broad, flat and rounded at its working end.
+    IconPart {
+        left: 29.0,
+        top: 8.0,
+        width: 42.0,
+        height: 32.0,
+        radius: 32.0,
+        shade: 0.20,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+    // The socket where the blade closes over the haft, in shadow under it.
+    IconPart {
+        left: 40.0,
+        top: 36.0,
+        width: 20.0,
+        height: 8.0,
+        radius: 20.0,
+        shade: -0.25,
+        iron: true,
         ..IconPart::PLAIN
     },
 ];
@@ -538,6 +640,8 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Blade => &BLADE,
         ItemShape::Bundle => &BUNDLE,
         ItemShape::Tool => &TOOL,
+        ItemShape::Pickaxe => &PICKAXE,
+        ItemShape::Shovel => &SHOVEL,
         ItemShape::Armour => &ARMOUR,
         ItemShape::Shield => &SHIELD,
         ItemShape::Bow => &BOW,
@@ -1145,6 +1249,66 @@ mod tests {
             along(blade),
             along(guard),
             along(grip)
+        );
+    }
+
+    /// **The flat pickaxe and shovel draw what the held ones are made of** (#1121): a haft in
+    /// the item's own colour, which the registry says is wood, under a head drawn entirely in
+    /// iron — and each head says which implement it is.
+    ///
+    /// Like the sword's test above, nothing here can reach the mesh constants across the
+    /// module boundary, so what it pins is the structure a reader can check by eye: the
+    /// pick's head is wider than anything else in its drawing and sits over the haft's top;
+    /// the shovel's blade is its broadest part, above the haft, with the grip below it.
+    #[test]
+    fn the_flat_pickaxe_and_shovel_are_wooden_hafts_under_iron_heads() {
+        let centre_y = |part: IconPart| part.top + part.height / 2.0;
+
+        let [haft, left_arm, right_arm, eye] = <[IconPart; 4]>::try_from(parts(ItemShape::Pickaxe))
+            .expect("the pickaxe is drawn as a haft, two arms and an eye");
+        assert!(
+            !haft.iron,
+            "the pickaxe's haft is drawn in iron rather than wood"
+        );
+        for (name, part) in [
+            ("left arm", left_arm),
+            ("right arm", right_arm),
+            ("eye", eye),
+        ] {
+            assert!(part.iron, "the pickaxe's {name} is not iron");
+            assert!(
+                centre_y(part) < haft.top + haft.height / 4.0,
+                "the pickaxe's {name} is not across the top of the haft"
+            );
+        }
+        // Two points, falling away on either side: the arms turn in opposite directions and
+        // together span more of the cell than the haft is long.
+        assert!(left_arm.rotation < 0.0 && right_arm.rotation > 0.0);
+        let head_span = right_arm.left + right_arm.width - left_arm.left;
+        assert!(
+            head_span > haft.height,
+            "the pickaxe's head spans {head_span}, no wider than its {} haft",
+            haft.height
+        );
+
+        let [haft, grip, blade, socket] = <[IconPart; 4]>::try_from(parts(ItemShape::Shovel))
+            .expect("the shovel is drawn as a haft, a grip, a blade and a socket");
+        assert!(
+            !haft.iron && !grip.iron,
+            "the shovel's wood is drawn in iron"
+        );
+        assert!(blade.iron && socket.iron, "the shovel's head is not iron");
+        assert!(
+            blade.width > grip.width && blade.width > socket.width && blade.width > haft.width,
+            "the shovel's blade is not its broadest part"
+        );
+        assert!(
+            centre_y(blade) < centre_y(haft) && centre_y(haft) < centre_y(grip),
+            "the shovel does not run blade, haft, grip down the cell"
+        );
+        assert!(
+            blade.rotation == 0.0,
+            "the shovel's blade is turned, so it no longer reads as flat"
         );
     }
 
