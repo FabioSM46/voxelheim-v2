@@ -19,7 +19,7 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
-use super::text_input::{Modifiers, TextEdit, TextField};
+use super::text_input::{FieldInput, TextEdit, TextField};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
 const LINE_COUNT: usize = 8;
@@ -329,11 +329,11 @@ fn message_colour(kind: LogKind, alpha: f32) -> Color {
     Color::srgba(red, green, blue, alpha)
 }
 
-#[allow(clippy::too_many_arguments)] // The held modifiers are the eighth input to one reader.
+#[allow(clippy::too_many_arguments)] // The field's keys and clipboard are the eighth input.
 fn capture_chat(
     time: Res<Time<Real>>,
     mut typed: MessageReader<KeyboardInput>,
-    keys: Option<Res<ButtonInput<KeyCode>>>,
+    mut field: FieldInput,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
     mut history: ResMut<ChatHistory>,
@@ -347,7 +347,6 @@ fn capture_chat(
         return;
     }
 
-    let modifiers = Modifiers::held(keys.as_deref());
     for key in typed.read() {
         if key.state == ButtonState::Pressed && key.logical_key == Key::ArrowUp {
             if let Some(last) = &history.0 {
@@ -359,7 +358,7 @@ fn capture_chat(
         // The reading of a key is `ui/text_input.rs`'s, shared with the map's note field.
         // What stays here is what makes this line chat's: the mode it lives in, and that
         // `Enter` is a message to the world rather than a mark on a map.
-        match draft.0.apply_key(key, modifiers, DRAFT_LIMIT_BYTES) {
+        match field.apply(&mut draft.0, key, DRAFT_LIMIT_BYTES) {
             Some(TextEdit::Cancelled) => {
                 draft.0.clear();
                 set_mode(&mut mode, InputMode::Playing);
@@ -575,6 +574,8 @@ fn line_alpha(mode: InputMode, visible: bool, age: Duration) -> f32 {
 mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, ChatMessage, PartyInvite, SessionParams};
+    use crate::ui::clipboard::{MemoryClipboard, TextClipboard};
+    use crate::ui::text_input::Modifiers;
 
     fn session() -> Session {
         Session(SessionParams {
@@ -640,6 +641,32 @@ mod tests {
         );
     }
 
+    /// **`Control+V` reaches the draft only while chat owns the keyboard.** Over the settings
+    /// screen the mode is `Menu`, and a paste there must not land in a draft nobody can see
+    /// that the next `T` would then open with.
+    #[test]
+    fn a_paste_lands_in_the_draft_only_while_chat_is_capturing() {
+        let mut app = capture_app(None);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        app.insert_resource(keys)
+            .insert_resource(TextClipboard::with(MemoryClipboard::holding(
+                "X 40 | Z -12",
+            )));
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+        app.update();
+        type_key(&mut app, Key::Character("v".into()));
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        type_key(&mut app, Key::Character("v".into()));
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "X 40 | Z -12");
+    }
+
     /// The held modifiers reach the field: `Shift` with an arrow selects rather than moves.
     #[test]
     fn shift_held_while_an_arrow_is_pressed_selects_in_the_draft() {
@@ -674,7 +701,7 @@ mod tests {
             repeat: false,
             window: Entity::PLACEHOLDER,
         };
-        field.apply_key(&press, modifiers, DRAFT_LIMIT_BYTES);
+        field.apply_key(&press, modifiers, None, DRAFT_LIMIT_BYTES);
     }
 
     fn texts(pieces: &[(String, DraftLook); DRAFT_SPANS]) -> [&str; DRAFT_SPANS] {

@@ -1,8 +1,8 @@
 //! The four pieces of signal processing a captured voice goes through, and nothing else.
 //!
 //! **Written by hand, and `docs/adr/0001-voice-transport.md` is why.** The dependency budget
-//! in `client/AGENTS.md` is five crates; a resampler, a gate, an automatic gain control and a
-//! level meter are two hundred lines of arithmetic between them, and a sixth crate to hold
+//! in `client/AGENTS.md` is six crates; a resampler, a gate, an automatic gain control and a
+//! level meter are two hundred lines of arithmetic between them, and a seventh crate to hold
 //! them would cost a discussion the ADR already had. What is deliberately *not* here is echo
 //! cancellation — that needs libwebrtc, the ADR declines it by name, and push-to-talk is the
 //! mitigation this client ships instead.
