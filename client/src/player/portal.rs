@@ -1,7 +1,7 @@
-//! The nearby crossing hint. Interact remains owned by loot's single dispatcher.
+//! The nearby crossing hint. A portal is crossed by walking into its veil, which the server
+//! notices on its own: nothing here sends anything, and no key is involved.
 use super::{ApplyInputMode, ApplySnapshots, InputGate, SnapshotBuffer};
 use crate::net::{BlockCoord, Session};
-use crate::settings::{Control, Settings, key_name};
 use crate::world::{portal::PortalSites, transition::CurrentWorld};
 use bevy::prelude::*;
 
@@ -9,6 +9,10 @@ use bevy::prelude::*;
 pub(super) struct PortalFocus(pub Option<BlockCoord>);
 #[derive(Component)]
 struct PortalHint;
+
+/// Guidance names the gesture, never a key: the veil is crossed by walking into it.
+const PORTAL_ENTER_HINT: &str = "Walk into the veil to enter the dungeon";
+const PORTAL_RETURN_HINT: &str = "Walk into the veil to return";
 
 pub(super) struct PortalInteractionPlugin;
 impl Plugin for PortalInteractionPlugin {
@@ -20,8 +24,7 @@ impl Plugin for PortalInteractionPlugin {
                 focus_portal
                     .after(crate::world::portal::PortalUpdate)
                     .after(ApplyInputMode)
-                    .after(ApplySnapshots)
-                    .before(super::loot::OriginateInteract),
+                    .after(ApplySnapshots),
             );
     }
 }
@@ -55,7 +58,6 @@ struct FocusContext<'w> {
     buffer: Res<'w, SnapshotBuffer>,
     sites: Option<Res<'w, PortalSites>>,
     current: Option<Res<'w, CurrentWorld>>,
-    settings: Option<Res<'w, Settings>>,
 }
 
 fn focus_portal(
@@ -69,7 +71,6 @@ fn focus_portal(
         buffer,
         sites,
         current,
-        settings,
     } = context;
     focus.0 = None;
     if gate.may_aim()
@@ -100,20 +101,13 @@ fn focus_portal(
         if focus.0.is_none() {
             continue;
         }
-        let bindings = settings
-            .as_deref()
-            .map_or_else(Default::default, |s| *s.bindings());
-        let key = key_name(bindings.key(Control::Interact))
-            .unwrap_or("interact")
-            .to_uppercase();
-        let action = if current.as_deref().is_some_and(|w| w.id != 0) {
-            "Return through the veil"
+        let next = if current.as_deref().is_some_and(|w| w.id != 0) {
+            PORTAL_RETURN_HINT
         } else {
-            "Enter the dungeon"
+            PORTAL_ENTER_HINT
         };
-        let next = format!("[{key}]  {action}");
         if text.0 != next {
-            text.0 = next;
+            text.0 = next.to_owned();
         }
     }
 }
@@ -170,9 +164,19 @@ mod tests {
                 player_token: ANY_TOKEN,
                 voice_range_blocks: 0.0,
             }))
+            .add_systems(Startup, spawn_hint)
             .add_systems(Update, focus_portal);
         app.update();
         assert_eq!(app.world().resource::<PortalFocus>().0, Some(arch));
+        let hint = |app: &mut App| {
+            let mut hints = app.world_mut().query::<(&Text, &Visibility)>();
+            let (text, visibility) = hints.single(app.world()).unwrap();
+            (text.0.clone(), *visibility)
+        };
+        assert_eq!(
+            hint(&mut app),
+            (PORTAL_ENTER_HINT.to_owned(), Visibility::Visible)
+        );
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
         app.update();
         assert_eq!(app.world().resource::<PortalFocus>().0, None);
@@ -190,9 +194,14 @@ mod tests {
         app.world_mut().resource_mut::<CurrentWorld>().exit_arch = Some(arch);
         app.update();
         assert_eq!(app.world().resource::<PortalFocus>().0, Some(arch));
+        assert_eq!(
+            hint(&mut app),
+            (PORTAL_RETURN_HINT.to_owned(), Visibility::Visible)
+        );
         app.world_mut().remove_resource::<Session>();
         app.update();
         assert_eq!(app.world().resource::<PortalFocus>().0, None);
+        assert_eq!(hint(&mut app).1, Visibility::Hidden);
         app.world_mut().resource_mut::<PortalFocus>().0 = Some(arch);
         crate::player::reset_world(app.world_mut());
         assert_eq!(app.world().resource::<PortalFocus>().0, None);

@@ -31,7 +31,8 @@ pub(crate) struct PortalSites {
 }
 
 impl PortalSites {
-    /// Deliberately conservative hint radius; the server rechecks body-to-voxel reach.
+    /// The portal a hint is about, within a deliberately small radius. Only a hint: a
+    /// crossing is the server noticing the body reach the veil, and nothing here asks for one.
     pub fn nearest(&self, feet: [f32; 3]) -> Option<BlockCoord> {
         let feet = Vec3::from_array(feet);
         self.sites

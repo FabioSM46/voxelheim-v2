@@ -160,7 +160,6 @@ struct LootIntent<'w> {
     cadence: Res<'w, InputCadence>,
     outbound: Option<ResMut<'w, Outbound>>,
     trade_prompts: MessageWriter<'w, PlayerTradePromptRequest>,
-    portal: Option<Res<'w, super::portal::PortalFocus>>,
 }
 
 fn send_loot_intents(
@@ -178,7 +177,6 @@ fn send_loot_intents(
         cadence,
         mut outbound,
         mut trade_prompts,
-        portal,
     } = intent;
     if window.current.is_some() && gate.mode() != InputMode::Loot {
         window.dismiss_current();
@@ -230,15 +228,9 @@ fn send_loot_intents(
     let Some(session) = session else {
         return;
     };
-    // A deliberate crossing has priority at the threshold, including when a party
-    // member stands beside it. This remains the sole Interact dispatcher.
-    if let Some(arch) = portal.as_deref().and_then(|focus| focus.0) {
-        if let Some(outbound) = outbound.as_deref_mut() {
-            outbound.send(crate::net::encode_portal_request(arch));
-        }
-        return;
-    }
-
+    // A portal is not one of the things this key means. Crossing is walking into the veil,
+    // and the server notices that on its own; a veil beside a corpse or a party member
+    // leaves the key to them.
     if let Some(corpse_id) = buffer.nearest_accessible_corpse(session.0.entity_id, MAX_REACH) {
         let Some(outbound) = outbound.as_deref_mut() else {
             return;
@@ -969,8 +961,11 @@ mod tests {
         app.update();
         assert!(app.world().resource::<LootWindow>().state().is_none());
     }
+    /// Standing at a veil takes nothing from the key. The hint still has a portal in focus,
+    /// and a press there opens the corpse in reach exactly as it would anywhere else — one
+    /// open request, and no crossing, because nothing on this side asks for one any more.
     #[test]
-    fn a_portal_crossing_uses_one_interact_intent_and_never_opens_a_corpse() {
+    fn interact_beside_a_portal_opens_the_corpse_and_asks_for_no_crossing() {
         let (mut app, frames) = held_key_app();
         let arch = crate::net::BlockCoord {
             x: -32,
@@ -983,26 +978,19 @@ mod tests {
             &frames,
             [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
         );
-        assert_eq!(sent, vec![crate::net::encode_portal_request(arch)]);
-        let root = crate::wire::voxelheim::net::root_as_envelope(&sent[0]).unwrap();
-        let request = root.payload_as_portal_request().unwrap();
-        let got = request.arch().unwrap();
-        assert_eq!((got.x(), got.y(), got.z()), (arch.x, arch.y, arch.z));
-        assert!(
-            keyboard_frame(&mut app, &frames, []).is_empty(),
-            "holding Interact cannot spam crossings"
+        assert_eq!(
+            sent,
+            vec![encode_loot_open_request(&LootOpenRequest {
+                corpse_id: CORPSE,
+                client_tick: 0,
+            })]
         );
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
-        assert!(
-            keyboard_frame(
-                &mut app,
-                &frames,
-                [
-                    key_event(KeyCode::KeyF, ButtonState::Released, false),
-                    key_event(KeyCode::KeyF, ButtonState::Pressed, false)
-                ]
-            )
-            .is_empty()
-        );
+        for frame in &sent {
+            let root = crate::wire::voxelheim::net::root_as_envelope(frame).unwrap();
+            assert!(
+                root.payload_as_portal_request().is_none(),
+                "Interact asked for a crossing"
+            );
+        }
     }
 }

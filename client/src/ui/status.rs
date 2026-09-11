@@ -543,7 +543,9 @@ fn has_no_sentence_yet(reason: RefusalReason) -> bool {
 fn describe_refusal(refused: &ActionRefused) -> Option<String> {
     if refused.action == RefusedAction::CrossPortal {
         return match refused.reason {
-            RefusalReason::NotAtPortal => Some("Cannot cross: stand near a portal arch".to_owned()),
+            RefusalReason::NotAtPortal => {
+                Some("Cannot cross: walk into the veil on foot".to_owned())
+            }
             RefusalReason::InstanceLimit => {
                 Some("Cannot cross: too many instances are open; try again later".to_owned())
             }

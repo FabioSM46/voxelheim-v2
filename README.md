@@ -204,11 +204,15 @@ cd client && RUST_LOG=info,voxelheim_client=debug cargo run --release -- \
 ### Entering and leaving the dungeon
 
 The ruin's lower chamber contains an indestructible runic stone arch with a moving teal
-veil. Stand near its centre and press **Interact** (default **F**); the nearby hint shows
-your configured key. The server decides whether to admit you, offer entry into a saved
-run, or refuse. Inside the dungeon, the matching arch in the arrival court returns you
-to the open world without requiring a boss kill. Mining or placing blocks cannot destroy
-or obstruct either threshold.
+veil. Walk into the veil to cross; no key is involved, and touching the stone frame or
+standing beside the arch does nothing. The server notices your body reaching the veil and
+decides whether to admit you, offer entry into a saved run, or refuse. One walk into the
+veil is one attempt: after a refusal or a declined offer, step back out and walk in again to
+ask again. Inside the dungeon, the matching arch in the arrival court returns you to the
+open world without requiring a boss kill. You come back where you crossed, often still in
+the veil, and it will not take you back until you have walked out of it. Interact (default **F**) keeps its usual
+meanings beside a portal. Mining or placing blocks cannot destroy or obstruct either
+threshold.
 
 These portals require protocol 36 and worldgen 31. Updating does not delete or rewrite
 previous world directories; the versioned-directory behavior described below still applies.
