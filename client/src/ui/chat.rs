@@ -331,14 +331,19 @@ fn select_in_log(
         return;
     };
 
-    // Physical pixels throughout: glyphs are laid out at the window's scale, and a node's own
-    // inverse scale factor is what takes the logical cursor there.
-    let mut scale = 1.0;
+    // Physical pixels throughout. `ComputedNode` documents its sizes as physical, the transform
+    // is built from the same layout, and `bevy_ui`'s own picking backend hit-tests
+    // `TextLayoutInfo::run_geometry` with the pointer scaled to physical pixels; the logical
+    // cursor is taken there by a node's inverse scale factor. Every row is in the one window, so
+    // any row's factor is every row's: it is read once rather than from whichever row is last.
+    let scale = rows
+        .iter()
+        .next()
+        .map_or(1.0, |(_, node, _, _)| node.inverse_scale_factor);
     let drawn: Vec<DrawnLine<'_>> = rows
         .iter()
         .filter_map(|(row, node, transform, layout)| {
             let line = log.0.get(row.0)?;
-            scale = node.inverse_scale_factor;
             let content = node.content_box();
             Some(DrawnLine {
                 line: line.serial,
@@ -715,6 +720,12 @@ mod tests {
     /// An app running only the log's pointer system, over two rows laid out the way Bevy would:
     /// each row's content box starts at x 16, row 0 at y 50 and row 1 at y 70.
     fn selection_app(lines: &[&str]) -> App {
+        selection_app_at(lines, 1.0)
+    }
+
+    /// [`selection_app`] on a display with `factor` physical pixels to a logical one: the nodes,
+    /// the transforms and the glyphs in physical pixels, the pointer still logical, as Bevy has them.
+    fn selection_app_at(lines: &[&str], factor: f32) -> App {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .insert_resource(InputMode::Chat)
@@ -730,14 +741,14 @@ mod tests {
             app.world_mut().spawn((
                 ChatText(row),
                 ComputedNode {
-                    size: Vec2::new(300.0, ROW_HEIGHT),
+                    size: Vec2::new(300.0, ROW_HEIGHT) * factor,
+                    inverse_scale_factor: factor.recip(),
                     ..ComputedNode::DEFAULT
                 },
-                UiGlobalTransform::from_translation(Vec2::new(
-                    166.0,
-                    60.0 + ROW_HEIGHT * row as f32,
-                )),
-                monospaced_layout(line.chars().count(), ADVANCE, ROW_HEIGHT),
+                UiGlobalTransform::from_translation(
+                    Vec2::new(166.0, 60.0 + ROW_HEIGHT * row as f32) * factor,
+                ),
+                monospaced_layout(line.chars().count(), ADVANCE * factor, ROW_HEIGHT * factor),
             ));
         }
         app
@@ -814,6 +825,23 @@ mod tests {
         app.update();
         assert!(!app.world().resource::<LogSelection>().is_dragging());
         assert_eq!(copied(&app).as_deref(), Some("Eivor: hi\nAstrid"));
+    }
+
+    /// **The pointer is taken to physical pixels before it is hit-tested.** At a factor of one the
+    /// two spaces coincide, so a conversion that multiplied instead of divided — or skipped the
+    /// step — would pass every other test here and put the selection in the wrong place on any
+    /// scaled display. The same logical drag must select the same glyphs whatever the factor.
+    #[test]
+    fn a_drag_selects_the_same_glyphs_on_a_scaled_display() {
+        for factor in [2.0, 1.5] {
+            let mut app = selection_app_at(&["Eivor: hi", "Astrid: aye"], factor);
+            drag(&mut app, (0, 72.0), (1, 58.0));
+            assert_eq!(
+                copied(&app).as_deref(),
+                Some("hi\nAstrid"),
+                "at a scale factor of {factor}"
+            );
+        }
     }
 
     #[test]

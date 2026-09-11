@@ -118,6 +118,13 @@ impl LogSelection {
     /// The selected text of `lines`, one line per selected log line joined with `\n`, exactly as
     /// the lines are displayed — a player's line keeps the `Name: ` it was shown with.
     ///
+    /// **The copy is what was highlighted, and no more.** An end of the selection that sits on a
+    /// line boundary — past the last character of one line, or before the first of another —
+    /// selects nothing on that line and draws no highlight there, so it contributes no line to the
+    /// copy either: a drag from the middle of one line to the start of the next copies that part
+    /// of the first line without a trailing newline. Only the ends are trimmed; a line inside the
+    /// selection is always one line of the copy.
+    ///
     /// `None` when nothing is selected or the selection covers no characters, so a copy of it is
     /// never a copy that empties the clipboard.
     pub(super) fn text<'a>(
@@ -133,8 +140,9 @@ impl LogSelection {
                     .map_or("", |range| &text[range])
             })
             .collect();
-        let joined = pieces.join("\n");
-        (!joined.trim_matches('\n').is_empty()).then_some(joined)
+        let first = pieces.iter().position(|piece| !piece.is_empty())?;
+        let last = pieces.iter().rposition(|piece| !piece.is_empty())?;
+        Some(pieces[first..=last].join("\n"))
     }
 }
 
@@ -566,6 +574,32 @@ mod tests {
             "the end of one line to the start of the next covers no character"
         );
         assert_eq!(LogSelection::default().text(log), None);
+    }
+
+    /// An end on a line boundary highlights nothing on its line, so it adds no blank line to the
+    /// copy: what reaches the clipboard is exactly the stretches that were drawn highlighted.
+    #[test]
+    fn an_end_on_a_line_boundary_adds_no_blank_line_to_the_copy() {
+        let log = [
+            (7, "Eivor: well met"),
+            (8, "[INFO] The storm is coming"),
+            (9, "Astrid: to the hall"),
+        ];
+        assert_eq!(
+            dragged(point(7, 15), point(9, 0)).text(log).as_deref(),
+            Some("[INFO] The storm is coming"),
+            "past the end of the first line to the start of the third copies the middle alone"
+        );
+        assert_eq!(
+            dragged(point(7, 7), point(8, 0)).text(log).as_deref(),
+            Some("well met"),
+            "the middle of one line to the start of the next has no trailing newline"
+        );
+        assert_eq!(
+            dragged(point(8, 0), point(7, 7)).text(log).as_deref(),
+            Some("well met"),
+            "and the same stretch dragged backwards copies the same"
+        );
     }
 
     #[test]
