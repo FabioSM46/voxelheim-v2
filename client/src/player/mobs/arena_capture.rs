@@ -995,38 +995,42 @@ fn capture_bosses_in_the_shipped_chamber() {
             );
         }
     }
-    // Blade blows with the monolith 0.6 blocks from the body's front edge.
+    // Blade blows with the monolith 0.6 blocks from the body's front edge, then the same
+    // blows 1.1 blocks from the east wall's face (#1103).
     let toward_monolith = -std::f32::consts::FRAC_PI_2;
-    for (name, kind, combo) in [
-        ("sentence", KingsSentence, None),
-        ("toll-left", ThreeTolls, Some((1, 3))),
-        ("toll-right", ThreeTolls, Some((2, 3))),
-        ("toll-thrust", ThreeTolls, Some((3, 3))),
-    ] {
-        for (phase_name, phase, percent) in phases {
-            let action = if phase == Recovery {
-                MobAction::Recovery
-            } else {
-                MobAction::Windup
-            };
-            announce(
-                &mut app,
-                next(),
-                king,
-                post,
-                toward_monolith,
-                action,
-                1,
-                Announce::Move(kind, combo, phase, 0, percent),
-            );
-            review.shot(
-                &mut app,
-                &chamber,
-                king,
-                &format!("{name}-{phase_name}"),
-                post + Vec3::new(-2.6, 3.0, -4.4),
-                post + Vec3::new(1.0, 1.0, 0.0),
-            );
+    let by_wall = Vec3::new(30.9, FLOOR_TOP, 60.5);
+    for (scene, stance) in [("", post), ("wall-", by_wall)] {
+        for (name, kind, combo) in [
+            ("sentence", KingsSentence, None),
+            ("toll-left", ThreeTolls, Some((1, 3))),
+            ("toll-right", ThreeTolls, Some((2, 3))),
+            ("toll-thrust", ThreeTolls, Some((3, 3))),
+        ] {
+            for (phase_name, phase, percent) in phases {
+                let action = if phase == Recovery {
+                    MobAction::Recovery
+                } else {
+                    MobAction::Windup
+                };
+                announce(
+                    &mut app,
+                    next(),
+                    king,
+                    stance,
+                    toward_monolith,
+                    action,
+                    1,
+                    Announce::Move(kind, combo, phase, 0, percent),
+                );
+                review.shot(
+                    &mut app,
+                    &chamber,
+                    king,
+                    &format!("{scene}{name}-{phase_name}"),
+                    stance + Vec3::new(-2.6, 3.0, -4.4),
+                    stance + Vec3::new(1.0, 1.0, 0.0),
+                );
+            }
         }
     }
     // Casts and channels at the throne.
