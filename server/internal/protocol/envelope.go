@@ -980,6 +980,10 @@ type PlayerVitals struct {
 	Experience       uint32
 	ExperienceToNext uint32
 	Blocking         bool
+	// Energy never exceeds MaxEnergy, and MaxEnergy is a display denominator: zero is
+	// the absent-field case, never a valid reserve.
+	Energy    uint16
+	MaxEnergy uint16
 }
 
 // MobState is one mob's authoritative state, as a snapshot carries it.
@@ -2862,6 +2866,8 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.PlayerVitalsAddExperience(b, s.Vitals.Experience)
 	vnet.PlayerVitalsAddExperienceToNext(b, s.Vitals.ExperienceToNext)
 	vnet.PlayerVitalsAddBlocking(b, s.Vitals.Blocking)
+	vnet.PlayerVitalsAddEnergy(b, s.Vitals.Energy)
+	vnet.PlayerVitalsAddMaxEnergy(b, s.Vitals.MaxEnergy)
 	vitalsOffset := vnet.PlayerVitalsEnd(b)
 
 	// A vector of structs must be complete before the table that references it

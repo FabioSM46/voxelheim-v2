@@ -11,13 +11,13 @@ pub const ENUM_MIN_REFUSED_ACTION: u8 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_REFUSED_ACTION: u8 = 21;
+pub const ENUM_MAX_REFUSED_ACTION: u8 = 22;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
 #[allow(non_camel_case_types)]
-pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 22] = [
+pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 23] = [
     RefusedAction::Unknown,
     RefusedAction::PlaceStructure,
     RefusedAction::MineBlock,
@@ -40,6 +40,7 @@ pub const ENUM_VALUES_REFUSED_ACTION: [RefusedAction; 22] = [
     RefusedAction::Mount,
     RefusedAction::PlayerTrade,
     RefusedAction::CrossPortal,
+    RefusedAction::Energy,
 ];
 
 /// Which action a server refused, in an `ActionRefused`.
@@ -112,9 +113,14 @@ impl RefusedAction {
     pub const PlayerTrade: Self = Self(20);
     /// PortalRequest refused without a destination, session id or remote world state.
     pub const CrossPortal: Self = Self(21);
+    /// An `AttackRequest` refused because the swing's energy was not there to spend.
+    /// A member of its own rather than `Attack` with a reason, because the answering
+    /// surface is the energy display rather than the weapon: `Attack` keeps meaning a
+    /// refusal about what is in the hand. Nothing was queued and nothing was spent.
+    pub const Energy: Self = Self(22);
 
     pub const ENUM_MIN: u8 = 0;
-    pub const ENUM_MAX: u8 = 21;
+    pub const ENUM_MAX: u8 = 22;
     pub const ENUM_VALUES: &'static [Self] = &[
         Self::Unknown,
         Self::PlaceStructure,
@@ -138,6 +144,7 @@ impl RefusedAction {
         Self::Mount,
         Self::PlayerTrade,
         Self::CrossPortal,
+        Self::Energy,
     ];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {
@@ -164,6 +171,7 @@ impl RefusedAction {
             Self::Mount => Some("Mount"),
             Self::PlayerTrade => Some("PlayerTrade"),
             Self::CrossPortal => Some("CrossPortal"),
+            Self::Energy => Some("Energy"),
             _ => None,
         }
     }
