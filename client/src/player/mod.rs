@@ -49,6 +49,7 @@
 mod ambience;
 mod ambient_sound;
 mod appearance;
+mod armour;
 mod birds;
 mod camera;
 mod combat;
@@ -91,10 +92,13 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
+use armour::ArmourLook;
+pub(crate) use armour::{ArmourStyle, sculpted_icon};
+
 pub(crate) use appearance::{
     ArmourPiece, ArmourSegment, BodyPart, BodyPiece, Limb, PlacedBox, envelope as body_envelope,
     held_item_anchor as body_held_item_anchor, held_item_box as body_held_item_box, piece_boxes,
-    placed as placed_box, placed_armour,
+    placed as placed_box,
 };
 
 // Issue #548 deliberately adds no production consumer, but the resource's public field
@@ -642,8 +646,10 @@ pub(crate) struct PlayerVisuals {
     /// One per model, paired with the model it draws. An array rather than a map because
     /// there are five of them and `HairModel` is deliberately not a number.
     hair: [(HairModel, Handle<Mesh>); HairModel::ALL.len()],
-    /// One shared overlay mesh per independently moving armour segment.
-    armour: [(ArmourSegment, Handle<Mesh>); ArmourSegment::ALL.len()],
+    /// One shared overlay mesh per independently moving armour segment **and per look**: the
+    /// plain cuboid under `None`, and one sculpted mesh for every look an item in the registry
+    /// is worn in (see [`armour::looks`]). Every body wearing a look shares its six handles.
+    armour: Vec<(Option<ArmourLook>, ArmourSegment, Handle<Mesh>)>,
     shield: Handle<Mesh>,
 }
 
@@ -677,11 +683,18 @@ impl PlayerVisuals {
         }
     }
 
-    fn armour_mesh(&self, segment: ArmourSegment) -> Handle<Mesh> {
-        self.armour
-            .iter()
-            .find(|(drawn, _)| *drawn == segment)
-            .map_or_else(|| self.armour[0].1.clone(), |(_, mesh)| mesh.clone())
+    /// The mesh one segment is drawn from for an item worn in `look`.
+    ///
+    /// A look with no entry — unreachable, because the cache is built from the registry's own
+    /// looks — falls back to the plain cuboid rather than drawing nothing.
+    fn armour_mesh(&self, look: Option<ArmourLook>, segment: ArmourSegment) -> Handle<Mesh> {
+        let find = |look: Option<ArmourLook>| {
+            self.armour
+                .iter()
+                .find(|(drawn, piece, _)| *drawn == look && *piece == segment)
+                .map(|(_, _, mesh)| mesh.clone())
+        };
+        find(look).or_else(|| find(None)).unwrap_or_default()
     }
 }
 
@@ -766,6 +779,10 @@ impl BodyFinish {
 struct BodyMaterialKey {
     colour: BodyColour,
     finish: BodyFinish,
+    /// The livery the material samples, when the mesh it draws carries coordinates in that
+    /// livery's band. Only a sculpted armour look does; the rig and the plain overlay cuboid
+    /// carry none, so their materials stay untextured.
+    livery: Option<Livery>,
 }
 
 impl BodyMaterialKey {
@@ -773,6 +790,7 @@ impl BodyMaterialKey {
         Self {
             colour: BodyColour::Srgb(colour),
             finish: BodyFinish::Matte,
+            livery: None,
         }
     }
 
@@ -780,6 +798,7 @@ impl BodyMaterialKey {
         Self {
             colour: BodyColour::item(item_id),
             finish: BodyFinish::armour(item_id),
+            livery: armour::look(item_id).and_then(|look| look.livery),
         }
     }
 }
@@ -793,12 +812,16 @@ impl BodyMaterials {
         &mut self,
         key: BodyMaterialKey,
         materials: &mut Assets<StandardMaterial>,
+        livery_image: Option<&Handle<Image>>,
     ) -> Handle<StandardMaterial> {
         self.0
             .entry(key)
             .or_insert_with(|| {
                 materials.add(StandardMaterial {
                     base_color: key.colour.colour(),
+                    // **The image the hand, the cell and the drop sample**, for a key that
+                    // names a livery; nothing at all otherwise.
+                    base_color_texture: key.livery.and(livery_image.cloned()),
                     perceptual_roughness: key.finish.roughness(),
                     metallic: key.finish.metallic(),
                     ..default()
@@ -819,6 +842,9 @@ pub(crate) struct Wardrobe<'a> {
     visuals: &'a PlayerVisuals,
     palette: &'a mut BodyMaterials,
     materials: &'a mut Assets<StandardMaterial>,
+    /// The livery image a sculpted look's material samples, when the player plugin has made
+    /// one. The character preview's app may not have, and it draws no armour.
+    livery_image: Option<Handle<Image>>,
 }
 
 impl Wardrobe<'_> {
@@ -836,6 +862,7 @@ impl Wardrobe<'_> {
                 self.palette.of(
                     BodyMaterialKey::appearance(part.colour(worn)),
                     self.materials,
+                    self.livery_image.as_ref(),
                 ),
             )
         })
@@ -854,9 +881,12 @@ impl Wardrobe<'_> {
                 (item_id != 0).then(|| {
                     (
                         segment,
-                        self.visuals.armour_mesh(segment),
-                        self.palette
-                            .of(BodyMaterialKey::armour(item_id), self.materials),
+                        self.visuals.armour_mesh(armour::look(item_id), segment),
+                        self.palette.of(
+                            BodyMaterialKey::armour(item_id),
+                            self.materials,
+                            self.livery_image.as_ref(),
+                        ),
                     )
                 })
             })
@@ -867,8 +897,11 @@ impl Wardrobe<'_> {
         (worn.off_hand == crafting::ITEM_WOODEN_SHIELD).then(|| {
             (
                 self.visuals.shield.clone(),
-                self.palette
-                    .of(BodyMaterialKey::appearance(0x00ff_ffff), self.materials),
+                self.palette.of(
+                    BodyMaterialKey::appearance(0x00ff_ffff),
+                    self.materials,
+                    self.livery_image.as_ref(),
+                ),
             )
         })
     }
@@ -884,6 +917,7 @@ pub(crate) struct Dressing<'w> {
     visuals: Option<Res<'w, PlayerVisuals>>,
     palette: ResMut<'w, BodyMaterials>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
+    liveries: Option<Res<'w, Liveries>>,
 }
 
 impl Dressing<'_> {
@@ -898,6 +932,7 @@ impl Dressing<'_> {
             visuals: self.visuals.as_deref()?,
             palette: &mut self.palette,
             materials: &mut self.materials,
+            livery_image: self.liveries.as_deref().map(Liveries::material_image),
         })
     }
 }
@@ -1344,6 +1379,18 @@ impl Worn {
         }
     }
 
+    /// How this body's hair is drawn under what it wears on its head.
+    ///
+    /// Hidden under a helm whose style closes over it — `ArmourStyle::hides_hair` records why
+    /// the hair cannot simply be drawn inside one — and drawn as ever otherwise.
+    fn hair_visibility(self) -> Visibility {
+        if armour::look(self.head).is_some_and(|look| look.style.hides_hair()) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        }
+    }
+
     fn material_keys(self) -> impl Iterator<Item = BodyMaterialKey> {
         ArmourPiece::ALL
             .into_iter()
@@ -1522,8 +1569,17 @@ fn create_player_visuals(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>
     commands.insert_resource(PlayerVisuals {
         fixed: BodyPiece::FIXED.map(|piece| (piece, meshes.add(piece_mesh(piece, ANY_HAIR)))),
         hair: HairModel::ALL.map(|model| (model, meshes.add(piece_mesh(BodyPiece::Hair, model)))),
-        armour: ArmourSegment::ALL
-            .map(|segment| (segment, meshes.add(armour_segment_mesh(segment)))),
+        armour: std::iter::once(None)
+            .chain(armour::looks().into_iter().map(Some))
+            .flat_map(|look| ArmourSegment::ALL.map(|segment| (look, segment)))
+            .map(|(look, segment)| {
+                (
+                    look,
+                    segment,
+                    meshes.add(armour_segment_mesh(look, segment)),
+                )
+            })
+            .collect(),
         shield: meshes.add(hands::shield_mesh(0.62)),
     });
 }
@@ -1562,12 +1618,15 @@ fn piece_mesh(piece: BodyPiece, model: HairModel) -> Mesh {
 /// One worn segment authored around the pivot of the body piece underneath it.
 ///
 /// A cuirass is one logical server slot but its sleeves move with the arms, just as the
-/// two greaves move with their respective legs. The six shared meshes preserve those
-/// pivots without changing the three-slot wire contract.
-fn armour_segment_mesh(segment: ArmourSegment) -> Mesh {
-    let placed = placed_armour(segment.piece(), segment.cell());
-    Mesh::from(Cuboid::from_size(placed.size))
-        .translated_by(placed.centre - segment.body_piece().pivot())
+/// two greaves move with their respective legs. The shared meshes preserve those pivots
+/// without changing the three-slot wire contract.
+///
+/// **The worn item decides the geometry through its registry row, never through its id**:
+/// `look` is [`armour::look`] of the item, a sculpted set's parts when its row names a style
+/// and the plain overlay cuboid when it names none. Either way the mesh stays inside the cell
+/// `appearance::placed_armour` gives the segment.
+fn armour_segment_mesh(look: Option<ArmourLook>, segment: ArmourSegment) -> Mesh {
+    armour::segment_mesh(look, segment)
 }
 
 /// Reads the controls into [`MoveIntent`] and [`LookState`].
@@ -2140,6 +2199,7 @@ fn dress_bodies(
             &BodyVisual,
             &mut Mesh3d,
             &mut MeshMaterial3d<StandardMaterial>,
+            &mut Visibility,
         ),
         Without<ArmourVisual>,
     >,
@@ -2191,7 +2251,12 @@ fn dress_bodies(
         }
 
         for child in children {
-            if let Ok((visual, mut mesh, mut material)) = parts.get_mut(*child) {
+            if let Ok((visual, mut mesh, mut material, mut visibility)) = parts.get_mut(*child) {
+                // Before the appearance check: a helm put on or taken off changes what the
+                // hair shows under without changing the appearance at all.
+                if visual.0 == BodyPiece::Hair {
+                    visibility.set_if_neq(next.hair_visibility());
+                }
                 if !appearance_changed {
                     continue;
                 }
@@ -2342,6 +2407,11 @@ fn spawn_body(
                 Mesh3d(mesh),
                 MeshMaterial3d(material),
                 resting_piece_transform(piece),
+                if piece == BodyPiece::Hair {
+                    worn.hair_visibility()
+                } else {
+                    Visibility::Inherited
+                },
             ));
         }
         for (segment, mesh, material) in armour {

@@ -101,8 +101,10 @@ carefully it is written.
 
 ### 7. Reuse a shape before inventing one
 
-`ItemShape` is a vocabulary of *kinds*, not a picture per item: every wearable piece shares one
-`Armour` plate and is told apart by colour. Reach for an existing variant first.
+`ItemShape` is a vocabulary of *kinds*, not a picture per item: every wearable piece shares the
+`Armour` shape and is told apart by colour. Reach for an existing variant first. How a piece looks
+**on a body** is a separate row fact, `armour_style`: a set sculpted in `client/src/player/armour/`
+names its style, and a row that names none is drawn as the plain overlay.
 
 The pickaxe and the shovel are the counter-example worth knowing (#1121): they shared the axe's
 `Tool` silhouette in dirt and stone swatches until a pack holding all three read as three

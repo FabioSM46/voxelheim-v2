@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
+use super::appearance::ArmourPiece;
+use super::armour::{self, ArmourLook};
 use super::hands::{
     bow_mesh, pickaxe_mesh, sceptre_mesh, shield_mesh, shovel_mesh, sword_grip_mesh,
     sword_guard_base, sword_mesh_with,
@@ -197,6 +199,11 @@ pub(super) struct DropVisuals {
     /// The one image every liveried surface samples, held here so `material_for` needs no
     /// second argument and cannot be handed a different one.
     livery_image: Handle<Image>,
+    /// One mesh per sculpted armour piece an item is (#1130): the segments the body wears it
+    /// as, merged and scaled to a drop — see `armour::piece_mesh`. Consulted before `shapes`,
+    /// so a rusty helm on the ground and in the fist is the helm, while an armour item with no
+    /// set keeps the shape's plate.
+    sculpted: Vec<((ArmourLook, ArmourPiece), Handle<Mesh>)>,
 }
 
 impl DropVisuals {
@@ -207,6 +214,11 @@ impl DropVisuals {
     /// row answers [`ItemShape::Material`], which that function documents as the least
     /// wrong guess.
     pub(super) fn mesh_for(&self, item_id: u16) -> Handle<Mesh> {
+        if let Some(piece) = armour::sculpted_piece(item_id)
+            && let Some((_, mesh)) = self.sculpted.iter().find(|(key, _)| *key == piece)
+        {
+            return mesh.clone();
+        }
         let key = mesh_key(item_shape(item_id), item_livery(item_id));
         self.shapes
             .iter()
@@ -368,6 +380,15 @@ pub(super) fn create_visuals(
         blade_grip: meshes.add(sword_grip_mesh(DROP_EDGE * BLADE_DROP_LENGTH)),
         materials: Vec::new(),
         livery_image: liveries.material_image(),
+        sculpted: armour::sculpted_pieces()
+            .into_iter()
+            .map(|(look, piece)| {
+                (
+                    (look, piece),
+                    meshes.add(armour::piece_mesh(look, piece, SCULPTED_DROP_LONGEST)),
+                )
+            })
+            .collect(),
     });
 }
 
@@ -444,7 +465,14 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
     }
 }
 
-/// A compact cuirass silhouette: one body plate and two raised shoulders.
+/// The longest side of a dropped sculpted armour piece, in blocks.
+///
+/// The width of the plate [`armour_mesh`] draws — its body and both shoulders span just under
+/// one drop edge — so a sculpted piece on the ground is the size an unsculpted one already is.
+const SCULPTED_DROP_LONGEST: f32 = DROP_EDGE * 0.96;
+
+/// A compact cuirass silhouette: one body plate and two raised shoulders. What every armour
+/// item that is not a sculpted piece drops as.
 fn armour_mesh() -> Mesh {
     let body_size = Vec3::new(DROP_EDGE * 0.64, DROP_EDGE * 0.72, DROP_EDGE * 0.22);
     let shoulder_size = Vec3::new(DROP_EDGE * 0.28, DROP_EDGE * 0.18, DROP_EDGE * 0.28);
@@ -1097,6 +1125,7 @@ mod tests {
                 shape: item_shape(item_id),
                 colour: Color::WHITE,
                 livery: item_livery(item_id),
+                armour: crate::player::sculpted_icon(item_id),
             };
             let host = world.spawn_empty().id();
             world.commands().entity(host).with_children(|host| {
@@ -1172,6 +1201,7 @@ mod tests {
                 shape: item_shape(item_id),
                 colour: Color::WHITE,
                 livery,
+                armour: crate::player::sculpted_icon(item_id),
             };
             let host = world.spawn_empty().id();
             world.commands().entity(host).with_children(|host| {
@@ -1253,8 +1283,17 @@ mod tests {
                 if left >= right {
                     continue;
                 }
-                if (item_shape(left), item_livery(left)) != (item_shape(right), item_livery(right))
-                {
+                // A sculpted armour piece is its own mesh (#1130), so it shares one only with
+                // an item that is the same piece in the same look.
+                if (
+                    item_shape(left),
+                    item_livery(left),
+                    armour::sculpted_piece(left),
+                ) != (
+                    item_shape(right),
+                    item_livery(right),
+                    armour::sculpted_piece(right),
+                ) {
                     continue;
                 }
                 shared += 1;
@@ -1269,6 +1308,82 @@ mod tests {
             shared > 10,
             "only {shared} sharing pairs, so this sweeps nothing"
         );
+    }
+
+    /// **A dropped sculpted piece is the mesh it is worn as** (#1130): the helm, the cuirass
+    /// with both vambraces, and both greaves, each merged from the body's own segment meshes
+    /// and scaled to a drop — while an armour item with no set keeps the shape's plate.
+    #[test]
+    fn a_dropped_sculpted_piece_is_the_mesh_it_is_worn_as() {
+        use super::super::appearance::ArmourSegment;
+        use crate::player::crafting::{
+            ITEM_LEATHER_CAP, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM,
+        };
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let visuals = world.resource::<DropVisuals>();
+        let plate = visuals
+            .shapes
+            .iter()
+            .find(|(key, _)| *key == (ItemShape::Armour, None))
+            .map(|(_, mesh)| mesh.clone())
+            .expect("the armour shape has a drop mesh");
+        assert_eq!(
+            visuals.mesh_for(ITEM_LEATHER_CAP),
+            plate,
+            "the leather cap no longer drops as the armour plate"
+        );
+
+        let mut seen = Vec::new();
+        for (item_id, piece) in [
+            (ITEM_RUSTY_HELM, ArmourPiece::Head),
+            (ITEM_RUSTY_CUIRASS, ArmourPiece::Chest),
+            (ITEM_RUSTY_GREAVES, ArmourPiece::Legs),
+        ] {
+            let handle = visuals.mesh_for(item_id);
+            assert_ne!(handle, plate, "item {item_id} still drops as the plate");
+            assert!(
+                !seen.contains(&handle),
+                "item {item_id} drops as another piece"
+            );
+            seen.push(handle.clone());
+
+            let look = armour::look(item_id).expect("the rusty set is sculpted");
+            let worn: usize = ArmourSegment::ALL
+                .into_iter()
+                .filter(|segment| segment.piece() == piece)
+                .map(|segment| armour::segment_mesh(Some(look), segment).count_vertices())
+                .sum();
+            let meshes = world.resource::<Assets<Mesh>>();
+            let mesh = meshes.get(&handle).expect("the sculpted drop mesh exists");
+            assert_eq!(
+                mesh.count_vertices(),
+                worn,
+                "item {item_id} drops as something other than the segments it is worn as"
+            );
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("a drop mesh carries positions");
+            };
+            let (low, high) =
+                positions
+                    .iter()
+                    .fold((Vec3::MAX, Vec3::MIN), |(low, high), position| {
+                        let position = Vec3::from_array(*position);
+                        (low.min(position), high.max(position))
+                    });
+            assert!(
+                ((high - low).max_element() - SCULPTED_DROP_LONGEST).abs() < 1e-5,
+                "item {item_id} is not drop-sized"
+            );
+            assert!(
+                ((low + high) / 2.0).length() < 1e-5,
+                "item {item_id} is not centred on its drop"
+            );
+        }
     }
 
     #[test]

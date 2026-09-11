@@ -58,7 +58,7 @@ use crate::net::{
 use crate::player::{
     ApplyInputMode, ApplySnapshots, ConfirmationAnswer, ConfirmationPrompt, CraftClick, EntryOffer,
     EntryOfferAnswer, ITEM_SILVER, InputMode, InventoryClick, Liveries, PlayerTradeClick,
-    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape,
+    SelfVitals, ViewMode, item_linear_rgba, item_livery, item_shape, sculpted_icon,
 };
 use crate::settings::{Bindings, Control, Settings};
 
@@ -825,6 +825,7 @@ pub(super) fn stack_style(stack: Option<InventoryStack>) -> StackStyle {
             shape: item_shape(stack.item_id),
             colour: Color::linear_rgba(r, g, b, a),
             livery: item_livery(stack.item_id),
+            armour: sculpted_icon(stack.item_id),
         }),
         count: stack.count.to_string(),
     }
@@ -841,6 +842,7 @@ pub(super) fn silver_icon() -> StackIcon {
         shape: item_shape(ITEM_SILVER),
         colour: Color::linear_rgba(r, g, b, a),
         livery: item_livery(ITEM_SILVER),
+        armour: None,
     }
 }
 
@@ -1594,6 +1596,7 @@ mod tests {
                 .icon
                 .unwrap_or_else(|| panic!("item {item_id} draws no picture"));
             assert_eq!(icon.shape, item_shape(item_id), "item {item_id}");
+            assert_eq!(icon.armour, sculpted_icon(item_id), "item {item_id}");
             let [r, g, b, a] = item_linear_rgba(item_id);
             assert_eq!(
                 icon.colour,

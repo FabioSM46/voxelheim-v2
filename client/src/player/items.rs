@@ -19,6 +19,7 @@
 //! entry here draws the wrong shape, spells the wrong word, and cannot make an item do
 //! anything.
 
+use super::armour::ArmourStyle;
 use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::ITEM_WOODEN_SHIELD;
 use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
@@ -163,8 +164,10 @@ pub(crate) enum ItemShape {
     Pickaxe,
     /// A wooden haft with a small D-grip under a flat iron blade.
     Shovel,
-    /// A compact plate with shoulders: every wearable piece uses one silhouette and the
-    /// registry colour distinguishes worked leather from forged iron.
+    /// A compact plate with shoulders: every wearable piece is this shape in the pack, and
+    /// the registry colour distinguishes worked leather from rusty steel. **On a body** a row
+    /// may also name an `armour_style`, which is the sculpted silhouette that piece is worn
+    /// as; a row that names none is drawn as the plain overlay.
     Armour,
     /// A wooden plate with a metal boss.
     Shield,
@@ -340,7 +343,7 @@ impl ItemColour {
 /// would be worth it because a bare cube is the flattest thing in the game, grain on a
 /// raw-meat stub is a texture nobody will look at. `client/AGENTS.md` lists which materials
 /// have one and why the rest do not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Livery {
     /// Worn steel: oxide, warm and dark, eaten *into* the metal rather than laid over it.
     WornSteel,
@@ -412,6 +415,14 @@ pub(super) struct ItemDisplay {
     /// the **leather patch**, which is bark-coloured worked hide. Two of those seven are not
     /// wood. A livery inferred from the colour would grain them both.
     livery: Option<Livery>,
+    /// The sculpted set an armour item is drawn as on a body, when it is sculpted at all.
+    ///
+    /// **A presentation fact like the livery beside it, and explicit per row for the same
+    /// reason**: nothing in the colour or the name says which silhouette a piece is cut in.
+    /// `None` is what every non-armour row says and what an armour row with no sculpted set
+    /// says, and `super::armour` draws that as the plain overlay cuboid. The segment a piece
+    /// covers is not here — that is the equipment slot's answer.
+    armour_style: Option<ArmourStyle>,
 }
 
 /// Every item id this client knows, in the order the server's registry appends them.
@@ -426,6 +437,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::STONE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_DIRT,
@@ -433,6 +445,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::DIRT),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_SNOW,
@@ -440,6 +453,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::SNOW),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_LOG,
@@ -447,6 +461,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_RAW_COAL,
@@ -454,6 +469,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::COAL_ORE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_RAW_IRON,
@@ -461,6 +477,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::IRON_ORE),
         livery: None,
+        armour_style: None,
     },
     // The starter blade. `super::combat` reads the same id to decide what a click asks
     // for; the row here is only what it looks like and what it is called.
@@ -470,6 +487,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Blade,
         colour: ItemColour::WornSteel,
         livery: Some(Livery::WornSteel),
+        armour_style: None,
     },
     // The two items that plant an entity rather than a voxel. Iron for the forge, canvas
     // for the tent, so a player can see which of the two they are carrying.
@@ -479,6 +497,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::IRON_ORE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_TENT,
@@ -486,6 +505,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::SNOW),
         livery: None,
+        armour_style: None,
     },
     // The forge's two products. The iron blade is a `Blade` beside the rusty one, in clean
     // forged steel rather than worn steel so the two are told apart in the hand as well as
@@ -496,6 +516,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Blade,
         colour: ItemColour::ForgedSteel,
         livery: Some(Livery::ForgedSteel),
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_SHARPENING_STONE,
@@ -503,6 +524,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::STONE),
         livery: None,
+        armour_style: None,
     },
     // The third bundle, and the first whose point is the ground *around* it. A `Bundle`
     // beside the tent and the forge because the place press means the same thing while
@@ -514,6 +536,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     // What a hunt leaves, and what it is worked into. All three are `Material`, because
     // that is what the shape vocabulary has for a thing you carry and spend — and because
@@ -531,6 +554,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::SNOW),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_VARGR_PELT,
@@ -538,6 +562,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::DIRT),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         // **The other `Block(palette::LOG)` that is not wood**: bark is what a worked hide
@@ -547,6 +572,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Block(palette::LOG),
         livery: None,
+        armour_style: None,
     },
     // The three implements. The shovel and the pickaxe are told apart from each other and
     // from the axe by silhouette since #1121, so their colour is free to say what they are
@@ -560,6 +586,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Shovel,
         colour: ItemColour::Block(palette::LOG),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_PICKAXE,
@@ -567,6 +594,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Pickaxe,
         colour: ItemColour::Block(palette::LOG),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         // **`Block(palette::LOG)` and no livery, deliberately.** The axe is still the T its
@@ -579,6 +607,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Tool,
         colour: ItemColour::Block(palette::LOG),
         livery: None,
+        armour_style: None,
     },
     // The hunted ingredient and its cooked product. Both are `Material`, while distinct
     // item-only swatches keep the raw and cooked forms legible in the same pack.
@@ -588,6 +617,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::RawMeat,
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_COOKED_MEAT,
@@ -595,6 +625,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::CookedMeat,
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_CAP,
@@ -602,6 +633,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_JERKIN,
@@ -609,6 +641,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_LEGGINGS,
@@ -616,18 +649,20 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
+        armour_style: None,
     },
     // The rusty set: the starter blade's metal, worn. Both the colour and the livery are the
-    // rusty sword's, and **the colour is what reaches the screen** — an armour mesh and an
-    // armour cell sample the livery image's neutral band, so the body overlay, the icon and
-    // the drop all show rust through `ItemColour::WornSteel`. The livery names the material
-    // honestly for whatever later draws an armour surface against it.
+    // rusty sword's. The set is sculpted (#1130), and on a body and on the ground its plates
+    // carry coordinates in the livery's own band — a drop is built from the same segment meshes
+    // — so the worn and dropped helm, cuirass and greaves wear the sword's oxide. Only the cell
+    // still samples the neutral band and shows rust through `ItemColour::WornSteel`.
     ItemDisplay {
         item_id: ITEM_RUSTY_HELM,
         name: "rusty helm",
         shape: ItemShape::Armour,
         colour: ItemColour::WornSteel,
         livery: Some(Livery::WornSteel),
+        armour_style: Some(ArmourStyle::Rusty),
     },
     ItemDisplay {
         item_id: ITEM_RUSTY_CUIRASS,
@@ -635,6 +670,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::WornSteel,
         livery: Some(Livery::WornSteel),
+        armour_style: Some(ArmourStyle::Rusty),
     },
     ItemDisplay {
         item_id: ITEM_RUSTY_GREAVES,
@@ -642,6 +678,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::WornSteel,
         livery: Some(Livery::WornSteel),
+        armour_style: Some(ArmourStyle::Rusty),
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SHIELD,
@@ -649,6 +686,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Shield,
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_BOW,
@@ -656,6 +694,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bow,
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_ARROW,
@@ -663,6 +702,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Material,
         colour: ItemColour::Arrow,
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_WOODEN_SCEPTRE,
@@ -670,6 +710,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Sceptre,
         colour: ItemColour::Block(palette::LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     // What a desert and a gravel bar are dug into. Three plain block items, each
     // naming the terrain swatch it came out of, so a pack holding sand and
@@ -689,6 +730,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::SAND),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_SANDSTONE,
@@ -696,6 +738,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::SANDSTONE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_GRAVEL,
@@ -703,6 +746,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::GRAVEL),
         livery: None,
+        armour_style: None,
     },
     // The lid off a frozen lake, on exactly the terms the three above are held: it places
     // the voxel it came out of, so it is a `Block` rather than a `Material`, and it names
@@ -713,6 +757,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::ICE),
         livery: None,
+        armour_style: None,
     },
     // The coin. Its own shape and its own swatch, because it is the one item in a pack that
     // is read as a *number* rather than as a material — and no livery, because a struck disc
@@ -726,6 +771,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Coin,
         colour: ItemColour::Silver,
         livery: None,
+        armour_style: None,
     },
     // The three a settlement is built from. `Block` for all of them, for the reason ice
     // is: the server's registry gives each of them a voxel to place, and a shape that
@@ -737,6 +783,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::PLANKS),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_COBBLESTONE,
@@ -744,6 +791,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::COBBLESTONE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_THATCH,
@@ -751,6 +799,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::THATCH),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_RUNESTONE,
@@ -758,6 +807,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::STONE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_PALM_LOG,
@@ -765,6 +815,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Block,
         colour: ItemColour::Block(palette::PALM_LOG),
         livery: Some(Livery::Wood),
+        armour_style: None,
     },
     // Stablemaster tokens. Their names are the one canonical presentation used by the vendor,
     // inventory and mount-selection rows; their colour resolves through `horse::coat_colour`,
@@ -775,6 +826,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::HorseHead,
         colour: ItemColour::Horse(MountKind::BlackHorse),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_BROWN_HORSE,
@@ -782,6 +834,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::HorseHead,
         colour: ItemColour::Horse(MountKind::BrownHorse),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_GREY_HORSE,
@@ -789,6 +842,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::HorseHead,
         colour: ItemColour::Horse(MountKind::GreyHorse),
         livery: None,
+        armour_style: None,
     },
     // The three benches, carried as bundles the way every other structure item is, each in
     // the colour of what it is mostly made of. Their own silhouettes are #1129.
@@ -798,6 +852,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::PLANKS),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_ARMOUR_BENCH,
@@ -805,6 +860,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::COBBLESTONE),
         livery: None,
+        armour_style: None,
     },
     ItemDisplay {
         item_id: ITEM_ENCHANTING_TABLE,
@@ -812,6 +868,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Bundle,
         colour: ItemColour::Block(palette::BASALT),
         livery: None,
+        armour_style: None,
     },
 ];
 
@@ -906,6 +963,32 @@ pub(super) fn liveried_shapes() -> Vec<(ItemShape, Livery)> {
         };
         if !pairs.contains(&(row.shape, livery)) {
             pairs.push((row.shape, livery));
+        }
+    }
+    pairs
+}
+
+/// The sculpted set one item id is drawn as on a body, when it has one.
+///
+/// `None` for an unknown id and for every row that names none, which `super::armour` draws as
+/// the plain overlay cuboid. **This is what the body asks instead of naming an item.**
+pub(super) fn item_armour_style(item_id: u16) -> Option<ArmourStyle> {
+    display(item_id).and_then(|row| row.armour_style)
+}
+
+/// Every distinct style-and-livery pair a sculpted armour item in this build is worn in.
+///
+/// What the body's shared armour meshes are built from, for the reason [`liveried_shapes`] is
+/// what the drop's are: a livery is written into the coordinates, so the pair decides the mesh,
+/// and deriving the pairs from the table keeps the cache to what can be worn.
+pub(super) fn armour_styles() -> Vec<(ArmourStyle, Option<Livery>)> {
+    let mut pairs: Vec<(ArmourStyle, Option<Livery>)> = Vec::new();
+    for row in ITEMS {
+        let Some(style) = row.armour_style else {
+            continue;
+        };
+        if !pairs.contains(&(style, row.livery)) {
+            pairs.push((style, row.livery));
         }
     }
     pairs
@@ -1397,10 +1480,11 @@ mod tests {
     /// The colour and the livery are pinned *to the sword's row* rather than to a named
     /// variant, because "the same rust the sword uses" is the requirement: a later edit that
     /// moved the sword to another livery without moving the set would leave the two base-tier
-    /// pieces a player starts beside visibly different metals. The colour half is the one a
-    /// player sees today — armour meshes and cells sample the neutral band — so it is asserted
-    /// through `item_linear_rgba`, the function the body overlay, the icon and the drop read,
-    /// and not merely through the row. And the set is no longer the iron sword's forged steel,
+    /// pieces a player starts beside visibly different metals. The colour half is the one every
+    /// surface shows — the cell samples only the neutral band, while the sculpted body and drop
+    /// meshes add the livery on top of it — so it is asserted through `item_linear_rgba`, the
+    /// function the body overlay, the icon and the drop read, and not merely through the row.
+    /// And the set is no longer the iron sword's forged steel,
     /// which is what it wore before the rename.
     #[test]
     fn the_rusty_armour_rows_resolve_the_rusty_swords_rust() {
@@ -1515,6 +1599,7 @@ mod tests {
             shape: ItemShape::Material,
             colour: ItemColour::Block(palette::STONE),
             livery: None,
+            armour_style: None,
         };
         assert!(
             !row_is_complete(&nameless),

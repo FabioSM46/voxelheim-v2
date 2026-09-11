@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
 use crate::net::MarkerKind;
-use crate::player::{ItemShape, Liveries, Livery, field_rect};
+use crate::player::{ArmourPiece, ArmourStyle, ItemShape, Liveries, Livery, field_rect};
 
 /// The picture one cell is drawing: a shape, in the item's colour.
 ///
@@ -48,6 +48,13 @@ pub(crate) struct StackIcon {
     /// livery needs. The drawing stays keyed on [`ItemShape`]; this says which of the
     /// rectangles in it sample an image.
     pub(crate) livery: Option<Livery>,
+    /// The sculpted set and piece an armour item is drawn as, when it is one
+    /// (`player::sculpted_icon`).
+    ///
+    /// **The one refinement of a drawing keyed on the shape.** A helm, a cuirass and greaves
+    /// of one sculpted set are three silhouettes on a body and on the ground, and one plate in
+    /// the pack would say otherwise; an armour item with no set keeps [`ARMOUR`].
+    pub(crate) armour: Option<(ArmourStyle, ArmourPiece)>,
 }
 
 /// One rectangle of a picture.
@@ -493,7 +500,9 @@ const SHOVEL: [IconPart; 4] = [
 ];
 
 /// Armour laid flat: a broad chest plate with two shoulders and a narrowed waist.
-/// Leather and rusty armour share the outline and are told apart by the item registry's colour.
+///
+/// The picture of every armour item that is not a sculpted piece — the leather set today —
+/// told apart by the item registry's colour. A sculpted piece draws [`armour_parts`] instead.
 const ARMOUR: [IconPart; 3] = [
     IconPart {
         left: 27.0,
@@ -519,6 +528,217 @@ const ARMOUR: [IconPart; 3] = [
         height: 18.0,
         radius: 10.0,
         shade: -0.34,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The rusty helm, face on: a domed shell under a low crest, the brow band across it, two dark
+/// eye slits split by the nasal ridge and a barred grille over the mouth — the silhouette the
+/// worn helm is cut in.
+const RUSTY_HELM: [IconPart; 8] = [
+    IconPart {
+        left: 45.0,
+        top: 8.0,
+        width: 10.0,
+        height: 20.0,
+        radius: 40.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 24.0,
+        top: 14.0,
+        width: 52.0,
+        height: 66.0,
+        radius: 38.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 20.0,
+        top: 38.0,
+        width: 60.0,
+        height: 9.0,
+        radius: 20.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 31.0,
+        top: 51.0,
+        width: 15.0,
+        height: 5.0,
+        shade: -0.75,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 54.0,
+        top: 51.0,
+        width: 15.0,
+        height: 5.0,
+        shade: -0.75,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 47.0,
+        top: 34.0,
+        width: 6.0,
+        height: 30.0,
+        shade: 0.35,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 34.0,
+        top: 64.0,
+        width: 32.0,
+        height: 10.0,
+        radius: 10.0,
+        shade: -0.60,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 34.0,
+        top: 68.0,
+        width: 32.0,
+        height: 2.5,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The rusty cuirass laid flat: a breastplate with its centre ridge, domed pauldrons at both
+/// shoulders, the gorget at the neck and a fauld lame under a dark seam at the waist.
+const RUSTY_CUIRASS: [IconPart; 7] = [
+    IconPart {
+        left: 27.0,
+        top: 24.0,
+        width: 46.0,
+        height: 52.0,
+        radius: 14.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 12.0,
+        top: 20.0,
+        width: 26.0,
+        height: 20.0,
+        radius: 45.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 62.0,
+        top: 20.0,
+        width: 26.0,
+        height: 20.0,
+        radius: 45.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 38.0,
+        top: 14.0,
+        width: 24.0,
+        height: 11.0,
+        radius: 30.0,
+        shade: 0.15,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 48.0,
+        top: 30.0,
+        width: 4.0,
+        height: 42.0,
+        shade: 0.40,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 29.0,
+        top: 74.0,
+        width: 42.0,
+        height: 3.0,
+        shade: -0.60,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 26.0,
+        top: 77.0,
+        width: 48.0,
+        height: 10.0,
+        radius: 18.0,
+        shade: -0.15,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The rusty greaves side by side: two shin plates with a ridge down each, knee cops standing
+/// proud of them and a flare at each ankle.
+const RUSTY_GREAVES: [IconPart; 8] = [
+    IconPart {
+        left: 22.0,
+        top: 22.0,
+        width: 20.0,
+        height: 58.0,
+        radius: 16.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 22.0,
+        width: 20.0,
+        height: 58.0,
+        radius: 16.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 30.0,
+        top: 54.0,
+        width: 4.0,
+        height: 22.0,
+        shade: 0.40,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 66.0,
+        top: 54.0,
+        width: 4.0,
+        height: 22.0,
+        shade: 0.40,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 19.0,
+        top: 36.0,
+        width: 26.0,
+        height: 16.0,
+        radius: 45.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 55.0,
+        top: 36.0,
+        width: 26.0,
+        height: 16.0,
+        radius: 45.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 18.0,
+        top: 78.0,
+        width: 28.0,
+        height: 8.0,
+        radius: 30.0,
+        shade: -0.20,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 54.0,
+        top: 78.0,
+        width: 28.0,
+        height: 8.0,
+        radius: 30.0,
+        shade: -0.20,
         ..IconPart::PLAIN
     },
 ];
@@ -621,17 +841,37 @@ const SCEPTRE: [IconPart; 2] = [
 /// Whether one shape's picture has a rectangle that samples a livery.
 ///
 /// **Not every shape does, and that is a drawing decision rather than an omission.** A blade
-/// has an edge, and an edge is what a livery is about; a cell drawn as armour is a plate and
-/// two shoulders, and putting forge marks on it would be inventing detail the mesh does not
-/// have either — the armour meshes carry the neutral coordinate for the same reason. So an
-/// rusty helm names `WornSteel` honestly, and its rust reaches both surfaces through the
-/// registry colour alone.
+/// has an edge, and an edge is what a livery is about; a cell drawn as armour is a handful of
+/// plates, and rust on them at a cell's size would be detail nobody can read. So a rusty helm
+/// names `WornSteel` honestly and its cell shows the rust through the registry colour alone,
+/// while the worn and dropped sculpted meshes carry the livery itself.
 ///
 /// Test-only: [`part_bundle`] already answers it per rectangle, and this is the same fact one
 /// level up, for the sweep that has to know which items can reach a livery in a cell at all.
 #[cfg(test)]
 pub(crate) fn draws_a_livery(shape: ItemShape) -> bool {
     parts(shape).iter().any(|part| part.livery)
+}
+
+/// The rectangles one cell's icon is drawn from: the sculpted piece's picture for an armour
+/// item that is one, and its shape's picture for everything else.
+pub(crate) fn drawing(icon: StackIcon) -> &'static [IconPart] {
+    match icon.armour {
+        Some((style, piece)) if icon.shape == ItemShape::Armour => armour_parts(style, piece),
+        _ => parts(icon.shape),
+    }
+}
+
+/// The rectangles one sculpted armour piece is drawn from.
+///
+/// **Wildcard-free over both halves**, so a new set does not compile until each of its three
+/// pieces has a picture — the same guarantee [`parts`] gives a new shape.
+pub(crate) fn armour_parts(style: ArmourStyle, piece: ArmourPiece) -> &'static [IconPart] {
+    match (style, piece) {
+        (ArmourStyle::Rusty, ArmourPiece::Head) => &RUSTY_HELM,
+        (ArmourStyle::Rusty, ArmourPiece::Chest) => &RUSTY_CUIRASS,
+        (ArmourStyle::Rusty, ArmourPiece::Legs) => &RUSTY_GREAVES,
+    }
 }
 
 pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
@@ -702,7 +942,7 @@ pub(crate) fn spawn(
 ) {
     let base = icon.colour.to_linear();
     let image = livery_image(icon, liveries);
-    for part in parts(icon.shape) {
+    for part in drawing(icon) {
         let mut rect = host.spawn(part_bundle(part, base));
         if let Some(node) = livery_node(part, base, image.as_ref(), icon.livery) {
             rect.insert(node);
@@ -760,7 +1000,7 @@ pub(crate) fn redraw(
     let base = icon.colour.to_linear();
     let image = livery_image(icon, liveries);
     host.with_children(|host| {
-        for part in parts(icon.shape) {
+        for part in drawing(icon) {
             let mut rect = host.spawn(part_bundle(part, base));
             if let Some(node) = livery_node(part, base, image.as_ref(), icon.livery) {
                 rect.insert(node);
@@ -1126,6 +1366,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **Every sculpted armour piece has a drawing of its own** (#1130): no two pieces share a
+    /// picture, and none borrows a shape's.
+    #[test]
+    fn every_sculpted_armour_piece_has_a_drawing_of_its_own() {
+        let mut seen: Vec<&[IconPart]> = ItemShape::ALL.iter().map(|shape| parts(*shape)).collect();
+        for style in ArmourStyle::ALL {
+            for piece in ArmourPiece::ALL {
+                let drawn = armour_parts(style, piece);
+                assert!(
+                    is_a_drawing(drawn),
+                    "{style:?} {piece:?} has no drawing: {drawn:?}"
+                );
+                assert!(
+                    !seen.contains(&drawn),
+                    "{style:?} {piece:?} draws a picture something else already draws"
+                );
+                seen.push(drawn);
+            }
+        }
+    }
+
+    /// A cell draws the sculpted piece for exactly the items that are one, and every other
+    /// item its shape's picture.
+    #[test]
+    fn a_cell_draws_the_sculpted_piece_an_item_is_and_otherwise_its_shape() {
+        use crate::player::{item_shape, known_item_ids, sculpted_icon};
+
+        let mut sculpted = 0;
+        for item_id in known_item_ids() {
+            let icon = StackIcon {
+                shape: item_shape(item_id),
+                colour: Color::WHITE,
+                livery: None,
+                armour: sculpted_icon(item_id),
+            };
+            match icon.armour {
+                Some((style, piece)) => {
+                    sculpted += 1;
+                    assert_eq!(icon.shape, ItemShape::Armour, "item {item_id}");
+                    assert_eq!(drawing(icon), armour_parts(style, piece), "item {item_id}");
+                }
+                None => assert_eq!(drawing(icon), parts(icon.shape), "item {item_id}"),
+            }
+        }
+        assert_eq!(
+            sculpted, 3,
+            "the rusty helm, cuirass and greaves are the sculpted pieces"
+        );
     }
 
     #[test]
