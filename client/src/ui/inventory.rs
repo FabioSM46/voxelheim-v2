@@ -1766,14 +1766,24 @@ pub(super) fn craft_clicks(
     rows: Query<(&Interaction, &CraftRow), Changed<Interaction>>,
     mut clicks: MessageWriter<CraftClick>,
 ) {
-    if !matches!(*mode, InputMode::Inventory | InputMode::Station) {
-        return;
-    }
+    // Which surface owns the pointer in this mode: the pack's hand rows, or a station panel's.
+    // Bevy already treats a row under a hidden root as released (`ui_focus_system` resets the
+    // `Interaction` of anything whose `InheritedVisibility` is off), so this is not what stops
+    // a hidden row being pressed. It is what states the rule where a press is read, so one
+    // clickable surface per mode does not rest on how the two roots happen to be hidden.
+    let station_rows = match *mode {
+        InputMode::Inventory => false,
+        InputMode::Station => true,
+        _ => return,
+    };
     let Some(inventory) = inventory else {
         return;
     };
 
     for (interaction, row) in &rows {
+        if row.0.station.is_some() != station_rows {
+            continue;
+        }
         if *interaction != Interaction::Pressed || !row.0.affordable(&inventory) {
             continue;
         }
@@ -3388,6 +3398,43 @@ mod tests {
         assert!(
             press(&mut app, RecipeId::Tent).is_empty(),
             "a short row was activated"
+        );
+    }
+
+    /// One clickable surface per mode: with a station panel open a pack row reports nothing,
+    /// and with the pack open a station panel's row reports nothing — both affordable, both
+    /// pressed, so only the surface rule can be what refuses them.
+    #[test]
+    fn a_press_is_reported_only_from_the_surface_the_mode_owns() {
+        let cap = crate::player::recipes_made_at(Some(StructureKind::LeatherBench))
+            .find(|recipe| recipe.id == RecipeId::LeatherCap)
+            .copied()
+            .expect("the leather bench makes a cap");
+        let pelts = cap.ingredients[0];
+
+        let mut app = app();
+        deliver(&mut app, &[(LOG, 8), (pelts.item_id, pelts.count)]);
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Station;
+        app.update();
+        assert!(
+            press(&mut app, RecipeId::Tent).is_empty(),
+            "a pack row was activated behind an open station panel"
+        );
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        app.world_mut()
+            .spawn((CraftRow(cap), Button, Interaction::Pressed));
+        app.update();
+        let reported: Vec<CraftClick> = app
+            .world_mut()
+            .resource_mut::<Messages<CraftClick>>()
+            .drain()
+            .collect();
+        assert!(
+            reported.is_empty(),
+            "a station row was activated from the pack: {reported:?}"
         );
     }
 
