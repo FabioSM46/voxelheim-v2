@@ -75,7 +75,7 @@ use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
-use super::text_input::{TextEdit, apply_key};
+use super::text_input::{Modifiers, TextEdit, TextField};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, Landmark, LandmarkList, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn,
@@ -2171,7 +2171,7 @@ struct MarkerDraft {
     /// Where in the window it was clicked, so the form is anchored where the player pointed.
     cursor: Vec2,
     kind: MarkerKind,
-    note: String,
+    note: TextField,
 }
 
 /// How far the pointer may travel between press and release and still be a click.
@@ -2410,7 +2410,7 @@ fn click_the_map(
         // The mark that is only its note, because it is the one a player can mean without
         // having read the row of pictures first.
         kind: MarkerKind::Note,
-        note: String::new(),
+        note: TextField::default(),
     });
 }
 
@@ -2419,9 +2419,11 @@ fn click_the_map(
 /// The reading is `ui/text_input.rs`'s, shared with chat; the bound is the server's, mirrored
 /// so a note that could not be stored is one the field would not take rather than one the
 /// server has to refuse.
+#[allow(clippy::too_many_arguments)] // The held modifiers are the eighth input to one reader.
 fn type_the_note(
     current: Option<Res<crate::world::transition::CurrentWorld>>,
     mut typed: MessageReader<KeyboardInput>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
     screen: Res<MapScreen>,
     mut form: ResMut<MarkerForm>,
     mut ticks: ResMut<MarkerTick>,
@@ -2442,11 +2444,12 @@ fn type_the_note(
         typed.clear();
         return;
     }
+    let modifiers = Modifiers::held(keys.as_deref());
     for key in typed.read() {
         let Some(draft) = form.0.as_mut() else {
             break;
         };
-        match apply_key(key, &mut draft.note, MARKER_NOTE_MAX_BYTES) {
+        match draft.note.apply_key(key, modifiers, MARKER_NOTE_MAX_BYTES) {
             Some(TextEdit::Cancelled) => {
                 form.0 = None;
                 return;
@@ -2522,7 +2525,7 @@ fn ask_to_place(
         kind: draft.kind,
         // Trimmed, because leading and trailing space is not a note and the tooltip would
         // draw it as an indent.
-        note: draft.note.trim().to_owned(),
+        note: draft.note.text().trim().to_owned(),
         client_tick,
     }));
     if sent == Sent::Dropped {
@@ -2645,8 +2648,8 @@ fn refresh_the_form(
         }
     }
     for mut text in &mut notes {
-        if text.0 != draft.note {
-            text.0.clone_from(&draft.note);
+        if text.0 != draft.note.text() {
+            text.0 = draft.note.text().to_owned();
         }
     }
     for (button, interaction, mut background, mut border) in &mut kinds {
@@ -5069,7 +5072,7 @@ mod tests {
             "floored, and the click's"
         );
         assert_eq!(open.kind, MarkerKind::Note);
-        assert!(open.note.is_empty());
+        assert!(open.note.text().is_empty());
 
         // And the pointer beside the picture opens nothing: there is no block there to name.
         app.world_mut().resource_mut::<MarkerForm>().0 = None;
@@ -5104,12 +5107,12 @@ mod tests {
         typing(&mut app, Key::Character("cold".into()));
         typing(&mut app, Key::Space);
         typing(&mut app, Key::Character("here".into()));
-        assert_eq!(draft(&mut app).expect("open").note, "cold here");
+        assert_eq!(draft(&mut app).expect("open").note.text(), "cold here");
 
         for _ in 0..MARKER_NOTE_MAX_BYTES {
             typing(&mut app, Key::Character("a".into()));
         }
-        let note = draft(&mut app).expect("open").note;
+        let note = draft(&mut app).expect("open").note.text().to_owned();
         assert_eq!(
             note.len(),
             MARKER_NOTE_MAX_BYTES,
@@ -5231,7 +5234,7 @@ mod tests {
             block: IVec2::new(12, -4),
             cursor: Vec2::new(300.0, 200.0),
             kind: MarkerKind::Note,
-            note: String::new(),
+            note: TextField::default(),
         });
     }
 

@@ -2,7 +2,7 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
-use super::text_input::{TextEdit, apply_key};
+use super::text_input::{Modifiers, TextEdit, TextField};
 use super::{BUTTON, CELL_EDGE, button_colour, cell_node, icon, stack_style};
 use crate::net::{InventoryStack, PLAYER_TRADE_SLOTS, PlayerTradeSlot, Session};
 use crate::player::{
@@ -33,7 +33,7 @@ struct SilverFieldText;
 #[derive(Resource, Debug, Default)]
 struct SilverDraft {
     seed: Option<(u64, u32)>,
-    line: String,
+    line: TextField,
     focused: bool,
 }
 
@@ -108,7 +108,7 @@ fn rebuild_window(
         let seed = (state.partner_entity_id, state.my_silver);
         if draft.seed != Some(seed) {
             draft.seed = Some(seed);
-            draft.line = state.my_silver.to_string();
+            draft.line.set_text(&state.my_silver.to_string());
             draft.focused = false;
         }
 
@@ -132,7 +132,7 @@ fn rebuild_window(
                     state.my_silver,
                     state.my_confirmed,
                     true,
-                    &draft.line,
+                    draft.line.text(),
                     liveries.as_deref(),
                 );
                 spawn_offer_column(
@@ -363,6 +363,7 @@ fn edit_silver(
     window: Res<PlayerTradeWindow>,
     mut draft: ResMut<SilverDraft>,
     mut keys: MessageReader<KeyboardInput>,
+    held: Option<Res<ButtonInput<KeyCode>>>,
     mut fields: Query<(&Interaction, &mut BackgroundColor), With<SilverField>>,
     mut labels: Query<&mut Text, With<SilverFieldText>>,
     mut clicks: MessageWriter<PlayerTradeClick>,
@@ -391,9 +392,10 @@ fn edit_silver(
 
     let mut submit = false;
     if draft.focused {
+        let modifiers = Modifiers::held(held.as_deref());
         for event in &events {
-            match apply_key(event, &mut draft.line, 10) {
-                Some(TextEdit::Typed) => draft.line.retain(|character| character.is_ascii_digit()),
+            match draft.line.apply_key(event, modifiers, 10) {
+                Some(TextEdit::Typed) => keep_digits(&mut draft.line),
                 Some(TextEdit::Submitted) => submit = true,
                 Some(TextEdit::Cancelled) | None => {}
             }
@@ -401,12 +403,23 @@ fn edit_silver(
     }
     if submit {
         draft.focused = false;
-        if let Ok(silver) = draft.line.parse::<u32>() {
+        if let Ok(silver) = draft.line.text().parse::<u32>() {
             clicks.write(PlayerTradeClick::SetSilver(silver));
         }
     }
     for mut label in &mut labels {
-        label.0 = format!("Silver: {}", draft.line);
+        label.0 = format!("Silver: {}", draft.line.text());
+    }
+}
+
+/// Drops everything but digits, which is the whole of what a silver amount may hold.
+///
+/// Only when something has to go, because replacing the line puts the cursor at its end: an
+/// ordinary digit typed in the middle of the amount keeps the cursor where the player put it.
+fn keep_digits(line: &mut TextField) {
+    if !line.text().bytes().all(|byte| byte.is_ascii_digit()) {
+        let digits: String = line.text().chars().filter(char::is_ascii_digit).collect();
+        line.set_text(&digits);
     }
 }
 

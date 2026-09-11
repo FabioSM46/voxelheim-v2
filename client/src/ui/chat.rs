@@ -19,7 +19,7 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
-use super::text_input::{TextEdit, apply_key};
+use super::text_input::{Modifiers, TextEdit, TextField};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
 const LINE_COUNT: usize = 8;
@@ -36,14 +36,15 @@ const LEFT: f32 = 16.0;
 const INPUT_BOTTOM: f32 = 44.0;
 const LOG_BOTTOM: f32 = 70.0;
 
+/// The draft: the line, its cursor and its selection, edited by `ui/text_input.rs`.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
-struct ChatLine(String);
+struct ChatLine(TextField);
 
 /// The one submitted line this process can recall.
 ///
 /// This stays beside the draft rather than in the shared text-input helper: remembering a
-/// submission is chat behaviour, and the map's note field must keep treating arrows as no-op
-/// keys. It is deliberately a single optional line rather than a growing session log.
+/// submission is chat behaviour, and the map's note field must keep treating `ArrowUp` as a
+/// no-op key. It is deliberately a single optional line rather than a growing session log.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct ChatHistory(Option<String>);
 
@@ -151,24 +152,93 @@ fn spawn_chat(mut commands: Commands) {
             }
         });
 
-    commands.spawn((
-        ChatInput,
-        Text::new(String::new()),
-        TextFont {
-            font_size: FONT_SIZE,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        TextShadow::default(),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(LEFT),
-            bottom: Val::Px(INPUT_BOTTOM),
-            width: Val::Percent(38.0),
-            ..default()
-        },
-        GlobalZIndex(14),
-    ));
+    commands
+        .spawn((
+            ChatInput,
+            Text::new(String::new()),
+            TextFont {
+                font_size: FONT_SIZE,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextShadow::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(LEFT),
+                bottom: Val::Px(INPUT_BOTTOM),
+                width: Val::Percent(38.0),
+                ..default()
+            },
+            GlobalZIndex(14),
+        ))
+        .with_children(|input| {
+            for index in 0..DRAFT_SPANS {
+                input.spawn((
+                    DraftSpan(index),
+                    TextSpan::new(String::new()),
+                    TextFont {
+                        font_size: FONT_SIZE,
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    TextBackgroundColor(Color::NONE),
+                ));
+            }
+        });
+}
+
+/// How many spans the draft is drawn in: the text before, two middle pieces and the text after.
+///
+/// Fixed, so the spans are spawned once and only their contents move. See [`draft_pieces`].
+const DRAFT_SPANS: usize = 4;
+
+/// One of the draft's [`DRAFT_SPANS`] spans, by position.
+#[derive(Component)]
+struct DraftSpan(usize);
+
+/// The caret, drawn as a character in the line.
+///
+/// A glyph and not a rectangle, because the font is monospaced and the glyph lands exactly
+/// where the cursor is without a layout query; the price is one column the line is wider by
+/// while it is being typed. `|` is in the 95 printable ASCII glyphs `default_font` carries.
+const CARET: &str = "|";
+const CARET_COLOUR: Color = Color::srgb(1.0, 0.72, 0.25);
+const SELECTION_BACKGROUND: Color = Color::srgba(0.35, 0.55, 0.95, 0.6);
+
+/// How one span of the draft is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftLook {
+    Plain,
+    Selected,
+    Caret,
+}
+
+/// The draft cut into [`DRAFT_SPANS`] spans: text before, the caret and the selection in the
+/// order the cursor puts them, text after.
+///
+/// The cursor is always one end of the selection, so the caret sits before the selected span
+/// when the selection was made leftward and after it when it was made rightward, and a middle
+/// span is empty when nothing is selected.
+fn draft_pieces(field: &TextField) -> [(String, DraftLook); DRAFT_SPANS] {
+    let text = field.text();
+    let caret = (CARET.to_owned(), DraftLook::Caret);
+    let Some(selection) = field.selection() else {
+        let (before, after) = text.split_at(field.cursor());
+        return [
+            (before.to_owned(), DraftLook::Plain),
+            caret,
+            (String::new(), DraftLook::Plain),
+            (after.to_owned(), DraftLook::Plain),
+        ];
+    };
+    let before = (text[..selection.start].to_owned(), DraftLook::Plain);
+    let selected = (text[selection.clone()].to_owned(), DraftLook::Selected);
+    let after = (text[selection.end..].to_owned(), DraftLook::Plain);
+    if field.cursor() == selection.start {
+        [before, caret, selected, after]
+    } else {
+        [before, selected, caret, after]
+    }
 }
 
 fn ingest_server_lines(
@@ -259,9 +329,11 @@ fn message_colour(kind: LogKind, alpha: f32) -> Color {
     Color::srgba(red, green, blue, alpha)
 }
 
+#[allow(clippy::too_many_arguments)] // The held modifiers are the eighth input to one reader.
 fn capture_chat(
     time: Res<Time<Real>>,
     mut typed: MessageReader<KeyboardInput>,
+    keys: Option<Res<ButtonInput<KeyCode>>>,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
     mut history: ResMut<ChatHistory>,
@@ -275,10 +347,11 @@ fn capture_chat(
         return;
     }
 
+    let modifiers = Modifiers::held(keys.as_deref());
     for key in typed.read() {
         if key.state == ButtonState::Pressed && key.logical_key == Key::ArrowUp {
             if let Some(last) = &history.0 {
-                draft.0.clone_from(last);
+                draft.0.set_text(last);
             }
             continue;
         }
@@ -286,14 +359,14 @@ fn capture_chat(
         // The reading of a key is `ui/text_input.rs`'s, shared with the map's note field.
         // What stays here is what makes this line chat's: the mode it lives in, and that
         // `Enter` is a message to the world rather than a mark on a map.
-        match apply_key(key, &mut draft.0, DRAFT_LIMIT_BYTES) {
+        match draft.0.apply_key(key, modifiers, DRAFT_LIMIT_BYTES) {
             Some(TextEdit::Cancelled) => {
                 draft.0.clear();
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
             Some(TextEdit::Submitted) => {
-                let line = std::mem::take(&mut draft.0);
+                let line = draft.0.take();
                 if !line.trim().is_empty() {
                     history.0 = Some(line.clone());
                 }
@@ -437,6 +510,15 @@ fn render_chat(
     time: Res<Time<Real>>,
     mut lines: Query<(&ChatText, &mut Text, &mut TextColor)>,
     mut input: Query<&mut Text, (With<ChatInput>, Without<ChatText>)>,
+    mut spans: Query<
+        (
+            &DraftSpan,
+            &mut TextSpan,
+            &mut TextColor,
+            &mut TextBackgroundColor,
+        ),
+        Without<ChatText>,
+    >,
 ) {
     let visible = matches!(*mode, InputMode::Playing | InputMode::Chat);
     let now = time.elapsed();
@@ -454,10 +536,28 @@ fn render_chat(
     let Ok(mut input) = input.single_mut() else {
         return;
     };
-    if *mode == InputMode::Chat {
-        input.0 = format!("> {}", draft.0);
-    } else {
+    if *mode != InputMode::Chat {
         input.0.clear();
+        for (_, mut span, _, _) in &mut spans {
+            span.0.clear();
+        }
+        return;
+    }
+    input.0 = "> ".to_owned();
+    let pieces = draft_pieces(&draft.0);
+    for (slot, mut span, mut colour, mut background) in &mut spans {
+        let Some((text, look)) = pieces.get(slot.0) else {
+            continue;
+        };
+        span.0.clone_from(text);
+        colour.0 = match look {
+            DraftLook::Caret => CARET_COLOUR,
+            DraftLook::Plain | DraftLook::Selected => Color::WHITE,
+        };
+        background.0 = match look {
+            DraftLook::Selected => SELECTION_BACKGROUND,
+            DraftLook::Plain | DraftLook::Caret => Color::NONE,
+        };
     }
 }
 
@@ -535,8 +635,126 @@ mod tests {
         }
         app.update();
         assert_eq!(
-            app.world().resource::<ChatLine>().0.len(),
+            app.world().resource::<ChatLine>().0.text().len(),
             DRAFT_LIMIT_BYTES
+        );
+    }
+
+    /// The held modifiers reach the field: `Shift` with an arrow selects rather than moves.
+    #[test]
+    fn shift_held_while_an_arrow_is_pressed_selects_in_the_draft() {
+        let mut app = capture_app(None);
+        type_key(&mut app, Key::Character("hello".into()));
+        app.update();
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        app.insert_resource(keys);
+        type_key(&mut app, Key::ArrowLeft);
+        type_key(&mut app, Key::ArrowLeft);
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.selection(), Some(3..5));
+    }
+
+    fn field_with(text: &str, keys: &[Key], modifiers: Modifiers) -> TextField {
+        let mut field = TextField::default();
+        field.set_text(text);
+        for key in keys {
+            press_on(&mut field, key.clone(), modifiers);
+        }
+        field
+    }
+
+    fn press_on(field: &mut TextField, key: Key, modifiers: Modifiers) {
+        let press = KeyboardInput {
+            key_code: KeyCode::KeyA,
+            logical_key: key,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        };
+        field.apply_key(&press, modifiers, DRAFT_LIMIT_BYTES);
+    }
+
+    fn texts(pieces: &[(String, DraftLook); DRAFT_SPANS]) -> [&str; DRAFT_SPANS] {
+        [0, 1, 2, 3].map(|index| pieces[index].0.as_str())
+    }
+
+    #[test]
+    fn the_caret_sits_at_the_cursor_and_on_the_moving_end_of_a_selection() {
+        let shift = Modifiers {
+            shift: true,
+            control: false,
+        };
+
+        let resting = draft_pieces(&field_with(
+            "hello",
+            &[Key::ArrowLeft],
+            Modifiers::default(),
+        ));
+        assert_eq!(texts(&resting), ["hell", CARET, "", "o"]);
+        assert_eq!(resting[1].1, DraftLook::Caret);
+
+        let leftward = draft_pieces(&field_with("hello", &[const { Key::ArrowLeft }; 2], shift));
+        assert_eq!(texts(&leftward), ["hel", CARET, "lo", ""]);
+        assert_eq!(leftward[2].1, DraftLook::Selected);
+
+        let mut rightward = field_with("hello", &[Key::Home], Modifiers::default());
+        press_on(&mut rightward, Key::ArrowRight, shift);
+        let rightward = draft_pieces(&rightward);
+        assert_eq!(texts(&rightward), ["", "h", CARET, "ello"]);
+        assert_eq!(rightward[1].1, DraftLook::Selected);
+
+        let empty = draft_pieces(&TextField::default());
+        assert_eq!(texts(&empty), ["", CARET, "", ""]);
+    }
+
+    #[test]
+    fn the_draft_is_drawn_with_a_caret_and_a_highlighted_selection_only_while_typing() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(InputMode::Chat)
+            .insert_resource(ChatLine(field_with(
+                "hello",
+                &[const { Key::ArrowLeft }; 2],
+                Modifiers {
+                    shift: true,
+                    control: false,
+                },
+            )))
+            .init_resource::<ChatLog>()
+            .add_systems(Startup, spawn_chat)
+            .add_systems(Update, render_chat);
+        app.update();
+
+        let drawn = |app: &mut App| {
+            let mut spans: Vec<(usize, String, Color, Color)> = app
+                .world_mut()
+                .query::<(&DraftSpan, &TextSpan, &TextColor, &TextBackgroundColor)>()
+                .iter(app.world())
+                .map(|(slot, span, colour, background)| {
+                    (slot.0, span.0.clone(), colour.0, background.0)
+                })
+                .collect();
+            spans.sort_by_key(|span| span.0);
+            spans
+        };
+        let spans = drawn(&mut app);
+        let texts: Vec<&str> = spans.iter().map(|span| span.1.as_str()).collect();
+        assert_eq!(texts, ["hel", CARET, "lo", ""]);
+        assert_eq!(spans[1].2, CARET_COLOUR, "the caret has its own colour");
+        assert_eq!(
+            spans[2].3, SELECTION_BACKGROUND,
+            "the selection is highlighted"
+        );
+        assert_eq!(spans[0].3, Color::NONE, "and the rest of the line is not");
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert!(
+            drawn(&mut app).iter().all(|span| span.1.is_empty()),
+            "no caret is left behind once chat closes"
         );
     }
 
@@ -833,7 +1051,7 @@ mod tests {
         type_key(&mut app, Key::Escape);
         app.update();
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
         assert!(receiver.try_recv().is_err());
     }
 
@@ -860,7 +1078,7 @@ mod tests {
     fn reopen_chat(app: &mut App) {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
     }
 
     #[test]
@@ -876,13 +1094,13 @@ mod tests {
         type_key(&mut app, Key::Backspace);
         type_key(&mut app, Key::Character("!".into()));
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "hell!");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "hell!");
 
         for _ in 0..5 {
             type_key(&mut app, Key::Backspace);
         }
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
     }
 
     #[test]
@@ -895,7 +1113,10 @@ mod tests {
         reopen_chat(&mut app);
         type_key(&mut app, Key::ArrowUp);
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "/teleport 1 2 3  ");
+        assert_eq!(
+            app.world().resource::<ChatLine>().0.text(),
+            "/teleport 1 2 3  "
+        );
     }
 
     #[test]
@@ -918,7 +1139,7 @@ mod tests {
         reopen_chat(&mut app);
         type_key(&mut app, Key::ArrowUp);
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "remember me");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "remember me");
     }
 
     #[test]
@@ -933,7 +1154,7 @@ mod tests {
             .add_systems(Update, capture_chat);
         type_key(&mut app, Key::Character("t".into()));
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
 
         assert!(line_alpha(InputMode::Playing, true, Duration::ZERO) > 0.99);
         assert!(line_alpha(InputMode::Playing, true, Duration::from_millis(11_900)) > 0.0);
