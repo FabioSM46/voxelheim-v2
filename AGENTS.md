@@ -534,7 +534,15 @@ bootstrap path.
 ### Automated PR Review (DeepSeek)
 
 `deepseek-pr-review.yml` provides automated code review via the DeepSeek API
-(`deepseek-v4-flash`, thinking enabled, `reasoning_effort=high`):
+(`deepseek-flash`, thinking enabled, `reasoning_effort=high`):
+
+**The model is DeepSeek-V4.1-Flash, and every measurement below was taken on V4-Flash.** V4.1
+shipped on 2026-09-10 under the id `deepseek-flash`; the legacy `deepseek-v4-flash` id only routes
+there temporarily, so the workflow names the new id rather than wait for the alias to be withdrawn.
+The API surface this reviewer uses is unchanged (thinking mode, `reasoning_effort=high`,
+`reasoning_content`, the 384K output maximum). The diff cap below was derived from V4-Flash
+replays, and the rule stated with it applies: the ratio belongs to the model, so the cap stands
+until V4.1 replays confirm or move it.
 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
@@ -883,14 +891,15 @@ run 32175108406 reviewed that same diff on its first attempt in 8m58s and return
 characters / 35,966 completion tokens; the JSON verdict parsed successfully and measure-only
 posted nothing to GitHub. 262,144 held until the diff cap was raised; a larger diff reasons for
 longer before it has a verdict, so the configured value now *is*
-[V4's documented 384K maximum](https://api-docs.deepseek.com/quick_start/pricing) rather than a
+[documented 384K maximum](https://api-docs.deepseek.com/quick_start/pricing), unchanged in V4.1, rather than a
 step below it — and because there is nothing above it, the diff cap is the number that has to
 absorb every later surprise. Startup validation rejects zero, non-numeric and oversized values before
 an API call, and its executable ceiling was already 384,000 — this change spends headroom that
 existed rather than creating any. **There is none left above it**: a review that exhausts 384K
-needs a smaller diff, not a larger budget. At the V4 Flash rate of $0.28 per million output
-tokens, one attempt that consumes the full ceiling costs about $0.108; with the single retry the
-worst-case two-attempt output envelope is about $0.215, excluding input tokens.
+needs a smaller diff, not a larger budget. At the V4.1 Flash peak rate of $1.20 per million output
+tokens, one attempt that consumes the full ceiling costs about $0.461; with the single retry the
+worst-case two-attempt output envelope is about $0.922, excluding input tokens. The off-peak rate
+of $0.60 halves both. (V4-Flash was $0.28, which is where the earlier $0.108 / $0.215 came from.)
 
 **Reasoning effort is `high`, not `max`.** That trades some reasoning depth for lower latency and
 a lower risk that reasoning consumes the shared 384,000-token output budget before a verdict can
