@@ -6,12 +6,16 @@
 //! chat-carried command input.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::time::Duration;
 
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy::text::TextLayoutInfo;
 use bevy::time::Real;
+use bevy::ui::{ComputedNode, UiGlobalTransform, UiSystems};
+use bevy::window::PrimaryWindow;
 
 use crate::net::{
     ChatEntry, ChatInbox, ChatRequest, DrainNetwork, Outbound, PartyAction, PartyRequest, Sent,
@@ -19,8 +23,10 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
+use super::chat_selection::{DrawnLine, LogSelection, glyph_cells, point_at};
 use super::text_input::{
-    FieldInput, FieldSpan, TextEdit, TextField, paint_span, spawn_field_spans,
+    FieldInput, FieldLook, FieldPieces, FieldSpan, TextEdit, TextField, paint_span,
+    spawn_field_spans,
 };
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
@@ -62,10 +68,14 @@ struct LogLine {
     text: String,
     added: Duration,
     kind: LogKind,
+    /// How many lines the log had taken before this one: what a selection names it by, so a
+    /// new line pushing the ring along cannot move a selection onto its neighbour.
+    serial: u64,
 }
 
+/// The last [`LINE_COUNT`] lines, oldest first, and how many lines the log has ever taken.
 #[derive(Resource, Debug, Default)]
-pub(super) struct ChatLog(VecDeque<LogLine>);
+pub(super) struct ChatLog(VecDeque<LogLine>, u64);
 
 impl ChatLog {
     fn push(&mut self, text: String, now: Duration) {
@@ -80,7 +90,19 @@ impl ChatLog {
             text,
             added: now,
             kind,
+            serial: self.1,
         });
+        self.1 = self.1.wrapping_add(1);
+    }
+
+    /// Every line with its serial, oldest first.
+    fn lines(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.0.iter().map(|line| (line.serial, line.text.as_str()))
+    }
+
+    /// The serial of the oldest line still held, when any is.
+    fn oldest(&self) -> Option<u64> {
+        self.0.front().map(|line| line.serial)
     }
 
     fn push_highlighted(&mut self, text: String, now: Duration) {
@@ -88,8 +110,17 @@ impl ChatLog {
     }
 }
 
+/// One row of the log, by its place in the ring: row 0 draws the oldest line held.
 #[derive(Component)]
 struct ChatText(usize);
+
+/// Marks the spans a log row is drawn in, by the row they belong to.
+///
+/// A row is drawn in the draft's four spans rather than as one `Text`, and for the draft's reason:
+/// a highlighted stretch of a line is a span with a background, and splitting the line in
+/// [`log_pieces`] keeps each glyph where it was.
+#[derive(Component, Clone)]
+struct LogSpan(usize);
 
 #[derive(Component)]
 struct ChatInput;
@@ -104,11 +135,15 @@ impl Plugin for ChatUiPlugin {
         app.init_resource::<ChatLine>()
             .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
             .init_resource::<ChatInbox>()
             .init_resource::<PartyLogInbox>()
             .add_message::<KeyboardInput>()
             .add_message::<PlayerMessage>()
             .add_systems(Startup, spawn_chat)
+            // After `text_system`, which writes each row's glyphs in `PostLayout`: a press is hit
+            // against the layout the player was looking at, not the one before it.
+            .add_systems(PostUpdate, select_in_log.after(UiSystems::PostLayout))
             .add_systems(
                 Update,
                 (
@@ -141,16 +176,26 @@ fn spawn_chat(mut commands: Commands) {
         ))
         .with_children(|root| {
             for index in 0..LINE_COUNT {
+                let font = TextFont {
+                    font_size: FONT_SIZE,
+                    ..default()
+                };
                 root.spawn((
                     ChatText(index),
                     Text::new(String::new()),
-                    TextFont {
-                        font_size: FONT_SIZE,
-                        ..default()
-                    },
+                    font.clone(),
                     TextColor(Color::NONE),
                     TextShadow::default(),
-                ));
+                ))
+                .with_children(|row| {
+                    spawn_field_spans(
+                        row,
+                        &log_pieces("", None),
+                        &font,
+                        Color::NONE,
+                        LogSpan(index),
+                    );
+                });
             }
         });
 
@@ -191,7 +236,7 @@ fn spawn_chat(mut commands: Commands) {
 #[derive(Component, Clone)]
 struct DraftSpan;
 
-/// The draft's spans, apart from the log lines that share their colour component.
+/// The draft's spans, apart from the log rows' spans that share their components.
 type DraftSpans<'w, 's> = Query<
     'w,
     's,
@@ -201,8 +246,120 @@ type DraftSpans<'w, 's> = Query<
         &'static mut TextColor,
         &'static mut TextBackgroundColor,
     ),
-    (With<DraftSpan>, Without<ChatText>),
+    (With<DraftSpan>, Without<LogSpan>),
 >;
+
+/// The log rows' spans, apart from the draft's.
+type LogSpans<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LogSpan,
+        &'static FieldSpan,
+        &'static mut TextSpan,
+        &'static mut TextColor,
+        &'static mut TextBackgroundColor,
+    ),
+    Without<DraftSpan>,
+>;
+
+/// A log line cut into the four spans a row is drawn in: before the selection, the selection, an
+/// unused piece where the draft keeps its caret, and after.
+fn log_pieces(text: &str, selected: Option<Range<usize>>) -> FieldPieces {
+    let selected = selected.unwrap_or(text.len()..text.len());
+    let look = if selected.is_empty() {
+        FieldLook::Plain
+    } else {
+        FieldLook::Selected
+    };
+    [
+        (text[..selected.start].to_owned(), FieldLook::Plain),
+        (text[selected.clone()].to_owned(), look),
+        (String::new(), FieldLook::Plain),
+        (text[selected.end..].to_owned(), FieldLook::Plain),
+    ]
+}
+
+/// Reads a press, a drag and a release of the primary button over the log into [`LogSelection`].
+///
+/// **Only while chat is open.** In any other mode the pointer is captured or belongs to a panel,
+/// so the selection is dropped and nothing is read: closing chat clears it, and nothing in the log
+/// can be selected while it is closed. A press on a row with a line in it begins a selection there;
+/// a press anywhere else clears it. A drag that has begun follows the pointer to the nearest row
+/// even outside the log, and — the inventory's rule — losing the pointer ends the drag, because a
+/// release outside the window is not delivered on every platform.
+///
+/// **The keyboard is not read here**, and that is what keeps typing on the draft: the selection is
+/// something `Control+C` consults in [`capture_chat`], never a second place keys can go.
+fn select_in_log(
+    mode: Res<InputMode>,
+    buttons: Option<Res<ButtonInput<MouseButton>>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    log: Res<ChatLog>,
+    rows: Query<(
+        &ChatText,
+        &ComputedNode,
+        &UiGlobalTransform,
+        &TextLayoutInfo,
+    )>,
+    mut selection: ResMut<LogSelection>,
+) {
+    if *mode != InputMode::Chat {
+        if *selection != LogSelection::default() {
+            selection.clear();
+        }
+        return;
+    }
+    selection.forget_lines_before(log.oldest());
+
+    let Some(buttons) = buttons.filter(|buttons| buttons.pressed(MouseButton::Left)) else {
+        if selection.is_dragging() {
+            selection.release();
+        }
+        return;
+    };
+    let pressed = buttons.just_pressed(MouseButton::Left);
+    if !pressed && !selection.is_dragging() {
+        return;
+    }
+    let Some(cursor) = windows.iter().next().and_then(Window::cursor_position) else {
+        if pressed {
+            selection.clear();
+        } else {
+            selection.release();
+        }
+        return;
+    };
+
+    // Physical pixels throughout: glyphs are laid out at the window's scale, and a node's own
+    // inverse scale factor is what takes the logical cursor there.
+    let mut scale = 1.0;
+    let drawn: Vec<DrawnLine<'_>> = rows
+        .iter()
+        .filter_map(|(row, node, transform, layout)| {
+            let line = log.0.get(row.0)?;
+            scale = node.inverse_scale_factor;
+            let content = node.content_box();
+            Some(DrawnLine {
+                line: line.serial,
+                text: &line.text,
+                frame: Rect::from_corners(
+                    transform.translation + content.min,
+                    transform.translation + content.max,
+                ),
+                cells: glyph_cells(layout),
+            })
+        })
+        .collect();
+    let pointer = cursor / scale;
+
+    match point_at(&drawn, pointer, pressed) {
+        Some(point) if pressed => selection.begin(point),
+        Some(point) => selection.extend(point),
+        None if pressed => selection.clear(),
+        None => {}
+    }
+}
 
 fn ingest_server_lines(
     time: Res<Time<Real>>,
@@ -292,7 +449,7 @@ fn message_colour(kind: LogKind, alpha: f32) -> Color {
     Color::srgba(red, green, blue, alpha)
 }
 
-#[allow(clippy::too_many_arguments)] // The field's keys and clipboard are the eighth input.
+#[allow(clippy::too_many_arguments)] // The field's keys and clipboard, and the log's selection.
 fn capture_chat(
     time: Res<Time<Real>>,
     mut typed: MessageReader<KeyboardInput>,
@@ -302,6 +459,7 @@ fn capture_chat(
     mut history: ResMut<ChatHistory>,
     mut outbound: Option<ResMut<Outbound>>,
     mut log: ResMut<ChatLog>,
+    selection: Res<LogSelection>,
 ) {
     if *mode != InputMode::Chat || mode.is_changed() {
         // Always drain: the T that opened chat and keys typed elsewhere must never leak
@@ -315,6 +473,18 @@ fn capture_chat(
             if let Some(last) = &history.0 {
                 draft.0.set_text(last);
             }
+            continue;
+        }
+
+        // `Control+C` copies the log's selection when there is one, and is the draft's own
+        // shortcut otherwise. Only `C`: the log is read-only, so a cut or a paste always means
+        // the draft, and no other key is ever taken from it.
+        if key.state == ButtonState::Pressed
+            && field.modifiers().control
+            && matches!(&key.logical_key, Key::Character(letter) if letter.eq_ignore_ascii_case("c"))
+            && let Some(copied) = selection.text(log.lines())
+        {
+            field.copy(&copied);
             continue;
         }
 
@@ -465,26 +635,38 @@ fn bounded_display(value: &str, limit: usize) -> String {
     shown
 }
 
+#[allow(clippy::too_many_arguments)] // The log's selection and its spans are the eighth input.
 fn render_chat(
     mode: Res<InputMode>,
     draft: Res<ChatLine>,
     log: Res<ChatLog>,
+    selection: Res<LogSelection>,
     time: Res<Time<Real>>,
-    mut lines: Query<(&ChatText, &mut Text, &mut TextColor)>,
-    mut input: Query<&mut Text, (With<ChatInput>, Without<ChatText>)>,
+    mut rows: LogSpans,
+    mut input: Query<&mut Text, With<ChatInput>>,
     mut spans: DraftSpans,
 ) {
     let visible = matches!(*mode, InputMode::Playing | InputMode::Chat);
     let now = time.elapsed();
-    for (slot, mut text, mut colour) in &mut lines {
-        let Some(line) = log.0.get(slot.0) else {
-            text.0.clear();
-            colour.0 = Color::NONE;
-            continue;
-        };
-        text.0.clone_from(&line.text);
-        let alpha = line_alpha(*mode, visible, now.saturating_sub(line.added));
-        colour.0 = message_colour(line.kind, alpha);
+    let drawn: Vec<(FieldPieces, Color)> = (0..LINE_COUNT)
+        .map(|row| match log.0.get(row) {
+            Some(line) => {
+                let alpha = line_alpha(*mode, visible, now.saturating_sub(line.added));
+                (
+                    log_pieces(&line.text, selection.range_on(line.serial, line.text.len())),
+                    message_colour(line.kind, alpha),
+                )
+            }
+            None => (log_pieces("", None), Color::NONE),
+        })
+        .collect();
+    for (row, slot, span, colour, background) in &mut rows {
+        if let Some((piece, line_colour)) = drawn
+            .get(row.0)
+            .and_then(|(pieces, colour)| Some((pieces.get(slot.0)?, *colour)))
+        {
+            paint_span(piece, line_colour, span, colour, background);
+        }
     }
 
     let Ok(mut input) = input.single_mut() else {
@@ -523,8 +705,262 @@ fn line_alpha(mode: InputMode, visible: bool, age: Duration) -> f32 {
 mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, ChatMessage, PartyInvite, SessionParams};
+    use crate::ui::chat_selection::{LogPoint, monospaced_layout};
     use crate::ui::clipboard::{MemoryClipboard, TextClipboard};
     use crate::ui::text_input::{CARET, CARET_COLOUR, Modifiers, SELECTION_BACKGROUND};
+
+    const ADVANCE: f32 = 10.0;
+    const ROW_HEIGHT: f32 = 20.0;
+
+    /// An app running only the log's pointer system, over two rows laid out the way Bevy would:
+    /// each row's content box starts at x 16, row 0 at y 50 and row 1 at y 70.
+    fn selection_app(lines: &[&str]) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(InputMode::Chat)
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
+            .add_systems(Update, select_in_log);
+        app.world_mut().spawn((PrimaryWindow, Window::default()));
+        for (row, line) in lines.iter().enumerate() {
+            app.world_mut()
+                .resource_mut::<ChatLog>()
+                .push((*line).to_owned(), Duration::ZERO);
+            app.world_mut().spawn((
+                ChatText(row),
+                ComputedNode {
+                    size: Vec2::new(300.0, ROW_HEIGHT),
+                    ..ComputedNode::DEFAULT
+                },
+                UiGlobalTransform::from_translation(Vec2::new(
+                    166.0,
+                    60.0 + ROW_HEIGHT * row as f32,
+                )),
+                monospaced_layout(line.chars().count(), ADVANCE, ROW_HEIGHT),
+            ));
+        }
+        app
+    }
+
+    /// Puts the pointer at `x` pixels into the text of `row`, halfway down it.
+    fn pointer_over(app: &mut App, row: usize, x: f32) {
+        pointer_at(
+            app,
+            Some(Vec2::new(16.0 + x, 60.0 + ROW_HEIGHT * row as f32)),
+        );
+    }
+
+    fn pointer_at(app: &mut App, position: Option<Vec2>) {
+        app.world_mut()
+            .query_filtered::<&mut Window, With<PrimaryWindow>>()
+            .single_mut(app.world_mut())
+            .expect("one primary window")
+            .set_cursor_position(position);
+    }
+
+    /// Holds or releases the primary button for the next frame, as `InputPlugin` would report it.
+    fn primary(app: &mut App, held: bool) {
+        let mut buttons = app.world_mut().resource_mut::<ButtonInput<MouseButton>>();
+        buttons.clear();
+        if held {
+            buttons.press(MouseButton::Left);
+        } else {
+            buttons.release(MouseButton::Left);
+        }
+    }
+
+    fn drag(app: &mut App, from: (usize, f32), to: (usize, f32)) {
+        pointer_over(app, from.0, from.1);
+        primary(app, true);
+        app.update();
+        pointer_over(app, to.0, to.1);
+        primary(app, true);
+        app.update();
+        primary(app, false);
+        app.update();
+    }
+
+    fn copied(app: &App) -> Option<String> {
+        let world = app.world();
+        world
+            .resource::<LogSelection>()
+            .text(world.resource::<ChatLog>().lines())
+    }
+
+    #[test]
+    fn a_drag_over_the_log_selects_from_the_glyph_pressed_to_the_glyph_released_on() {
+        let mut app = selection_app(&["Eivor: hi", "Astrid: aye"]);
+        // 72 px is the left half of the eighth character, so the press is before "hi"; 58 px is
+        // the right half of the sixth character of the next row, so the release is after "Astrid".
+        drag(&mut app, (0, 72.0), (1, 58.0));
+        assert_eq!(copied(&app).as_deref(), Some("hi\nAstrid"));
+        assert!(!app.world().resource::<LogSelection>().is_dragging());
+
+        // A press on the log clears the old selection and starts anew; dragged up and left to
+        // the window's corner, out of the log altogether, it still follows the nearest row, to
+        // that row's start. (Past the window's edge Bevy reports no pointer at all — below.)
+        pointer_over(&mut app, 1, 58.0);
+        primary(&mut app, true);
+        app.update();
+        assert_eq!(copied(&app), None, "a fresh press selects nothing yet");
+        pointer_at(&mut app, Some(Vec2::new(2.0, 2.0)));
+        primary(&mut app, true);
+        app.update();
+        assert_eq!(copied(&app).as_deref(), Some("Eivor: hi\nAstrid"));
+
+        // Losing the pointer mid-drag ends the drag and keeps what was selected.
+        pointer_at(&mut app, None);
+        app.update();
+        assert!(!app.world().resource::<LogSelection>().is_dragging());
+        assert_eq!(copied(&app).as_deref(), Some("Eivor: hi\nAstrid"));
+    }
+
+    #[test]
+    fn a_click_elsewhere_a_line_leaving_or_closing_chat_clears_the_selection() {
+        let mut app = selection_app(&["Eivor: hi", "Astrid: aye"]);
+        drag(&mut app, (0, 0.0), (1, 58.0));
+        assert!(copied(&app).is_some());
+        pointer_at(&mut app, Some(Vec2::new(800.0, 400.0)));
+        primary(&mut app, true);
+        app.update();
+        assert_eq!(
+            *app.world().resource::<LogSelection>(),
+            LogSelection::default()
+        );
+
+        // A new line that pushes nothing out leaves it alone; the one that pushes its first
+        // line out of the ring drops it.
+        primary(&mut app, false);
+        drag(&mut app, (0, 0.0), (1, 58.0));
+        for number in 2..LINE_COUNT {
+            app.world_mut()
+                .resource_mut::<ChatLog>()
+                .push(number.to_string(), Duration::ZERO);
+        }
+        app.update();
+        assert_eq!(copied(&app).as_deref(), Some("Eivor: hi\nAstrid"));
+        app.world_mut()
+            .resource_mut::<ChatLog>()
+            .push("the ninth".to_owned(), Duration::ZERO);
+        app.update();
+        assert_eq!(copied(&app), None, "its first line left the log");
+
+        drag(&mut app, (0, 0.0), (1, 58.0));
+        assert!(copied(&app).is_some());
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(copied(&app), None, "closing chat clears it");
+
+        drag(&mut app, (0, 0.0), (1, 58.0));
+        assert_eq!(
+            *app.world().resource::<LogSelection>(),
+            LogSelection::default(),
+            "and nothing is selectable while chat is closed"
+        );
+    }
+
+    #[test]
+    fn control_c_copies_the_log_selection_and_otherwise_the_drafts() {
+        let mut app = capture_app(None);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        app.insert_resource(keys)
+            .insert_resource(TextClipboard::with(MemoryClipboard::default()));
+        {
+            let mut log = app.world_mut().resource_mut::<ChatLog>();
+            log.push("Eivor: well met".to_owned(), Duration::ZERO);
+            log.push("Astrid: to the hall".to_owned(), Duration::ZERO);
+        }
+        {
+            let mut selection = app.world_mut().resource_mut::<LogSelection>();
+            selection.begin(LogPoint { line: 0, byte: 7 });
+            selection.extend(LogPoint { line: 1, byte: 6 });
+            selection.release();
+        }
+        app.world_mut()
+            .resource_mut::<ChatLine>()
+            .0
+            .set_text("draft");
+
+        type_key(&mut app, Key::Character("c".into()));
+        app.update();
+        let pasted = |app: &mut App| app.world_mut().resource_mut::<TextClipboard>().paste();
+        assert_eq!(pasted(&mut app).as_deref(), Some("well met\nAstrid"));
+        assert_eq!(
+            app.world().resource::<ChatLine>().0.text(),
+            "draft",
+            "the draft is left as it was"
+        );
+
+        app.world_mut().resource_mut::<LogSelection>().clear();
+        type_key(&mut app, Key::Character("a".into()));
+        type_key(&mut app, Key::Character("C".into()));
+        app.update();
+        assert_eq!(
+            pasted(&mut app).as_deref(),
+            Some("draft"),
+            "with nothing selected in the log, Control+C is the draft's again"
+        );
+    }
+
+    #[test]
+    fn a_selected_stretch_of_a_log_line_is_drawn_on_the_selection_background() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(InputMode::Chat)
+            .init_resource::<ChatLine>()
+            .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
+            .add_systems(Startup, spawn_chat)
+            .add_systems(Update, render_chat);
+        app.world_mut()
+            .resource_mut::<ChatLog>()
+            .push("Eivor: hi".to_owned(), Duration::ZERO);
+        {
+            let mut selection = app.world_mut().resource_mut::<LogSelection>();
+            selection.begin(LogPoint { line: 0, byte: 0 });
+            selection.extend(LogPoint { line: 0, byte: 5 });
+        }
+        app.update();
+
+        let row = |app: &mut App, wanted: usize| {
+            let mut spans: Vec<(usize, String, Color, Color)> = app
+                .world_mut()
+                .query::<(
+                    &LogSpan,
+                    &FieldSpan,
+                    &TextSpan,
+                    &TextColor,
+                    &TextBackgroundColor,
+                )>()
+                .iter(app.world())
+                .filter(|span| span.0.0 == wanted)
+                .map(|(_, slot, span, colour, background)| {
+                    (slot.0, span.0.clone(), colour.0, background.0)
+                })
+                .collect();
+            spans.sort_by_key(|span| span.0);
+            spans
+        };
+        let drawn = row(&mut app, 0);
+        let texts: Vec<&str> = drawn.iter().map(|span| span.1.as_str()).collect();
+        assert_eq!(texts, ["", "Eivor", "", ": hi"]);
+        assert_eq!(drawn[1].3, SELECTION_BACKGROUND);
+        assert_eq!(drawn[3].3, Color::NONE);
+        assert_eq!(
+            drawn[1].2,
+            message_colour(LogKind::Player, 1.0),
+            "selected text keeps its line's colour"
+        );
+        assert!(row(&mut app, 1).iter().all(|span| span.1.is_empty()));
+
+        app.world_mut().resource_mut::<LogSelection>().clear();
+        app.update();
+        let drawn = row(&mut app, 0);
+        assert_eq!(drawn[0].1, "Eivor: hi");
+        assert!(drawn.iter().all(|span| span.3 == Color::NONE));
+    }
 
     fn session() -> Session {
         Session(SessionParams {
@@ -551,6 +987,7 @@ mod tests {
             .init_resource::<ChatLine>()
             .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
             .add_systems(Update, capture_chat);
         if let Some(outbound) = outbound {
             app.insert_resource(outbound);
@@ -667,6 +1104,7 @@ mod tests {
                 },
             )))
             .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
             .add_systems(Startup, spawn_chat)
             .add_systems(Update, render_chat);
         app.update();
@@ -1094,6 +1532,7 @@ mod tests {
             .init_resource::<ChatLine>()
             .init_resource::<ChatHistory>()
             .init_resource::<ChatLog>()
+            .init_resource::<LogSelection>()
             .add_systems(Update, capture_chat);
         type_key(&mut app, Key::Character("t".into()));
         app.update();

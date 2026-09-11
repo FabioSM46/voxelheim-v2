@@ -93,8 +93,23 @@ impl FieldInput<'_> {
         key: &KeyboardInput,
         limit: usize,
     ) -> Option<TextEdit> {
-        let modifiers = Modifiers::held(self.keys.as_deref());
+        let modifiers = self.modifiers();
         field.apply_key(key, modifiers, self.clipboard.as_deref_mut(), limit)
+    }
+
+    /// The modifiers held now.
+    pub(super) fn modifiers(&self) -> Modifiers {
+        Modifiers::held(self.keys.as_deref())
+    }
+
+    /// Copies `text` to the shared clipboard, answering whether it got there.
+    ///
+    /// For text that is not in a field -- the chat log's selection -- so that a copy of it goes
+    /// through the same [`TextClipboard`] and the same once-only failure report as a field's.
+    pub(super) fn copy(&mut self, text: &str) -> bool {
+        self.clipboard
+            .as_deref_mut()
+            .is_some_and(|clipboard| clipboard.copy(text))
     }
 }
 
