@@ -327,9 +327,13 @@ const TEST_BUTTON: f32 = 3.0 * STEP_BUTTON;
 const BUS_READING_WIDTH: f32 = READING_WIDTH - TEST_BUTTON - CONTROL_GAP;
 
 const _: () = {
+    // The four controls filling the column is the definition of `BUS_READING_WIDTH`, so an
+    // assert of that sum could never fail. What can fail is the narrowing leaving the reading
+    // no room at all; whether the row fits is measured on the spawned nodes by
+    // `every_rows_controls_fit_the_column_at_their_own_widths`. Found in review on #1139.
     assert!(
-        2.0 * STEP_BUTTON + BUS_READING_WIDTH + TEST_BUTTON + 3.0 * CONTROL_GAP == STEPPER_WIDTH,
-        "a bus knob's four controls must fill the stepper column exactly"
+        BUS_READING_WIDTH > 0.0,
+        "a bus knob's reading has no room left once its test is drawn"
     );
     assert!(ROW_COLUMN_GAP > 0.0, "the two row columns must not overlap");
     assert!(
@@ -357,6 +361,15 @@ const WIDE_BUTTON: f32 = 40.0;
 /// Whatever the stepper column has left once the button is drawn, so the row is the same width
 /// as every other row on the tab.
 const METER_WIDTH: f32 = STEPPER_WIDTH - STEP_BUTTON * 4.0 - CONTROL_GAP;
+
+// `METER_WIDTH` is defined as what the column has left after the button, so an assert that
+// button, gap and meter fill the column could never fail; the row's sum is measured on the
+// spawned nodes by `every_rows_controls_fit_the_column_at_their_own_widths`. What the
+// constant can get wrong is leaving the meter no room.
+const _: () = assert!(
+    METER_WIDTH > 0.0,
+    "the microphone test's meter has no room left"
+);
 
 /// The height of the meter's bar.
 const METER_HEIGHT: f32 = 12.0;
@@ -3243,14 +3256,12 @@ mod tests {
         assert!(!app.world().resource::<SettingsScreen>().is_open());
     }
 
-    /// **A bus knob's `-` and `+` are the stepper's own size**, and the four controls fill the
-    /// column exactly rather than asking flexbox to find the difference somewhere.
+    /// **A bus knob's `-` and `+` are the stepper's own size**, and the narrowed reading still
+    /// holds every value a bus knob can show. Whether the row fits its column is measured on the
+    /// spawned nodes by `every_rows_controls_fit_the_column_at_their_own_widths`, not restated
+    /// here from the constants that define it.
     #[test]
     fn every_stepper_button_is_full_size_and_a_bus_row_fits_its_column() {
-        assert_eq!(
-            2.0 * STEP_BUTTON + BUS_READING_WIDTH + TEST_BUTTON + 3.0 * CONTROL_GAP,
-            STEPPER_WIDTH
-        );
         // The widest a bus reading gets, at both ends of every bus knob.
         for knob in KNOBS.into_iter().filter(|knob| bus_of(*knob).is_some()) {
             for steps in [-10_000, 10_000] {
@@ -3299,14 +3310,12 @@ mod tests {
     /// a pixel width and cannot shrink, and those widths plus the gaps between them fit
     /// [`STEPPER_WIDTH`]. An absolutely positioned child — a select's dropdown, the Voices panel
     /// — is out of the flow and takes no width from the row. Found in review on #1139.
+    ///
+    /// `flex_shrink: 0` is required of every control in a row because every control in a row is
+    /// fixed width: a full-width control lives at the foot of its column (see `spawn_button`),
+    /// never inside a row's flow, so a row that wants one is a new layout and not a regression.
     #[test]
     fn every_rows_controls_fit_the_column_at_their_own_widths() {
-        assert_eq!(
-            STEP_BUTTON * 4.0 + CONTROL_GAP + METER_WIDTH,
-            STEPPER_WIDTH,
-            "the microphone test's button and meter do not fill the column"
-        );
-
         let mut app = screen_app();
         let world = app.world_mut();
         let rows: Vec<(Entity, Vec<Entity>)> = world
