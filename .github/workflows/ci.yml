@@ -268,11 +268,40 @@ jobs:
         # than the one being fixed. A repeated URI is the only cost, and the
         # mirror method tolerates one.
         #
-        # Matched on the host alone, so http and https both move and no other
-        # mirror in the file (security.ubuntu.com, ports.ubuntu.com) is touched.
+        # Matched on the host, so no other mirror in the file (security.ubuntu.com,
+        # ports.ubuntu.com) is touched.
+        #
+        # **Repointed to https, and given a second host** (#1107). The first
+        # version of this step moved the host and kept the image's http scheme,
+        # leaving http://archive.ubuntu.com at priority 1. On 2026-09-11 that port
+        # stopped answering from the runners and three client jobs spent their five
+        # minutes in 33-second index timeouts on it. Moving to https was not enough
+        # on its own: the next run's indexes took four minutes of retries over
+        # https, and every package download from archive.ubuntu.com then timed out.
+        # After this repoint every Ubuntu entry is that one host, so there was
+        # nothing to fail over to.
+        #
+        # mirrors.edge.kernel.org carries the full Ubuntu archive with Ubuntu's
+        # signed InRelease files, so APT still verifies every package against
+        # Ubuntu's key and the mirror adds a route, not trust. It goes in once,
+        # at priority 2: after the repointed archive entry at priority 1, and
+        # level with the image's own archive entry, which APT orders at random.
+        # APT's mirror method moves to the next mirror when a file fails.
+        #
+        # Priority 4, after every image entry, was too late. A failing file costs
+        # 15 seconds per attempt (Acquire::https::Timeout), and three attempts on
+        # degraded hosts per file, across four index suites and four packages,
+        # spend the step's five minutes before the mirror is reached. At
+        # priority 2 a file fails over after one or two attempts.
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            if ! grep -q '^https://mirrors\.edge\.kernel\.org/ubuntu/' /etc/apt/apt-mirrors.txt; then
+              if [ -n "$(tail -c1 /etc/apt/apt-mirrors.txt)" ]; then
+                echo | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+              fi
+              printf 'https://mirrors.edge.kernel.org/ubuntu/\tpriority:2\n' | sudo tee -a /etc/apt/apt-mirrors.txt > /dev/null
+            fi
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
           fi
@@ -408,6 +437,7 @@ jobs:
           bash scripts/test/split-sizing-docs.test.sh
           bash scripts/test/client-ci-budget.test.sh
           bash scripts/test/client-cache-parity.test.sh
+          bash scripts/test/apt-mirror-repoint.test.sh
           bash scripts/test/client-data-home-isolation.test.sh
           bash scripts/test/auth-dir-docs.test.sh
           bash scripts/test/helpers-selector-docs.test.sh
