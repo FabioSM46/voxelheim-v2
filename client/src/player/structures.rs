@@ -131,14 +131,17 @@ const LEATHER_BENCH_HEADROOM: i32 = 1;
 const ARMOUR_BENCH_HEADROOM: i32 = 2;
 const ENCHANTING_TABLE_HEADROOM: i32 = 2;
 
-/// Every kind this module draws, so a fold over the whole contract has one place to read.
+/// Every kind this module knows, so a fold over the whole contract has one place to read.
 ///
 /// The one link here the compiler cannot check, and deliberately the only one:
 /// [`footprint_offsets`] and [`headroom`] are exhaustive matches, so a new member of
 /// [`StructureKind`] cannot compile without visiting them — and `StructureKind::from_wire`
-/// admits a member only in the commit that teaches this module to draw it, so whoever adds
-/// one is already standing here. A member missing from this list costs preview cells and
-/// nothing worse; [`MAX_FOOTPRINT_CELLS`] is where that bound is kept.
+/// admits a member only in the commit that teaches this module about it, so whoever adds one
+/// is already standing here. Usually that commit also draws it; the three benches are the
+/// exception, admitted with their footprints mirrored in the commit that makes the server
+/// place them and drawn nothing until their models land (#1129), on the
+/// `MobKind::VargrGuardian` precedent. A member missing from this list costs preview cells
+/// and nothing worse; [`MAX_FOOTPRINT_CELLS`] is where that bound is kept.
 const ALL_STRUCTURE_KINDS: [StructureKind; 7] = [
     StructureKind::Tent,
     StructureKind::Forge,
