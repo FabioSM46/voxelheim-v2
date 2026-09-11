@@ -59,11 +59,23 @@ def run_block(name):
     return textwrap.dedent(body)
 
 
-# The three client jobs must repair the mirrorlist identically: a copy left behind is
-# the same outage, deferred to whichever workflow still carries it.
-blocks = {name: run_block(name) for name in WORKFLOWS}
+# Every workflow that carries the step must repair the mirrorlist identically: a copy
+# left behind is the same outage, deferred to whichever workflow still carries it. The
+# carriers are found in the tree rather than listed, so a new copy of the step is
+# checked the moment it exists instead of staying green outside a hardcoded set.
+step_line = re.compile(rf"^      - name: {re.escape(STEP)}\s*$", re.MULTILINE)
+carriers = sorted(
+    path.name
+    for pattern in ("*.yml", "*.yaml")
+    for path in (root / ".github/workflows").glob(pattern)
+    if step_line.search(path.read_text())
+)
+assert set(WORKFLOWS) <= set(carriers), (
+    f"every client job must carry the mirror step; carriers={carriers!r}"
+)
+blocks = {name: run_block(name) for name in carriers}
 assert len(set(blocks.values())) == 1, (
-    f"every client job must repair the mirrors identically; got {blocks!r}"
+    f"every workflow carrying the step must repair the mirrors identically; got {blocks!r}"
 )
 block = blocks["ci.yml"]
 assert "sudo sed -i" in block and "sudo tee -a" in block, (
@@ -103,6 +115,22 @@ assert repair("again", repaired) == repaired, (
     "the repair must be idempotent: a second run may not append the mirror again"
 )
 
+# tee -a adds no separator, so a file whose last line has no newline would get the
+# mirror glued onto that line: unparseable, and invisible to the anchored guard, so
+# every run would append again. The block terminates the line first.
+UNTERMINATED = (
+    "https://archive.ubuntu.com/ubuntu/\tpriority:1\n"
+    "https://security.ubuntu.com/ubuntu/\tpriority:3"
+)
+terminated = repair("unterminated", UNTERMINATED)
+assert terminated == UNTERMINATED + "\n" + KERNEL, (
+    f"the mirror must go on its own line after an unterminated last line; got {terminated!r}"
+)
+assert repair("unterminated-again", terminated) == terminated, (
+    "the repair of an unterminated file must be idempotent too"
+)
+assert repair("empty", "") == KERNEL, "an empty mirrorlist must gain only the mirror line"
+
 # An https Azure entry moves too, so the scheme never depends on how the image wrote it.
 assert repair("https-azure", "https://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n") == (
     "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" + KERNEL
@@ -140,7 +168,7 @@ assert automation_job.count(invocation) == 1, (
 )
 
 print(
-    f"apt mirror repoint — {len(WORKFLOWS)} client jobs agree, image mirrorlist starts "
+    f"apt mirror repoint — {len(carriers)} workflows agree, image mirrorlist starts "
     "on https and falls back to a second host"
 )
 PY
