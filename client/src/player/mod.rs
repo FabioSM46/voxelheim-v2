@@ -76,6 +76,7 @@ mod prompt;
 mod saddle;
 mod shapes;
 mod sky;
+mod station;
 mod structures;
 mod target;
 mod tool_audio;
@@ -108,7 +109,11 @@ pub(crate) use camera::{AimCamera, DeathFall};
 pub use camera::{Orbit, ViewMode, WorldCamera};
 // The character screen's preview is the same rig with no server entity behind it, so it
 // is dressed out of the same wardrobe rather than from a second copy of the tables.
-pub use crafting::{CraftClick, Ingredient, RECIPES, Recipe, RecipeCategory};
+pub use crafting::{CraftClick, Ingredient, Recipe, RecipeCategory};
+// Every production reader goes through `station::recipes_made_at`, which is what keeps the
+// pack and the station panels a partition of the table; tests still sweep the table whole.
+#[cfg(test)]
+pub(crate) use crafting::RECIPES;
 pub use interpolate::{Interpolated, SnapshotBuffer};
 #[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;
@@ -124,6 +129,7 @@ pub(crate) use livery::{Liveries, field_rect};
 pub use loot::{LootTakeClick, LootWindow};
 pub use mounts::{LearnedMounts, mount_label, preference_from_mount};
 pub(crate) use sky::{Daylight, SkyClock, sun_phase};
+pub use station::{StationHint, StationWindow, recipes_made_at, station_title};
 // The sky the low-health vignette has to be visible against. Test-only and deliberately
 // so: `ui/health.rs` reads the colour to assert that its edge is not one the night has
 // already reached (#553), and nothing at runtime may read a rule back out of it.
@@ -298,6 +304,14 @@ pub enum InputMode {
     Inventory,
     /// Pointer visible and confined over one authoritative corpse container.
     Loot,
+    /// Pointer visible and confined over one crafting station's recipes.
+    ///
+    /// **Movement is closed, unlike [`Self::Inventory`]**, because the panel belongs to a
+    /// place: a player who walks away from the bench has left the thing the panel lists. It
+    /// opens from the interact key in play and closes on that key, on `Escape` and on death.
+    /// Nothing about it is authority — the server measures its own distance to its own station
+    /// on every craft.
+    Station,
     /// Pointer visible and confined over one authoritative stall.
     ///
     /// [`Self::Loot`]'s rules with a different window behind them, and deliberately not a
@@ -528,6 +542,7 @@ impl Plugin for PlayerPlugin {
             // against its system set.
             .add_plugins(crafting::CraftingPlugin)
             .add_plugins(loot::LootPlugin)
+            .add_plugins(station::StationPlugin)
             .add_plugins(mounts::MountsPlugin)
             .add_plugins(trade::PlayerTradePlugin)
             .add_plugins(instance_entry::InstanceEntryPlugin)
@@ -3289,11 +3304,14 @@ pub(crate) fn reset_world(world: &mut World) {
     reset::<MoveIntent>(world);
     reset::<LootWindow>(world);
     reset::<VendorWindow>(world);
+    reset::<StationWindow>(world);
+    reset::<StationHint>(world);
     reset::<PlayerTradeWindow>(world);
     reset::<ConfirmationPrompt>(world);
     reset::<EntryOffer>(world);
     reset::<PickedStack>(world);
     reset::<structures::StructureTarget>(world);
+    reset::<structures::StationTarget>(world);
     reset::<structures::FootprintPreview>(world);
     despawn::<Body>(world);
     despawn::<NamePlate>(world);
@@ -3320,6 +3338,7 @@ pub(crate) fn reset_world(world: &mut World) {
     clear_messages::<PlayerTradeClick>(world);
     clear_messages::<PlayerTradeEnded>(world);
     clear_messages::<LootTakeClick>(world);
+    clear_messages::<station::OpenStation>(world);
     clear_messages::<VendorTradeClick>(world);
     clear_messages::<InventoryClick>(world);
     clear_messages::<CraftClick>(world);
