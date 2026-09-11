@@ -3290,6 +3290,67 @@ mod tests {
         assert_eq!(tests, 5, "one tone test per bus, the master's included");
     }
 
+    /// **Every row's controls fit its column at their own widths**, not only the bus rows.
+    ///
+    /// `spawn_button` stopped letting a fixed-width control shrink in #1126, so a row that asks
+    /// for more than the column holds now pokes out of it rather than squeezing a button — and
+    /// the stepper test above only looks at `-`, `+` and `TEST`. This walks every row on every
+    /// tab, the microphone test's button and meter included: each control in the row's flow has
+    /// a pixel width and cannot shrink, and those widths plus the gaps between them fit
+    /// [`STEPPER_WIDTH`]. An absolutely positioned child — a select's dropdown, the Voices panel
+    /// — is out of the flow and takes no width from the row. Found in review on #1139.
+    #[test]
+    fn every_rows_controls_fit_the_column_at_their_own_widths() {
+        assert_eq!(
+            STEP_BUTTON * 4.0 + CONTROL_GAP + METER_WIDTH,
+            STEPPER_WIDTH,
+            "the microphone test's button and meter do not fill the column"
+        );
+
+        let mut app = screen_app();
+        let world = app.world_mut();
+        let rows: Vec<(Entity, Vec<Entity>)> = world
+            .query_filtered::<(Entity, &Children), With<RowControls>>()
+            .iter(world)
+            .map(|(row, children)| (row, children.iter().collect()))
+            .collect();
+        let expected: usize = Tab::ALL.into_iter().map(|tab| rows_of(tab).len()).sum();
+        assert_eq!(
+            rows.len(),
+            expected,
+            "a row drew no controls, or controls were drawn outside a row"
+        );
+
+        for (row, children) in rows {
+            let mut used = 0.0;
+            let mut in_flow = 0;
+            for child in children {
+                let node = world.get::<Node>(child).expect("a row's control is a node");
+                if node.position_type == PositionType::Absolute {
+                    continue;
+                }
+                let Val::Px(width) = node.width else {
+                    panic!(
+                        "{child:?} in row {row:?} has no pixel width: {:?}",
+                        node.width
+                    );
+                };
+                assert_eq!(
+                    node.flex_shrink, 0.0,
+                    "{child:?} in row {row:?} can be squeezed"
+                );
+                used += width;
+                in_flow += 1;
+            }
+            assert!(in_flow > 0, "row {row:?} draws no control");
+            let used = used + CONTROL_GAP * (in_flow - 1) as f32;
+            assert!(
+                used <= STEPPER_WIDTH,
+                "row {row:?} needs {used} px in a {STEPPER_WIDTH} px column"
+            );
+        }
+    }
+
     /// The consume control has one row on the Controls tab, and the screen rebinds it and
     /// resets it exactly as it does any other.
     ///
