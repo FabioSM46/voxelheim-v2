@@ -232,7 +232,7 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
-    /// V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+    /// V40. Current energy, in the same units as `max_energy`, rounded down to a whole
     /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
     /// the blow through the shield at full damage, and nothing else changes. Attacks and
     /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
@@ -249,7 +249,7 @@ impl<'a> PlayerVitals<'a> {
                 .unwrap()
         }
     }
-    /// V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+    /// V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
     #[inline]
     pub fn max_energy(&self) -> u16 {
         // Safety:

@@ -1396,7 +1396,7 @@ mod tests {
         RefusalReason::InstanceUnavailable,
         RefusalReason::SessionMismatch,
         RefusalReason::EntryOfferUnknown,
-        // V39's energy reason.
+        // V40's energy reason.
         RefusalReason::NotEnoughEnergy,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,

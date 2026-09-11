@@ -575,17 +575,28 @@ pub enum StructureKind {
     Forge,
     Campfire,
     Runestone,
+    LeatherBench,
+    ArmourBench,
+    EnchantingTable,
 }
 
 impl StructureKind {
-    /// The same rule [`MobKind::from_wire`] carries: a member is accepted here in the
-    /// commit that teaches [`crate::player::structures`] to draw it, never before.
+    /// The same rule [`MobKind::from_wire`] carries, including its exception.
+    ///
+    /// The first four were accepted in the commit that taught [`crate::player::structures`]
+    /// to draw them. V39's three benches are accepted before they have models, on the
+    /// precedent `MobKind::VargrGuardian` set: the server really places them from V39 on,
+    /// and refusing a member it really sends would end the session the first time somebody
+    /// put a bench down in view. Their footprints are mirrored and their models are #1129.
     fn from_wire(value: fb::StructureKind) -> Option<Self> {
         match value {
             fb::StructureKind::Tent => Some(Self::Tent),
             fb::StructureKind::Forge => Some(Self::Forge),
             fb::StructureKind::Campfire => Some(Self::Campfire),
             fb::StructureKind::Runestone => Some(Self::Runestone),
+            fb::StructureKind::LeatherBench => Some(Self::LeatherBench),
+            fb::StructureKind::ArmourBench => Some(Self::ArmourBench),
+            fb::StructureKind::EnchantingTable => Some(Self::EnchantingTable),
             _ => None,
         }
     }
@@ -936,6 +947,9 @@ pub enum RecipeId {
     Arrows,
     WoodenSceptre,
     Runestone,
+    LeatherBench,
+    ArmourBench,
+    EnchantingTable,
 }
 
 impl RecipeId {
@@ -970,6 +984,9 @@ impl RecipeId {
             Self::Arrows => fb::RecipeID::Arrows,
             Self::WoodenSceptre => fb::RecipeID::WoodenSceptre,
             Self::Runestone => fb::RecipeID::Runestone,
+            Self::LeatherBench => fb::RecipeID::LeatherBench,
+            Self::ArmourBench => fb::RecipeID::ArmourBench,
+            Self::EnchantingTable => fb::RecipeID::EnchantingTable,
         }
     }
 }
@@ -1447,7 +1464,7 @@ pub enum RefusedAction {
     PlayerTrade,
     /// Portal crossing; the answering surface is supplied by #974.
     CrossPortal,
-    /// V39. An attack refused because its energy was not there to spend. Nothing was
+    /// V40. An attack refused because its energy was not there to spend. Nothing was
     /// queued and nothing was spent.
     Energy,
 }
@@ -1558,7 +1575,7 @@ pub enum RefusalReason {
     InstanceUnavailable,
     SessionMismatch,
     EntryOfferUnknown,
-    /// V39. The player's energy is below what the action costs.
+    /// V40. The player's energy is below what the action costs.
     NotEnoughEnergy,
 
     // The request said something no correct client sends.
@@ -3158,7 +3175,7 @@ impl BlowLanded {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(
     clippy::large_enum_variant,
-    reason = "Snapshot is the hot-path message and remains inline, as SessionEvent keeps it; V39 energy in PlayerVitals crossed the lint's ratio"
+    reason = "Snapshot is the hot-path message and remains inline, as SessionEvent keeps it; V40 energy in PlayerVitals crossed the lint's ratio"
 )]
 pub enum Message {
     /// The session is accepted, and the parameters have already been validated.
@@ -10686,9 +10703,11 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        // V39 appends energy to `PlayerVitals`: a non-zero `max_energy` this client
-        // refuses to go without, which a V38 server never sends.
-        assert_eq!(fb::ProtocolVersion::Current.0, 39);
+        // V39 appends the three benches to `StructureKind`: the runestone's argument, an
+        // enum member inside a table field whose decoder refuses what it cannot name.
+        // V40 appends energy to `PlayerVitals`: a non-zero `max_energy` this client
+        // refuses to go without, which a V39 server never sends.
+        assert_eq!(fb::ProtocolVersion::Current.0, 40);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -12965,7 +12984,7 @@ mod tests {
             // question no, and a player can act on either.
             (fb::RefusalReason::SessionMismatch, 51),
             (fb::RefusalReason::EntryOfferUnknown, 52),
-            // V39's one, appended inside the low group: the player's own reserve answered
+            // V40's one, appended inside the low group: the player's own reserve answered
             // a legal swing no, and waiting is what they can do about it.
             (fb::RefusalReason::NotEnoughEnergy, 53),
             (fb::RefusalReason::MalformedNoAnchor, 64),
@@ -13289,7 +13308,30 @@ mod tests {
             StructureKind::from_wire(fb::StructureKind::Runestone),
             Some(StructureKind::Runestone)
         );
-        assert_eq!(StructureKind::from_wire(fb::StructureKind(5)), None);
+        // V39's three benches, appended after Runestone = 4 and accepted before their
+        // models exist — see [`StructureKind::from_wire`] for why.
+        for (wire, value, kind) in [
+            (
+                fb::StructureKind::LeatherBench,
+                5,
+                StructureKind::LeatherBench,
+            ),
+            (
+                fb::StructureKind::ArmourBench,
+                6,
+                StructureKind::ArmourBench,
+            ),
+            (
+                fb::StructureKind::EnchantingTable,
+                7,
+                StructureKind::EnchantingTable,
+            ),
+        ] {
+            assert_eq!(wire.0, value);
+            assert_eq!(StructureKind::from_wire(wire), Some(kind));
+        }
+        // One past the contract, which is 8 since V39.
+        assert_eq!(StructureKind::from_wire(fb::StructureKind(8)), None);
         assert_eq!(StructureKind::from_wire(fb::StructureKind(200)), None);
     }
 
@@ -16035,6 +16077,9 @@ mod tests {
             (RecipeId::Arrows, fb::RecipeID::Arrows),
             (RecipeId::WoodenSceptre, fb::RecipeID::WoodenSceptre),
             (RecipeId::Runestone, fb::RecipeID::Runestone),
+            (RecipeId::LeatherBench, fb::RecipeID::LeatherBench),
+            (RecipeId::ArmourBench, fb::RecipeID::ArmourBench),
+            (RecipeId::EnchantingTable, fb::RecipeID::EnchantingTable),
         ];
 
         for (recipe, wire) in named {
@@ -17058,7 +17103,7 @@ mod tests {
                 DecodeError::AliveWithoutHealth,
             ),
             (
-                "a zero energy maximum, which is what a V38 server's absent field decodes as",
+                "a zero energy maximum, which is what a V39 server's absent field decodes as",
                 PlayerVitalsWire {
                     energy: 0,
                     max_energy: 0,

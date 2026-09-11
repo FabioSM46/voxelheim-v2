@@ -66,7 +66,7 @@ pub enum Phase {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(
     clippy::large_enum_variant,
-    reason = "Snapshot is the hot-path transition and remains inline, as SessionEvent keeps it; V39 energy in PlayerVitals crossed the lint's ratio"
+    reason = "Snapshot is the hot-path transition and remains inline, as SessionEvent keeps it; V40 energy in PlayerVitals crossed the lint's ratio"
 )]
 pub enum Transition {
     /// The characters this account owns here, and the number it may hold. The player

@@ -240,7 +240,7 @@ func (rcv *PlayerVitals) MutateBlocking(n bool) bool {
 	return rcv._tab.MutateBoolSlot(24, n)
 }
 
-// / V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+// / V40. Current energy, in the same units as `max_energy`, rounded down to a whole
 // / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
 // / the blow through the shield at full damage, and nothing else changes. Attacks and
 // / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
@@ -254,7 +254,7 @@ func (rcv *PlayerVitals) Energy() uint16 {
 	return 0
 }
 
-// / V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+// / V40. Current energy, in the same units as `max_energy`, rounded down to a whole
 // / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
 // / the blow through the shield at full damage, and nothing else changes. Attacks and
 // / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
@@ -264,7 +264,7 @@ func (rcv *PlayerVitals) MutateEnergy(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(26, n)
 }
 
-// / V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+// / V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
 func (rcv *PlayerVitals) MaxEnergy() uint16 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
@@ -273,7 +273,7 @@ func (rcv *PlayerVitals) MaxEnergy() uint16 {
 	return 0
 }
 
-// / V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+// / V40. Maximum energy. Non-zero, always: it is the denominator of every energy display.
 func (rcv *PlayerVitals) MutateMaxEnergy(n uint16) bool {
 	return rcv._tab.MutateUint16Slot(28, n)
 }

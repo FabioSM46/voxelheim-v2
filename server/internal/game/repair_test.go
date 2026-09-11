@@ -103,8 +103,8 @@ func TestTheStoneAndThePatchAreTheOnlyRepairKits(t *testing.T) {
 //
 // Asserted as the two relationships rather than as the two numbers: what matters is that
 // a patch is worth *nearly* a stone — so neither is the answer and a player spends what
-// they have — and that the recipe for one needs nothing built, which is what makes it a
-// thing you make in the field out of what you killed.
+// they have — and that each kit is made at its own station: the stone at the forge out of
+// what you dug, the patch at the leather bench out of what you killed (#1119).
 func TestThePatchIsAFieldKitWorthNearlyAStone(t *testing.T) {
 	t.Parallel()
 
@@ -118,8 +118,11 @@ func TestThePatchIsAFieldKitWorthNearlyAStone(t *testing.T) {
 		t.Errorf("a patch restores %d against a stone's %d, which is too far behind to be a choice",
 			LeatherPatchRestore, SharpeningStoneRestore)
 	}
-	if station := recipeTable[vnet.RecipeIDLeatherPatch].station; station != vnet.StructureKindUnknown {
-		t.Errorf("the patch needs a %s to make, and its whole point is needing nowhere to stand", station)
+	if station := recipeTable[vnet.RecipeIDLeatherPatch].station; station != vnet.StructureKindLeatherBench {
+		t.Errorf("the patch is made at a %s, want the leather bench", station)
+	}
+	if station := recipeTable[vnet.RecipeIDSharpeningStone].station; station != vnet.StructureKindForge {
+		t.Errorf("the stone is made at a %s, want the forge", station)
 	}
 }
 
