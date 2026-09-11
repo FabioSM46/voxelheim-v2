@@ -320,13 +320,16 @@ func TestClientHelloWithoutVersionDecodesAsUnknown(t *testing.T) {
 // peers would otherwise fail on the first snapshot after a clean handshake. The two
 // refusal members that ride with it, RefusedAction.Energy and
 // RefusalReason.NotEnoughEnergy, owe nothing on their own: both decoders are total.
+//
+// **V41 puts health on EntityState**, the same argument on the hottest struct: a V41 client
+// refuses the zero max_health a V40 server's padding reads as.
 func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	t.Parallel()
 
 	// V39 appends StructureKind's three benches: the runestone's argument at V26, an enum
 	// member inside StructureState.kind whose decoder refuses what it cannot name.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 40 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 40", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 41 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 41", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -1952,10 +1955,12 @@ func TestDecodeIsTotalOverADamagedPlayerInput(t *testing.T) {
 func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 	t.Parallel()
 
+	// Three distinct health pairs, the last a dead player's zero: a pair swapped with its
+	// neighbour, or swapped within itself, cannot come back equal.
 	want := []EntityState{
-		{EntityID: 1, Pos: [3]float32{0.5, 64, -0.5}, Vel: [3]float32{1, 0, -2}, Yaw: 0.25},
-		{EntityID: 9, Pos: [3]float32{100.5, 44.25, 7}, Vel: [3]float32{}, Yaw: -3},
-		{EntityID: 4096, Pos: [3]float32{-1, -2, -3}, Vel: [3]float32{0, -60, 0}, Yaw: 3.14},
+		{EntityID: 1, Pos: [3]float32{0.5, 64, -0.5}, Vel: [3]float32{1, 0, -2}, Yaw: 0.25, Health: 73, MaxHealth: 120},
+		{EntityID: 9, Pos: [3]float32{100.5, 44.25, 7}, Vel: [3]float32{}, Yaw: -3, Health: 100, MaxHealth: 100},
+		{EntityID: 4096, Pos: [3]float32{-1, -2, -3}, Vel: [3]float32{0, -60, 0}, Yaw: 3.14, Health: 0, MaxHealth: 65535},
 	}
 
 	wantDrops := []ItemDropState{
@@ -2022,10 +2027,12 @@ func TestEntitySnapshotCarriesEveryEntityInOrder(t *testing.T) {
 		entity.Vel(vel)
 
 		got := EntityState{
-			EntityID: entity.EntityId(),
-			Pos:      [3]float32{pos.X(), pos.Y(), pos.Z()},
-			Vel:      [3]float32{vel.X(), vel.Y(), vel.Z()},
-			Yaw:      entity.Yaw(),
+			EntityID:  entity.EntityId(),
+			Pos:       [3]float32{pos.X(), pos.Y(), pos.Z()},
+			Vel:       [3]float32{vel.X(), vel.Y(), vel.Z()},
+			Yaw:       entity.Yaw(),
+			Health:    entity.Health(),
+			MaxHealth: entity.MaxHealth(),
 		}
 		if got != expected {
 			t.Errorf("entity %d decoded as %+v, want %+v", i, got, expected)
@@ -2216,8 +2223,9 @@ func TestV27SnapshotValidatorRefusesBrokenMountAssociations(t *testing.T) {
 	t.Parallel()
 
 	vitals := PlayerVitals{Health: 100, MaxHealth: 100, Hunger: 100, MaxHunger: 100, Level: 1, ExperienceToNext: 50, LifeState: vnet.LifeStateAlive}
+	player := func(id uint64) EntityState { return EntityState{EntityID: id, Health: 100, MaxHealth: 100} }
 	valid := EntitySnapshot{
-		Entities: []EntityState{{EntityID: 7}},
+		Entities: []EntityState{player(7)},
 		Mounts:   []MountState{{EntityID: 7, Mount: vnet.MountKindBlackHorse}},
 		Vitals:   vitals,
 	}
@@ -2227,25 +2235,33 @@ func TestV27SnapshotValidatorRefusesBrokenMountAssociations(t *testing.T) {
 
 	for name, snapshot := range map[string]EntitySnapshot{
 		"missing player": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Mounts:   []MountState{{EntityID: 9, Mount: vnet.MountKindBlackHorse}},
 			Vitals:   vitals,
 		},
 		"zero player id": {
-			Entities: []EntityState{{EntityID: 0}},
+			Entities: []EntityState{player(0)},
 			Vitals:   vitals,
 		},
 		"duplicate player": {
-			Entities: []EntityState{{EntityID: 7}, {EntityID: 7}},
+			Entities: []EntityState{player(7), player(7)},
+			Vitals:   vitals,
+		},
+		"zero max health": {
+			Entities: []EntityState{{EntityID: 7}},
+			Vitals:   vitals,
+		},
+		"health above max": {
+			Entities: []EntityState{{EntityID: 7, Health: 101, MaxHealth: 100}},
 			Vitals:   vitals,
 		},
 		"zero mount id": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Mounts:   []MountState{{EntityID: 0, Mount: vnet.MountKindBlackHorse}},
 			Vitals:   vitals,
 		},
 		"duplicate mount": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Mounts: []MountState{
 				{EntityID: 7, Mount: vnet.MountKindBlackHorse},
 				{EntityID: 7, Mount: vnet.MountKindBrownHorse},
@@ -2253,18 +2269,18 @@ func TestV27SnapshotValidatorRefusesBrokenMountAssociations(t *testing.T) {
 			Vitals: vitals,
 		},
 		"unknown mount": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Mounts:   []MountState{{EntityID: 7, Mount: vnet.MountKindUnknown}},
 			Vitals:   vitals,
 		},
 		"unknown cast": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Vitals:   vitals,
 			HasCast:  true,
 			Cast:     CastState{Kind: vnet.CastKindUnknown},
 		},
 		"completed cast": {
-			Entities: []EntityState{{EntityID: 7}},
+			Entities: []EntityState{player(7)},
 			Vitals:   vitals,
 			HasCast:  true,
 			Cast:     CastState{Kind: vnet.CastKindMount, Progress: ^uint8(0)},
@@ -4254,6 +4270,10 @@ func TestV7AppendsWithoutMovingWhatCameBefore(t *testing.T) {
 // snapshot — the most frequently sent payload in the game. V7 gave every player an
 // appearance and put none of it here; this is what catches somebody quietly adding a
 // field later, which a FlatBuffers struct can never take back.
+//
+// V41's health pair is the one addition that did not move it: two ushorts fill the
+// padding the ulong already forced after yaw. The number stayed 40 because the stride
+// did, and a later field that needs it to change needs that decision, not a test edit.
 //
 // Measured from the encoded frame rather than read from a constant: the stride is
 // baked into the generated accessor, so two adjacent elements are the only place the

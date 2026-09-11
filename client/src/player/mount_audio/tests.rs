@@ -124,6 +124,8 @@ fn snapshot(tick: u32, mounted: &[u64], present: &[u64]) -> Snapshot {
                 pos: [0.0; 3],
                 vel: [0.0; 3],
                 yaw: 0.0,
+                health: 100,
+                max_health: 100,
             })
             .collect(),
         mounts: mounted

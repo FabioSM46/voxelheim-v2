@@ -29,8 +29,24 @@ import (
 // / dead. A fifth field here would have charged every visible player those bytes on
 // / every tick to say "no", and could never have been taken back.
 // /
-// / Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
-// / snapshot, because only that complete vector can answer whether an id occurs twice.
+// / **V41 added `health` and `max_health`, and the struct is still 40 bytes.** Every
+// / visible player's health is public: the repository owner decided on 2026-09-11 that
+// / a player sees how hurt everyone around them is, not only their party. Unlike a life
+// / state, health is a value almost every entry has something to say about on almost
+// / every tick, so it belongs beside the transform rather than in a sparse vector. The
+// / two `ushort`s occupy the four bytes of alignment padding the `ulong` already forced
+// / after `yaw`, so the stride of the entity array did not move — which is why the size
+// / test on both sides still reads 40 rather than being edited to a new number.
+// /
+// / Decoder invariants:
+// /   - `entity_id` is non-zero. Uniqueness belongs to the containing snapshot, because
+// /     only that complete vector can answer whether an id occurs twice
+// /   - `max_health` is non-zero and `health` never exceeds it — `PlayerVitals`' own
+// /     invariants, for the same division a health bar performs
+// /
+// / A dead player carries `health = 0`, because the server's health for a dead player is
+// / zero. The decoder does not cross-check that against `EntitySnapshot.dead_players`:
+// / whether a body is down is that vector's statement, and never inferred from this number.
 type EntityState struct {
 	_tab flatbuffers.Struct
 }
@@ -72,9 +88,32 @@ func (rcv *EntityState) MutateYaw(n float32) bool {
 	return rcv._tab.MutateFloat32(rcv._tab.Pos+flatbuffers.UOffsetT(32), n)
 }
 
-func CreateEntityState(builder *flatbuffers.Builder, entityId uint64, pos_x float32, pos_y float32, pos_z float32, vel_x float32, vel_y float32, vel_z float32, yaw float32) flatbuffers.UOffsetT {
+// / V41. Current health, in the same units as `max_health` — the value the server
+// / holds, which for the recipient's own entity equals `self_vitals.health`.
+func (rcv *EntityState) Health() uint16 {
+	return rcv._tab.GetUint16(rcv._tab.Pos + flatbuffers.UOffsetT(36))
+}
+
+// / V41. Current health, in the same units as `max_health` — the value the server
+// / holds, which for the recipient's own entity equals `self_vitals.health`.
+func (rcv *EntityState) MutateHealth(n uint16) bool {
+	return rcv._tab.MutateUint16(rcv._tab.Pos+flatbuffers.UOffsetT(36), n)
+}
+
+// / V41. Maximum health. Non-zero, always: it is the denominator of every health bar.
+func (rcv *EntityState) MaxHealth() uint16 {
+	return rcv._tab.GetUint16(rcv._tab.Pos + flatbuffers.UOffsetT(38))
+}
+
+// / V41. Maximum health. Non-zero, always: it is the denominator of every health bar.
+func (rcv *EntityState) MutateMaxHealth(n uint16) bool {
+	return rcv._tab.MutateUint16(rcv._tab.Pos+flatbuffers.UOffsetT(38), n)
+}
+
+func CreateEntityState(builder *flatbuffers.Builder, entityId uint64, pos_x float32, pos_y float32, pos_z float32, vel_x float32, vel_y float32, vel_z float32, yaw float32, health uint16, maxHealth uint16) flatbuffers.UOffsetT {
 	builder.Prep(8, 40)
-	builder.Pad(4)
+	builder.PrependUint16(maxHealth)
+	builder.PrependUint16(health)
 	builder.PrependFloat32(yaw)
 	builder.Prep(4, 12)
 	builder.PrependFloat32(vel_z)

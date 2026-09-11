@@ -2185,6 +2185,8 @@ mod tests {
                     pos: SPAWN,
                     vel: [0.0; 3],
                     yaw: 0.0,
+                    health: 100,
+                    max_health: 100,
                 }],
                 structures,
                 ..Default::default()

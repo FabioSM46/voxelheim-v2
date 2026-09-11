@@ -1548,13 +1548,19 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	// offered the tick's bundle.
 	s.advanceEncounterPhasesLocked()
 
+	// Health rides on every state since V41 and is read from the same two places
+	// vitalsLocked reads it, so a player's own bar and every other viewer's bar over them
+	// are one authoritative number. dieLocked zeroes p.health, which is how a dead body
+	// streams zero without a rule of its own here.
 	states := make([]protocol.EntityState, len(players))
 	for i, p := range players {
 		states[i] = protocol.EntityState{
-			EntityID: p.entityID,
-			Pos:      toWire(p.pos),
-			Vel:      toWire(p.vel),
-			Yaw:      float32(p.yaw),
+			EntityID:  p.entityID,
+			Pos:       toWire(p.pos),
+			Vel:       toWire(p.vel),
+			Yaw:       float32(p.yaw),
+			Health:    p.health,
+			MaxHealth: p.maxHealthLocked(),
 		}
 	}
 	// The structures, read rather than advanced: nothing about a tent changes with a

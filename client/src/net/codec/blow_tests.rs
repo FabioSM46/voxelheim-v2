@@ -109,6 +109,8 @@ fn a_blow_requires_the_exact_snapshot_tick_position_and_target_species() {
         pos: blow.position,
         vel: [0.0; 3],
         yaw: 0.0,
+        health: 100,
+        max_health: 100,
     });
     assert!(blow.matches_snapshot(&snapshot));
     blow.tick = 0;

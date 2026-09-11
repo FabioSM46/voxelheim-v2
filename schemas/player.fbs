@@ -1265,13 +1265,36 @@ table ActionRefused {
 /// dead. A fifth field here would have charged every visible player those bytes on
 /// every tick to say "no", and could never have been taken back.
 ///
-/// Decoder invariant: `entity_id` is non-zero. Uniqueness belongs to the containing
-/// snapshot, because only that complete vector can answer whether an id occurs twice.
+/// **V41 added `health` and `max_health`, and the struct is still 40 bytes.** Every
+/// visible player's health is public: the repository owner decided on 2026-09-11 that
+/// a player sees how hurt everyone around them is, not only their party. Unlike a life
+/// state, health is a value almost every entry has something to say about on almost
+/// every tick, so it belongs beside the transform rather than in a sparse vector. The
+/// two `ushort`s occupy the four bytes of alignment padding the `ulong` already forced
+/// after `yaw`, so the stride of the entity array did not move — which is why the size
+/// test on both sides still reads 40 rather than being edited to a new number.
+///
+/// Decoder invariants:
+///   - `entity_id` is non-zero. Uniqueness belongs to the containing snapshot, because
+///     only that complete vector can answer whether an id occurs twice
+///   - `max_health` is non-zero and `health` never exceeds it — `PlayerVitals`' own
+///     invariants, for the same division a health bar performs
+///
+/// A dead player carries `health = 0`, because the server's health for a dead player is
+/// zero. The decoder does not cross-check that against `EntitySnapshot.dead_players`:
+/// whether a body is down is that vector's statement, and never inferred from this number.
 struct EntityState {
   entity_id: ulong;
   pos: Vec3;
   vel: Vec3;
   yaw: float;
+
+  /// V41. Current health, in the same units as `max_health` — the value the server
+  /// holds, which for the recipient's own entity equals `self_vitals.health`.
+  health: ushort;
+
+  /// V41. Maximum health. Non-zero, always: it is the denominator of every health bar.
+  max_health: ushort;
 }
 
 /// Which settled projectile presentation the authoritative server is streaming.
@@ -2110,12 +2133,13 @@ table EntitySnapshot {
   /// Every **other** member of the recipient's party, in authoritative party order.
   /// Empty when the recipient is in no party.
   ///
-  /// **Why this widens a snapshot beyond ordinary visibility.** `dead_players` is sparse
-  /// state only for bodies already present in `entities`, and `PlayerVitals` exposes one
-  /// player's health only to that player. Party membership is explicit consent to share
-  /// position and health with the other members, including outside the streamed view, so
-  /// this vector is the narrow exception rather than a field on `EntityState` paid by every
-  /// visible player. For everyone outside a party it is absent and costs zero bytes.
+  /// **Why this widens a snapshot beyond ordinary visibility.** Since V41 every visible
+  /// player's health is public and rides on `EntityState` itself, so what this vector adds
+  /// is not health but reach: `entities` holds only the bodies inside the streamed view,
+  /// and party membership is explicit consent to share position and health with the other
+  /// members **outside** it too. A member standing in view is therefore described twice,
+  /// once in each place, from the same authoritative value. For everyone outside a party
+  /// this vector is absent and costs zero bytes.
   ///
   /// Decoder invariants:
   ///   - no `entity_id` appears twice
