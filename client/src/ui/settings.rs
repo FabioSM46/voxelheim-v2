@@ -379,7 +379,8 @@ const METER_MARK: Color = Color::linear_rgb(1.0, 0.72, 0.25);
 const METER_MARK_WIDTH: f32 = 2.0;
 
 /// The Voices panel's stacking position, and a select dropdown's reasoning verbatim: a
-/// child of the row it belongs to would paint behind every row spawned after it.
+/// child of the row it belongs to would paint behind every row spawned after it. One under
+/// [`SELECT_LAYER`], because a select on the Audio tab can be open over it.
 const VOICES_PANEL_LAYER: i32 = 46;
 
 /// The most speakers the Voices panel draws at once.
@@ -401,11 +402,21 @@ const VOICE_LEVEL_WIDTH: f32 = 70.0;
 
 /// Every select dropdown's stacking position. Without a `GlobalZIndex` of its own one would
 /// paint inside its row's slot in the panel's tree order — behind every row spawned after it,
-/// exactly where it must appear above all of them. One more than `SettingsRoot`'s own 45 (see
-/// [`spawn_settings_screen`]) is enough, the same margin `ui/mod.rs`'s `GlobalZIndex(31)`
-/// keeps over the HUD overlays it sits above; and one layer serves them all, because only one
-/// is ever open.
-const SELECT_LAYER: i32 = 46;
+/// exactly where it must appear above all of them. Above `SettingsRoot`'s own 45 (see
+/// [`spawn_settings_screen`]), and one layer serves every select, because only one is ever
+/// open.
+///
+/// **And above [`VOICES_PANEL_LAYER`], which is a decision rather than a margin.** A select on
+/// the Audio tab can be open while the Voices panel is, and `read_settings_keys` closes the
+/// select first because it is the overlay on top. On an equal layer Bevy breaks the tie by tree
+/// order, the Voices row is spawned last on the tab, and the panel would paint over the list
+/// Escape is about to close. Found in review on #1141.
+const SELECT_LAYER: i32 = 47;
+
+const _: () = assert!(
+    SELECT_LAYER > VOICES_PANEL_LAYER,
+    "a select must paint over the Voices panel it can be open beside"
+);
 
 /// The most rows any one tab may draw.
 ///
@@ -3021,6 +3032,14 @@ mod tests {
         );
 
         let world = app.world_mut();
+        // The layer the Voices panel is actually spawned on, read from the tree rather than
+        // from the constant, so a panel moved to another layer is still compared against.
+        let mut voices = world.query_filtered::<&GlobalZIndex, With<VoicesPanel>>();
+        let voices_layer = voices
+            .iter(world)
+            .next()
+            .map(|layer| layer.0)
+            .expect("the Voices panel carries a stacking layer");
         let mut layers = world.query::<(&GlobalZIndex, &SelectPanel)>();
         let mut seen = 0;
         for (layer, panel) in layers.iter(world) {
@@ -3028,6 +3047,12 @@ mod tests {
             assert!(
                 layer.0 > 45,
                 "{panel:?} does not outrank the settings screen it overlays: {layer:?}"
+            );
+            // Equal would be decided by tree order, and the Voices row is spawned after every
+            // select on the Audio tab — see `SELECT_LAYER`.
+            assert!(
+                layer.0 > voices_layer,
+                "{panel:?} can be drawn under the Voices panel on layer {voices_layer}: {layer:?}"
             );
         }
         assert_eq!(
