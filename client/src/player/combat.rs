@@ -744,6 +744,8 @@ mod tests {
                         respawn_ticks: 40,
                         invulnerable: false,
                         blocking: false,
+                        energy: 100,
+                        max_energy: 100,
                     });
             }),
         ] {

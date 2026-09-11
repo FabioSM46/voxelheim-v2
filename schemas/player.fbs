@@ -929,7 +929,15 @@ enum RefusedAction : ubyte {
   PlayerTrade = 20,
 
   /// PortalRequest refused without a destination, session id or remote world state.
-  CrossPortal = 21
+  CrossPortal = 21,
+
+  // -- V39. Appended so every shipped action keeps its number.
+
+  /// An `AttackRequest` refused because the swing's energy was not there to spend.
+  /// A member of its own rather than `Attack` with a reason, because the answering
+  /// surface is the energy display rather than the weapon: `Attack` keeps meaning a
+  /// refusal about what is in the hand. Nothing was queued and nothing was spent.
+  Energy = 22
 }
 
 /// Why a server refused an action, in an `ActionRefused`.
@@ -1147,6 +1155,14 @@ enum RefusalReason : ubyte {
   /// are the same sentence, which is what keeps a guess from learning anything — the
   /// same call `MarkerUnknown` makes for a mark that belongs to somebody else.
   EntryOfferUnknown = 52,
+
+  // -- V39. Appended inside the low group: a player out of energy asked a legal question
+  //    and the answer is to wait.
+
+  /// The player's energy is below what the action costs. Paired with
+  /// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
+  /// the answer, so no amount is carried here.
+  NotEnoughEnergy = 53,
 
   // -- The request said something no correct client sends. A defect in the peer.
 
@@ -1500,6 +1516,8 @@ enum MobAction : ubyte {
 ///     reason one fact is stated twice is argued
 ///   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
 ///     entity id is in that vector exactly when this is true
+///   - `max_energy` is non-zero and `energy` never exceeds it — the health invariant,
+///     for the same division
 table PlayerVitals {
   /// Current health, in the same units as `max_health`. Zero is legal and means the
   /// player is dead — the server's transition to `Dead` is what makes it so, not the
@@ -1543,6 +1561,17 @@ table PlayerVitals {
   /// Whether the authoritative server currently holds this recipient's off-hand raised.
   /// Intent alone never makes this true; the server's equipment and durability rules do.
   blocking: bool;
+
+  /// V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+  /// point. Zero is legal. Below an action's cost the server refuses the swing, or lets
+  /// the blow through the shield at full damage, and nothing else changes. Attacks and
+  /// shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
+  /// locally**: a client that drew its own regeneration would show a swing as ready the
+  /// tick before the server refuses it.
+  energy: ushort;
+
+  /// V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+  max_energy: ushort;
 }
 
 /// One mob's authoritative state in a snapshot.

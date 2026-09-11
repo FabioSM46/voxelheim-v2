@@ -1012,6 +1012,12 @@ pub struct PlayerVitals {
     /// the timer; this is its answer.
     pub invulnerable: bool,
     pub blocking: bool,
+    /// Current energy, rounded down to a whole point by the server. Never exceeds
+    /// `max_energy`. **The server's number**: the client never predicts a cost or a
+    /// refill, so a presentation holds this value between snapshots.
+    pub energy: u16,
+    /// Maximum energy. Guaranteed non-zero.
+    pub max_energy: u16,
 }
 
 impl PlayerVitals {
@@ -1035,6 +1041,8 @@ impl PlayerVitals {
             respawn_ticks: 0,
             invulnerable: false,
             blocking: false,
+            energy: 100,
+            max_energy: 100,
         }
     }
 }
@@ -1439,6 +1447,9 @@ pub enum RefusedAction {
     PlayerTrade,
     /// Portal crossing; the answering surface is supplied by #974.
     CrossPortal,
+    /// V39. An attack refused because its energy was not there to spend. Nothing was
+    /// queued and nothing was spent.
+    Energy,
 }
 
 impl RefusedAction {
@@ -1466,6 +1477,7 @@ impl RefusedAction {
             fb::RefusedAction::Mount => Self::Mount,
             fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
             fb::RefusedAction::CrossPortal => Self::CrossPortal,
+            fb::RefusedAction::Energy => Self::Energy,
             _ => Self::Unknown,
         }
     }
@@ -1546,6 +1558,8 @@ pub enum RefusalReason {
     InstanceUnavailable,
     SessionMismatch,
     EntryOfferUnknown,
+    /// V39. The player's energy is below what the action costs.
+    NotEnoughEnergy,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1611,6 +1625,7 @@ impl RefusalReason {
             fb::RefusalReason::InstanceUnavailable => Self::InstanceUnavailable,
             fb::RefusalReason::SessionMismatch => Self::SessionMismatch,
             fb::RefusalReason::EntryOfferUnknown => Self::EntryOfferUnknown,
+            fb::RefusalReason::NotEnoughEnergy => Self::NotEnoughEnergy,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -3141,6 +3156,10 @@ impl BlowLanded {
 /// `Message::Deferred`"; by Protocol V4 five did, and nothing said so, because a
 /// number nobody can vary is a number nobody can see go wrong.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Snapshot is the hot-path message and remains inline, as SessionEvent keeps it; V39 energy in PlayerVitals crossed the lint's ratio"
+)]
 pub enum Message {
     /// The session is accepted, and the parameters have already been validated.
     Welcome(SessionParams),
@@ -3477,6 +3496,12 @@ pub enum DecodeError {
         level: u16,
         experience: u32,
         experience_to_next: u32,
+    },
+    /// `max_energy` is zero, or `energy` exceeds it. A spent reserve is legal; a zero
+    /// denominator is not.
+    VitalsEnergy {
+        energy: u16,
+        max_energy: u16,
     },
     /// An `Alive` player with no health left. Zero health is what the server's own
     /// transition to `Dead` means, so this is a server that has lost track of one of its
@@ -4230,6 +4255,10 @@ impl fmt::Display for DecodeError {
                 "progression is level {level} at {experience}/{experience_to_next}, want a non-zero level and denominator and no more experience than it"
             ),
             Self::AliveWithoutHealth => write!(f, "vitals say alive with no health left"),
+            Self::VitalsEnergy { energy, max_energy } => write!(
+                f,
+                "energy is {energy}/{max_energy}, want a non-zero maximum and no more energy than it"
+            ),
             Self::RespawnWhileAlive { respawn_ticks } => write!(
                 f,
                 "vitals count {respawn_ticks} ticks to a respawn for a player who is not dead"
@@ -7018,6 +7047,10 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
             experience_to_next,
         });
     }
+    let (energy, max_energy) = (vitals.energy(), vitals.max_energy());
+    if max_energy == 0 || energy > max_energy {
+        return Err(DecodeError::VitalsEnergy { energy, max_energy });
+    }
     if life_state == LifeState::Alive && health == 0 {
         return Err(DecodeError::AliveWithoutHealth);
     }
@@ -7039,6 +7072,8 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         respawn_ticks,
         invulnerable: vitals.invulnerable(),
         blocking: vitals.blocking(),
+        energy,
+        max_energy,
     })
 }
 
@@ -8700,6 +8735,8 @@ pub(super) mod server_side {
         pub respawn_ticks: u32,
         pub invulnerable: bool,
         pub blocking: bool,
+        pub energy: u16,
+        pub max_energy: u16,
     }
 
     impl Default for PlayerVitalsWire {
@@ -8717,6 +8754,8 @@ pub(super) mod server_side {
                 respawn_ticks: 0,
                 invulnerable: false,
                 blocking: false,
+                energy: 100,
+                max_energy: 100,
             }
         }
     }
@@ -8770,6 +8809,7 @@ pub(super) mod server_side {
                 max_health: 100,
                 hunger: 100,
                 max_hunger: 100,
+                max_energy: 100,
                 level: 1,
                 experience_to_next: 50,
                 life_state: fb::LifeState::Alive,
@@ -8846,6 +8886,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -8923,6 +8965,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -8974,6 +9018,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9183,6 +9229,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9230,6 +9278,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9286,6 +9336,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9895,6 +9947,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10293,6 +10347,8 @@ pub(super) mod server_side {
                 max_health: vitals.max_health,
                 hunger: vitals.hunger,
                 max_hunger: vitals.max_hunger,
+                energy: vitals.energy,
+                max_energy: vitals.max_energy,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10630,7 +10686,9 @@ mod tests {
         // `Villager`'s argument for the third and fourth time: an enum member inside a
         // table field whose decoder refuses what it cannot name, so an older peer would
         // handshake cleanly and end the session the first time a boss entered view.
-        assert_eq!(fb::ProtocolVersion::Current.0, 38);
+        // V39 appends energy to `PlayerVitals`: a non-zero `max_energy` this client
+        // refuses to go without, which a V38 server never sends.
+        assert_eq!(fb::ProtocolVersion::Current.0, 39);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -12831,6 +12889,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::Mount.0, 19);
         assert_eq!(fb::RefusedAction::PlayerTrade.0, 20);
         assert_eq!(fb::RefusedAction::CrossPortal.0, 21);
+        assert_eq!(fb::RefusedAction::Energy.0, 22);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -12841,7 +12900,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            22,
+            23,
             "a removal is refused in silence by design"
         );
 
@@ -12906,6 +12965,9 @@ mod tests {
             // question no, and a player can act on either.
             (fb::RefusalReason::SessionMismatch, 51),
             (fb::RefusalReason::EntryOfferUnknown, 52),
+            // V39's one, appended inside the low group: the player's own reserve answered
+            // a legal swing no, and waiting is what they can do about it.
+            (fb::RefusalReason::NotEnoughEnergy, 53),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -12915,7 +12977,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            57,
+            58,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -16818,6 +16880,8 @@ mod tests {
                 respawn_ticks: 60,
                 invulnerable: false,
                 blocking: false,
+                energy: 37,
+                max_energy: 100,
             },
         ) else {
             panic!("a valid dead player's snapshot did not decode");
@@ -16837,6 +16901,8 @@ mod tests {
                 respawn_ticks: 60,
                 invulnerable: false,
                 blocking: false,
+                energy: 37,
+                max_energy: 100,
             }
         );
     }
@@ -16990,6 +17056,30 @@ mod tests {
                     ..PlayerVitalsWire::default()
                 },
                 DecodeError::AliveWithoutHealth,
+            ),
+            (
+                "a zero energy maximum, which is what a V38 server's absent field decodes as",
+                PlayerVitalsWire {
+                    energy: 0,
+                    max_energy: 0,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsEnergy {
+                    energy: 0,
+                    max_energy: 0,
+                },
+            ),
+            (
+                "more energy than the maximum",
+                PlayerVitalsWire {
+                    energy: 101,
+                    max_energy: 100,
+                    ..PlayerVitalsWire::default()
+                },
+                DecodeError::VitalsEnergy {
+                    energy: 101,
+                    max_energy: 100,
+                },
             ),
             (
                 "a respawn countdown for someone who is not dead",

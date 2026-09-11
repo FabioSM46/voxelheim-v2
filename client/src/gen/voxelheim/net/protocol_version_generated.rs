@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 38;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 39;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -319,10 +319,17 @@ impl ProtocolVersion {
     /// Appending fields is layout-compatible, but a V37 client silently drops the
     /// position and a V38 client cannot recover it from a V37 server. Both directions
     /// must reject the handshake rather than disagree about the final opening.
-    pub const Current: Self = Self(38);
+    ///
+    /// V39: `PlayerVitals` appends `energy` and `max_energy`, and the refusal enums gain
+    /// `RefusedAction.Energy` and `RefusalReason.NotEnoughEnergy`. The two enum members owe
+    /// nothing on their own — both decoders read an unknown member as `Unknown`. The
+    /// vitals append owes the bump: a V39 client requires a non-zero `max_energy` that a
+    /// V38 server never sends, so without it the peers would handshake cleanly and the
+    /// client would refuse the first snapshot — V15's and V17's argument again.
+    pub const Current: Self = Self(39);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 38;
+    pub const ENUM_MAX: u16 = 39;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

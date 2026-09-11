@@ -3673,6 +3673,8 @@ fn vitals(health: u16, life_state: LifeState, respawn_ticks: u32) -> PlayerVital
         respawn_ticks,
         invulnerable: false,
         blocking: false,
+        energy: 100,
+        max_energy: 100,
     }
 }
 

@@ -175,6 +175,14 @@ func checkVitals(t *testing.T, vitals *vnet.PlayerVitals) {
 		t.Errorf("hunger %d exceeds max_hunger %d", hunger, maxHunger)
 	}
 
+	energy, maxEnergy := vitals.Energy(), vitals.MaxEnergy()
+	if maxEnergy == 0 {
+		t.Error("max_energy is zero, which is the division every energy display performs")
+	}
+	if energy > maxEnergy {
+		t.Errorf("energy %d exceeds max_energy %d", energy, maxEnergy)
+	}
+
 	level, experience, experienceToNext := vitals.Level(), vitals.Experience(), vitals.ExperienceToNext()
 	if level == 0 {
 		t.Error("level is zero, which is the absent value rather than a progression level")

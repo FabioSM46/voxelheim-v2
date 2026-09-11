@@ -29,6 +29,8 @@ import (
 // /     reason one fact is stated twice is argued
 // /   - `blocking` agrees with `EntitySnapshot.blocking_players`: the recipient's own
 // /     entity id is in that vector exactly when this is true
+// /   - `max_energy` is non-zero and `energy` never exceeds it — the health invariant,
+// /     for the same division
 type PlayerVitals struct {
 	_tab flatbuffers.Table
 }
@@ -238,8 +240,46 @@ func (rcv *PlayerVitals) MutateBlocking(n bool) bool {
 	return rcv._tab.MutateBoolSlot(24, n)
 }
 
+// / V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+// / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
+// / the blow through the shield at full damage, and nothing else changes. Attacks and
+// / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
+// / locally**: a client that drew its own regeneration would show a swing as ready the
+// / tick before the server refuses it.
+func (rcv *PlayerVitals) Energy() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / V39. Current energy, in the same units as `max_energy`, rounded down to a whole
+// / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
+// / the blow through the shield at full damage, and nothing else changes. Attacks and
+// / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
+// / locally**: a client that drew its own regeneration would show a swing as ready the
+// / tick before the server refuses it.
+func (rcv *PlayerVitals) MutateEnergy(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(26, n)
+}
+
+// / V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+func (rcv *PlayerVitals) MaxEnergy() uint16 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetUint16(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+// / V39. Maximum energy. Non-zero, always: it is the denominator of every energy display.
+func (rcv *PlayerVitals) MutateMaxEnergy(n uint16) bool {
+	return rcv._tab.MutateUint16Slot(28, n)
+}
+
 func PlayerVitalsStart(builder *flatbuffers.Builder) {
-	builder.StartObject(11)
+	builder.StartObject(13)
 }
 func PlayerVitalsAddHealth(builder *flatbuffers.Builder, health uint16) {
 	builder.PrependUint16Slot(0, health, 0)
@@ -273,6 +313,12 @@ func PlayerVitalsAddExperienceToNext(builder *flatbuffers.Builder, experienceToN
 }
 func PlayerVitalsAddBlocking(builder *flatbuffers.Builder, blocking bool) {
 	builder.PrependBoolSlot(10, blocking, false)
+}
+func PlayerVitalsAddEnergy(builder *flatbuffers.Builder, energy uint16) {
+	builder.PrependUint16Slot(11, energy, 0)
+}
+func PlayerVitalsAddMaxEnergy(builder *flatbuffers.Builder, maxEnergy uint16) {
+	builder.PrependUint16Slot(12, maxEnergy, 0)
 }
 func PlayerVitalsEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
