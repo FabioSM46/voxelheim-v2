@@ -1599,6 +1599,37 @@ numbers from that table rather than from constants of their own.
   vargr is the separate issue that owns it — the server half is finished first because the
   contract was reserved first.
 
+## A boss answers the levels of the party that pulled it
+
+`internal/game/boss_scale.go` owns it (#1099). At the pull, `startBossEncounterLocked` reads the
+level of every character inside the simulation, computes `bossScaleFor` once and stores it on
+`bossEncounter.scale`. Nothing writes it again.
+
+- **Levels are the only input**, by the repository owner's decision. Equipment, gear score and
+  class are never read, so a party cannot take its armour off at the door to make the boss
+  weaker. `TestBossScaleDoesNotReadEquipment` holds that.
+- **Health grows with the members, not with their levels.** A level raises a character's maximum
+  health (`maxHealthFor`) and nothing else. A blow is the blade's damage at the same cadence at
+  every level, so a per-member share that grew with level would make the same party fight longer
+  for having levelled. Each member brings `mobDefinition.maxHealth`, which on a boss row is the
+  per-member health, up to `bossScaleMaxMembers` (4). A fifth member adds nothing, and four times
+  every boss row must fit the wire's uint16 (`TestBossHealthFitsTheWireAtEveryScale`).
+- **Damage follows level through the same curve.** Every move's blow is multiplied by the party's
+  mean of `maxHealthFor(level) / PlayerMaxHealth`, from 100% at level 1 to 245% at `MaxLevel`. A
+  boss blow therefore costs a member the same share of their health at any level.
+- **The pull is the only moment.** A level-up, an armour change, a death, a disconnect or a
+  return during the fight changes nothing. A wipe replaces the boss (`resetWipedDungeonLocked`),
+  and its next pull is a new encounter that measures who is there again. Nobody new may enter
+  during boss combat, so the characters inside at the pull are the party that fights.
+- **Everything that reads a boss's ceiling reads `mob.maxHealth()`**: the snapshot's `MaxHealth`,
+  the stage thresholds in `encounterPhaseFor`, and the corpse the boss leaves. A boss hurt before
+  its pull keeps the share it had lost.
+- **Fight length is measured, not asserted.** The per-member health on each boss row is calibrated
+  with the #1037 harness against the approved design's 3–4 minute Vargr and 5–6 minute Draugr
+  targets. `docs/reviews/boss-balance-1099.md` records the before and after kill times and their
+  spread. A change to a boss row, a move's recovery or the blades is a change to fight length, and
+  that record is what to re-run.
+
 ## The hostile ledger, and why armour earns attention at the blow
 
 Every hostile `mob` owns a transient threat ledger keyed by player entity id. It is guarded by

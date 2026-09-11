@@ -205,11 +205,12 @@ func TestTheStageRisesWithTheDamageAndNeverFallsBack(t *testing.T) {
 
 	h.sim.mu.Lock()
 	h.sim.startBossEncounterLocked(h.sim.mobs[boss], h.sim.players[1])
+	// The ceiling the pull scaled the king to, which the thresholds are measured against.
+	full := h.sim.mobs[boss].maxHealth()
 	h.sim.mu.Unlock()
 
-	full := mobRegistry[vnet.MobKindDraugrKing].maxHealth
 	// Widened before the multiplication rather than after: `full * 70` overflows a uint16
-	// at 1200 health, and a wrapped value would put this boss somewhere it never was.
+	// at a king's health, and a wrapped value would put this boss somewhere it never was.
 	at := func(percent uint32) uint16 { return uint16(uint32(full) * percent / 100) }
 	for _, step := range []struct {
 		name   string

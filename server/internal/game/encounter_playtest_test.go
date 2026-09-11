@@ -139,12 +139,36 @@ type playtestConfig struct {
 
 	// timed records the wall time of every simulation step, for the server cost harness.
 	timed bool
+
+	// levels is each member's level, in join order; a member past the end of the list is
+	// level one. The boss scales to these at the pull (#1099); the kit never enters it.
+	levels []uint16
+}
+
+// level is the level member i joins at.
+func (c playtestConfig) level(i int) uint16 {
+	if i < len(c.levels) {
+		return c.levels[i]
+	}
+	return 1
+}
+
+// levelsLabel is every member's level joined by semicolons.
+func (c playtestConfig) levelsLabel() string {
+	labels := make([]string, c.party)
+	for i := range labels {
+		labels[i] = fmt.Sprint(c.level(i))
+	}
+	return strings.Join(labels, ";")
 }
 
 func (c playtestConfig) String() string {
 	name := fmt.Sprintf("%s/party%d/%s/%s/%s", playtestBossName(c.boss), c.party, c.kit.name, c.policy, c.network)
 	if c.ranged > 0 {
 		name += fmt.Sprintf("/ranged%d", c.ranged)
+	}
+	if len(c.levels) > 0 {
+		name += "/levels" + strings.ReplaceAll(c.levelsLabel(), ";", "-")
 	}
 	if c.stage > 0 {
 		name += fmt.Sprintf("/stage%d-%ds", c.stage, c.seconds)
@@ -213,6 +237,9 @@ type playtestResult struct {
 
 	// stepNanos is the wall time of every simulation step, when the config asked for it.
 	stepNanos []int64
+
+	// scale is what the pull decided about the boss, read from the first engaged tick.
+	scale bossScale
 }
 
 func (r *playtestResult) move(kind vnet.EncounterMoveKind) *playtestMoveStats {
@@ -321,7 +348,7 @@ func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
 		if i < cfg.ranged {
 			bot.stand = playtestRangedStand
 		}
-		life := playtestLife(t, spawn, cfg.kit)
+		life := playtestLife(t, spawn, cfg.kit, cfg.level(i))
 		character := instanceTestCharacter(uint64(i + 1))
 		p, err := s.JoinCharacter(s.mintEntityID(), character.PlayerID, character.CharacterID, fmt.Sprintf("Reader%d", i+1),
 			spawn, testAppearance(), &life, func(frame []byte) bool {
@@ -342,20 +369,22 @@ func newPlaytest(t *testing.T, cfg playtestConfig) *playtest {
 		boss := s.mobs[pt.bossIDLocked()]
 		s.startBossEncounterLocked(boss, pt.bots[0].p)
 		if def := boss.species(); cfg.stage > 1 {
-			boss.health = uint16(uint32(def.maxHealth) * uint32(def.phaseHealthPercents[cfg.stage-2]) / 100)
+			boss.health = uint16(uint32(boss.maxHealth()) * uint32(def.phaseHealthPercents[cfg.stage-2]) / 100)
 		}
 		s.mu.Unlock()
 	}
 	return pt
 }
 
-func playtestLife(t *testing.T, spawn [3]float32, kit playtestKit) Life {
+func playtestLife(t *testing.T, spawn [3]float32, kit playtestKit, level uint16) Life {
 	t.Helper()
 	pieces := make([]testArmourPiece, 0, len(kit.armour))
 	for _, item := range kit.armour {
 		pieces = append(pieces, fullTestArmour(item))
 	}
 	life := lifeWearing(t, spawn, pieces...)
+	life.Experience = experienceBefore(level)
+	life.Health = maxHealthFor(level)
 	sword := itemRegistry[kit.sword]
 	life.Slots[0] = protocol.InventoryStack{ItemID: uint16(kit.sword), Count: 1,
 		Durability: sword.maxDurability, MaxDurability: sword.maxDurability}
@@ -525,6 +554,7 @@ func (pt *playtest) run() playtestResult {
 		}
 		if boss.encounter != nil && pullTick == 0 {
 			pullTick = pt.tick
+			result.scale = boss.encounter.scale
 		}
 		if boss.health < bossHealth {
 			result.bossDamage[playtestBossState(boss)] += int(bossHealth - boss.health)
@@ -1043,6 +1073,14 @@ func TestFirstDungeonPlaytest(t *testing.T) {
 				}
 			}
 		}
+		// Representative levels (#1099): solo at ten and thirty, a mixed party and a full
+		// party at the level cap. Health reads only the member count, so a reader's kill time
+		// should not move; the stander is where the level-scaled blows show.
+		for _, levels := range [][]uint16{{10}, {30}, {1, 10, 20, 30}, {30, 30, 30, 30}} {
+			for _, policy := range []playtestPolicy{policyReader, policyStander} {
+				results = append(results, runPlaytest(t, playtestConfig{boss: boss, party: len(levels), kit: kitIron, policy: policy, levels: levels}))
+			}
+		}
 		for _, network := range []playtestNetwork{
 			{delayMillis: 100}, {delayMillis: 250}, {delayMillis: 400}, {delayMillis: 500}, {delayMillis: 600}, {delayMillis: 800},
 			{lossEvery: 2, lossBurst: 1}, {lossEvery: 20, lossBurst: 4}, {delayMillis: 250, lossEvery: 20, lossBurst: 4},
@@ -1097,8 +1135,9 @@ func (r playtestResult) sortedKinds() []vnet.EncounterMoveKind {
 
 func (r playtestResult) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "killed=%v after %.2fs stages=%v deaths=%d wipes=%d hits=%d damage-taken=%d unperceived=%d unattributed=%d boss-damage=%v",
-		r.killed, r.killSeconds, r.stageSeconds, r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.unattributed, r.bossDamage)
+	fmt.Fprintf(&b, "killed=%v after %.2fs stages=%v deaths=%d wipes=%d hits=%d damage-taken=%d unperceived=%d unattributed=%d boss-damage=%v scale=%d/%d/%d%%",
+		r.killed, r.killSeconds, r.stageSeconds, r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.unattributed, r.bossDamage,
+		r.scale.members, r.scale.maxHealth, r.scale.damagePercent)
 	for _, kind := range r.sortedKinds() {
 		s := r.moves[kind]
 		fmt.Fprintf(&b, "\n  %-20s moves=%d windows=%d threatened=%d escaped=%d hits=%d damage=%d",
@@ -1117,7 +1156,7 @@ func (r playtestResult) String() string {
 func writePlaytestCSV(t *testing.T, path string, results []playtestResult) {
 	t.Helper()
 	var b strings.Builder
-	b.WriteString("boss,party,ranged,kit,policy,network,stage,killed,kill_seconds,stage_seconds,deaths,wipes,hits,damage_taken,unperceived_hits,unattributed_losses,boss_damage_recovery,boss_damage_telegraph,boss_damage_release,boss_damage_pursuit,boss_damage_other\n")
+	b.WriteString("boss,party,ranged,kit,policy,network,stage,killed,kill_seconds,stage_seconds,deaths,wipes,hits,damage_taken,unperceived_hits,unattributed_losses,boss_damage_recovery,boss_damage_telegraph,boss_damage_release,boss_damage_pursuit,boss_damage_other,levels,boss_max_health,boss_damage_percent\n")
 	for _, r := range results {
 		c := r.config
 		stages := make([]string, len(r.stageSeconds))
@@ -1125,10 +1164,10 @@ func writePlaytestCSV(t *testing.T, path string, results []playtestResult) {
 			stages[i] = fmt.Sprintf("%.2f", v)
 		}
 		other := r.bossDamage["killing blow"] + r.bossDamage["interrupt opening"] + r.bossDamage["before the pull"]
-		fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%v,%.2f,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+		fmt.Fprintf(&b, "%s,%d,%d,%s,%s,%s,%d,%v,%.2f,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%d,%d\n",
 			playtestBossName(c.boss), c.party, c.ranged, c.kit.name, c.policy, c.network, c.stage, r.killed, r.killSeconds,
 			strings.Join(stages, ";"), r.deaths, r.wipes, r.hits, r.damageTaken, r.unperceived, r.unattributed, r.bossDamage["recovery"], r.bossDamage["telegraph"],
-			r.bossDamage["release or pulse"], r.bossDamage["pursuit"], other)
+			r.bossDamage["release or pulse"], r.bossDamage["pursuit"], other, c.levelsLabel(), r.scale.maxHealth, r.scale.damagePercent)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		t.Fatal(err)

@@ -19,10 +19,13 @@ import (
 // Integer arithmetic on both sides of the comparison, deliberately: `health * 100` against
 // `maxHealth * percent` is the same threshold on every run, where a float division would
 // put a boss on one side of 55% here and the other side of it in a test.
-func encounterPhaseFor(def mobDefinition, health uint16) uint8 {
+//
+// maxHealth is the boss's own ceiling, the scale its pull gave it, so a stage begins at the
+// same share of the fight for a party of four as for one player.
+func encounterPhaseFor(def mobDefinition, maxHealth, health uint16) uint8 {
 	phase := uint8(1)
 	for _, percent := range def.phaseHealthPercents {
-		if uint32(health)*100 <= uint32(def.maxHealth)*uint32(percent) {
+		if uint32(health)*100 <= uint32(maxHealth)*uint32(percent) {
 			phase++
 		}
 	}
@@ -61,7 +64,7 @@ func (s *Sim) advanceEncounterPhasesLocked() {
 		if m.encounter == nil {
 			continue
 		}
-		if phase := encounterPhaseFor(m.species(), m.health); phase > m.encounter.phase {
+		if phase := encounterPhaseFor(m.species(), m.maxHealth(), m.health); phase > m.encounter.phase {
 			m.encounter.phase = phase
 		}
 	}

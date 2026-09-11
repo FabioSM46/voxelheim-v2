@@ -12,9 +12,10 @@ import (
 // loses health by and the only one that reaches the killed-mob transition.
 //
 // The damage is applied rather than swung, for the reason boss_species_test.go gives:
-// a Vargr guardian has 720 health and a Draugr king 1200, so driving these assertions
-// through the authoritative Attack path would cost eighteen and thirty swings apiece
-// and would be measuring the balance rather than the rule under test. The rule under
+// a Vargr guardian and a Draugr king carry thousands of health for every member of the
+// party that pulls them (#1099), so driving these assertions through the authoritative
+// Attack path would cost hundreds of swings apiece and would be measuring the balance
+// rather than the rule under test. The rule under
 // test is what a *death* does, and this is the transition a death goes through.
 //
 // Prefer an accessible placed encounter. Tests of generic binding idempotency may

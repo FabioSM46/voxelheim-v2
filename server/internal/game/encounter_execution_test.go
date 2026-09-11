@@ -67,7 +67,7 @@ func atStage(h *vitalsHarness, id uint64, stage uint8) {
 	def := m.species()
 	if stage > 1 {
 		percent := uint32(def.phaseHealthPercents[stage-2])
-		m.health = uint16(uint32(def.maxHealth) * percent / 100)
+		m.health = uint16(uint32(m.maxHealth()) * percent / 100)
 	}
 	m.encounter.phase = stage
 }

@@ -363,6 +363,13 @@ func (s *Sim) startBossEncounterLocked(m *mob, first *Player) {
 		// before: an encounter that exists has a repertoire ledger, empty or not.
 		cooldowns: make(map[vnet.EncounterMoveKind]uint32),
 		lastUsed:  make(map[vnet.EncounterMoveKind]uint64),
+		scale:     bossScaleFor(m.species(), s.bossScaleLevelsLocked()),
+	}
+	// The boss grows to the party once, in proportion, so a creature somehow hurt before its
+	// pull keeps the share of its health it had lost and the stage that share put it in. See
+	// boss_scale.go for the rule and for why nothing ever recomputes it.
+	if base := uint32(m.species().maxHealth); base > 0 {
+		m.health = uint16(max(uint32(m.health)*uint32(m.encounter.scale.maxHealth)/base, 1))
 	}
 }
 
