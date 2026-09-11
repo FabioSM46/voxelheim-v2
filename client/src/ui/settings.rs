@@ -1579,22 +1579,36 @@ fn monitor_select_toggle(
 
 /// Applies a press inside the open Monitor dropdown, and closes it either way.
 ///
-/// `monitors.preferences()` is read fresh rather than cached from spawn time: an index that
-/// no longer names a live preference — the operating system dropped a display between the
-/// click and this system running — is answered by doing nothing, the same refusal a missing
-/// chunk or an unheld item answers elsewhere in this client.
+/// **Through [`Settings::adjust_with_choices`], as every other press on this screen is**: the
+/// option's index becomes a number of steps from the current value, so the bound, the clamp
+/// and the file are the model's and the select has no setter of its own. The options are read
+/// fresh rather than cached from spawn time: an index that no longer names an option — the
+/// operating system dropped a display between the click and this system running — is answered
+/// by doing nothing, the same refusal a missing chunk or an unheld item answers elsewhere.
+///
+/// Choosing the option already held writes nothing, so a press that changes nothing does not
+/// mark the settings changed and rewrite the file. A value the list no longer offers is never
+/// "already held", which is what lets choosing any option replace it.
 fn monitor_dropdown_actions(
-    mut options: Query<(&MonitorOption, &Interaction), Changed<Interaction>>,
+    options: Query<(&MonitorOption, &Interaction), Changed<Interaction>>,
     monitors: Res<MonitorChoices>,
+    devices: Res<AudioDevices>,
     mut settings: ResMut<Settings>,
     mut screen: ResMut<SettingsScreen>,
 ) {
-    for (option, interaction) in &mut options {
+    let choices = Choices {
+        monitors: &monitors,
+        devices: &devices,
+    };
+    for (option, interaction) in &options {
         if *interaction != Interaction::Pressed {
             continue;
         }
-        if let Some(preference) = monitors.preferences().get(option.0).cloned() {
-            settings.set_monitor(preference);
+        if let Some(offered) = settings.options_with_choices(Knob::Monitor, choices)
+            && offered.selected != Some(option.0)
+            && let Some(steps) = offered.steps_to(option.0)
+        {
+            settings.adjust_with_choices(Knob::Monitor, steps, choices);
         }
         screen.monitor_dropdown_open = false;
     }
