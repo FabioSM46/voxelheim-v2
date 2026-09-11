@@ -197,7 +197,7 @@ jobs:
         if: ${{ steps.ws.outputs.present == 'true' }}
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
           fi

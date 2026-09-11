@@ -268,11 +268,20 @@ jobs:
         # than the one being fixed. A repeated URI is the only cost, and the
         # mirror method tolerates one.
         #
-        # Matched on the host alone, so http and https both move and no other
-        # mirror in the file (security.ubuntu.com, ports.ubuntu.com) is touched.
+        # Matched on the host, so no other mirror in the file (security.ubuntu.com,
+        # ports.ubuntu.com) is touched.
+        #
+        # **And repointed to https, whatever scheme it had** (#1107). The image
+        # writes the Azure entry as plain http, and the first version of this step
+        # moved the host and kept the scheme, leaving http://archive.ubuntu.com at
+        # priority 1. On 2026-09-11 that port stopped answering from the runners:
+        # three client jobs spent their five minutes in 33-second index timeouts on
+        # it, and https://archive.ubuntu.com, one line below, answered in the same
+        # logs seconds before the step expired. https is the transport the
+        # image's own fallback entries already use.
         run: |
           if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i 's|//azure\.archive\.ubuntu\.com/|//archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
+            sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com/|https://archive.ubuntu.com/|g' /etc/apt/apt-mirrors.txt
             echo "APT mirrors after repointing the Azure entry:"
             cat /etc/apt/apt-mirrors.txt
           fi
@@ -408,6 +417,7 @@ jobs:
           bash scripts/test/split-sizing-docs.test.sh
           bash scripts/test/client-ci-budget.test.sh
           bash scripts/test/client-cache-parity.test.sh
+          bash scripts/test/apt-mirror-repoint.test.sh
           bash scripts/test/client-data-home-isolation.test.sh
           bash scripts/test/auth-dir-docs.test.sh
           bash scripts/test/helpers-selector-docs.test.sh
