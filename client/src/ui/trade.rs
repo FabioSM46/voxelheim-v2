@@ -2,7 +2,9 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::ui::FocusPolicy;
 
-use super::text_input::{Modifiers, TextEdit, TextField};
+use super::text_input::{
+    FieldPieces, FieldSpan, Modifiers, TextEdit, TextField, paint_span, spawn_field_spans,
+};
 use super::{BUTTON, CELL_EDGE, button_colour, cell_node, icon, stack_style};
 use crate::net::{InventoryStack, PLAYER_TRADE_SLOTS, PlayerTradeSlot, Session};
 use crate::player::{
@@ -27,8 +29,22 @@ struct TradePress {
 #[derive(Component)]
 struct SilverField;
 
-#[derive(Component)]
+/// One of the spans the silver amount is drawn in.
+#[derive(Component, Clone)]
 struct SilverFieldText;
+
+/// The silver amount's spans, which [`edit_silver`] repaints.
+type SilverSpans<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static FieldSpan,
+        &'static mut TextSpan,
+        &'static mut TextColor,
+        &'static mut TextBackgroundColor,
+    ),
+    With<SilverFieldText>,
+>;
 
 #[derive(Resource, Debug, Default)]
 struct SilverDraft {
@@ -132,7 +148,7 @@ fn rebuild_window(
                     state.my_silver,
                     state.my_confirmed,
                     true,
-                    draft.line.text(),
+                    &draft.line.pieces(draft.focused),
                     liveries.as_deref(),
                 );
                 spawn_offer_column(
@@ -142,7 +158,7 @@ fn rebuild_window(
                     state.their_silver,
                     state.their_confirmed,
                     false,
-                    "",
+                    &TextField::default().pieces(false),
                     liveries.as_deref(),
                 );
             });
@@ -212,7 +228,7 @@ fn spawn_offer_column(
     silver: u32,
     confirmed: bool,
     mine: bool,
-    silver_line: &str,
+    silver_line: &FieldPieces,
     liveries: Option<&Liveries>,
 ) {
     columns
@@ -260,11 +276,20 @@ fn spawn_offer_column(
                         },
                         BackgroundColor(if confirmed { LOCKED } else { BUTTON }),
                     ))
-                    .with_child((
-                        SilverFieldText,
-                        trade_text(format!("Silver: {silver_line}"), 15.0),
-                        FocusPolicy::Pass,
-                    ));
+                    .with_children(|field| {
+                        let (label, font, colour) = trade_text("Silver: ", 15.0);
+                        field
+                            .spawn((label, font.clone(), colour, FocusPolicy::Pass))
+                            .with_children(|label| {
+                                spawn_field_spans(
+                                    label,
+                                    silver_line,
+                                    &font,
+                                    colour.0,
+                                    SilverFieldText,
+                                );
+                            });
+                    });
             } else {
                 column.spawn(trade_text(format!("Silver: {silver}"), 15.0));
             }
@@ -365,7 +390,7 @@ fn edit_silver(
     mut keys: MessageReader<KeyboardInput>,
     held: Option<Res<ButtonInput<KeyCode>>>,
     mut fields: Query<(&Interaction, &mut BackgroundColor), With<SilverField>>,
-    mut labels: Query<&mut Text, With<SilverFieldText>>,
+    mut labels: SilverSpans,
     mut clicks: MessageWriter<PlayerTradeClick>,
 ) {
     let events: Vec<KeyboardInput> = keys.read().cloned().collect();
@@ -379,6 +404,7 @@ fn edit_silver(
     if state.my_confirmed {
         draft.focused = false;
         colour.0 = LOCKED;
+        draw_silver(&draft.line, false, &mut labels);
         return;
     }
     colour.0 = if draft.focused {
@@ -407,8 +433,16 @@ fn edit_silver(
             clicks.write(PlayerTradeClick::SetSilver(silver));
         }
     }
-    for mut label in &mut labels {
-        label.0 = format!("Silver: {}", draft.line.text());
+    draw_silver(&draft.line, draft.focused, &mut labels);
+}
+
+/// Draws the amount, with a caret and a selection only while the field has the keyboard.
+fn draw_silver(line: &TextField, focused: bool, labels: &mut SilverSpans) {
+    let pieces = line.pieces(focused);
+    for (slot, span, colour, background) in labels {
+        if let Some(piece) = pieces.get(slot.0) {
+            paint_span(piece, Color::WHITE, span, colour, background);
+        }
     }
 }
 
@@ -546,7 +580,19 @@ mod tests {
         let mut texts = world.query::<&Text>();
         let text: Vec<_> = texts.iter(world).map(|text| text.0.as_str()).collect();
         assert!(text.contains(&"Trade with Eirik"));
-        assert!(text.contains(&"Silver: 12") && text.contains(&"Silver: 23"));
+        assert!(text.contains(&"Silver: ") && text.contains(&"Silver: 23"));
         assert!(text.iter().any(|line| line.contains("5/10")));
+
+        let mut mine = world.query_filtered::<(&FieldSpan, &TextSpan), With<SilverFieldText>>();
+        let mut spans: Vec<_> = mine
+            .iter(world)
+            .map(|(slot, span)| (slot.0, span.0.clone()))
+            .collect();
+        spans.sort_by_key(|span| span.0);
+        assert_eq!(
+            spans.into_iter().map(|span| span.1).collect::<String>(),
+            "12",
+            "the amount is drawn in its spans, and unfocused it has no caret"
+        );
     }
 }

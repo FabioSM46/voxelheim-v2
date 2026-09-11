@@ -75,7 +75,7 @@ use bevy::ui::{FocusPolicy, UiGlobalTransform, UiSystems};
 use bevy::window::PrimaryWindow;
 
 use super::compass::coordinates_reading;
-use super::text_input::{Modifiers, TextEdit, TextField};
+use super::text_input::{FieldSpan, Modifiers, TextEdit, TextField, paint_span, spawn_field_spans};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 use crate::net::{
     CHUNK_COLUMN_BLOCKS, Landmark, LandmarkList, MAP_TILE_EDGE, MARKER_NOTE_MAX_BYTES, MapColumn,
@@ -2206,8 +2206,8 @@ struct MarkerFormTitle;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct MarkerKindButton(MarkerKind);
 
-/// The note as it has been typed.
-#[derive(Component)]
+/// One of the spans the note is drawn in, caret and selection included.
+#[derive(Component, Clone)]
 struct MarkerNoteText;
 
 /// The two buttons that end the form.
@@ -2298,16 +2298,21 @@ fn spawn_marker_form(overlay: &mut ChildSpawnerCommands<'_>) {
                 FocusPolicy::Pass,
             ))
             .with_children(|field| {
-                field.spawn((
-                    MarkerNoteText,
-                    Text::new(String::new()),
-                    TextFont {
-                        font_size: FontSize::Px(READING_SIZE),
-                        ..default()
-                    },
-                    TextColor(READING),
-                    FocusPolicy::Pass,
-                ));
+                let font = TextFont {
+                    font_size: FontSize::Px(READING_SIZE),
+                    ..default()
+                };
+                field
+                    .spawn((
+                        Text::new(String::new()),
+                        font.clone(),
+                        TextColor(READING),
+                        FocusPolicy::Pass,
+                    ))
+                    .with_children(|note| {
+                        let pieces = TextField::default().pieces(false);
+                        spawn_field_spans(note, &pieces, &font, READING, MarkerNoteText);
+                    });
             });
             form.spawn((
                 Node {
@@ -2608,7 +2613,15 @@ fn refresh_the_form(
     windows: Query<&Window, With<PrimaryWindow>>,
     mut roots: Query<(&mut Node, &mut Visibility), With<MarkerFormRoot>>,
     mut titles: Query<&mut Text, (With<MarkerFormTitle>, Without<MarkerNoteText>)>,
-    mut notes: Query<&mut Text, With<MarkerNoteText>>,
+    mut notes: Query<
+        (
+            &FieldSpan,
+            &mut TextSpan,
+            &mut TextColor,
+            &mut TextBackgroundColor,
+        ),
+        With<MarkerNoteText>,
+    >,
     mut kinds: Query<(
         &MarkerKindButton,
         &Interaction,
@@ -2647,9 +2660,12 @@ fn refresh_the_form(
             text.0 = title.clone();
         }
     }
-    for mut text in &mut notes {
-        if text.0 != draft.note.text() {
-            text.0 = draft.note.text().to_owned();
+    // The note is always the field being typed into while the form is up, so it is drawn
+    // focused: the caret and the selection are where the next key will land.
+    let pieces = draft.note.pieces(true);
+    for (slot, span, colour, background) in &mut notes {
+        if let Some(piece) = pieces.get(slot.0) {
+            paint_span(piece, READING, span, colour, background);
         }
     }
     for (button, interaction, mut background, mut border) in &mut kinds {
@@ -5119,15 +5135,28 @@ mod tests {
             "the field refuses the byte past the server's bound"
         );
 
-        // And the drawn field says what the note is.
-        let drawn = app
-            .world_mut()
-            .query_filtered::<&Text, With<MarkerNoteText>>()
-            .iter(app.world())
-            .next()
-            .map(|text| text.0.clone())
-            .expect("the form has a note field");
-        assert_eq!(drawn, note);
+        // And the drawn field says what the note is, with the caret where the cursor is.
+        let drawn = |app: &mut App| {
+            let mut spans: Vec<(usize, String)> = app
+                .world_mut()
+                .query_filtered::<(&FieldSpan, &TextSpan), With<MarkerNoteText>>()
+                .iter(app.world())
+                .map(|(slot, span)| (slot.0, span.0.clone()))
+                .collect();
+            spans.sort_by_key(|span| span.0);
+            spans.into_iter().map(|span| span.1).collect::<String>()
+        };
+        assert_eq!(
+            drawn(&mut app),
+            format!("{note}{}", crate::ui::text_input::CARET)
+        );
+        typing(&mut app, Key::Home);
+        app.update();
+        assert_eq!(
+            drawn(&mut app),
+            format!("{}{note}", crate::ui::text_input::CARET),
+            "a cursor the player moves is a cursor the player can see"
+        );
     }
 
     #[test]

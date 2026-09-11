@@ -19,7 +19,7 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
-use super::text_input::{Modifiers, TextEdit, TextField};
+use super::text_input::{FieldSpan, Modifiers, TextEdit, TextField, paint_span, spawn_field_spans};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
 const LINE_COUNT: usize = 8;
@@ -172,74 +172,35 @@ fn spawn_chat(mut commands: Commands) {
             GlobalZIndex(14),
         ))
         .with_children(|input| {
-            for index in 0..DRAFT_SPANS {
-                input.spawn((
-                    DraftSpan(index),
-                    TextSpan::new(String::new()),
-                    TextFont {
-                        font_size: FONT_SIZE,
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
-                    TextBackgroundColor(Color::NONE),
-                ));
-            }
+            spawn_field_spans(
+                input,
+                &TextField::default().pieces(false),
+                &TextFont {
+                    font_size: FONT_SIZE,
+                    ..default()
+                },
+                Color::WHITE,
+                DraftSpan,
+            );
         });
 }
 
-/// How many spans the draft is drawn in: the text before, two middle pieces and the text after.
-///
-/// Fixed, so the spans are spawned once and only their contents move. See [`draft_pieces`].
-const DRAFT_SPANS: usize = 4;
+/// Marks the draft's spans, which `ui/text_input.rs` fills.
+#[derive(Component, Clone)]
+struct DraftSpan;
 
-/// One of the draft's [`DRAFT_SPANS`] spans, by position.
-#[derive(Component)]
-struct DraftSpan(usize);
-
-/// The caret, drawn as a character in the line.
-///
-/// A glyph and not a rectangle, because the font is monospaced and the glyph lands exactly
-/// where the cursor is without a layout query; the price is one column the line is wider by
-/// while it is being typed. `|` is in the 95 printable ASCII glyphs `default_font` carries.
-const CARET: &str = "|";
-const CARET_COLOUR: Color = Color::srgb(1.0, 0.72, 0.25);
-const SELECTION_BACKGROUND: Color = Color::srgba(0.35, 0.55, 0.95, 0.6);
-
-/// How one span of the draft is drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DraftLook {
-    Plain,
-    Selected,
-    Caret,
-}
-
-/// The draft cut into [`DRAFT_SPANS`] spans: text before, the caret and the selection in the
-/// order the cursor puts them, text after.
-///
-/// The cursor is always one end of the selection, so the caret sits before the selected span
-/// when the selection was made leftward and after it when it was made rightward, and a middle
-/// span is empty when nothing is selected.
-fn draft_pieces(field: &TextField) -> [(String, DraftLook); DRAFT_SPANS] {
-    let text = field.text();
-    let caret = (CARET.to_owned(), DraftLook::Caret);
-    let Some(selection) = field.selection() else {
-        let (before, after) = text.split_at(field.cursor());
-        return [
-            (before.to_owned(), DraftLook::Plain),
-            caret,
-            (String::new(), DraftLook::Plain),
-            (after.to_owned(), DraftLook::Plain),
-        ];
-    };
-    let before = (text[..selection.start].to_owned(), DraftLook::Plain);
-    let selected = (text[selection.clone()].to_owned(), DraftLook::Selected);
-    let after = (text[selection.end..].to_owned(), DraftLook::Plain);
-    if field.cursor() == selection.start {
-        [before, caret, selected, after]
-    } else {
-        [before, selected, caret, after]
-    }
-}
+/// The draft's spans, apart from the log lines that share their colour component.
+type DraftSpans<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static FieldSpan,
+        &'static mut TextSpan,
+        &'static mut TextColor,
+        &'static mut TextBackgroundColor,
+    ),
+    (With<DraftSpan>, Without<ChatText>),
+>;
 
 fn ingest_server_lines(
     time: Res<Time<Real>>,
@@ -510,15 +471,7 @@ fn render_chat(
     time: Res<Time<Real>>,
     mut lines: Query<(&ChatText, &mut Text, &mut TextColor)>,
     mut input: Query<&mut Text, (With<ChatInput>, Without<ChatText>)>,
-    mut spans: Query<
-        (
-            &DraftSpan,
-            &mut TextSpan,
-            &mut TextColor,
-            &mut TextBackgroundColor,
-        ),
-        Without<ChatText>,
-    >,
+    mut spans: DraftSpans,
 ) {
     let visible = matches!(*mode, InputMode::Playing | InputMode::Chat);
     let now = time.elapsed();
@@ -536,28 +489,22 @@ fn render_chat(
     let Ok(mut input) = input.single_mut() else {
         return;
     };
-    if *mode != InputMode::Chat {
+    let typing = *mode == InputMode::Chat;
+    if typing {
+        input.0 = "> ".to_owned();
+    } else {
         input.0.clear();
-        for (_, mut span, _, _) in &mut spans {
-            span.0.clear();
-        }
-        return;
     }
-    input.0 = "> ".to_owned();
-    let pieces = draft_pieces(&draft.0);
-    for (slot, mut span, mut colour, mut background) in &mut spans {
-        let Some((text, look)) = pieces.get(slot.0) else {
-            continue;
-        };
-        span.0.clone_from(text);
-        colour.0 = match look {
-            DraftLook::Caret => CARET_COLOUR,
-            DraftLook::Plain | DraftLook::Selected => Color::WHITE,
-        };
-        background.0 = match look {
-            DraftLook::Selected => SELECTION_BACKGROUND,
-            DraftLook::Plain | DraftLook::Caret => Color::NONE,
-        };
+    // Closed, the draft draws as nothing at all -- an empty line, not an unfocused one.
+    let pieces = if typing {
+        draft.0.pieces(true)
+    } else {
+        TextField::default().pieces(false)
+    };
+    for (slot, span, colour, background) in &mut spans {
+        if let Some(piece) = pieces.get(slot.0) {
+            paint_span(piece, Color::WHITE, span, colour, background);
+        }
     }
 }
 
@@ -575,6 +522,7 @@ fn line_alpha(mode: InputMode, visible: bool, age: Duration) -> f32 {
 mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, ChatMessage, PartyInvite, SessionParams};
+    use crate::ui::text_input::{CARET, CARET_COLOUR, SELECTION_BACKGROUND};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -677,39 +625,6 @@ mod tests {
         field.apply_key(&press, modifiers, DRAFT_LIMIT_BYTES);
     }
 
-    fn texts(pieces: &[(String, DraftLook); DRAFT_SPANS]) -> [&str; DRAFT_SPANS] {
-        [0, 1, 2, 3].map(|index| pieces[index].0.as_str())
-    }
-
-    #[test]
-    fn the_caret_sits_at_the_cursor_and_on_the_moving_end_of_a_selection() {
-        let shift = Modifiers {
-            shift: true,
-            control: false,
-        };
-
-        let resting = draft_pieces(&field_with(
-            "hello",
-            &[Key::ArrowLeft],
-            Modifiers::default(),
-        ));
-        assert_eq!(texts(&resting), ["hell", CARET, "", "o"]);
-        assert_eq!(resting[1].1, DraftLook::Caret);
-
-        let leftward = draft_pieces(&field_with("hello", &[const { Key::ArrowLeft }; 2], shift));
-        assert_eq!(texts(&leftward), ["hel", CARET, "lo", ""]);
-        assert_eq!(leftward[2].1, DraftLook::Selected);
-
-        let mut rightward = field_with("hello", &[Key::Home], Modifiers::default());
-        press_on(&mut rightward, Key::ArrowRight, shift);
-        let rightward = draft_pieces(&rightward);
-        assert_eq!(texts(&rightward), ["", "h", CARET, "ello"]);
-        assert_eq!(rightward[1].1, DraftLook::Selected);
-
-        let empty = draft_pieces(&TextField::default());
-        assert_eq!(texts(&empty), ["", CARET, "", ""]);
-    }
-
     #[test]
     fn the_draft_is_drawn_with_a_caret_and_a_highlighted_selection_only_while_typing() {
         let mut app = App::new();
@@ -731,7 +646,7 @@ mod tests {
         let drawn = |app: &mut App| {
             let mut spans: Vec<(usize, String, Color, Color)> = app
                 .world_mut()
-                .query::<(&DraftSpan, &TextSpan, &TextColor, &TextBackgroundColor)>()
+                .query_filtered::<(&FieldSpan, &TextSpan, &TextColor, &TextBackgroundColor), With<DraftSpan>>()
                 .iter(app.world())
                 .map(|(slot, span, colour, background)| {
                     (slot.0, span.0.clone(), colour.0, background.0)
