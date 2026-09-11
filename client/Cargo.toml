@@ -16,9 +16,10 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-# Five dependencies, all GDD-level architecture. A sixth needs a discussion,
+# Six dependencies, all GDD-level architecture. A seventh needs a discussion,
 # not a commit — see client/AGENTS.md. The fourth and fifth were argued on the record
-# before either was added: docs/adr/0001-voice-transport.md.
+# before either was added: docs/adr/0001-voice-transport.md; the sixth in
+# docs/adr/0003-system-clipboard.md.
 #
 # `default-features = false` plus an explicit list, because Bevy's `default`
 # feature is `2d + 3d + ui + audio`: it drags in glTF, PBR, animation, image
@@ -151,6 +152,20 @@ cpal = "0.16"
 # the ADR — `libopus_sys` 0.4, which keeps the `pkg-config` property for the price of a
 # hand-written `unsafe` layer. Two lockfile entries and no runtime dependency beyond them.
 audiopus = "0.3.0-rc.0"
+
+# The sixth crate: the system clipboard, for Control+C / X / V in text fields. The discussion
+# is **docs/adr/0003-system-clipboard.md**, approved in the feature-spec of 2026-09-11. winit
+# has no clipboard API, shelling out to `xclip` or `wl-paste` works only where somebody
+# installed them, and Bevy's own `system_clipboard` feature is this same crate behind a resource
+# whose backend is chosen at compile time -- which leaves no in-memory clipboard for tests.
+#
+# `default-features = false` and nothing enabled. The default `image-data` pulls the `image`
+# crate to copy pictures, and a text field copies text. `wayland-data-control` is left off
+# because the window is X11 (see `x11` above) and XWayland bridges its clipboard. Measured on
+# x86_64-unknown-linux-gnu, the normal graph grows by `arboard` alone: `x11rb`, `log`,
+# `parking_lot` and `percent-encoding` were already here through winit, and nothing new
+# declares `links`, so the CI apt list is unchanged.
+arboard = { version = "3.6.1", default-features = false }
 
 # No `[lints] unsafe_code = "forbid"`, deliberately: flatc's output is full of
 # `unsafe` accessor bodies, and a crate-level `forbid` cannot be relaxed by an
