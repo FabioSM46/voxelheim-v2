@@ -287,23 +287,145 @@ pub(super) fn assemble(p: Controls, feet: [Vec3; 2]) -> [Transform; 17] {
     })
 }
 
-pub(in super::super) fn sample(
-    motion: &super::motion::Motion,
-    one: Option<&PresentedMove>,
-    yaw: f32,
-) -> [Transform; 17] {
-    let Some(one) =
-        one.filter(|one| one.window == Window::Current && one.announced.ended.is_none())
-    else {
-        return motion.transforms;
+/// A wrist articulation of the blade about the achieved grip, in radians: `yaw` swings the
+/// blade's direction about the vertical, `raise` lifts its tip (negative lowers it).
+///
+/// Both are weighted by how horizontal the authored blade is, so a blade held upright overhead
+/// or planted straight down is unchanged, and a pose that is already clear of terrain uses
+/// [`Wrist::AUTHORED`] and is bit-for-bit the authored one. The grip, timing, aim twist and
+/// every other joint target stay authored; only where the blade points past the hands changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(in super::super) struct Wrist {
+    pub yaw: f32,
+    pub raise: f32,
+}
+
+impl Wrist {
+    pub(in super::super) const AUTHORED: Self = Self {
+        yaw: 0.0,
+        raise: 0.0,
     };
+}
+
+const fn wrist(yaw: f32, raise: f32) -> Wrist {
+    Wrist { yaw, raise }
+}
+
+/// The variants a planted blow may take beside terrain, in preference order: the authored
+/// stroke, then each articulation from the smallest departure to the largest.
+pub(super) const WRISTS: [Wrist; 13] = [
+    Wrist::AUTHORED,
+    wrist(0.0, 0.5),
+    wrist(0.0, -0.5),
+    wrist(0.5, 0.0),
+    wrist(-0.5, 0.0),
+    wrist(0.0, 0.9),
+    wrist(0.0, -0.9),
+    wrist(0.9, 0.0),
+    wrist(-0.9, 0.0),
+    wrist(0.0, 1.25),
+    wrist(0.0, -1.25),
+    wrist(1.25, 0.0),
+    wrist(-1.25, 0.0),
+];
+
+fn articulate(blade: Quat, wrist: Wrist) -> Quat {
+    if wrist == Wrist::AUTHORED {
+        return blade;
+    }
+    let along = blade * -Vec3::Y;
+    let level = along.xz().length();
+    let lift = along.cross(Vec3::Y).normalize_or_zero();
+    Quat::from_rotation_y(wrist.yaw * level)
+        * Quat::from_axis_angle(lift, wrist.raise * level)
+        * blade
+}
+
+/// A current, unended window: the only kind this module poses.
+pub(super) fn live(one: Option<&PresentedMove>) -> Option<&PresentedMove> {
+    one.filter(|one| one.window == Window::Current && one.announced.ended.is_none())
+}
+
+/// The planted blows whose blade reaches past the body: the Sentence and the three Tolls.
+pub(super) fn planted_blow(one: &PresentedMove) -> bool {
+    matches!(
+        one.announced.kind,
+        EncounterMoveKind::KingsSentence | EncounterMoveKind::ThreeTolls
+    )
+}
+
+/// The authored controls for this window, with the crown and the locked aim applied.
+fn authored(motion: &super::motion::Motion, one: &PresentedMove, yaw: f32) -> Controls {
     let mut p = controls(one);
     p.crown = motion.regalia.crown();
     if let Some(aim) = one.announced.aim {
         let local = Quat::from_rotation_y(-yaw) * Vec3::from_array(aim);
         p.twist += (-local.x).atan2(-local.z).clamp(-0.25, 0.25);
     }
+    p
+}
+
+/// The pose these controls assemble into, with the blade articulated at the wrist.
+pub(super) fn pose(
+    motion: &super::motion::Motion,
+    mut p: Controls,
+    wrist: Wrist,
+) -> [Transform; 17] {
+    p.blade = articulate(p.blade, wrist);
     let mut pose = assemble(p, super::motion::REST_FEET);
     motion.regalia.dress(&mut pose);
     pose
+}
+
+/// Whether both hands still hold the weapon in a pose these controls assembled: the right palm
+/// on the grip and, for a two-handed stroke, the left on the second grip. A wrist variant
+/// that asks an arm past its rigid reach would let go, which is not a stroke at all.
+pub(super) fn held(pose: &[Transform; 17], p: &Controls) -> bool {
+    use Segment::*;
+    let palm = Vec3::new(0.39, 1.39, -0.02);
+    let right = pose[ForeRight as usize].transform_point(palm);
+    let grip = pose[Blade as usize].transform_point(palm);
+    let left = pose[ForeLeft as usize].transform_point(Vec3::new(-0.39, 1.39, -0.02));
+    let second = pose[Blade as usize].transform_point(Vec3::new(0.39, 1.49, -0.02));
+    right.distance(grip) < 0.002 && (!p.two_hands || left.distance(second) < 0.003)
+}
+
+/// How many samples each phase of a blow is judged at, both ends included.
+pub(super) const PHASE_SAMPLES: u32 = 21;
+
+/// The authored controls of every preparation, release and recovery sample of this blow,
+/// whichever phase is being presented now: a variant is chosen for the whole blow, so no
+/// phase boundary can switch strokes.
+pub(super) fn frames(
+    motion: &super::motion::Motion,
+    one: &PresentedMove,
+    yaw: f32,
+) -> Vec<Controls> {
+    [
+        MovePhase::Telegraph,
+        MovePhase::Release,
+        MovePhase::Recovery,
+    ]
+    .into_iter()
+    .flat_map(|phase| {
+        (0..PHASE_SAMPLES).map(move |i| {
+            let mut at = one.clone();
+            at.announced.phase = phase;
+            at.announced.phase_ticks = PHASE_SAMPLES;
+            at.remaining_ticks = PHASE_SAMPLES - i;
+            authored(motion, &at, yaw)
+        })
+    })
+    .collect()
+}
+
+pub(in super::super) fn sample(
+    motion: &super::motion::Motion,
+    one: Option<&PresentedMove>,
+    yaw: f32,
+) -> [Transform; 17] {
+    let Some(one) = live(one) else {
+        return motion.transforms;
+    };
+    pose(motion, authored(motion, one, yaw), motion.wrist(one))
 }

@@ -141,6 +141,263 @@ pub(super) fn vertices(segment: Segment, transform: Transform) -> Vec<Vec3> {
         .collect()
 }
 
+/// The planted blows: the Sentence and the three Tolls.
+const BLOWS: [(EncounterMoveKind, Option<(u8, u8)>); 4] = [MOVES[0], MOVES[1], MOVES[2], MOVES[3]];
+
+/// A king standing where the chamber capture measured him (#1037): a floor top at y = 1, facing
+/// +X with the monolith column's face 1.1 blocks ahead of his root.
+const STANCE: Vec3 = Vec3::new(22.9, 1.0, 60.5);
+const TOWARD_MONOLITH: f32 = -std::f32::consts::FRAC_PI_2;
+
+type Terrain = fn(IVec3) -> bool;
+
+fn floor(voxel: IVec3) -> bool {
+    voxel.y <= 0
+}
+fn monolith(voxel: IVec3) -> bool {
+    floor(voxel) || (voxel.x == 24 && voxel.z == 60 && (1..=4).contains(&voxel.y))
+}
+fn wall_ahead(voxel: IVec3) -> bool {
+    floor(voxel) || voxel.x >= 24
+}
+/// The monolith ahead and a wall 1.1 blocks to his right (+Z when facing +X).
+fn corner_right(voxel: IVec3) -> bool {
+    monolith(voxel) || voxel.z >= 62
+}
+/// The monolith ahead and a wall 1.1 blocks to his left.
+fn corner_left(voxel: IVec3) -> bool {
+    monolith(voxel) || voxel.z <= 58
+}
+
+/// The scenes, each with the root that puts its faces 1.1 blocks away.
+const SCENES: [(&str, Terrain, Vec3); 4] = [
+    ("monolith", monolith, STANCE),
+    ("wall", wall_ahead, STANCE),
+    ("corner-right", corner_right, Vec3::new(22.9, 1.0, 60.9)),
+    ("corner-left", corner_left, Vec3::new(22.9, 1.0, 60.1)),
+];
+
+/// `presented` for a king at `yaw`: the locked aim turns with him, as the server announces it.
+fn presented_at(
+    kind: EncounterMoveKind,
+    combo: Option<(u8, u8)>,
+    phase: MovePhase,
+    progress: f32,
+    yaw: f32,
+) -> PresentedMove {
+    let mut one = presented(kind, combo, phase, progress);
+    one.announced.aim = one
+        .announced
+        .aim
+        .map(|aim| (Quat::from_rotation_y(yaw) * Vec3::from_array(aim)).to_array());
+    one
+}
+
+/// Model vertices inside solid terrain in one pose, by the chamber capture's measure.
+fn buried_vertices(pose: &[Transform; 17], root: Vec3, yaw: f32, terrain: Terrain) -> usize {
+    let placed = Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), root);
+    SEGMENTS
+        .iter()
+        .zip(pose)
+        .map(|(&segment, transform)| {
+            let matrix = placed * transform.to_matrix();
+            motion::ground_points(segment)
+                .iter()
+                .filter(|&&point| motion::buried(matrix.transform_point3(point), root.y, &terrain))
+                .count()
+        })
+        .sum()
+}
+
+/// Every preparation, release and recovery sample of a blow, as the production pose pass
+/// presents it after `choose` has seen the blow's first preparation frame.
+fn blow_samples(
+    kind: EncounterMoveKind,
+    combo: Option<(u8, u8)>,
+    root: Vec3,
+    yaw: f32,
+    terrain: Terrain,
+) -> Vec<(MovePhase, u32, [Transform; 17])> {
+    let mut motion = motion::Motion::new(root, yaw, MobAction::Windup);
+    let mut samples = Vec::new();
+    for phase in [
+        MovePhase::Telegraph,
+        MovePhase::Release,
+        MovePhase::Recovery,
+    ] {
+        for sample in 0..21 {
+            let one = presented_at(kind, combo, phase, sample as f32 / 20.0, yaw);
+            motion.choose_blade(Some(&one), root, yaw, terrain);
+            samples.push((
+                phase,
+                sample,
+                choreography::sample(&motion, Some(&one), yaw),
+            ));
+        }
+    }
+    samples
+}
+
+#[test]
+fn a_planted_blow_beside_terrain_keeps_every_vertex_out_of_it_with_the_authored_hands() {
+    use Segment::*;
+    let yaw = TOWARD_MONOLITH;
+    for (scene, terrain, root) in SCENES {
+        for (kind, combo) in BLOWS {
+            let authored = blow_samples(kind, combo, root, yaw, floor);
+            let chosen = blow_samples(kind, combo, root, yaw, terrain);
+            let before: usize = authored
+                .iter()
+                .map(|(_, _, pose)| buried_vertices(pose, root, yaw, terrain))
+                .sum();
+            assert!(
+                before > 0,
+                "{scene} {kind:?} {combo:?}: the fixture reproduces the measured clipping"
+            );
+            for ((phase, sample, pose), (_, _, original)) in chosen.iter().zip(&authored) {
+                let at = format!("{scene} {kind:?} {combo:?} {phase:?} {sample}");
+                assert_eq!(buried_vertices(pose, root, yaw, terrain), 0, "{at}");
+                // The same grip at the same moment: only where the blade points past the hands
+                // differs, so the stroke keeps the announced timing and the locked aim's twist.
+                let grip = Vec3::new(0.42, 1.39, -0.115);
+                let moved = pose[Blade as usize]
+                    .transform_point(grip)
+                    .distance(original[Blade as usize].transform_point(grip));
+                assert!(moved < 0.01, "{at}: the grip moved {moved}");
+                for segment in SEGMENTS {
+                    if ![Blade, UpperLeft, UpperRight, ForeLeft, ForeRight].contains(&segment) {
+                        assert_eq!(
+                            pose[segment as usize], original[segment as usize],
+                            "{at}: {segment:?} left its authored pose"
+                        );
+                    }
+                }
+                let right = pose[ForeRight as usize].transform_point(Vec3::new(0.39, 1.39, -0.02));
+                let held = pose[Blade as usize].transform_point(Vec3::new(0.39, 1.39, -0.02));
+                assert!(right.distance(held) < 0.002, "{at}: detached blade");
+                let left = pose[ForeLeft as usize].transform_point(Vec3::new(-0.39, 1.39, -0.02));
+                let second = pose[Blade as usize].transform_point(Vec3::new(0.39, 1.49, -0.02));
+                assert!(
+                    left.distance(second) < 0.003,
+                    "{at}: left hand missed the grip"
+                );
+                for transform in pose {
+                    assert!(
+                        transform.scale.abs_diff_eq(Vec3::ONE, 0.001),
+                        "{at}: scaled"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn away_from_terrain_every_planted_blow_is_the_authored_pose() {
+    let yaw = TOWARD_MONOLITH;
+    // Open floor, and a monolith 4.1 blocks ahead: inside what is read, beyond any reach.
+    let distant = |voxel: IVec3| floor(voxel) || (voxel.x == 27 && voxel.z == 60 && voxel.y >= 1);
+    for terrain in [floor as Terrain, |_| false, distant] {
+        for (kind, combo) in BLOWS {
+            let mut motion = motion::Motion::new(STANCE, yaw, MobAction::Windup);
+            let untouched = motion::Motion::new(STANCE, yaw, MobAction::Windup);
+            for phase in [
+                MovePhase::Telegraph,
+                MovePhase::Release,
+                MovePhase::Recovery,
+            ] {
+                for sample in 0..21 {
+                    let one = presented_at(kind, combo, phase, sample as f32 / 20.0, yaw);
+                    motion.choose_blade(Some(&one), STANCE, yaw, terrain);
+                    assert_eq!(motion.wrist(&one), choreography::Wrist::AUTHORED);
+                    assert_eq!(
+                        choreography::sample(&motion, Some(&one), yaw),
+                        choreography::sample(&untouched, Some(&one), yaw),
+                        "{kind:?} {combo:?} {phase:?} {sample}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_blade_variant_is_chosen_once_per_blow_and_again_for_a_new_blow_or_stance() {
+    let yaw = TOWARD_MONOLITH;
+    let open: Terrain = |_| false;
+    let mut motion = motion::Motion::new(STANCE, yaw, MobAction::Windup);
+    let mut one = presented_at(
+        EncounterMoveKind::KingsSentence,
+        None,
+        MovePhase::Telegraph,
+        0.0,
+        yaw,
+    );
+    motion.choose_blade(Some(&one), STANCE, yaw, monolith);
+    let chosen = motion.wrist(&one);
+    assert_ne!(
+        chosen,
+        choreography::Wrist::AUTHORED,
+        "the monolith needs a variant"
+    );
+    one.announced.phase = MovePhase::Release;
+    motion.choose_blade(Some(&one), STANCE, yaw, open);
+    assert_eq!(
+        motion.wrist(&one),
+        chosen,
+        "a phase change keeps the blow's variant"
+    );
+
+    let moved = STANCE - Vec3::X * 2.0;
+    motion.choose_blade(Some(&one), moved, yaw, monolith);
+    assert_eq!(
+        motion.wrist(&one),
+        choreography::Wrist::AUTHORED,
+        "a stance two blocks back is clear and chooses again"
+    );
+
+    let mut next = one.clone();
+    next.key.instance += 1;
+    assert_eq!(
+        motion.wrist(&next),
+        choreography::Wrist::AUTHORED,
+        "a variant never carries to another blow"
+    );
+    let mut toll = presented_at(
+        EncounterMoveKind::ThreeTolls,
+        Some((1, 3)),
+        MovePhase::Telegraph,
+        0.0,
+        yaw,
+    );
+    motion.choose_blade(Some(&toll), STANCE, yaw, monolith);
+    let first = motion.wrist(&toll);
+    toll.announced.combo = Some((3, 3));
+    assert_eq!(
+        motion.wrist(&toll),
+        choreography::Wrist::AUTHORED,
+        "the thrust is not the first toll"
+    );
+    motion.choose_blade(Some(&toll), STANCE, yaw, monolith);
+    assert_ne!(motion.wrist(&toll), choreography::Wrist::AUTHORED);
+    assert_ne!(first, choreography::Wrist::AUTHORED);
+
+    // Spells and stale windows are never articulated.
+    let mut burial = presented_at(
+        EncounterMoveKind::Burial,
+        None,
+        MovePhase::Channel,
+        0.5,
+        yaw,
+    );
+    motion.choose_blade(Some(&burial), STANCE, yaw, monolith);
+    assert_eq!(motion.wrist(&burial), choreography::Wrist::AUTHORED);
+    burial.announced.kind = EncounterMoveKind::KingsSentence;
+    burial.window = Window::Upcoming;
+    motion.choose_blade(Some(&burial), STANCE, yaw, monolith);
+    assert_eq!(motion.wrist(&burial), choreography::Wrist::AUTHORED);
+}
+
 #[test]
 fn sentence_has_a_held_high_blade_a_real_downstroke_and_a_planted_opening() {
     let prepare = poses(&presented(

@@ -1,6 +1,8 @@
 //! Cosmetic contacts follow snapshot displacement. A planted boot stays in world
 //! space until the other support takes over; teleports replant instead of stretching.
+use super::choreography::Wrist;
 use super::*;
+use crate::player::encounters::PresentedMove;
 
 pub(super) const REST_FEET: [Vec3; 2] = [Vec3::new(-0.17, 0.0, 0.0), Vec3::new(0.17, 0.0, 0.0)];
 
@@ -22,6 +24,8 @@ pub(in super::super) struct Motion {
     /// Which way the corpse folds: 1 forward, the authored fall, or -1 backward. Chosen once
     /// when a fall begins, from terrain, and cleared by a replant.
     fall: Option<f32>,
+    /// The wrist articulation chosen for the planted blow being presented, from terrain.
+    blade: Option<Blade>,
     /// Mask, crown and core state. Survives a replant: a teleport is not a new fight.
     pub(in super::super) regalia: super::regalia::Regalia,
     pub(in super::super) transforms: [Transform; 17],
@@ -45,6 +49,7 @@ impl Motion {
             next: 0,
             entrance: (action == MobAction::Idle).then_some(Duration::ZERO),
             fall: None,
+            blade: None,
             regalia: default(),
             transforms: [Transform::IDENTITY; 17],
         }
@@ -212,14 +217,9 @@ impl Motion {
             let pose = self.fold(1.0, sign);
             SEGMENTS.iter().zip(&pose).any(|(&segment, transform)| {
                 let matrix = root * transform.to_matrix();
-                ground_points(segment).iter().any(|&point| {
-                    let p = matrix.transform_point3(point);
-                    let within = p - p.floor();
-                    p.y > position.y + 0.02
-                        && within.cmpge(Vec3::splat(0.02)).all()
-                        && within.cmple(Vec3::splat(0.98)).all()
-                        && solid(p.floor().as_ivec3())
-                })
+                ground_points(segment)
+                    .iter()
+                    .any(|&point| buried(matrix.transform_point3(point), position.y, &solid))
             })
         };
         self.fall = Some(if clips(1.0) && !clips(-1.0) {
@@ -227,6 +227,171 @@ impl Motion {
         } else {
             1.0
         });
+    }
+
+    /// The wrist articulation to present `one` with, if it is the blow a choice was made for.
+    pub(in super::super) fn wrist(&self, one: &PresentedMove) -> Wrist {
+        self.blade
+            .filter(|blade| blade.instance == one.key.instance && blade.step == step(one))
+            .map_or(Wrist::AUTHORED, |blade| blade.wrist)
+    }
+
+    /// Chooses once per planted blow how its blade is articulated: the authored stroke unless
+    /// some model vertex would lie inside solid terrain in a preparation, release or recovery
+    /// sample, then the first variant in [`super::choreography::WRISTS`] with none, or failing
+    /// that the one with the fewest.
+    ///
+    /// Measured in the shipped chamber (#1037): a king striking 1.1 blocks from a monolith put
+    /// 24–96 blade vertices inside it. Presentation only — the snapshot root, yaw, locked aim,
+    /// timing and announced regions are not touched, and the strike layer drawing the announced
+    /// reach does not read this choice. A new blow, or a root that moves, chooses again.
+    pub(in super::super) fn choose_blade(
+        &mut self,
+        one: Option<&PresentedMove>,
+        position: Vec3,
+        yaw: f32,
+        solid: impl Fn(IVec3) -> bool,
+    ) {
+        let Some(one) =
+            super::choreography::live(one).filter(|one| super::choreography::planted_blow(one))
+        else {
+            return;
+        };
+        if self.blade.is_some_and(|blade| {
+            blade.instance == one.key.instance
+                && blade.step == step(one)
+                && blade.position.distance(position) < 0.25
+                && (blade.yaw - yaw).abs() < 0.1
+        }) {
+            return;
+        }
+        let near = Near::read(position, &solid);
+        let wrist = if near.any {
+            self.clearest(one, position, yaw, &near)
+        } else {
+            Wrist::AUTHORED
+        };
+        self.blade = Some(Blade {
+            instance: one.key.instance,
+            step: step(one),
+            position,
+            yaw,
+            wrist,
+        });
+    }
+
+    fn clearest(&self, one: &PresentedMove, position: Vec3, yaw: f32, near: &Near) -> Wrist {
+        use Segment::*;
+        // The segments a wrist articulation moves. Every other segment is the same in every
+        // variant, so it is counted once, from the authored stroke.
+        const WIELDING: [Segment; 5] = [Blade, UpperLeft, UpperRight, ForeLeft, ForeRight];
+        let root = Mat4::from_rotation_translation(Quat::from_rotation_y(yaw), position);
+        let frames = super::choreography::frames(self, one, yaw);
+        let solid = |voxel: IVec3| near.at(voxel);
+        let count = |wrist: Wrist, wielding: bool, limit: usize| {
+            let mut clipped = 0;
+            for &p in &frames {
+                let pose = super::choreography::pose(self, p, wrist);
+                if wielding && wrist != Wrist::AUTHORED && !super::choreography::held(&pose, &p) {
+                    return usize::MAX;
+                }
+                for (&segment, transform) in SEGMENTS.iter().zip(&pose) {
+                    if WIELDING.contains(&segment) != wielding {
+                        continue;
+                    }
+                    let matrix = root * transform.to_matrix();
+                    clipped += ground_points(segment)
+                        .iter()
+                        .filter(|&&point| {
+                            buried(matrix.transform_point3(point), position.y, &solid)
+                        })
+                        .count();
+                    if clipped > limit {
+                        return clipped;
+                    }
+                }
+            }
+            clipped
+        };
+        let fixed = count(Wrist::AUTHORED, false, usize::MAX);
+        let (mut fewest, mut chosen) = (usize::MAX, Wrist::AUTHORED);
+        for wrist in super::choreography::WRISTS {
+            // Only a strictly smaller count replaces the earlier, smaller departure.
+            let limit = fewest.saturating_sub(fixed).saturating_sub(1);
+            let total = fixed.saturating_add(count(wrist, true, limit));
+            if total < fewest {
+                (fewest, chosen) = (total, wrist);
+            }
+            if fewest == 0 {
+                break;
+            }
+        }
+        chosen
+    }
+}
+
+/// The blow a wrist choice was made for, and the stance it was made in.
+#[derive(Debug, Clone, Copy)]
+struct Blade {
+    instance: u64,
+    step: u8,
+    position: Vec3,
+    yaw: f32,
+    wrist: Wrist,
+}
+
+fn step(one: &PresentedMove) -> u8 {
+    one.announced.combo.map_or(0, |(step, _)| step)
+}
+
+/// Whether a model point lies strictly inside a solid voxel above the floor the body stands on,
+/// at least 0.02 blocks from every face: the measure the chamber capture reports (#1037).
+pub(super) fn buried(point: Vec3, floor: f32, solid: &impl Fn(IVec3) -> bool) -> bool {
+    let within = point - point.floor();
+    point.y > floor + 0.02
+        && within.cmpge(Vec3::splat(0.02)).all()
+        && within.cmple(Vec3::splat(0.98)).all()
+        && solid(point.floor().as_ivec3())
+}
+
+/// The voxels a standing king's blade can reach, read once per choice so a blow's many samples
+/// never query the chunk store vertex by vertex. Nothing outside it is reachable: the blade tip
+/// is at most 2.6 blocks from the root across, and 3.8 above the floor.
+struct Near {
+    origin: IVec3,
+    cells: Vec<bool>,
+    any: bool,
+}
+
+impl Near {
+    const REACH: i32 = 4;
+    const HEIGHT: i32 = 6;
+    const SIDE: i32 = 2 * Self::REACH + 1;
+
+    /// Starts at the layer above the floor the body stands on, which [`buried`] never counts,
+    /// so a king on open floor reads no solid voxel and keeps the authored stroke at once.
+    fn read(position: Vec3, solid: &impl Fn(IVec3) -> bool) -> Self {
+        let base = (position + Vec3::Y * 0.02).floor().as_ivec3();
+        let origin = base - IVec3::new(Self::REACH, 0, Self::REACH);
+        let mut cells = Vec::with_capacity((Self::SIDE * Self::SIDE * Self::HEIGHT) as usize);
+        for y in 0..Self::HEIGHT {
+            for z in 0..Self::SIDE {
+                for x in 0..Self::SIDE {
+                    cells.push(solid(origin + IVec3::new(x, y, z)));
+                }
+            }
+        }
+        let any = cells.contains(&true);
+        Self { origin, cells, any }
+    }
+
+    fn at(&self, voxel: IVec3) -> bool {
+        let local = voxel - self.origin;
+        let side = Self::SIDE;
+        (0..side).contains(&local.x)
+            && (0..side).contains(&local.z)
+            && (0..Self::HEIGHT).contains(&local.y)
+            && self.cells[((local.y * side + local.z) * side + local.x) as usize]
     }
 }
 
@@ -263,7 +428,7 @@ pub(super) fn leg_matrices(index: usize, target: Vec3, drop: f32) -> (Mat4, Mat4
 
 // Read actual authored vertices once. A box around a slanted corpse includes
 // empty corners and would visibly float the real mesh above the floor.
-fn ground_points(segment: Segment) -> &'static [Vec3] {
+pub(super) fn ground_points(segment: Segment) -> &'static [Vec3] {
     use bevy::mesh::VertexAttributeValues;
     static POINTS: std::sync::LazyLock<[Vec<Vec3>; 17]> = std::sync::LazyLock::new(|| {
         SEGMENTS.map(|segment| {
