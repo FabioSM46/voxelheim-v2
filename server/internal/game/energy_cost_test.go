@@ -71,6 +71,18 @@ func TestAnAttackRefusedForAnotherReasonSpendsNoEnergy(t *testing.T) {
 		},
 		"shield raised": func(_ *vitalsHarness, p *Player) { p.blocking = true },
 		"dead":          func(_ *vitalsHarness, p *Player) { p.dieLocked() },
+		// What is in the hand is asked before energy, so a swing with nothing that
+		// attacks is free, exactly as a launcher with no ammunition already was.
+		"an empty slot": func(_ *vitalsHarness, p *Player) {
+			p.inventory.mu.Lock()
+			defer p.inventory.mu.Unlock()
+			p.inventory.slots[0] = inventoryStack{}
+		},
+		"a slot of stone": func(_ *vitalsHarness, p *Player) {
+			p.inventory.mu.Lock()
+			defer p.inventory.mu.Unlock()
+			p.inventory.slots[0] = stackOf(ItemStone, 10)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -89,6 +101,31 @@ func TestAnAttackRefusedForAnotherReasonSpendsNoEnergy(t *testing.T) {
 				t.Errorf("energy after a refused request = %d, want the untouched %d", player.energy, fullEnergy)
 			}
 		})
+	}
+}
+
+// A worn-through blade is still a weapon in the hand: its swing is admitted, as the repair
+// tests require, and it pays like a miss even though the tick finds it unusable. Only a
+// hand holding nothing that attacks is refused for free.
+func TestAWornThroughBladeIsAdmittedAndPaysLikeAMiss(t *testing.T) {
+	t.Parallel()
+
+	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
+	player.inventory.mu.Lock()
+	player.inventory.slots[0].durability = 0
+	player.inventory.mu.Unlock()
+
+	if reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+		t.Fatalf("a worn-through blade was refused at admission: %s, %v", reason, err)
+	}
+	h.sim.mu.Lock()
+	if want := fullEnergy - uint32(AttackEnergyCost)*energyScale; player.energy != want {
+		t.Errorf("energy after a worn blade's swing = %d, want %d", player.energy, want)
+	}
+	h.sim.mu.Unlock()
+	h.step()
+	if got := h.mobHealth(id); got != draugrRow.maxHealth {
+		t.Errorf("a worn-through blade took %d health off the draugr", draugrRow.maxHealth-got)
 	}
 }
 

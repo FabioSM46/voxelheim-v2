@@ -41,6 +41,10 @@ const (
 
 	// playtestLimitSeconds ends a fight that has not finished. Far beyond the approved
 	// design's longest intended fight, so reaching it is a finding and not a budget.
+	// **Simulated seconds, not wall time**: run counts this many ticks at DefaultTickRate
+	// and steps the simulation directly, so a slow runner cannot time a fight out, and a
+	// fight that never ends costs about two seconds of wall time to report rather than
+	// thirty minutes — a failing 900-second run took 0.73 s.
 	//
 	// **It was 900 until #1127's energy economy, and the move is that finding, recorded.**
 	// Attacks cost 25 of a reserve refilling 12.5 a second, so a player swinging whenever
