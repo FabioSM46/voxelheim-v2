@@ -1912,6 +1912,111 @@ fn leather_keeps_the_existing_rough_non_metallic_finish() {
     }
 }
 
+/// Whether one body's hair piece is drawn.
+fn hair_visibility(app: &mut App, entity_id: u64) -> Visibility {
+    let world = app.world_mut();
+    let mut owners = world.query::<(&Body, &Children)>();
+    let children: Vec<Entity> = owners
+        .iter(world)
+        .find(|(body, _)| body.0 == entity_id)
+        .map(|(_, children)| children.iter().collect())
+        .unwrap_or_default();
+    let mut pieces = world.query::<(&BodyVisual, &Visibility)>();
+    children
+        .into_iter()
+        .filter_map(|child| pieces.get(world, child).ok())
+        .find(|(visual, _)| visual.0 == BodyPiece::Hair)
+        .map(|(_, visibility)| *visibility)
+        .expect("the body draws hair")
+}
+
+/// **The rusty set is sculpted on a body and the leather set keeps the overlay cuboid**
+/// (#1130), read off the running wardrobe rather than off the builder.
+///
+/// A sculpted piece wears the livery image the hand, the cell and the drop sample, and a closed
+/// helm hides the hair under it. Swapping the helm for a cap in place swaps the meshes and shows
+/// the hair again, without respawning the body.
+#[test]
+fn a_sculpted_set_swaps_in_place_and_its_helm_hides_the_hair() {
+    let mut app = headless_player();
+    let appearance = an_appearance(HairModel::Braided);
+    let rusty = [
+        crafting::ITEM_RUSTY_HELM,
+        crafting::ITEM_RUSTY_CUIRASS,
+        crafting::ITEM_RUSTY_GREAVES,
+        0,
+    ];
+    let leather = [
+        crafting::ITEM_LEATHER_CAP,
+        crafting::ITEM_LEATHER_JERKIN,
+        crafting::ITEM_LEATHER_LEGGINGS,
+        0,
+    ];
+    describe_wearing(&mut app, 99, appearance, rusty);
+    describe_wearing(&mut app, 98, appearance, leather);
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+            state(98, [8.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let sculpted = armour_of(&mut app, 99);
+    let plain = armour_of(&mut app, 98);
+    assert_eq!(sculpted.len(), ArmourSegment::ALL.len());
+    assert_eq!(plain.len(), ArmourSegment::ALL.len());
+    let image = app.world().resource::<Liveries>().material_image();
+    for ((segment, sculpted_mesh, sculpted_material), (_, plain_mesh, plain_material)) in
+        sculpted.iter().zip(&plain)
+    {
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let vertices = |handle: &Handle<Mesh>| {
+            meshes
+                .get(handle)
+                .expect("the overlay mesh exists")
+                .count_vertices()
+        };
+        assert_eq!(
+            vertices(plain_mesh),
+            24,
+            "leather {segment:?} is no longer the overlay cuboid"
+        );
+        assert!(
+            vertices(sculpted_mesh) > 24,
+            "rusty {segment:?} is still the overlay cuboid"
+        );
+        let materials = app.world().resource::<Assets<StandardMaterial>>();
+        let texture = |handle: &Handle<StandardMaterial>| {
+            materials
+                .get(handle)
+                .expect("the overlay material exists")
+                .base_color_texture
+                .clone()
+        };
+        assert_eq!(texture(sculpted_material), Some(image.clone()));
+        assert_eq!(texture(plain_material), None);
+    }
+    assert_eq!(hair_visibility(&mut app, 99), Visibility::Hidden);
+    assert_eq!(hair_visibility(&mut app, 98), Visibility::Inherited);
+
+    let body = body_of(&mut app, 99);
+    describe_wearing(&mut app, 99, appearance, leather);
+    app.update();
+    assert_eq!(body_of(&mut app, 99), body, "the body was respawned");
+    assert_eq!(armour_of(&mut app, 99), plain);
+    assert_eq!(hair_visibility(&mut app, 99), Visibility::Inherited);
+
+    describe_wearing(&mut app, 99, appearance, rusty);
+    app.update();
+    assert_eq!(armour_of(&mut app, 99), sculpted);
+    assert_eq!(hair_visibility(&mut app, 99), Visibility::Hidden);
+}
+
 #[test]
 fn actual_snapshot_motion_swings_local_and_remote_limbs_by_one_path() {
     let mut app = headless_player();

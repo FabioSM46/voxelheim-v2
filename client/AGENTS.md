@@ -975,10 +975,12 @@ belongs to the server and a character with more hair is not a taller character.
 into meshes for the bodies the snapshots drive. Two tables would be two answers to "what does a shirt
 colour cover", and the first thing two answers do is disagree.
 
-**Twenty-two meshes for a whole settlement.** Every player is the same geometry and only the colours
+**Twenty-eight meshes for a whole settlement.** Every player is the same geometry and only the colours
 and server-described equipment differ, so each independently moving piece is merged into one mesh
-at startup — eleven fixed body pieces, one per hair model and six armour segments grouped under
-three of the four equipment slots; off-hand carries no geometry — and nothing is ever rebuilt.
+at startup — eleven fixed body pieces, one per hair model, and six armour segments grouped under
+three of the four equipment slots for each armour look (the plain overlay cuboid, and every sculpted
+style-and-livery pair the item registry names); off-hand carries no geometry — and nothing is ever
+rebuilt.
 Splitting the arms and legs creates pivots, not
 per-player geometry: every body still shares those handles. Armour is up to six optional overlay
 children; sleeves and greaves reuse the matching limb pivots, and changing worn ids adds, removes or
@@ -988,6 +990,18 @@ trousers, so different materials never share a plane. Materials are keyed on col
 the ordinary rig and leather stay rough, while the rusty set is smoother and slightly metallic. The map is
 swept against the appearances and worn ids still in view, because a server may describe colours this
 client cannot choose and a cache filled by the wire must remain a cache rather than a history.
+
+**Sculpted armour is a row fact, dispatched in one place.** An armour row in `player/items.rs` may
+name an `armour_style`; `player/armour/mod.rs` turns a style and a segment into merged lofted parts
+through one wildcard-free `match`, and a row that names none keeps the overlay cuboid. A second set
+is therefore a variant, an arm and a module beside `armour/rusty.rs` — never an `item_id ==`
+comparison. Every style is cut inside the cell `placed_armour` gives its segment, which is what
+keeps the pivots, the walk cycle and the envelope unchanged, and the tests read that off the built
+vertices rather than off the tables. A sculpted look carries texture coordinates in its livery's
+band and its material carries the livery image; recesses are a darker vertex colour. **A closed helm
+hides the hair**: every hair model reaches half a notch above the helmet's cell, and that cell is
+not armour's to grow, so `ArmourStyle::hides_hair` is the switch and
+`every_hair_model_reaches_above_the_helmets_cell` pins the reason for it.
 
 Four rules hold the numbers together:
 

@@ -1,0 +1,812 @@
+//! Sculpted armour: which silhouette a worn item is drawn from, and how one is built.
+//!
+//! **A style is a row fact, and this module is its dispatch.** An armour item names the
+//! style it is sculpted in through the registry's `armour_style` column in
+//! [`super::items`], and [`ArmourStyle::parts`] is the one wildcard-free `match` that turns a
+//! style and a segment into geometry. Nothing here compares an item id: a second set is a
+//! variant, an arm and a module beside [`rusty`], and an armour item whose row names no
+//! style is drawn as the plain overlay cuboid it always was.
+//!
+//! **Every style is cut inside the cell the cuboid filled.** [`placed_armour`] decides the
+//! box one segment occupies, and every vertex a style emits stays inside it, so the pivots,
+//! the walk cycle and the body envelope are the ones the cuboid had. What a style changes is
+//! how that box is *spent*: plates, ridges and bands at the surface, and a darker core
+//! showing through the gaps between them.
+//!
+//! # The primitive
+//!
+//! One kind of solid, [`Part`]: an octagonal section lofted through a list of [`Ring`]s. A
+//! ring is a height, an inset from the part's outline and a corner chamfer, so the same
+//! primitive is a plain box (two rings, no inset, no chamfer), a chamfered plate, a flared
+//! cuff or a domed crown. Each part is emitted flat-shaded with its own normals, texture
+//! coordinates and a per-vertex [`Tone`], and the parts of one segment are merged into the one
+//! mesh the body shares.
+//!
+//! **Authored in the model sheet's notches and axes** — `+z` is forwards, as it is in
+//! [`super::appearance`] — and converted to Bevy's space in exactly one place,
+//! [`sheet_to_body`], so the tables in a style module read against the rig they wrap.
+//!
+//! # The surface
+//!
+//! A style's parts wear the item's livery through real texture coordinates: `along` runs up
+//! the segment's cell and `across` over whichever side of it a face looks out of, both inside
+//! the livery's own band. A segment for an item with no livery points every vertex at the
+//! neutral texel instead. The recesses are darker by a vertex colour, which multiplies the
+//! material's colour and its livery alike.
+
+mod rusty;
+
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::prelude::*;
+
+use super::appearance::{ArmourSegment, NOTCH_XZ, NOTCH_Y, PlacedBox, placed_armour};
+use super::items::{Livery, armour_styles, item_armour_style, item_livery};
+use super::{livery, merge_all};
+
+/// The sculpted set one armour item is drawn as.
+///
+/// **A vocabulary of sets, not of items**: the three pieces of one set share a variant, and
+/// which segment each covers is the equipment slot's answer, never this enum's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ArmourStyle {
+    /// Old plate, worn: a knight's helm, a cuirass with pauldrons, segmented vambraces and
+    /// greaves with knee cops. See [`rusty`].
+    Rusty,
+}
+
+impl ArmourStyle {
+    /// Every style, for the sweeps. Hand-written for the reason `ItemShape::ALL` is.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 1] = [Self::Rusty];
+
+    /// The parts one segment of this style is cut from.
+    ///
+    /// **Wildcard-free**, so a new style does not compile until every segment has geometry.
+    fn parts(self, segment: ArmourSegment) -> &'static [Part] {
+        match self {
+            Self::Rusty => rusty::parts(segment),
+        }
+    }
+
+    /// Whether this style's helm closes over the hair.
+    ///
+    /// **The hair is taller than the helmet's cell**, and the cell is not this module's to
+    /// grow: every hair model's cap reaches half a notch above the top of the head cell's
+    /// second wrapping tier, and the topknot three and a half more. A closed helm drawn inside
+    /// its cell over visible hair would wear a hair-coloured lid, so a style that closes says
+    /// so and the body hides its hair while the helm is worn.
+    pub(super) const fn hides_hair(self) -> bool {
+        match self {
+            Self::Rusty => rusty::HIDES_HAIR,
+        }
+    }
+}
+
+/// Everything about an item that decides which sculpted mesh it wears.
+///
+/// **The livery belongs in it**, because it is written into the texture coordinates: two
+/// items in one style and two different metals are two meshes, and two items sharing both
+/// halves share one — the same widening `drops::MeshKey` made for a pitted blade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct ArmourLook {
+    pub(super) style: ArmourStyle,
+    pub(super) livery: Option<Livery>,
+}
+
+/// The sculpted look one item id is drawn with, or `None` for the plain overlay cuboid.
+///
+/// `None` for an unknown id and for every armour row that names no style, which is the
+/// fallback the acceptance criterion asks for rather than a guess about a newer server's item.
+pub(super) fn look(item_id: u16) -> Option<ArmourLook> {
+    item_armour_style(item_id).map(|style| ArmourLook {
+        style,
+        livery: item_livery(item_id),
+    })
+}
+
+/// Every distinct look an item in this build is drawn with, for the shared mesh cache.
+///
+/// Derived from the registry rather than the cross product of styles and liveries, so the
+/// cache holds exactly what can be worn.
+pub(super) fn looks() -> Vec<ArmourLook> {
+    armour_styles()
+        .into_iter()
+        .map(|(style, livery)| ArmourLook { style, livery })
+        .collect()
+}
+
+/// How dark a recess is drawn, as a multiplier of the material's colour.
+///
+/// **Dark enough to read as a gap at the distance a body is hardest to read**, and not black:
+/// the core of a plate is the same metal in shadow, so it keeps the livery's rust under it.
+const RECESS_SHADE: f32 = 0.55;
+
+/// Which surface one part is: the plate a player sees, or the core showing through a gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tone {
+    Plate,
+    Recess,
+}
+
+impl Tone {
+    const fn shade(self) -> f32 {
+        match self {
+            Self::Plate => 1.0,
+            Self::Recess => RECESS_SHADE,
+        }
+    }
+}
+
+/// One horizontal section of a lofted part, in notches.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Ring {
+    /// Height above the feet.
+    pub(super) y: f32,
+    /// How far this section stands in from the part's outline on every side.
+    pub(super) inset: f32,
+    /// How much each vertical corner of this section is cut, measured along both sides.
+    pub(super) chamfer: f32,
+}
+
+/// One ring, in the order a style's table reads: height, inset, chamfer.
+pub(super) const fn ring(y: f32, inset: f32, chamfer: f32) -> Ring {
+    Ring { y, inset, chamfer }
+}
+
+/// The rings one part is lofted through, lowest first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Profile {
+    /// A plain box between two heights.
+    Block { y: (f32, f32) },
+    /// A section lofted through every ring in order.
+    Loft(&'static [Ring]),
+}
+
+/// One solid of a sculpted segment, in the model sheet's notches and axes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Part {
+    /// Low and high bound to the character's right.
+    pub(super) x: (f32, f32),
+    /// Low and high bound along the way they face. **Positive is forwards.**
+    pub(super) z: (f32, f32),
+    pub(super) profile: Profile,
+    pub(super) tone: Tone,
+}
+
+impl Part {
+    /// A plain box.
+    pub(super) const fn block(x: (f32, f32), y: (f32, f32), z: (f32, f32), tone: Tone) -> Self {
+        Self {
+            x,
+            z,
+            profile: Profile::Block { y },
+            tone,
+        }
+    }
+
+    /// A section lofted through `rings`, lowest first.
+    pub(super) const fn loft(
+        x: (f32, f32),
+        z: (f32, f32),
+        rings: &'static [Ring],
+        tone: Tone,
+    ) -> Self {
+        Self {
+            x,
+            z,
+            profile: Profile::Loft(rings),
+            tone,
+        }
+    }
+
+    /// The same part on the other side of the body.
+    ///
+    /// The rig is mirrored across `x = 0` — the right sleeve, trouser and fist are the left
+    /// ones negated — so a style authors one side and mirrors it rather than keeping two
+    /// tables that could disagree.
+    pub(super) const fn mirrored(self) -> Self {
+        Self {
+            x: (-self.x.1, -self.x.0),
+            ..self
+        }
+    }
+
+    fn rings(self) -> Vec<Ring> {
+        match self.profile {
+            Profile::Block { y } => vec![
+                Ring {
+                    y: y.0,
+                    inset: 0.0,
+                    chamfer: 0.0,
+                },
+                Ring {
+                    y: y.1,
+                    inset: 0.0,
+                    chamfer: 0.0,
+                },
+            ],
+            Profile::Loft(rings) => rings.to_vec(),
+        }
+    }
+}
+
+/// Every part of one table, mirrored across the body.
+pub(super) const fn mirrored<const N: usize>(parts: [Part; N]) -> [Part; N] {
+    let mut out = parts;
+    let mut index = 0;
+    while index < N {
+        out[index] = parts[index].mirrored();
+        index += 1;
+    }
+    out
+}
+
+/// A point in the model sheet's notches, as Bevy's feet-relative blocks.
+///
+/// **The one place this module applies the sheet's sign**, for the reason
+/// `appearance::placed` is the one place the rig does: the sheet measures forwards as `+z`
+/// and a body faces `-Z`.
+fn sheet_to_body(x: f32, y: f32, z: f32) -> Vec3 {
+    Vec3::new(x * NOTCH_XZ, y * NOTCH_Y, -z * NOTCH_XZ)
+}
+
+/// One worn segment's mesh, authored around the pivot of the body piece underneath it.
+///
+/// `None` is the plain overlay: the inflated cell as one cuboid, exactly what every armour
+/// item drew before a style existed and what an item without one still draws.
+pub(super) fn segment_mesh(look: Option<ArmourLook>, segment: ArmourSegment) -> Mesh {
+    let cell = placed_armour(segment.piece(), segment.cell());
+    let pivot = segment.body_piece().pivot();
+    let cuboid = || Mesh::from(Cuboid::from_size(cell.size)).translated_by(cell.centre - pivot);
+    let Some(look) = look else {
+        return cuboid();
+    };
+
+    let mut parts = look
+        .style
+        .parts(segment)
+        .iter()
+        .map(|part| part_mesh(*part, cell, pivot, look.livery));
+    // Unreachable: every style's table is non-empty, and
+    // `every_sculpted_segment_stays_inside_its_inflated_cell` builds all of them. The cuboid
+    // is the cosmetic direction to fail in.
+    let Some(mut merged) = parts.next() else {
+        error!("{:?} {segment:?} is cut from no parts at all", look.style);
+        return cuboid();
+    };
+    merge_all(&mut merged, parts, "sculpted armour");
+    merged
+}
+
+/// One part as a flat-shaded solid, relative to `pivot`.
+fn part_mesh(part: Part, cell: PlacedBox, pivot: Vec3, livery: Option<Livery>) -> Mesh {
+    let rings = part.rings();
+    let centre = ((part.x.0 + part.x.1) / 2.0, (part.z.0 + part.z.1) / 2.0);
+    let outline = |ring: &Ring| -> [Vec3; 8] {
+        let (x0, x1) = (part.x.0 + ring.inset, part.x.1 - ring.inset);
+        let (z0, z1) = (part.z.0 + ring.inset, part.z.1 - ring.inset);
+        let cut = ring.chamfer;
+        [
+            (x0 + cut, z0),
+            (x1 - cut, z0),
+            (x1, z0 + cut),
+            (x1, z1 - cut),
+            (x1 - cut, z1),
+            (x0 + cut, z1),
+            (x0, z1 - cut),
+            (x0, z0 + cut),
+        ]
+        .map(|(x, z)| sheet_to_body(x, ring.y, z))
+    };
+    let sections: Vec<[Vec3; 8]> = rings.iter().map(outline).collect();
+
+    // Every triangle with the way it has to face. The winding is settled against that normal
+    // on the way out, so no arithmetic here has to reason about the sheet's flipped axis.
+    let mut triangles: Vec<([Vec3; 3], Vec3)> = Vec::new();
+    for pair in sections.windows(2) {
+        let (low, high) = (pair[0], pair[1]);
+        for corner in 0..8 {
+            let next = (corner + 1) % 8;
+            let quad = [low[corner], low[next], high[next], high[corner]];
+            let normal = (quad[1] - quad[0]).cross(quad[2] - quad[0])
+                + (quad[2] - quad[0]).cross(quad[3] - quad[0]);
+            let Some(mut normal) = normal.try_normalize() else {
+                continue;
+            };
+            let middle = (quad[0] + quad[1] + quad[2] + quad[3]) / 4.0;
+            let axis = sheet_to_body(centre.0, 0.0, centre.1);
+            let outward = Vec3::new(middle.x - axis.x, 0.0, middle.z - axis.z);
+            if normal.dot(outward) < 0.0 {
+                normal = -normal;
+            }
+            triangles.push(([quad[0], quad[1], quad[2]], normal));
+            triangles.push(([quad[0], quad[2], quad[3]], normal));
+        }
+    }
+    for (section, normal) in [(sections.first(), Vec3::NEG_Y), (sections.last(), Vec3::Y)] {
+        let Some(section) = section else {
+            continue;
+        };
+        let middle = section.iter().copied().sum::<Vec3>() / 8.0;
+        for corner in 0..8 {
+            triangles.push(([middle, section[corner], section[(corner + 1) % 8]], normal));
+        }
+    }
+
+    let shade = part.tone.shade();
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    for (corners, normal) in triangles {
+        let facing = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+        // A chamfer of zero repeats a corner, which leaves triangles with no area; they
+        // would draw nothing and only cost vertices.
+        if facing.length_squared() < 1e-14 {
+            continue;
+        }
+        let ordered = if facing.dot(normal) < 0.0 {
+            [corners[0], corners[2], corners[1]]
+        } else {
+            corners
+        };
+        for point in ordered {
+            positions.push((point - pivot).to_array());
+            normals.push(normal.to_array());
+            uvs.push(surface_uv(livery, point, normal, cell));
+        }
+    }
+    let count = positions.len();
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_attribute(
+        Mesh::ATTRIBUTE_COLOR,
+        vec![[shade, shade, shade, 1.0]; count],
+    )
+    .with_inserted_indices(Indices::U32((0..count as u32).collect()))
+}
+
+/// The texture coordinate one vertex of a sculpted segment carries.
+///
+/// `along` runs up the segment's cell and `across` over the side of the cell the face looks
+/// out of — the depth for a face turned sideways, the width otherwise — so the field reads
+/// continuously over each face and a face never samples across the whole image the way a
+/// seam of a wrapped coordinate would. Both land inside the livery's own band through
+/// [`livery::blade_uv`], which is what keeps a plate from reading another metal's rows.
+fn surface_uv(livery: Option<Livery>, point: Vec3, normal: Vec3, cell: PlacedBox) -> [f32; 2] {
+    let Some(livery) = livery else {
+        return livery::neutral_uv();
+    };
+    let low = cell.centre - cell.size / 2.0;
+    let along = ((point.y - low.y) / cell.size.y).clamp(0.0, 1.0);
+    let across = if normal.x.abs() > normal.z.abs() {
+        (point.z - low.z) / cell.size.z
+    } else {
+        (point.x - low.x) / cell.size.x
+    };
+    livery::blade_uv(livery, across.clamp(0.0, 1.0), along)
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::mesh::VertexAttributeValues;
+
+    use super::super::appearance::{ArmourPiece, BodyPart, BodyPiece, boxes, piece_boxes, placed};
+    use super::super::items::{ITEMS, ItemShape};
+    use super::super::livery::band_holds;
+    use super::*;
+    use crate::net::HairModel;
+
+    /// Every style with every livery it could be worn in, plus none.
+    fn every_look() -> Vec<ArmourLook> {
+        let mut all = Vec::new();
+        for style in ArmourStyle::ALL {
+            for livery in Livery::ALL.map(Some).into_iter().chain([None]) {
+                all.push(ArmourLook { style, livery });
+            }
+        }
+        all
+    }
+
+    fn positions(mesh: &Mesh) -> Vec<Vec3> {
+        let Some(VertexAttributeValues::Float32x3(values)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("a segment carries positions");
+        };
+        values
+            .iter()
+            .map(|value| Vec3::from_array(*value))
+            .collect()
+    }
+
+    /// The extents of one placed box, as (low, high) per axis.
+    fn spans(box_: PlacedBox) -> [(f32, f32); 3] {
+        let low = box_.centre - box_.size / 2.0;
+        let high = box_.centre + box_.size / 2.0;
+        [(low.x, high.x), (low.y, high.y), (low.z, high.z)]
+    }
+
+    /// One part's bounding box, in Bevy's feet-relative blocks.
+    fn part_spans(part: Part) -> [(f32, f32); 3] {
+        let rings = part.rings();
+        let (y0, y1) = (rings[0].y, rings[rings.len() - 1].y);
+        let low = sheet_to_body(part.x.0, y0, part.z.1);
+        let high = sheet_to_body(part.x.1, y1, part.z.0);
+        [(low.x, high.x), (low.y, high.y), (low.z, high.z)]
+    }
+
+    fn overlaps(a: (f32, f32), b: (f32, f32)) -> bool {
+        a.0 < b.1 && b.0 < a.1
+    }
+
+    /// Whether a point in the sheet's notches is inside one part's solid.
+    fn contains(part: Part, point: Vec3) -> bool {
+        const SLACK: f32 = 1e-3;
+        let rings = part.rings();
+        let (first, last) = (rings[0], rings[rings.len() - 1]);
+        if point.y < first.y - SLACK || point.y > last.y + SLACK {
+            return false;
+        }
+        let y = point.y.clamp(first.y, last.y);
+        let ring = rings
+            .windows(2)
+            .find(|pair| (pair[0].y..=pair[1].y).contains(&y))
+            .map_or(first, |pair| {
+                let t = (y - pair[0].y) / (pair[1].y - pair[0].y).max(f32::EPSILON);
+                Ring {
+                    y,
+                    inset: pair[0].inset + (pair[1].inset - pair[0].inset) * t,
+                    chamfer: pair[0].chamfer + (pair[1].chamfer - pair[0].chamfer) * t,
+                }
+            });
+        let (x0, x1) = (part.x.0 + ring.inset, part.x.1 - ring.inset);
+        let (z0, z1) = (part.z.0 + ring.inset, part.z.1 - ring.inset);
+        let inside =
+            |value: f32, low: f32, high: f32| value >= low - SLACK && value <= high + SLACK;
+        if !inside(point.x, x0, x1) || !inside(point.z, z0, z1) {
+            return false;
+        }
+        let across = (point.x - x0).min(x1 - point.x);
+        let deep = (point.z - z0).min(z1 - point.z);
+        across + deep >= ring.chamfer - SLACK
+    }
+
+    /// Samples of a box, in the sheet's notches: its corners, edge midpoints and face centres.
+    fn samples(box_: PlacedBox) -> Vec<Vec3> {
+        let low = box_.centre - box_.size / 2.0;
+        let high = box_.centre + box_.size / 2.0;
+        let mut points = Vec::new();
+        for x in [low.x, box_.centre.x, high.x] {
+            for y in [low.y, box_.centre.y, high.y] {
+                for z in [low.z, box_.centre.z, high.z] {
+                    points.push(Vec3::new(x / NOTCH_XZ, y / NOTCH_Y, -z / NOTCH_XZ));
+                }
+            }
+        }
+        points
+    }
+
+    /// The body pieces an armour segment is drawn over.
+    fn covered(segment: ArmourSegment) -> Vec<BodyPiece> {
+        match segment {
+            ArmourSegment::Helmet => vec![BodyPiece::HeadAndNeck, BodyPiece::Eyes],
+            other => vec![other.body_piece()],
+        }
+    }
+
+    #[test]
+    fn every_ring_list_climbs_and_stays_inside_its_outline() {
+        for style in ArmourStyle::ALL {
+            for segment in ArmourSegment::ALL {
+                for part in style.parts(segment) {
+                    let rings = part.rings();
+                    assert!(rings.len() >= 2, "{style:?} {segment:?} has a flat part");
+                    assert!(
+                        rings.windows(2).all(|pair| pair[0].y < pair[1].y),
+                        "{style:?} {segment:?} has rings out of order: {part:?}"
+                    );
+                    let narrowest = (part.x.1 - part.x.0).min(part.z.1 - part.z.0);
+                    for ring in rings {
+                        assert!(
+                            ring.inset >= 0.0
+                                && ring.chamfer >= 0.0
+                                && 2.0 * (ring.inset + ring.chamfer) < narrowest + f32::EPSILON,
+                            "{style:?} {segment:?} has a ring that turns inside out: {part:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Every vertex stays inside the cell the cuboid filled**, which is what keeps the
+    /// pivot, the walk cycle and the body envelope unchanged.
+    #[test]
+    fn every_sculpted_segment_stays_inside_its_inflated_cell() {
+        for look in every_look() {
+            for segment in ArmourSegment::ALL {
+                let cell = spans(placed_armour(segment.piece(), segment.cell()));
+                let pivot = segment.body_piece().pivot();
+                let mesh = segment_mesh(Some(look), segment);
+                let points = positions(&mesh);
+                assert!(!points.is_empty(), "{look:?} {segment:?} drew nothing");
+                for point in points {
+                    let point = point + pivot;
+                    for (axis, (low, high)) in cell.iter().enumerate() {
+                        assert!(
+                            point[axis] >= low - 1e-5 && point[axis] <= high + 1e-5,
+                            "{look:?} {segment:?} leaves its cell on axis {axis} at {point}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The body under a segment is inside it**, so nothing of the chest, a limb or the head
+    /// shows through the plate at rest — and because the segment turns about the same pivot
+    /// as the piece it wraps, not in the walk cycle either.
+    ///
+    /// Read against the parts rather than the triangles: every corner, edge midpoint and face
+    /// centre of each covered box, clipped to the height the cell spans, lies in some solid.
+    #[test]
+    fn the_body_under_a_sculpted_segment_stays_inside_it() {
+        for style in ArmourStyle::ALL {
+            for segment in ArmourSegment::ALL {
+                let cell = spans(placed_armour(segment.piece(), segment.cell()));
+                for piece in covered(segment) {
+                    for part_box in piece_boxes(piece, HairModel::Shaved) {
+                        let mut box_ = placed(piece.part(), *part_box);
+                        let [_, (low, high), _] = spans(box_);
+                        let (low, high) = (low.max(cell[1].0), high.min(cell[1].1));
+                        if low >= high {
+                            continue;
+                        }
+                        box_.size.y = high - low;
+                        box_.centre.y = (low + high) / 2.0;
+                        for point in samples(box_) {
+                            assert!(
+                                style
+                                    .parts(segment)
+                                    .iter()
+                                    .any(|part| contains(*part, point)),
+                                "{style:?} {segment:?} leaves {piece:?} showing at {point}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Rule 2 of the rig, for sculpted plates**: no face of a part lands on the plane of a
+    /// body face of another colour where the two overlap.
+    ///
+    /// Read off each part's bounding box, which can report a plane a chamfer has cut away and
+    /// cannot miss one — the direction for a check like this to be weak in. Hair under a helm
+    /// that hides it is not drawn and is skipped.
+    #[test]
+    fn no_sculpted_face_shares_a_plane_with_the_body() {
+        for style in ArmourStyle::ALL {
+            for model in HairModel::ALL {
+                for segment in ArmourSegment::ALL {
+                    for part in style.parts(segment) {
+                        let overlay = part_spans(*part);
+                        for body_part in BodyPart::IN_DRAWING_ORDER {
+                            if body_part == BodyPart::Hair
+                                && segment == ArmourSegment::Helmet
+                                && style.hides_hair()
+                            {
+                                continue;
+                            }
+                            for cell in boxes(body_part, model) {
+                                let under = spans(placed(body_part, *cell));
+                                for axis in 0..3 {
+                                    let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                                    if !overlaps(overlay[u], under[u])
+                                        || !overlaps(overlay[v], under[v])
+                                    {
+                                        continue;
+                                    }
+                                    for side in [overlay[axis].0, overlay[axis].1] {
+                                        for face in [under[axis].0, under[axis].1] {
+                                            assert!(
+                                                (side - face).abs() > 1e-5,
+                                                "{style:?} {segment:?} part {part:?} shares \
+                                                 plane {side} on axis {axis} with {body_part:?} \
+                                                 wearing {model:?}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two parts of one segment in different tones never face the same way on one plane
+    /// where they overlap — a plate and the recess beside it would flicker between two
+    /// shades. Facing opposite ways on a shared plane is two solids meeting, and is allowed.
+    #[test]
+    fn no_two_tones_share_a_plane_inside_one_segment() {
+        for style in ArmourStyle::ALL {
+            for segment in ArmourSegment::ALL {
+                let parts = style.parts(segment);
+                for (index, one) in parts.iter().enumerate() {
+                    for two in &parts[index + 1..] {
+                        if one.tone == two.tone {
+                            continue;
+                        }
+                        let (a, b) = (part_spans(*one), part_spans(*two));
+                        for axis in 0..3 {
+                            let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                            if !overlaps(a[u], b[u]) || !overlaps(a[v], b[v]) {
+                                continue;
+                            }
+                            assert!(
+                                (a[axis].0 - b[axis].0).abs() > 1e-5
+                                    && (a[axis].1 - b[axis].1).abs() > 1e-5,
+                                "{style:?} {segment:?}: {one:?} and {two:?} share a face on \
+                                 axis {axis}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every triangle's winding agrees with its normal, so back-face culling keeps the
+    /// outside of every plate rather than drawing a segment inside out.
+    #[test]
+    fn every_sculpted_triangle_faces_the_way_its_normal_says() {
+        for look in every_look() {
+            for segment in ArmourSegment::ALL {
+                let mesh = segment_mesh(Some(look), segment);
+                let points = positions(&mesh);
+                let Some(VertexAttributeValues::Float32x3(normals)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+                else {
+                    panic!("a segment carries normals");
+                };
+                for (index, triangle) in points.chunks(3).enumerate() {
+                    let facing = (triangle[1] - triangle[0]).cross(triangle[2] - triangle[0]);
+                    let normal = Vec3::from_array(normals[index * 3]);
+                    assert!(
+                        facing.dot(normal) > 0.0,
+                        "{look:?} {segment:?} triangle {index} is wound against its normal"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every sculpted segment shows both a plate and a recess, and the recess is the darker.
+    #[test]
+    fn every_segment_has_plates_and_darker_recesses() {
+        assert!(Tone::Recess.shade() < Tone::Plate.shade());
+        assert!(
+            Tone::Recess.shade() > 0.0,
+            "a recess is metal in shadow, not a hole"
+        );
+        for style in ArmourStyle::ALL {
+            for segment in ArmourSegment::ALL {
+                let parts = style.parts(segment);
+                for tone in [Tone::Plate, Tone::Recess] {
+                    assert!(
+                        parts.iter().any(|part| part.tone == tone),
+                        "{style:?} {segment:?} has no {tone:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A liveried segment samples only its own livery's band; an unliveried one only the
+    /// neutral texel.
+    #[test]
+    fn a_sculpted_segment_samples_only_the_livery_it_wears() {
+        for look in every_look() {
+            for segment in ArmourSegment::ALL {
+                let mesh = segment_mesh(Some(look), segment);
+                let Some(VertexAttributeValues::Float32x2(uvs)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+                else {
+                    panic!("a segment carries texture coordinates");
+                };
+                for uv in uvs {
+                    match look.livery {
+                        Some(livery) => assert!(
+                            band_holds(livery, *uv),
+                            "{look:?} {segment:?} reads outside its band at {uv:?}"
+                        ),
+                        None => assert_eq!(*uv, livery::neutral_uv()),
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Every armour item with a style resolves a sculpted mesh, and every one without falls
+    /// back to the cuboid** — swept over the registry, so a new armour row is covered by
+    /// existing.
+    #[test]
+    fn every_armour_item_resolves_a_mesh_and_unstyled_ones_keep_the_cuboid() {
+        let armour_rows: Vec<_> = ITEMS
+            .iter()
+            .filter(|row| row.shape == ItemShape::Armour)
+            .collect();
+        assert!(armour_rows.iter().any(|row| look(row.item_id).is_some()));
+        for row in armour_rows {
+            for segment in ArmourSegment::ALL {
+                let cuboid = positions(&segment_mesh(None, segment));
+                let drawn = positions(&segment_mesh(look(row.item_id), segment));
+                match look(row.item_id) {
+                    Some(found) => {
+                        assert!(
+                            looks().contains(&found),
+                            "item {} is not in the shared cache",
+                            row.item_id
+                        );
+                        assert_ne!(drawn, cuboid, "item {} is still a cuboid", row.item_id);
+                    }
+                    None => assert_eq!(drawn, cuboid, "item {} lost its cuboid", row.item_id),
+                }
+            }
+        }
+        assert_eq!(look(4242), None, "an unknown id wears no style");
+    }
+
+    #[test]
+    fn the_mirrored_segments_are_mirrors() {
+        for style in ArmourStyle::ALL {
+            for (left, right) in [
+                (ArmourSegment::LeftSleeve, ArmourSegment::RightSleeve),
+                (ArmourSegment::LeftGreave, ArmourSegment::RightGreave),
+            ] {
+                let mirrored: Vec<Part> = style
+                    .parts(left)
+                    .iter()
+                    .map(|part| part.mirrored())
+                    .collect();
+                assert_eq!(mirrored, style.parts(right));
+            }
+            // The torso and the helm are their own mirror images.
+            for segment in [ArmourSegment::Torso, ArmourSegment::Helmet] {
+                let parts = style.parts(segment);
+                for part in parts {
+                    assert!(
+                        parts.contains(&part.mirrored()),
+                        "{style:?} {segment:?} is lopsided at {part:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The reason a closed helm hides the hair** is a fact about the rig, pinned so the
+    /// switch cannot outlive it: every hair model reaches above the helmet's cell.
+    #[test]
+    fn every_hair_model_reaches_above_the_helmets_cell() {
+        let cell = spans(placed_armour(
+            ArmourPiece::Head,
+            ArmourSegment::Helmet.cell(),
+        ));
+        for model in HairModel::ALL {
+            let top = boxes(BodyPart::Hair, model)
+                .iter()
+                .map(|box_| spans(placed(BodyPart::Hair, *box_))[1].1)
+                .fold(f32::MIN, f32::max);
+            assert!(top > cell[1].1, "{model:?} fits under the helm after all");
+        }
+    }
+}
