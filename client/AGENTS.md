@@ -96,7 +96,7 @@ keeps meaning "everything the client is".
 | `ui/icon.rs` | the flat picture each `ItemShape` is drawn as in a cell, and the nodes that draw it | key a drawing on an item id, decide a shape of its own, or load an asset |
 | `ui/health.rs` | the health bar, the server's respawn-protection flag and the death overlay with its countdown | hold a timer, run a countdown down, or write any resource |
 | `ui/hunger.rs` | the hunger bar and its wall-clock low-reserve reminder | change hunger, decide whether food may be eaten, or turn its presentation timer into simulation time |
-| `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade and routing of the five slash commands into typed party requests | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
+| `ui/chat.rs` | the local chat draft, the last eight accepted lines, their wall-clock fade, routing of the five slash commands into typed party requests, and a pointer selection of the log that `Control+C` copies (model and glyph hit-testing in `ui/chat_selection.rs`) | parse received text, trust a display name as identity, decide that a message or party action succeeds, or keep persistent history |
 | `ui/storm.rs` | the last server-sent storm warning, its receive instant, and the one routing that publishes each milestone sentence once through the tagged chat channel | infer a storm from weather, advance a phase locally, or grow a second notification surface |
 | `ui/party.rs` | four permanent rows mirroring the newest accepted party snapshot, with names from the appearance cache, and the two marks a row draws — the leader's crown and the hunted mark — as nodes | infer membership, health, leadership, invitation state or any party outcome from local intent, or give a drawn mark a colour of its own |
 | `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent — or that the microphone they named is not there — with the bound key that would start it and who is going to hear it, and who has been heard in the last second and not muted | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
@@ -2342,7 +2342,8 @@ screen whose whole content is one button is a button nobody can press. `Escape` 
 login screen is deliberately not dismissible, and `show_menu` is the other half, so the pause menu
 is not drawn underneath.
 
-**Chat owns text, not the world.** `InputMode::Chat` keeps the cursor captured and leaves mobs,
+**Chat owns text, not the world.** `InputMode::Chat` releases the pointer under `Confined`, so
+the log can be selected with it (below), and leaves mobs,
 the authoritative vital bars and the selected held-item presentation visible, while the same
 `InputGate` that closes inventory and menu input closes aiming, actions, movement and camera
 sampling. The inventory, crafting screen, hotbar, crosshair, settings and pause menu remain hidden;
@@ -2359,6 +2360,16 @@ sees it, never parsed or used as identity. Both share one `ChatInbox`, which pre
 relative wire order for its first consumer. The log holds eight lines, fades them after twelve
 seconds of `Time<Real>`, and shows all
 eight fully while chat is open; there is no persistence, scrollback, timestamp or channel state.
+
+**The log is selectable, and the draft keeps the keyboard.** While chat is open a press and drag
+over the log selects across lines, hit-tested against the glyphs Bevy laid out (`TextLayoutInfo`,
+read in `PostUpdate` after `UiSystems::PostLayout`) and drawn as a span background, the draft's
+own highlight. `Control+C` copies that selection through `TextClipboard` — each line exactly as
+displayed, sender prefix included, joined with `\n` — and is the draft's shortcut whenever nothing
+in the log is selected. A selection names lines by their arrival serial and a byte range, so a new
+line pushing the ring along never slides it onto a neighbour; a click elsewhere, closing chat
+(`Escape` included) or any selected line leaving the ring drops it whole. `ui/chat_selection.rs`
+holds the model and the hit-testing as plain numbers, which is what lets both be tested headlessly.
 
 ## Choosing who goes in
 
@@ -2923,7 +2934,7 @@ Recorded here so the next reader does not mistake them for oversights:
   where a refusal would. Asking the server to slow down is the other candidate and it is a
   protocol change. Stated rather than traded away, in `DecodeQueue::admit` as well as here.
 - **The pointer has three states, and focus loss is always the released one.** A focused live
-  session uses `Locked` and hides the pointer for play and chat; panels keep it visible under
+  session uses `Locked` and hides the pointer for play; chat and panels keep it visible under
   `Confined`; login, server-list, disconnect and every unfocused window use `None`. A
   `WindowFocused` transition writes that answer even when `CursorOptions` already contains it,
   because the compositor can drop a native constraint without changing Bevy's component. Bevy

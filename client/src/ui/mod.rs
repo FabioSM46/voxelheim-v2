@@ -3,6 +3,7 @@
 mod cast;
 mod character;
 mod chat;
+mod chat_selection;
 mod clipboard;
 mod compass;
 mod crosshair;
@@ -758,12 +759,14 @@ fn sync_cursor(
         // Focus loss must always release confinement: alt-tab and the window manager's
         // own bindings are how a player deliberately leaves the game.
         (CursorGrabMode::None, true)
-    } else if matches!(*mode, InputMode::Playing | InputMode::Chat) {
+    } else if *mode == InputMode::Playing {
         // Bevy falls back to Confined on X11, where Locked is unsupported.
         (CursorGrabMode::Locked, false)
     } else {
         // Panels need a visible pointer, but letting it cross a window edge turns an
-        // ordinary UI gesture into a focus change on a multi-monitor desktop.
+        // ordinary UI gesture into a focus change on a multi-monitor desktop. Chat is one
+        // of them: its log is selected with the pointer, and the camera it would otherwise
+        // turn is already closed to pointer input while the line is open.
         (CursorGrabMode::Confined, true)
     };
 
@@ -2419,11 +2422,8 @@ mod tests {
         app.update();
         assert_eq!(primary_cursor(&mut app), (CursorGrabMode::Locked, false));
 
-        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
-        app.update();
-        assert_eq!(primary_cursor(&mut app), (CursorGrabMode::Locked, false));
-
         for mode in [
+            InputMode::Chat,
             InputMode::Inventory,
             InputMode::Station,
             InputMode::Loot,
