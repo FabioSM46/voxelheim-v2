@@ -227,6 +227,10 @@ fn render(settings: &Settings) -> String {
         settings.voice_audience.name()
     ));
     out.push_str(&format!("vsync {}\n", on_or_off(settings.vsync)));
+    out.push_str(&format!(
+        "reduced-effects {}\n",
+        on_or_off(settings.reduced_effects)
+    ));
     out.push_str(&format!("readout {}\n", on_or_off(settings.readout_shown)));
     out.push_str(&format!(
         "readout-corner {}\n",
@@ -374,6 +378,11 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
             },
             "vsync" => match flag(value) {
                 Some(parsed) => settings.vsync = parsed,
+                None => refuse("on or off"),
+            },
+            // Absent from every file written before #1093, which therefore loads it off.
+            "reduced-effects" => match flag(value) {
+                Some(parsed) => settings.reduced_effects = parsed,
                 None => refuse("on or off"),
             },
             "readout" => match flag(value) {
@@ -542,6 +551,7 @@ mod tests {
         settings.adjust(Knob::VoiceAudience, 1);
         settings.toggle_vsync();
         settings.toggle_readout();
+        settings.toggle_reduced_effects();
         settings.cycle_readout_corner();
         settings.set_default_mount(DefaultMount::Grey);
         for (control, key) in [
@@ -616,8 +626,58 @@ mod tests {
         assert_ne!(moved.readout_corner(), untouched.readout_corner());
         assert_ne!(moved.music_on(), untouched.music_on());
         assert_ne!(moved.mono_audio(), untouched.mono_audio());
+        assert_ne!(moved.reduced_effects(), untouched.reduced_effects());
         assert_ne!(moved.default_mount(), untouched.default_mount());
         assert_ne!(moved.bindings(), untouched.bindings());
+    }
+
+    /// The reduced-effects switch survives a restart either way, a file written before it
+    /// existed loads with it off and every other line intact, and a value that says neither
+    /// is refused at the cost of that one line.
+    #[test]
+    fn the_reduced_effects_switch_round_trips_and_an_older_file_loads_it_off() {
+        let scratch = Scratch::new("settings-reduced-effects");
+        let path = scratch.join("settings");
+        for on in [true, false] {
+            let mut settings = Settings::default();
+            if on {
+                settings.toggle_reduced_effects();
+            }
+            assert_eq!(save(&path, &settings), Ok(()));
+            let written = fs::read_to_string(&path).expect("the saved file");
+            let line = format!("reduced-effects {}\n", if on { "on" } else { "off" });
+            assert!(written.contains(&line), "{written}");
+            let (reloaded, complaints) = load(&path);
+            assert_eq!(complaints, Vec::<String>::new());
+            assert_eq!(reloaded.reduced_effects(), on);
+        }
+
+        // A file from before #1093: everything this client writes except the new line.
+        let mut previous = Settings::default();
+        previous.toggle_vsync();
+        previous.toggle_mono_audio();
+        let older: String = render(&previous)
+            .lines()
+            .filter(|line| !line.starts_with("reduced-effects"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(&path, older).expect("a scratch file");
+        let (reloaded, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new());
+        assert!(!reloaded.reduced_effects());
+        assert_eq!(
+            reloaded, previous,
+            "an older file lost a setting it did carry"
+        );
+
+        fs::write(&path, "reduced-effects sometimes\nvsync off\n").expect("a scratch file");
+        let (reloaded, complaints) = load(&path);
+        assert!(
+            !reloaded.reduced_effects(),
+            "a malformed switch was read as on"
+        );
+        assert!(!reloaded.vsync(), "a malformed line took the next with it");
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
     }
 
     /// One unreadable line among the new audio settings costs that one setting and no other,

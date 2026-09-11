@@ -26,6 +26,7 @@ use crate::net::{
     EncounterMove, EncounterTimeline, EncounterTimelineInbox, HazardVolume, MobAction, MobKind,
     MovePhase, Session, Snapshot,
 };
+use crate::settings::Settings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Window {
@@ -96,7 +97,23 @@ pub(super) fn register(app: &mut App) {
     app.init_resource::<EncounterTimelineInbox>()
         .init_resource::<EncounterPresentation>()
         .init_resource::<ReducedEffects>()
-        .add_systems(Update, reconcile.after(ApplySnapshots));
+        .add_systems(
+            Update,
+            (
+                // Before the layers read it, so a switch is drawn on the frame it is made.
+                follow_the_setting.before(reconcile),
+                reconcile.after(ApplySnapshots),
+            ),
+        );
+}
+
+/// Carries the player's saved choice onto the gate. Only a changed [`Settings`] writes it,
+/// so an app without settings keeps whatever value it was given.
+fn follow_the_setting(settings: Option<Res<Settings>>, mut reduced: ResMut<ReducedEffects>) {
+    let Some(settings) = settings.filter(|settings| settings.is_changed()) else {
+        return;
+    };
+    reduced.set_if_neq(ReducedEffects(settings.reduced_effects()));
 }
 
 pub(super) fn reconcile(
@@ -354,6 +371,43 @@ pub(crate) mod tests {
         assert!(project(inbox.live(), Some(&snapshot(119)))[0].damaging());
         assert!(new[0].announced.interruptible);
         assert_eq!(new, project(inbox.live(), Some(&snapshot(115))));
+    }
+
+    /// The saved setting drives the gate, both ways, the moment it changes; another setting
+    /// changing leaves it alone, and without settings a value given directly is kept.
+    #[test]
+    fn the_saved_setting_drives_the_gate_the_frame_it_changes() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, bevy::asset::AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_resource::<SnapshotBuffer>();
+        register(&mut app);
+        let gate = |app: &App| app.world().resource::<ReducedEffects>().0;
+        app.update();
+        assert!(!gate(&app));
+        app.insert_resource(ReducedEffects(true));
+        app.update();
+        assert!(gate(&app), "no settings, yet something overwrote the gate");
+
+        app.insert_resource(Settings::default());
+        app.update();
+        assert!(!gate(&app), "a fresh settings file draws every effect");
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .toggle_reduced_effects();
+        app.update();
+        assert!(gate(&app));
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .toggle_mono_audio();
+        app.update();
+        assert!(gate(&app), "another setting moved the gate");
+        app.world_mut()
+            .resource_mut::<Settings>()
+            .toggle_reduced_effects();
+        app.update();
+        assert!(!gate(&app));
     }
 
     #[test]
