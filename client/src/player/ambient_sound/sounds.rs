@@ -3,7 +3,6 @@ use crate::audio::synth::{Envelope, Exciter, Filter, FilterKind, Layer, Noise, S
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Bed {
-    Crickets,
     Rain,
     DrivingRain,
     Snowfall,
@@ -30,7 +29,6 @@ impl Bed {
         // All bands remain below the lowest supported sample rate's Nyquist margin.
         // Rain gains a second, lower wash as intensity grows: more than louder drizzle.
         let layers = match self {
-            Self::Crickets => vec![noise(Noise::White, 0.24, FilterKind::Band, 3200.0, 8.0)],
             Self::Rain => vec![noise(Noise::White, 0.18, FilterKind::High, 1800.0, 0.7)],
             Self::DrivingRain => vec![noise(Noise::White, 0.3, FilterKind::Low, 950.0, 0.7)],
             // A soft granular hush, not the bright white-noise streaks of rainfall.
@@ -91,9 +89,17 @@ pub(super) enum Call {
     Crow,
     Eagle,
     Wolf,
+    /// Green country at night: an occasional cricket, not a continuous wall of them.
+    Cricket,
 }
 
-pub(super) const CALLS: [Call; 4] = [Call::Rattlesnake, Call::Crow, Call::Eagle, Call::Wolf];
+pub(super) const CALLS: [Call; 5] = [
+    Call::Rattlesnake,
+    Call::Crow,
+    Call::Eagle,
+    Call::Wolf,
+    Call::Cricket,
+];
 
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
 /// duration by a wide margin; even dusk leaves the desert mostly silent.
@@ -105,6 +111,16 @@ pub(super) struct CallProfile {
     pub range: f32,
 }
 
+/// How many chirps one cricket call carries: one to three, from its seed.
+pub(super) fn chirps(seed: u64) -> u32 {
+    1 + ((seed >> 8) % 3) as u32
+}
+
+/// Chirps per second within one call, 3.2 to 4.0, from its seed.
+fn chirp_rate(seed: u64) -> f32 {
+    3.2 + ((seed >> 16) % 81) as f32 / 100.0
+}
+
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
@@ -112,6 +128,9 @@ impl Call {
             Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
             Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
             Self::Wolf => ([35.0, 79.0], 26.0, 0.0, 3.8, 96.0),
+            // In the grass a few blocks off. The longest call, three chirps at the slowest
+            // rate, closes at 4 / 3.2 = 1.25 s, inside the baked 1.3 s.
+            Self::Cricket => ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0),
         };
         CallProfile {
             interval,
@@ -138,6 +157,13 @@ impl Call {
             Self::Crow => (0.025, 0.28, 0.05, 0.12),
             Self::Eagle => (0.015, 0.4, 0.0, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
+            // The attack peaks on the second pulse and the decay closes on the null after
+            // the last counted one, so `chirps(seed)` pulses sound, each softer than the one
+            // before. The first pulse, under the attack ramp, is a faint lead-in.
+            Self::Cricket => {
+                let rate = chirp_rate(seed);
+                (1.0 / rate, chirps(seed) as f32 / rate, 0.0, 0.02)
+            }
         };
         let envelope = Envelope {
             attack,
@@ -211,6 +237,18 @@ impl Call {
                     },
                 ]
             }
+            // Five sines one chirp rate apart, weighted 1-4-6-4-1, sum to 16·cos⁴(π·rate·t)
+            // times a carrier: a sharp pulse every 1/rate with true silence between pulses,
+            // without an onset primitive. The top partial stays under 8 kHz's 3.6 kHz bound.
+            Self::Cricket => {
+                let hz = 3000.0 + variation * 200.0;
+                let rate = chirp_rate(seed);
+                [1.0, 4.0, 6.0, 4.0, 1.0]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, weight)| tone(hz + k as f32 * rate, 0.018 * weight, envelope))
+                    .collect()
+            }
         };
         Sound { layers }
     }
@@ -238,7 +276,7 @@ mod tests {
         }
     }
     #[test]
-    fn weather_and_insects_have_distinct_spectra() {
+    fn weather_beds_have_distinct_spectra() {
         let bright = |bed| {
             let v = stream(bed, 48000, 11);
             v.windows(2).map(|p| (p[1] - p[0]).powi(2)).sum::<f32>()
@@ -246,7 +284,6 @@ mod tests {
         };
         assert!(bright(Bed::Rain) > bright(Bed::DrivingRain) * 3.0);
         assert!(bright(Bed::Rain) > bright(Bed::Snowfall) * 10.0);
-        assert_ne!(stream(Bed::Crickets, 8000, 2), stream(Bed::Rain, 8000, 2));
     }
     #[test]
     fn descriptions_are_seeded_and_calls_have_silent_edges() {
@@ -262,5 +299,51 @@ mod tests {
                 parrot(11).bake(0.3, rate, 11).unwrap().samples()
             );
         }
+    }
+
+    /// Count the pulses actually rendered, from the samples rather than from `chirps`:
+    /// a 5 ms peak envelope must rise past a fifth of the loudest pulse, and fall back
+    /// under a twentieth before another pulse is counted.
+    fn rendered_chirps(seed: u64, rate: u32) -> u32 {
+        let call = Call::Cricket
+            .description(seed)
+            .bake(Call::Cricket.profile().seconds, rate, seed)
+            .unwrap();
+        let envelope: Vec<f32> = call
+            .samples()
+            .chunks(rate as usize / 200)
+            .map(|window| window.iter().fold(0.0, |peak, v| v.abs().max(peak)))
+            .collect();
+        let loudest = envelope.iter().copied().fold(0.0, f32::max);
+        let (mut count, mut armed) = (0, true);
+        for level in envelope {
+            if armed && level > loudest * 0.2 {
+                count += 1;
+                armed = false;
+            } else if level < loudest * 0.05 {
+                armed = true;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn a_cricket_call_is_one_to_three_rendered_chirps() {
+        let mut seen = [false; 3];
+        for seed in 0..60u64 {
+            let seed = super::super::controller::scramble(seed);
+            let expected = chirps(seed);
+            assert!((1..=3).contains(&expected));
+            seen[expected as usize - 1] = true;
+            assert!((3.2..=4.0).contains(&chirp_rate(seed)));
+            for rate in [8000, 48000] {
+                assert_eq!(
+                    rendered_chirps(seed, rate),
+                    expected,
+                    "seed {seed} at {rate}"
+                );
+            }
+        }
+        assert_eq!(seen, [true; 3], "every chirp count occurs");
     }
 }
