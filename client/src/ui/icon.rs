@@ -493,7 +493,7 @@ const SHOVEL: [IconPart; 4] = [
 ];
 
 /// Armour laid flat: a broad chest plate with two shoulders and a narrowed waist.
-/// Leather and iron share the outline and are told apart by the item registry's colour.
+/// Leather and rusty armour share the outline and are told apart by the item registry's colour.
 const ARMOUR: [IconPart; 3] = [
     IconPart {
         left: 27.0,
@@ -624,7 +624,8 @@ const SCEPTRE: [IconPart; 2] = [
 /// has an edge, and an edge is what a livery is about; a cell drawn as armour is a plate and
 /// two shoulders, and putting forge marks on it would be inventing detail the mesh does not
 /// have either — the armour meshes carry the neutral coordinate for the same reason. So an
-/// iron helm names `ForgedSteel` honestly and draws exactly as it did, on both surfaces.
+/// rusty helm names `WornSteel` honestly, and its rust reaches both surfaces through the
+/// registry colour alone.
 ///
 /// Test-only: [`part_bundle`] already answers it per rectangle, and this is the same fact one
 /// level up, for the sweep that has to know which items can reach a livery in a cell at all.

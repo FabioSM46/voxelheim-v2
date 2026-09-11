@@ -325,19 +325,19 @@ func TestALongFallCostsHealth(t *testing.T) {
 	}
 }
 
-func TestFullIronDoesNotSoftenAFall(t *testing.T) {
+func TestFullRustyArmourDoesNotSoftenAFall(t *testing.T) {
 	t.Parallel()
 
-	landedHealth := func(t *testing.T, iron bool) uint16 {
+	landedHealth := func(t *testing.T, rusty bool) uint16 {
 		t.Helper()
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		pos := [3]float32{0.5, 104, 0.5}
 		var player *Player
-		if iron {
+		if rusty {
 			life := lifeWearing(t, pos,
-				fullTestArmour(ItemIronHelm),
-				fullTestArmour(ItemIronCuirass),
-				fullTestArmour(ItemIronGreaves),
+				fullTestArmour(ItemRustyHelm),
+				fullTestArmour(ItemRustyCuirass),
+				fullTestArmour(ItemRustyGreaves),
 			)
 			player, _ = h.joinLife(1, pos, &life)
 		} else {
@@ -352,7 +352,7 @@ func TestFullIronDoesNotSoftenAFall(t *testing.T) {
 		t.Fatal("the comparison fall cost nothing, so it cannot discriminate armour")
 	}
 	if armoured != naked {
-		t.Errorf("full iron left %d health after the fall, want the unarmoured %d", armoured, naked)
+		t.Errorf("full rusty armour left %d health after the fall, want the unarmoured %d", armoured, naked)
 	}
 }
 
@@ -503,7 +503,7 @@ func TestEveryInventoryMutationRefreshesTheWornSummary(t *testing.T) {
 			name: "Join",
 			run: func(t *testing.T) *Player {
 				h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
-				life := lifeWearing(t, pos, fullTestArmour(ItemIronHelm))
+				life := lifeWearing(t, pos, fullTestArmour(ItemRustyHelm))
 				player, _ := h.joinLife(1, pos, &life)
 				return player
 			},

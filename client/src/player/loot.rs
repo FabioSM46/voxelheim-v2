@@ -732,6 +732,74 @@ mod tests {
         );
     }
 
+    /// F closes an open station panel even with the station still in the crosshair, and the
+    /// closing press never reopens it.
+    ///
+    /// Both plugins run, so what this pins is a dependency between them rather than either
+    /// alone: `station::close_on_interact` hands the mode back to `Playing` before this module
+    /// resolves the key, and it is `InputGate::may_act` observing that write — the mode's change
+    /// flag — that withholds the frame from the station branch above. Take that away and the
+    /// same press would write a fresh `OpenStation`, `open_station` would reopen the panel on
+    /// the frame it closed, and F would never close anything.
+    #[test]
+    fn interact_closes_an_open_station_even_with_the_station_still_in_sight() {
+        use super::super::station::{StationPlugin, StationWindow};
+        use crate::net::{BlockCoord, Facing, StructureKind, StructureState};
+
+        // The forge the crosshair is on also stands in the snapshot, beside the player and well
+        // inside its craft radius, so nothing but the key can be what closes the panel.
+        let mut app = app_seeing(Snapshot {
+            server_tick: 1,
+            entities: vec![me()],
+            structures: vec![StructureState {
+                structure_id: 900,
+                kind: StructureKind::Forge,
+                anchor: BlockCoord { x: 0, y: 63, z: 0 },
+                facing: Facing::North,
+                owner_entity_id: OTHER_PLAYER,
+                lit: true,
+            }],
+            ..Default::default()
+        });
+        app.add_plugins((InputPlugin, StationPlugin));
+        let (outbound, frames) = Outbound::to_a_test(8);
+        app.insert_resource(outbound)
+            .insert_resource(forge_in_sight());
+        app.update();
+
+        let opened = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert!(opened.is_empty(), "opening a station reached the wire");
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Station);
+        station_opens(&mut app);
+        keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Released, false)],
+        );
+
+        let closed = keyboard_frame(
+            &mut app,
+            &frames,
+            [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+        );
+        assert!(closed.is_empty(), "closing a station reached the wire");
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(app.world().resource::<StationWindow>().station(), None);
+        assert!(
+            station_opens(&mut app).is_empty(),
+            "the press that closed the panel asked to open it again"
+        );
+
+        // And a frame later it is still closed: the press was spent, not deferred.
+        keyboard_frame(&mut app, &frames, []);
+        assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
+        assert_eq!(app.world().resource::<StationWindow>().station(), None);
+    }
+
     /// Somebody past the reach is not addressed, and nothing is sent at all.
     ///
     /// The bound is [`MAX_REACH`], and it decides which intent this client *originates* —

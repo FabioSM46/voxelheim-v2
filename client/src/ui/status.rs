@@ -532,11 +532,17 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// and what #459 has now done for `NotEnoughSilver` and `VendorDoesNotWant`: there is a
 /// stall on screen, and a refused trade is answered beside it.
 ///
+/// `NotEnoughEnergy` is here on the same terms and for a named surface: the energy bar
+/// (#1134) answers a starved swing by flashing, without a message, so a chat line here
+/// would be the second answer to one refusal. It leaves this list when that bar lands.
+///
 /// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
-        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
+        RefusalReason::TileMisaligned
+            | RefusalReason::TradeNotOpen
+            | RefusalReason::NotEnoughEnergy
     )
 }
 
@@ -633,6 +639,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::InstanceUnavailable
         | RefusalReason::SessionMismatch
         | RefusalReason::EntryOfferUnknown
+        | RefusalReason::NotEnoughEnergy
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1330,7 +1337,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 57] = [
+    const EVERY_REASON: [RefusalReason; 58] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1389,6 +1396,8 @@ mod tests {
         RefusalReason::InstanceUnavailable,
         RefusalReason::SessionMismatch,
         RefusalReason::EntryOfferUnknown,
+        // V40's energy reason.
+        RefusalReason::NotEnoughEnergy,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1409,6 +1418,7 @@ mod tests {
             | RefusalReason::NoInvite
             | RefusalReason::NotLeader => RefusedAction::Party,
             RefusalReason::NoAmmunition => RefusedAction::Attack,
+            RefusalReason::NotEnoughEnergy => RefusedAction::Energy,
             RefusalReason::MountNotLearned
             | RefusalReason::AlreadyMounted
             | RefusalReason::MountNotGrounded

@@ -19,7 +19,9 @@ use crate::net::{
 };
 use crate::player::{ApplyInputMode, ApplySnapshots, InputMode, PartyLogInbox};
 
-use super::text_input::{TextEdit, apply_key};
+use super::text_input::{
+    FieldInput, FieldSpan, TextEdit, TextField, paint_span, spawn_field_spans,
+};
 use super::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages, set_mode};
 
 const LINE_COUNT: usize = 8;
@@ -36,14 +38,15 @@ const LEFT: f32 = 16.0;
 const INPUT_BOTTOM: f32 = 44.0;
 const LOG_BOTTOM: f32 = 70.0;
 
+/// The draft: the line, its cursor and its selection, edited by `ui/text_input.rs`.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
-struct ChatLine(String);
+struct ChatLine(TextField);
 
 /// The one submitted line this process can recall.
 ///
 /// This stays beside the draft rather than in the shared text-input helper: remembering a
-/// submission is chat behaviour, and the map's note field must keep treating arrows as no-op
-/// keys. It is deliberately a single optional line rather than a growing session log.
+/// submission is chat behaviour, and the map's note field must keep treating `ArrowUp` as a
+/// no-op key. It is deliberately a single optional line rather than a growing session log.
 #[derive(Resource, Debug, Default, PartialEq, Eq)]
 struct ChatHistory(Option<String>);
 
@@ -151,25 +154,55 @@ fn spawn_chat(mut commands: Commands) {
             }
         });
 
-    commands.spawn((
-        ChatInput,
-        Text::new(String::new()),
-        TextFont {
-            font_size: FONT_SIZE,
-            ..default()
-        },
-        TextColor(Color::WHITE),
-        TextShadow::default(),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(LEFT),
-            bottom: Val::Px(INPUT_BOTTOM),
-            width: Val::Percent(38.0),
-            ..default()
-        },
-        GlobalZIndex(14),
-    ));
+    commands
+        .spawn((
+            ChatInput,
+            Text::new(String::new()),
+            TextFont {
+                font_size: FONT_SIZE,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextShadow::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(LEFT),
+                bottom: Val::Px(INPUT_BOTTOM),
+                width: Val::Percent(38.0),
+                ..default()
+            },
+            GlobalZIndex(14),
+        ))
+        .with_children(|input| {
+            spawn_field_spans(
+                input,
+                &TextField::default().pieces(false),
+                &TextFont {
+                    font_size: FONT_SIZE,
+                    ..default()
+                },
+                Color::WHITE,
+                DraftSpan,
+            );
+        });
 }
+
+/// Marks the draft's spans, which `ui/text_input.rs` fills.
+#[derive(Component, Clone)]
+struct DraftSpan;
+
+/// The draft's spans, apart from the log lines that share their colour component.
+type DraftSpans<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static FieldSpan,
+        &'static mut TextSpan,
+        &'static mut TextColor,
+        &'static mut TextBackgroundColor,
+    ),
+    (With<DraftSpan>, Without<ChatText>),
+>;
 
 fn ingest_server_lines(
     time: Res<Time<Real>>,
@@ -259,9 +292,11 @@ fn message_colour(kind: LogKind, alpha: f32) -> Color {
     Color::srgba(red, green, blue, alpha)
 }
 
+#[allow(clippy::too_many_arguments)] // The field's keys and clipboard are the eighth input.
 fn capture_chat(
     time: Res<Time<Real>>,
     mut typed: MessageReader<KeyboardInput>,
+    mut field: FieldInput,
     mut mode: ResMut<InputMode>,
     mut draft: ResMut<ChatLine>,
     mut history: ResMut<ChatHistory>,
@@ -278,7 +313,7 @@ fn capture_chat(
     for key in typed.read() {
         if key.state == ButtonState::Pressed && key.logical_key == Key::ArrowUp {
             if let Some(last) = &history.0 {
-                draft.0.clone_from(last);
+                draft.0.set_text(last);
             }
             continue;
         }
@@ -286,14 +321,14 @@ fn capture_chat(
         // The reading of a key is `ui/text_input.rs`'s, shared with the map's note field.
         // What stays here is what makes this line chat's: the mode it lives in, and that
         // `Enter` is a message to the world rather than a mark on a map.
-        match apply_key(key, &mut draft.0, DRAFT_LIMIT_BYTES) {
+        match field.apply(&mut draft.0, key, DRAFT_LIMIT_BYTES) {
             Some(TextEdit::Cancelled) => {
                 draft.0.clear();
                 set_mode(&mut mode, InputMode::Playing);
                 return;
             }
             Some(TextEdit::Submitted) => {
-                let line = std::mem::take(&mut draft.0);
+                let line = draft.0.take();
                 if !line.trim().is_empty() {
                     history.0 = Some(line.clone());
                 }
@@ -437,6 +472,7 @@ fn render_chat(
     time: Res<Time<Real>>,
     mut lines: Query<(&ChatText, &mut Text, &mut TextColor)>,
     mut input: Query<&mut Text, (With<ChatInput>, Without<ChatText>)>,
+    mut spans: DraftSpans,
 ) {
     let visible = matches!(*mode, InputMode::Playing | InputMode::Chat);
     let now = time.elapsed();
@@ -454,10 +490,22 @@ fn render_chat(
     let Ok(mut input) = input.single_mut() else {
         return;
     };
-    if *mode == InputMode::Chat {
-        input.0 = format!("> {}", draft.0);
+    let typing = *mode == InputMode::Chat;
+    if typing {
+        input.0 = "> ".to_owned();
     } else {
         input.0.clear();
+    }
+    // Closed, the draft draws as nothing at all -- an empty line, not an unfocused one.
+    let pieces = if typing {
+        draft.0.pieces(true)
+    } else {
+        TextField::default().pieces(false)
+    };
+    for (slot, span, colour, background) in &mut spans {
+        if let Some(piece) = pieces.get(slot.0) {
+            paint_span(piece, Color::WHITE, span, colour, background);
+        }
     }
 }
 
@@ -475,6 +523,8 @@ fn line_alpha(mode: InputMode, visible: bool, age: Duration) -> f32 {
 mod tests {
     use super::*;
     use crate::net::{ANY_TOKEN, ChatMessage, PartyInvite, SessionParams};
+    use crate::ui::clipboard::{MemoryClipboard, TextClipboard};
+    use crate::ui::text_input::{CARET, CARET_COLOUR, Modifiers, SELECTION_BACKGROUND};
 
     fn session() -> Session {
         Session(SessionParams {
@@ -535,8 +585,119 @@ mod tests {
         }
         app.update();
         assert_eq!(
-            app.world().resource::<ChatLine>().0.len(),
+            app.world().resource::<ChatLine>().0.text().len(),
             DRAFT_LIMIT_BYTES
+        );
+    }
+
+    /// **`Control+V` reaches the draft only while chat owns the keyboard.** Over the settings
+    /// screen the mode is `Menu`, and a paste there must not land in a draft nobody can see
+    /// that the next `T` would then open with.
+    #[test]
+    fn a_paste_lands_in_the_draft_only_while_chat_is_capturing() {
+        let mut app = capture_app(None);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ControlLeft);
+        app.insert_resource(keys)
+            .insert_resource(TextClipboard::with(MemoryClipboard::holding(
+                "X 40 | Z -12",
+            )));
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Menu;
+        app.update();
+        type_key(&mut app, Key::Character("v".into()));
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
+        app.update();
+        type_key(&mut app, Key::Character("v".into()));
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "X 40 | Z -12");
+    }
+
+    /// The held modifiers reach the field: `Shift` with an arrow selects rather than moves.
+    #[test]
+    fn shift_held_while_an_arrow_is_pressed_selects_in_the_draft() {
+        let mut app = capture_app(None);
+        type_key(&mut app, Key::Character("hello".into()));
+        app.update();
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ShiftLeft);
+        app.insert_resource(keys);
+        type_key(&mut app, Key::ArrowLeft);
+        type_key(&mut app, Key::ArrowLeft);
+        app.update();
+        assert_eq!(app.world().resource::<ChatLine>().0.selection(), Some(3..5));
+    }
+
+    fn field_with(text: &str, keys: &[Key], modifiers: Modifiers) -> TextField {
+        let mut field = TextField::default();
+        field.set_text(text);
+        for key in keys {
+            press_on(&mut field, key.clone(), modifiers);
+        }
+        field
+    }
+
+    fn press_on(field: &mut TextField, key: Key, modifiers: Modifiers) {
+        let press = KeyboardInput {
+            key_code: KeyCode::KeyA,
+            logical_key: key,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        };
+        field.apply_key(&press, modifiers, None, DRAFT_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn the_draft_is_drawn_with_a_caret_and_a_highlighted_selection_only_while_typing() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(InputMode::Chat)
+            .insert_resource(ChatLine(field_with(
+                "hello",
+                &[const { Key::ArrowLeft }; 2],
+                Modifiers {
+                    shift: true,
+                    control: false,
+                },
+            )))
+            .init_resource::<ChatLog>()
+            .add_systems(Startup, spawn_chat)
+            .add_systems(Update, render_chat);
+        app.update();
+
+        let drawn = |app: &mut App| {
+            let mut spans: Vec<(usize, String, Color, Color)> = app
+                .world_mut()
+                .query_filtered::<(&FieldSpan, &TextSpan, &TextColor, &TextBackgroundColor), With<DraftSpan>>()
+                .iter(app.world())
+                .map(|(slot, span, colour, background)| {
+                    (slot.0, span.0.clone(), colour.0, background.0)
+                })
+                .collect();
+            spans.sort_by_key(|span| span.0);
+            spans
+        };
+        let spans = drawn(&mut app);
+        let texts: Vec<&str> = spans.iter().map(|span| span.1.as_str()).collect();
+        assert_eq!(texts, ["hel", CARET, "lo", ""]);
+        assert_eq!(spans[1].2, CARET_COLOUR, "the caret has its own colour");
+        assert_eq!(
+            spans[2].3, SELECTION_BACKGROUND,
+            "the selection is highlighted"
+        );
+        assert_eq!(spans[0].3, Color::NONE, "and the rest of the line is not");
+
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert!(
+            drawn(&mut app).iter().all(|span| span.1.is_empty()),
+            "no caret is left behind once chat closes"
         );
     }
 
@@ -833,7 +994,7 @@ mod tests {
         type_key(&mut app, Key::Escape);
         app.update();
         assert_eq!(*app.world().resource::<InputMode>(), InputMode::Playing);
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
         assert!(receiver.try_recv().is_err());
     }
 
@@ -860,7 +1021,7 @@ mod tests {
     fn reopen_chat(app: &mut App) {
         *app.world_mut().resource_mut::<InputMode>() = InputMode::Chat;
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
     }
 
     #[test]
@@ -876,13 +1037,13 @@ mod tests {
         type_key(&mut app, Key::Backspace);
         type_key(&mut app, Key::Character("!".into()));
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "hell!");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "hell!");
 
         for _ in 0..5 {
             type_key(&mut app, Key::Backspace);
         }
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
     }
 
     #[test]
@@ -895,7 +1056,10 @@ mod tests {
         reopen_chat(&mut app);
         type_key(&mut app, Key::ArrowUp);
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "/teleport 1 2 3  ");
+        assert_eq!(
+            app.world().resource::<ChatLine>().0.text(),
+            "/teleport 1 2 3  "
+        );
     }
 
     #[test]
@@ -918,7 +1082,7 @@ mod tests {
         reopen_chat(&mut app);
         type_key(&mut app, Key::ArrowUp);
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "remember me");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "remember me");
     }
 
     #[test]
@@ -933,7 +1097,7 @@ mod tests {
             .add_systems(Update, capture_chat);
         type_key(&mut app, Key::Character("t".into()));
         app.update();
-        assert_eq!(app.world().resource::<ChatLine>().0, "");
+        assert_eq!(app.world().resource::<ChatLine>().0.text(), "");
 
         assert!(line_alpha(InputMode::Playing, true, Duration::ZERO) > 0.99);
         assert!(line_alpha(InputMode::Playing, true, Duration::from_millis(11_900)) > 0.0);

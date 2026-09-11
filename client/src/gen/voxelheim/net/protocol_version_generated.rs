@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 39;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 40;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -326,10 +326,17 @@ impl ProtocolVersion {
     /// client would handshake cleanly and lose the session the first time somebody put a
     /// bench down in view. The three `RecipeID` members that build them ride along and
     /// owe nothing alone — an unknown recipe is an ordinary silence from the server.
-    pub const Current: Self = Self(39);
+    ///
+    /// V40: `PlayerVitals` appends `energy` and `max_energy`, and the refusal enums gain
+    /// `RefusedAction.Energy` and `RefusalReason.NotEnoughEnergy`. The two enum members owe
+    /// nothing on their own — both decoders read an unknown member as `Unknown`. The
+    /// vitals append owes the bump: a V40 client requires a non-zero `max_energy` that a
+    /// V39 server never sends, so without it the peers would handshake cleanly and the
+    /// client would refuse the first snapshot — V15's and V17's argument again.
+    pub const Current: Self = Self(40);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 39;
+    pub const ENUM_MAX: u16 = 40;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

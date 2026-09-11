@@ -946,6 +946,8 @@ mod tests {
                     respawn_ticks: 0,
                     invulnerable: false,
                     blocking: false,
+                    energy: 100,
+                    max_energy: 100,
                 }))
                 .add_systems(Update, toggle_view);
 

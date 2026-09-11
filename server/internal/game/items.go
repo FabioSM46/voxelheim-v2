@@ -75,9 +75,9 @@ const (
 	ItemLeatherCap
 	ItemLeatherJerkin
 	ItemLeatherLeggings
-	ItemIronHelm
-	ItemIronCuirass
-	ItemIronGreaves
+	ItemRustyHelm
+	ItemRustyCuirass
+	ItemRustyGreaves
 
 	ItemWoodenShield
 
@@ -192,10 +192,10 @@ const (
 	// penalty is being narrowed to what a player has on them.
 	ToolMaxDurability uint16 = 200
 
-	// Leather survives on the rusty blade's scale; iron survives twice as long. A set is
+	// Leather survives on the rusty blade's scale; the rusty set survives twice as long. A set is
 	// three separate objects, so every piece carries the same maximum and its own wear.
 	LeatherArmourMaxDurability uint16 = 100
-	IronArmourMaxDurability    uint16 = 200
+	RustyArmourMaxDurability   uint16 = 200
 	WoodenShieldMaxDurability  uint16 = 40
 
 	// A bow wears from each shot rather than only from death. Its own maximum belongs
@@ -253,13 +253,13 @@ type itemDefinition struct {
 
 	// armour is the percentage points of incoming damage this worn piece will remove.
 	// This issue only records the value: three leather pieces sum to 15%, turning a
-	// draugr's 10 into 8 and a vargr's 7 into 5; three iron pieces sum to 30%, turning
+	// draugr's 10 into 8 and a vargr's 7 into 5; three rusty pieces sum to 30%, turning
 	// those same hits into 7 and 4. Damage application belongs to the combat issue.
 	armour uint16
 
 	// threat is tenths added to the mob aggro weight while this piece is worn. Leather
-	// adds none; three iron pieces add fifteen tenths to the base weight of one, so a
-	// fully iron-clad player weighs 2.5 times as much in a mob's choice. Aggro applies it
+	// adds none; three rusty pieces add fifteen tenths to the base weight of one, so a
+	// player in the full rusty set weighs 2.5 times as much in a mob's choice. Aggro applies it
 	// later; the registry merely owns the item stat here.
 	threat uint16
 
@@ -449,11 +449,14 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemLeatherJerkin:   {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 5, maxDurability: LeatherArmourMaxDurability},
 	ItemLeatherLeggings: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 5, maxDurability: LeatherArmourMaxDurability},
 
-	// Forged iron: twice the durability and armour of leather. Five threat tenths per
-	// piece make the complete set add 1.5 to the base aggro weight, hence 2.5 times.
-	ItemIronHelm:    {places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
-	ItemIronCuirass: {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
-	ItemIronGreaves: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: IronArmourMaxDurability},
+	// The rusty set: the metal armour a character can make at the start, the same pitted
+	// iron as the rusty sword they spawn holding. Its stats did not move when #1120
+	// renamed it from iron — twice the durability and armour of leather, and five threat
+	// tenths per piece make the complete set add 1.5 to the base aggro weight, hence 2.5
+	// times. The ids stay 24, 25 and 26 because they are on the wire and in stored packs.
+	ItemRustyHelm:    {places: world.Air, maxStack: 1, wornAt: wornHead, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability},
+	ItemRustyCuirass: {places: world.Air, maxStack: 1, wornAt: wornChest, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability},
+	ItemRustyGreaves: {places: world.Air, maxStack: 1, wornAt: wornLegs, armour: 10, threat: 5, maxDurability: RustyArmourMaxDurability},
 
 	ItemWoodenShield: {places: world.Air, maxStack: 1, wornAt: wornOffHand, maxDurability: WoodenShieldMaxDurability, blockFraction: 50},
 
