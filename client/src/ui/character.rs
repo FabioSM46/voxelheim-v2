@@ -482,7 +482,7 @@ struct PreviewPart;
 
 /// Between the server list's 45 and the login screen's 50. A player choosing a character
 /// has signed in and picked a server, and neither of those screens is up behind this one.
-const CHARACTER_LAYER: i32 = 47;
+pub(super) const CHARACTER_LAYER: i32 = 47;
 
 const PANEL: Color = Color::srgb(0.065, 0.075, 0.095);
 

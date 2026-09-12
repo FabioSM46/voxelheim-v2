@@ -1851,8 +1851,12 @@ enum RejoinBy {
 /// It is removed by whichever dial consumes it, before that dial can fail. So a rejoin
 /// that is itself refused reports the refusal and stops, which is what keeps this one
 /// return rather than a retry policy — `client/AGENTS.md` still says there is none.
+///
+/// **Public for its presence and nothing else.** `ui/session_ended.rs` must not draw an
+/// ending over the frames between a deliberate leave's close and the dial that replaces it;
+/// nothing outside this module inserts or removes it.
 #[derive(Resource, Debug, Default)]
-struct Rejoining;
+pub struct Rejoining;
 
 /// The local presentation clock for a server-owned leave duration.
 ///
@@ -1925,9 +1929,18 @@ fn rejoin_for_a_character(
             );
         }
         None => {
-            // Nothing was ever dialled, so there is nothing to go back to. Reachable only
-            // if a `DisconnectRequest` arrived on a client that never opened a session.
+            // Nothing was ever dialled, so there is nothing to go back to. Reachable if a
+            // `DisconnectRequest` arrived on a client that never opened a session.
             commands.remove_resource::<Rejoining>();
+            // **And a rejoin that cannot proceed still ends the session (#1175).** A name
+            // refusal keeps `Choosing` and the form mounted for the dial that was about to
+            // replace the session; with no dial coming they would stand over a session
+            // that no longer exists, and no screen for an ending would ever be drawn.
+            // Assigned only from `Choosing`, so a terminal state keeps its own reason.
+            if matches!(*state, ConnectionState::Choosing) {
+                *state = ConnectionState::Disconnected;
+            }
+            commands.remove_resource::<CharacterChoice>();
         }
     }
 }
@@ -1961,6 +1974,9 @@ fn dial_recorded_address(
         Err(err) => {
             error!("the network thread would not start: {err}");
             *state = ConnectionState::Rejected { reason: err };
+            // A rejoin armed on the character screen dials from `Choosing` with the form
+            // mounted; a refused dial leaves no session for it to answer (#1175).
+            commands.remove_resource::<CharacterChoice>();
         }
     }
 }
@@ -2069,9 +2085,14 @@ fn connect_on_request(
     {
         return;
     }
-    if reopening_character {
+    if rejoining.is_some() {
         // Consume the single internal retry before the dial can fail. Ordinary clicks
         // cannot reach `Choosing`, and a failed retry has no flag left to loop on.
+        //
+        // **From any state it was armed in, not only `Choosing`.** The rejoin a
+        // deliberate leave arms reaches here from `Disconnected`, and a flag that survived
+        // a refused row there was written again by `rejoin_for_a_character` on every later
+        // frame and refused again (#1175).
         commands.remove_resource::<Rejoining>();
     }
 
@@ -2089,6 +2110,10 @@ fn connect_on_request(
         *state = ConnectionState::Rejected {
             reason: "that server is no longer in the list. Refresh it and try again.".to_owned(),
         };
+        // A rejoin armed on the character screen reaches here with the form still
+        // mounted. It has no session left to answer a choice, so it comes down with the
+        // attempt rather than standing over the refusal (#1175).
+        commands.remove_resource::<CharacterChoice>();
         return;
     };
 
@@ -2113,6 +2138,8 @@ fn connect_on_request(
         Err(err) => {
             error!("the network thread would not start: {err}");
             *state = ConnectionState::Rejected { reason: err };
+            // The same stale form as the refused row above, for the same reason.
+            commands.remove_resource::<CharacterChoice>();
         }
     }
 }
@@ -5002,6 +5029,171 @@ mod tests {
             ),
             "a failed rejoin left {:?}",
             state(&app)
+        );
+    }
+
+    /// A character screen held open for a name refusal, whose session then ends.
+    ///
+    /// The one ending `drain_session_events` deliberately leaves in `Choosing` with
+    /// `CharacterChoice` mounted, because the rejoin is about to replace the session under
+    /// the same form. Everything a session holds is removed regardless.
+    fn a_character_screen_awaiting_its_rejoin() -> (App, Sender<SessionEvent>) {
+        let (mut app, events) = app_with_manual_link(ConnectionState::Choosing);
+        app.insert_resource(
+            CharacterChoice::for_a_test(Vec::new(), 3).after_creation_refusal("that name is taken"),
+        )
+        .insert_resource(Rejoining)
+        .insert_resource(ServerAddress("server.example:7777".to_owned()))
+        .add_message::<ConnectRequest>()
+        .add_systems(
+            Update,
+            (rejoin_for_a_character, connect_on_request)
+                .chain()
+                .before(drain_session_events),
+        );
+        (app, events)
+    }
+
+    /// Ends the session behind [`a_character_screen_awaiting_its_rejoin`], the way a
+    /// server's character timeout ends one, and lets the rejoin run.
+    fn end_the_session_behind_the_form(app: &mut App, events: Sender<SessionEvent>) {
+        events
+            .send(SessionEvent::Ended(Some(
+                "server.example:7777 closed the connection while a character was being chosen"
+                    .to_owned(),
+            )))
+            .expect("the app holds the receiver");
+        app.update();
+        drop(events);
+        for _ in 0..5 {
+            app.update();
+        }
+    }
+
+    fn connect_requests(app: &App) -> usize {
+        let messages = app.world().resource::<Messages<ConnectRequest>>();
+        let mut cursor = messages.get_cursor();
+        cursor.read(messages).count()
+    }
+
+    /// **The rejoin a name refusal armed cannot proceed, so the client must still end.**
+    /// With no route there is nothing to dial, and it used to stop there: `Rejoining` gone,
+    /// the state still `Choosing` and the form still mounted, over a session that no longer
+    /// existed and with no screen for an ending ever drawn (#1175).
+    #[test]
+    fn a_rejoin_with_nowhere_to_go_ends_the_session_rather_than_stranding_the_form() {
+        let (mut app, events) = a_character_screen_awaiting_its_rejoin();
+
+        end_the_session_behind_the_form(&mut app, events);
+
+        assert_eq!(state(&app), ConnectionState::Disconnected);
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the character screen stayed up over a session that had ended"
+        );
+        assert!(!app.world().contains_resource::<Rejoining>());
+        assert_eq!(connect_requests(&app), 0, "a rejoin with no route dialled");
+        // The address stays: it is what a way back is offered on.
+        assert!(app.world().contains_resource::<ServerAddress>());
+    }
+
+    /// **And a rejoin whose row is no longer listed ends with the reason, not the form.**
+    /// `connect_on_request` refuses a row it cannot find, which is right, but it left
+    /// `CharacterChoice` behind — so the character screen sat over a `Rejected` state with
+    /// nothing behind it to answer a choice.
+    #[test]
+    fn a_rejoin_whose_row_is_gone_ends_with_its_reason_rather_than_the_form() {
+        let (mut app, events) = a_character_screen_awaiting_its_rejoin();
+        app.insert_resource(RejoinBy::Row("midgard".to_owned()));
+
+        end_the_session_behind_the_form(&mut app, events);
+
+        assert!(
+            matches!(state(&app), ConnectionState::Rejected { .. }),
+            "{:?}",
+            state(&app)
+        );
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the character screen stayed up over a refused rejoin"
+        );
+        assert!(!app.world().contains_resource::<Rejoining>());
+        assert_eq!(connect_requests(&app), 1, "one rejoin, asked for once");
+    }
+
+    /// **A rejoin that fails is one attempt, whichever state it was armed from.**
+    /// `connect_on_request` consumed `Rejoining` only from `Choosing`, so the rejoin a
+    /// deliberate leave armed survived a refused row: every later frame wrote the request
+    /// again and was refused again, which is the retry loop this flag must never become.
+    #[test]
+    fn a_rejoin_after_a_leave_whose_row_is_gone_asks_once_and_stops() {
+        let mut app = ready_to_reconnect(ConnectionState::Disconnected);
+        app.insert_resource(RejoinBy::Row("midgard".to_owned()))
+            .insert_resource(Rejoining)
+            .add_systems(
+                Update,
+                (rejoin_for_a_character, connect_on_request)
+                    .chain()
+                    .before(reconnect_on_request),
+            );
+
+        for _ in 0..6 {
+            app.update();
+        }
+
+        assert_eq!(connect_requests(&app), 1, "a refused rejoin asked again");
+        assert!(!app.world().contains_resource::<Rejoining>());
+        assert!(
+            matches!(state(&app), ConnectionState::Rejected { .. }),
+            "{:?}",
+            state(&app)
+        );
+    }
+
+    /// **The same rule on the address route, which never passes through
+    /// `connect_on_request`.** `rejoin_for_a_character` removes `Rejoining` before it calls
+    /// `dial_recorded_address`, so a dial on that route that fails — here a real session
+    /// thread refused at an address nothing listens on — ends terminal with the form down and
+    /// no flag left: the ended screen is not held back, and nothing asks again (#1175).
+    #[test]
+    fn a_rejoin_on_the_address_route_that_fails_consumes_its_flag_and_stops() {
+        let (mut app, events) = a_character_screen_awaiting_its_rejoin();
+        app.insert_resource(RejoinBy::Address {
+            // Port 0 is not an address a client can dial, so the attempt fails the way an
+            // unreachable server does.
+            addr: "127.0.0.1:0".to_owned(),
+            expected: tls::Expectation::Unlisted,
+            ticket_path: None,
+        });
+
+        end_the_session_behind_the_form(&mut app, events);
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "the flag survived the dial on the address route"
+        );
+
+        pump_until(&mut app, "the rejoin's dial to fail", |app| {
+            matches!(
+                state(app),
+                ConnectionState::Rejected { .. } | ConnectionState::Disconnected
+            )
+        });
+        let ended = state(&app);
+        // A redial would move the state back to `Connecting`; nothing may ask again.
+        for _ in 0..20 {
+            app.update();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(state(&app), ended, "a failed rejoin dialled again");
+        assert!(!app.world().contains_resource::<Rejoining>());
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the character screen stayed up over a failed rejoin"
+        );
+        assert_eq!(
+            connect_requests(&app),
+            0,
+            "the address route wrote a row request"
         );
     }
 

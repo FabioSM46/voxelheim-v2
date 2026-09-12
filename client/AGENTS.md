@@ -103,7 +103,8 @@ keeps meaning "everything the client is".
 | `ui/voice.rs` | the two lines a player can see about voice: whether they are being sent — or that the microphone they named is not there — with the bound key that would start it and who is going to hear it, and who has been heard in the last second and not muted | decide anything, be read by anything that decides, or stay up on a server that relays no voice |
 | `ui/status.rs` | the debug text nodes: connection, world counters, player position, inventory — the frame-rate readout in whichever of the four corners the setting names, and routing server refusals and trade endings into tagged chat | reach into another module's internals, grow a health bar, call the snapshot age a round trip, or grow a second notification surface |
 | `ui/login.rs` | the login screen: one control, the line under it, and when it is up | start a sign-in, hold a ticket, or offer a way past itself |
-| `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on, and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
+| `ui/servers.rs` | the server list screen: a row per server, the retry, the line under them, the reconnect that goes back to the server the last session was on (spawned for `ui/session_ended.rs` too), and when each is up | learn a server's address, open a socket, dial without a press, or draw an empty list for a list it could not read |
+| `ui/session_ended.rs` | the centred screen for a session that is over on a launch with no server list: what ended or the refusal verbatim, the list's own reconnect, a quit, and when it is up | dial without a press, learn an address, keep a second copy of the reconnect's rules, or be up where the login screen, the server list or a rejoin already owns the moment |
 | `ui/character.rs` | the character screen: the rows, the creation draft, the stated palettes, the live preview, and the launch that answers it from `--name` | decide whether a name may be worn, invent a colour the contract does not allow, or enter a world before the welcome |
 | `ui/settings.rs` | the settings screen behind the pause menu: the four tabs, the fixed-height area under them, the rows, the steppers, the rebinding capture, the refusal it prints, one reset per tab, and the overlays with lifecycles of their own — one select dropdown per multiple-choice knob (at most one open) and the Voices panel | hold a bound, a step or a default of its own, decide which tab a setting is on, narrow the set of keys the model offers, or leave a control with no key |
 | `src/gen/` | flatc output | be hand-edited, ever |
@@ -2901,7 +2902,9 @@ Recorded here so the next reader does not mistake them for oversights:
 - **No *automatic* reconnect, backoff or session resumption — and one button.** A dropped
   connection is reported and stays reported, with nothing set to try it a second time. What #627
   added is not a policy but an affordance: `ui/servers.rs` draws `RECONNECT` while a session is
-  over and there is a `ServerAddress` to go back to, and a press writes one `ReconnectRequest`
+  over and there is a `ServerAddress` to go back to — beside the rows, or centred on
+  `ui/session_ended.rs` for a `--server` launch, which has no list and before #1175 drew nothing
+  at all over an ending — and a press writes one `ReconnectRequest`
   that `net::reconnect_on_request` turns into exactly one dial on the `RejoinBy` route the session
   was opened by. **The press is the whole of the trigger.** There is no timer, no backoff and no
   countdown behind it, it inserts no `Rejoining`, and a client that redialled on its own would be
@@ -2928,7 +2931,13 @@ Recorded here so the next reader does not mistake them for oversights:
   and permits the one rejoin, so the countdown wins the race exactly where the server decided it.
 
   The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
-  refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
+  refused is a refusal a player can read rather than the first turn of a loop — whichever state
+  armed it: `connect_on_request` once consumed it only from `Choosing`, and the rejoin a leave arms
+  from `Disconnected` was written and refused again on every frame (#1175). **A rejoin that cannot
+  proceed still ends the session.** A name refusal keeps `Choosing` and the form mounted for the
+  dial about to replace it, so a route that is missing, a row no longer listed or a thread that
+  will not start must take `CharacterChoice` down and leave `Disconnected` or `Rejected`; before
+  #1175 each left the character screen over a session that no longer existed. The list is fetched
   again over a fresh connection rather than reused, because what the server holds may have changed,
   and going back through `RejoinBy::Row` rather than a remembered address is what keeps the
   certificate verified against the same row it was verified against the first time.
