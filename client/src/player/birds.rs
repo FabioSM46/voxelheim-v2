@@ -68,6 +68,7 @@ use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
+use super::eyeshine::{Eyeshine, eye_pair_mesh, eyeshine_material};
 use super::sky::{self, Period, SkyClock};
 use crate::net::{BlockCoord, ChunkCoord, Session};
 use crate::world::{ChunkStore, palette};
@@ -326,6 +327,14 @@ pub(super) struct BirdSpecies {
     pub(super) plumage: &'static [(Color, Color)],
     /// How it flies.
     pub(super) pattern: Flight,
+    /// The pair of glowing eyes this row wears, for a row that is only ever seen after dark.
+    ///
+    /// `None` for every row that flies by day, and that is the whole of why it is an option
+    /// rather than a colour every row carries: a bird with no eyeshine spawns three entities
+    /// and costs three draws, exactly what it cost before this field existed. The
+    /// presentation itself is `player/eyeshine.rs`, shared with the ground creatures that
+    /// need the same thing — see that module's head for why it is not authored here.
+    pub(super) eyeshine: Option<Eyeshine>,
     /// The fastest this row's pattern can move it, in blocks per second.
     ///
     /// A bound rather than a speed, and **test-only** for exactly that reason: nothing reads
@@ -462,6 +471,7 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         // The longest leg is |2 * DART_SPREAD| = 14.5 blocks over the shortest leg time.
         #[cfg(test)]
         max_speed: 7.5,
+        eyeshine: None,
     },
     // The vulture: high over the sand, turning, and barely beating a wing.
     BirdSpecies {
@@ -480,6 +490,7 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         // The tightest turn at the widest radius, plus the drift and the rise.
         #[cfg(test)]
         max_speed: 7.5,
+        eyeshine: None,
     },
     // The eagle: higher still, alone or in a pair, and never in a hurry.
     BirdSpecies {
@@ -500,6 +511,7 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         // Both lobes of the sweep reach their fastest together at the crossing.
         #[cfg(test)]
         max_speed: 10.0,
+        eyeshine: None,
     },
     // The owl of the wood, and the first row in this table that flies after dark. Wooded
     // grass, because it needs a tree to sit on and `requires_wooded` is where that is already
@@ -533,6 +545,7 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         // `a_perched_bird_never_jumps_between_two_frames` walks the whole drawn cycle.
         #[cfg(test)]
         max_speed: 9.0,
+        eyeshine: Some(OWL_EYES),
     },
     // The same owl in the north. A snow country's trees are sparser and the row does not
     // require them: an owl that finds no tree flies its circuit and does not perch, which is
@@ -552,6 +565,7 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         pattern: Flight::Perch,
         #[cfg(test)]
         max_speed: 9.0,
+        eyeshine: Some(OWL_EYES),
     },
 ];
 
@@ -573,6 +587,26 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
 pub(super) const OWL_WOOD: usize = 3;
 #[allow(dead_code)]
 pub(super) const OWL_NORTH: usize = 4;
+
+/// The owl's eyes: huge, gold, and the brightest thing on a night-time treetop.
+///
+/// An owl's face **is** its eyes, so the pair is authored a little wider than the head it
+/// sits on (±0.060 of a wingspan against the head section's ±0.048) rather than tucked inside
+/// it. At the owl's 1.6 span each eye is 0.077 blocks across, which at a dozen blocks is
+/// about 0.37° — a moon's width, and the smallest thing that reads as a glint rather than as
+/// a stray pixel.
+///
+/// The glow is warmer and brighter than `structures.rs`'s cold rune because it is reflected
+/// firelight rather than magic, and its red component is over one for the reason that file
+/// gives: a glow bounded by one is an eye dimmer than a white wall.
+const OWL_EYES: Eyeshine = Eyeshine {
+    spread: 0.036,
+    forward: 0.232,
+    rise: 0.02,
+    size: 0.048,
+    colour: Color::srgb(0.98, 0.86, 0.45),
+    glow: LinearRgba::rgb(3.4, 2.6, 0.9),
+};
 
 /// Which row flies over this country in this half of the day, if any.
 ///
@@ -1229,6 +1263,20 @@ pub(super) struct BirdVisuals {
     wing: Handle<Mesh>,
     /// One `(body, wing)` pair per bird the sky can hold, claimed at spawn.
     pool: [(Handle<StandardMaterial>, Handle<StandardMaterial>); BIRD_COUNT_MAX],
+    /// One eye-pair mesh and one glow material per row of [`BIRDS`] that declares
+    /// [`BirdSpecies::eyeshine`], built once here for the reason `pool` is: the set is fixed
+    /// and a flock is stood up every time the eye crosses an anchor cell.
+    ///
+    /// **Per row rather than per slot, which is the opposite of `pool` and is deliberate.**
+    /// `pool`'s pairs are per slot because a plumage handle cannot carry a per-bird alpha and
+    /// two birds of one plumage would fade as one. An eye's alpha comes from the same write —
+    /// so the eyes need the same treatment, and they get it by taking their alpha from the
+    /// *slot's* entry here: this array holds the mesh and the row's colours, and the drawn
+    /// material is one more pool pair. Indexed by row so a row with no eyes holds `None` and
+    /// costs nothing.
+    eyes: [Option<Handle<Mesh>>; BIRDS.len()],
+    /// One eye material per bird the sky can hold, claimed with the pool pair beside it.
+    eye_pool: [Handle<StandardMaterial>; BIRD_COUNT_MAX],
 }
 
 /// One bird. The root, and the only thing anything outside this module may see.
@@ -1269,6 +1317,9 @@ pub(super) struct Bird {
     pool: usize,
     body_material: Handle<StandardMaterial>,
     wing_material: Handle<StandardMaterial>,
+    /// The eye pair's material, for a row that has eyes. `None` is the three rows that fly by
+    /// day and spawn no eye entity at all.
+    eye_material: Option<Handle<StandardMaterial>>,
 }
 
 /// One wing, as a child of the bird it belongs to.
@@ -1307,8 +1358,31 @@ pub(super) fn create_visuals(
                 materials.add(plumage_material(Color::WHITE, 0.0)),
             )
         }),
+        // One mesh per row that has eyes, and none for the rows that do not.
+        eyes: std::array::from_fn(|row| {
+            BIRDS[row]
+                .eyeshine
+                .map(|eyes| meshes.add(eye_pair_mesh(eyes)))
+        }),
+        eye_pool: std::array::from_fn(|_| materials.add(eyeshine_material(BLANK_EYES, 0.0))),
     });
 }
+
+/// The eyeshine a pooled material is minted with: dark, and invisible.
+///
+/// Every pool entry is overwritten with its bird's own row the moment a bird claims it, so
+/// this is only ever what an unclaimed handle holds. It is the same "colourless until
+/// claimed" that [`BirdVisuals::pool`] mints its plumage pairs with, and it exists as a named
+/// constant only because [`Eyeshine`] has six fields and a literal here would read as a
+/// species.
+const BLANK_EYES: Eyeshine = Eyeshine {
+    spread: 0.0,
+    forward: 0.0,
+    rise: 0.0,
+    size: 0.0,
+    colour: Color::BLACK,
+    glow: LinearRgba::BLACK,
+};
 
 /// The fractions of a wing's chord the spar's flat runs between.
 ///
@@ -1834,6 +1908,17 @@ pub(super) fn keep_the_flock(
         if let Some(mut material) = materials.get_mut(&wing_material) {
             *material = plumage_material(wing_colour, 0.0);
         }
+        // The eye pair, for a row that has one: its own pooled material, written with this
+        // row's glow and faded in beside the plumage.
+        let eyes = species.eyeshine.zip(visuals.eyes[index].clone());
+        let eye_material = eyes.as_ref().map(|(eyeshine, _)| {
+            let eyeshine = *eyeshine;
+            let handle = visuals.eye_pool[pool].clone();
+            if let Some(mut material) = materials.get_mut(&handle) {
+                *material = eyeshine_material(eyeshine, 0.0);
+            }
+            handle
+        });
         let bird = commands
             .spawn((
                 Bird {
@@ -1852,6 +1937,7 @@ pub(super) fn keep_the_flock(
                     pool,
                     body_material: body_material.clone(),
                     wing_material: wing_material.clone(),
+                    eye_material: eye_material.clone(),
                 },
                 Mesh3d(visuals.body.clone()),
                 MeshMaterial3d(body_material),
@@ -1874,8 +1960,23 @@ pub(super) fn keep_the_flock(
                     Transform::default(),
                 ));
             }
+            // A fourth entity, and only for a row that declares eyes — so the three rows
+            // that fly by day are three draws, exactly what they were. It carries no
+            // component of its own: nothing animates an eye, and the glow is written into
+            // the material the parent already holds a handle to.
+            if let (Some(mesh), Some(material)) = (eyes.map(|(_, mesh)| mesh), eye_material) {
+                parent.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default()));
+            }
         });
     }
+}
+
+/// The eyeshine one row wears, by index, for a caller that has a [`Bird::species`] and not a
+/// row. A row out of range answers `None` rather than panicking: a bird alive across a table
+/// change is what [`BIRDS`]'s "appended to, never reordered" exists to prevent, and a missing
+/// glint is the right way to survive it being got wrong anyway.
+fn species_eyeshine(species: usize) -> Option<Eyeshine> {
+    BIRDS.get(species).and_then(|row| row.eyeshine)
 }
 
 /// The one camera, told apart from the entities this system also holds mutably.
@@ -1961,6 +2062,15 @@ pub(super) fn fly_the_flock(
                 if let Some(mut material) = materials.get_mut(&handle) {
                     material.base_color = material.base_color.with_alpha(fade);
                 }
+            }
+            // The eyes take the same fade, and their **glow** takes it too — an emissive
+            // term carries no alpha, so eyes left at full brightness would be two dots
+            // hanging where a bird had been. `eyeshine.rs` says the same thing at length.
+            if let (Some(handle), Some(eyeshine)) =
+                (bird.eye_material.clone(), species_eyeshine(bird.species))
+                && let Some(mut material) = materials.get_mut(&handle)
+            {
+                *material = eyeshine_material(eyeshine, fade);
             }
         }
 
@@ -3243,6 +3353,31 @@ mod tests {
                 "block {block} was mistaken for a tree"
             );
         }
+    }
+
+    #[test]
+    fn only_the_night_rows_have_eyes_and_the_day_rows_still_cost_three_draws() {
+        // The eyeshine is an option so that a bird that flies by daylight spawns what it
+        // always spawned: a body and two wings, three entities and three draws.
+        for (index, species) in BIRDS.iter().enumerate() {
+            assert_eq!(
+                species.eyeshine.is_some(),
+                species.flies == Period::Night,
+                "row {index} disagrees with its own half of the day about having eyes"
+            );
+        }
+        // And the owl's pair is a glint rather than a stray pixel: at its band top the eye
+        // subtends about a third of a degree, which is a moon's width.
+        let owl = &BIRDS[OWL_WOOD];
+        let eyes = owl.eyeshine.expect("the owl has eyes");
+        let across = eyes.size * owl.size;
+        let degrees = 2.0 * (across / 2.0).atan2(*owl.altitude.end()).to_degrees();
+        assert!(
+            (0.25..0.5).contains(&degrees),
+            "an owl's eye subtends {degrees}°, which is not a glint"
+        );
+        // Both owl rows wear the same eyes: they are the same bird in two countries.
+        assert_eq!(BIRDS[OWL_NORTH].eyeshine, owl.eyeshine);
     }
 
     #[test]
