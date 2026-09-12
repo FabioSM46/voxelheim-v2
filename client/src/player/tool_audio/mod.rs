@@ -1,6 +1,6 @@
 //! Bounded, disposable SFX. Mining observations authorize presentation; no sound
 //! originates a request, advances progress, infers a break, or consumes a landed blow.
-mod sounds;
+pub(super) mod sounds;
 
 use super::{
     Body, EYE_HEIGHT, InputMode, LocalMount, SnapshotBuffer, WorldCamera,

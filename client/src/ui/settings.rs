@@ -108,6 +108,7 @@ impl Plugin for SettingsScreenPlugin {
                     read_settings_keys.after(crate::player::ApplyInputMode),
                     rebuild_select_options,
                     show_select_dropdowns,
+                    turn_select_chevrons,
                     colour_select_controls,
                     close_the_microphone_test_with_the_screen,
                     show_the_microphone_meter,
@@ -163,6 +164,11 @@ struct SelectButton(Knob);
 /// lifecycle rather than the panel's.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectPanel(Knob);
+
+/// The chevron at the right edge of a select's closed control, naming whose. A shape rather
+/// than a glyph — see [`spawn_select`] — and turned by [`turn_select_chevrons`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectChevron(Knob);
 
 /// The option labels a [`SelectPanel`] was last **built with**, so [`rebuild_select_options`]
 /// rebuilds a list when what it says changes and not merely because a resource was written.
@@ -272,9 +278,10 @@ enum Reading {
     /// Whether the stereo image is folded, as the word on its own button.
     MonoAudio,
     Binding(Control),
-    /// A select row's closed control: the knob's current value plus the open indicator, as
-    /// one centred string. Distinct from `Knob(knob)`, which nothing spawns a text node for on
-    /// a select row — those draw as a [`SelectButton`], not a stepper.
+    /// A select row's closed control: the knob's current value alone, left-aligned. The open
+    /// indicator is a [`SelectChevron`] beside it, not a character in it. Distinct from
+    /// `Knob(knob)`, which nothing spawns a text node for on a select row — those draw as a
+    /// [`SelectButton`], not a stepper.
     SelectControl(Knob),
     /// Whether the Voices panel is showing, as the word on its own button.
     VoicesPanel,
@@ -352,6 +359,27 @@ const ROW_GAP: f32 = 6.0;
 /// or `+`, a toggle, a binding capture, and the Monitor select's own closed control and
 /// dropdown options.
 const CONTROL_BUTTON_HEIGHT: f32 = ROW_HEIGHT - 4.0;
+
+/// The fixed column at the right edge of a select's closed control that holds its chevron.
+const SELECT_INDICATOR_WIDTH: f32 = 20.0;
+
+/// The space between a select's left edge and the first character of its value.
+const SELECT_TEXT_INSET: f32 = 8.0;
+
+/// The width of a select's value: every pixel of the control its inset and its indicator
+/// column do not take, so the value is clipped short of the chevron and never under it.
+const SELECT_TEXT_WIDTH: f32 = STEPPER_WIDTH - SELECT_TEXT_INSET - SELECT_INDICATOR_WIDTH;
+
+const _: () = assert!(
+    SELECT_TEXT_WIDTH > 0.0,
+    "a select's value has no room left once its chevron is drawn"
+);
+
+/// The side of the square whose two drawn edges are a select's chevron.
+const CHEVRON_SIZE: f32 = 7.0;
+
+/// The thickness of those two edges.
+const CHEVRON_STROKE: f32 = 2.0;
 
 /// The height of a full-width control — the reset at the foot of a tab, and `BACK`.
 const WIDE_BUTTON: f32 = 40.0;
@@ -932,16 +960,19 @@ fn spawn_select(parent: &mut ChildSpawnerCommands<'_>, knob: Knob) {
                 height: Val::Px(CONTROL_BUTTON_HEIGHT),
                 flex_shrink: 0.0,
                 align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
+                justify_content: JustifyContent::FlexStart,
+                padding: UiRect::left(Val::Px(SELECT_TEXT_INSET)),
                 border_radius: BorderRadius::all(Val::Px(3.0)),
                 ..default()
             },
             BackgroundColor(BUTTON),
         ))
         .with_children(|button| {
-            // Value and indicator are one string, so "centred" is one property
-            // (`Justify::Center` here, `AlignItems::Center` on the button) rather than two
-            // children whose combined width would need centring separately.
+            // The value and the indicator are two children, not one string (#1161). As one
+            // centred string the indicator was a letter `v` after the value's last word, at a
+            // different x on every row. Every width here is fixed instead: the inset, then the
+            // value — left-aligned and clipped at `SELECT_TEXT_WIDTH` — then the indicator
+            // column, so the chevron stands at the control's right edge whatever the value says.
             button.spawn((
                 Reading::SelectControl(knob),
                 Text::new(String::new()),
@@ -950,14 +981,43 @@ fn spawn_select(parent: &mut ChildSpawnerCommands<'_>, knob: Knob) {
                     ..default()
                 },
                 TextColor(Color::WHITE),
-                TextLayout::no_wrap().with_justify(Justify::Center),
+                TextLayout::no_wrap().with_justify(Justify::Left),
                 Node {
-                    width: Val::Px(STEPPER_WIDTH),
+                    width: Val::Px(SELECT_TEXT_WIDTH),
                     flex_shrink: 0.0,
                     overflow: Overflow::clip(),
                     ..default()
                 },
             ));
+            button
+                .spawn(Node {
+                    width: Val::Px(SELECT_INDICATOR_WIDTH),
+                    height: Val::Percent(100.0),
+                    flex_shrink: 0.0,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                })
+                .with_children(|column| {
+                    // A square with only its bottom and right edges drawn, turned 45 degrees
+                    // clockwise, is a down chevron. A shape needs no glyph, so `ascii_guard` in
+                    // `ui/mod.rs` — the rule that made it a letter — has nothing to hold it to.
+                    column.spawn((
+                        SelectChevron(knob),
+                        Node {
+                            width: Val::Px(CHEVRON_SIZE),
+                            height: Val::Px(CHEVRON_SIZE),
+                            border: UiRect {
+                                right: Val::Px(CHEVRON_STROKE),
+                                bottom: Val::Px(CHEVRON_STROKE),
+                                ..default()
+                            },
+                            ..default()
+                        },
+                        BorderColor::all(Color::WHITE),
+                        chevron_turn(false),
+                    ));
+                });
 
             // Anchored directly below the control, at its exact width. `GlobalZIndex` —
             // not a plain `ZIndex` — is what lets it paint over every row beneath it rather
@@ -1769,6 +1829,37 @@ fn show_select_dropdowns(
     }
 }
 
+/// How a select's chevron is turned: pointing down while its list is closed, up while it is
+/// open. The nudge recentres the V, whose point sits half a diagonal from its square's centre
+/// while its arms end level with it.
+fn chevron_turn(open: bool) -> UiTransform {
+    let (degrees, nudge) = if open {
+        (-135.0, CHEVRON_SIZE * 0.35)
+    } else {
+        (45.0, -CHEVRON_SIZE * 0.35)
+    };
+    UiTransform {
+        translation: Val2::px(0.0, nudge),
+        rotation: Rot2::degrees(degrees),
+        ..UiTransform::IDENTITY
+    }
+}
+
+/// Turns the open select's chevron up and every other one down, on the frame
+/// [`show_select_dropdowns`] shows or hides the list. It reads the same `open_select`, so
+/// the chevron and the list cannot disagree about whether a select is open.
+fn turn_select_chevrons(
+    screen: Res<SettingsScreen>,
+    mut chevrons: Query<(&SelectChevron, &mut UiTransform)>,
+) {
+    for (chevron, mut transform) in &mut chevrons {
+        let next = chevron_turn(screen.open_select == Some(chevron.0));
+        if *transform != next {
+            *transform = next;
+        }
+    }
+}
+
 /// Paints every select's closed control and the open list's options — the pointer's three
 /// states for both, plus the one extra state [`button_colour`] has no arm for: the option the
 /// setting holds, coloured exactly as the active tab is.
@@ -2055,11 +2146,7 @@ fn describe(
         Reading::MonoAudio => on_or_off(settings.mono_audio()),
         Reading::ReadoutCorner => settings.readout_corner().name().to_owned(),
         Reading::ReducedEffects => on_or_off(settings.reduced_effects()),
-        // "v" stands in for a down chevron: `ascii_guard` in `ui/mod.rs` holds every
-        // string here to the 95 codepoints Bevy's embedded font can draw.
-        Reading::SelectControl(knob) => {
-            format!("{} v", settings.reading_with_choices(knob, choices))
-        }
+        Reading::SelectControl(knob) => settings.reading_with_choices(knob, choices),
         Reading::VoicesPanel => if screen.voices_open { "HIDE" } else { "SHOW" }.to_owned(),
         Reading::MicTestButton => if mic_test.open { "STOP" } else { "LISTEN" }.to_owned(),
         Reading::VoiceLevel(entity_id) => format!("{}%", voices.volume(entity_id)),
@@ -2458,11 +2545,11 @@ mod tests {
         let mut app = screen_app();
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
-            "borderless v"
+            "borderless"
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
-            "primary - Main display (1920x1080 at 0,0) v"
+            "primary - Main display (1920x1080 at 0,0)"
         );
 
         press_select(&mut app, Knob::WindowMode);
@@ -2479,21 +2566,21 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
-            "windowed v"
+            "windowed"
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
-            "Side display (1920x1080 at 1920,0) v"
+            "Side display (1920x1080 at 1920,0)"
         );
 
         press(&mut app, SettingsAction::Reset(Tab::Graphics));
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::WindowMode)),
-            "borderless v"
+            "borderless"
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
-            "primary - Main display (1920x1080 at 0,0) v"
+            "primary - Main display (1920x1080 at 0,0)"
         );
     }
 
@@ -2814,12 +2901,12 @@ mod tests {
     #[test]
     fn monitor_readings_are_complete_normally_and_clip_unbounded_names_on_one_line() {
         let mut app = screen_app();
-        let normal = "primary - Main display (1920x1080 at 0,0) v";
+        let normal = "primary - Main display (1920x1080 at 0,0)";
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::Monitor)),
             normal
         );
-        assert!(row_text_width(normal) <= STEPPER_WIDTH);
+        assert!(row_text_width(normal) <= SELECT_TEXT_WIDTH);
 
         let long_name = "External-monitor-name-".repeat(32);
         *app.world_mut().resource_mut::<MonitorChoices>() =
@@ -2840,11 +2927,11 @@ mod tests {
             row_text_width(&text.0) > STEPPER_WIDTH,
             "the overflow fixture unexpectedly fits"
         );
-        assert_eq!(node.width, Val::Px(STEPPER_WIDTH));
+        assert_eq!(node.width, Val::Px(SELECT_TEXT_WIDTH));
         assert_eq!(node.flex_shrink, 0.0);
         assert_eq!(node.overflow, Overflow::clip());
         assert_eq!(layout.linebreak, LineBreak::NoWrap);
-        assert_eq!(layout.justify, Justify::Center);
+        assert_eq!(layout.justify, Justify::Left);
 
         // And the control itself, not only its text node, kept the stepper column's exact
         // width — a long name is clipped inside the control rather than widening the row.
@@ -2858,8 +2945,8 @@ mod tests {
     // The Monitor dropdown
     // -------------------------------------------------------------------------
 
-    /// Closed by default, and the closed control names both the current monitor and an
-    /// open indicator through one `Reading::SelectControl(Knob::Monitor)` string.
+    /// Closed by default: the closed control names the current monitor, and its indicator is
+    /// the chevron beside the value, pointing down — not a letter at the end of it.
     #[test]
     fn the_monitor_dropdown_starts_closed() {
         let mut app = screen_app();
@@ -2867,7 +2954,173 @@ mod tests {
         assert_eq!(app.world().resource::<SettingsScreen>().open_select, None);
         let closed = reading_of(&mut app, Reading::SelectControl(Knob::Monitor));
         assert!(closed.contains("Main display"), "{closed}");
-        assert!(closed.ends_with(" v"), "no open indicator in {closed:?}");
+        assert!(!closed.ends_with(" v"), "a letter indicator in {closed:?}");
+        assert!(
+            chevrons_up(&mut app).contains(&(Knob::Monitor, false)),
+            "the monitor select has no chevron pointing down"
+        );
+    }
+
+    /// Every select's chevron, and whether it is turned up. Each must be turned one of the two
+    /// ways [`chevron_turn`] names, never something in between.
+    fn chevrons_up(app: &mut App) -> Vec<(Knob, bool)> {
+        let world = app.world_mut();
+        let mut query = world.query::<(&SelectChevron, &UiTransform)>();
+        query
+            .iter(world)
+            .map(|(chevron, transform)| {
+                let up = *transform == chevron_turn(true);
+                assert!(
+                    up || *transform == chevron_turn(false),
+                    "{:?}'s chevron is turned {transform:?}",
+                    chevron.0
+                );
+                (chevron.0, up)
+            })
+            .collect()
+    }
+
+    /// #1161: the open indicator was the letter `v` after the value, at a different x on every
+    /// row. Now, on every select on every tab — the Interface tab's included, which names no
+    /// select of its own — the control is the value, then a fixed indicator column holding a
+    /// chevron drawn as two borders, and the value never carries an indicator of its own.
+    ///
+    /// Layout does not run headless, so the chevron's x is read from the widths that decide
+    /// it. Every one is fixed, and they fill the control exactly, so the indicator column
+    /// starts `SELECT_INDICATOR_WIDTH` short of the control's right edge however long the
+    /// value is — which the monitor select is given a name far wider than the control to show.
+    #[test]
+    fn every_select_draws_its_chevron_at_the_right_edge_whatever_its_value_says() {
+        let mut app = screen_app();
+        let long_name = "External-monitor-name-".repeat(32);
+        *app.world_mut().resource_mut::<MonitorChoices>() =
+            MonitorChoices::named(&[long_name.as_str()]);
+        app.update();
+        assert_eq!(
+            SELECT_TEXT_INSET + SELECT_TEXT_WIDTH + SELECT_INDICATOR_WIDTH,
+            STEPPER_WIDTH
+        );
+
+        let buttons: Vec<(Knob, Node, Vec<Entity>)> = {
+            let world = app.world_mut();
+            let mut query = world.query::<(&SelectButton, &Node, &Children)>();
+            query
+                .iter(world)
+                .map(|(button, node, children)| (button.0, node.clone(), children.to_vec()))
+                .collect()
+        };
+        let choices: Vec<Knob> = KNOBS.into_iter().filter(|knob| knob.is_choice()).collect();
+        let mut drawn: Vec<Knob> = buttons.iter().map(|(knob, _, _)| *knob).collect();
+        drawn.sort_by_key(|knob| format!("{knob:?}"));
+        let mut wanted = choices.clone();
+        wanted.sort_by_key(|knob| format!("{knob:?}"));
+        assert_eq!(drawn, wanted, "every choice knob draws exactly one select");
+        assert!(choices.contains(&Knob::HealthBars));
+
+        let world = app.world();
+        let choices = Choices {
+            monitors: world.resource::<MonitorChoices>(),
+            devices: world.resource::<AudioDevices>(),
+        };
+        for (knob, node, children) in buttons {
+            assert_eq!(node.width, Val::Px(STEPPER_WIDTH), "{knob:?}");
+            assert_eq!(node.padding.left, Val::Px(SELECT_TEXT_INSET), "{knob:?}");
+            assert_eq!(node.justify_content, JustifyContent::FlexStart, "{knob:?}");
+            let [value, column, panel] = children[..] else {
+                panic!("{knob:?}'s control holds {children:?}");
+            };
+
+            assert_eq!(
+                world.get::<Reading>(value),
+                Some(&Reading::SelectControl(knob))
+            );
+            let text = &world.get::<Text>(value).expect("the value is text").0;
+            assert_eq!(
+                *text,
+                world
+                    .resource::<Settings>()
+                    .reading_with_choices(knob, choices),
+                "{knob:?}"
+            );
+            assert!(!text.ends_with(" v"), "{knob:?} reads {text:?}");
+            let value_node = world.get::<Node>(value).expect("the value has a node");
+            assert_eq!(value_node.width, Val::Px(SELECT_TEXT_WIDTH), "{knob:?}");
+            assert_eq!(value_node.flex_shrink, 0.0, "{knob:?}");
+            assert_eq!(value_node.overflow, Overflow::clip(), "{knob:?}");
+            assert_eq!(
+                world.get::<TextLayout>(value).map(|layout| layout.justify),
+                Some(Justify::Left),
+                "{knob:?}"
+            );
+
+            let column_node = world.get::<Node>(column).expect("the column has a node");
+            assert_eq!(
+                column_node.width,
+                Val::Px(SELECT_INDICATOR_WIDTH),
+                "{knob:?}"
+            );
+            assert_eq!(column_node.flex_shrink, 0.0, "{knob:?}");
+            let chevron = match world.get::<Children>(column).map(|c| c.to_vec()) {
+                Some(inside) if inside.len() == 1 => inside[0],
+                inside => panic!("{knob:?}'s indicator column holds {inside:?}"),
+            };
+            assert_eq!(
+                world.get::<SelectChevron>(chevron),
+                Some(&SelectChevron(knob))
+            );
+            let shape = world.get::<Node>(chevron).expect("the chevron has a node");
+            assert_eq!(
+                (shape.width, shape.height),
+                (Val::Px(CHEVRON_SIZE), Val::Px(CHEVRON_SIZE))
+            );
+            assert_eq!(
+                shape.border,
+                UiRect {
+                    right: Val::Px(CHEVRON_STROKE),
+                    bottom: Val::Px(CHEVRON_STROKE),
+                    ..default()
+                },
+                "{knob:?}: only two edges are drawn"
+            );
+
+            // The dropdown is the control's third child, and positioned absolutely, so it
+            // takes no room in the row the widths above fill.
+            assert_eq!(world.get::<SelectPanel>(panel), Some(&SelectPanel(knob)));
+            assert_eq!(
+                world.get::<Node>(panel).map(|panel| panel.position_type),
+                Some(PositionType::Absolute)
+            );
+        }
+    }
+
+    /// The chevron points up while its select's list is open and down otherwise. It turns back
+    /// whichever way the list closes — its own control, a choice, a click elsewhere — and only
+    /// the open select's chevron is ever turned up.
+    #[test]
+    fn a_selects_chevron_turns_up_while_its_list_is_open_and_back_when_it_closes() {
+        let mut app = screen_app();
+        let all_down = |app: &mut App| chevrons_up(app).iter().all(|(_, up)| !up);
+        assert!(all_down(&mut app));
+        for knob in KNOBS.into_iter().filter(|knob| knob.is_choice()) {
+            press_tab(&mut app, knob.tab());
+
+            press_select(&mut app, knob);
+            assert!(select_shown(&mut app, knob));
+            for (other, up) in chevrons_up(&mut app) {
+                assert_eq!(up, other == knob, "{other:?} while {knob:?} is open");
+            }
+            press_select(&mut app, knob);
+            assert!(all_down(&mut app), "{knob:?} closed by its own control");
+
+            press_select(&mut app, knob);
+            click_nowhere(&mut app);
+            assert!(!select_shown(&mut app, knob));
+            assert!(all_down(&mut app), "{knob:?} closed by a click elsewhere");
+
+            press_select(&mut app, knob);
+            press_select_option(&mut app, knob, 0);
+            assert!(all_down(&mut app), "{knob:?} closed by a choice");
+        }
     }
 
     /// Pressing the closed control opens it, and the list holds exactly `Primary` plus
@@ -3143,10 +3396,7 @@ mod tests {
                         },
                     )
                 };
-                assert_eq!(
-                    reading_of(&mut app, Reading::SelectControl(knob)),
-                    format!("{reading} v")
-                );
+                assert_eq!(reading_of(&mut app, Reading::SelectControl(knob)), reading);
             }
         }
     }
@@ -3535,7 +3785,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::VoiceAudience)),
-            "everyone v"
+            "everyone"
         );
 
         press_select(&mut app, Knob::VoiceAudience);
@@ -3547,7 +3797,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::VoiceAudience)),
-            "party only v"
+            "party only"
         );
 
         press_select(&mut app, Knob::VoiceAudience);
@@ -3614,7 +3864,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
-            "system default v"
+            "system default"
         );
 
         // The knob moves, the reading follows, and the reset that owns it puts it back
@@ -3656,7 +3906,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
-            "USB headset v"
+            "USB headset"
         );
         let microphones = select_option_entities(&mut app, Knob::InputDevice);
         let monitors = select_option_entities(&mut app, Knob::Monitor);
@@ -3674,7 +3924,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::OutputDevice)),
-            "USB headset (unavailable) v"
+            "USB headset (unavailable)"
         );
 
         // The list is what is attached now, and nothing in it is held.
@@ -3904,14 +4154,14 @@ mod tests {
         assert_eq!(shown_tabs(&mut app), vec![Tab::Ui]);
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
-            "all v"
+            "all"
         );
 
         press_select(&mut app, Knob::HealthBars);
         press_select_option(&mut app, Knob::HealthBars, 1);
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
-            "enemies only v"
+            "enemies only"
         );
 
         assert_eq!(reading_of(&mut app, Reading::Readout), "off");
@@ -3941,7 +4191,7 @@ mod tests {
         );
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
-            "enemies only v",
+            "enemies only",
             "resetting graphics moved the health-bar filter"
         );
 
@@ -3950,7 +4200,7 @@ mod tests {
         let after = app.world().resource::<Settings>().clone();
         assert_eq!(
             reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
-            "all v"
+            "all"
         );
         assert!(!after.readout_shown(), "the readout did not come back");
         assert_eq!(after.readout_corner(), Settings::default().readout_corner());
