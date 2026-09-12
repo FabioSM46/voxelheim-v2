@@ -61,6 +61,7 @@ pub enum Error {
     Gate,
     Duration,
     ContinuousNeedsNoise,
+    GatedBed,
 }
 
 fn bounded(value: f32, low: f32, high: f32) -> bool {

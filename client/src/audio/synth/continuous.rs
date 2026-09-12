@@ -15,8 +15,23 @@ pub struct Continuous {
 impl Sound {
     /// Requires an audible sustained noise layer. A finite collection of constant-frequency
     /// oscillators alone is periodic and is not an ambience bed under this contract.
+    ///
+    /// **A gate is refused here for the same reason, and it is the same contract rather than a
+    /// second one.** [`Gate::hz_at`] clamps its progress at one, so once a gate has wound up to
+    /// `to` it holds that rate for as long as the source runs: the layer is then struck open and
+    /// shut strictly periodically, and noise behind a periodic gate is a pulse a listener can
+    /// count, not a bed. The noise check alone does not catch it — a gated noise layer is still
+    /// noise, audible and sustained — so the two are checked together. No bed carries a gate
+    /// today; this closes the gap before one does, because `Gate` is a general primitive and
+    /// nothing else would have said no. Raised in review on #1199.
+    ///
+    /// A bed that genuinely wants a slow swell should say so with a primitive that cannot hold a
+    /// fixed rate, or lift this deliberately with the measurement to justify it.
     pub fn continuous(&self, rate: u32, seed: u64) -> Result<Continuous, Error> {
         self.validate(rate)?;
+        if self.layers.iter().any(|layer| layer.gate.is_some()) {
+            return Err(Error::GatedBed);
+        }
         if !self.layers.iter().any(|layer| {
             matches!(layer.exciter, Exciter::Noise(_))
                 && layer.gain > 0.0
