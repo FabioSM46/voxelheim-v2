@@ -8,4 +8,7 @@ fn the_arrival_chime_bakes_identically_to_its_pin() {
     pin::assert_pins(&rendered, PINS);
 }
 
-const PINS: &[(&str, u64)] = &[("chime", 0xa454c43d00769407)];
+#[rustfmt::skip]
+const PINS: &[pin::Row] = &[
+    ("chime", 32032, [21.37576, 5.70463, 17.60261, -1.02038]),
+];

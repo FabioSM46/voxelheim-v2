@@ -34,14 +34,15 @@ fn every_mount_sound_bakes_identically_to_its_pin() {
     pin::assert_pins(&rendered, PINS);
 }
 
-const PINS: &[(&str, u64)] = &[
-    ("hoof Air", 0xc15a50d47ba2505b),
-    ("hoof Stone", 0xa41c116595b1cd5e),
-    ("hoof Earth", 0xf18e4eeb856a66e3),
-    ("hoof Sand", 0x735c8ae98c2461df),
-    ("hoof Wood", 0xdfd3401f58717584),
-    ("hoof Foliage", 0xa3d35e444a19e25c),
-    ("hoof Glass", 0xa41c116595b1cd5e),
-    ("hoof Water", 0xc15a50d47ba2505b),
-    ("whinny", 0x5f7ea41c19d14724),
+#[rustfmt::skip]
+const PINS: &[pin::Row] = &[
+    ("hoof Air", 16016, [-0.36095, 3.51984, 0.77844, 2.50563]),
+    ("hoof Stone", 16016, [6.86085, 7.85808, 4.46710, -2.89134]),
+    ("hoof Earth", 16016, [2.07080, 4.01297, -0.32366, 3.09828]),
+    ("hoof Sand", 16016, [-5.23344, 7.32789, 4.03183, 8.41880]),
+    ("hoof Wood", 16016, [-2.79734, 3.53200, -3.22070, -3.16936]),
+    ("hoof Foliage", 16016, [7.71461, 2.02446, 1.89802, 2.50821]),
+    ("hoof Glass", 16016, [6.86085, 7.85808, 4.46710, -2.89134]),
+    ("hoof Water", 16016, [-0.36095, 3.51984, 0.77844, 2.50563]),
+    ("whinny", 125125, [-74.40801, -57.63112, -14.82609, -34.06357]),
 ];
