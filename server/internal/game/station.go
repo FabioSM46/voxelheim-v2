@@ -142,6 +142,7 @@ func (p *Player) MaterialiseSettlements(coord world.Coord) {
 //
 // The caller holds Sim.mu.
 func (s *Sim) materialiseSettlementsLocked(coord world.Coord) {
+	s.staticProps.materialise(coord)
 	originX, _, originZ := coord.Origin()
 	near := world.SettlementsNear(s.worldSeed, originX+world.ChunkSize/2, originZ+world.ChunkSize/2, 1)
 

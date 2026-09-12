@@ -202,7 +202,7 @@ func (p *Player) closeVendorLocked() {
 //
 // The caller holds sim.mu.
 func (p *Player) tradeableLocked(r *resident) bool {
-	if r == nil || p.cannotActLocked() != nil || !vendorRole(r.role) {
+	if r == nil || p.cannotActLocked() != nil || !vendorRole(r.role) || !p.residentVisiblePastProps(r) {
 		return false
 	}
 	if !withinView(p.chunk, r.chunk, p.sim.viewDistance) {

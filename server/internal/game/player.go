@@ -30,7 +30,8 @@ import (
 // deliberate rather than lazy: see Leave for the guarantee it buys, and Step for why
 // nothing under the lock is allowed to block.
 type Sim struct {
-	dungeon *dungeonEncounters
+	staticProps *staticPropIndex
+	dungeon     *dungeonEncounters
 	// Tick-local contacts, projected only after this tick resolves all outcomes.
 	blows []landedBlow
 
@@ -518,7 +519,20 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	for _, threshold := range configured.portals {
 		sheets = append(sheets, newPortalSheet(threshold))
 	}
+	var staticProps *staticPropIndex
+	if cached, ok := terrain.(*CacheTerrain); ok && !cached.cache.Finite() {
+		poses, err := world.CapitalStaticProps(worldSeed)
+		if err != nil {
+			return nil, fmt.Errorf("game: capital furniture: %w", err)
+		}
+		staticProps, err = newStaticPropIndex(poses)
+		if err != nil {
+			return nil, err
+		}
+		cached.staticProps = staticProps
+	}
 	return &Sim{
+		staticProps:        staticProps,
 		portalSheets:       sheets,
 		mu:                 &configured.group.mu,
 		group:              configured.group,
@@ -1081,6 +1095,12 @@ func (s *Sim) joinCharacter(
 		pos, yaw, health, hunger, experience, silver, learnedMounts, slots = resume.Pos, resume.Yaw, resume.Health, resume.Hunger, resume.Experience, resume.Silver, resume.LearnedMounts, restoredSlots(resume.Slots)
 	}
 
+	safePos, arrivalErr := s.SafeStaticPropArrival(pos, joinSpawn)
+	if arrivalErr != nil {
+		return nil, arrivalErr
+	}
+	pos = safePos
+
 	p := &Player{
 		sim:         s,
 		entityID:    entityID,
@@ -1593,6 +1613,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	visibleMobs := make([]protocol.MobState, 0, len(projectedMobs))
 	visibleLootCorpses := make([]uint64, 0)
 	visibleStructures := make([]protocol.StructureState, 0, len(standing))
+	var visibleStaticProps []protocol.StaticPropState
 	visibleProjectiles := make([]protocol.ProjectileState, 0, len(projectedProjectiles))
 	// **Filled from the same pass that fills `visible`, and that is what keeps the two
 	// agreeing.** The contract says every id here names a player in the same snapshot's
@@ -1624,6 +1645,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 	var residentFaces map[uint64][]byte
 
 	for _, viewer := range players {
+		visibleStaticProps = s.staticProps.visible(viewer.chunk, s.viewDistance, visibleStaticProps[:0])
 		visible = visible[:0]
 		visibleDead = visibleDead[:0]
 		visibleBlocking = visibleBlocking[:0]
@@ -1814,7 +1836,8 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 			// The same complete-existence-set rule. A structure that stops appearing has
 			// stopped existing for this viewer — removed, collapsed, or simply out of the
 			// cube — and the client despawns it rather than inferring which.
-			Structures: visibleStructures,
+			Structures:  visibleStructures,
+			StaticProps: visibleStaticProps,
 			// The contract's one required field, and now the viewer's real health: a
 			// snapshot is addressed to one session, so the vitals in it are that
 			// player's and nobody else's. Superseded by the next tick's, which is why

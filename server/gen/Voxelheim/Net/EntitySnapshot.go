@@ -760,8 +760,38 @@ func (rcv *EntitySnapshot) MutateWorldTick(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(40, n)
 }
 
+// / Complete relevant overworld decoration set. Absent/empty removes all old props.
+// / At most 256 entries, checked before allocation: the world has exactly one capital,
+// / whose authored catalogue (including fixtures) is bounded to 256 roots. Each entry
+// / satisfies StaticPropState. Instances send none. Relevance covers every chunk the
+// / prop spans, so losing its origin chunk alone does not remove a visible overhang.
+func (rcv *EntitySnapshot) StaticProps(obj *StaticPropState, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *EntitySnapshot) StaticPropsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+// / Complete relevant overworld decoration set. Absent/empty removes all old props.
+// / At most 256 entries, checked before allocation: the world has exactly one capital,
+// / whose authored catalogue (including fixtures) is bounded to 256 roots. Each entry
+// / satisfies StaticPropState. Instances send none. Relevance covers every chunk the
+// / prop spans, so losing its origin chunk alone does not remove a visible overhang.
 func EntitySnapshotStart(builder *flatbuffers.Builder) {
-	builder.StartObject(19)
+	builder.StartObject(20)
 }
 func EntitySnapshotAddServerTick(builder *flatbuffers.Builder, serverTick uint32) {
 	builder.PrependUint32Slot(0, serverTick, 0)
@@ -855,6 +885,12 @@ func EntitySnapshotAddSelfCast(builder *flatbuffers.Builder, selfCast flatbuffer
 }
 func EntitySnapshotAddWorldTick(builder *flatbuffers.Builder, worldTick uint64) {
 	builder.PrependUint64Slot(18, worldTick, 0)
+}
+func EntitySnapshotAddStaticProps(builder *flatbuffers.Builder, staticProps flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(19, flatbuffers.UOffsetT(staticProps), 0)
+}
+func EntitySnapshotStartStaticPropsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
 }
 func EntitySnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
