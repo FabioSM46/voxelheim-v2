@@ -46,6 +46,8 @@ import "slices"
 // The runes are [schematicLegend]: `b` the basalt footing, `K` and `k` the dressed wall
 // and its weathered course, `S` smooth trim, `R` the slate of every roof and spire, `D`
 // floorboards, `W` pale timber, `G` a window, `_` a room and `.` the terrain left alone.
+// Lowercase n/e/s/w are slate stairs with their high half in that cardinal direction.
+// The west wing now uses two-wide shaped switchbacks; see docs/CASTLE_PLAN.md.
 // Rows run from the back (z=0) to the front (z=62, where the gate is), and each row runs
 // left to right along +X.
 var keepSchematic = mustSchematic(
