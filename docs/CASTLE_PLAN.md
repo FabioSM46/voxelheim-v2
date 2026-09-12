@@ -29,7 +29,11 @@ Landings occupy Z27–29 and Z37–38. Guard walls follow both edges of each
 flight. The two-wide approach X14–15/Z24–38 connects every landing to its room.
 The north route is X17–18/Z6–18, then X16–17/Z19–26.
 
-The east stair reservation is X51–56/Z27–38, with approach X49–50/Z24–38.
+The east stairs occupy X51–56/Z27–38, with approach X49–50/Z24–38.
+Their two-wide flights alternate X52–53 northwards and X55–56 southwards,
+connecting Y0/7/14/21/28. X51 and X54 guard the flights; the existing outer wall
+at X57 guards the return flight. Landings occupy Z27–29 and Z37–38.
+The existing entrance remains X46–47/Z39–41 and connects to the south landing.
 The east north route is X37–38/Z6–19, with the future tower-entry corridor
 X37–44/Z11–12. Cross-room routes use Z24–25 across X6–24 (west) and
 X37–56 (east), joined across the bridge at Y21.
@@ -50,16 +54,16 @@ verified. Preserve the differentiated silhouettes and the tallest eastern spire.
 
 ## Delivery and verification
 
-Issue #1202 is delivered in independently verified changes. The first change
-implements **west main-wing stairs and their access only**, together with
-oriented schematic placement. East stairs, the widened curtain/corner rooms,
-spire interiors and final renderer captures follow in subsequent changes.
+Issue #1202 is delivered in independently verified changes. The first two changes
+implement **west and east main-wing stairs and their access**, together with
+oriented schematic placement. The widened curtain/corner rooms, spire interiors
+and final renderer captures follow in subsequent changes.
 The plans above reserve their space; they do not claim that those changes have
 already been built.
 
-The west route test drives the real `Player.step` with ordinary walking intent,
-production gravity and no jump input, from the gate up all three flights and back
-down, in all four rotations. It crosses chunk boundaries and checks overlap,
+The main-wing route test drives the real `Player.step` with ordinary walking intent,
+production gravity and no jump input, from the gate up every flight, into each
+upper room, and back down, in all four rotations. It crosses chunk boundaries and checks overlap,
 step height and fall damage. Separate world tests inspect actual placed stair
 orientations and all furniture-pocket floor/headroom reservations. World-level
 room connectivity continues to guard the rest of the existing castle, including
