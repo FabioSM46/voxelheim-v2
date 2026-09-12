@@ -305,6 +305,40 @@ fn the_strike_changes_with_the_ground_under_the_horse() {
 }
 
 #[test]
+fn a_swimming_horse_strikes_nothing_however_shallow_the_water_over_the_floor_is() {
+    // A floor of stone with one block of water over it: the ground probe reaches the stone
+    // a quarter of a block under the feet, so without the water question a swimming horse
+    // would clop on it. The server is treating this body as swimming — its box overlaps a
+    // fluid voxel — so the legs are moving through water and strike nothing.
+    let mut f = Fixture::new(palette::STONE);
+    for x in 0..9 {
+        for z in 0..9 {
+            f.store
+                .apply_block(BlockCoord { x, y: 1, z }, palette::WATER, 32);
+        }
+    }
+    let feet = Vec3::new(4.5, 1.0, 4.5);
+    assert_eq!(ground(&f.store, feet, 32), None);
+    f.feet.insert(f.horse, feet);
+    let mut mounts = Mounts::default();
+    assert_eq!(energy(&f.hear(&mut mounts, 3.4, &[])), 0.0);
+    assert!(mounts.playing.is_empty());
+    // The suppression is the water's, not a blanket one: a horse on the stone beside the
+    // same pool strikes it exactly as it did before.
+    let mut bank = Fixture::new(palette::STONE);
+    for x in 0..3 {
+        for z in 0..9 {
+            bank.store
+                .apply_block(BlockCoord { x, y: 1, z }, palette::WATER, 32);
+        }
+    }
+    let dry = Vec3::new(6.5, 1.0, 6.5);
+    assert_eq!(ground(&bank.store, dry, 32), Some(MaterialClass::Stone));
+    bank.feet.insert(bank.horse, dry);
+    assert!(energy(&bank.hear(&mut Mounts::default(), 3.4, &[])) > 0.1);
+}
+
+#[test]
 fn another_players_horse_is_panned_on_sfx_and_muted_with_it() {
     let f = Fixture::new(palette::DIRT);
     let whinny = f.hear(&mut Mounts::default(), 0.0, &[f.horse]);

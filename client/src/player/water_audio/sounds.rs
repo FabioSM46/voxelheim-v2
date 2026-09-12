@@ -224,6 +224,63 @@ pub(super) fn splash(mounted: bool, force: Force) -> Sound {
     Sound { layers }
 }
 
+/// How long one swimming stroke sounds for. A mounted stroke is longer: a horse swims with
+/// slower, bigger movements than a person does.
+pub(super) const STROKE_SECONDS: f32 = 0.45;
+pub(super) const MOUNTED_STROKE_SECONDS: f32 = 0.70;
+
+/// One stroke of a swimmer through the water.
+///
+/// **Not a small splash, and the difference is structural rather than a matter of gain.** An
+/// entry is a body arriving: an impact, with a crown of spray that opens in three
+/// milliseconds and a long gurgle behind it. A stroke is water being *pushed* — there is no
+/// impact at all, so it swells in over tens of milliseconds, and the whole of it is broad
+/// and low with only the surface splutter up high. A couple of bubbles roll off the end of
+/// it, fewer and quieter than an entry's.
+pub(super) fn stroke(mounted: bool) -> Sound {
+    // A horse's stroke is slower and lower than a swimmer's; a swimmer's has more of the
+    // surface splutter in it.
+    let (stretch, bright): (f32, f32) = if mounted { (1.55, 0.62) } else { (1.0, 1.0) };
+    let mut layers = vec![
+        // The surface the arm or the shoulder breaks: the brightest part of a stroke, and
+        // still nothing like an entry's crown — it swells rather than opening.
+        noise(
+            Noise::White,
+            (0.12 * bright).min(1.0),
+            0.03 * stretch,
+            0.16 * stretch,
+            band(1900.0, 0.8),
+        ),
+        // The body of the stroke: the water moving past.
+        noise(
+            Noise::White,
+            0.21,
+            0.05 * stretch,
+            0.22 * stretch,
+            band(820.0 * bright, 0.7),
+        ),
+        // The mass of it, under everything else. Lower and louder for the heavier body.
+        noise(
+            Noise::Brown,
+            (0.30 / bright).min(1.0),
+            0.06 * stretch,
+            0.26 * stretch,
+            low(300.0 * bright),
+        ),
+    ];
+    let biggest = if mounted { 280.0 } else { 400.0 };
+    for index in 0..2 {
+        let step = index as f32;
+        layers.push(bubble(
+            biggest * (1.0 + 0.30 * step),
+            0.05,
+            (0.10 + 0.07 * step) * stretch,
+            0.12 * stretch,
+        ));
+    }
+    Sound { layers }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,12 +298,24 @@ mod tests {
         }
     }
 
-    fn samples(sound: &Sound, mounted: bool, rate: u32) -> Vec<f32> {
+    fn stroke_seconds(mounted: bool) -> f32 {
+        if mounted {
+            MOUNTED_STROKE_SECONDS
+        } else {
+            STROKE_SECONDS
+        }
+    }
+
+    fn baked(sound: &Sound, seconds: f32, rate: u32) -> Vec<f32> {
         sound
-            .bake(seconds(mounted), rate, 1188)
-            .expect("a splash bakes")
+            .bake(seconds, rate, 1188)
+            .expect("a water sound bakes")
             .samples()
             .to_vec()
+    }
+
+    fn samples(sound: &Sound, mounted: bool, rate: u32) -> Vec<f32> {
+        baked(sound, seconds(mounted), rate)
     }
 
     fn energy(samples: &[f32]) -> f64 {
@@ -311,8 +380,8 @@ mod tests {
     /// sine at its filter's centre, and every bubble's saw replaced by a sine. Same
     /// layers, same envelopes, same frequencies — and no texture anywhere. It must fail
     /// the measurement the splash passes, or the measurement is not reading texture.
-    fn clean_partials(mounted: bool, force: Force) -> Sound {
-        let layers = splash(mounted, force)
+    fn clean_partials(sound: Sound) -> Sound {
+        let layers = sound
             .layers
             .into_iter()
             .map(|layer| {
@@ -342,24 +411,44 @@ mod tests {
         Sound { layers }
     }
 
-    /// A splash is water, never a note: its energy is spread across the whole band rather
+    /// Every description this file holds, named, with the duration its player bakes it at.
+    /// The catalogue-wide measurements iterate this, so a description added without a rule
+    /// to measure it by is not possible.
+    fn catalogue() -> Vec<(String, Sound, f32)> {
+        let mut sounds = Vec::new();
+        for mounted in [false, true] {
+            let name = if mounted { "mounted" } else { "on foot" };
+            for force in FORCES {
+                sounds.push((
+                    format!("splash {name} {force:?}"),
+                    splash(mounted, force),
+                    seconds(mounted),
+                ));
+            }
+            sounds.push((
+                format!("stroke {name}"),
+                stroke(mounted),
+                stroke_seconds(mounted),
+            ));
+        }
+        sounds
+    }
+
+    /// Water is broadband, never a note: its energy is spread across the whole band rather
     /// than sitting on a handful of frequencies. The negative control is the point — the
     /// same description voiced as clean partials measures an order of magnitude flatter
-    /// and fails the floor this passes.
+    /// and fails the floor these pass.
     #[test]
-    fn every_splash_is_broadband_and_a_clean_partial_control_fails_the_measurement() {
-        for mounted in [false, true] {
-            for force in FORCES {
-                let splash = samples(&splash(mounted, force), mounted, RATE);
-                let flat = flatness(&splash, RATE);
-                assert!(flat > 0.15, "mounted {mounted}, {force:?}: flatness {flat}");
-                let control = samples(&clean_partials(mounted, force), mounted, RATE);
-                let clean = flatness(&control, RATE);
-                assert!(
-                    clean < 0.05,
-                    "mounted {mounted}, {force:?}: clean partials measured flatness {clean}"
-                );
-            }
+    fn every_water_sound_is_broadband_and_a_clean_partial_control_fails_the_measurement() {
+        for (name, sound, seconds) in catalogue() {
+            let rendered = baked(&clean_partials(sound.clone()), seconds, RATE);
+            let clean = flatness(&rendered, RATE);
+            let water = flatness(&baked(&sound, seconds, RATE), RATE);
+            assert!(water > 0.15, "{name}: flatness {water}");
+            assert!(
+                clean < 0.05,
+                "{name}: clean partials measured flatness {clean}"
+            );
         }
     }
 
@@ -463,37 +552,30 @@ mod tests {
     /// later edit broke it in a way the read-back missed.
     #[test]
     fn every_frequency_is_under_the_eight_kilohertz_ceiling() {
-        for mounted in [false, true] {
-            for force in FORCES {
-                let sound = splash(mounted, force);
-                for layer in &sound.layers {
-                    match layer.exciter {
-                        Exciter::Oscillator { hz, .. } => {
-                            assert!(hz <= CEILING_HZ, "{mounted} {force:?}: a {hz} Hz partial");
-                        }
-                        Exciter::Glide(glide) => {
-                            // The highest frequency the glide reaches, vibrato included:
-                            // the synthesiser's own `Glide::peak`, which is private to
-                            // `audio::synth`, restated here rather than exported for a
-                            // test.
-                            let peak = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
-                            assert!(
-                                peak <= CEILING_HZ,
-                                "{mounted} {force:?}: a glide peaking at {peak} Hz"
-                            );
-                        }
-                        Exciter::Noise(_) => {}
+        for (name, sound, seconds) in catalogue() {
+            for layer in &sound.layers {
+                match layer.exciter {
+                    Exciter::Oscillator { hz, .. } => {
+                        assert!(hz <= CEILING_HZ, "{name}: a {hz} Hz partial");
                     }
-                    if let Some(filter) = layer.filter {
-                        assert!(
-                            filter.hz <= CEILING_HZ,
-                            "{mounted} {force:?}: a filter at {} Hz",
-                            filter.hz
-                        );
+                    Exciter::Glide(glide) => {
+                        // The highest frequency the glide reaches, vibrato included: the
+                        // synthesiser's own `Glide::peak`, which is private to
+                        // `audio::synth`, restated here rather than exported for a test.
+                        let peak = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                        assert!(peak <= CEILING_HZ, "{name}: a glide peaking at {peak} Hz");
                     }
+                    Exciter::Noise(_) => {}
                 }
-                assert!(sound.bake(seconds(mounted), 8000, 1188).is_ok());
+                if let Some(filter) = layer.filter {
+                    assert!(
+                        filter.hz <= CEILING_HZ,
+                        "{name}: a filter at {} Hz",
+                        filter.hz
+                    );
+                }
             }
+            assert!(sound.bake(seconds, 8000, 1188).is_ok(), "{name}");
         }
     }
 
@@ -501,29 +583,78 @@ mod tests {
     /// and loud enough to be heard once the distance has taken its share.
     #[test]
     fn the_catalogue_is_bounded_at_every_supported_device_rate() {
-        for mounted in [false, true] {
-            for force in FORCES {
-                for rate in [8000, 44100, 48000, 96000, 192000] {
-                    let sound = splash(mounted, force);
-                    let baked = sound
-                        .bake(seconds(mounted), rate, 17)
-                        .expect("a splash bakes at every rate");
-                    let rendered = baked.samples();
-                    assert!(rendered.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
-                    assert!(
-                        peak(rendered) < 0.85,
-                        "mounted {mounted}, {force:?} at {rate}: peaks at {}",
-                        peak(rendered)
-                    );
-                    assert!(
-                        peak(rendered) > 0.05,
-                        "mounted {mounted}, {force:?} at {rate}: peaks at only {}",
-                        peak(rendered)
-                    );
-                    assert_eq!(rendered.first(), Some(&0.0));
-                    assert_eq!(rendered.last(), Some(&0.0));
-                }
+        for (name, sound, seconds) in catalogue() {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let baked = sound
+                    .bake(seconds, rate, 17)
+                    .expect("a water sound bakes at every rate");
+                let rendered = baked.samples();
+                assert!(rendered.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+                assert!(
+                    peak(rendered) < 0.85,
+                    "{name} at {rate}: peaks at {}",
+                    peak(rendered)
+                );
+                assert!(
+                    peak(rendered) > 0.05,
+                    "{name} at {rate}: peaks at only {}",
+                    peak(rendered)
+                );
+                assert_eq!(rendered.first(), Some(&0.0));
+                assert_eq!(rendered.last(), Some(&0.0));
             }
         }
+    }
+
+    /// A stroke is water being pushed, not a body arriving: no impact, so it swells in
+    /// where every entry opens in three milliseconds, and it is shorter and quieter than
+    /// the gentlest entry there is.
+    #[test]
+    fn a_stroke_swells_rather_than_striking_and_is_quieter_than_any_entry() {
+        for mounted in [false, true] {
+            let name = if mounted { "mounted" } else { "on foot" };
+            let sound = stroke(mounted);
+            for layer in &sound.layers {
+                assert!(
+                    layer.envelope.attack >= 0.02,
+                    "{name}: a {} s onset in a stroke",
+                    layer.envelope.attack
+                );
+            }
+            let rendered = baked(&sound, stroke_seconds(mounted), RATE);
+            let gentlest = samples(&splash(mounted, Force::Step), mounted, RATE);
+            assert!(
+                peak(&rendered) < peak(&gentlest),
+                "{name}: a stroke peaks at {}, the gentlest entry at {}",
+                peak(&rendered),
+                peak(&gentlest)
+            );
+            assert!(stroke_seconds(mounted) < seconds(mounted));
+            // Heard all the same: energy above 200 Hz, where an ear and a laptop speaker
+            // both are.
+            let audible = energy(&rendered) * (1.0 - share_below(&rendered, RATE, 200.0));
+            assert!(audible > 1.0, "{name}: {audible} above 200 Hz");
+        }
+    }
+
+    /// A mounted stroke is the slower, bigger one the acceptance criterion asks for: it
+    /// lasts longer, its energy arrives later, and more of it is low.
+    #[test]
+    fn a_mounted_stroke_is_slower_and_bigger_than_one_on_foot() {
+        let foot = baked(&stroke(false), stroke_seconds(false), RATE);
+        let mount = baked(&stroke(true), stroke_seconds(true), RATE);
+        const { assert!(MOUNTED_STROKE_SECONDS > STROKE_SECONDS * 1.4) };
+        assert!(
+            mean_time(&mount, RATE) > mean_time(&foot, RATE) * 1.3,
+            "mounted at {} s, on foot at {} s",
+            mean_time(&mount, RATE),
+            mean_time(&foot, RATE)
+        );
+        assert!(
+            share_below(&mount, RATE, 500.0) > share_below(&foot, RATE, 500.0) * 1.2,
+            "mounted {} under 500 Hz, on foot {}",
+            share_below(&mount, RATE, 500.0),
+            share_below(&foot, RATE, 500.0)
+        );
     }
 }
