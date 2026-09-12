@@ -48,16 +48,22 @@ const PINS: &[pin::Row] = &[
     ("call Parrot 0x0", 85085, [-8.17830, -2.40361, -5.37675, -23.03340]),
     ("call Parrot 0x10203", 85085, [-4.62595, 31.01545, -22.88560, 4.83245]),
     ("call Parrot 0xfedcba9876543210", 85085, [-13.54914, 2.12278, 4.51390, 3.48718]),
-    // #1184 refreshed these three and only these three: the rattle is a gated click train.
+    // #1186 refreshed these six and only these six: the condor's three rows are new, and the
+    // eagle's three moved with its rebuilt description. The crow's three are gone with its
+    // lane. Every other row in this table is still the value that shipped — the rattlesnake's
+    // from #1184, the wolf's from #1185.
+    ("call Condor 0x0", 95095, [-5.19836, -17.55229, -7.76909, 3.73417]),
+    ("call Condor 0x10203", 95095, [13.62573, -5.51038, -10.29624, -14.52523]),
+    ("call Condor 0xfedcba9876543210", 95095, [-29.78988, -0.50194, -3.97474, -31.50031]),
     ("call Rattlesnake 0x0", 80080, [-6.97348, -2.07740, 6.56404, -3.78326]),
     ("call Rattlesnake 0x10203", 80080, [-10.04333, -0.44017, 1.13749, -2.26129]),
     ("call Rattlesnake 0xfedcba9876543210", 80080, [12.91951, 14.30284, 1.62295, 4.91613]),
-    ("call Crow 0x0", 55055, [47.69889, 10.45412, -22.87443, 24.07085]),
-    ("call Crow 0x10203", 55055, [6.96192, -25.30306, 5.82284, 46.13588]),
-    ("call Crow 0xfedcba9876543210", 55055, [-21.81715, 15.99740, -25.17112, 26.64207]),
-    ("call Eagle 0x0", 65065, [28.98983, 6.86640, 46.32582, 55.42906]),
-    ("call Eagle 0x10203", 65065, [6.99825, -15.24564, 9.69421, -21.02498]),
-    ("call Eagle 0xfedcba9876543210", 65065, [1.20862, -37.04444, 13.56195, -17.38928]),
+    // The eagle's three moved a second time, in the review of this pull request: its bake grew
+    // from 0.65 s to 0.74 s so that the 0.55 s fall and the 0.14 s release stop overlapping,
+    // which is why the sample count below is 74074 where the other calls' are unchanged.
+    ("call Eagle 0x0", 74074, [54.32723, -36.38857, -12.58745, 11.60847]),
+    ("call Eagle 0x10203", 74074, [-0.11002, -12.20113, 1.50655, -3.38921]),
+    ("call Eagle 0xfedcba9876543210", 74074, [24.23985, 19.10018, -3.29602, 18.51908]),
     ("call Wolf 0x0", 380380, [294.73353, -3.58899, 33.95288, 15.38056]),
     ("call Wolf 0x10203", 380380, [-286.83836, 92.49962, 27.00282, -49.48961]),
     ("call Wolf 0xfedcba9876543210", 380380, [0.08069, -35.75515, 193.97934, 153.31113]),

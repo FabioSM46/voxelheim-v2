@@ -29,9 +29,9 @@
 //! **Three things are new, and they are the whole of this module's interest.**
 //!
 //! - **The ground is the path rather than an obstacle.** A bird is *lifted* off the terrain
-//!   by [`birds`]'s clearance; a critter is *placed on* it. That is the same column probe
-//!   with the opposite sign and a far tighter tolerance — [`surface_under`] and
-//!   [`next_stand`] — and it means [`place`] cannot answer a critter's height at all. It
+//!   by `birds.rs`'s clearance; a critter is *placed on* it. That is the same column probe
+//!   with the opposite sign and a far tighter tolerance — `surface_under` and
+//!   `next_stand` (part two) — and it means [`place`] cannot answer a critter's height at all. It
 //!   answers where a critter is on the **horizontal plane**, and the terrain answers the
 //!   rest. Every box invariant here is therefore horizontal, which is the one structural
 //!   difference from `birds.rs` a reader has to hold on to.
@@ -41,7 +41,7 @@
 //!   [`generation_of`] is how that is expressed without storing a birth time: the life
 //!   window is a *function of the session clock*, so the critter alive in one slot at one
 //!   moment is decided by arithmetic rather than remembered.
-//! - **The climb needs a trunk, and a trunk is a fact about the world.** [`trunk_near`]
+//! - **The climb needs a trunk, and a trunk is a fact about the world.** `trunk_near` (part two)
 //!   looks for one when a critter is stood up, and that answer is written into the component
 //!   once and never again — the same category of spawn-time constant as [`Critter::anchor`].
 //!   A critter that finds none simply fades where it is, and that is a real branch rather
@@ -138,7 +138,7 @@ const CRITTER_SEED: u64 = 0x5C01_7715_C0DE_1A75;
 
 /// How many re-seeds are tried before a replacement is accepted wherever it fell.
 ///
-/// The flock's [`birds`] reasoning applies unchanged: each try is one hash, about half land on
+/// The flock's `birds.rs` reasoning applies unchanged: each try is one hash, about half land on
 /// the far side, and the fallback is a real branch that
 /// `a_replacement_is_seeded_on_the_far_side_of_the_move` asserts.
 const FAR_SIDE_TRIES: u64 = 12;
@@ -170,7 +170,7 @@ const SCURRY_LEG_SECONDS: RangeInclusive<f32> = 1.8..=3.0;
 /// touches `1.5 * d / t`, not `d / t`. The longest dash is the diagonal of the waypoint box,
 /// `2 * SCURRY_SPREAD * sqrt(2)` = 4.24 blocks, over `0.6 * 1.8` = 1.08 seconds: 5.89 blocks a
 /// second at the peak, plus [`FORAGE_TRAVEL`] where the two happen to align. That is what
-/// [`CritterSpecies::max_speed`] is 6.5 for, and
+/// `CritterSpecies::max_speed` is 6.5 for, and
 /// `a_critter_moves_no_faster_than_its_row_allows` is what measures it rather than trusting
 /// this paragraph.
 const SCURRY_DASH_SHARE: f32 = 0.6;
@@ -210,7 +210,7 @@ const STAND_PROBE_ABOVE: f32 = 8.0;
 /// the point.** While the ground under a scurrying critter changes more slowly than this, the
 /// ease reaches it and sits on it exactly — so "a critter stands on the surface" is an
 /// equality on rolling ground rather than a tolerance, and
-/// `a_critter_stands_exactly_on_the_ground_once_it_has_settled` asserts it as one. A vertical
+/// `a_critter_stands_on_flat_ground_exactly_and_on_broken_ground_within_a_voxel` asserts it as one. A vertical
 /// step of a single voxel is crossed in forty milliseconds, which is a hop rather than a
 /// teleport.
 const STAND_STEP_SPEED: f32 = 24.0;
@@ -481,18 +481,18 @@ fn generation_of(species: &CritterSpecies, slot: usize, elapsed: f32) -> (i64, f
 /// **Four of the five are fixed when the critter is stood up** — the row, the seed, the
 /// anchor and the trunk — and `age` is the clock. That is the flock's claim with one more
 /// constant in it, and the extra constant is the trunk, because where a tree is cannot be
-/// derived from a hash: [`trunk_near`] reads it out of the world once. A critter whose trunk
+/// derived from a hash: `trunk_near` (part two) reads it out of the world once. A critter whose trunk
 /// is `None` forages for its whole life and never rises, which is the documented fallback.
 ///
 /// **`trunk` must be within [`TRUNK_REACH`] of where this critter's forage ends**, which is
-/// what [`trunk_near`] answers within and what `keep_the_critters` searches from. It is a
+/// what `trunk_near` (part two) answers within and what `keep_the_critters` searches from. It is a
 /// precondition rather than a clamp because the approach's speed is derived from it: a trunk
 /// twice as far is an approach that walks twice as fast, and
 /// `a_critter_moves_no_faster_than_its_row_allows` would rather fail than have this function
 /// quietly cover for a caller that broke the chain.
 ///
 /// **The `y` it answers is the anchor's, and means nothing.** A critter's height is the
-/// ground's answer plus its climb, which [`next_stand`] and [`climb_rise`] own; everything
+/// ground's answer plus its climb, which `next_stand` (part two) and [`climb_rise`] own; everything
 /// here is `x` and `z`. Continuity is the property that matters and it is pinned —
 /// `a_critter_moves_no_faster_than_its_row_allows` walks every row's whole life at sixty
 /// samples a second and fails on a step longer than `max_speed * dt`.
@@ -651,7 +651,7 @@ enum Ground {
 /// critter's ground asks what would *hold it up*, which is exactly what solidity means here —
 /// and since #446 and #550 it deliberately excludes water and cover. A squirrel standing on a
 /// lake surface or halfway up a leaf is the failure this choice avoids, and
-/// `a_critter_does_not_stand_on_water_or_on_leaves` pins both.
+/// `a_critter_stands_on_what_would_hold_a_body_up_and_not_on_water` pins both.
 ///
 /// **The window is `[from - STAND_PROBE_BELOW, from + STAND_PROBE_ABOVE]`**, thirty-three
 /// voxels, walked downward from the top so the answer is the highest ground rather than the
@@ -785,9 +785,20 @@ fn trunk_near(store: &ChunkStore, from: Vec3, surface: f32, chunk_size: usize) -
                 if away.length() > TRUNK_REACH {
                     continue;
                 }
-                // A trunk is a log standing in the two voxels above the surface: one log flat
-                // on the ground is a fallen branch, and a squirrel does not climb it.
-                if (1..=2).all(|up| {
+                // **A trunk is a log in the surface voxel and the one above it**, and the
+                // window starts at zero rather than one because `surface` is the ground's top
+                // *face*: the highest solid voxel is `surface - 1`, so the first voxel a trunk
+                // standing on that ground occupies is `voxel_of(surface)` itself. That is the
+                // same voxel the returned foot sits at, which is what makes the two agree.
+                //
+                // It read `1..=2` and so inspected the two voxels *above* the foot, which made
+                // a two-block trunk invisible and compared a trunk's blocks against the
+                // critter's surface rather than its own base. The fixture hid it by floating
+                // its logs one block clear of the ground; it now stands them on it.
+                //
+                // Two voxels rather than one: a single log lying on the ground is a fallen
+                // branch, and a squirrel does not climb it.
+                if (0..=1).all(|up| {
                     let coord = ChunkCoord {
                         cx: column.x.div_euclid(size),
                         cy: (column.y + up).div_euclid(size),
@@ -1763,7 +1774,7 @@ mod tests {
     const DT: f32 = 1.0 / 60.0;
     /// The fastest a critter may be drawn climbing, in blocks per second.
     ///
-    /// A separate bound from [`CritterSpecies::max_speed`] because it bounds a separate
+    /// A separate bound from `CritterSpecies::max_speed` because it bounds a separate
     /// number: the gait's bound is on [`place`], which is horizontal, and the rise is a named
     /// step over it that `place` never sees. Nine blocks over 2.39 seconds is 3.77 on average
     /// and 5.65 at a smoothstep's peak, so six is the bound with the same one-and-a-half
@@ -1882,6 +1893,11 @@ mod tests {
         path
     }
 
+    /// The species gate: a row answers for the look it names, an unknown look gets nothing,
+    /// and no row lives on an answer that means "there is no answer".
+    ///
+    /// The only coverage of `species_for`'s `None` on sand and snow — the macaw-parity test
+    /// below asserts the two tables agree rather than asserting either one's answer.
     #[test]
     fn one_row_per_look_and_no_row_answers_an_unknown_one() {
         assert_eq!(species_for(&Ambience::default()), None);
@@ -2494,10 +2510,11 @@ mod tests {
             }
         };
         let bare = blocks(anchor, reach, wood(trunk_at, 0..0));
-        let standing = blocks(anchor, reach, wood(trunk_at, 1..6));
-        let distant = blocks(anchor, reach, wood(far_at, 1..6));
-        // A single log lying *on* the ground is a fallen branch rather than a trunk.
-        let fallen = blocks(anchor, reach, wood(trunk_at, 1..2));
+        let standing = blocks(anchor, reach, wood(trunk_at, 0..5));
+        let distant = blocks(anchor, reach, wood(far_at, 0..5));
+        // A single log lying *on* the ground is a fallen branch rather than a trunk: it fills
+        // the surface voxel and nothing above it.
+        let fallen = blocks(anchor, reach, wood(trunk_at, 0..1));
 
         let near = Vec3::new(18.5, 0.0, 17.5);
         let found = trunk_near(&standing, near, surface, CHUNK).expect("the trunk is in reach");
@@ -2511,19 +2528,34 @@ mod tests {
         // from this reach, so a probe that answered further would break a bound two functions
         // away. Measured horizontally, because the foot is on the ground and the critter is
         // too.
-        let reach = Vec3::new(found.x - near.x, 0.0, found.z - near.z).length();
+        // **`distance`, not `reach`.** Binding this as `reach` shadowed the fixture radius,
+        // so every store built below it covered one chunk and the "nearest wins" assertion
+        // ran against a store holding a single trunk and no ground at all.
+        let distance = Vec3::new(found.x - near.x, 0.0, found.z - near.z).length();
         assert!(
-            reach <= TRUNK_REACH,
-            "the probe answered a trunk {reach} away, over its {TRUNK_REACH} reach"
+            distance <= TRUNK_REACH,
+            "the probe answered a trunk {distance} away, over its {TRUNK_REACH} reach"
         );
         // The nearest wins: a second trunk further out does not change the answer.
         let crowded = blocks(anchor, reach, |at| {
-            match (wood(trunk_at, 1..6)(at), wood(far_at, 1..6)(at)) {
+            match (wood(trunk_at, 0..5)(at), wood(far_at, 0..5)(at)) {
                 (palette::LOG, _) | (_, palette::LOG) => palette::LOG,
                 (block, _) => block,
             }
         });
         assert_eq!(trunk_near(&crowded, near, surface, CHUNK), Some(found));
+
+        // **The shortest thing that is a trunk rather than a branch**: two logs, the lower of
+        // them in the surface voxel. This is the case that separates the probe's window from
+        // the one it had — inspecting the two voxels *above* the foot answers `None` here, so
+        // a two-block trunk was invisible. The five-block fixtures above pass either way,
+        // which is why this case is the one that pins the window.
+        let shortest = blocks(anchor, reach, wood(trunk_at, 0..2));
+        assert_eq!(
+            trunk_near(&shortest, near, surface, CHUNK),
+            Some(found),
+            "a two-block trunk standing on the ground was not found"
+        );
 
         // Every shape of "no trunk" is the fallback branch, and each is reached.
         for (name, store) in [

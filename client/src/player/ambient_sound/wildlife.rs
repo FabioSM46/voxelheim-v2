@@ -25,16 +25,17 @@
 //!   `height`, re-chosen for each call, anchored for that call's short life. A rattlesnake
 //!   nobody sees is somewhere over there, and that is the whole truth about it.
 //! - **Which of the two applies is a property of the creature, not of the frame.** A species
-//!   that is sometimes drawn and sometimes not — the macaw is the one that exists today — is
-//!   placed at a body when one is there to place it at, and falls back to the bearing when
-//!   the flock is out of range or has not spawned. Silence is not the fallback: a voice with
-//!   no body is still ambience.
+//!   that is sometimes drawn and sometimes not — the macaw and the condor are the two that
+//!   exist today — is placed at a body when one is there to place it at, and falls back to
+//!   the bearing when the flock is out of range or has not spawned. Silence is not the
+//!   fallback: a voice with no body is still ambience.
 //!
-//! Today every row is on the second half of that rule, the macaw included: its call has come
-//! from a bearing since it was written, unrelated to where any macaw is
-//! (`controller.rs`'s `Calls::update`). Moving it to the first half is a change to where a
+//! Today every row is on the second half of that rule, the two [`Habitat::Flock`] rows
+//! included: their calls come from a bearing, unrelated to where any macaw or vulture is
+//! (`controller.rs`'s `Calls::update`). Moving one to the first half is a change to where a
 //! shipped sound comes from and belongs to the issue that adds a creature which needs it, not
-//! to the refactor that wrote the rule down.
+//! to the refactor that wrote the rule down — and not to #1186 either, which cited this rule
+//! rather than re-deciding it when it gave the condor the vulture's voice.
 
 use super::sounds::Call;
 use crate::player::ambience::{Ambience, GroundLook};
@@ -100,13 +101,19 @@ pub(super) struct Voice {
 ///
 /// |  | day | night |
 /// |---|---|---|
-/// | sand | rattlesnake | crow |
+/// | sand | rattlesnake, and the condor where the bird table flies the vulture | — |
 /// | snow | eagle | wolf |
 /// | grass | macaw, where the bird table flies it | cricket |
 ///
 /// `GroundLook::Unknown` is deliberately absent and so is the open plain's day: "not enough
 /// loaded evidence" is silence, exactly as it is an empty sky in [`birds::BIRDS`], rather
 /// than a default creature.
+///
+/// **The desert night is deliberately empty, and that is the one cell with nothing in it.**
+/// A crow held it until #1186, in a country no crow lives in; the night it belongs to is mice
+/// and bats, which needs a creature system and is a later issue. A wrong sound is worse than
+/// no sound, and an absent row is a visible gap where a placeholder would not be —
+/// `the_table_answers_every_country_and_half_of_the_day` asserts the silence by name.
 ///
 /// ## The order is the claim order, and it is load-bearing
 ///
@@ -139,17 +146,34 @@ pub(super) const WILDLIFE: [Voice; 6] = [
         period: Period::Day,
         stream: 0,
     },
+    // The condor, heard by day exactly where the bird table flies the griffon vulture: sand,
+    // trees or none. **Gated on the flock rather than on the ground, and that is the choice
+    // #1186 made.** Today the two gates coincide — `BIRDS[VULTURE]` requires sand and is
+    // *indifferent* to woodland, `requires_wooded: false` being the absence of a requirement
+    // rather than a prohibition, so the vulture flies over wooded sand exactly as it does over
+    // bare. That indifference is precisely what makes the row equal to
+    // `Habitat::Ground(Sand)`; a row that forbade trees would cover less than the ground does
+    // and the two gates would *not* coincide.
+    // `the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture` asserts the
+    // equality over both values of `wooded` rather than leaving it to this sentence — so the
+    // declaration buys no behaviour
+    // now and buys the only thing that matters later: this voice *is* that bird's, so the
+    // sound and the silhouette cannot come to disagree when a row gains a condition. #1176 is
+    // what that disagreement costs when the sound lane keeps its own opinion.
+    //
+    // It sits here, above the ground-only rows, because a creature the eye can see claims its
+    // mixer slot first — see the paragraph on the order above.
+    Voice {
+        call: Call::Condor,
+        habitat: Habitat::Flock(VULTURE),
+        period: Period::Day,
+        stream: 0x9865,
+    },
     Voice {
         call: Call::Rattlesnake,
         habitat: Habitat::Ground(GroundLook::Sand),
         period: Period::Day,
         stream: 0x9860,
-    },
-    Voice {
-        call: Call::Crow,
-        habitat: Habitat::Ground(GroundLook::Sand),
-        period: Period::Night,
-        stream: 0x9861,
     },
     Voice {
         call: Call::Eagle,
@@ -174,6 +198,10 @@ pub(super) const WILDLIFE: [Voice; 6] = [
 
 /// The macaw's row in [`birds::BIRDS`], which is appended to and never reordered.
 pub(super) const PARROT: usize = 0;
+
+/// The griffon vulture's row in [`birds::BIRDS`] — the desert's daytime raptor, whose voice
+/// the condor is. Same table, same rule about never reordering it.
+pub(super) const VULTURE: usize = 1;
 
 impl Voice {
     /// How loudly this voice belongs where the eye is, right now: its habitat's yes or no
