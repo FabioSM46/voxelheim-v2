@@ -91,6 +91,52 @@ impl Sound {
         })
     }
 
+    /// This sound struck again at each of `onsets` seconds, summed into one `seconds`-long
+    /// buffer: a call of separate syllables with true silence between them. Every layer's
+    /// envelope starts at its sound's own zero, so a later syllable cannot be a layer of one
+    /// description.
+    ///
+    /// Each strike is baked for `length` seconds exactly as [`Sound::bake`] would, and draws its
+    /// own noise — the seed plus the strike's index — so a noise syllable is not one grain
+    /// replayed. Every strike must end inside the buffer, which keeps both edges of the call at
+    /// exact silence; one that would not, a negative onset, or no strike at all is refused. At
+    /// most [`MAX_LAYERS`] strikes, the same bound one description's layers have.
+    pub fn bake_at(
+        &self,
+        onsets: &[f32],
+        length: f32,
+        seconds: f32,
+        rate: u32,
+        seed: u64,
+    ) -> Result<Baked, Error> {
+        if onsets.is_empty() || onsets.len() > MAX_LAYERS {
+            return Err(Error::Layers);
+        }
+        if !bounded(seconds, 0.002, MAX_BAKED_SECONDS)
+            || !bounded(length, 0.002, seconds)
+            || onsets
+                .iter()
+                .any(|onset| !bounded(*onset, 0.0, seconds - length))
+        {
+            return Err(Error::Duration);
+        }
+        let strikes = (0..onsets.len())
+            .map(|index| self.bake(length, rate, seed.wrapping_add(index as u64)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = (f64::from(seconds) * f64::from(rate)).round() as usize;
+        let mut samples = vec![0.0f32; count];
+        for (onset, strike) in onsets.iter().zip(&strikes) {
+            let start = ((f64::from(*onset) * f64::from(rate)).round() as usize).min(count);
+            for (sample, value) in samples[start..].iter_mut().zip(strike.samples()) {
+                *sample = (*sample + value).clamp(-1.0, 1.0);
+            }
+        }
+        Ok(Baked {
+            samples: samples.into(),
+            rate,
+        })
+    }
+
     pub(super) fn validate(&self, rate: u32) -> Result<(), Error> {
         if !(8_000..=192_000).contains(&rate) {
             return Err(Error::SampleRate);

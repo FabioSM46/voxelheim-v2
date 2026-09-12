@@ -271,7 +271,7 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
             profile.seconds,
             profile.range
         ),
-        ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0)
+        ([6.0, 16.0], 4.0, -1.2, 0.45, 24.0)
     );
     assert!(profile.seconds < profile.interval[0]);
     assert!(matches!(CALLS[4], sounds::Call::Cricket));
@@ -300,23 +300,31 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
 }
 
 #[test]
-fn a_simulated_night_hears_a_few_chirps_a_minute_rather_than_a_wall() {
+fn a_simulated_night_hears_a_few_cri_cris_a_minute_rather_than_a_wall() {
     for seed in [17, 39, 1123] {
         let (starts, levels) = wildlife_sequence(sounds::Call::Cricket, seed, 1.0, 1.0);
-        // wildlife_sequence spans ten minutes; the seeds are the ones each call rendered.
+        // wildlife_sequence spans ten minutes of 0.1 s ticks.
         let calls = starts.len() as f32 / 10.0;
-        let chirps = starts
+        assert!((3.0..=8.0).contains(&calls), "{calls} calls a minute");
+        let syllables = starts
             .iter()
-            .map(|(_, seed, _)| sounds::chirps(*seed))
-            .sum::<u32>() as f32
+            .map(|(_, seed, _)| sounds::syllables(*seed))
+            .sum::<usize>() as f32
             / 10.0;
-        assert!((3.0..=10.0).contains(&calls), "{calls} calls a minute");
         assert!(
-            (4.0..=20.0).contains(&chirps) && chirps >= calls && chirps <= calls * 3.0,
-            "{chirps} chirps a minute from {calls} calls"
+            syllables >= calls * 2.0 && syllables <= calls * 3.0,
+            "{syllables} syllables a minute from {calls} calls"
         );
+        // Most of every minute is silence, and every call is still heard across more than
+        // one tick: two or three syllables spread over a quarter to half a second.
         let silent = levels.iter().filter(|energy| **energy == 0.0).count();
-        assert!(silent > 5100, "{silent} of 6000 ticks silent");
+        assert!(silent > 5400, "{silent} of 6000 ticks silent");
+        let heard = 6000 - silent;
+        assert!(
+            heard >= starts.len() * 2,
+            "{heard} ticks heard from {} calls",
+            starts.len()
+        );
     }
 }
 
@@ -428,11 +436,7 @@ fn new_descriptions_are_audible_distinct_seeded_and_have_silent_edges() {
     for rate in [8000, 48000, 192000] {
         let mut signatures = Vec::new();
         for call in CALLS {
-            let render = |seed| {
-                call.description(seed)
-                    .bake(call.profile().seconds, rate, seed)
-                    .unwrap()
-            };
+            let render = |seed| call.bake(seed, rate).unwrap();
             let first = render(7);
             let samples = first.samples();
             assert!(samples.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
@@ -441,7 +445,8 @@ fn new_descriptions_are_audible_distinct_seeded_and_have_silent_edges() {
             assert_eq!(*samples.last().unwrap(), 0.0);
             assert_eq!(samples, render(7).samples());
             assert_ne!(samples, render(29).samples());
-            let signature = samples[..rate as usize / 2].to_vec();
+            // Half a second, or the whole call when it is shorter — a cricket's is 0.45 s.
+            let signature = samples[..(rate as usize / 2).min(samples.len())].to_vec();
             assert!(signatures.iter().all(|other| other != &signature));
             signatures.push(signature);
         }
@@ -495,7 +500,6 @@ fn wildlife_sequence(
                 interval: profile.interval,
                 radius: profile.radius,
                 height: profile.height,
-                seconds: profile.seconds,
                 origin,
                 gain: 1.0,
             },
@@ -503,9 +507,9 @@ fn wildlife_sequence(
                 position.set(source);
                 spatial::place(origin, 0.0, source, profile.range, 0.0)
             },
-            |seed| {
+            |seed, rate| {
                 starts.push((tick, seed, position.get()));
-                call.description(seed)
+                call.bake(seed, rate)
             },
         );
         levels.push(energy(&mixer, 800));
