@@ -66,8 +66,10 @@ pub(super) enum Call {
     Wolf,
     /// Green country at night: an occasional cricket, not a continuous wall of them.
     Cricket,
-    /// The macaw's squawk, heard by day only where `birds::species_for` answers the macaw.
+    /// The macaw's squawk, heard by day only where the bird table flies the macaw.
     Parrot,
+    /// The owl's two-part hoot, heard after dark wherever the bird table flies an owl.
+    Owl,
 }
 
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
@@ -401,6 +403,112 @@ fn rattle(variation: f32, seed: u64, envelope: Envelope) -> Vec<Layer> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// The owl
+// ---------------------------------------------------------------------------
+
+/// The two notes of one hoot: how long each sounds, and where the second starts.
+///
+/// **Unequal, which is the whole shape of the call.** A tawny owl's hoot is a short opening
+/// note, a held silence, and then a longer one that falls away — and an owl whose two notes
+/// are the same length reads as a stutter rather than as a bird. `Sound::bake_parts` exists
+/// because [`Sound::bake_at`] could only strike one length; its doc says so.
+///
+/// The gap is true silence rather than a dip: the second note is a separate strike, so its
+/// envelope starts at its own zero.
+const HOOT_FIRST_SECONDS: f32 = 0.34;
+const HOOT_SECOND_SECONDS: f32 = 0.62;
+const HOOT_GAP_SECONDS: f32 = 0.30;
+
+/// How long the whole call is baked for, with the second note ending inside it.
+///
+/// `HOOT_FIRST_SECONDS + HOOT_GAP_SECONDS + HOOT_SECOND_SECONDS` is 1.26, and the buffer is a
+/// little longer so both edges sit at exact silence.
+pub(super) const HOOT_SECONDS: f32 = 1.35;
+
+/// Where each note of a hoot starts and how long it sounds.
+///
+/// The first note opens the call; the second follows the gap. Nothing here varies with the
+/// seed — an owl's two notes are the same two notes every time, and what the seed moves is the
+/// pitch and the breath, not the rhythm. That is the opposite of the cricket and the macaw,
+/// whose *counts* vary, and it is deliberate: a hoot with a random number of notes is not a
+/// hoot.
+pub(super) fn hoot_parts() -> [(f32, f32); 2] {
+    [
+        (0.0, HOOT_FIRST_SECONDS),
+        (HOOT_FIRST_SECONDS + HOOT_GAP_SECONDS, HOOT_SECOND_SECONDS),
+    ]
+}
+
+/// How far the hoot's pitch falls across one note, as a fraction of where it starts.
+const HOOT_FALL: f32 = 0.88;
+
+/// How far above the voice its rough twin sits: at 240 to 300 Hz, 1.5% beats at 3.6 to 4.5 Hz,
+/// the slow waver of a soft throat rather than a second note.
+const HOOT_DETUNE: f32 = 1.015;
+
+/// One note of an owl: low, breathy and soft-edged, and never a note in the musical sense.
+///
+/// Closer to the wolf's register than to any bird in the catalogue, and built from the same
+/// vocabulary as [`squawk`] and [`howl`]:
+///
+/// - **A pitch contour.** Every voiced layer rides one glide falling to [`HOOT_FALL`] of where
+///   it started, with a single half-cycle of vibrato arching it a little on the way — a hoot
+///   swells and sags rather than sitting on a pitch.
+/// - **Formants over a triangle, not a harmonic stack.** Two low bands stand for the throat and
+///   the open beak — 330 Hz and 780 Hz — and beside the lower one a twin [`HOOT_DETUNE`] above
+///   it beats with it at a few hertz. A triangle rather than a saw because an owl is *soft*:
+///   the saw's dense upper harmonics are what make a macaw harsh, and an owl is the opposite.
+/// - **Breath, and a lot of it.** An owl's hoot is mostly air. Noise through the same two
+///   bands and a low wash above them fills the spectrum between the harmonics, which is what
+///   separates this from the clean partials its negative control is built from.
+///
+/// Every band, and every frequency a glide reaches with its arch, stays far under 3.6 kHz —
+/// the easy case for the 8 kHz bound, because an owl's call is low, and asserted anyway.
+fn hoot(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 240.0 + variation * 60.0;
+    let voice = |detune: f32, harmonic: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Triangle,
+            from: hz * detune * harmonic,
+            to: hz * detune * harmonic * HOOT_FALL,
+            seconds: HOOT_SECOND_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.5 / HOOT_SECOND_SECONDS,
+                depth: 0.06,
+                onset: 0.05,
+            },
+        }),
+        gain,
+        envelope,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+        gate: None,
+    };
+    let breath = |gain, kind, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, kind, formant, q)
+    };
+    vec![
+        // The throat, and the waver in it.
+        voice(1.0, 1.0, 0.35, 330.0, 1.1),
+        voice(HOOT_DETUNE, 1.0, 0.16, 330.0, 1.1),
+        // The beak: the second partial read through a higher band, which is what gives the
+        // hoot its "oo" rather than leaving it a hum.
+        voice(1.0, 2.0, 0.13, 780.0, 1.3),
+        // The air. Wide bands and a low-passed wash above them, for the reason `howl` gives:
+        // narrow bands alone leave empty bins, and empty bins are what a flatness measurement
+        // reads as a note.
+        breath(0.39, FilterKind::Band, 330.0, 0.55),
+        breath(0.31, FilterKind::Band, 780.0, 0.6),
+        breath(0.19, FilterKind::Low, 1600.0, 0.6),
+    ]
+}
+
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
@@ -415,6 +523,18 @@ impl Call {
             // a few calls a minute rather than one every second (#1176). Two squawks at the
             // slowest spacing end at 0.52 + 0.3 = 0.82 s, inside the baked 0.85 s.
             Self::Parrot => ([8.0, 22.0], 7.0, 5.0, 0.85, 32.0),
+            // **The sparsest call in the table, and that is the acceptance criterion**: a
+            // night has a few hoots, not a chorus. Thirty to ninety seconds between them,
+            // against the cricket's six to sixteen.
+            //
+            // `radius` and `height` are the fallback bearing only — an owl is drawn, so its
+            // hoot is placed at its body and these are what a hoot uses when no owl has
+            // spawned yet. See `Origin` in `wildlife.rs`. They put it in a tree eight blocks
+            // off and six up, which is where an owl perches, and which is also the distance
+            // `a_hoot_carries_from_its_tree_without_clipping_at_any_rate` measures the call's
+            // level against: the fallback is the *pessimistic* case, since a hoot placed at a
+            // body is as close as the bird is.
+            Self::Owl => ([30.0, 90.0], 8.0, 6.0, HOOT_SECONDS, 64.0),
         };
         CallProfile {
             interval,
@@ -446,6 +566,11 @@ impl Call {
                 rate,
                 seed,
             ),
+            // Two notes of **unequal** length, which `bake_at` cannot say — see
+            // `Sound::bake_parts`, which exists for this call.
+            Self::Owl => self
+                .description(seed)
+                .bake_parts(&hoot_parts(), seconds, rate, seed),
             _ => self.description(seed).bake(seconds, rate, seed),
         }
     }
@@ -473,6 +598,9 @@ impl Call {
             Self::Cricket => (0.005, 0.025, 0.85, 0.02),
             // One squawk: a hard but unclicked onset, a harsh held middle, a quick close.
             Self::Parrot => (0.012, 0.08, 0.7, 0.06),
+            // One note of a hoot: a soft swell rather than an onset, a held body, and a long
+            // sigh out of it. The attack is what keeps an owl from sounding struck.
+            Self::Owl => (0.055, 0.18, 0.62, 0.12),
         };
         let envelope = Envelope {
             attack,
@@ -526,6 +654,7 @@ impl Call {
                     .collect()
             }
             Self::Parrot => squawk(variation, envelope),
+            Self::Owl => hoot(variation, envelope),
         };
         Sound { layers }
     }
@@ -821,7 +950,19 @@ mod tests {
     /// white noise, and near zero for clean partials, whose energy is on a few bins and whose
     /// other bins are empty. A voice made rough and breathy fills the bins between harmonics.
     fn flatness(samples: &[f32], rate: u32) -> f64 {
-        let power = band_power(samples, rate, 400.0, 3600.0);
+        flatness_between(samples, rate, 400.0, 3600.0)
+    }
+
+    /// The same measurement over a stated band.
+    ///
+    /// **The band has to be the one the voice actually fills**, and that is not a detail. A
+    /// macaw's squawk lives between 400 Hz and 3.6 kHz, which is why [`flatness`] reads there.
+    /// An owl's hoot lives between 240 and 1600 Hz, so read over the macaw's band most of the
+    /// bins are empty *because the owl is not in them* — which measures as a note and would
+    /// have condemned a perfectly breathy call. The floor separates rough from clean only
+    /// inside the band both are in.
+    fn flatness_between(samples: &[f32], rate: u32, low: f32, high: f32) -> f64 {
+        let power = band_power(samples, rate, low, high);
         let floor = power.iter().sum::<f64>() / power.len() as f64 * 1e-12;
         let log = power.iter().map(|p| (p + floor).ln()).sum::<f64>() / power.len() as f64;
         log.exp() / (power.iter().sum::<f64>() / power.len() as f64)
@@ -1700,6 +1841,218 @@ mod tests {
                 );
                 assert_eq!(samples.first(), Some(&0.0));
                 assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// The owl's two notes, as rendered runs: `(first, last)` sounding sample.
+    fn hoot_notes(samples: &[f32], rate: u32) -> Vec<(usize, usize)> {
+        rendered_syllables(samples, rate)
+    }
+
+    /// #1191: an owl's call is two parts of **unequal** length with real silence between
+    /// them — a short opening note and a longer one after it. `Sound::bake_parts` exists
+    /// because `bake_at` could only strike one length, so this is the test that would fail if
+    /// the owl went back to it.
+    #[test]
+    fn a_hoot_is_two_notes_of_unequal_length_with_silence_between() {
+        for seed in (0..24u64).map(scramble) {
+            for rate in [8000, 48000] {
+                let call = Call::Owl.bake(seed, rate).unwrap();
+                let found = hoot_notes(call.samples(), rate);
+                assert_eq!(found.len(), 2, "seed {seed} at {rate}: {found:?}");
+                let length = |(first, last): (usize, usize)| (last - first) as f32 / rate as f32;
+                let (first, second) = (length(found[0]), length(found[1]));
+                assert!(
+                    second > first * 1.3,
+                    "seed {seed} at {rate}: a {first} s note then a {second} s one, which is \
+                     not the unequal pair an owl makes"
+                );
+                // Each inside the window `hoot_parts` gave it, and neither vanishingly short.
+                assert!(first > 0.1 && first <= HOOT_FIRST_SECONDS);
+                assert!(second > 0.2 && second <= HOOT_SECOND_SECONDS);
+                // Real silence, not a dip: the gap is a whole separate strike apart.
+                let silence = (found[1].0 - found[0].1) as f32 / rate as f32;
+                assert!(
+                    silence >= 0.15,
+                    "seed {seed} at {rate}: {silence} s between the notes"
+                );
+                // Both edges of the call at exact silence, at every device rate.
+                assert_eq!(call.samples().first(), Some(&0.0));
+                assert_eq!(call.samples().last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// The owner's standing rule, applied to the owl: a sound is realistic, never a note. A
+    /// hoot is mostly breath over a soft throat, so its energy is spread across the band an
+    /// owl fills; a note keeps it on a few frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same two notes, the same contour, voiced as
+    /// clean partials with the breath removed, must **fail** the measurement the hoot passes —
+    /// otherwise the floor is passing everything rather than separating the two.
+    #[test]
+    fn a_hoot_is_breathy_and_broadband_and_not_a_note() {
+        let mut controls = 0usize;
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Owl.bake(seed, 8000).unwrap();
+            let flat = flatness_between(call.samples(), 8000, 150.0, 2000.0);
+            assert!(
+                flat > 0.12,
+                "seed {seed}: the hoot measured flatness {flat}, which is a note"
+            );
+
+            // The control: every voiced layer the same glide as a sine, and no breath at all.
+            let clean = Sound {
+                layers: Call::Owl
+                    .description(seed)
+                    .layers
+                    .into_iter()
+                    .filter_map(|layer| match layer.exciter {
+                        Exciter::Glide(glide) => Some(Layer {
+                            exciter: Exciter::Glide(Glide {
+                                wave: Wave::Sine,
+                                ..glide
+                            }),
+                            filter: None,
+                            ..layer
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+            .bake_parts(&hoot_parts(), HOOT_SECONDS, 8000, seed)
+            .unwrap();
+            let control = flatness_between(clean.samples(), 8000, 150.0, 2000.0);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates \
+                 nothing"
+            );
+            assert!(control < flat, "seed {seed}: {control} against {flat}");
+            controls += 1;
+        }
+        assert!(controls > 0, "no control was ever built");
+    }
+
+    /// An owl's call is low, so the 3.6 kHz bound is the easy case — and it is asserted
+    /// anyway, because "easy" is a claim about today's numbers and the bound is what lets
+    /// every description bake at an 8 kHz device.
+    #[test]
+    fn every_frequency_in_a_hoot_stays_under_the_eight_kilohertz_bound() {
+        const CEILING: f32 = 3600.0;
+        for seed in (0..24u64).map(scramble) {
+            for layer in Call::Owl.description(seed).layers {
+                match layer.exciter {
+                    // The highest frequency the glide reaches, arch included — the same
+                    // arithmetic `Glide::peak` does inside the synth, restated here because
+                    // that one is private to it.
+                    Exciter::Glide(glide) => {
+                        let top = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                        assert!(top <= CEILING, "seed {seed}: a glide reaches {top} Hz");
+                    }
+                    Exciter::Oscillator { hz, .. } => assert!(hz <= CEILING),
+                    Exciter::Noise(_) => {}
+                }
+                if let Some(filter) = layer.filter {
+                    assert!(
+                        filter.hz <= CEILING,
+                        "seed {seed}: a band sits at {} Hz",
+                        filter.hz
+                    );
+                }
+            }
+            // And it bakes at the lowest supported rate, which is what the bound is for.
+            assert!(Call::Owl.bake(seed, 8000).is_ok());
+        }
+    }
+
+    /// Heard where it is placed — at the owl's own body, so the distance is whatever the bird
+    /// is, and the fallback bearing is what this measures against. A hoot has to carry across
+    /// a wood without clipping at any device rate.
+    #[test]
+    fn a_hoot_carries_from_its_tree_without_clipping_at_any_rate() {
+        let profile = Call::Owl.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..16u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Owl.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.06,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+            }
+        }
+    }
+
+    /// Each strike of a `bake_parts` call lands at **its own** onset, for **its own** length,
+    /// from **its own** seed.
+    ///
+    /// **This replaces a test that could not fail.** It was an `assert_eq!` between
+    /// `bake_at(..)` and `bake_parts(..)` over the shipped cricket and macaw, cited as proof
+    /// that no shipped sound had moved — but `bake_at` *is* `bake_parts` since the
+    /// generalisation: it builds the `(onset, length)` pairs and delegates. Both sides ran
+    /// identical code on identical inputs and were equal by construction, so the assertion
+    /// would have passed with a real bug in `bake_parts` sitting on both sides of it. Caught
+    /// in review on #1219.
+    ///
+    /// **The actual guard that no shipped sound moved is `pins.rs`**, whose cricket, macaw,
+    /// rattlesnake, crow, eagle and wolf rows are byte-identical across this change; only the
+    /// three new Owl rows are new. A golden buffer captured before the refactor is what can
+    /// fail, and the pins are that.
+    ///
+    /// What *this* checks is the contract the pins cannot see: that `bake_parts` places three
+    /// independent things correctly. The owl's two strikes do not overlap, so each region of
+    /// the buffer is exactly one strike and can be compared against a `Sound::bake` built
+    /// here — `bake` is not part of the generalisation, so the two sides are genuinely
+    /// different code. Mis-seed the second strike, place it at the wrong sample, or give it
+    /// the first one's length, and this fails.
+    #[test]
+    fn each_strike_lands_at_its_own_onset_for_its_own_length_from_its_own_seed() {
+        for seed in (0..6u64).map(scramble) {
+            for rate in [8000, 48000] {
+                let description = Call::Owl.description(seed);
+                let parts = hoot_parts();
+                // The premise the region-by-region comparison rests on, asserted rather than
+                // assumed: the two strikes do not overlap.
+                assert!(parts[0].0 + parts[0].1 < parts[1].0, "{parts:?}");
+
+                let baked = description
+                    .bake_parts(&parts, HOOT_SECONDS, rate, seed)
+                    .unwrap();
+                let samples = baked.samples();
+                assert_eq!(samples.len(), (HOOT_SECONDS * rate as f32).round() as usize);
+
+                for (index, (onset, length)) in parts.iter().enumerate() {
+                    // Built from `bake`, which the generalisation did not touch, and seeded
+                    // the way `bake_parts` documents: the call's seed plus the strike's index.
+                    let alone = description
+                        .bake(*length, rate, seed.wrapping_add(index as u64))
+                        .unwrap();
+                    let start = (f64::from(*onset) * f64::from(rate)).round() as usize;
+                    assert_eq!(
+                        &samples[start..start + alone.samples().len()],
+                        alone.samples(),
+                        "seed {seed} at {rate}: strike {index} is not its own bake at {onset}s"
+                    );
+                }
+
+                // And everything outside the two strikes is exact silence — which is what
+                // makes the regions above the whole of the buffer rather than part of it.
+                let first_end = (f64::from(parts[0].1) * f64::from(rate)).round() as usize;
+                let second_start = (f64::from(parts[1].0) * f64::from(rate)).round() as usize;
+                assert!(
+                    samples[first_end..second_start].iter().all(|v| *v == 0.0),
+                    "seed {seed} at {rate}: the gap between the notes is not silent"
+                );
             }
         }
     }

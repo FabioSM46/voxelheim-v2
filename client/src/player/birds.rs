@@ -576,16 +576,15 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
 /// looks, which is a change to the three rows that ship and to the table's whole shape for
 /// the sake of one duplicated plumage.
 ///
-/// **The `allow` is a seam and not a shrug**, and it comes off in part 2 of this issue. These
-/// name the rows `player/ambient_sound/wildlife.rs` will hang the hoot's two
-/// [`Habitat::Flock`](super::ambient_sound) rows on; until that lands the only code reading
-/// them is this module's own tests, and a `pub` item reachable from nothing but
-/// `#[cfg(test)]` is `dead_code` in a binary crate under `-D warnings`. `net/codec.rs`
-/// carries the same allow for encoders that ship before their callers, for the same reason
-/// and under the same obligation to take it off again.
-#[allow(dead_code)]
+/// `player/ambient_sound/wildlife.rs` reads both, as the one `Habitat::Flock` row the hoot is
+/// heard from — which is why they are names here rather than numbers there.
+///
+/// **They carried `#[allow(dead_code)]` for exactly as long as that was true**, across the two
+/// earlier parts of this issue where the only code reading them was this module's own tests: a
+/// `pub` item reachable from nothing but `#[cfg(test)]` is `dead_code` in a binary crate under
+/// `-D warnings`. `net/codec.rs` carries the same allow for encoders that ship before their
+/// callers, under the same obligation to take it off again — and this is it taken off.
 pub(super) const OWL_WOOD: usize = 3;
-#[allow(dead_code)]
 pub(super) const OWL_NORTH: usize = 4;
 
 /// The owl's eyes: huge, gold, and the brightest thing on a night-time treetop.
