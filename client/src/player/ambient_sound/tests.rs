@@ -271,7 +271,7 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
             profile.seconds,
             profile.range
         ),
-        ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0)
+        ([5.0, 12.0], 4.0, -1.2, 0.9, 24.0)
     );
     assert!(profile.seconds < profile.interval[0]);
     assert!(matches!(CALLS[4], sounds::Call::Cricket));
@@ -300,23 +300,22 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
 }
 
 #[test]
-fn a_simulated_night_hears_a_few_chirps_a_minute_rather_than_a_wall() {
+fn a_simulated_night_hears_a_few_trills_a_minute_rather_than_a_wall() {
     for seed in [17, 39, 1123] {
         let (starts, levels) = wildlife_sequence(sounds::Call::Cricket, seed, 1.0, 1.0);
-        // wildlife_sequence spans ten minutes; the seeds are the ones each call rendered.
+        // wildlife_sequence spans ten minutes of 0.1 s ticks.
         let calls = starts.len() as f32 / 10.0;
-        let chirps = starts
-            .iter()
-            .map(|(_, seed, _)| sounds::chirps(*seed))
-            .sum::<u32>() as f32
-            / 10.0;
-        assert!((3.0..=10.0).contains(&calls), "{calls} calls a minute");
-        assert!(
-            (4.0..=20.0).contains(&chirps) && chirps >= calls && chirps <= calls * 3.0,
-            "{chirps} chirps a minute from {calls} calls"
-        );
+        assert!((4.0..=10.0).contains(&calls), "{calls} trills a minute");
         let silent = levels.iter().filter(|energy| **energy == 0.0).count();
         assert!(silent > 5100, "{silent} of 6000 ticks silent");
+        // And the rest is a trill somebody can notice, not a tick: every call sounds for most
+        // of its baked length, and the lane still leaves most of each minute silent.
+        let heard = 6000 - silent;
+        assert!(
+            heard as f32 >= starts.len() as f32 * 7.0,
+            "{heard} ticks heard from {} calls",
+            starts.len()
+        );
     }
 }
 

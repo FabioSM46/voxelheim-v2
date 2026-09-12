@@ -111,15 +111,16 @@ pub(super) struct CallProfile {
     pub range: f32,
 }
 
-/// How many chirps one cricket call carries: one to three, from its seed.
-pub(super) fn chirps(seed: u64) -> u32 {
-    1 + ((seed >> 8) % 3) as u32
+/// Pulses per second within one cricket trill, 26 to 34, from its seed. Steady for the whole
+/// call: a trill is recognised by its rate, and a cricket does not drift inside one.
+pub(super) fn pulse_rate(seed: u64) -> f32 {
+    26.0 + ((seed >> 16) % 81) as f32 / 10.0
 }
 
-/// Chirps per second within one call, 3.2 to 4.0, from its seed.
-fn chirp_rate(seed: u64) -> f32 {
-    3.2 + ((seed >> 16) % 81) as f32 / 100.0
-}
+/// Each of the cricket's five partials, before its 1-4-6-4-1 weight. Their sum peaks at
+/// sixteen times this, 0.56 at the source: loud enough to stand out over a silent night at
+/// the few blocks the call is placed, where #1145's 0.018 was a faint tick.
+const CRICKET_PARTIAL_GAIN: f32 = 0.035;
 
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
@@ -128,9 +129,9 @@ impl Call {
             Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
             Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
             Self::Wolf => ([35.0, 79.0], 26.0, 0.0, 3.8, 96.0),
-            // In the grass a few blocks off. The longest call, three chirps at the slowest
-            // rate, closes at 4 / 3.2 = 1.25 s, inside the baked 1.3 s.
-            Self::Cricket => ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0),
+            // In the grass a few blocks off: one trill of a little under a second, several
+            // times a minute, and most of every minute still silence.
+            Self::Cricket => ([5.0, 12.0], 4.0, -1.2, 0.9, 24.0),
         };
         CallProfile {
             interval,
@@ -157,14 +158,9 @@ impl Call {
             Self::Crow => (0.025, 0.28, 0.05, 0.12),
             Self::Eagle => (0.015, 0.4, 0.0, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
-            // The tones below pulse at t = n / rate. The attack peaks on the pulse at 1 / rate
-            // and the decay reaches zero on the peak of the pulse at (chirps + 1) / rate, so
-            // `chirps(seed)` pulses sound, each softer than the one before. The pulse at t = 0
-            // rises under the attack ramp: a faint lead-in, under a tenth of the loudest.
-            Self::Cricket => {
-                let rate = chirp_rate(seed);
-                (1.0 / rate, chirps(seed) as f32 / rate, 0.0, 0.02)
-            }
+            // A trill held at full level for the whole call: a short rise, then every pulse as
+            // loud as the last until the release closes the call over its final few pulses.
+            Self::Cricket => (0.03, 0.0, 1.0, 0.12),
         };
         let envelope = Envelope {
             attack,
@@ -238,16 +234,22 @@ impl Call {
                     },
                 ]
             }
-            // Five sines one chirp rate apart, weighted 1-4-6-4-1, sum to 16·cos⁴(π·rate·t)
+            // Five sines one pulse rate apart, weighted 1-4-6-4-1, sum to 16·cos⁴(π·rate·t)
             // times a carrier: a sharp pulse every 1/rate with true silence between pulses,
             // without an onset primitive. The top partial stays under 8 kHz's 3.6 kHz bound.
             Self::Cricket => {
                 let hz = 3000.0 + variation * 200.0;
-                let rate = chirp_rate(seed);
+                let rate = pulse_rate(seed);
                 [1.0, 4.0, 6.0, 4.0, 1.0]
                     .into_iter()
                     .enumerate()
-                    .map(|(k, weight)| tone(hz + k as f32 * rate, 0.018 * weight, envelope))
+                    .map(|(k, weight)| {
+                        tone(
+                            hz + k as f32 * rate,
+                            CRICKET_PARTIAL_GAIN * weight,
+                            envelope,
+                        )
+                    })
                     .collect()
             }
         };
@@ -258,6 +260,7 @@ impl Call {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::spatial;
     fn stream(bed: Bed, rate: u32, seed: u64) -> Vec<f32> {
         let mut stream = bed.description().continuous(rate, seed).unwrap();
         let mut output = vec![0.0; rate as usize * 2];
@@ -302,74 +305,84 @@ mod tests {
         }
     }
 
-    /// Count the pulses actually rendered, from the samples rather than from `chirps`:
-    /// a 5 ms peak envelope must rise past a fifth of the loudest pulse, and fall back
-    /// under a twentieth before another pulse is counted.
-    fn rendered_chirps(seed: u64, rate: u32) -> u32 {
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0, |peak, v| v.abs().max(peak))
+    }
+
+    /// The onsets of the pulses actually rendered, in seconds, from the samples rather than
+    /// from `pulse_rate`: a 2 ms peak envelope must rise past a fifth of the loudest pulse,
+    /// and fall back under a twentieth before another pulse is counted.
+    fn rendered_pulses(seed: u64, rate: u32) -> Vec<f32> {
         let call = Call::Cricket
             .description(seed)
             .bake(Call::Cricket.profile().seconds, rate, seed)
             .unwrap();
         let envelope: Vec<f32> = call
             .samples()
-            .chunks(rate as usize / 200)
-            .map(|window| window.iter().fold(0.0, |peak, v| v.abs().max(peak)))
+            .chunks(rate as usize / 500)
+            .map(peak)
             .collect();
         let loudest = envelope.iter().copied().fold(0.0, f32::max);
-        let (mut count, mut armed) = (0, true);
-        for level in envelope {
+        let (mut onsets, mut armed) = (Vec::new(), true);
+        for (window, level) in envelope.into_iter().enumerate() {
             if armed && level > loudest * 0.2 {
-                count += 1;
+                onsets.push(window as f32 / 500.0);
                 armed = false;
             } else if level < loudest * 0.05 {
                 armed = true;
             }
         }
-        count
+        onsets
     }
 
+    /// #1161: #1145's call was one to three pulses about a quarter of a second apart — an
+    /// occasional tick. A trill is many pulses at one rate, which is what makes it a cricket.
     #[test]
-    fn a_cricket_call_is_one_to_three_rendered_chirps() {
-        let mut seen = [false; 3];
+    fn a_cricket_call_is_a_trill_of_many_pulses_at_a_steady_rate() {
+        let seconds = Call::Cricket.profile().seconds;
         for seed in 0..60u64 {
             let seed = super::super::controller::scramble(seed);
-            let expected = chirps(seed);
-            assert!((1..=3).contains(&expected));
-            seen[expected as usize - 1] = true;
-            assert!((3.2..=4.0).contains(&chirp_rate(seed)));
-            for rate in [8000, 48000] {
-                assert_eq!(
-                    rendered_chirps(seed, rate),
-                    expected,
-                    "seed {seed} at {rate}"
+            let rate = pulse_rate(seed);
+            assert!((26.0..=34.0).contains(&rate));
+            let period = 1.0 / rate;
+            for device in [8000, 48000] {
+                let onsets = rendered_pulses(seed, device);
+                // The rise and the release take a pulse or so off each end, and no more.
+                assert!(
+                    onsets.len() as f32 >= (seconds - 0.15) * rate,
+                    "seed {seed} at {device}: {} pulses at {rate} a second",
+                    onsets.len()
                 );
+                for pair in onsets.windows(2) {
+                    let gap = pair[1] - pair[0];
+                    assert!(
+                        (gap - period).abs() <= period * 0.25,
+                        "seed {seed} at {device}: a {gap} s gap in a trill of {period} s"
+                    );
+                }
             }
         }
-        assert_eq!(seen, [true; 3], "every chirp count occurs");
     }
 
+    /// Heard where the lane places it — `radius` out and `height` down, faded by the same
+    /// `spatial::attenuation` every placed sound is — before the Ambience bus. #1145's call
+    /// peaked near 0.12 here, and only for a few milliseconds of each of three pulses.
     #[test]
-    fn the_cricket_envelope_ends_on_a_pulse_peak_inside_the_baked_call() {
-        // The longest call, three chirps at the slowest rate, reaches zero at 4 / 3.2 s.
-        // The 0.02 s release is the buffer's last, so the two must not overlap.
-        let seconds = Call::Cricket.profile().seconds;
-        assert!(4.0 / 3.2 + 0.02 <= seconds);
+    fn a_cricket_call_placed_at_its_radius_is_clearly_heard() {
+        let profile = Call::Cricket.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
         for seed in 0..60u64 {
             let seed = super::super::controller::scramble(seed);
-            let rate = chirp_rate(seed);
-            assert!((chirps(seed) + 1) as f32 / rate + 0.02 <= seconds);
             let call = Call::Cricket
                 .description(seed)
-                .bake(seconds, 48000, seed)
+                .bake(profile.seconds, 48000, seed)
                 .unwrap();
-            let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |p, v| v.abs().max(p));
-            let loudest = peak(call.samples());
-            // The pulse at t = 0 rises under the attack ramp: x·cos⁴(πx) peaks near 0.095
-            // over its half period, so it is faint rather than silent.
-            let lead_in = peak(&call.samples()[..(0.5 / rate * 48000.0) as usize]);
+            let heard: Vec<f32> = call.samples().iter().map(|v| v * gain).collect();
+            let rms = (heard.iter().map(|v| v * v).sum::<f32>() / heard.len() as f32).sqrt();
             assert!(
-                lead_in > loudest * 0.05 && lead_in < loudest * 0.15,
-                "seed {seed}: lead-in {lead_in} of {loudest}"
+                peak(&heard) >= 0.2 && rms >= 0.06,
+                "seed {seed}: peak {}, rms {rms}",
+                peak(&heard)
             );
         }
     }
