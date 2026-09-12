@@ -1,6 +1,6 @@
 //! Every ambient bed and call, pinned (see `audio::synth::pin`). A call's seed
 //! varies per play, so each is pinned at three seeds that reach different variations.
-use super::sounds::{CALLS, parrot};
+use super::sounds::{CALLS, Call};
 use super::*;
 use crate::audio::synth::pin;
 
@@ -16,10 +16,10 @@ fn every_ambient_sound_renders_identically_to_its_pin() {
             pin::continuous(&bed.description(), 0.75, 7),
         ));
     }
-    for call in CALLS {
+    for call in CALLS.into_iter().chain([Call::Parrot]) {
         for seed in SEEDS {
-            // The lane's own bake: the cricket's syllables struck apart, every other call
-            // baked whole.
+            // The lane's own bake: the cricket's syllables and the macaw's squawks struck
+            // apart, every other call baked whole.
             let hash = pin::across_rates(|rate| {
                 call.bake(seed, rate)
                     .expect("a call bakes")
@@ -28,12 +28,6 @@ fn every_ambient_sound_renders_identically_to_its_pin() {
             });
             rendered.push((format!("call {call:?} {seed:#x}"), hash));
         }
-    }
-    for seed in SEEDS {
-        rendered.push((
-            format!("parrot {seed:#x}"),
-            pin::baked(&parrot(seed), 0.3, seed),
-        ));
     }
     pin::assert_pins(&rendered, PINS);
 }
@@ -60,7 +54,7 @@ const PINS: &[pin::Row] = &[
     ("call Cricket 0x0", 45045, [18.27520, -3.10288, -4.44538, -43.16450]),
     ("call Cricket 0x10203", 45045, [-3.81560, 6.62133, 4.83353, 20.00880]),
     ("call Cricket 0xfedcba9876543210", 45045, [-14.74555, 6.99188, 16.89307, 31.56857]),
-    ("parrot 0x0", 30030, [-1.88147, 4.64971, 1.14186, -9.89350]),
-    ("parrot 0x10203", 30030, [4.06720, 5.48371, -8.13336, 5.47562]),
-    ("parrot 0xfedcba9876543210", 30030, [7.07907, 7.66294, -6.97357, 2.13390]),
+    ("call Parrot 0x0", 85085, [-8.17830, -2.40361, -5.37675, -23.03340]),
+    ("call Parrot 0x10203", 85085, [-4.62595, 31.01545, -22.88560, 4.83245]),
+    ("call Parrot 0xfedcba9876543210", 85085, [-13.54914, 2.12278, 4.51390, 3.48718]),
 ];

@@ -59,12 +59,119 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
         wooded: false,
         ..grass()
     };
-    assert_eq!(targets(&plain, 0.0, None).day, 1.0);
-    assert_eq!(birds::species_for(&grass()), Some(0));
-    // No biome, temperature, terrain seed or gameplay facts enter this selector.
+    assert_eq!(birds::species_for(&grass()), Some(PARROT));
+    // No biome, temperature, terrain seed or gameplay facts enter this selector. Trees decide
+    // only whether the macaw is there to be heard.
     let a = targets(&grass(), 0.3, weather(WeatherKind::Rain, 120));
     let b = targets(&plain, 0.3, weather(WeatherKind::Rain, 120));
-    assert_eq!(a, b);
+    assert_eq!((a.beds, a.wildlife), (b.beds, b.wildlife));
+}
+
+/// #1176: the day call played on every sunny grass tile, because a treeless plain has no
+/// species and `is_none_or` counted that as parrot country. It is heard now exactly where the
+/// bird table flies the macaw, and every other answer — no species, or another one — is
+/// silence.
+#[test]
+fn the_macaw_is_heard_by_day_only_where_the_bird_table_flies_it() {
+    let row = &birds::BIRDS[PARROT];
+    assert!(
+        row.ground == GroundLook::Grass && row.requires_wooded,
+        "PARROT no longer names the macaw's row"
+    );
+    let mut heard = 0;
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            let country = Ambience { ground, wooded };
+            let macaw = birds::species_for(&country) == Some(PARROT);
+            heard += usize::from(macaw);
+            for night in [0.0, 0.25, 1.0] {
+                let expected = if macaw { 1.0 - night } else { 0.0 };
+                for weather in [None, weather(WeatherKind::Rain, 200)] {
+                    assert_eq!(
+                        targets(&country, night, weather).day,
+                        expected,
+                        "wooded {wooded}, night {night}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(heard, 1, "only wooded grass is the macaw's");
+    let plain = Ambience {
+        wooded: false,
+        ..grass()
+    };
+    assert_eq!(
+        targets(&plain, 0.0, None).day,
+        0.0,
+        "an open plain is silent"
+    );
+    assert_eq!(targets(&grass(), 0.0, None).day, 1.0);
+    assert_eq!(targets(&grass(), 1.0, None).day, 0.0, "no macaw at night");
+}
+
+/// Ten minutes of the real system at 0.1 s a tick, on the world's own seed: the ambience,
+/// the day lane and its profile together, and nothing but the macaw sounding by day. Returns
+/// each tick's energy.
+fn a_simulated_day(ambience: Ambience) -> Vec<f32> {
+    let mixer = mixer();
+    let shared = mixer.shared_for_test().clone();
+    let mut app = App::new();
+    app.insert_resource(mixer)
+        .insert_resource(Time::<()>::default())
+        .insert_resource(ambience)
+        .insert_resource(session())
+        .init_resource::<Weather>()
+        .init_resource::<SkyClock>()
+        .init_resource::<ChunkStore>();
+    register(&mut app);
+    app.world_mut().spawn((WorldCamera, Transform::default()));
+    (0..6000)
+        .map(|_| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(100));
+            app.update();
+            energy(&AudioMixer::from_shared_for_test(shared.clone()), 800)
+        })
+        .collect()
+}
+
+/// #1176: one call every 0.7 to 2.5 s was close to a continuous bed. A day in the macaw's
+/// wood now hears a few calls a minute, and most of every minute is silence; an open plain
+/// hears nothing at all.
+#[test]
+fn a_simulated_day_in_a_wood_hears_a_few_squawks_a_minute_and_a_plain_hears_none() {
+    let levels = a_simulated_day(grass());
+    // A call is at most 0.85 s and the next starts at least 8 s later, so a sound after two
+    // silent seconds is a new call.
+    let mut calls = 0;
+    let mut quiet = usize::MAX;
+    for level in &levels {
+        if *level == 0.0 {
+            quiet = quiet.saturating_add(1);
+        } else {
+            calls += usize::from(quiet >= 20);
+            quiet = 0;
+        }
+    }
+    let per_minute = calls as f32 / 10.0;
+    assert!(
+        (2.0..=6.0).contains(&per_minute),
+        "{per_minute} calls a minute"
+    );
+    let silent = levels.iter().filter(|level| **level == 0.0).count();
+    assert!(silent > 5400, "{silent} of 6000 ticks silent");
+    let plain = a_simulated_day(Ambience {
+        wooded: false,
+        ..grass()
+    });
+    assert!(plain.iter().all(|level| *level == 0.0), "a plain squawked");
 }
 
 #[test]
@@ -435,7 +542,7 @@ fn storm_winds_scale_independently_and_blizzard_keeps_the_existing_snowfall() {
 fn new_descriptions_are_audible_distinct_seeded_and_have_silent_edges() {
     for rate in [8000, 48000, 192000] {
         let mut signatures = Vec::new();
-        for call in CALLS {
+        for call in CALLS.into_iter().chain([sounds::Call::Parrot]) {
             let render = |seed| call.bake(seed, rate).unwrap();
             let first = render(7);
             let samples = first.samples();
@@ -523,7 +630,7 @@ fn wildlife_sequence(
 
 #[test]
 fn shipped_calls_are_sparse_irregular_reproducible_and_world_placed() {
-    for call in CALLS {
+    for call in CALLS.into_iter().chain([sounds::Call::Parrot]) {
         let first = wildlife_sequence(call, 17, 1.0, 1.0);
         assert_eq!(first, wildlife_sequence(call, 17, 1.0, 1.0));
         assert_ne!(first.0, wildlife_sequence(call, 39, 1.0, 1.0).0);

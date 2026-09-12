@@ -181,14 +181,14 @@ mod tests {
                 CallFrame {
                     dt: 0.1,
                     seed,
-                    interval: [0.7, 2.5],
+                    interval: sounds::Call::Parrot.profile().interval,
                     radius: 7.0,
                     height: 5.0,
                     origin: Vec3::ZERO,
                     gain,
                 },
                 |_| Placement::UNPOSITIONED,
-                |seed, rate| sounds::parrot(seed).bake(0.3, rate, seed),
+                |seed, rate| sounds::Call::Parrot.bake(seed, rate),
             );
             let mut buffer = Buffer(vec![0.0; 800]);
             shared.render(&mut buffer);
