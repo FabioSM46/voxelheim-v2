@@ -43,7 +43,7 @@
 //!   moment is decided by arithmetic rather than remembered.
 //! - **The climb needs a trunk, and a trunk is a fact about the world.** [`trunk_near`]
 //!   looks for one when a critter is stood up, and that answer is written into the component
-//!   once and never again — the same category of spawn-time constant as `Critter::anchor` (part two).
+//!   once and never again — the same category of spawn-time constant as [`Critter::anchor`].
 //!   A critter that finds none simply fades where it is, and that is a real branch rather
 //!   than an unreachable one: `a_critter_with_no_trunk_forages_and_fades_where_it_is`
 //!   asserts it.
@@ -58,55 +58,34 @@
 //! and a row that names it. Nothing below reads `CRITTERS[0]` by its index outside the
 //! table's own tests.
 //!
-//! ## What is here, and what arrives with the parts after it
+//! ## Two entities and no asset
 //!
-//! **This is part one of four, and each part answers one question.** This one answers *where a
-//! critter is*: the species table, the path as a pure function of a seed and the clock, the
-//! life window, and the seeds. It reads nothing — there is no `ChunkStore` import in this file
-//! and no `use` of `palette` — so every claim below is settled by arithmetic, and every
-//! function is exercised by this module's own tests rather than by anything that runs.
+//! A body lofted through nine cross-sections, and a tail as a child — one mesh each, so a
+//! critter is two draws and a full wood is eight. The tail is a child for the reason a bird's
+//! wing is: it turns about its own root, which is cheaper to write and to read than
+//! recomputing its vertices, and `a_critter_is_two_draws_however_detailed_it_is` is what keeps
+//! a richer model from becoming a richer scene.
 //!
-//! - **Part two: what a critter stands on.** `surface_under`, `next_stand` and `trunk_near` —
-//!   the terrain probe and the trunk search, and with them this module's first read of the
-//!   world.
-//! - **Part three: what draws it.** `CritterVisuals`, the `Critter` and `CritterTail`
-//!   components, the body and tail lofted in code, and the `keep_the_critters` /
-//!   `run_the_critters` pair that `player/mod.rs` registers.
-//! - **Part four: what it sounds like.** The squirrel's chatter, its row in the wildlife table,
-//!   and the rule that places a visible creature's voice at its body.
+//! ## How this issue was landed, since the parts are still visible in its history
 //!
-//! Until the systems land, the items here have no caller in a shipped build and carry
-//! `#[allow(dead_code)]` for exactly that reason, in the form this repository already uses for
-//! a contract that ships before its consumer — see `net/codec.rs`, whose outbound intent
-//! builders carry the same allowance with the same kind of comment. **Part three removes it**,
-//! and nothing else may: an item still unused once the systems exist is one nobody needed.
-//!
-//! The seams are boundaries the code already draws rather than character counts — but the
-//! counts are why there are four of them. Whole, this issue measured about 170,000 characters
-//! against a 90,000 review cap, and a truncated review is one that comes back having read
-//! neither half.
+//! #1190 measured about 170,000 characters whole against a 90,000 review cap, so it arrived in
+//! four pull requests, each answering one question and each a boundary the code already draws:
+//! where a critter is (the pure path and the seeds), what it stands on (the terrain probe and
+//! the trunk search), **what draws it** — this part, which is also what removes the module's
+//! temporary dead-code allowance by giving every item above a caller — and what it sounds like.
 
-// **Removed by part two, and only by part two.** Nothing in this half has a caller in a
-// shipped build yet: the systems that would call it are what part two adds. It is scoped to
-// this module and to this one lint, which is the form `client/AGENTS.md` asks for when a lint
-// has to be silenced at all — never a wider set and never workspace-wide — and it is the same
-// bargain `net/codec.rs` strikes for an outbound contract that ships before its consumer.
-//
-// It is a blanket rather than forty-odd attributes because *every* item here is in that
-// position, and forty copies of one comment would say less than this one does. The risk it
-// carries is the honest one: while it is here, genuinely dead code would not be reported
-// either. That is bounded by its lifetime — part two deletes this line and the compiler then
-// has an opinion about every item below.
-#![allow(dead_code)]
-
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_1_SQRT_2, TAU};
 use std::ops::RangeInclusive;
 
+use bevy::asset::RenderAssetUsages;
+use bevy::ecs::system::SystemParam;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
-use super::sky::Period;
-use crate::net::{BlockCoord, ChunkCoord};
+use super::camera::WorldCamera;
+use super::sky::{self, Period, SkyClock};
+use crate::net::{BlockCoord, ChunkCoord, Session};
 use crate::world::{ChunkStore, palette};
 
 /// How coarsely the eye is quantised before it anchors the critters in a cell, in blocks.
@@ -376,7 +355,7 @@ impl CritterSpecies {
     }
 }
 
-/// Every kind of critter there is. Appended to, never reordered: `Critter::species` (part two) is an
+/// Every kind of critter there is. Appended to, never reordered: [`Critter::species`] is an
 /// index into this table and a critter alive across a reorder would change species on the
 /// ground.
 ///
@@ -763,7 +742,7 @@ fn next_stand(
 ///
 /// **A ring search rather than a scan, because the cost has to be bounded and it is paid
 /// once.** This runs when a critter is stood up and never again — the answer goes into
-/// `Critter::trunk` (part two) — so it may read more columns than a per-frame probe could afford, and
+/// [`Critter::trunk`] — so it may read more columns than a per-frame probe could afford, and
 /// it reads them in rings outward so the trunk it finds is a near one rather than the first in
 /// a raster.
 ///
@@ -933,12 +912,838 @@ fn group_size(species: &CritterSpecies, cell: u64) -> usize {
     (low + mix(cell, SALT_COUNT) as usize % span).min(CRITTER_COUNT_MAX)
 }
 
+// ---------------------------------------------------------------------------
+// The entities
+// ---------------------------------------------------------------------------
+
+/// The two meshes every critter in the session is drawn from, and one material pair per slot.
+///
+/// The materials are built once, here, rather than at every spawn — the reasoning
+/// `birds::BirdVisuals` gives, and it applies harder to a critter: a life is twenty seconds,
+/// so a wood stands critters up and retires them continuously rather than only when the eye
+/// crosses a cell, and `materials.add` at spawn time would mint a fresh `StandardMaterial`
+/// several times a minute forever.
+///
+/// **Keyed by slot rather than by coat, and the fade is why.** A handle shared by a whole coat
+/// cannot carry a per-critter alpha: two grey squirrels, one arriving and one leaving, would
+/// fade as one. `keep_the_critters`'s second guard holds the ground to
+/// [`CRITTER_COUNT_MAX`], so a pool that size never runs dry and nothing is minted after
+/// startup.
+#[derive(Resource, Debug)]
+pub(super) struct CritterVisuals {
+    body: Handle<Mesh>,
+    tail: Handle<Mesh>,
+    /// One `(body, tail)` pair per critter the ground can hold, claimed at spawn.
+    pool: [(Handle<StandardMaterial>, Handle<StandardMaterial>); CRITTER_COUNT_MAX],
+}
+
+/// One critter. The root, and the only thing anything outside this module may see.
+///
+/// It deliberately carries **no** `MobVisuals`, no name plate, no collider, no health and
+/// nothing the target raycast or any other system reads.
+#[derive(Component, Debug)]
+pub(super) struct Critter {
+    /// The row of [`CRITTERS`] this critter is, as an index. Never re-read from [`Ambience`]:
+    /// a critter whose species changed is one that should have been replaced.
+    pub(super) species: usize,
+    seed: u64,
+    /// Which slot of its cell this critter holds, so a replacement takes the empty one.
+    index: usize,
+    /// Which life window it is, so a critter is retired when the clock leaves its window
+    /// rather than when anything stored says so.
+    generation: i64,
+    /// The point [`place`] draws its forage around, fixed for this critter's whole life.
+    pub(super) anchor: Vec3,
+    /// The foot of the trunk this critter climbs at the end of its life, if it found one.
+    ///
+    /// Written once when the critter is stood up and never again — the same category of
+    /// spawn-time constant as `anchor`, and the reason [`place`] takes five arguments rather
+    /// than four. `None` is the documented fallback: it forages for its whole life.
+    trunk: Option<Vec3>,
+    /// How much of the critter is drawn: 0 invisible, 1 whole.
+    pub(super) fade: f32,
+    /// What `fade` is moving towards. Zero means this critter is on its way out, and nothing
+    /// ever moves it back, so a look that flickers cannot make a critter flicker with it.
+    pub(super) wanted: f32,
+    /// The height its feet are drawn at: the ground's answer, eased.
+    ///
+    /// The only per-critter state its position has, and it is deliberately the *ground* rather
+    /// than the whole position: [`place`] remains the whole of where a critter is on the
+    /// plane, [`climb_rise`] is the whole of how far above this it has climbed, and this is
+    /// what the terrain says about the column it is in.
+    stand: f32,
+    /// Which pair of [`CritterVisuals::pool`] this critter draws from. Distinct from `index`:
+    /// a stray and a new critter can hold the same *slot*, and must not share an alpha.
+    pool: usize,
+    body_material: Handle<StandardMaterial>,
+    tail_material: Handle<StandardMaterial>,
+}
+
+/// One tail, as a child of the critter it belongs to.
+#[derive(Component, Debug)]
+pub(super) struct CritterTail {
+    /// Its own copy of the row's flick, so the tail needs nothing from its parent and the two
+    /// queries can be taken in one system without aliasing a `Transform`.
+    flick_hz: f32,
+}
+
+/// Builds the two meshes and every material any critter will ever wear.
+pub(super) fn create_visuals(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.insert_resource(CritterVisuals {
+        body: meshes.add(body_mesh()),
+        // Authored from its root outwards, so rotating the child about its own origin is the
+        // flick and nothing has to offset it.
+        tail: meshes.add(tail_mesh()),
+        // Colourless and invisible until a critter claims the pair and writes its coat in.
+        pool: std::array::from_fn(|_| {
+            (
+                materials.add(coat_material(Color::WHITE, 0.0)),
+                materials.add(coat_material(Color::WHITE, 0.0)),
+            )
+        }),
+    });
+}
+
+/// The buffers one hand-authored critter mesh is accumulated into.
+///
+/// The same three-attribute accumulator `player/hands.rs` uses for its blade and `birds.rs`
+/// for its body, and deliberately a third small copy rather than either made public: each
+/// carries the assumptions of its own model, and `hands::MeshBuild::fan` writes
+/// `livery::neutral_uv` into every corner, which is a statement about the first-person hand's
+/// atlas that a critter — whose material carries no image at all — has no part in.
+#[derive(Debug, Default)]
+struct MeshBuild {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+}
+
+impl MeshBuild {
+    /// One flat-shaded quad, wound around its perimeter.
+    ///
+    /// Flat rather than smooth, for the reason `hands::MeshBuild::quad` gives: the facets are
+    /// the shape, and averaging normals along a ring would soften exactly where the light
+    /// should break.
+    fn quad(&mut self, corners: [Vec3; 4], uvs: [[f32; 2]; 4]) {
+        let [a, b, c, d] = corners;
+        // From the diagonals rather than from one triangle's two edges: a quad lofted between
+        // two sections of different widths is not exactly planar.
+        let normal = (c - a).cross(d - b).normalize_or_zero();
+        let first = self.push(corners.into_iter().zip(uvs), normal);
+        self.indices
+            .extend([first, first + 1, first + 3, first + 1, first + 2, first + 3]);
+    }
+
+    /// One flat-shaded polygon, as a fan from its first corner.
+    ///
+    /// The corners must already be wound so that `normal` is the outward one; [`loft`]
+    /// reverses them for the end that faces the other way.
+    fn fan(&mut self, corners: &[Vec3], normal: Vec3) {
+        let first = self.push(corners.iter().map(|corner| (*corner, [0.5, 0.5])), normal);
+        for corner in 1..corners.len() as u32 - 1 {
+            self.indices
+                .extend([first, first + corner, first + corner + 1]);
+        }
+    }
+
+    /// Appends vertices sharing one normal, and answers the index the first of them landed at.
+    fn push(&mut self, corners: impl Iterator<Item = (Vec3, [f32; 2])>, normal: Vec3) -> u32 {
+        let first = self.positions.len() as u32;
+        for (corner, uv) in corners {
+            self.positions.push(corner.to_array());
+            self.normals.push(normal.to_array());
+            self.uvs.push(uv);
+        }
+        first
+    }
+
+    /// The three attributes and the indices, as the asset the renderer draws.
+    fn finish(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// Lofts one closed shell through `rings` and caps both ends.
+///
+/// Every ring must carry the same number of corners, wound the same way, and the rings must
+/// run along `forward`. The first cap is the first ring **reversed** — it faces the other way,
+/// exactly as `hands::blade_loft`'s root cap and `birds::loft` do — and the last is the last
+/// ring as authored.
+fn loft(build: &mut MeshBuild, rings: &[Vec<Vec3>], forward: Vec3) {
+    let spans = rings.len() - 1;
+    for (span, pair) in rings.windows(2).enumerate() {
+        let [lower, upper] = pair else {
+            unreachable!("windows(2) yields pairs")
+        };
+        let sides = lower.len();
+        let along = |step: usize| step as f32 / spans as f32;
+        for corner in 0..sides {
+            let next = (corner + 1) % sides;
+            let around = |step: usize| step as f32 / sides as f32;
+            build.quad(
+                [lower[corner], lower[next], upper[next], upper[corner]],
+                [
+                    [around(corner), along(span)],
+                    [around(corner + 1), along(span)],
+                    [around(corner + 1), along(span + 1)],
+                    [around(corner), along(span + 1)],
+                ],
+            );
+        }
+    }
+    let mut first: Vec<Vec3> = rings[0].clone();
+    first.reverse();
+    build.fan(&first, -forward);
+    build.fan(&rings[spans], forward);
+}
+
+/// One cross-section of a critter's body: where it sits along the critter, how far it reaches
+/// to either side, how tall it is, and how far its centre is off the ground.
+///
+/// The fourth field is what `birds::BodySection` has no need of: a bird is authored about its
+/// own centre line because nothing it does is relative to a floor, while a critter's model has
+/// to **stand on `y = 0`** so that placing it on a measured surface puts its feet there. So a
+/// section carries a `lift` — how high the middle of the body is at that station — and the
+/// shape's lowest point is what `the_model_stands_on_its_own_origin` checks.
+#[derive(Debug, Clone, Copy)]
+struct BodySection {
+    z: f32,
+    half_width: f32,
+    half_height: f32,
+    lift: f32,
+}
+
+impl BodySection {
+    /// The eight corners of the section, in order around its perimeter.
+    ///
+    /// **The order is load-bearing rather than a convention**, and this is the warning
+    /// `hands::BladeSection::perimeter` and `birds::BodySection::perimeter` both carry:
+    /// [`MeshBuild::quad`] takes the outward normal from the corners it is handed, so a ring
+    /// walked the other way round is a critter lit entirely from the inside. `cull_mode: None`
+    /// means the shape does not even vanish to say so — it merely looks wrong, at ten blocks,
+    /// where nobody will diagnose it. Counter-clockwise seen from `+Z`, lofted toward `+Z`,
+    /// and `every_face_of_a_critter_is_wound_outward` is what checks that rather than a pair
+    /// of eyes.
+    fn perimeter(self) -> Vec<Vec3> {
+        let Self {
+            z,
+            half_width: w,
+            half_height: h,
+            lift,
+        } = self;
+        let (dw, dh) = (w * FRAC_1_SQRT_2, h * FRAC_1_SQRT_2);
+        vec![
+            Vec3::new(0.0, lift + h, z),
+            Vec3::new(-dw, lift + dh, z),
+            Vec3::new(-w, lift, z),
+            Vec3::new(-dw, lift - dh, z),
+            Vec3::new(0.0, lift - h, z),
+            Vec3::new(dw, lift - dh, z),
+            Vec3::new(w, lift, z),
+            Vec3::new(dw, lift + dh, z),
+        ]
+    }
+}
+
+/// The sections the body is lofted through, from the tip of the nose to the rump.
+///
+/// **`-Z` is forward, and `y = 0` is the ground.** `run_the_critters` aims a critter with
+/// `Transform::look_to`, which points `-Z` along the heading, so the nose is the most negative
+/// `z` in this table; and the model stands on its own origin, so the lowest corner any section
+/// reaches is exactly zero.
+///
+/// The whole model is authored at a body length of exactly one, nose to rump, so
+/// [`CritterSpecies::size`] is literally that length. The shape is a squirrel's crouch: a low
+/// forequarter, a waist, and haunches taller than the shoulders, which is what makes it read
+/// as an animal gathered to spring rather than as a sausage.
+///
+/// **Two sections carry a `lift` exactly equal to their `half_height`, and that is deliberate
+/// rather than a coincidence of rounding.** Those are the belly, and a section whose centre
+/// sits its own half-height off the floor is one whose lowest corner is at exactly zero —
+/// which is what puts the animal *on* the ground when it is placed on a measured surface.
+/// `the_model_stands_on_its_own_origin` asserts that minimum as an equality, so an edit that
+/// lifts the belly by a thousandth fails rather than making every squirrel hover.
+fn body_sections() -> [BodySection; 9] {
+    [
+        // The nose: a point, and the reason a critter has a front at all from above.
+        BodySection {
+            z: -0.500,
+            half_width: 0.012,
+            half_height: 0.010,
+            lift: 0.105,
+        },
+        BodySection {
+            z: -0.455,
+            half_width: 0.035,
+            half_height: 0.032,
+            lift: 0.110,
+        },
+        // The head, wider and taller than the muzzle, and the waist of a neck behind it —
+        // the waist is what makes it a head rather than the front of the body.
+        BodySection {
+            z: -0.380,
+            half_width: 0.082,
+            half_height: 0.086,
+            lift: 0.135,
+        },
+        BodySection {
+            z: -0.285,
+            half_width: 0.068,
+            half_height: 0.070,
+            lift: 0.120,
+        },
+        // The shoulders, low: a squirrel's forequarter is close to the ground.
+        BodySection {
+            z: -0.175,
+            half_width: 0.100,
+            half_height: 0.098,
+            lift: 0.098,
+        },
+        BodySection {
+            z: -0.030,
+            half_width: 0.108,
+            half_height: 0.106,
+            lift: 0.106,
+        },
+        // The haunches: the tallest and widest part, and the reason the silhouette rises
+        // toward the back.
+        BodySection {
+            z: 0.140,
+            half_width: 0.125,
+            half_height: 0.132,
+            lift: 0.140,
+        },
+        BodySection {
+            z: 0.330,
+            half_width: 0.105,
+            half_height: 0.115,
+            lift: 0.150,
+        },
+        // The rump, where the tail is rooted.
+        BodySection {
+            z: 0.500,
+            half_width: 0.055,
+            half_height: 0.060,
+            lift: 0.155,
+        },
+    ]
+}
+
+/// The sections the tail is lofted through, from its root at the rump out to its tip.
+///
+/// **Authored from its own root outwards along `+Z`**, so rotating the child entity about its
+/// origin is the flick and nothing has to offset it — the property `birds::wing_sections`
+/// relies on for the same reason.
+///
+/// It is a *bushy* tail: the width more than doubles away from the root before it tapers, and
+/// it is as tall as it is wide rather than flat, because a squirrel's tail is the half of the
+/// silhouette that identifies it. `a_tail_is_bushy_rather_than_a_rod` is what holds that
+/// against a future edit that quietly tidies it into a cylinder.
+fn tail_sections() -> [BodySection; 5] {
+    [
+        BodySection {
+            z: 0.000,
+            half_width: 0.040,
+            half_height: 0.044,
+            lift: 0.0,
+        },
+        BodySection {
+            z: 0.130,
+            half_width: 0.078,
+            half_height: 0.086,
+            lift: 0.0,
+        },
+        BodySection {
+            z: 0.290,
+            half_width: 0.098,
+            half_height: 0.112,
+            lift: 0.0,
+        },
+        BodySection {
+            z: 0.440,
+            half_width: 0.080,
+            half_height: 0.094,
+            lift: 0.0,
+        },
+        BodySection {
+            z: 0.545,
+            half_width: 0.026,
+            half_height: 0.032,
+            lift: 0.0,
+        },
+    ]
+}
+
+/// Where the tail is rooted on the body, in the model's own units.
+///
+/// The last body section's station, lifted to the middle of the rump: a tail hinged at the
+/// ground would sweep through the terrain, and one hinged at the top of the rump would float.
+const TAIL_ROOT: Vec3 = Vec3::new(0.0, 0.155, 0.440);
+
+/// How far the tail swings from its resting arch, in radians, and where that rest is.
+///
+/// **The rest is not level, and that is the whole of the pose.** A squirrel at ease holds its
+/// tail up over its back in an S; a tail sticking straight out behind is a rat. So the child
+/// is rotated most of a right angle up as its neutral, and the flick is a modest swing about
+/// that — `a_tail_is_held_over_the_back_and_flicks_about_that_rest` pins both halves.
+const TAIL_REST_RADIANS: f32 = -1.15;
+const TAIL_FLICK_RADIANS: f32 = 0.22;
+
+// The two halves of that pose, checked by the compiler rather than by a test, which is what
+// `ambience.rs` does with the arithmetic relating its lattice constants. A claim about two
+// literals sitting beside each other is one a test can only restate: clippy says as much —
+// `assertions_on_constants` fires on exactly this — and a compile-time assertion is the form
+// that both satisfies it and fails at the declaration a reader is editing.
+const _: () = assert!(
+    TAIL_REST_RADIANS < -0.8,
+    "the tail is not held over the back"
+);
+const _: () = assert!(
+    TAIL_FLICK_RADIANS < -TAIL_REST_RADIANS / 2.0,
+    "the flick is a sweep rather than a twitch"
+);
+
+/// The body, as one mesh and therefore one draw.
+fn body_mesh() -> Mesh {
+    let mut build = MeshBuild::default();
+    let rings: Vec<Vec<Vec3>> = body_sections()
+        .iter()
+        .map(|section| section.perimeter())
+        .collect();
+    loft(&mut build, &rings, Vec3::Z);
+    build.finish()
+}
+
+/// The tail, lofted from its root out to its tip.
+fn tail_mesh() -> Mesh {
+    let mut build = MeshBuild::default();
+    let rings: Vec<Vec<Vec3>> = tail_sections()
+        .iter()
+        .map(|section| section.perimeter())
+        .collect();
+    loft(&mut build, &rings, Vec3::Z);
+    build.finish()
+}
+
+/// The rotation one tail has, `elapsed` seconds into the session.
+///
+/// About `X`, which is the axis that lifts it over the back: the tail is authored along `+Z`
+/// and a negative turn about `X` takes `+Z` toward `+Y`. A negative scale would also arch it
+/// and would invert the winding — which `cull_mode: None` hides rather than fixes, which is
+/// exactly why it is not used.
+fn tail_turn(tail: &CritterTail, elapsed: f32) -> Quat {
+    let swing = (elapsed * tail.flick_hz * TAU).sin() * TAIL_FLICK_RADIANS;
+    Quat::from_rotation_x(TAIL_REST_RADIANS + swing)
+}
+
+/// Lit, blended and drawn from both faces.
+///
+/// **Lit** for the reason `birds::plumage_material` gives: `player/sky.rs`'s bodies are unlit
+/// because they are the light source, and a critter is not — it is an object in the world, so
+/// night darkens it and the fog takes it at distance exactly as they take a mob.
+///
+/// **`cull_mode: None`** so that the winding mistake [`BodySection::perimeter`] warns about is
+/// a shading mistake rather than a hole; the winding is held by a test instead.
+/// **`AlphaMode::Blend` and an explicit alpha** because the fade is written here, which is
+/// also why the pair a critter draws from is its own rather than its coat's — see
+/// [`CritterVisuals`].
+fn coat_material(colour: Color, alpha: f32) -> StandardMaterial {
+    StandardMaterial {
+        base_color: colour.with_alpha(alpha),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    }
+}
+
+/// Everything `keep_the_critters` reads and nothing it writes.
+#[derive(SystemParam)]
+pub(super) struct GroundInputs<'w> {
+    ambience: Res<'w, Ambience>,
+    session: Option<Res<'w, Session>>,
+    store: Option<Res<'w, ChunkStore>>,
+    clock: Res<'w, SkyClock>,
+    time: Res<'w, Time>,
+    visuals: Option<Res<'w, CritterVisuals>>,
+}
+
+/// Decides which critters should exist, and stands the missing ones up.
+///
+/// Runs after `camera::AimCamera` and after `ambience::sample_the_ground`, so the anchor is
+/// this frame's eye and the look is this frame's answer. It writes nothing outside its own
+/// entities.
+///
+/// **It is `birds::keep_the_flock` with one extra retirement and one extra spawn-time read.**
+/// The retirement is the life: a critter whose generation is no longer the clock's is on its
+/// way out, which is what makes a population that comes and goes rather than one that is only
+/// ever replaced by walking. The read is the trunk, and it is why this system needs the store
+/// at all — `keep_the_flock` does not.
+pub(super) fn keep_the_critters(
+    read: GroundInputs<'_>,
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    eyes: Query<&Transform, With<WorldCamera>>,
+    mut ground: Query<(Entity, &mut Critter)>,
+) {
+    let GroundInputs {
+        ambience,
+        session,
+        store,
+        clock,
+        time,
+        visuals,
+    } = read;
+    let (Some(visuals), Some(eye)) = (visuals, eyes.iter().next()) else {
+        return;
+    };
+    if !eye.translation.is_finite() {
+        return;
+    }
+
+    let cell = cell_of(eye.translation);
+    let anchor = anchor_of(cell);
+    let elapsed = time.elapsed_secs();
+
+    // Indoors of its own half of the day, and only when the server keeps a clock:
+    // `night_now` answers `None` for a world with no time of day, which puts every row about
+    // all day rather than never — see `Period::abroad`.
+    let night = session
+        .as_deref()
+        .and_then(|session| sky::night_now(&clock, session));
+    let wanted = species_for(&ambience).filter(|index| CRITTERS[*index].abroad.abroad(night));
+    let cell_seed = cell_seed(cell);
+    // Read before the retirement pass, because how many this cell wants is what decides how
+    // many of the previous cell's critters may stay.
+    let wanted_size = wanted.map_or(0, |index| group_size(&CRITTERS[index], cell_seed));
+
+    // Retire everything that is the wrong species for this look, that the anchor has left
+    // behind, or whose life is over. Retiring is one-way, so a look that flickers cannot
+    // oscillate a population.
+    //
+    // **Two counts, because a fade makes "how many critters are there" two questions.**
+    // `staying` is every critter not on its way out, bounded by `wanted_size`, so the living
+    // population is one row's and never two anchors' summed. `alive` is every entity, the
+    // fading ones included, bounded by `CRITTER_COUNT_MAX` — which is also what guarantees
+    // the material pool has a free pair for a critter about to spawn.
+    let mut bias = Vec3::ZERO;
+    let mut taken = [false; CRITTER_COUNT_MAX];
+    let mut pool_taken = [false; CRITTER_COUNT_MAX];
+    let mut alive = 0usize;
+    let mut staying = 0usize;
+    // A critter of the right row still inside the box whose anchor is a *previous* cell's. It
+    // holds no slot in `taken` — its `index` numbers another anchor's group — so it is counted
+    // against `wanted_size` below instead of being invisible to it, which is the defect
+    // `birds::keep_the_flock` names: a one-cell walk otherwise leaves the old group on the
+    // ground and a second group is stood up beside it.
+    let mut strays = [None; CRITTER_COUNT_MAX];
+    let mut stray_count = 0usize;
+    for (entity, mut critter) in &mut ground {
+        alive += 1;
+        pool_taken[critter.pool] = true;
+        // Already leaving: it holds a pool pair and counts against the population, but
+        // nothing here may bring it back.
+        if critter.wanted == 0.0 {
+            continue;
+        }
+        let row = &CRITTERS[critter.species];
+        let (generation, age) = generation_of(row, critter.index, elapsed);
+        let position = place(row, critter.seed, age, critter.anchor, critter.trunk);
+        let from = position - anchor;
+        let outside = Vec3::new(from.x, 0.0, from.z).abs().max_element() > CRITTER_RANGE;
+        if wanted != Some(critter.species) || outside || generation != critter.generation {
+            critter.wanted = 0.0;
+            // Only a critter the *anchor* left behind says which way the player went; one
+            // retired because the ground changed under them, or because its life ran out,
+            // says nothing about direction.
+            if outside {
+                bias += anchor - critter.anchor;
+            }
+            continue;
+        }
+        if critter.anchor == anchor && critter.index < CRITTER_COUNT_MAX {
+            // This cell's own group. `index < wanted_size` holds by construction: the anchor
+            // determines the cell, and the cell determines `wanted_size`.
+            taken[critter.index] = true;
+            staying += 1;
+        } else if stray_count < CRITTER_COUNT_MAX {
+            strays[stray_count] = Some(entity);
+            stray_count += 1;
+        }
+    }
+
+    // A stray stays only while this cell's group has room for it, and starts fading the
+    // moment it does not — it fades rather than vanishing, and the count is `wanted_size`.
+    for entity in strays.into_iter().flatten() {
+        if staying < wanted_size {
+            staying += 1;
+        } else if let Ok((_, mut critter)) = ground.get_mut(entity) {
+            critter.wanted = 0.0;
+        }
+    }
+
+    let Some(index) = wanted else {
+        return;
+    };
+    let species = &CRITTERS[index];
+    // Nothing to stand on and nothing to climb: a critter is not stood up at all rather than
+    // stood up in the air. This is the one place the two systems differ in what an absent
+    // store means — `run_the_critters` *holds* a critter whose ground it cannot read, because
+    // it already has a height, and here there is no height to hold. It is temporary either
+    // way: the next frame with a store stands the critter up.
+    let (Some(store), Some(session)) = (store.as_deref(), session.as_deref()) else {
+        return;
+    };
+    let chunk_size = usize::from(session.0.chunk_size);
+
+    for (slot, held) in taken.iter().enumerate().take(wanted_size) {
+        // The group is the cap, and `group_size` is already clamped to CRITTER_COUNT_MAX. The
+        // second guard is the whole population rather than one group: a critter still fading
+        // out holds a material pair, so a free pair exists only while `alive` is under the
+        // maximum.
+        if staying >= wanted_size || alive >= CRITTER_COUNT_MAX {
+            break;
+        }
+        if *held {
+            continue;
+        }
+        let Some(pool) = pool_taken.iter().position(|claimed| !claimed) else {
+            break;
+        };
+        let (generation, age) = generation_of(species, slot, elapsed);
+        let seed = seed_on_the_far_side(cell_seed, slot, generation, anchor, bias);
+        // The ground under where this critter's forage begins, which is what both the trunk
+        // search and the first frame's height are measured from. No ground, no critter: the
+        // alternative is one standing in the air until the probe succeeds.
+        let home = place(species, seed, age, anchor, None);
+        let Ground::Surface(surface) = surface_under(store, home, anchor.y, chunk_size) else {
+            continue;
+        };
+        // Read once, here, and never again: `Critter::trunk` is a spawn-time constant.
+        //
+        // **Searched where the forage ends rather than where it begins.** A critter browses
+        // several blocks across the ground over its life, so a trunk within `TRUNK_REACH` of
+        // its first position can be twice that from its last — and the approach would then
+        // have to outrun the gait to reach it. The forage's end is knowable here because the
+        // path is a pure function: `place` at `forage_seconds` is where this critter will be
+        // when it stops foraging, and no frame has to run for that to be true.
+        let ends_at = place(species, seed, species.forage_seconds(), anchor, None);
+        let trunk = species
+            .climbs
+            .then(|| trunk_near(store, ends_at, surface, chunk_size))
+            .flatten();
+        pool_taken[pool] = true;
+        staying += 1;
+        alive += 1;
+        // Claimed, not minted: `create_visuals` built every pair, and this writes the coat the
+        // seed chose into the two handles the slot owns.
+        let (body_colour, tail_colour) = species.coat_at(species.coat_of(seed));
+        let (body_material, tail_material) = visuals.pool[pool].clone();
+        if let Some(mut material) = materials.get_mut(&body_material) {
+            *material = coat_material(body_colour, 0.0);
+        }
+        if let Some(mut material) = materials.get_mut(&tail_material) {
+            *material = coat_material(tail_colour, 0.0);
+        }
+        let at = place(species, seed, age, anchor, trunk);
+        let critter = commands
+            .spawn((
+                Critter {
+                    species: index,
+                    seed,
+                    index: slot,
+                    generation,
+                    anchor,
+                    trunk,
+                    fade: 0.0,
+                    wanted: 1.0,
+                    stand: surface,
+                    pool,
+                    body_material: body_material.clone(),
+                    tail_material: tail_material.clone(),
+                },
+                Mesh3d(visuals.body.clone()),
+                MeshMaterial3d(body_material),
+                Transform::from_translation(Vec3::new(at.x, surface, at.z))
+                    .with_scale(Vec3::splat(species.size)),
+                Visibility::Visible,
+            ))
+            .id();
+        commands.entity(critter).with_children(|parent| {
+            parent.spawn((
+                CritterTail {
+                    flick_hz: species.flick_hz,
+                },
+                Mesh3d(visuals.tail.clone()),
+                MeshMaterial3d(tail_material),
+                Transform::from_translation(TAIL_ROOT),
+            ));
+        });
+    }
+}
+
+/// The one camera, told apart from the entities this system also holds mutably.
+///
+/// Bevy cannot prove a `WorldCamera` is neither a critter nor a tail, and refuses the system
+/// rather than risk aliasing the `Transform` — the same reason `birds::EyeOfTheFlock` and
+/// `player/sky.rs`'s `Without<Sun>` filter exist. A named type because the filter is otherwise
+/// long enough for clippy to call the query complex, and a name is better than an allow.
+type EyeOnTheGround = (With<WorldCamera>, Without<Critter>, Without<CritterTail>);
+
+/// Everything `run_the_critters` reads.
+#[derive(SystemParam)]
+pub(super) struct RunInputs<'w> {
+    session: Option<Res<'w, Session>>,
+    store: Option<Res<'w, ChunkStore>>,
+    time: Res<'w, Time>,
+}
+
+/// Moves every critter, stands it on the ground, flicks its tail, and fades the ones on their
+/// way out.
+///
+/// Two transforms per critter per frame and one colour write when the alpha has actually
+/// moved: at [`CRITTER_COUNT_MAX`] that is eight transforms, beside the eighteen a full flock
+/// costs. The tail is a second query rather than a child lookup because the parent's `Critter`
+/// is already held here — `CritterTail` carries its own copy of the row's flick, so neither
+/// loop has to reach into the other's entity.
+///
+/// **The height is the ground's and the climb's, in that order**, which is where this differs
+/// from `birds::fly_the_flock`: the flock takes `place`'s `y` and lifts it clear of the
+/// terrain, and here the terrain *is* the `y` and the climb is what goes on top. A critter the
+/// terrain cannot place — [`Ground::Empty`], a chasm — is retired rather than drawn somewhere
+/// arbitrary.
+///
+/// Critters are hidden, not faded, while the eye is submerged: the same override
+/// `player/sky.rs` applies to the fog and `birds.rs` to the flock, read through the same
+/// answer so there are not two of them.
+pub(super) fn run_the_critters(
+    read: RunInputs<'_>,
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    eyes: Query<&Transform, EyeOnTheGround>,
+    mut ground: Query<(Entity, &mut Critter, &mut Transform, &mut Visibility)>,
+    mut tails: Query<(&CritterTail, &mut Transform), Without<Critter>>,
+) {
+    let RunInputs {
+        session,
+        store,
+        time,
+    } = read;
+    let elapsed = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let step = dt / CRITTER_FADE_SECONDS;
+
+    let submerged = match (session.as_deref(), eyes.iter().next()) {
+        (Some(session), Some(eye)) => sky::submerged_at(
+            store.as_deref(),
+            eye.translation,
+            usize::from(session.0.chunk_size),
+        ),
+        _ => false,
+    };
+    // The terrain a critter stands on, if there is any to read. A frame with no session or no
+    // store answers the same way an unloaded chunk does: the height is held.
+    let terrain = match (store.as_deref(), session.as_deref()) {
+        (Some(store), Some(session)) => Some((store, usize::from(session.0.chunk_size))),
+        _ => None,
+    };
+
+    for (entity, mut critter, mut transform, mut visibility) in &mut ground {
+        let fade = if critter.wanted > critter.fade {
+            (critter.fade + step).min(critter.wanted)
+        } else {
+            (critter.fade - step).max(critter.wanted)
+        };
+        if critter.wanted == 0.0 && fade <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if fade != critter.fade {
+            critter.fade = fade;
+            for handle in [critter.body_material.clone(), critter.tail_material.clone()] {
+                if let Some(mut material) = materials.get_mut(&handle) {
+                    material.base_color = material.base_color.with_alpha(fade);
+                }
+            }
+        }
+
+        let species = &CRITTERS[critter.species];
+        let (_, age) = generation_of(species, critter.index, elapsed);
+        // The last fade of a life belongs to the end of the climb, so a squirrel is high in
+        // its trunk while it is disappearing rather than dissolving on the ground. It is set
+        // here rather than in `keep_the_critters` because this is the system that owns the
+        // fade, and it is one-way: nothing moves `wanted` back up.
+        if critter.wanted > 0.0 && age >= species.life - CRITTER_FADE_SECONDS {
+            critter.wanted = 0.0;
+        }
+
+        let position = place(species, critter.seed, age, critter.anchor, critter.trunk);
+        // The ground: a named step over `place`'s answer, never a sixth argument to it.
+        let Some(stand) = next_stand(terrain, position, critter.anchor.y, critter.stand, dt) else {
+            // Nowhere to stand. Retired rather than drawn: this frame keeps the height it
+            // had, and the fade takes it from here.
+            critter.wanted = 0.0;
+            continue;
+        };
+        // Guarded for the reason the visibility write below is: `Mut` marks a component
+        // changed on every `DerefMut`, and over level ground this is the same number every
+        // frame forever.
+        if stand != critter.stand {
+            critter.stand = stand;
+        }
+        let rise = climb_rise(species, age, critter.trunk);
+        transform.translation = Vec3::new(position.x, stand + rise, position.z);
+        // Which way it faces is the direction it is going, sampled from the same pure
+        // function rather than differenced against last frame — so a critter nothing drew for
+        // a hundred frames comes back facing correctly on the first one. Horizontal only: a
+        // climbing squirrel keeps its body along the trunk's column rather than pitching, and
+        // a heading that took the ground's slope in would tip it into the hill.
+        let ahead = place(
+            species,
+            critter.seed,
+            age + HEADING_STEP,
+            critter.anchor,
+            critter.trunk,
+        ) - position;
+        if let Ok(heading) = Dir3::new(Vec3::new(ahead.x, 0.0, ahead.z)) {
+            transform.look_to(heading.as_vec3(), Vec3::Y);
+        }
+
+        let should = if submerged {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        };
+        // Guarded: `Mut` marks a component changed on every `DerefMut`, and re-extracting a
+        // visibility that has not moved is a cost for nothing.
+        if *visibility != should {
+            *visibility = should;
+        }
+    }
+
+    for (tail, mut transform) in &mut tails {
+        transform.rotation = tail_turn(tail, elapsed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
     use crate::world::{BlockId, VoxelChunk};
+    use bevy::mesh::MeshVertexAttributeId;
 
     const DT: f32 = 1.0 / 60.0;
     /// The fastest a critter may be drawn climbing, in blocks per second.
@@ -1903,5 +2708,252 @@ mod tests {
             .map(|generation| critter_seed(cell, 0, generation, 0))
             .collect();
         assert_eq!(generations.len(), 32, "two lives shared a seed");
+    }
+    // -----------------------------------------------------------------------
+    // The model
+    // -----------------------------------------------------------------------
+
+    /// One mesh's positions, its normals, and its triangles as index triples.
+    fn geometry(mesh: &Mesh) -> (Vec<Vec3>, Vec<Vec3>, Vec<[usize; 3]>) {
+        let read = |id: MeshVertexAttributeId| {
+            mesh.attribute(id)
+                .and_then(|values| values.as_float3())
+                .expect("a critter mesh carries positions and normals")
+                .iter()
+                .map(|value| Vec3::from_array(*value))
+                .collect::<Vec<_>>()
+        };
+        let Some(Indices::U32(indices)) = mesh.indices() else {
+            panic!("a critter mesh is a U32 triangle list")
+        };
+        let triangles = indices
+            .chunks_exact(3)
+            .map(|triple| [triple[0] as usize, triple[1] as usize, triple[2] as usize])
+            .collect();
+        (
+            read(Mesh::ATTRIBUTE_POSITION.id),
+            read(Mesh::ATTRIBUTE_NORMAL.id),
+            triangles,
+        )
+    }
+
+    /// Every position in a mesh.
+    fn points(mesh: &Mesh) -> Vec<Vec3> {
+        geometry(mesh).0
+    }
+
+    #[test]
+    fn every_face_of_a_critter_is_wound_outward() {
+        // The failure `hands::BladeSection::perimeter` warns about and `birds.rs` made a
+        // machine's problem, made one here too. A ring walked the wrong way round is a shell
+        // lit entirely from the inside, and because the coat material draws both faces it does
+        // not vanish to announce itself.
+        //
+        // Three properties settle it without anybody looking: every triangle's stored normal
+        // agrees in direction with its own winding, the area vectors cancel (true of a closed
+        // surface and of nothing else, so no cap was forgotten), and the volume that winding
+        // encloses is positive — which is the whole of what "outward" means, and the one of
+        // the three a mesh built inside out fails.
+        for (name, mesh) in [("body", body_mesh()), ("tail", tail_mesh())] {
+            let (positions, normals, triangles) = geometry(&mesh);
+            let mut area = Vec3::ZERO;
+            let mut volume = 0.0f32;
+            for corners in triangles {
+                let [a, b, c] = corners.map(|corner| positions[corner]);
+                let cross = (b - a).cross(c - a);
+                assert!(cross.length() > 1e-9, "{name} has a degenerate face at {a}");
+                let wound = cross.normalize();
+                for corner in corners {
+                    let stored = normals[corner];
+                    // **The sign is the property; the margin is a sanity bound.** A quad
+                    // lofted between two sections of different shape is not planar, and
+                    // `MeshBuild::quad` deliberately hands both its triangles the *diagonal*
+                    // normal rather than either one's own — so the two can never agree
+                    // exactly. Anything under 0.8 is a section table that has folded a quad
+                    // over rather than tapered it.
+                    assert!(
+                        stored.dot(wound) > 0.8,
+                        "{name}: a face stores {stored} where its winding gives {wound}"
+                    );
+                }
+                area += cross;
+                volume += a.cross(b).dot(c);
+            }
+            assert!(
+                area.length() < 1e-4,
+                "{name} is not a closed shell: its area vectors sum to {area}"
+            );
+            assert!(
+                volume > 0.0,
+                "{name} encloses {}, so its rings are wound inside out",
+                volume / 6.0
+            );
+            // **The negative control, which `every_solid_in_the_sword_is_wound_outward`
+            // established and `birds.rs`'s copy of this test does not have.** A signed volume
+            // computed from the mesh and then asserted positive is proving the mesh with the
+            // mesh: the same code would pass if `volume` were an absolute value, or if the
+            // winding convention were the other one. Reversing every triangle must read
+            // negative, and if it does not then this test is measuring nothing.
+            let reversed: f32 = geometry(&mesh)
+                .2
+                .into_iter()
+                .map(|corners| {
+                    let [a, b, c] = corners.map(|corner| positions[corner]);
+                    a.cross(c).dot(b)
+                })
+                .sum();
+            assert!(
+                reversed < 0.0,
+                "{name} read {reversed} wound inside out, so the sign proves nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn the_model_is_authored_at_a_body_length_of_exactly_one() {
+        // `CritterSpecies::size` is documented as the body length *and* used as the scale, so
+        // the model has to be one long nose to rump, or every angle argued on `CRITTERS` is
+        // wrong by a factor nobody wrote down.
+        let body = points(&body_mesh());
+        let nose = body.iter().fold(f32::INFINITY, |near, at| near.min(at.z));
+        let rump = body.iter().fold(f32::NEG_INFINITY, |far, at| far.max(at.z));
+        assert_eq!(rump - nose, 1.0, "the body is not one long nose to rump");
+        // `-Z` is forward, so the nose has to be the far end of that.
+        assert!(nose < -0.4 && rump > 0.4);
+        // And it is an animal rather than a plank: narrow across, and taller at the haunches
+        // than at the shoulders, which is the whole of the crouch.
+        assert!(
+            body.iter().all(|at| at.x.abs() <= 0.2),
+            "the body is wider than it is a third long"
+        );
+        let tallest = |range: std::ops::RangeInclusive<f32>| {
+            body.iter()
+                .filter(|at| range.contains(&at.z))
+                .fold(f32::NEG_INFINITY, |high, at| high.max(at.y))
+        };
+        assert!(
+            tallest(0.1..=0.35) > tallest(-0.2..=-0.03),
+            "the haunches are not above the shoulders, so it is not crouched"
+        );
+    }
+
+    #[test]
+    fn the_model_stands_on_its_own_origin() {
+        // The one thing about this model that `birds.rs`'s does not have to be true of: a
+        // critter is placed *on* a measured surface, so its feet are at `y = 0` in its own
+        // units. Author it a hair above and every squirrel hovers; a hair below and every
+        // squirrel is buried, at every scale, and nothing would say which.
+        let body = points(&body_mesh());
+        let lowest = body.iter().fold(f32::INFINITY, |low, at| low.min(at.y));
+        assert_eq!(lowest, 0.0, "the body does not rest on y = 0");
+        let highest = body
+            .iter()
+            .fold(f32::NEG_INFINITY, |high, at| high.max(at.y));
+        assert!(
+            (0.2..0.45).contains(&highest),
+            "a critter {highest} tall for a body one long is not a squirrel"
+        );
+    }
+
+    #[test]
+    fn a_tail_is_bushy_rather_than_a_rod() {
+        // The half of the silhouette that says "squirrel". A tail that is quietly tidied into
+        // a cylinder is a rat's, and nothing about a cylinder would fail any other test here.
+        let sections = tail_sections();
+        let root = sections[0].half_width;
+        let widest = sections
+            .iter()
+            .fold(0.0f32, |wide, section| wide.max(section.half_width));
+        assert!(
+            widest >= root * 2.0,
+            "a tail {widest} at its widest and {root} at its root is a rod"
+        );
+        assert!(
+            sections.last().expect("a tail has sections").half_width < widest,
+            "a tail that never tapers is a club"
+        );
+        // As tall as it is wide, rather than flat: a bird's tail is a flat spread and a
+        // squirrel's is a plume.
+        for section in sections {
+            assert!(
+                section.half_height >= section.half_width,
+                "a tail section {} wide and {} tall is flat",
+                section.half_width,
+                section.half_height
+            );
+        }
+        // And it is rooted on the body rather than floating behind it.
+        let body = points(&body_mesh());
+        let rump = body.iter().fold(f32::NEG_INFINITY, |far, at| far.max(at.z));
+        assert!(
+            TAIL_ROOT.z < rump && TAIL_ROOT.z > rump - 0.2,
+            "the tail is rooted at {} on a body ending at {rump}",
+            TAIL_ROOT.z
+        );
+    }
+
+    #[test]
+    fn a_tail_is_held_over_the_back_and_flicks_about_that_rest() {
+        // The pose, which is most of what reads as a squirrel: the tail is up over the back
+        // and twitches, rather than trailing behind and wagging.
+        let tail = CritterTail { flick_hz: 1.4 };
+        let tip = Vec3::new(0.0, 0.0, tail_sections()[4].z);
+        let mut highest = f32::NEG_INFINITY;
+        let mut lowest = f32::INFINITY;
+        for step in 0..=64u32 {
+            let at = tail_turn(&tail, step as f32 / 8.0) * tip;
+            assert!(
+                at.y > tip.z * 0.5,
+                "the tail fell to {at} instead of staying over the back"
+            );
+            highest = highest.max(at.y);
+            lowest = lowest.min(at.y);
+        }
+        assert!(
+            highest - lowest > 0.02,
+            "nothing ever flicked: {lowest} to {highest}"
+        );
+        // That the rest is an arch rather than level, and the flick a twitch rather than a
+        // sweep, is asserted at the two constants themselves where the compiler checks it —
+        // see the `const _` pair beside them. What is measured *here* is the thing those two
+        // numbers are for: where the tip actually ends up once the rotation is applied.
+    }
+
+    #[test]
+    fn the_drawn_critter_stays_inside_its_horizontal_box() {
+        // `a_critter_never_leaves_its_horizontal_box` is about where `place` puts a critter's
+        // **origin**, and `place` reads no part of `CritterSpecies::size` — so it would pass
+        // with a squirrel the size of a hill. This is the half the size moves: the tail tip,
+        // not the origin.
+        let mut reach = Vec3::ZERO;
+        for point in points(&body_mesh()) {
+            reach = reach.max(point.abs());
+        }
+        // The tail wherever the flick takes it, rooted where it is rooted.
+        let tail = points(&tail_mesh());
+        for step in 0..=32u32 {
+            let turn = tail_turn(&CritterTail { flick_hz: 1.0 }, step as f32 / 4.0);
+            for point in &tail {
+                reach = reach.max((TAIL_ROOT + turn * *point).abs());
+            }
+        }
+        let anchor = Vec3::new(-512.0, 64.0, 512.0);
+        for species in &CRITTERS {
+            // A whole turned critter is at most its longest axis from its origin, whichever
+            // way `look_to` has it facing.
+            let half = reach.max_element() * species.size;
+            for seed in 0..16u64 {
+                let seed = mix(seed, 0xB0A7);
+                for frame in 0..=life_frames(species) {
+                    let at = place(species, seed, frame as f32 * DT, anchor, None) - anchor;
+                    let drawn = Vec3::new(at.x, 0.0, at.z).abs() + Vec3::splat(half);
+                    assert!(
+                        drawn.max_element() <= CRITTER_RANGE,
+                        "{:?} drew out to {drawn} from its anchor",
+                        species.gait
+                    );
+                }
+            }
+        }
     }
 }

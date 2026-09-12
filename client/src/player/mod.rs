@@ -408,6 +408,7 @@ impl Plugin for PlayerPlugin {
                     sky::spawn_sky,
                     precipitation::create_visuals,
                     birds::create_visuals,
+                    critters::create_visuals,
                 ),
             )
             .add_systems(
@@ -519,6 +520,18 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 (birds::keep_the_flock, birds::fly_the_flock)
+                    .chain()
+                    .after(camera::AimCamera)
+                    .after(ambience::sample_the_ground),
+            )
+            // The same ordering and the same reasons one module over: the critters are
+            // anchored to the eye, which species is about is the look this frame settled on,
+            // and the pair is chained because `keep_the_critters` decides what should exist
+            // while `run_the_critters` stands it on the ground — a frame between the two
+            // would draw a newborn squirrel at the origin.
+            .add_systems(
+                Update,
+                (critters::keep_the_critters, critters::run_the_critters)
                     .chain()
                     .after(camera::AimCamera)
                     .after(ambience::sample_the_ground),
@@ -3362,6 +3375,7 @@ pub(crate) fn reset_world(world: &mut World) {
     despawn::<structures::Structure>(world);
     despawn::<horse::PaddockHorse>(world);
     despawn::<birds::Bird>(world);
+    despawn::<critters::Critter>(world);
     target::reset_world(world);
     projectiles::reset_world(world);
     wards::reset_world(world);

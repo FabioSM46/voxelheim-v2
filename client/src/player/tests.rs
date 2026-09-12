@@ -6459,3 +6459,485 @@ fn world_replacement_drops_bodies_snapshots_and_open_entity_panels() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// The critters
+// ---------------------------------------------------------------------------
+
+/// Where the eye stands for every critter test: the middle of anchor cell zero.
+///
+/// The cell matters and the height does not, beyond being inside the wood: `CRITTER_ANCHOR_CELL`
+/// is 32, so this eye anchors the critters at (16, 16, 16) and the ground probe's window is the
+/// thirty-three voxels around that.
+const CRITTER_EYE: Vec3 = Vec3::new(16.5, 20.0, 16.5);
+
+/// The surface every critter fixture below stands its critters on.
+const CRITTER_SURFACE: i32 = 12;
+
+/// A wood: a grass floor at [`CRITTER_SURFACE`] over every column a critter can reach, trunks
+/// standing in it on a coarse grid, and whatever `extra` names on top of that.
+///
+/// Wide enough to cover the whole of a critter's box plus the cell the eye crosses into in
+/// `the_population_is_bounded_while_critters_are_fading`, because a column with no ground is a
+/// column no critter is stood up in — which would make a test about the population bound pass
+/// by drawing nothing.
+fn a_wood(extra: impl Fn(IVec3) -> Option<crate::world::BlockId>) -> crate::world::ChunkStore {
+    const SIZE: i32 = 32;
+    let mut store = crate::world::ChunkStore::default();
+    for cx in -2..=3 {
+        for cy in -1..=0 {
+            for cz in -2..=3 {
+                let mut chunk = crate::world::VoxelChunk::all_air(SIZE as usize);
+                for ly in 0..SIZE {
+                    for lz in 0..SIZE {
+                        for lx in 0..SIZE {
+                            let at = IVec3::new(cx * SIZE + lx, cy * SIZE + ly, cz * SIZE + lz);
+                            // Trunks every eight blocks, six tall: near enough that a critter
+                            // stood up anywhere finds one inside `TRUNK_REACH`, sparse enough
+                            // that plenty of columns are open ground.
+                            let trunk = at.x.rem_euclid(8) == 0
+                                && at.z.rem_euclid(8) == 0
+                                && (CRITTER_SURFACE..CRITTER_SURFACE + 6).contains(&at.y);
+                            let block = match extra(at) {
+                                Some(block) => block,
+                                None if trunk => crate::world::palette::LOG,
+                                None if at.y < CRITTER_SURFACE => crate::world::palette::GRASS,
+                                None => crate::world::palette::AIR,
+                            };
+                            if block != crate::world::palette::AIR {
+                                chunk.set(lx as usize, ly as usize, lz as usize, block);
+                            }
+                        }
+                    }
+                }
+                store.insert(crate::net::ChunkCoord { cx, cy, cz }, chunk);
+            }
+        }
+    }
+    store
+}
+
+/// A headless client standing in a wood whose ground look is whatever the test says it is.
+///
+/// The same `HeldLook` mechanism [`birdwatching`] uses and for the same reason: the ground
+/// sampler publishes `Unknown` once a second over a store it cannot read a full lattice from,
+/// which would silently empty the wood under every test below.
+fn squirrelwatching(ground: GroundLook, wooded: bool) -> App {
+    let mut app = headless_player();
+    app.insert_resource(HeldLook(Ambience { ground, wooded }))
+        .insert_resource(a_wood(|_| None))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            100,
+        )))
+        .add_systems(
+            Update,
+            hold_the_ambience
+                .before(critters::keep_the_critters)
+                .after(ambience::sample_the_ground),
+        );
+    app.update();
+    put_the_eye_at(&mut app, CRITTER_EYE);
+    app
+}
+
+/// Every critter alive, as `(species, fade, wanted)`.
+fn wood(app: &mut App) -> Vec<(usize, f32, f32)> {
+    let world = app.world_mut();
+    let mut query = world.query::<&critters::Critter>();
+    query
+        .iter(world)
+        .map(|critter| (critter.species, critter.fade, critter.wanted))
+        .collect()
+}
+
+fn critter_entities(app: &mut App) -> Vec<Entity> {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<Entity, With<critters::Critter>>();
+    query.iter(world).collect()
+}
+
+fn critter_positions(app: &mut App) -> Vec<Vec3> {
+    let world = app.world_mut();
+    let mut query = world.query_filtered::<&Transform, With<critters::Critter>>();
+    query
+        .iter(world)
+        .map(|transform| transform.translation)
+        .collect()
+}
+
+#[test]
+fn only_a_wood_in_green_country_gets_critters() {
+    // The gate, end to end: the same look the macaw needs and nothing else. An open plain is
+    // the case worth naming, because it is the one #1176 got wrong for a voice.
+    for (ground, wooded, expected) in [
+        (GroundLook::Grass, true, Some(0)),
+        (GroundLook::Grass, false, None),
+        (GroundLook::Sand, true, None),
+        (GroundLook::Sand, false, None),
+        (GroundLook::Snow, true, None),
+        (GroundLook::Unknown, false, None),
+    ] {
+        let mut app = squirrelwatching(ground, wooded);
+        watch(&mut app, 4);
+        let critters = wood(&mut app);
+        match expected {
+            None => assert!(
+                critters.is_empty(),
+                "{ground:?}/{wooded} put {} critters on the ground",
+                critters.len()
+            ),
+            Some(index) => {
+                let row = &critters::CRITTERS[index];
+                assert!(
+                    row.count.contains(&(critters.len() as u8)),
+                    "{ground:?}/{wooded} stood up {} of row {index}",
+                    critters.len()
+                );
+                assert!(critters.iter().all(|critter| critter.0 == index));
+            }
+        }
+        assert!(critters.len() <= critters::CRITTER_COUNT_MAX);
+    }
+}
+
+#[test]
+fn a_squirrel_is_drawn_standing_on_the_ground_under_it() {
+    // The acceptance criterion a player would notice first: a squirrel in the grass rather
+    // than in it or over it. The surface here is flat and known, so this is an equality.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 4);
+    let standing = critter_positions(&mut app);
+    assert!(!standing.is_empty(), "the wood got no squirrels");
+    for at in standing {
+        assert_eq!(
+            at.y, CRITTER_SURFACE as f32,
+            "a squirrel was drawn at {at}, off a surface at {CRITTER_SURFACE}"
+        );
+    }
+}
+
+#[test]
+fn a_critter_is_two_draws_however_detailed_it_is() {
+    // A richer model must not become a richer *scene*. The body is one mesh and one draw and
+    // the tail is a second, because the tail has to turn about its own root — so a critter is
+    // two entities that draw and a whole wood is `CRITTER_COUNT_MAX * 2`. The two meshes
+    // belong to the *session* rather than to the critter, which is what stops a detailed
+    // model becoming an asset per animal.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 5);
+    let critters = critter_entities(&mut app);
+    assert!(!critters.is_empty(), "the wood got no squirrels");
+
+    let mut drawn = Vec::new();
+    for critter in &critters {
+        let world = app.world();
+        let entity = world.entity(*critter);
+        drawn.push(
+            entity
+                .get::<Mesh3d>()
+                .expect("a critter's body is drawn")
+                .0
+                .id(),
+        );
+        let children = entity.get::<Children>().expect("a critter has a tail");
+        assert_eq!(children.len(), 1, "a critter is a body and one tail");
+        for tail in children.iter() {
+            drawn.push(
+                world
+                    .entity(tail)
+                    .get::<Mesh3d>()
+                    .expect("a tail is drawn")
+                    .0
+                    .id(),
+            );
+        }
+    }
+    assert_eq!(
+        drawn.len(),
+        critters.len() * 2,
+        "a critter is not two draws"
+    );
+    assert!(drawn.len() <= critters::CRITTER_COUNT_MAX * 2);
+
+    let distinct: HashSet<_> = drawn.into_iter().collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the wood holds one body mesh and one tail mesh, not a pair per critter"
+    );
+}
+
+#[test]
+fn a_life_ends_in_a_fade_and_the_population_stays_bounded_through_it() {
+    // Two acceptance criteria at once, and they are the same mechanism: a critter's life runs
+    // out, it fades rather than vanishing, and the bound holds *while* it is fading. A life is
+    // twenty seconds and a frame here is 100 ms, so three hundred frames is one and a half
+    // lives for every slot — every generation boundary in the table is crossed.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    let mut fading = 0usize;
+    let mut seen = HashSet::new();
+    for frame in 0..300 {
+        app.update();
+        let critters = wood(&mut app);
+        assert!(
+            critters.len() <= critters::CRITTER_COUNT_MAX,
+            "frame {frame} put {} critters in a wood that holds {}",
+            critters.len(),
+            critters::CRITTER_COUNT_MAX
+        );
+        // A critter on its way out is still drawn: that is what makes it a fade.
+        fading += critters
+            .iter()
+            .filter(|critter| critter.2 == 0.0 && critter.1 > 0.0)
+            .count();
+        for entity in critter_entities(&mut app) {
+            seen.insert(entity);
+        }
+    }
+    assert!(
+        fading > 0,
+        "no critter ever faded out, so the bound was never tested during one"
+    );
+    assert!(
+        seen.len() > critters::CRITTER_COUNT_MAX,
+        "only {} critters ever lived, so no life ever ended",
+        seen.len()
+    );
+    assert!(
+        !wood(&mut app).is_empty(),
+        "the wood emptied instead of replacing its critters"
+    );
+}
+
+#[test]
+fn walking_a_long_way_re_seeds_the_critters_around_the_new_anchor() {
+    // The anchor is what makes a critter's path a pure function of the clock, and it holds
+    // still for a cell's width. Cross one and every critter is a stray: it stays only while
+    // the new cell has room, and the population is bounded throughout.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 20);
+    let before = critter_entities(&mut app);
+    assert!(!before.is_empty(), "the wood got no squirrels");
+
+    let mut eye = CRITTER_EYE;
+    for step in 0..3 {
+        eye.x += critters::CRITTER_ANCHOR_CELL;
+        put_the_eye_at(&mut app, eye);
+        watch(&mut app, 20);
+        let critters = wood(&mut app);
+        assert!(
+            critters.len() <= critters::CRITTER_COUNT_MAX,
+            "step {step} put {} critters in a wood that holds {}",
+            critters.len(),
+            critters::CRITTER_COUNT_MAX
+        );
+    }
+    let after = critter_entities(&mut app);
+    assert!(
+        after.iter().all(|entity| !before.contains(entity)),
+        "a critter anchored three cells back is still on the ground"
+    );
+    assert!(!after.is_empty(), "walking emptied the wood");
+    // And every one of them is near the eye rather than near where the eye was.
+    for at in critter_positions(&mut app) {
+        let from = at - eye;
+        assert!(
+            Vec3::new(from.x, 0.0, from.z).abs().max_element()
+                <= critters::CRITTER_RANGE + critters::CRITTER_ANCHOR_CELL,
+            "a critter at {at} is not near an eye at {eye}"
+        );
+    }
+}
+
+#[test]
+fn a_submerged_eye_hides_the_critters_without_retiring_them() {
+    // The same override `player/sky.rs` applies to the fog and `birds.rs` to the flock, read
+    // through the same answer so there are not two of them. Hidden and not retired, because
+    // surfacing must not cost a second and a quarter of empty ground.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 20);
+    assert!(!critter_entities(&mut app).is_empty(), "no squirrels");
+
+    // Water in the one voxel the eye is inside, the wood otherwise unchanged.
+    let eye = CRITTER_EYE.floor().as_ivec3();
+    app.insert_resource(a_wood(|at| {
+        (at == eye).then_some(crate::world::palette::WATER)
+    }));
+    app.update();
+
+    for critter in critter_entities(&mut app) {
+        assert_eq!(
+            app.world()
+                .entity(critter)
+                .get::<Visibility>()
+                .expect("a critter is drawn or not"),
+            Visibility::Hidden,
+            "a critter was still drawn from under water"
+        );
+    }
+    assert!(
+        wood(&mut app)
+            .iter()
+            .all(|critter| critter.1 > 0.0 && critter.2 == 1.0),
+        "water retired the critters instead of hiding them"
+    );
+}
+
+#[test]
+fn nothing_a_critter_carries_belongs_to_anything_that_decides() {
+    // The pin under the whole module, and `birds.rs`'s word for word: a critter is two
+    // entities and neither may hold a component from `mobs.rs`, `hands.rs`, `drops.rs`,
+    // `structures.rs` or the body rig — and `target.rs` has no component to carry at all,
+    // because it raycasts voxels and the bodies a snapshot named.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 4);
+    let squirrels = critter_entities(&mut app);
+    assert!(
+        !squirrels.is_empty(),
+        "there were no critters to make assertions about"
+    );
+
+    let mut every = Vec::new();
+    for squirrel in squirrels {
+        every.push(squirrel);
+        let world = app.world();
+        let children = world
+            .entity(squirrel)
+            .get::<Children>()
+            .expect("a critter has a tail");
+        assert_eq!(children.len(), 1, "a critter is a body and one tail");
+        every.extend(children.iter());
+    }
+
+    for entity in every {
+        let entity = app.world().entity(entity);
+        assert!(!entity.contains::<mobs::Mob>());
+        assert!(!entity.contains::<mobs::MobVisual>());
+        assert!(!entity.contains::<mobs::AggroMarker>());
+        assert!(!entity.contains::<hands::HeldItem>());
+        assert!(!entity.contains::<drops::DroppedItem>());
+        assert!(!entity.contains::<drops::DropVisual>());
+        assert!(!entity.contains::<structures::Structure>());
+        assert!(!entity.contains::<structures::StructureVisual>());
+        assert!(!entity.contains::<structures::FireLight>());
+        assert!(!entity.contains::<Body>());
+        assert!(!entity.contains::<NamePlate>());
+        assert!(!entity.contains::<LocalPlayer>());
+        assert!(!entity.contains::<Worn>());
+    }
+}
+
+#[test]
+fn a_snapshot_that_names_no_mobs_leaves_the_critters_alone() {
+    // A critter is not snapshot state, so the existence set that despawns every mob the
+    // server stopped naming must not reach one.
+    let mut app = squirrelwatching(GroundLook::Grass, true);
+    watch(&mut app, 4);
+    let before = critter_entities(&mut app);
+    assert!(!before.is_empty());
+
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.5, 64.0, 0.5], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+    deliver(&mut app, 2, vec![], Instant::now());
+    app.update();
+
+    let after = critter_entities(&mut app);
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "an empty snapshot took critters with it"
+    );
+    assert!(before.iter().all(|entity| after.contains(entity)));
+}
+
+#[test]
+fn a_critter_on_the_aim_line_is_not_what_the_crosshair_finds() {
+    // The strongest available form of "a critter is not a thing": the player aims straight
+    // down the line a squirrel is standing on, and the crosshair finds exactly the voxel it
+    // would have found with the wood empty. `target.rs` raycasts voxels and the bodies a
+    // snapshot named, so there is no path from a critter into it — and this is the
+    // measurement rather than the claim.
+    //
+    // **A comparison of two worlds rather than an assertion about one voxel**, which is the
+    // shape `a_mining_intent_along_a_bird_sends_exactly_what_an_empty_sky_would` uses and for
+    // a better reason than symmetry: naming the voxel the ray *should* hit means computing it
+    // by hand from the eye, the look and the terrain, and a mistake there fails the test
+    // without saying anything about critters. Two runs over identical terrain, one with
+    // squirrels and one without, differ in exactly the thing under test.
+    //
+    // **The local body is delivered standing in the wood, and both halves of that matter.**
+    // The ray is cast along the *camera's* forward vector, and the camera only takes its
+    // rotation from `LookState` once there is a body for it to follow — so unlike every other
+    // critter test here, this one cannot use `put_the_eye_at` alone, and written that way it
+    // found nothing at all in either run. But the body cannot be delivered at the session's
+    // own spawn either: that is sixty-four blocks up and clean out of this wood, and a critter
+    // is stood up only where its anchor has ground under it, so the wood would be empty and
+    // the comparison would be between two empty woods.
+    let standing_in_the_wood = [CRITTER_EYE.x, CRITTER_SURFACE as f32 + 1.0, CRITTER_EYE.z];
+    let occupied = |ground, wooded| {
+        let mut app = squirrelwatching(ground, wooded);
+        for tick in 1..=2 {
+            deliver(
+                &mut app,
+                tick,
+                vec![state(LOCAL_ID, standing_in_the_wood, 0.0)],
+                Instant::now(),
+            );
+            app.update();
+        }
+        app
+    };
+
+    let mut wooded = occupied(GroundLook::Grass, true);
+    watch(&mut wooded, 20);
+    let standing = critter_positions(&mut wooded);
+    assert!(
+        !standing.is_empty(),
+        "there were no squirrels to aim at, so this test would pass on nothing"
+    );
+    let eye = camera_transform(&mut wooded).translation;
+    // Straight down the line the nearest squirrel is standing on.
+    let along = (standing[0] - eye).normalize();
+    let look = look_along(along);
+
+    let aimed_with = {
+        *wooded.world_mut().resource_mut::<LookState>() = look;
+        watch(&mut wooded, 2);
+        wooded.world().resource::<target::BlockTarget>().0
+    };
+    // The same store and the same eye, with a look the critter table has no row for, so the
+    // wood is empty of critters and identical in every other respect.
+    let aimed_without = {
+        let mut bare = occupied(GroundLook::Unknown, false);
+        watch(&mut bare, 20);
+        assert!(
+            critter_entities(&mut bare).is_empty(),
+            "the control run had critters in it"
+        );
+        *bare.world_mut().resource_mut::<LookState>() = look;
+        watch(&mut bare, 2);
+        bare.world().resource::<target::BlockTarget>().0
+    };
+
+    assert!(
+        aimed_with.is_some(),
+        "the ray found nothing at all, so the comparison would pass on two Nones"
+    );
+    assert_eq!(
+        aimed_with.map(|hit| hit.block),
+        aimed_without.map(|hit| hit.block),
+        "a squirrel on the aim line changed what the crosshair found"
+    );
+    // And the squirrel is still there, unbothered by having been aimed at.
+    assert!(
+        wood(&mut wooded)
+            .iter()
+            .any(|critter| critter.2 == 1.0 && critter.1 > 0.0),
+        "aiming at a squirrel retired it"
+    );
+}
