@@ -5150,6 +5150,53 @@ mod tests {
         );
     }
 
+    /// **The same rule on the address route, which never passes through
+    /// `connect_on_request`.** `rejoin_for_a_character` removes `Rejoining` before it calls
+    /// `dial_recorded_address`, so a dial on that route that fails — here a real session
+    /// thread refused at an address nothing listens on — ends terminal with the form down and
+    /// no flag left: the ended screen is not held back, and nothing asks again (#1175).
+    #[test]
+    fn a_rejoin_on_the_address_route_that_fails_consumes_its_flag_and_stops() {
+        let (mut app, events) = a_character_screen_awaiting_its_rejoin();
+        app.insert_resource(RejoinBy::Address {
+            // Port 0 is not an address a client can dial, so the attempt fails the way an
+            // unreachable server does.
+            addr: "127.0.0.1:0".to_owned(),
+            expected: tls::Expectation::Unlisted,
+            ticket_path: None,
+        });
+
+        end_the_session_behind_the_form(&mut app, events);
+        assert!(
+            !app.world().contains_resource::<Rejoining>(),
+            "the flag survived the dial on the address route"
+        );
+
+        pump_until(&mut app, "the rejoin's dial to fail", |app| {
+            matches!(
+                state(app),
+                ConnectionState::Rejected { .. } | ConnectionState::Disconnected
+            )
+        });
+        let ended = state(&app);
+        // A redial would move the state back to `Connecting`; nothing may ask again.
+        for _ in 0..20 {
+            app.update();
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(state(&app), ended, "a failed rejoin dialled again");
+        assert!(!app.world().contains_resource::<Rejoining>());
+        assert!(
+            !app.world().contains_resource::<CharacterChoice>(),
+            "the character screen stayed up over a failed rejoin"
+        );
+        assert_eq!(
+            connect_requests(&app),
+            0,
+            "the address route wrote a row request"
+        );
+    }
+
     /// **The character a session played is the one the next launch starts on.**
     ///
     /// Two sessions at one address: the first plays a character, and the second is offered
