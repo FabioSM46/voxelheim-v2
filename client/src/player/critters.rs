@@ -106,6 +106,8 @@ use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::sky::Period;
+use crate::net::{BlockCoord, ChunkCoord};
+use crate::world::{ChunkStore, palette};
 
 /// How coarsely the eye is quantised before it anchors the critters in a cell, in blocks.
 ///
@@ -207,6 +209,32 @@ const FORAGE_TRAVEL: f32 = 0.5;
 /// and a heading sampled a twentieth of a second out would point at where the dash *ends*
 /// rather than along it.
 const HEADING_STEP: f32 = 0.02;
+
+/// How far down a critter's column is probed for the ground it stands on, in blocks.
+///
+/// Measured from the anchor's own height, so it is a window around the eye rather than around
+/// the critter: twenty-four blocks below and eight above covers a wooded hillside without
+/// letting a critter stand on a cave floor under the player's feet. It is the one number here
+/// that bounds the probe's cost — thirty-two lookups per critter per frame, a hundred and
+/// twenty-eight at [`CRITTER_COUNT_MAX`], beside the eight the flock already takes.
+const STAND_PROBE_BELOW: f32 = 24.0;
+const STAND_PROBE_ABOVE: f32 = 8.0;
+
+/// How fast a critter's feet may follow a change in the ground under them, in blocks/second.
+///
+/// Eased rather than assigned, for the reason the server's `approach` gives in
+/// `internal/game/player.go` and `birds::CLEARANCE_LIFT_SPEED` repeats: a value that snaps to
+/// its target reads as a wall of velocity, and a squirrel that jumps a block the instant it
+/// crosses a voxel edge is exactly that.
+///
+/// **Twenty-four blocks a second, which is three times the fastest dash, and the factor is
+/// the point.** While the ground under a scurrying critter changes more slowly than this, the
+/// ease reaches it and sits on it exactly — so "a critter stands on the surface" is an
+/// equality on rolling ground rather than a tolerance, and
+/// `a_critter_stands_exactly_on_the_ground_once_it_has_settled` asserts it as one. A vertical
+/// step of a single voxel is crossed in forty milliseconds, which is a hop rather than a
+/// teleport.
+const STAND_STEP_SPEED: f32 = 24.0;
 
 /// How much of a critter's climb is spent reaching the trunk before any of it is spent rising.
 const CLIMB_APPROACH_SHARE: f32 = 0.35;
@@ -590,6 +618,226 @@ fn smooth(t: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
+// The ground a critter stands on
+// ---------------------------------------------------------------------------
+//
+// [`place`] answers where a critter is on the plane, from five arguments and nothing else,
+// and nothing below changes that. The ground is a second, named step over its answer, applied
+// in `run_the_critters` where the terrain and the previous frame's height both already are —
+// so the path stays a pure function and stays testable without a window, and the whole of
+// what the ground does to a critter is one number.
+//
+// This is `birds::surface_under` and `birds::next_lift` with the opposite sign: the flock is
+// *lifted off* the surface by a clearance and a critter is *placed on* it. The three-answer
+// shape is the same, and the reasoning for it is the one `birds::GroundUnder` gives at length.
+
+/// One float floored to the voxel index containing it.
+///
+/// `floor`, never a bare cast, for the reason `player/target.rs`'s raycast gives: `-0.5 as
+/// i32` truncates to 0 and the voxel containing -0.5 is -1. Half the world is on that side of
+/// the origin.
+fn voxel_of(value: f32) -> i32 {
+    Vec3::splat(value).floor().as_ivec3().x
+}
+
+/// What the probe found in a critter's column: three answers, not two.
+///
+/// The separation is `birds::GroundUnder`'s and is load-bearing for the same reason, with one
+/// difference in what the middle answer *means*. For a bird, an empty window is a measurement
+/// that the clearance is already met. For a critter it is a measurement that there is **no
+/// ground here at all** within a window centred on the eye's own height — a chasm, or a column
+/// the player is flying over — and a ground creature with no ground under it has nowhere to
+/// be, so it is retired rather than held.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ground {
+    /// The top face of the first thing found in the window.
+    Surface(f32),
+    /// Nothing in the window, and every chunk it crosses was there to be read.
+    Empty,
+    /// A chunk the window crosses is not loaded, so there is no answer at all.
+    Unknown,
+}
+
+/// The top face of the ground in one column, looked for in a window around `from`.
+///
+/// **An absent chunk is not evidence of a floor** — the conservative direction `Terrain.Fluid`
+/// takes, and the mesher's neighbour rule, and the server's step-up probe — and it is not
+/// evidence of a chasm either, which is why it answers [`Ground::Unknown`] rather than
+/// [`Ground::Empty`]. The store is *read* here and never asked to fetch: [`ChunkStore::get`]
+/// answering `None` ends the probe.
+///
+/// **`solid_at` rather than "not air", which is the opposite of the choice the flock makes,
+/// and the reason is the same question asked about a different body.** A bird's clearance asks
+/// what it would be *seen to fly into*, so a lake's surface and a leaf canopy both count. A
+/// critter's ground asks what would *hold it up*, which is exactly what solidity means here —
+/// and since #446 and #550 it deliberately excludes water and cover. A squirrel standing on a
+/// lake surface or halfway up a leaf is the failure this choice avoids, and
+/// `a_critter_does_not_stand_on_water_or_on_leaves` pins both.
+///
+/// **The window is `[from - STAND_PROBE_BELOW, from + STAND_PROBE_ABOVE]`**, thirty-three
+/// voxels, walked downward from the top so the answer is the highest ground rather than the
+/// first one found. It hangs off the **anchor's** height rather than off the critter's own,
+/// deliberately: a critter's height is what is being computed, so using it would be circular,
+/// and the anchor is the eye's cell centre — which is to say the window is "the ground near
+/// the player", which is the only ground worth standing a cosmetic squirrel on.
+fn surface_under(store: &ChunkStore, column: Vec3, from: f32, chunk_size: usize) -> Ground {
+    // An argument nothing can be measured from is an absence, not an empty window.
+    if !column.is_finite() || !from.is_finite() || chunk_size == 0 {
+        return Ground::Unknown;
+    }
+    let Ok(size) = i32::try_from(chunk_size) else {
+        return Ground::Unknown;
+    };
+    let x = voxel_of(column.x);
+    let z = voxel_of(column.z);
+    let high = voxel_of(from + STAND_PROBE_ABOVE);
+    let low = voxel_of(from - STAND_PROBE_BELOW);
+
+    for y in (low..=high).rev() {
+        let coord = ChunkCoord {
+            cx: x.div_euclid(size),
+            cy: y.div_euclid(size),
+            cz: z.div_euclid(size),
+        };
+        // Downwards, and a gap ends the probe rather than being read through: a voxel this
+        // session does not hold could be higher than anything found under it, and standing a
+        // critter on the floor of a hole it cannot see the lid of is worse than not drawing
+        // it.
+        if store.get(coord).is_none() {
+            return Ground::Unknown;
+        }
+        if store.solid_at(BlockCoord { x, y, z }, chunk_size) {
+            // The voxel spans `[y, y + 1)`, so its top face is what a critter stands on.
+            return Ground::Surface((y + 1) as f32);
+        }
+    }
+    Ground::Empty
+}
+
+/// Moves `current` toward `target` by at most `step`, without overshooting.
+///
+/// The client's mirror of the server's `approach` in `internal/game/player.go`, and here for
+/// the reason given there and in `birds::approach`: a signed max/min pair rather than an
+/// exponential ease, because there is no time constant to tune. Once the target moves slower
+/// than `step` this sits on it exactly rather than trailing it — which is what lets a settled
+/// critter stand on the ground to the bit while it scurries over it.
+fn approach(current: f32, target: f32, step: f32) -> f32 {
+    if current > target {
+        (current - step).max(target)
+    } else {
+        (current + step).min(target)
+    }
+}
+
+/// This frame's answer for one critter's feet: the height it stands at, or `None` if it has
+/// nowhere to stand.
+///
+/// **The three answers [`Ground`] gives are three different outcomes, and only one of them is
+/// a target.** A [`Ground::Surface`] is eased toward at [`STAND_STEP_SPEED`].
+/// [`Ground::Unknown`] asks for **this frame's height back**: nothing was measured, so nothing
+/// moves, and the critter holds where the last frame that could read the ground put it — the
+/// direction `birds::next_lift` takes, and for the same reason. [`Ground::Empty`] answers
+/// `None`, which is not a height at all: the caller retires the critter, because a ground
+/// creature over a chasm has no correct position and fading it out is the only honest answer.
+///
+/// `ground` is `None` for a frame with no session or no store, and that is the same absence as
+/// an unloaded chunk: the height is held.
+fn next_stand(
+    ground: Option<(&ChunkStore, usize)>,
+    column: Vec3,
+    from: f32,
+    stand: f32,
+    dt: f32,
+) -> Option<f32> {
+    let under = ground.map_or(Ground::Unknown, |(store, chunk_size)| {
+        surface_under(store, column, from, chunk_size)
+    });
+    match under {
+        Ground::Surface(surface) => Some(approach(stand, surface, STAND_STEP_SPEED * dt)),
+        Ground::Unknown => Some(stand),
+        Ground::Empty => None,
+    }
+}
+
+/// The foot of a trunk a critter may climb, within [`TRUNK_REACH`] of `from`.
+///
+/// **A ring search rather than a scan, because the cost has to be bounded and it is paid
+/// once.** This runs when a critter is stood up and never again — the answer goes into
+/// `Critter::trunk` (part two) — so it may read more columns than a per-frame probe could afford, and
+/// it reads them in rings outward so the trunk it finds is a near one rather than the first in
+/// a raster.
+///
+/// `palette::LOG` and nothing else: it is the same block `ambience.rs` reads to decide a
+/// column is wooded, which is what makes "a squirrel appears where the wood is" and "a
+/// squirrel finds a trunk" the same fact rather than two that can disagree.
+///
+/// **`None` is a real answer and the caller must handle it**: a wooded look is a vote over
+/// sixty-four columns, so a critter can perfectly well be stood up a dozen blocks from the
+/// nearest actual trunk. It then forages for its whole life and fades where it is.
+fn trunk_near(store: &ChunkStore, from: Vec3, surface: f32, chunk_size: usize) -> Option<Vec3> {
+    // `> 0` and not merely convertible: `div_euclid(0)` panics, and a zero chunk size reaches
+    // here from a session whose welcome has not landed. `surface_under` fails closed on the
+    // same argument for the same reason.
+    let size = i32::try_from(chunk_size).ok().filter(|size| *size > 0)?;
+    if !from.is_finite() || !surface.is_finite() {
+        return None;
+    }
+    let reach = TRUNK_REACH as i32;
+    let base = IVec3::new(voxel_of(from.x), voxel_of(surface), voxel_of(from.z));
+    // Rings outward from the critter's own column, so the nearest trunk wins.
+    for ring in 0..=reach {
+        for dx in -ring..=ring {
+            for dz in -ring..=ring {
+                if dx.abs().max(dz.abs()) != ring {
+                    continue;
+                }
+                let column = IVec3::new(base.x + dx, base.y, base.z + dz);
+                // **The rings are square and the reach is a circle**, so a corner of the
+                // outermost ring is rejected: Chebyshev 7 is Euclidean 9.9, and `place`'s
+                // approach derives its speed from this distance, so letting a corner through
+                // would break a bound two functions away. Walking rings and rejecting corners
+                // is cheaper than ordering a disc, and the ring order still means the nearest
+                // trunk wins.
+                let away = Vec3::new(
+                    column.x as f32 + 0.5 - from.x,
+                    0.0,
+                    column.z as f32 + 0.5 - from.z,
+                );
+                if away.length() > TRUNK_REACH {
+                    continue;
+                }
+                // A trunk is a log standing in the two voxels above the surface: one log flat
+                // on the ground is a fallen branch, and a squirrel does not climb it.
+                if (1..=2).all(|up| {
+                    let coord = ChunkCoord {
+                        cx: column.x.div_euclid(size),
+                        cy: (column.y + up).div_euclid(size),
+                        cz: column.z.div_euclid(size),
+                    };
+                    store.get(coord).is_some()
+                        && store.block_at(
+                            BlockCoord {
+                                x: column.x,
+                                y: column.y + up,
+                                z: column.z,
+                            },
+                            chunk_size,
+                        ) == palette::LOG
+                }) {
+                    // The centre of the column, so the climb is up the middle of the trunk.
+                    return Some(Vec3::new(
+                        column.x as f32 + 0.5,
+                        surface,
+                        column.z as f32 + 0.5,
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Seeds
 // ---------------------------------------------------------------------------
 
@@ -690,6 +938,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::world::{BlockId, VoxelChunk};
 
     const DT: f32 = 1.0 / 60.0;
     /// The fastest a critter may be drawn climbing, in blocks per second.
@@ -700,12 +949,20 @@ mod tests {
     /// and 5.65 at a smoothstep's peak, so six is the bound with the same one-and-a-half
     /// factor [`SCURRY_DASH_SHARE`] explains folded in.
     const CLIMB_SPEED_MAX: f32 = 6.0;
+    /// The chunk edge every fixture below is built at, and asks about.
+    const CHUNK: usize = 32;
+    /// How long a critter is given to settle onto the ground before its height is read.
+    ///
+    /// A critter is stood up exactly on the surface under its first position, so the only
+    /// thing it has to settle is the change in ground as it scurries — a tenth of a second is
+    /// six frames of [`STAND_STEP_SPEED`], which is a block and a half.
+    const SETTLED: usize = 6;
+
     /// How many frames one whole life is, at sixty a second.
     fn life_frames(species: &CritterSpecies) -> usize {
         (species.life / DT).ceil() as usize
     }
 
-    #[test]
     /// A store over every chunk a box of `reach` around `centre` touches, holding whatever
     /// `block_at` names at each voxel and air wherever it names [`palette::AIR`].
     ///
@@ -714,6 +971,98 @@ mod tests {
     /// `birds.rs`'s clamp fixture with the block moved *into* the closure rather than beside
     /// it, which is what the trunk search needs: a wood is a floor **and** a log, and two
     /// kinds of block in one store cannot be stated by a predicate over one.
+    fn blocks(centre: Vec3, reach: f32, block_at: impl Fn(IVec3) -> BlockId) -> ChunkStore {
+        let span = CHUNK as i32;
+        let low = (centre - Vec3::splat(reach)).floor().as_ivec3();
+        let high = (centre + Vec3::splat(reach)).floor().as_ivec3();
+        let mut store = ChunkStore::default();
+        for cx in low.x.div_euclid(span)..=high.x.div_euclid(span) {
+            for cy in low.y.div_euclid(span)..=high.y.div_euclid(span) {
+                for cz in low.z.div_euclid(span)..=high.z.div_euclid(span) {
+                    let mut chunk = VoxelChunk::all_air(CHUNK);
+                    for ly in 0..CHUNK {
+                        for lz in 0..CHUNK {
+                            for lx in 0..CHUNK {
+                                let at = IVec3::new(
+                                    cx * span + lx as i32,
+                                    cy * span + ly as i32,
+                                    cz * span + lz as i32,
+                                );
+                                let block = block_at(at);
+                                if block != palette::AIR {
+                                    chunk.set(lx, ly, lz, block);
+                                }
+                            }
+                        }
+                    }
+                    store.insert(ChunkCoord { cx, cy, cz }, chunk);
+                }
+            }
+        }
+        store
+    }
+
+    /// The common case of [`blocks`]: one kind of block wherever `solid` says so.
+    fn terrain(
+        centre: Vec3,
+        reach: f32,
+        block: BlockId,
+        solid: impl Fn(IVec3) -> bool,
+    ) -> ChunkStore {
+        blocks(
+            centre,
+            reach,
+            |at| {
+                if solid(at) { block } else { palette::AIR }
+            },
+        )
+    }
+
+    /// One critter's drawn path over `frames` frames: `(drawn point, stand, rise)` each frame,
+    /// or `None` for the frame the ground gave it nowhere to be.
+    ///
+    /// It drives [`next_stand`] and [`climb_rise`] rather than restating what
+    /// `run_the_critters` does with them: a test that re-implemented the ground step would
+    /// pass whatever the client actually drew.
+    fn walked(
+        ground: Option<(&ChunkStore, usize)>,
+        species: &CritterSpecies,
+        seed: u64,
+        anchor: Vec3,
+        trunk: Option<Vec3>,
+        frames: usize,
+    ) -> Vec<Option<(Vec3, f32, f32)>> {
+        let mut stand = match ground {
+            Some((store, size)) => {
+                match surface_under(
+                    store,
+                    place(species, seed, 0.0, anchor, trunk),
+                    anchor.y,
+                    size,
+                ) {
+                    Ground::Surface(surface) => surface,
+                    _ => anchor.y,
+                }
+            }
+            None => anchor.y,
+        };
+        let mut path = Vec::with_capacity(frames + 1);
+        for frame in 0..=frames {
+            let age = frame as f32 * DT;
+            let at = place(species, seed, age, anchor, trunk);
+            match next_stand(ground, at, anchor.y, stand, DT) {
+                Some(next) => {
+                    stand = next;
+                    let rise = climb_rise(species, age, trunk);
+                    path.push(Some((Vec3::new(at.x, stand + rise, at.z), stand, rise)));
+                }
+                None => path.push(None),
+            }
+        }
+        path
+    }
+
+    #[test]
     fn one_row_per_look_and_no_row_answers_an_unknown_one() {
         assert_eq!(species_for(&Ambience::default()), None);
         assert_eq!(
@@ -966,6 +1315,460 @@ mod tests {
             );
             // A row with no trunk never rises at all, which is the fallback branch.
             assert_eq!(climb_rise(species, species.life * 0.99, None), 0.0);
+        }
+    }
+
+    #[test]
+    fn a_critter_with_no_trunk_forages_and_fades_where_it_is() {
+        // The documented fallback, asserted rather than hoped for: a wooded look is a vote
+        // over sixty-four columns, so a critter can perfectly well be stood up out of reach
+        // of any trunk. It must forage for its whole life and never rise — never panic, never
+        // aim at a trunk that is not there, and never leave the ground.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, CRITTER_RANGE + 8.0, palette::GRASS, |at| at.y < 64);
+        for species in &CRITTERS {
+            for seed in 0..8u64 {
+                let seed = mix(seed, 0x7A11);
+                let path = walked(
+                    Some((&store, CHUNK)),
+                    species,
+                    seed,
+                    anchor,
+                    None,
+                    life_frames(species),
+                );
+                for (frame, step) in path.iter().enumerate() {
+                    let (drawn, stand, rise) = step.expect("level ground places every critter");
+                    assert_eq!(rise, 0.0, "frame {frame} rose with no trunk to climb");
+                    assert_eq!(drawn.y, stand, "frame {frame} left the ground");
+                }
+                // And the position it holds while it fades is the forage's own last one,
+                // rather than a jump to a trunk column it never had.
+                let last = place(species, seed, species.life, anchor, None);
+                let held = place(species, seed, species.life * 2.0, anchor, None);
+                assert_eq!(last, held, "a trunkless critter moved after its forage");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The ground a critter stands on
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_surface_a_critter_stands_on_is_the_top_face_of_what_holds_it_up() {
+        // Solid below 40, so the highest voxel is 39. It spans `[39, 40)`, and 40 is where a
+        // critter's feet are.
+        let store = terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, palette::GRASS, |at| {
+            at.y < 40
+        });
+        let column = Vec3::new(8.5, 0.0, 8.5);
+        assert_eq!(
+            surface_under(&store, column, 40.0, CHUNK),
+            Ground::Surface(40.0)
+        );
+        // **The window's reach is asserted at both its edges**, because a window is only a
+        // bound if something is outside it. The highest solid voxel is 39, so a probe whose
+        // floor is exactly 39 still finds it and one a single block higher does not — which
+        // is the difference between "the ground near the player" and "any ground at all".
+        assert_eq!(
+            surface_under(&store, column, 39.0 + STAND_PROBE_BELOW, CHUNK),
+            Ground::Surface(40.0)
+        );
+        assert_eq!(
+            surface_under(&store, column, 40.0 + STAND_PROBE_BELOW, CHUNK),
+            Ground::Empty,
+            "a window whose floor is above the ground is not a measurement of the ground"
+        );
+        // And a window *buried* in the hill answers the top of the window rather than the top
+        // of the hill, which is the honest answer and worth pinning rather than leaving to be
+        // discovered: the probe is bounded, so the surface it reports is the highest one it
+        // was allowed to look at. A critter there is standing inside a hill, and it is the
+        // eye's own anchor that keeps that from happening — the window is centred on the
+        // player, who is not usually inside the ground.
+        assert_eq!(
+            surface_under(&store, column, 40.0 - STAND_PROBE_ABOVE - 2.0, CHUNK),
+            Ground::Surface(39.0)
+        );
+
+        // And it floors rather than truncating, on the side of the origin where the two
+        // differ — the trap `player/target.rs`'s raycast names, over half the world.
+        let below = terrain(Vec3::new(-8.0, -8.0, -8.0), 24.0, palette::GRASS, |at| {
+            at.y < -8
+        });
+        assert_eq!(
+            surface_under(&below, Vec3::new(-0.5, 0.0, -0.5), -8.0, CHUNK),
+            Ground::Surface(-8.0)
+        );
+    }
+
+    #[test]
+    fn a_critter_stands_on_what_would_hold_a_body_up_and_not_on_water() {
+        // `solid_at` and not "not air", which is the opposite of the choice the flock makes
+        // and the same question asked about a different body: a bird's clearance asks what it
+        // would be *seen to fly into*, so a lake surface and a leaf canopy both count, while a
+        // critter's ground asks what would *hold it up*. A squirrel standing on the surface of
+        // a lake is the failure this pins.
+        //
+        // **Leaves are on the other side of that line and deliberately so.** `palette` calls
+        // them solid — they stop a body, which is why a player can walk a canopy — so a
+        // squirrel may stand on them, and a squirrel in a canopy is exactly where a squirrel
+        // belongs. This test asserted the opposite when it was written, from the assumption
+        // that "not the ground" and "not solid" were the same set; `is_solid` is the authority
+        // and it disagreed.
+        let column = Vec3::new(8.5, 0.0, 8.5);
+        let lake = |block| {
+            terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, block, |at| {
+                (20..40).contains(&at.y)
+            })
+        };
+        for block in [palette::WATER, palette::WATER_FLOW3] {
+            assert_eq!(
+                surface_under(&lake(block), column, 40.0, CHUNK),
+                Ground::Empty,
+                "a critter was stood on block {block}"
+            );
+        }
+        // Every block that stops a body does hold a critter up, so the comparison above is
+        // about water rather than about the fixture.
+        for block in [
+            palette::STONE,
+            palette::GRASS,
+            palette::LOG,
+            palette::LEAVES,
+        ] {
+            assert!(
+                palette::is_solid(block),
+                "block {block} is not solid, so this row proves nothing"
+            );
+            assert_eq!(
+                surface_under(&lake(block), column, 40.0, CHUNK),
+                Ground::Surface(40.0),
+                "a critter fell through block {block}"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_nobody_has_streamed_is_not_evidence_of_a_floor_or_of_a_chasm() {
+        // Absence is not evidence — the direction `Terrain.Fluid`, the mesher's neighbour
+        // rule and the server's step-up probe all take. An unread column is `Unknown`, which
+        // holds a critter's height; an empty *read* column is `Empty`, which retires it. The
+        // two must not be collapsed: holding on an empty column strands a critter over a
+        // chasm forever, and retiring on an unread one kills every critter the moment a chunk
+        // is evicted.
+        let nothing = ChunkStore::default();
+        let column = Vec3::new(8.5, 0.0, 8.5);
+        assert_eq!(
+            surface_under(&nothing, column, 40.0, CHUNK),
+            Ground::Unknown
+        );
+        assert_eq!(
+            next_stand(Some((&nothing, CHUNK)), column, 40.0, 37.0, DT),
+            Some(37.0)
+        );
+        // A frame with no store or no session at all takes the same direction.
+        assert_eq!(next_stand(None, column, 40.0, 37.0, DT), Some(37.0));
+
+        // A gap is not read *through*, either. One chunk holds a floor and the chunk above it
+        // never arrived: a probe that crossed the hole would answer with the highest thing it
+        // happens to hold rather than with the highest thing there is.
+        let mut chunk = VoxelChunk::all_air(8);
+        for y in 0..8 {
+            for z in 0..8 {
+                for x in 0..8 {
+                    chunk.set(x, y, z, palette::STONE);
+                }
+            }
+        }
+        let mut gapped = ChunkStore::default();
+        gapped.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 4,
+                cz: 0,
+            },
+            chunk,
+        );
+        let column = Vec3::new(4.5, 0.0, 4.5);
+        // A window that stays inside the one chunk there is gets the honest answer: from 31
+        // it tops out at 39, which is the highest voxel that chunk holds.
+        assert_eq!(
+            surface_under(&gapped, column, 31.0, 8),
+            Ground::Surface(40.0)
+        );
+        // Opened into the missing chunk above, the floor under it is no longer an answer
+        // anybody may give.
+        assert_eq!(surface_under(&gapped, column, 38.0, 8), Ground::Unknown);
+
+        // And an empty read column is not a height at all.
+        let void = terrain(Vec3::new(8.0, 40.0, 8.0), 40.0, palette::GRASS, |_| false);
+        assert_eq!(
+            surface_under(&void, Vec3::new(8.5, 0.0, 8.5), 40.0, CHUNK),
+            Ground::Empty
+        );
+        assert_eq!(
+            next_stand(
+                Some((&void, CHUNK)),
+                Vec3::new(8.5, 0.0, 8.5),
+                40.0,
+                37.0,
+                DT
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_critter_stands_on_flat_ground_exactly_and_on_broken_ground_within_a_voxel() {
+        // **Two terrains, because the honest claim is two claims.** On flat ground a settled
+        // critter is on the surface *exactly*: the ease reaches its target and sits on it,
+        // which is the property `approach` is chosen for. On broken ground it cannot be
+        // exact every frame and should not pretend to be — a voxel world's surface changes
+        // in whole-block steps, so crossing one takes `1 / (STAND_STEP_SPEED * DT)` frames,
+        // and during those frames the critter is walking up the step rather than teleporting
+        // to the top of it. What is asserted there is that it is never more than that one
+        // voxel out, and that it is exactly on the surface for the large majority of frames —
+        // which is what separates a working ease from one that permanently trails the ground.
+        //
+        // Asserting equality on the ramp is what this test did when it was written, and the
+        // ramp failed it at frame 80 by four tenths of a block: the ease was mid-step, which
+        // is correct behaviour that a wrong assertion called a bug.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let flat = terrain(anchor, CRITTER_RANGE + 8.0, palette::GRASS, |at| at.y < 64);
+        let ramp = terrain(anchor, CRITTER_RANGE + 8.0, palette::GRASS, |at| {
+            at.y < 64 + at.x.div_euclid(4)
+        });
+        let mut heights = HashSet::new();
+        let mut exact = 0usize;
+        let mut total = 0usize;
+        for species in &CRITTERS {
+            for seed in 0..8u64 {
+                let seed = mix(seed, 0x5177);
+                for (name, store) in [("flat", &flat), ("ramp", &ramp)] {
+                    // Trunkless, so the whole walk is on the ground and every frame is a
+                    // claim about the surface.
+                    for (frame, step) in walked(
+                        Some((store, CHUNK)),
+                        species,
+                        seed,
+                        anchor,
+                        None,
+                        (species.forage_seconds() / DT) as usize,
+                    )
+                    .into_iter()
+                    .enumerate()
+                    .skip(SETTLED)
+                    {
+                        let (drawn, stand, _) = step.expect("solid ground places every critter");
+                        let surface = match surface_under(store, drawn, anchor.y, CHUNK) {
+                            Ground::Surface(surface) => surface,
+                            other => panic!("{name} frame {frame}: the ground answered {other:?}"),
+                        };
+                        assert_eq!(drawn.y, stand, "{name} frame {frame} left the ground");
+                        if name == "flat" {
+                            assert_eq!(
+                                stand, surface,
+                                "{name} frame {frame}: stood at {stand} over {surface}"
+                            );
+                            continue;
+                        }
+                        assert!(
+                            (stand - surface).abs() <= 1.0,
+                            "{name} frame {frame}: stood at {stand} over {surface}"
+                        );
+                        exact += usize::from(stand == surface);
+                        total += 1;
+                        heights.insert(surface as i32);
+                    }
+                }
+            }
+        }
+        assert!(
+            heights.len() > 1,
+            "the ramp never changed height under a critter, so this proves nothing"
+        );
+        assert!(
+            exact * 10 >= total * 8,
+            "only {exact} of {total} ramp frames were exactly on the ground"
+        );
+    }
+
+    #[test]
+    fn a_step_in_the_ground_never_teleports_a_critter() {
+        // A cliff through the middle of the box. Crossing it a critter climbs the step, and
+        // the whole reason the height is approached rather than assigned is that it must not
+        // jump.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, CRITTER_RANGE + 8.0, palette::GRASS, |at| {
+            at.y < if at.x < 16 { 66 } else { 72 }
+        });
+        let mut stepped = 0usize;
+        for species in &CRITTERS {
+            for seed in 0..8u64 {
+                let seed = mix(seed, 0xC11F);
+                let path = walked(
+                    Some((&store, CHUNK)),
+                    species,
+                    seed,
+                    anchor,
+                    None,
+                    (species.forage_seconds() / DT) as usize,
+                );
+                for pair in path.windows(2) {
+                    let (Some((was, before, _)), Some((now, after, _))) = (pair[0], pair[1]) else {
+                        continue;
+                    };
+                    assert!(
+                        (after - before).abs() <= STAND_STEP_SPEED * DT + 1e-4,
+                        "{:?} snapped its footing from {before} to {after}",
+                        species.gait
+                    );
+                    // What a player actually sees: the gait's own bound plus the footing's.
+                    let moved = now.distance(was);
+                    assert!(
+                        moved <= (species.max_speed + STAND_STEP_SPEED) * DT + 1e-4,
+                        "{:?} moved {moved} in {DT}s at a cliff edge",
+                        species.gait
+                    );
+                    stepped += usize::from(after != before);
+                }
+            }
+        }
+        assert!(
+            stepped > 0,
+            "no critter ever met the step, so this test would pass vacuously"
+        );
+    }
+
+    #[test]
+    fn a_footing_approaches_its_target_and_then_sits_on_it() {
+        // The server's `approach`, mirrored: no overshoot in either direction, and exact once
+        // the target is within one step — which is what lets a settled critter stand on the
+        // ground to the bit while it scurries over it.
+        assert_eq!(approach(0.0, 1.0, 0.25), 0.25);
+        assert_eq!(approach(0.9, 1.0, 0.25), 1.0);
+        assert_eq!(approach(2.0, 1.0, 0.25), 1.75);
+        assert_eq!(approach(1.1, 1.0, 0.25), 1.0);
+        assert_eq!(approach(1.0, 1.0, 0.25), 1.0);
+    }
+
+    #[test]
+    fn a_trunk_is_a_standing_log_near_the_critter_and_nothing_else() {
+        let surface = 64.0;
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let reach = CRITTER_RANGE + 8.0;
+        // A wood: a grass floor with one trunk standing in it a few blocks off, and a second
+        // trunk far outside the search.
+        let trunk_at = IVec3::new(21, 64, 18);
+        let far_at = IVec3::new(21 + TRUNK_REACH as i32 + 6, 64, 18);
+        let wood = |log: IVec3, height: std::ops::Range<i32>| {
+            move |at: IVec3| {
+                if at.x == log.x && at.z == log.z && height.contains(&(at.y - log.y)) {
+                    palette::LOG
+                } else if at.y < 64 {
+                    palette::GRASS
+                } else {
+                    palette::AIR
+                }
+            }
+        };
+        let bare = blocks(anchor, reach, wood(trunk_at, 0..0));
+        let standing = blocks(anchor, reach, wood(trunk_at, 1..6));
+        let distant = blocks(anchor, reach, wood(far_at, 1..6));
+        // A single log lying *on* the ground is a fallen branch rather than a trunk.
+        let fallen = blocks(anchor, reach, wood(trunk_at, 1..2));
+
+        let near = Vec3::new(18.5, 0.0, 17.5);
+        let found = trunk_near(&standing, near, surface, CHUNK).expect("the trunk is in reach");
+        assert_eq!(
+            (found.x, found.z),
+            (trunk_at.x as f32 + 0.5, trunk_at.z as f32 + 0.5),
+            "the climb does not go up the middle of the trunk"
+        );
+        assert_eq!(found.y, surface, "the trunk's foot is not on the ground");
+        // **The half of the contract `place` relies on**: the approach's speed is derived
+        // from this reach, so a probe that answered further would break a bound two functions
+        // away. Measured horizontally, because the foot is on the ground and the critter is
+        // too.
+        let reach = Vec3::new(found.x - near.x, 0.0, found.z - near.z).length();
+        assert!(
+            reach <= TRUNK_REACH,
+            "the probe answered a trunk {reach} away, over its {TRUNK_REACH} reach"
+        );
+        // The nearest wins: a second trunk further out does not change the answer.
+        let crowded = blocks(anchor, reach, |at| {
+            match (wood(trunk_at, 1..6)(at), wood(far_at, 1..6)(at)) {
+                (palette::LOG, _) | (_, palette::LOG) => palette::LOG,
+                (block, _) => block,
+            }
+        });
+        assert_eq!(trunk_near(&crowded, near, surface, CHUNK), Some(found));
+
+        // Every shape of "no trunk" is the fallback branch, and each is reached.
+        for (name, store) in [
+            ("a wood with no trunk in it", &bare),
+            ("a trunk out of reach", &distant),
+            ("a log lying on the ground", &fallen),
+        ] {
+            assert_eq!(
+                trunk_near(store, near, surface, CHUNK),
+                None,
+                "{name} answered a trunk"
+            );
+        }
+        // And an unreadable store answers the same way rather than panicking.
+        assert_eq!(
+            trunk_near(&ChunkStore::default(), near, surface, CHUNK),
+            None
+        );
+        assert_eq!(trunk_near(&standing, near, surface, 0), None);
+        assert_eq!(trunk_near(&standing, Vec3::NAN, surface, CHUNK), None);
+    }
+
+    #[test]
+    fn a_climbing_critter_rises_up_its_trunk_and_holds_its_column() {
+        // The climb: the approach brings it to the trunk's column on the ground, and the rise
+        // takes it up that column without moving sideways.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let store = terrain(anchor, CRITTER_RANGE + 8.0, palette::GRASS, |at| at.y < 64);
+        for species in CRITTERS.iter().filter(|row| row.climbs) {
+            for seed in 0..8u64 {
+                let seed = mix(seed, 0xC11B);
+                let trunk = Vec3::new(anchor.x + 6.5, 64.0, anchor.z - 4.5);
+                let path = walked(
+                    Some((&store, CHUNK)),
+                    species,
+                    seed,
+                    anchor,
+                    Some(trunk),
+                    life_frames(species),
+                );
+                let last = path
+                    .last()
+                    .and_then(|step| *step)
+                    .expect("level ground places every critter");
+                let (drawn, stand, rise) = last;
+                assert_eq!(rise, CLIMB_RISE, "a climb ended {rise} of {CLIMB_RISE} up");
+                assert_eq!(drawn.y, stand + rise, "the rise is not above the ground");
+                assert!(
+                    (drawn.x - trunk.x).abs() < 1e-3 && (drawn.z - trunk.z).abs() < 1e-3,
+                    "a climb ended at {drawn}, not up the trunk at {trunk}"
+                );
+                // And it is still on the ground when the rise begins, so the approach is
+                // walked rather than flown.
+                let at_rise = place(
+                    species,
+                    seed,
+                    species.forage_seconds() + species.climb_seconds() * CLIMB_APPROACH_SHARE,
+                    anchor,
+                    Some(trunk),
+                );
+                assert!(
+                    (at_rise.x - trunk.x).abs() < 1e-3 && (at_rise.z - trunk.z).abs() < 1e-3,
+                    "the rise began at {at_rise}, off the trunk at {trunk}"
+                );
+            }
         }
     }
 
