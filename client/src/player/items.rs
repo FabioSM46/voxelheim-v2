@@ -847,7 +847,9 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         armour_style: None,
     },
     // The three benches, carried as bundles the way every other structure item is, each in
-    // the colour of what it is mostly made of. Their own silhouettes are #1129.
+    // the colour of what it is mostly made of. `Bundle` is the right silhouette rather than
+    // a stand-in: it is what tells a player the place press asks for a structure, and the
+    // bench's own model is what stands in the world once the server places it.
     ItemDisplay {
         item_id: ITEM_LEATHER_BENCH,
         name: "leather bench",

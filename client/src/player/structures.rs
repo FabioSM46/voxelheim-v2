@@ -41,6 +41,7 @@ use bevy::prelude::*;
 use super::camera::{AimCamera, WorldCamera};
 use super::combat;
 use super::constants::MAX_REACH;
+use super::crafting::{ITEM_ARMOUR_BENCH, ITEM_ENCHANTING_TABLE, ITEM_LEATHER_BENCH};
 use super::interpolate::SnapshotBuffer;
 use super::target::{ApplyTargetInput, BlockTarget, DrawTargetHighlight, cell_outline_mesh};
 use super::{
@@ -137,11 +138,11 @@ const ENCHANTING_TABLE_HEADROOM: i32 = 2;
 /// [`footprint_offsets`] and [`headroom`] are exhaustive matches, so a new member of
 /// [`StructureKind`] cannot compile without visiting them — and `StructureKind::from_wire`
 /// admits a member only in the commit that teaches this module about it, so whoever adds one
-/// is already standing here. Usually that commit also draws it; the three benches are the
-/// exception, admitted with their footprints mirrored in the commit that makes the server
-/// place them and drawn nothing until their models land (#1129), on the
-/// `MobKind::VargrGuardian` precedent. A member missing from this list costs preview cells
-/// and nothing worse; [`MAX_FOOTPRINT_CELLS`] is where that bound is kept.
+/// is already standing here. Usually that commit also draws it; the three benches were the
+/// exception, admitted with their footprints mirrored in the commit that made the server
+/// place them and drawn from #1129 on, on the `MobKind::VargrGuardian` precedent. A member
+/// missing from this list costs preview cells and nothing worse; [`MAX_FOOTPRINT_CELLS`] is
+/// where that bound is kept.
 const ALL_STRUCTURE_KINDS: [StructureKind; 7] = [
     StructureKind::Tent,
     StructureKind::Forge,
@@ -462,6 +463,9 @@ pub(super) fn structure_in_hand(item_id: Option<u16>) -> Option<StructureKind> {
         ITEM_FORGE => Some(StructureKind::Forge),
         ITEM_CAMPFIRE => Some(StructureKind::Campfire),
         ITEM_RUNESTONE => Some(StructureKind::Runestone),
+        ITEM_LEATHER_BENCH => Some(StructureKind::LeatherBench),
+        ITEM_ARMOUR_BENCH => Some(StructureKind::ArmourBench),
+        ITEM_ENCHANTING_TABLE => Some(StructureKind::EnchantingTable),
         _ => None,
     }
 }
@@ -963,6 +967,48 @@ const RUNESTONE_OWN: Color = Color::linear_rgb(0.38, 0.41, 0.44);
 const RUNE_OTHER: Color = Color::linear_rgb(0.54, 0.58, 0.61);
 const RUNE_OWN: Color = Color::linear_rgb(0.72, 0.76, 0.79);
 
+/// The leather bench, in blocks: a low table over both of its cells, a hide stretched over
+/// most of its top and a strap hanging off the side. The table stands under the one cell of
+/// headroom the server clears for it.
+const LEATHER_TABLE_TOP: Vec3 = Vec3::new(0.90, 0.07, 1.84);
+const LEATHER_TABLE_HEIGHT: f32 = 0.52;
+const LEATHER_TABLE_LEG: f32 = 0.08;
+const LEATHER_HIDE: Vec3 = Vec3::new(0.70, 0.025, 1.10);
+const LEATHER_STRAP: Vec3 = Vec3::new(0.015, 0.34, 0.07);
+
+/// The armour bench: a heavy table, a cuirass form standing on a post over the anchor cell,
+/// and a hammer lying on the far cell. Chest-high, inside its two cells of headroom.
+const ARMOUR_TABLE_TOP: Vec3 = Vec3::new(0.94, 0.12, 1.90);
+const ARMOUR_TABLE_HEIGHT: f32 = 0.62;
+const ARMOUR_TABLE_LEG: f32 = 0.14;
+const ARMOUR_FORM_POST: Vec3 = Vec3::new(0.06, 0.30, 0.06);
+const ARMOUR_FORM_WAIST: Vec3 = Vec3::new(0.34, 0.20, 0.22);
+const ARMOUR_FORM_CHEST: Vec3 = Vec3::new(0.46, 0.30, 0.26);
+const ARMOUR_FORM_SHOULDERS: Vec3 = Vec3::new(0.58, 0.10, 0.24);
+const ARMOUR_HAMMER_HANDLE: Vec3 = Vec3::new(0.05, 0.05, 0.36);
+const ARMOUR_HAMMER_HEAD: Vec3 = Vec3::new(0.18, 0.08, 0.08);
+
+/// The enchanting table: a dark stone lectern — plinth, column and a reading slab tilted
+/// down toward the side it faces — with a rune laid into the slab that glows.
+const LECTERN_PLINTH: Vec3 = Vec3::new(0.72, 0.14, 0.72);
+const LECTERN_COLUMN: Vec3 = Vec3::new(0.30, 0.80, 0.30);
+const LECTERN_SLAB: Vec3 = Vec3::new(0.74, 0.08, 0.56);
+/// About -X, so the slab's front (-Z) edge is the low one a reader stands at.
+const LECTERN_TILT: f32 = -0.35;
+const LECTERN_RUNE_STROKE: f32 = 0.035;
+const LECTERN_RUNE_RAISE: f32 = 0.012;
+
+/// Bench timber, the hide worked on it, and the lectern's stone. One shade each: a station
+/// is a place anybody may work at, and nothing about it is told apart by who built it.
+const BENCH_WOOD: Color = Color::linear_rgb(0.19, 0.11, 0.05);
+const BENCH_HIDE: Color = Color::linear_rgb(0.42, 0.28, 0.15);
+const LECTERN_STONE: Color = Color::linear_rgb(0.05, 0.05, 0.07);
+
+/// The rune's glow: a cold blue, emissive for the reason the ember is — it reads as lit
+/// from its own material, and costs no light.
+const RUNE_GLOW: Color = Color::linear_rgb(0.30, 0.50, 0.95);
+const RUNE_GLOW_EMISSIVE: LinearRgba = LinearRgba::rgb(0.5, 1.2, 3.0);
+
 /// The colour, the brightness and the reach of a campfire's light.
 ///
 /// **The reach is a presentation choice and is documented as one.** The server decides
@@ -1078,6 +1124,16 @@ pub(super) struct StructureVisuals {
     fire_flame: Handle<Mesh>,
     runestone: Handle<Mesh>,
     rune: Handle<Mesh>,
+    leather_table: Handle<Mesh>,
+    leather_hide: Handle<Mesh>,
+    armour_table: Handle<Mesh>,
+    armour_iron: Handle<Mesh>,
+    lectern: Handle<Mesh>,
+    lectern_rune: Handle<Mesh>,
+    bench_wood: Handle<StandardMaterial>,
+    bench_hide: Handle<StandardMaterial>,
+    lectern_stone: Handle<StandardMaterial>,
+    rune_glow: Handle<StandardMaterial>,
     /// Indexed by `usize::from(own)`, so the two shades cannot drift apart in a `match`.
     canvas: [Handle<StandardMaterial>; 2],
     stone: [Handle<StandardMaterial>; 2],
@@ -1129,6 +1185,25 @@ pub(super) fn create_visuals(
         fire_flame: meshes.add(fire_flame_mesh()),
         runestone: meshes.add(runestone_mesh()),
         rune: meshes.add(rune_mesh()),
+        leather_table: meshes.add(leather_table_mesh()),
+        leather_hide: meshes.add(leather_hide_mesh()),
+        armour_table: meshes.add(armour_table_mesh()),
+        armour_iron: meshes.add(armour_iron_mesh()),
+        lectern: meshes.add(lectern_mesh()),
+        lectern_rune: meshes.add(lectern_rune_mesh()),
+        bench_wood: materials.add(rock(BENCH_WOOD)),
+        bench_hide: materials.add(StandardMaterial {
+            base_color: BENCH_HIDE,
+            perceptual_roughness: 1.0,
+            ..default()
+        }),
+        lectern_stone: materials.add(rock(LECTERN_STONE)),
+        rune_glow: materials.add(StandardMaterial {
+            base_color: RUNE_GLOW,
+            emissive: RUNE_GLOW_EMISSIVE,
+            perceptual_roughness: 1.0,
+            ..default()
+        }),
         canvas: [
             materials.add(canvas(CANVAS_OTHER)),
             materials.add(canvas(CANVAS_OWN)),
@@ -1395,6 +1470,156 @@ fn rune_mesh() -> Mesh {
     rune
 }
 
+/// Half a cell along the facing: the middle of a two-cell bench, between the anchor and the
+/// cell in front of it. North is -Z, as it is for the forge's hearth.
+const BENCH_MIDDLE_Z: f32 = -0.5;
+
+/// A table over both cells of a two-cell bench: a top whose upper face is at `height`, and
+/// four square legs set in from its corners.
+fn bench_table_mesh(top: Vec3, height: f32, leg: f32) -> Mesh {
+    let mut table = Mesh::from(Cuboid::from_size(top)).translated_by(Vec3::new(
+        0.0,
+        height - top.y / 2.0,
+        BENCH_MIDDLE_Z,
+    ));
+    let leg_height = height - top.y;
+    let inset = Vec2::new(
+        top.x / 2.0 - leg / 2.0 - 0.02,
+        top.z / 2.0 - leg / 2.0 - 0.02,
+    );
+    let legs = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)].map(|(x, z)| {
+        Mesh::from(Cuboid::new(leg, leg_height, leg)).translated_by(Vec3::new(
+            x * inset.x,
+            leg_height / 2.0,
+            BENCH_MIDDLE_Z + z * inset.y,
+        ))
+    });
+    merge_all(&mut table, legs, "bench table");
+    table
+}
+
+/// The leather bench's timber: a low table and nothing else.
+fn leather_table_mesh() -> Mesh {
+    bench_table_mesh(LEATHER_TABLE_TOP, LEATHER_TABLE_HEIGHT, LEATHER_TABLE_LEG)
+}
+
+/// The hide stretched over the leather bench's top, and the strap hanging off its side.
+fn leather_hide_mesh() -> Mesh {
+    let mut hide = Mesh::from(Cuboid::from_size(LEATHER_HIDE)).translated_by(Vec3::new(
+        0.0,
+        LEATHER_TABLE_HEIGHT + LEATHER_HIDE.y / 2.0,
+        BENCH_MIDDLE_Z,
+    ));
+    let strap = Mesh::from(Cuboid::from_size(LEATHER_STRAP)).translated_by(Vec3::new(
+        LEATHER_TABLE_TOP.x / 2.0 + LEATHER_STRAP.x / 2.0,
+        LEATHER_TABLE_HEIGHT - LEATHER_STRAP.y / 2.0,
+        -0.2,
+    ));
+    merge_all(&mut hide, [strap], "leather bench hide");
+    hide
+}
+
+/// Where the armour bench's hammer lies: over the cell in front of the anchor, while the
+/// cuirass form stands over the anchor itself.
+const ARMOUR_HAMMER_Z: f32 = -1.0;
+
+/// The armour bench's timber: the heavy table and the hammer's handle.
+fn armour_table_mesh() -> Mesh {
+    let mut table = bench_table_mesh(ARMOUR_TABLE_TOP, ARMOUR_TABLE_HEIGHT, ARMOUR_TABLE_LEG);
+    let handle = Mesh::from(Cuboid::from_size(ARMOUR_HAMMER_HANDLE)).translated_by(Vec3::new(
+        0.05,
+        ARMOUR_TABLE_HEIGHT + ARMOUR_HAMMER_HANDLE.y / 2.0,
+        ARMOUR_HAMMER_Z,
+    ));
+    merge_all(&mut table, [handle], "armour bench table");
+    table
+}
+
+/// The armour bench's iron: a cuirass form on its post — waist, chest and shoulders — and
+/// the hammer's head at the end of the handle.
+fn armour_iron_mesh() -> Mesh {
+    let top = ARMOUR_TABLE_HEIGHT;
+    let waist_bottom = top + ARMOUR_FORM_POST.y;
+    let chest_bottom = waist_bottom + ARMOUR_FORM_WAIST.y;
+    let shoulders_bottom = chest_bottom + ARMOUR_FORM_CHEST.y;
+
+    let mut iron = Mesh::from(Cuboid::from_size(ARMOUR_FORM_POST))
+        .translated_by(Vec3::Y * (top + ARMOUR_FORM_POST.y / 2.0));
+    let waist = Mesh::from(Cuboid::from_size(ARMOUR_FORM_WAIST))
+        .translated_by(Vec3::Y * (waist_bottom + ARMOUR_FORM_WAIST.y / 2.0));
+    let chest = Mesh::from(Cuboid::from_size(ARMOUR_FORM_CHEST))
+        .translated_by(Vec3::Y * (chest_bottom + ARMOUR_FORM_CHEST.y / 2.0));
+    let shoulders = Mesh::from(Cuboid::from_size(ARMOUR_FORM_SHOULDERS))
+        .translated_by(Vec3::Y * (shoulders_bottom + ARMOUR_FORM_SHOULDERS.y / 2.0));
+    let head = Mesh::from(Cuboid::from_size(ARMOUR_HAMMER_HEAD)).translated_by(Vec3::new(
+        0.05,
+        top + ARMOUR_HAMMER_HEAD.y / 2.0,
+        ARMOUR_HAMMER_Z - ARMOUR_HAMMER_HANDLE.z / 2.0 - ARMOUR_HAMMER_HEAD.z / 2.0,
+    ));
+
+    merge_all(
+        &mut iron,
+        [waist, chest, shoulders, head],
+        "armour bench iron",
+    );
+    iron
+}
+
+/// The middle of the lectern's reading slab, resting on the column's top.
+fn lectern_slab_centre() -> Vec3 {
+    Vec3::Y * (LECTERN_PLINTH.y + LECTERN_COLUMN.y + LECTERN_SLAB.y)
+}
+
+/// Lays a part authored in the slab's own frame onto the tilted slab.
+fn onto_lectern_slab(part: Mesh) -> Mesh {
+    part.rotated_by(Quat::from_rotation_x(LECTERN_TILT))
+        .translated_by(lectern_slab_centre())
+}
+
+/// The lectern's stone: a plinth, a column and the tilted slab.
+fn lectern_mesh() -> Mesh {
+    let mut lectern = Mesh::from(Cuboid::from_size(LECTERN_PLINTH))
+        .translated_by(Vec3::Y * (LECTERN_PLINTH.y / 2.0));
+    let column = Mesh::from(Cuboid::from_size(LECTERN_COLUMN))
+        .translated_by(Vec3::Y * (LECTERN_PLINTH.y + LECTERN_COLUMN.y / 2.0));
+    let slab = onto_lectern_slab(Mesh::from(Cuboid::from_size(LECTERN_SLAB)));
+    merge_all(&mut lectern, [column, slab], "enchanting table");
+    lectern
+}
+
+/// Ansuz, laid into the slab's upper face: a stave running up the slab and two branches
+/// falling from it. "Up" the slab is +Z, away from the low front edge.
+///
+/// Raised a hair above the stone rather than cut into it, so the glow never z-fights the
+/// face it sits on.
+fn lectern_rune_mesh() -> Mesh {
+    let lift = LECTERN_SLAB.y / 2.0 + LECTERN_RUNE_RAISE / 2.0;
+    let bar = |from: Vec2, to: Vec2| {
+        let along = to - from;
+        let middle = (from + to) / 2.0;
+        onto_lectern_slab(
+            Mesh::from(Cuboid::new(
+                LECTERN_RUNE_STROKE,
+                LECTERN_RUNE_RAISE,
+                along.length(),
+            ))
+            .rotated_by(Quat::from_rotation_y(along.x.atan2(along.y)))
+            .translated_by(Vec3::new(middle.x, lift, middle.y)),
+        )
+    };
+
+    let mut rune = bar(Vec2::new(0.08, -0.18), Vec2::new(0.08, 0.20));
+    merge_all(
+        &mut rune,
+        [
+            bar(Vec2::new(0.08, 0.20), Vec2::new(-0.12, 0.08)),
+            bar(Vec2::new(0.08, 0.08), Vec2::new(-0.12, -0.04)),
+        ],
+        "enchanting table rune",
+    );
+    rune
+}
+
 /// Where a campfire's light sits: in the flame, a little above the logs.
 fn fire_light_height() -> f32 {
     RING_STONE.y + FIRE_LOG_THICKNESS * 2.0 + FIRE_FLAME_BASE_HEIGHT / 2.0
@@ -1500,13 +1725,23 @@ fn spawn_structure(
                 part(visuals.rune.clone(), visuals.rune_stone[own].clone());
                 false
             }
-            // The three benches stand in the world and their footprints are mirrored above,
-            // so aiming and removal already work on them — but nothing draws them yet: their
-            // models are #1129. Accepted undrawn on `MobKind::VargrGuardian`'s precedent,
-            // because refusing a kind the server really places would end the session.
-            StructureKind::LeatherBench
-            | StructureKind::ArmourBench
-            | StructureKind::EnchantingTable => false,
+            StructureKind::LeatherBench => {
+                part(visuals.leather_table.clone(), visuals.bench_wood.clone());
+                part(visuals.leather_hide.clone(), visuals.bench_hide.clone());
+                false
+            }
+            StructureKind::ArmourBench => {
+                part(visuals.armour_table.clone(), visuals.bench_wood.clone());
+                part(visuals.armour_iron.clone(), visuals.iron.clone());
+                false
+            }
+            // The glow is the rune's own emissive material, not a light: a lectern is not a
+            // fire, and nothing about it should look like ground a fire keeps.
+            StructureKind::EnchantingTable => {
+                part(visuals.lectern.clone(), visuals.lectern_stone.clone());
+                part(visuals.lectern_rune.clone(), visuals.rune_glow.clone());
+                false
+            }
         };
 
         if lit {
@@ -1646,6 +1881,9 @@ mod tests {
             &FORGE_FOOTPRINT[..],
             &CAMPFIRE_FOOTPRINT[..],
             &RUNESTONE_FOOTPRINT[..],
+            &LEATHER_BENCH_FOOTPRINT[..],
+            &ARMOUR_BENCH_FOOTPRINT[..],
+            &ENCHANTING_TABLE_FOOTPRINT[..],
         ] {
             for offset in offsets {
                 let turned = [Facing::East, Facing::South, Facing::West]
@@ -1720,7 +1958,28 @@ mod tests {
                 (Vec3::new(4.0, 64.0, -7.0), Vec3::new(5.0, 67.0, -6.0)),
                 "a runestone facing {facing:?}"
             );
+            assert_eq!(
+                bounds(StructureKind::EnchantingTable, facing, anchor),
+                (Vec3::new(4.0, 64.0, -7.0), Vec3::new(5.0, 66.0, -6.0)),
+                "an enchanting table facing {facing:?}"
+            );
         }
+
+        // The two tables take the forge's two cells along the facing; the leather bench has
+        // its one cell of air and the armour bench two.
+        let north = (Vec3::new(4.0, 64.0, -8.0), Vec3::new(5.0, 65.0, -6.0));
+        assert_eq!(
+            bounds(StructureKind::LeatherBench, Facing::North, anchor),
+            north
+        );
+        assert_eq!(
+            bounds(StructureKind::ArmourBench, Facing::North, anchor),
+            (north.0, north.1 + Vec3::Y)
+        );
+        assert_eq!(
+            bounds(StructureKind::ArmourBench, Facing::East, anchor),
+            (Vec3::new(4.0, 64.0, -7.0), Vec3::new(6.0, 66.0, -6.0))
+        );
     }
 
     /// The compass is the movement basis: yaw 0 looks along -Z, and North *is* -Z.
@@ -1833,6 +2092,18 @@ mod tests {
             (
                 StructureKind::Runestone,
                 vec![runestone_mesh(), rune_mesh()],
+            ),
+            (
+                StructureKind::LeatherBench,
+                vec![leather_table_mesh(), leather_hide_mesh()],
+            ),
+            (
+                StructureKind::ArmourBench,
+                vec![armour_table_mesh(), armour_iron_mesh()],
+            ),
+            (
+                StructureKind::EnchantingTable,
+                vec![lectern_mesh(), lectern_rune_mesh()],
             ),
         ] {
             // The box the server validated, moved into the local space the meshes are
@@ -2500,6 +2771,84 @@ mod tests {
         }
     }
 
+    fn station_at(structure_id: u64, kind: StructureKind, anchor: [i32; 3]) -> StructureState {
+        StructureState {
+            kind,
+            ..tent_at(structure_id, anchor, OTHER_ID)
+        }
+    }
+
+    /// Every kind a recipe is made at stands up as something, and as something of its own:
+    /// a player finds the right station in a village by its silhouette, so no two stations
+    /// may be drawn from the same meshes. Read off the recipe mirror rather than listed, so
+    /// a fourth station arriving undrawn fails here.
+    #[test]
+    fn every_craft_station_is_drawn_from_meshes_of_its_own() {
+        let mut seen: Vec<(StructureKind, Vec<Handle<Mesh>>)> = Vec::new();
+        for kind in ALL_STRUCTURE_KINDS
+            .into_iter()
+            .filter(|kind| super::super::station::is_craft_station(*kind))
+        {
+            let mut app = aiming_app(store_with(&[]));
+            deliver(&mut app, 1, vec![station_at(900, kind, [3, 80, 0])]);
+            app.update();
+
+            let meshes: Vec<Handle<Mesh>> = parts(&mut app).into_iter().map(|(m, _)| m).collect();
+            assert!(meshes.len() >= 2, "a {kind:?} draws {} parts", meshes.len());
+            for (other, theirs) in &seen {
+                assert!(
+                    meshes.iter().all(|mesh| !theirs.contains(mesh)),
+                    "a {kind:?} shares a mesh with a {other:?}"
+                );
+            }
+            seen.push((kind, meshes));
+        }
+        let stations: Vec<_> = seen.iter().map(|(kind, _)| *kind).collect();
+        for bench in [
+            StructureKind::LeatherBench,
+            StructureKind::ArmourBench,
+            StructureKind::EnchantingTable,
+        ] {
+            assert!(stations.contains(&bench), "{bench:?} is not a station");
+        }
+    }
+
+    /// The lectern's slab tilts down toward the side it faces, and the rune lies on it
+    /// rather than inside the stone.
+    #[test]
+    fn the_lectern_slab_tilts_toward_its_front_and_carries_the_rune() {
+        let extent = |mesh: &Mesh, pick: fn(&[f32; 3]) -> bool| {
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|values| values.as_float3())
+                .expect("positions")
+                .iter()
+                .filter(|point| pick(point))
+                .map(|point| point[1])
+                .fold(f32::NEG_INFINITY, f32::max)
+        };
+        let rune = lectern_rune_mesh();
+        let front = extent(&rune, |point| point[2] < -0.1);
+        let back = extent(&rune, |point| point[2] > 0.1);
+        assert!(
+            front < back,
+            "the slab rises toward its front: {front} vs {back}"
+        );
+
+        // Taken back into the slab's own frame, every rune vertex is on or above its face.
+        let undo = Quat::from_rotation_x(LECTERN_TILT).inverse();
+        for point in rune
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("positions")
+        {
+            let local = undo * (Vec3::from_array(*point) - lectern_slab_centre());
+            assert!(
+                local.y >= LECTERN_SLAB.y / 2.0 - 1e-5,
+                "a rune vertex sinks into the slab at {local:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_runestone_draws_its_monolith_and_front_rune() {
         let mut app = aiming_app(store_with(&[]));
@@ -2895,6 +3244,13 @@ mod tests {
             structure_in_hand(Some(ITEM_RUNESTONE)),
             Some(StructureKind::Runestone)
         );
+        for (item_id, kind) in [
+            (ITEM_LEATHER_BENCH, StructureKind::LeatherBench),
+            (ITEM_ARMOUR_BENCH, StructureKind::ArmourBench),
+            (ITEM_ENCHANTING_TABLE, StructureKind::EnchantingTable),
+        ] {
+            assert_eq!(structure_in_hand(Some(item_id)), Some(kind));
+        }
         assert_eq!(structure_in_hand(None), None);
         assert_eq!(structure_in_hand(Some(ITEM_IRON_SWORD)), None);
 
@@ -3491,6 +3847,38 @@ mod tests {
             ("anvil", anvil_mesh().count_vertices(), 3 * cuboid + cone),
             // Two stacked cones.
             ("flame", flame_mesh().count_vertices(), 2 * cone),
+            // A top and four legs.
+            (
+                "leather table",
+                leather_table_mesh().count_vertices(),
+                5 * cuboid,
+            ),
+            // The hide and its strap.
+            (
+                "leather hide",
+                leather_hide_mesh().count_vertices(),
+                2 * cuboid,
+            ),
+            // A top, four legs and the hammer's handle.
+            (
+                "armour table",
+                armour_table_mesh().count_vertices(),
+                6 * cuboid,
+            ),
+            // Post, waist, chest, shoulders and the hammer's head.
+            (
+                "armour iron",
+                armour_iron_mesh().count_vertices(),
+                5 * cuboid,
+            ),
+            // Plinth, column and slab.
+            ("lectern", lectern_mesh().count_vertices(), 3 * cuboid),
+            // The stave and its two branches.
+            (
+                "lectern rune",
+                lectern_rune_mesh().count_vertices(),
+                3 * cuboid,
+            ),
         ] {
             assert_eq!(
                 got, want,
