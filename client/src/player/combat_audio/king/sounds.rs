@@ -108,6 +108,7 @@ fn note(hz: f32) -> Vec<Layer> {
                 sustain: 0.0,
                 release: 0.018,
             },
+            gate: None,
             filter: Some(Filter {
                 kind: FilterKind::Low,
                 hz: 900.0,

@@ -38,6 +38,18 @@ pub enum Curve {
     Exponential,
 }
 
+impl Curve {
+    /// Where a travel from `from` to `to` has reached, `progress` of the way through it.
+    /// Shared by every primitive that moves between two values, so a glide's pitch and a
+    /// gate's rate cannot drift apart in how they read their own curve.
+    pub(super) fn between(self, from: f64, to: f64, progress: f64) -> f64 {
+        match self {
+            Curve::Linear => from + (to - from) * progress,
+            Curve::Exponential => from * (to / from).powf(progress),
+        }
+    }
+}
+
 /// Sinusoidal frequency modulation. `depth` is a fraction of the frequency the glide has
 /// reached, so a flutter stays the same interval wide as the pitch falls under it, and it
 /// opens linearly from nothing over `onset` seconds.
@@ -74,10 +86,7 @@ impl Glide {
     pub(super) fn hz_at(self, seconds: f64) -> f64 {
         let (from, to) = (f64::from(self.from), f64::from(self.to));
         let progress = (seconds / f64::from(self.seconds)).min(1.0);
-        let centre = match self.curve {
-            Curve::Linear => from + (to - from) * progress,
-            Curve::Exponential => from * (to / from).powf(progress),
-        };
+        let centre = self.curve.between(from, to, progress);
         let opened = if self.vibrato.onset > 0.0 {
             (seconds / f64::from(self.vibrato.onset)).min(1.0)
         } else {
@@ -105,6 +114,78 @@ pub struct Filter {
     pub kind: FilterKind,
     pub hz: f32,
     pub q: f32,
+}
+
+/// A layer struck open and shut many times a second: `from` to `to` openings a second over
+/// `seconds` along `curve`, holding `to` afterwards, each opening lasting `duty` of its own
+/// period and the rest of that period at exact silence.
+///
+/// The opening is instant and falls linearly to nothing across the duty, so a short duty makes
+/// every opening a dry impact rather than a pulse of tone, and what lies between two openings
+/// is true silence rather than a dip in level. Where an [`Envelope`] shapes a sound once, a gate
+/// shapes it tens of times a second; where a [`Vibrato`] modulates a frequency, a gate
+/// modulates an amplitude. It is what a description reaches for when a voice is a sequence of
+/// impacts — a rattle, a scrape, a grain — and [`super::Sound::bake_at`] cannot serve, because
+/// a strike there is a whole independent bake and there are only [`super::MAX_LAYERS`] of them.
+///
+/// The phase accumulates from the instantaneous rate, exactly as a [`Glide`]'s does, so a train
+/// can wind up or slow down without the period stepping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gate {
+    pub from: f32,
+    pub to: f32,
+    pub seconds: f32,
+    pub curve: Curve,
+    pub duty: f32,
+}
+
+impl Gate {
+    /// Openings a second, `seconds` after the sound starts.
+    pub(super) fn hz_at(self, seconds: f64) -> f64 {
+        let progress = (seconds / f64::from(self.seconds)).min(1.0);
+        self.curve
+            .between(f64::from(self.from), f64::from(self.to), progress)
+    }
+
+    /// The gain `phase` of the way through one period: full where it opens, nothing by the end
+    /// of the duty, and nothing at all until the period comes round again.
+    fn shape(self, phase: f64) -> f64 {
+        let duty = f64::from(self.duty);
+        if phase < duty {
+            1.0 - phase / duty
+        } else {
+            0.0
+        }
+    }
+}
+
+/// One gate's running phase. Advanced once per sample, so the rate it reads is the rate at that
+/// sample rather than at the start of a block.
+#[derive(Debug)]
+pub(super) struct Gating {
+    gate: Gate,
+    phase: f64,
+    rate: f64,
+    elapsed: u64,
+}
+
+impl Gating {
+    pub(super) fn new(gate: Gate, rate: u32) -> Self {
+        Self {
+            gate,
+            phase: 0.0,
+            rate: f64::from(rate),
+            elapsed: 0,
+        }
+    }
+
+    pub(super) fn next(&mut self) -> f64 {
+        let hz = self.gate.hz_at(self.elapsed as f64 / self.rate);
+        self.elapsed = self.elapsed.saturating_add(1);
+        let phase = self.phase;
+        self.phase = (phase + hz / self.rate).fract();
+        self.gate.shape(phase)
+    }
 }
 
 /// Attack/decay/sustain followed by an explicit release. Times are seconds, never samples.
