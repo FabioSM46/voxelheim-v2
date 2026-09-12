@@ -6675,7 +6675,11 @@ fn a_life_ends_in_a_fade_and_the_population_stays_bounded_through_it() {
     // lives for every slot — every generation boundary in the table is crossed.
     let mut app = squirrelwatching(GroundLook::Grass, true);
     let mut fading = 0usize;
+    let mut peak_alive = 0usize;
     let mut seen = HashSet::new();
+    // The critters alive once the first of them has finished arriving, so "a life ended" can
+    // be asserted as a fact about these rather than inferred from how many ever existed.
+    let mut first: Vec<Entity> = Vec::new();
     for frame in 0..300 {
         app.update();
         let critters = wood(&mut app);
@@ -6690,7 +6694,12 @@ fn a_life_ends_in_a_fade_and_the_population_stays_bounded_through_it() {
             .iter()
             .filter(|critter| critter.2 == 0.0 && critter.1 > 0.0)
             .count();
-        for entity in critter_entities(&mut app) {
+        let alive = critter_entities(&mut app);
+        if frame == 20 {
+            first = alive.clone();
+        }
+        peak_alive = peak_alive.max(alive.len());
+        for entity in alive {
             seen.insert(entity);
         }
     }
@@ -6698,10 +6707,36 @@ fn a_life_ends_in_a_fade_and_the_population_stays_bounded_through_it() {
         fading > 0,
         "no critter ever faded out, so the bound was never tested during one"
     );
+    // **How many critters were ever stood up, which is a churn pin and was not one before.**
+    // This assertion used to read `seen.len() > CRITTER_COUNT_MAX` — "more than four ever
+    // lived, so a life must have ended" — and it passed for the wrong reason: a slot stood up
+    // inside its own fade window was retired on the same frame and stood up again on the next,
+    // so the count it read was the churn rather than the turnover. Measured on this fixture,
+    // which holds one critter at a time: **13 before the guard in `keep_the_critters`, 2
+    // after.** The old assertion would have gone on passing with the guard removed; this one
+    // does not.
+    //
+    // The bound is stated against the peak population rather than as a constant, so it does
+    // not silently become vacuous if this cell's `group_size` changes: the run is one and a
+    // half lives long, so every slot turns over at most twice, and three times the peak plus
+    // one is a generous reading of that.
     assert!(
-        seen.len() > critters::CRITTER_COUNT_MAX,
-        "only {} critters ever lived, so no life ever ended",
+        seen.len() <= peak_alive * 3 + 1,
+        "{} critters were stood up for a wood that never held more than {peak_alive}",
         seen.len()
+    );
+    // And a life did end, which is what the old assertion was reaching for — said directly
+    // rather than inferred from a count, because a count cannot tell turnover from churn and
+    // that confusion is what this test was previously making.
+    assert!(!first.is_empty(), "the wood was empty when the run started");
+    let alive_now = critter_entities(&mut app);
+    assert!(
+        first.iter().all(|entity| !alive_now.contains(entity)),
+        "every critter alive at the start is still alive, so no life ended"
+    );
+    assert!(
+        alive_now.iter().any(|entity| !first.contains(entity)),
+        "nothing replaced the critters whose lives ended"
     );
     assert!(
         !wood(&mut app).is_empty(),
