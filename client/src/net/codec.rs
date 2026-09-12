@@ -12,6 +12,12 @@
 //! so there is no reachable state in which the rest of the client holds a
 //! `tick_rate` of zero to divide by or a `view_distance` of 255 to allocate from.
 
+#[path = "static_props.rs"]
+mod static_props;
+// The model catalogue in the following #1203 part consumes the kind export.
+#[allow(unused_imports)]
+pub use static_props::{MAX_STATIC_PROPS, StaticPropKind, StaticPropState};
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -1236,6 +1242,8 @@ pub struct Snapshot {
     /// owner, collapsed under a broken block and simply out of view are the same fact on
     /// the wire, and the client is not entitled to distinguish them.
     pub structures: Vec<StructureState>,
+    /// Complete immutable capital decoration set, in a separate identity namespace.
+    pub static_props: Vec<StaticPropState>,
     /// Where this tick falls in the world's day, and zero from a server that keeps no
     /// clock.
     ///
@@ -1319,6 +1327,7 @@ impl Default for Snapshot {
             self_vitals: PlayerVitals::unharmed(),
             self_cast: None,
             structures: Vec::new(),
+            static_props: Vec::new(),
             tick_of_day: 0,
             world_tick: 0,
             dead_players: Vec::new(),
@@ -3612,6 +3621,8 @@ pub enum DecodeError {
     BlockingPlayerNamedTwice(u64),
     /// A structure carries the reserved identity 0.
     StructureWithoutIdentity,
+    /// A static-prop descriptor or complete-set bound breaks its wire contract.
+    InvalidStaticProp(&'static str),
     /// One id names a structure and a player, a drop, a mob, or another structure, in one
     /// snapshot. The schema's "globally unique" is a claim about the whole snapshot.
     StructureEntityConflict(u64),
@@ -4378,6 +4389,7 @@ impl fmt::Display for DecodeError {
             Self::BlockingPlayerNamedTwice(entity_id) => {
                 write!(f, "blocking_players names {entity_id} twice")
             }
+            Self::InvalidStaticProp(field) => write!(f, "invalid static prop {field}"),
             Self::StructureWithoutIdentity => {
                 write!(f, "a structure carries the reserved structure id 0")
             }
@@ -6904,6 +6916,7 @@ fn entity_snapshot(snapshot: &fb::EntitySnapshot) -> Result<Snapshot, DecodeErro
         self_vitals: player_vitals(&snapshot.self_vitals())?,
         self_cast,
         structures,
+        static_props: static_props::decode(snapshot)?,
         // Copied, not checked. See the field's own documentation: the bound is against a
         // number this function has never seen.
         tick_of_day: snapshot.tick_of_day(),
@@ -10759,7 +10772,7 @@ mod tests {
         // refuses to go without, which a V39 server never sends.
         // V41 puts health on `EntityState`: a non-zero `max_health` this client refuses to
         // go without, where a V40 server's snapshot carries only padding.
-        assert_eq!(fb::ProtocolVersion::Current.0, 41);
+        assert_eq!(fb::ProtocolVersion::Current.0, 42);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -14784,6 +14797,7 @@ mod tests {
                     mobs: vec![],
                     self_vitals: PlayerVitals::unharmed(),
                     structures: vec![],
+                    static_props: vec![],
                     dead_players: vec![],
                     blocking_players: vec![],
                     party_leader_entity_id: 0,

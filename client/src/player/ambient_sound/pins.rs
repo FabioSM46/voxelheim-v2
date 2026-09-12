@@ -3,7 +3,10 @@
 use super::*;
 use crate::audio::synth::pin;
 
-const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
+/// Visible to the catalogue's own tests so a content test can run *these* seeds rather than a
+/// second copy of them: the seeds a pin table pins are the ones a regression in seed handling
+/// lands on, so the wolf's gesture tests read this list directly (#1200).
+pub(super) const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
 
 #[test]
 fn every_ambient_sound_renders_identically_to_its_pin() {
@@ -55,9 +58,9 @@ const PINS: &[pin::Row] = &[
     ("call Eagle 0x0", 65065, [28.98983, 6.86640, 46.32582, 55.42906]),
     ("call Eagle 0x10203", 65065, [6.99825, -15.24564, 9.69421, -21.02498]),
     ("call Eagle 0xfedcba9876543210", 65065, [1.20862, -37.04444, 13.56195, -17.38928]),
-    ("call Wolf 0x0", 380380, [-48.15280, 19.58573, -109.64794, -53.43318]),
-    ("call Wolf 0x10203", 380380, [-120.48972, 20.45395, -132.55769, -14.62536]),
-    ("call Wolf 0xfedcba9876543210", 380380, [156.38050, 173.75575, -157.00243, -78.42733]),
+    ("call Wolf 0x0", 380380, [294.73353, -3.58899, 33.95288, 15.38056]),
+    ("call Wolf 0x10203", 380380, [-286.83836, 92.49962, 27.00282, -49.48961]),
+    ("call Wolf 0xfedcba9876543210", 380380, [0.08069, -35.75515, 193.97934, 153.31113]),
     ("call Cricket 0x0", 45045, [18.27520, -3.10288, -4.44538, -43.16450]),
     ("call Cricket 0x10203", 45045, [-3.81560, 6.62133, 4.83353, 20.00880]),
     ("call Cricket 0xfedcba9876543210", 45045, [-14.74555, 6.99188, 16.89307, 31.56857]),

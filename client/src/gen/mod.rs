@@ -40,6 +40,8 @@ pub mod voxelheim {
         pub use self::cast_kind_generated::*;
         mod mob_action_generated;
         pub use self::mob_action_generated::*;
+        mod static_prop_kind_generated;
+        pub use self::static_prop_kind_generated::*;
         mod structure_kind_generated;
         pub use self::structure_kind_generated::*;
         mod weather_kind_generated;
@@ -202,6 +204,8 @@ pub mod voxelheim {
         pub use self::mob_state_generated::*;
         mod mob_hit_generated;
         pub use self::mob_hit_generated::*;
+        mod static_prop_state_generated;
+        pub use self::static_prop_state_generated::*;
         mod structure_state_generated;
         pub use self::structure_state_generated::*;
         mod party_member_state_generated;
