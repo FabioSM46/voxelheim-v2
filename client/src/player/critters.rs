@@ -1944,7 +1944,10 @@ mod tests {
             for wooded in [false, true] {
                 let ambience = Ambience { ground, wooded };
                 let squirrels = species_for(&ambience).is_some();
-                let macaws = super::super::birds::species_for(&ambience) == Some(0);
+                // #1191 replaced the first-match `species_for` with a per-row question, because
+                // a country may now have a day row and a night row; the macaw is the row the
+                // squirrel shares its wood with, so ask that row.
+                let macaws = super::super::birds::BIRDS[0].flies_over(&ambience);
                 assert_eq!(
                     squirrels, macaws,
                     "{ground:?}/{wooded}: squirrels {squirrels}, macaws {macaws}"

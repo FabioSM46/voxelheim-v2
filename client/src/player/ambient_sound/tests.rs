@@ -7,7 +7,7 @@ use crate::player::sky::{PERIOD_SWITCH, Period};
 use crate::world::{VoxelChunk, palette};
 use sounds::Call;
 use std::sync::Arc;
-use wildlife::{Habitat, PARROT, SQUIRREL, VULTURE, Voice, row_of};
+use wildlife::{Habitat, OWLS, Origin, PARROT, SQUIRREL, VULTURE, Voice, row_of};
 
 struct Buffer(Vec<f32>);
 impl Sink for Buffer {
@@ -90,7 +90,7 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
         wooded: false,
         ..grass()
     };
-    assert_eq!(birds::species_for(&grass()), Some(PARROT));
+    assert!(birds::BIRDS[PARROT].flies_over(&grass()));
     // No biome, temperature, terrain seed or gameplay facts enter this selector. Trees decide
     // only whether the macaw is there to be heard.
     //
@@ -106,10 +106,13 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
         .filter(|voice| gain_of(&wood, voice.call) != gain_of(&plain, voice.call))
         .map(|voice| voice.call)
         .collect();
-    // Two lanes the trees move since #1190, not one: the macaw in the canopy and the squirrel
-    // under it. Both read the same `Ambience::wooded` through the table that draws them, which
-    // is the whole of what trees decide here — no bed moves, and no other country's voice does.
-    assert_eq!(moved, vec![Call::Parrot, Call::Squirrel]);
+    // Three lanes the trees move, not one: the macaw in the canopy, the squirrel under it
+    // (#1190) and the wood's own owl after dark (#1191). All three read the same
+    // `Ambience::wooded` through the table that draws them, which is the whole of what trees
+    // decide here — no bed moves, and no other country's voice does.
+    assert_eq!(moved, vec![Call::Parrot, Call::Squirrel, Call::Owl]);
+    // At `night = 0.3` the two day voices carry 0.7 and the night one 0.3, and the plain has
+    // none of them at all.
     for call in [Call::Parrot, Call::Squirrel] {
         assert_eq!(
             (gain_of(&wood, call), gain_of(&plain, call)),
@@ -117,6 +120,10 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
             "{call:?}"
         );
     }
+    assert_eq!(
+        (gain_of(&wood, Call::Owl), gain_of(&plain, Call::Owl)),
+        (0.3, 0.0)
+    );
 }
 
 /// #1176: the day call played on every sunny grass tile, because a treeless plain has no
@@ -139,7 +146,10 @@ fn the_macaw_is_heard_by_day_only_where_the_bird_table_flies_it() {
     ] {
         for wooded in [false, true] {
             let country = Ambience { ground, wooded };
-            let macaw = birds::species_for(&country) == Some(PARROT);
+            // The row named, asked directly. It was `species_for(..) == Some(PARROT)`, a
+            // first-match query that #1191 made unanswerable for a second row over one
+            // country — see `Habitat::Flock`.
+            let macaw = birds::BIRDS[PARROT].flies_over(&country);
             heard += usize::from(macaw);
             for night in [0.0, 0.25, 1.0] {
                 let expected = if macaw { 1.0 - night } else { 0.0 };
@@ -622,7 +632,13 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
                 [gain_of(&target, Call::Eagle), gain_of(&target, Call::Wolf)],
                 expected
             );
-            assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0);
+            // **The two ground voices still hand over, and the total is no longer one.**
+            // #1191 put an owl in the northern night as well, so the crossfading pair sums to
+            // one and the owl arrives on top of it. The pair is the claim above; this is the
+            // whole table, and the owl's own share is what accounts for the difference.
+            let owl = gain_of(&target, Call::Owl);
+            assert_eq!(owl, night, "the north's owl follows the night curve");
+            assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0 + owl);
             assert_eq!(
                 target.beds, [0.0; 5],
                 "quiet countries have no creature drone"
@@ -664,11 +680,12 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             "the desert night is silent, not quietly crowed at"
         );
     }
-    // Wooded grass at dusk is the cell where the day hands over to the night: the macaw and
-    // the squirrel going quiet together as the cricket comes up, each at half, and no other
-    // country's creature sounding at all. The sum is one per *period* rather than one
-    // outright, which is what `Period::share` promises — two day voices and one night voice
-    // crossing at dusk is 1.5, and it was 1.0 when the wood had one of each.
+    // Wooded grass at dusk is the cell where the day hands over to the night, and it is now
+    // the busiest cell in the table: the macaw and the squirrel going quiet together as the
+    // cricket and the owl come up, each at half, and no other country's creature sounding at
+    // all. The sum is one per *period* rather than one outright, which is what `Period::share`
+    // promises — two day voices and two night voices crossing at dusk is 2.0, where it was 1.0
+    // when the wood had one of each.
     let dusk = targets(&grass(), 0.5, None);
     assert_eq!(
         (
@@ -678,16 +695,21 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
         ),
         (0.5, 0.5, 0.5)
     );
-    assert_eq!(dusk.wildlife.iter().sum::<f32>(), 1.5);
+    assert_eq!(gain_of(&dusk, Call::Owl), 0.5);
+    assert_eq!(dusk.wildlife.iter().sum::<f32>(), 2.0);
     assert_eq!(
         targets(&Ambience::default(), 0.5, None).wildlife,
         [0.0; VOICES]
     );
+    // By day, because snow has two rows since #1191 and only the hour tells them apart.
     assert_eq!(
-        birds::species_for(&Ambience {
-            ground: GroundLook::Snow,
-            wooded: false
-        }),
+        birds::species_now(
+            &Ambience {
+                ground: GroundLook::Snow,
+                wooded: false
+            },
+            Some(0.0)
+        ),
         Some(2)
     );
 }
@@ -914,13 +936,16 @@ fn the_table_answers_every_country_and_half_of_the_day() {
             // issue. This empty vector is the gap, asserted rather than papered over.
             (GroundLook::Sand, _, true) => vec![],
             (GroundLook::Snow, _, false) => vec![Call::Eagle],
-            (GroundLook::Snow, _, true) => vec![Call::Wolf],
-            // Wooded grass is the one cell with seen-and-heard species in it, and since
-            // #1190 there are two of them: the macaw in the canopy and the squirrel under it,
-            // both gated on the same `Ambience::wooded`. In table order, which is claim order.
+            // The north at night is the owl and the wolf together: one is seen and heard and
+            // claims first, which is the whole of why the table is ordered as it is.
+            (GroundLook::Snow, _, true) => vec![Call::Owl, Call::Wolf],
+            // Wooded grass is the cell with seen-and-heard species in it, and there are two:
+            // the macaw in the canopy by day and the squirrel under it (#1190), with the owl
+            // taking over after dark (#1191). In table order, which is claim order.
             (GroundLook::Grass, true, false) => vec![Call::Parrot, Call::Squirrel],
             (GroundLook::Grass, false, false) => vec![],
-            (GroundLook::Grass, _, true) => vec![Call::Cricket],
+            (GroundLook::Grass, true, true) => vec![Call::Owl, Call::Cricket],
+            (GroundLook::Grass, false, true) => vec![Call::Cricket],
             // Not enough loaded evidence is silence, never a default creature.
             (GroundLook::Unknown, _, _) => vec![],
         }
@@ -967,7 +992,7 @@ fn the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture() {
     );
     assert_eq!(
         WILDLIFE[row_of(Call::Condor)].habitat,
-        Habitat::Flock(VULTURE),
+        Habitat::Flock(&[VULTURE]),
         "the condor's voice is gated on the bird table, not on the ground"
     );
     let mut heard = 0;
@@ -979,7 +1004,11 @@ fn the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture() {
     ] {
         for wooded in [false, true] {
             let country = Ambience { ground, wooded };
-            let vulture = birds::species_for(&country) == Some(VULTURE);
+            // The row named, asked directly. It was `species_for(..) == Some(VULTURE)`, a
+            // first-match query #1191 made unanswerable for a second row over one country —
+            // see `Habitat::Flock`. The claim is unchanged: this is still exactly "does the
+            // bird table fly the vulture here".
+            let vulture = birds::BIRDS[VULTURE].flies_over(&country);
             heard += usize::from(vulture);
             // The gates coincide: where the flock flies is where the ground is sand.
             assert_eq!(vulture, ground == GroundLook::Sand);
@@ -1040,18 +1069,24 @@ fn every_voice_has_its_own_stream_and_agrees_with_the_flock_it_belongs_to() {
             voice.call
         );
         assert_eq!(row_of(voice.call), index, "{:?} is in two rows", voice.call);
-        if let Habitat::Flock(species) = voice.habitat {
-            assert_eq!(
-                voice.period,
-                birds::BIRDS[species].flies,
-                "{:?} is heard when its flock is not flying",
-                voice.call
-            );
+        if let Habitat::Flock(rows) = voice.habitat {
+            // Every row named, because one creature may be two of them — the owl is the wood's
+            // and the north's. A voice heard when *any* of its rows is grounded would be a
+            // call from a species that is not in the air.
+            for row in rows {
+                assert_eq!(
+                    voice.period,
+                    birds::BIRDS[*row].flies,
+                    "{:?} is heard when its flock is not flying",
+                    voice.call
+                );
+            }
+            assert!(!rows.is_empty(), "{:?} names no flock at all", voice.call);
         }
     }
     assert_eq!(
         WILDLIFE[row_of(Call::Parrot)].habitat,
-        Habitat::Flock(PARROT),
+        Habitat::Flock(&[PARROT]),
         "the macaw's voice is gated on the bird table, not on the ground"
     );
 }
@@ -1067,6 +1102,7 @@ fn a_species_declared_nocturnal_is_not_heard_by_day() {
     let owl = Voice {
         call: Call::Eagle,
         habitat: Habitat::Ground(GroundLook::Grass),
+        origin: Origin::Bearing,
         period: Period::Night,
         stream: 0xB00,
     };
@@ -1169,7 +1205,9 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
     let body = eye + Vec3::new(3.0, 0.0, -2.0);
     assert_eq!(
         super::voice_placement(
+            Origin::Creature,
             Habitat::Critter(SQUIRREL),
+            &[],
             &[(SQUIRREL, body)],
             eye,
             &profile
@@ -1179,7 +1217,14 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
 
     // Not drawn: the row's bearing circle about the listener, at the row's own numbers.
     assert_eq!(
-        super::voice_placement(Habitat::Critter(SQUIRREL), &[], eye, &profile),
+        super::voice_placement(
+            Origin::Creature,
+            Habitat::Critter(SQUIRREL),
+            &[],
+            &[],
+            eye,
+            &profile
+        ),
         (eye, profile.radius, profile.height)
     );
 
@@ -1189,7 +1234,14 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
         .find(|voice| voice.call == Call::Cricket)
         .expect("the cricket is a row");
     assert_eq!(
-        super::voice_placement(cricket.habitat, &[(SQUIRREL, body)], eye, &profile),
+        super::voice_placement(
+            cricket.origin,
+            cricket.habitat,
+            &[],
+            &[(SQUIRREL, body)],
+            eye,
+            &profile
+        ),
         (eye, profile.radius, profile.height)
     );
 }
@@ -1201,17 +1253,17 @@ fn a_voice_that_belongs_to_a_visible_creature_is_placed_at_it() {
 
     // Nothing drawn: no body, so the lane falls back to the bearing. Silence is never the
     // fallback, which is why this answers `None` rather than suppressing the voice.
-    assert_eq!(squirrel.body(&[], eye), None);
+    assert_eq!(squirrel.body(&[], &[], eye), None);
     // A critter of another row is not this row's body.
-    assert_eq!(squirrel.body(&[(1, Vec3::ZERO)], eye), None);
+    assert_eq!(squirrel.body(&[], &[(1, Vec3::ZERO)], eye), None);
 
     // Drawn: the body, and the *nearest* one when several are, because the nearest is the one
     // the player is most likely to be looking at.
     let near = eye + Vec3::new(3.0, 0.0, 0.0);
     let far = eye + Vec3::new(-20.0, 0.0, 12.0);
-    assert_eq!(squirrel.body(&[(SQUIRREL, near)], eye), Some(near));
+    assert_eq!(squirrel.body(&[], &[(SQUIRREL, near)], eye), Some(near));
     assert_eq!(
-        squirrel.body(&[(SQUIRREL, far), (SQUIRREL, near)], eye),
+        squirrel.body(&[], &[(SQUIRREL, far), (SQUIRREL, near)], eye),
         Some(near),
         "the far squirrel spoke over the near one"
     );
@@ -1226,7 +1278,7 @@ fn a_voice_that_belongs_to_a_visible_creature_is_placed_at_it() {
         "the two squirrels order the same way from the origin, so this proves nothing"
     );
     assert_eq!(
-        squirrel.body(&[(SQUIRREL, far), (SQUIRREL, near)], vantage),
+        squirrel.body(&[], &[(SQUIRREL, far), (SQUIRREL, near)], vantage),
         Some(far)
     );
 
@@ -1235,13 +1287,13 @@ fn a_voice_that_belongs_to_a_visible_creature_is_placed_at_it() {
     // `wildlife.rs` has said since the table was written that it belongs to the issue that
     // needs it. Nothing about the macaw's lane moved here, which is what kept its pins intact.
     for habitat in [
-        Habitat::Flock(PARROT),
+        Habitat::Flock(&[PARROT]),
         Habitat::Ground(GroundLook::Grass),
         Habitat::Ground(GroundLook::Sand),
         Habitat::Ground(GroundLook::Snow),
     ] {
         assert_eq!(
-            habitat.body(&[(SQUIRREL, near)], eye),
+            habitat.body(&[], &[(SQUIRREL, near)], eye),
             None,
             "{habitat:?} took a body it does not own"
         );
@@ -1271,4 +1323,192 @@ fn the_squirrel_is_heard_exactly_where_the_critter_table_stands_it() {
     let night = targets(&grass(), 1.0, None);
     assert_eq!(gain_of(&night, Call::Squirrel), 0.0);
     assert!(gain_of(&night, Call::Cricket) > 0.0);
+}
+
+/// #1191: a night has a few hoots, not a chorus. The sparsest call in the table, driven
+/// through the shipped scheduler for ten minutes.
+#[test]
+fn a_simulated_night_hears_a_few_hoots_rather_than_a_chorus() {
+    for seed in [17, 39, 1123] {
+        let (starts, levels) = wildlife_sequence(sounds::Call::Owl, seed, 1.0, 1.0);
+        // Ten minutes of 0.1 s ticks.
+        let calls = starts.len() as f32 / 10.0;
+        assert!(
+            (0.6..=2.2).contains(&calls),
+            "{calls} hoots a minute, which is a chorus rather than a night"
+        );
+        // And it is genuinely the sparsest voice there is: sparser than the cricket, which is
+        // the thing an owl must not sound like.
+        let crickets = wildlife_sequence(sounds::Call::Cricket, seed, 1.0, 1.0)
+            .0
+            .len();
+        assert!(
+            starts.len() * 3 < crickets,
+            "{} hoots against {crickets} cri-cris",
+            starts.len()
+        );
+        // Most of the night is silence, and each hoot is heard across many ticks — two notes
+        // and the gap between them run to well over a second.
+        let silent = levels.iter().filter(|energy| **energy == 0.0).count();
+        assert!(silent > 5500, "{silent} of 6000 ticks silent");
+        let heard = 6000 - silent;
+        assert!(
+            heard >= starts.len() * 8,
+            "{heard} ticks heard from {} hoots",
+            starts.len()
+        );
+    }
+}
+
+/// The origin rule, as the table declares it.
+///
+/// An `Origin::Creature` row must name a creature the eye can see — a flock or a critter.
+/// Declaring it on a ground row would be a promise to place a voice at a body that does not
+/// exist, and the fallback would be the only branch ever taken.
+///
+/// **Both kinds now qualify**, which the name of this test no longer had to be widened for
+/// only because it says "flock": #1190 brought the squirrel as a `Critter` row placed at its
+/// body and #1191 the owl as a `Flock` row, and the two arrived independently. The count below
+/// is the part worth keeping honest — it is not "one" any more, and a row added without
+/// thought about where its voice comes from fails here rather than passing quietly.
+#[test]
+fn at_the_creature_is_only_declared_by_a_row_that_names_one() {
+    let mut placed = 0usize;
+    for voice in &WILDLIFE {
+        if voice.origin == Origin::Creature {
+            assert!(
+                matches!(voice.habitat, Habitat::Flock(_) | Habitat::Critter(_)),
+                "{:?} is placed at a creature it does not name",
+                voice.call
+            );
+            placed += 1;
+        }
+    }
+    assert_eq!(
+        placed, 2,
+        "the squirrel and the owl are placed at their own bodies today"
+    );
+    assert_eq!(WILDLIFE[row_of(Call::Owl)].origin, Origin::Creature);
+
+    // **The macaw keeps the bearing**, which is the rule's own instruction: moving a shipped
+    // sound belongs to the issue that adds a creature needing it, and #1191 added one rather
+    // than moving the macaw. Its pins are untouched for the same reason.
+    assert_eq!(WILDLIFE[row_of(Call::Parrot)].origin, Origin::Bearing);
+    assert!(
+        WILDLIFE
+            .iter()
+            .filter(|voice| matches!(voice.habitat, Habitat::Ground(_)))
+            .all(|voice| voice.origin == Origin::Bearing),
+        "a voice with no body was promised one"
+    );
+}
+
+/// The owl's voice is one row over two bird rows, and both of them are its own.
+#[test]
+fn one_owl_voice_answers_for_both_of_the_bird_tables_owl_rows() {
+    let owl = &WILDLIFE[row_of(Call::Owl)];
+    assert_eq!(owl.habitat, Habitat::Flock(&OWLS));
+    assert_eq!(OWLS.len(), 2, "an owl is the wood's row and the north's");
+    // Heard in both countries after dark, and in neither by day.
+    for ground in [GroundLook::Grass, GroundLook::Snow] {
+        let wooded = ground == GroundLook::Grass;
+        let country = Ambience { ground, wooded };
+        assert_eq!(owl.gain(&country, 1.0), 1.0, "{ground:?} at night");
+        assert_eq!(owl.gain(&country, 0.0), 0.0, "{ground:?} by day");
+    }
+    // And never over sand, at any hour — the desert has no owl row to name.
+    let desert = Ambience {
+        ground: GroundLook::Sand,
+        wooded: false,
+    };
+    for night in [0.0, 0.5, 1.0] {
+        assert_eq!(owl.gain(&desert, night), 0.0);
+    }
+    // An open plain has no owl either: the wood's row needs trees to sit in.
+    let plain = Ambience {
+        ground: GroundLook::Grass,
+        wooded: false,
+    };
+    assert_eq!(owl.gain(&plain, 1.0), 0.0);
+}
+
+/// **The night's lanes sum, and the sum is bounded — measured at the worst alignment there
+/// is, not at whichever one a ten-minute run happened to produce.**
+///
+/// Raised in review on #1219: the wood at night now carries a cricket at full gain *and* an
+/// owl at full gain, where before every cell summed to one crossfading lane. Each call is only
+/// asserted to peak below 0.85 on its own and the pins bake each row in isolation, so nothing
+/// bounded the combined output.
+///
+/// **Driving two lanes for ten minutes is the wrong instrument, and that is worth recording.**
+/// It was tried first and reported a peak of 0.7699 for both pairs — identical to four decimal
+/// places, which is the tell: that is the owl alone, because with a 30–90 s interval against
+/// the cricket's 6–16 s the two calls simply never landed on top of each other in the sample
+/// taken. A test that passes because the bad case did not occur proves nothing about the bad
+/// case.
+///
+/// So this slides one call across the other and takes the worst alignment, which is an upper
+/// bound on anything the scheduler can ever produce. The owl is given the loudest placement it
+/// can have — at its own body, distance zero, no attenuation, which is exactly what
+/// `Origin::Creature` made reachable — and its partner the attenuation of its own profile.
+///
+/// **Measured: an owl over a cricket reaches 0.883 and an owl over a wolf 0.690.** Neither
+/// clips, and the number worth keeping is the first one: twelve percent of headroom is not
+/// much, so a third night voice in either country, a louder hoot, or a shorter fallback radius
+/// for the cricket is the change that brings this down — and it fails here when it does,
+/// rather than in somebody's headphones.
+#[test]
+fn the_loudest_alignment_of_two_night_voices_does_not_clip() {
+    let rate = 8000;
+    // Every pair that can sound together after dark: the owl is heard in the wood and in the
+    // north, and each of those countries has a ground voice at night.
+    for partner in [Call::Cricket, Call::Wolf] {
+        let partner_profile = partner.profile();
+        // Its own placement, which is the loudest that voice is ever heard at.
+        let partner_gain = spatial::attenuation(
+            partner_profile.radius.hypot(partner_profile.height),
+            partner_profile.range,
+        );
+        let mut worst: f32 = 0.0;
+        let mut worst_at = 0usize;
+        for seed in (0..6u64).map(controller::scramble) {
+            // The owl at its own body: distance zero, so attenuation is exactly one.
+            assert_eq!(spatial::attenuation(0.0, Call::Owl.profile().range), 1.0);
+            let owl = Call::Owl.bake(seed, rate).unwrap();
+            let other = partner.bake(seed, rate).unwrap();
+            let owl = owl.samples();
+            let other = other.samples();
+            // Slide the partner across the whole hoot, a millisecond at a time, and take the
+            // loudest sample any alignment produces.
+            let step = (rate / 1000).max(1) as usize;
+            for offset in (0..owl.len()).step_by(step) {
+                for (index, value) in other.iter().enumerate() {
+                    let Some(under) = owl.get(offset + index) else {
+                        break;
+                    };
+                    let summed = (under + value * partner_gain).abs();
+                    if summed > worst {
+                        worst = summed;
+                        worst_at = offset;
+                    }
+                }
+            }
+        }
+        // Not vacuous: some offset really did overlap, so `worst` is a sum of two calls rather
+        // than the 0.0 the inner loop leaves when the partner sits entirely past the hoot.
+        //
+        // It used to also require `worst_at < 1000`, which the review of the assembled head
+        // found does not guard that at all: the overlap claim is `worst > 0.0` on its own, and
+        // the extra conjunct silently demanded that the loudest alignment fall inside the
+        // first 125 ms. Nothing makes that true — the hoot's second note is the longer of the
+        // two, and were it ever to become the louder one this would fail as a clipping message
+        // about a sound that does not clip.
+        assert!(worst > 0.0, "the two calls never overlapped: {worst}");
+        // The claim. A rendered sample outside [-1, 1] is a clipped one, and the mixer's
+        // buses are at unity here, so this bound is the whole of what reaches the device.
+        assert!(
+            worst <= 1.0,
+            "an owl over a {partner:?} reaches {worst} at offset {worst_at}, which clips"
+        );
+    }
 }

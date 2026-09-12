@@ -6143,11 +6143,31 @@ fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
 fn the_flight_period_is_a_row_and_a_nocturnal_row_would_invert_the_roost() {
     use crate::player::sky::{PERIOD_SWITCH, Period};
 
-    // Every species that exists today flies by day, which is why the roost test above still
-    // reads the same. A row that changes this changes the sky and must say so.
+    // **This said "every species flies by day" until #1191, and the owl is what changed it.**
+    // The assertion was never a count; it was a tripwire asking whoever added the first
+    // nocturnal row to come here and say what the roost test above stops covering. So, said:
+    // that test flies a *vulture* over sand, and sand has no night row, so what it measures —
+    // a flock that empties its sky when the night arrives — is still exactly what it
+    // measures. What it does not cover is a flock that *starts* at dusk, and
+    // `the_night_wood_and_the_night_north_fly_the_owl_and_the_desert_flies_nothing` in
+    // `birds.rs` is where that now lives.
+    //
+    // The tripwire stays rather than being deleted, narrowed to the claim the sand test
+    // actually rests on: the country it flies over must go on having no night row.
     assert!(
-        birds::BIRDS.iter().all(|row| row.flies == Period::Day),
-        "a bird row now flies at night and the roost test above no longer covers it"
+        birds::BIRDS
+            .iter()
+            .filter(|row| row.ground == GroundLook::Sand)
+            .all(|row| row.flies == Period::Day),
+        "the desert gained a night row, so the roost test above no longer empties its sky"
+    );
+    assert_eq!(
+        birds::BIRDS
+            .iter()
+            .filter(|row| row.flies == Period::Night)
+            .count(),
+        2,
+        "the nocturnal row count moved; say here what the roost test no longer covers"
     );
 
     // The switch, from both sides, including the exact boundary the old constant used.

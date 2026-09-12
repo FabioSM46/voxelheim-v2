@@ -58,6 +58,11 @@ const PINS: &[pin::Row] = &[
     ("call Squirrel 0x0", 115115, [-7.94429, -1.71007, 12.48703, 10.71695]),
     ("call Squirrel 0x10203", 115115, [-5.75800, -25.55758, 14.66264, 11.52364]),
     ("call Squirrel 0xfedcba9876543210", 115115, [3.35007, -3.00928, 29.21606, 14.66791]),
+    // The owl's three are new with #1191, and sit here because `WILDLIFE` claims
+    // seen-and-heard rows first and the owl is the fourth of them.
+    ("call Owl 0x0", 135135, [15.08984, -20.25460, 65.84948, -94.47059]),
+    ("call Owl 0x10203", 135135, [-8.50135, 43.55265, 8.14975, 19.76367]),
+    ("call Owl 0xfedcba9876543210", 135135, [17.19547, 14.37376, -15.31686, -22.54483]),
     // #1184 refreshed these three and only these three: the rattle is a gated click train.
     ("call Rattlesnake 0x0", 80080, [-6.97348, -2.07740, 6.56404, -3.78326]),
     ("call Rattlesnake 0x10203", 80080, [-10.04333, -0.44017, 1.13749, -2.26129]),

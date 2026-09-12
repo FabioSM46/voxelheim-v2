@@ -60,6 +60,7 @@ mod crafting;
 mod critters;
 mod drops;
 pub(crate) mod encounters;
+mod eyeshine;
 mod hands;
 mod horse;
 mod instance_entry;

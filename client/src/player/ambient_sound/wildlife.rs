@@ -53,21 +53,27 @@ pub(super) enum Habitat {
     Ground(GroundLook),
     /// Exactly where [`critters::species_for`] answers one row of [`critters::CRITTERS`].
     ///
-    /// **The ground half of "seen and heard"**, and the first habitat on the near side of the
-    /// origin rule at the top of this file: a critter is drawn where the player can walk up to
-    /// it, so its voice is placed at its body rather than on a circle. It is a variant of its
-    /// own rather than a `Ground` row with the same look, for the reason [`Habitat::Flock`]
-    /// is: the table that *draws* the species is where its habitat is already written down,
-    /// and a sound lane keeping a second opinion about where a visible species lives is
-    /// exactly #1176.
+    /// **The ground half of "seen and heard"**: a critter is drawn where the player can walk up
+    /// to it, so a row naming one may declare [`Origin::Creature`]. It is a variant of its own
+    /// rather than a `Ground` row with the same look for the reason [`Habitat::Flock`] is: the
+    /// table that *draws* the species is where its habitat is already written down, and a sound
+    /// lane keeping a second opinion about where a visible species lives is exactly #1176.
     Critter(usize),
-    /// Exactly where [`birds::species_for`] answers one row of [`birds::BIRDS`].
+    /// Exactly the country one named row of [`birds::BIRDS`] flies over.
     ///
     /// **For a creature that is seen as well as heard**, whose gate is the table that draws
     /// it rather than the ground alone — the macaw needs trees, and the bird table is where
     /// that is already written down. #1176 is what happens when the sound lane keeps its own
     /// opinion about where a visible species lives: the day call played on every sunny plain.
-    Flock(usize),
+    ///
+    /// **It asks the row it names, and it used to ask which row came first.** That was
+    /// `birds::species_for(ambience) == Some(species)`, which is the same answer only while
+    /// each country has one bird row; #1191 gave wooded grass and snow a night row each, and
+    /// a first-match query can never answer for the second of them. Naming the row and asking
+    /// it is also the reading that keeps the hour out of the habitat, which is what
+    /// [`Voice::period`] below is for: the crossfade over the twilight belongs to the period
+    /// and a habitat that flipped at `PERIOD_SWITCH` would put a hard edge underneath it.
+    Flock(&'static [usize]),
 }
 
 impl Habitat {
@@ -76,9 +82,35 @@ impl Habitat {
         match self {
             Self::Ground(ground) => ambience.ground == ground,
             Self::Critter(species) => critters::species_for(ambience) == Some(species),
-            Self::Flock(species) => birds::species_for(ambience) == Some(species),
+            // **Any** of the rows named, because one creature may be two rows. An owl is in
+            // the wood and in the north, and `BirdSpecies::ground` is a single `GroundLook`,
+            // so the bird table spells it as two rows of the same bird — while the *voice* is
+            // one row here, with one call, one stream and one pin.
+            Self::Flock(species) => species
+                .iter()
+                .any(|row| birds::BIRDS[*row].flies_over(ambience)),
         }
     }
+}
+
+/// Where a voice is heard **from** — the rule at the head of this file, as data.
+///
+/// It is a property of the creature and therefore a field of its row, which is what the rule
+/// says: "Which of the two applies is a property of the creature, not of the frame."
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// A random bearing at the row's `radius` and `height`, re-chosen for each call and
+    /// anchored for that call's short life. The second half of the rule: a creature nobody
+    /// sees is somewhere over there, and that is the whole truth about it.
+    Bearing,
+    /// At the body of the creature the row names, when one is drawn, and at the bearing when
+    /// none is. The first half of the rule.
+    ///
+    /// **Only [`Habitat::Flock`] rows may declare it**, because only they name a creature the
+    /// eye can see; `at_the_creature_is_only_declared_by_a_row_that_names_a_flock` holds that.
+    /// The fallback is the bearing rather than silence, which is the rule's own third bullet:
+    /// a voice with no body is still ambience.
+    Creature,
 }
 
 /// One row of [`WILDLIFE`]: one voice, and everything about where and when it is heard.
@@ -89,6 +121,14 @@ pub(super) struct Voice {
     pub(super) call: Call,
     /// Where it is heard.
     pub(super) habitat: Habitat,
+    /// Where it is heard **from**: at its own body, or on a bearing.
+    ///
+    /// **The macaw keeps [`Origin::Bearing`], deliberately.** The rule at the head of this
+    /// file says moving a shipped sound to the first half "belongs to the issue that adds a
+    /// creature which needs it, not to the refactor that wrote the rule down" — and #1191 is
+    /// the issue that adds one, not the issue that moves the macaw. Its call has come from a
+    /// bearing since it was written and still does, so no squawk moves.
+    pub(super) origin: Origin,
     /// Which half of the day it is heard in. Crossfaded over the twilight by
     /// [`Period::share`], so a country's day voice and its night voice cross rather than
     /// leaving a silent gap.
@@ -158,14 +198,37 @@ pub(super) struct Voice {
 /// would also put it below the cricket in the claim order, which is the one outcome the
 /// paragraph above exists to prevent — a squirrel scolding three blocks away falling silent so
 /// that an unseen cricket can be heard.
-pub(super) const WILDLIFE: [Voice; 7] = [
+///
+/// ## Before adding another night voice, read this number
+///
+/// The lanes **sum**, and there is not much room left. Since #1191 the wood carries a cricket
+/// and an owl after dark, and the north a wolf and an owl, where every cell used to hold one
+/// crossfading voice. Measured at the worst alignment two calls can have — slid across each
+/// other a millisecond at a time, with the owl at its own body, which is distance zero and so
+/// no attenuation at all:
+///
+/// | pair | peak |
+/// |---|---|
+/// | owl over cricket | **0.883** |
+/// | owl over wolf | 0.690 |
+///
+/// A rendered sample outside `[-1, 1]` clips, and both mixer buses are at unity, so 0.883
+/// leaves **twelve percent**. A third night voice in either country does not fit inside that,
+/// and neither does a louder hoot or a shorter fallback radius for the cricket.
+/// `the_loudest_alignment_of_two_night_voices_does_not_clip` is where it fails if you try —
+/// deliberately a worst-alignment sweep rather than a simulated night, because a ten-minute
+/// run of the real scheduler reported the two pairs as identical to seven digits (the owl
+/// alone: at a 30–90 s interval against the cricket's 6–16 s they never once landed together)
+/// and so measured nothing at all.
+pub(super) const WILDLIFE: [Voice; 8] = [
     // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
     // plain has no species and another country has another one, and neither hosts the call
     // (#1176). It had a lane of its own until the table could hold a habitat that is not the
     // ground's; the `0` salt is that lane's seed, kept so not one squawk moved.
     Voice {
         call: Call::Parrot,
-        habitat: Habitat::Flock(PARROT),
+        habitat: Habitat::Flock(&[PARROT]),
+        origin: Origin::Bearing,
         period: Period::Day,
         stream: 0,
     },
@@ -188,34 +251,60 @@ pub(super) const WILDLIFE: [Voice; 7] = [
     // mixer slot first — see the paragraph on the order above.
     Voice {
         call: Call::Condor,
-        habitat: Habitat::Flock(VULTURE),
+        habitat: Habitat::Flock(&[VULTURE]),
+        origin: Origin::Bearing,
         period: Period::Day,
         stream: 0x9865,
     },
     // The squirrel, heard by day exactly where the critter table stands it: the same wooded
-    // grass the macaw needs, read from the same `Ambience::wooded`. Second rather than sixth
-    // because it is seen as well as heard — see the claim order above.
+    // grass the macaw needs, read from the same `Ambience::wooded`. Above the ground rows
+    // because it is seen as well as heard — see the claim order above — and placed at its own
+    // body, which is what `Habitat::Critter` exists to make declarable.
     Voice {
         call: Call::Squirrel,
         habitat: Habitat::Critter(SQUIRREL),
+        origin: Origin::Creature,
         period: Period::Day,
         stream: 0x9867,
+    },
+    // The owl, heard after dark exactly where the bird table flies one — the wood or the
+    // north, which is two bird rows and one voice. **Above the ground-only rows** because it
+    // is seen as well as heard: see the claim-order paragraph on this table.
+    //
+    // Placed at its own body rather than on a bearing. An owl is sitting on a treetop the
+    // player can see, and a hoot arriving from somewhere else while the bird is plainly over
+    // there reads as a bug in the world.
+    //
+    // **The salt is `0x9866` and not `0x9865`**, which the condor took while this branch was
+    // open, nor `0x9867`, which the squirrel took: two rows sharing a stream is two creatures
+    // calling on one bearing at one moment, and
+    // `every_voice_has_its_own_stream_and_agrees_with_the_flock_it_belongs_to` is what refuses
+    // it.
+    Voice {
+        call: Call::Owl,
+        habitat: Habitat::Flock(&OWLS),
+        origin: Origin::Creature,
+        period: Period::Night,
+        stream: 0x9866,
     },
     Voice {
         call: Call::Rattlesnake,
         habitat: Habitat::Ground(GroundLook::Sand),
+        origin: Origin::Bearing,
         period: Period::Day,
         stream: 0x9860,
     },
     Voice {
         call: Call::Eagle,
         habitat: Habitat::Ground(GroundLook::Snow),
+        origin: Origin::Bearing,
         period: Period::Day,
         stream: 0x9862,
     },
     Voice {
         call: Call::Wolf,
         habitat: Habitat::Ground(GroundLook::Snow),
+        origin: Origin::Bearing,
         period: Period::Night,
         stream: 0x9863,
     },
@@ -223,6 +312,7 @@ pub(super) const WILDLIFE: [Voice; 7] = [
     Voice {
         call: Call::Cricket,
         habitat: Habitat::Ground(GroundLook::Grass),
+        origin: Origin::Bearing,
         period: Period::Night,
         stream: 0x9864,
     },
@@ -248,25 +338,51 @@ impl Habitat {
     /// since the table was written that the change belongs to the issue that needs it rather
     /// than to the one that wrote the rule down. Nothing about the macaw's lane moves here,
     /// which is also what keeps its three pin rows untouched.
-    pub(super) fn body(self, drawn: &[(usize, Vec3)], eye: Vec3) -> Option<Vec3> {
-        let Self::Critter(species) = self else {
-            return None;
+    /// **Nearest rather than first**, because a flock is several birds and the one a player is
+    /// looking at is the one whose voice has to come from the right place. With two owls in the
+    /// wood the far one's hoot arriving from the near one is a smaller error than a hoot on a
+    /// bearing, but it is still an error, and picking the nearest costs one comparison a bird.
+    /// It reads the drawn transform rather than recomputing a position, so a perched owl's hoot
+    /// comes from the branch it is actually drawn on, clamp and perch already applied.
+    ///
+    /// **Both kinds of visible creature answer here**, each from its own drawn list: a critter
+    /// row names one critter row, a flock row names bird rows — an owl is two of them, the
+    /// wood's and the north's, because a bird row carries a single `GroundLook`. #1190 and
+    /// #1191 each arrived with one kind, and keeping two selectors would have been two places
+    /// to get "nearest to the eye" wrong.
+    pub(super) fn body(
+        self,
+        flock: &[(usize, Vec3)],
+        critters: &[(usize, Vec3)],
+        eye: Vec3,
+    ) -> Option<Vec3> {
+        let nearest = |drawn: &[(usize, Vec3)], wanted: &[usize]| {
+            drawn
+                .iter()
+                .filter(|(row, _)| wanted.contains(row))
+                .map(|(_, at)| *at)
+                .filter(|at| at.is_finite())
+                .min_by(|a, b| {
+                    (*a - eye)
+                        .length_squared()
+                        .total_cmp(&(*b - eye).length_squared())
+                })
         };
-        drawn
-            .iter()
-            .filter(|(row, _)| *row == species)
-            .min_by(|a, b| {
-                (a.1 - eye)
-                    .length_squared()
-                    .total_cmp(&(b.1 - eye).length_squared())
-            })
-            .map(|(_, at)| *at)
+        match self {
+            Self::Critter(species) => nearest(critters, &[species]),
+            Self::Flock(rows) => nearest(flock, rows),
+            Self::Ground(_) => None,
+        }
     }
 }
 
 /// The griffon vulture's row in [`birds::BIRDS`] — the desert's daytime raptor, whose voice
 /// the condor is. Same table, same rule about never reordering it.
 pub(super) const VULTURE: usize = 1;
+
+/// The owl's two rows there — the wood's and the north's, one creature spelled twice because
+/// a bird row carries a single [`GroundLook`].
+pub(super) const OWLS: [usize; 2] = [birds::OWL_WOOD, birds::OWL_NORTH];
 
 impl Voice {
     /// How loudly this voice belongs where the eye is, right now: its habitat's yes or no

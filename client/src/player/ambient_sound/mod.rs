@@ -7,6 +7,7 @@ mod wildlife;
 use super::{
     Weather,
     ambience::Ambience,
+    birds::Bird,
     camera::{AimCamera, WorldCamera},
     critters::Critter,
     sky::{self, SkyClock},
@@ -23,7 +24,7 @@ use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
 use sounds::Bed;
 use sounds::CallProfile;
-use wildlife::{Habitat, WILDLIFE};
+use wildlife::{Habitat, Origin, WILDLIFE};
 
 /// How many wildlife lanes there are: one per row of [`WILDLIFE`] and never a number of its
 /// own, so a new species brings its lane, its gain and its target with it.
@@ -98,30 +99,49 @@ struct Inputs<'w, 's> {
     clock: Res<'w, SkyClock>,
     store: Option<Res<'w, ChunkStore>>,
     eyes: Query<'w, 's, &'static Transform, With<WorldCamera>>,
-    /// Every critter drawn right now, for the half of the origin rule that places a voice at
-    /// the creature it belongs to. Read-only and by row, so this lane knows *which species is
-    /// where* without knowing anything else about one — it holds no opinion about where a
-    /// critter lives, which is `critters::CRITTERS`'s to answer and `Habitat::Critter`'s to
-    /// ask (#1176 is what a second opinion costs).
+    /// Every bird drawn right now, so a voice belonging to one can be placed at it.
+    ///
+    /// **Read-only and filtered `Without<WorldCamera>`**: Bevy cannot prove a camera is not a
+    /// bird, and this system already holds the camera's `Transform`. The same reason
+    /// `birds.rs`'s own `EyeOfTheFlock` exists.
+    flock: Query<'w, 's, (&'static Bird, &'static Transform), Without<WorldCamera>>,
+    /// Every critter drawn right now, for the same half of the origin rule. Read-only and by
+    /// row, so this lane knows *which species is where* without knowing anything else about
+    /// one — it holds no opinion about where a critter lives, which is `critters::CRITTERS`'s
+    /// to answer and `Habitat::Critter`'s to ask (#1176 is what a second opinion costs).
     critters: Query<'w, 's, (&'static Critter, &'static Transform), Without<WorldCamera>>,
 }
 
-/// Where one voice is heard from this frame: its creature's body when that creature is drawn,
-/// and the row's bearing circle when it is not.
+/// Where one voice is heard from this frame: its creature's body when the row declares
+/// [`Origin::Creature`] and one is drawn, and the row's bearing circle otherwise.
 ///
 /// Named and separate so the rule can be tested rather than only read. A body collapses the
 /// circle to nothing — radius and height both zero — because the sound is *at* the animal, not
 /// on a ring around the listener; leaving either non-zero would scatter a visible creature's
 /// voice away from it. Raised in review on #1221, where the lane's own arms were exercised by
 /// nothing and a swapped pair would have passed every test.
+///
+/// **Both kinds of visible creature answer here.** A flock row names bird rows and a critter
+/// row names a critter row, and #1190 and #1191 arrived with one each; keeping two placement
+/// paths would have been two chances to forget to zero the circle. The fallback is the bearing
+/// rather than silence, which is the origin rule's own third bullet.
 fn voice_placement(
+    origin: Origin,
     habitat: Habitat,
-    drawn: &[(usize, Vec3)],
+    flock: &[(usize, Vec3)],
+    critters: &[(usize, Vec3)],
     eye_position: Vec3,
     profile: &CallProfile,
 ) -> (Vec3, f32, f32) {
-    match habitat.body(drawn, eye_position) {
-        Some(body) => (body, 0.0, 0.0),
+    // `Origin` decides whether to ask at all; `Habitat::body` decides where, from the list
+    // that draws that kind of creature. A `Bearing` row never asks, which is what keeps the
+    // macaw's shipped placement exactly where it was.
+    let body = match origin {
+        Origin::Creature => habitat.body(flock, critters, eye_position),
+        Origin::Bearing => None,
+    };
+    match body {
+        Some(at) => (at, 0.0, 0.0),
         None => (eye_position, profile.radius, profile.height),
     }
 }
@@ -177,21 +197,37 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         .iter()
         .map(|(critter, at)| (critter.species, at.translation))
         .collect();
+    // The same, for birds. Read from the transform rather than by recomputing `birds::place`,
+    // so a perched owl's hoot comes from the branch it is actually drawn on — clamp and perch
+    // already applied — rather than from the circuit it would have been flying.
+    let flock_drawn: Vec<(usize, Vec3)> = input
+        .flock
+        .iter()
+        .map(|(bird, at)| (bird.species, at.translation))
+        .collect();
     for (index, voice) in WILDLIFE.iter().enumerate() {
         country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
             * (1.0 - (-dt / controller::FADE_SECONDS).exp());
         let gain = country.wildlife_gains[index];
         let call = voice.call;
         let profile = call.profile();
-        // **The origin rule, and the whole of where it is applied.** A voice whose creature is
-        // drawn is placed *at that creature*: the origin is its body and the bearing circle
-        // collapses to nothing, so the sound moves when it moves and is occluded by what
-        // stands between. A voice with no body keeps the row's bearing at the row's radius and
-        // height. Which of the two applies is a property of the creature rather than of the
-        // frame — `Habitat::body` answers for the habitat and never looks at the clock — and
-        // silence is not one of the options.
-        let (origin, radius, height) =
-            voice_placement(voice.habitat, &drawn, eye_position, &profile);
+        // **The origin rule, and the whole of where it is applied.** A row that declares
+        // `Origin::Creature` is placed at the nearest drawn body of the creature it names, so
+        // the sound moves when it moves and is occluded by what stands between; every other row
+        // keeps its bearing at the row's radius and height. Which of the two applies is a
+        // property of the creature rather than of the frame, and silence is not an option.
+        //
+        // The radius and height are **zeroed** with the body, not kept: `Calls::update` adds
+        // them to the origin to make a bearing, and a hoot eleven blocks from the owl is the
+        // very thing placing it at the owl was for.
+        let (origin, radius, height) = voice_placement(
+            voice.origin,
+            voice.habitat,
+            &flock_drawn,
+            &drawn,
+            eye_position,
+            &profile,
+        );
         country.wildlife[index].update(
             mixer,
             CallFrame {
@@ -221,6 +257,8 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
     }
 }
 
+/// The drawn body of `rows` nearest the eye, if any is drawn at all.
+///
 #[cfg(test)]
 mod pins;
 
