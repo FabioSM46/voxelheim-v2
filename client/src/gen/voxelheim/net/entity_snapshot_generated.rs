@@ -44,6 +44,7 @@ impl<'a> EntitySnapshot<'a> {
     pub const VT_MOUNTS: ::flatbuffers::VOffsetT = 36;
     pub const VT_SELF_CAST: ::flatbuffers::VOffsetT = 38;
     pub const VT_WORLD_TICK: ::flatbuffers::VOffsetT = 40;
+    pub const VT_STATIC_PROPS: ::flatbuffers::VOffsetT = 42;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -62,6 +63,9 @@ impl<'a> EntitySnapshot<'a> {
         let mut builder = EntitySnapshotBuilder::new(_fbb);
         builder.add_world_tick(args.world_tick);
         builder.add_party_leader_entity_id(args.party_leader_entity_id);
+        if let Some(x) = args.static_props {
+            builder.add_static_props(x);
+        }
         if let Some(x) = args.self_cast {
             builder.add_self_cast(x);
         }
@@ -532,6 +536,25 @@ impl<'a> EntitySnapshot<'a> {
                 .unwrap()
         }
     }
+    /// Complete relevant overworld decoration set. Absent/empty removes all old props.
+    /// At most 256 entries, checked before allocation: the world has exactly one capital,
+    /// whose authored catalogue (including fixtures) is bounded to 256 roots. Each entry
+    /// satisfies StaticPropState. Instances send none. Relevance covers every chunk the
+    /// prop spans, so losing its origin chunk alone does not remove a visible overhang.
+    #[inline]
+    pub fn static_props(
+        &self,
+    ) -> Option<::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StaticPropState<'a>>>>
+    {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab.get::<::flatbuffers::ForwardsUOffset<
+                ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StaticPropState>>,
+            >>(EntitySnapshot::VT_STATIC_PROPS, None)
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
@@ -560,6 +583,7 @@ impl ::flatbuffers::Verifiable for EntitySnapshot<'_> {
      .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<MountState>>>>("mounts", Self::VT_MOUNTS, false)?
      .visit_field::<::flatbuffers::ForwardsUOffset<CastState>>("self_cast", Self::VT_SELF_CAST, false)?
      .visit_field::<u64>("world_tick", Self::VT_WORLD_TICK, false)?
+     .visit_field::<::flatbuffers::ForwardsUOffset<::flatbuffers::Vector<'_, ::flatbuffers::ForwardsUOffset<StaticPropState>>>>("static_props", Self::VT_STATIC_PROPS, false)?
      .finish();
         Ok(())
     }
@@ -602,6 +626,11 @@ pub struct EntitySnapshotArgs<'a> {
     >,
     pub self_cast: Option<::flatbuffers::WIPOffset<CastState<'a>>>,
     pub world_tick: u64,
+    pub static_props: Option<
+        ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'a, ::flatbuffers::ForwardsUOffset<StaticPropState<'a>>>,
+        >,
+    >,
 }
 impl<'a> Default for EntitySnapshotArgs<'a> {
     #[inline]
@@ -626,6 +655,7 @@ impl<'a> Default for EntitySnapshotArgs<'a> {
             mounts: None,
             self_cast: None,
             world_tick: 0,
+            static_props: None,
         }
     }
 }
@@ -800,6 +830,18 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> EntitySnapshotBuilder<'a, 'b,
             .push_slot::<u64>(EntitySnapshot::VT_WORLD_TICK, world_tick, 0);
     }
     #[inline]
+    pub fn add_static_props(
+        &mut self,
+        static_props: ::flatbuffers::WIPOffset<
+            ::flatbuffers::Vector<'b, ::flatbuffers::ForwardsUOffset<StaticPropState<'b>>>,
+        >,
+    ) {
+        self.fbb_.push_slot_always::<::flatbuffers::WIPOffset<_>>(
+            EntitySnapshot::VT_STATIC_PROPS,
+            static_props,
+        );
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> EntitySnapshotBuilder<'a, 'b, A> {
@@ -840,6 +882,7 @@ impl ::core::fmt::Debug for EntitySnapshot<'_> {
         ds.field("mounts", &self.mounts());
         ds.field("self_cast", &self.self_cast());
         ds.field("world_tick", &self.world_tick());
+        ds.field("static_props", &self.static_props());
         ds.finish()
     }
 }

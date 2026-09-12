@@ -72,8 +72,9 @@ pub use codec::{
     PLACEHOLDER_APPEARANCE, PartyAction, PartyInvite, PartyMemberState, PartyRequest,
     PartyRosterMember, PlaceStructureRequest, PlayerAppearance, PlayerInput, PlayerVitals,
     ProjectileKind, ProjectileState, RecipeId, RefusalReason, RefusedAction, Reject,
-    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StructureKind, StructureState,
-    WorldClock, WorldUpdate, map_tile_explored_bytes, map_tile_span,
+    RemoveStructureRequest, RepairRequest, SessionParams, Snapshot, StaticPropKind,
+    StaticPropState, StructureKind, StructureState, WorldClock, WorldUpdate,
+    map_tile_explored_bytes, map_tile_span,
 };
 // V27's stable contract, ahead of the server and presentation consumers that fill it.
 #[cfg(test)]
