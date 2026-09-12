@@ -81,6 +81,9 @@ fn noise(kind: Noise, gain: f32, attack: f32, decay: f32, filter: Filter) -> Lay
             release: 0.02,
         },
         filter: Some(filter),
+        // Water is poured and thrown, never struck open and shut: a splash is one continuous
+        // rush of noise under its envelope. #1199's gate belongs to a rattle.
+        gate: None,
     }
 }
 
@@ -134,6 +137,9 @@ fn bubble(from: f32, gain: f32, onset: f32, seconds: f32) -> Layer {
             release: 0.02,
         },
         filter: Some(band(from * 1.3, 2.4)),
+        // A bubble rings once and dies with its envelope; striking it periodically would make
+        // it a rhythm instead. See the note on `noise` above.
+        gate: None,
     }
 }
 
