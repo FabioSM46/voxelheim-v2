@@ -3,7 +3,9 @@
 //! No asset files, and the classes are the palette's rather than a second opinion about
 //! block ids.
 use crate::{
-    audio::synth::{Envelope, Exciter, Filter, FilterKind, Layer, Noise, Sound, Wave},
+    audio::synth::{
+        Curve, Envelope, Exciter, Filter, FilterKind, Glide, Layer, Noise, Sound, Vibrato, Wave,
+    },
     world::palette::MaterialClass,
 };
 
@@ -90,60 +92,105 @@ pub(super) fn hoof(ground: MaterialClass) -> Sound {
     Sound { layers }
 }
 
-/// One step of the call: a nasal, buzzing voice. Two saws a percent apart beat at about
-/// ten hertz, which is the flutter a whinny has, and a band at the nose shapes the buzz.
-fn call(hz: f32, onset: f32, decay: f32) -> [Layer; 2] {
-    let voice = |hz| Layer {
-        exciter: Exciter::Oscillator {
-            wave: Wave::Saw,
-            hz,
-        },
-        gain: 0.22,
+/// Where the call starts and ends, in hertz, and how long its fall takes.
+const SQUEAL_HZ: f32 = 1250.0;
+const CLOSE_HZ: f32 = 470.0;
+const FALL_SECONDS: f32 = 1.0;
+/// The flutter: eleven wavers a second, five percent either side of the falling pitch,
+/// opening over the first third of a second so the onset is a clean squeal.
+const FLUTTER: Vibrato = Vibrato {
+    hz: 11.0,
+    depth: 0.05,
+    onset: 0.3,
+};
+
+/// The one pitch track every voiced layer follows, at a harmonic of it. Every harmonic has
+/// the same curve and the same fractional vibrato, so the partials stay locked together as
+/// one voice rather than beating against each other.
+fn pitch(harmonic: f32, wave: Wave) -> Glide {
+    Glide {
+        wave,
+        from: SQUEAL_HZ * harmonic,
+        to: CLOSE_HZ * harmonic,
+        seconds: FALL_SECONDS,
+        curve: Curve::Exponential,
+        vibrato: FLUTTER,
+    }
+}
+
+/// A voiced layer: a partial of the pitch track shaped by one formant band of the head.
+fn formant(glide: Glide, gain: f32, hz: f32, q: f32, envelope: (f32, f32, f32)) -> Layer {
+    let (attack, decay, sustain) = envelope;
+    Layer {
+        exciter: Exciter::Glide(glide),
+        gain,
         envelope: Envelope {
-            attack: onset,
+            attack,
             decay,
-            sustain: 0.0,
+            sustain,
             release: 0.03,
         },
         filter: Some(Filter {
             kind: FilterKind::Band,
-            hz: 1300.0,
-            q: 0.9,
+            hz,
+            q,
         }),
-    };
-    [voice(hz), voice(hz * 1.012)]
+    }
 }
 
-pub(super) fn whinny() -> Sound {
-    // The synthesiser has no glide, so the fall of the call is four steps whose envelopes
-    // peak one after another — each attack is where that step is loudest — from a high
-    // squeal down to the throaty end, over a breath that carries the whole of it.
-    let mut layers = Vec::with_capacity(10);
-    for (hz, onset, decay) in [
-        (1180.0, 0.06, 0.22),
-        (1010.0, 0.20, 0.26),
-        (840.0, 0.36, 0.30),
-        (640.0, 0.55, 0.35),
-    ] {
-        layers.extend(call(hz, onset, decay));
-    }
-    layers.push(noise(0.18, 0.04, 0.90, 2200.0, FilterKind::Band));
-    layers.push(Layer {
-        exciter: Exciter::Noise(Noise::Brown),
-        gain: 0.35,
+/// Breath: noise that swells in over most of the call and closes it.
+fn breath(kind: Noise, gain: f32, filter: Filter, attack: f32, decay: f32) -> Layer {
+    Layer {
+        exciter: Exciter::Noise(kind),
+        gain,
         envelope: Envelope {
-            attack: 0.85,
-            decay: 0.25,
+            attack,
+            decay,
             sustain: 0.0,
             release: 0.03,
         },
-        filter: Some(Filter {
-            kind: FilterKind::Low,
-            hz: 400.0,
-            q: 0.7,
-        }),
-    });
-    Sound { layers }
+        filter: Some(filter),
+    }
+}
+
+pub(super) fn whinny() -> Sound {
+    // One falling, fluttering pitch through the formants of a long head: the nasal band high
+    // at 2.8 kHz carries the squeal and is gone within half a second; 1.4 kHz is the body of
+    // the call; 700 Hz grows as the pitch falls into it, and a breath takes over at the end.
+    // The close's breath is low-passed rather than banded: a band's skirts fall only 6 dB an
+    // octave, and on white noise they would carry the close brighter than the squeal.
+    let band = |hz, q| Filter {
+        kind: FilterKind::Band,
+        hz,
+        q,
+    };
+    let low = |hz| Filter {
+        kind: FilterKind::Low,
+        hz,
+        q: 0.7,
+    };
+    Sound {
+        layers: vec![
+            formant(pitch(2.0, Wave::Sine), 0.22, 2800.0, 1.4, (0.02, 0.40, 0.0)),
+            formant(
+                pitch(1.0, Wave::Triangle),
+                0.26,
+                1400.0,
+                1.1,
+                (0.04, 1.10, 0.05),
+            ),
+            formant(
+                pitch(1.0, Wave::Triangle),
+                0.20,
+                700.0,
+                0.9,
+                (0.15, 1.00, 0.30),
+            ),
+            breath(Noise::White, 0.10, band(1800.0, 0.8), 0.03, 1.1),
+            breath(Noise::White, 0.35, low(900.0), 0.85, 0.40),
+            breath(Noise::Brown, 1.0, low(500.0), 0.90, 0.30),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -170,8 +217,14 @@ mod tests {
     /// two. Every baked sound starts and ends at exact silence, so the rectangular window
     /// leaks nothing a Hann window would have saved.
     fn spectrum(samples: &[f32]) -> Vec<(f32, f64)> {
+        spectrum_every(samples, 1)
+    }
+    /// [`spectrum`] at every `stride`th bin only: a long sound's shares, at a fraction of the
+    /// arithmetic, from bins still far narrower than any band a share is read over.
+    fn spectrum_every(samples: &[f32], stride: usize) -> Vec<(f32, f64)> {
         let n = samples.len();
         (0..n / 2)
+            .step_by(stride)
             .map(|bin| {
                 let omega = std::f64::consts::TAU * bin as f64 / n as f64;
                 let coefficient = 2.0 * omega.cos();
@@ -314,6 +367,208 @@ mod tests {
         // Past the end of any strike, the call is still sounding.
         assert!(energy(&whinny[strike.len() * 3..]) > 1.0);
         assert!(difference(&whinny[..strike.len()], &strike) > 1.0);
+    }
+
+    /// The whinny's layers of one kind baked alone: the voiced partials, or the breath. A bake
+    /// is a sum of its layers, so the two halves can be read apart.
+    fn part(voiced: bool) -> Vec<f32> {
+        let layers = whinny()
+            .layers
+            .into_iter()
+            .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)) == voiced)
+            .collect();
+        samples(Sound { layers }, WHINNY_SECONDS)
+    }
+
+    /// The pitch a voiced passage is at, every ten milliseconds, from a thirty-millisecond
+    /// window: the shortest lag between 300 and 1800 Hz whose normalised autocorrelation comes
+    /// within a tenth of the best, placed between samples by a parabola through its two
+    /// neighbours. The shortest such lag rather than the best, so a period twice as long never
+    /// reads as an octave's fall. Windows under a fifth of the loudest one's amplitude are
+    /// skipped: they have no pitch worth reading.
+    fn pitch_track(samples: &[f32]) -> Vec<(f32, f32)> {
+        const WINDOW: usize = 1440;
+        const HOP: usize = 480;
+        let (shortest, longest) = (RATE as usize / 1800, RATE as usize / 300);
+        let starts = (0..samples.len() - WINDOW - longest - 1).step_by(HOP);
+        let loudest = starts
+            .clone()
+            .map(|start| energy(&samples[start..start + WINDOW]))
+            .fold(0.0, f32::max);
+        starts
+            .filter_map(|start| {
+                let window = &samples[start..start + WINDOW];
+                if energy(window) < loudest * 0.04 {
+                    return None;
+                }
+                let correlation = |lag: usize| {
+                    let later = &samples[start + lag..start + lag + WINDOW];
+                    let (mut cross, mut here, mut there) = (0.0f64, 0.0f64, 0.0f64);
+                    for (x, y) in window.iter().zip(later) {
+                        let (x, y) = (f64::from(*x), f64::from(*y));
+                        cross += x * y;
+                        here += x * x;
+                        there += y * y;
+                    }
+                    cross / (here * there).sqrt()
+                };
+                let r: Vec<f64> = (0..=longest + 1)
+                    .map(|lag| {
+                        if lag + 1 < shortest {
+                            0.0
+                        } else {
+                            correlation(lag)
+                        }
+                    })
+                    .collect();
+                let best = r[shortest..=longest]
+                    .iter()
+                    .copied()
+                    .fold(f64::MIN, f64::max);
+                let lag = (shortest..=longest).find(|&lag| {
+                    r[lag] >= best * 0.9 && r[lag] >= r[lag - 1] && r[lag] >= r[lag + 1]
+                })?;
+                let (before, at, after) = (r[lag - 1], r[lag], r[lag + 1]);
+                let offset = 0.5 * (before - after) / (before - 2.0 * at + after);
+                Some((
+                    (start + WINDOW / 2) as f32 / RATE as f32,
+                    (f64::from(RATE) / (lag as f64 + offset)) as f32,
+                ))
+            })
+            .collect()
+    }
+
+    /// Each pitch divided by the mean of the nine around it — ninety milliseconds, one full
+    /// waver of the flutter — minus one: the flutter alone, with the fall taken out.
+    fn trend(track: &[(f32, f32)]) -> Vec<f32> {
+        (0..track.len())
+            .map(|index| {
+                let around = &track[index.saturating_sub(4)..(index + 5).min(track.len())];
+                around.iter().map(|(_, hz)| hz).sum::<f32>() / around.len() as f32
+            })
+            .collect()
+    }
+
+    /// #1160: the call was four fixed pitches — 1180, 1010, 840 and 640 Hz — each a jump of
+    /// 14 to 24% from the one before, which the ear hears as stairs. It now falls as one
+    /// continuous track, and no ten milliseconds of it moves by more than 8%: the fall and
+    /// the flutter together.
+    #[test]
+    fn the_whinny_falls_continuously_from_a_high_squeal_to_a_low_close() {
+        let track = pitch_track(&part(true));
+        assert!(track.len() > 80, "{} voiced windows", track.len());
+        let (start, end) = (track[0].1, track[track.len() - 1].1);
+        assert!(start > 1100.0, "opens at {start} Hz");
+        assert!(end < 560.0, "closes at {end} Hz");
+        for pair in track.windows(2) {
+            let step = (pair[1].1 / pair[0].1 - 1.0).abs();
+            assert!(step < 0.08, "a {step} step: {pair:?}");
+        }
+        // With the flutter averaged out, the pitch only ever falls or holds: within 1%, which
+        // is what a ninety-millisecond mean leaves of the flutter once the fall has ended.
+        for pair in trend(&track).windows(2) {
+            assert!(pair[1] < pair[0] * 1.01, "the fall turns back up: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn the_whinny_flutters_fast_through_its_middle() {
+        let track = pitch_track(&part(true));
+        let flutter: Vec<f32> = track
+            .iter()
+            .zip(trend(&track))
+            .filter(|((time, _), _)| (0.3..1.0).contains(time))
+            .map(|((_, hz), trend)| hz / trend - 1.0)
+            .collect();
+        let crossings = flutter
+            .windows(2)
+            .filter(|pair| pair[0].signum() != pair[1].signum())
+            .count();
+        let rate = crossings as f32 / 2.0 / (flutter.len() as f32 * 0.01);
+        assert!((8.0..=16.0).contains(&rate), "flutter at {rate} Hz");
+        let depth = (flutter.iter().map(|x| x * x).sum::<f32>() / flutter.len() as f32).sqrt();
+        assert!(depth > 0.015, "flutter {depth} deep");
+    }
+
+    #[test]
+    fn the_whinny_opens_bright_and_closes_low_and_breathy_below_four_kilohertz() {
+        let call = samples(whinny(), WHINNY_SECONDS);
+        let above = 1.0 - share_below(&spectrum_every(&call, 16), 4000.0);
+        assert!(above < 0.05, "{above} of the call above 4 kHz");
+        let span = RATE as usize * 3 / 10;
+        let open = centroid(&spectrum(&call[..span]));
+        let close = centroid(&spectrum(&call[call.len() - span..]));
+        assert!(
+            open > close * 1.5,
+            "opens at {open} Hz, closes at {close} Hz"
+        );
+        let (voiced, breath) = (part(true), part(false));
+        let breathy = |from: f32, to: f32| {
+            let range = (from * RATE as f32) as usize..(to * RATE as f32) as usize;
+            let breath = energy(&breath[range.clone()]);
+            breath / (breath + energy(&voiced[range]))
+        };
+        assert!(
+            breathy(0.95, 1.25) > breathy(0.3, 0.7) * 2.0,
+            "breath is {} of the close and {} of the middle",
+            breathy(0.95, 1.25),
+            breathy(0.3, 0.7)
+        );
+    }
+
+    /// #1143's call peaked at 0.67 with an RMS of 0.105 at 48 kHz. The voice that replaces it
+    /// keeps that level, never clips, and starts and ends at silence at every device rate.
+    #[test]
+    fn the_whinny_keeps_the_level_of_the_call_it_replaces_at_every_rate() {
+        for rate in [8_000, 44_100, 48_000, 96_000, 192_000] {
+            let baked = whinny().bake(WHINNY_SECONDS, rate, 1122).unwrap();
+            let call = baked.samples();
+            let rms = (energy(call) / call.len() as f32).sqrt();
+            assert!(peak(call) < 0.85, "{rate}: peaks at {}", peak(call));
+            assert!((0.07..0.15).contains(&rms), "{rate}: RMS {rms}");
+            assert_eq!(call.first(), Some(&0.0));
+            assert_eq!(call.last(), Some(&0.0));
+        }
+    }
+
+    #[test]
+    fn the_whinny_is_one_pitch_track_of_gentle_partials_through_formants() {
+        let voiced: Vec<_> = whinny()
+            .layers
+            .into_iter()
+            .filter_map(|layer| match layer.exciter {
+                Exciter::Glide(glide) => Some((glide, layer.filter)),
+                Exciter::Oscillator { .. } => panic!("a fixed pitch in the call: {layer:?}"),
+                Exciter::Noise(_) => None,
+            })
+            .collect();
+        assert!(voiced.len() >= 3);
+        let (first, _) = voiced[0];
+        let mut formants = vec![];
+        for (glide, filter) in voiced {
+            assert!(
+                matches!(glide.wave, Wave::Sine | Wave::Triangle),
+                "{glide:?}"
+            );
+            // Every partial is a harmonic of one track: the same fall, the same flutter.
+            assert!((glide.to / glide.from - first.to / first.from).abs() < 1e-6);
+            assert_eq!(
+                (glide.seconds, glide.curve, glide.vibrato),
+                (first.seconds, first.curve, first.vibrato)
+            );
+            let Some(Filter {
+                kind: FilterKind::Band,
+                hz,
+                ..
+            }) = filter
+            else {
+                panic!("a partial outside a formant: {filter:?}");
+            };
+            formants.push(hz);
+        }
+        assert!(formants.iter().any(|hz| (600.0..=800.0).contains(hz)));
+        assert!(formants.iter().any(|hz| (1200.0..=1600.0).contains(hz)));
+        assert!(formants.iter().any(|hz| (2400.0..=3200.0).contains(hz)));
     }
 
     #[test]

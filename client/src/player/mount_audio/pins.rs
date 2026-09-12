@@ -43,5 +43,5 @@ const PINS: &[(&str, u64)] = &[
     ("hoof Foliage", 0x1b6ea626dda60c95),
     ("hoof Glass", 0x287525a66fa3d458),
     ("hoof Water", 0x8ed610ce00e6ef07),
-    ("whinny", 0xe30447a22acd6fb9),
+    ("whinny", 0xa973a9f21097038e),
 ];
