@@ -20,7 +20,10 @@ use crate::{
 };
 use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
-use sounds::{Bed, CALLS};
+use sounds::{Bed, CALLS, Call};
+
+/// The macaw's row in [`birds::BIRDS`], which is appended to and never reordered.
+const PARROT: usize = 0;
 
 const BEDS: [Bed; 5] = [
     Bed::Rain,
@@ -69,9 +72,9 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
             WeatherKind::Clear | WeatherKind::Sandstorm => (0.0, 0.0),
         }
     });
-    // The existing grassy species is the macaw. No visible flock on a treeless plain
-    // means it may be heard off-screen, not that we invent another species there.
-    let parrot = birds::species_for(ambience).is_none_or(|species| species == 0);
+    // The macaw is heard only where the bird table flies it: wooded grass. An open plain has
+    // no species and another country has another one, and neither hosts the call (#1176).
+    let parrot = birds::species_for(ambience) == Some(PARROT);
     let (sand_wind, ice_wind) = weather.map_or((0.0, 0.0), |weather| {
         let strength = f32::from(weather.intensity) / 255.0;
         match weather.kind {
@@ -90,7 +93,7 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
             // The same green-ground night the cricket bed was gated on, now a sparse call.
             green * night,
         ],
-        day: green * (1.0 - night) * f32::from(u8::from(parrot)),
+        day: (1.0 - night) * f32::from(u8::from(parrot)),
     }
 }
 
@@ -150,14 +153,15 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
     country.day_gain +=
         (target.day - country.day_gain) * (1.0 - (-dt / controller::FADE_SECONDS).exp());
     let gain = country.day_gain;
+    let parrot = Call::Parrot.profile();
     country.calls.update(
         mixer,
         CallFrame {
             dt,
             seed,
-            interval: [0.7, 2.5],
-            radius: 7.0,
-            height: 5.0,
+            interval: parrot.interval,
+            radius: parrot.radius,
+            height: parrot.height,
             origin: eye_position,
             gain,
         },
@@ -167,11 +171,11 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                 eye_position,
                 spatial::listener_yaw(eye.rotation),
                 source,
-                32.0,
+                parrot.range,
                 cover,
             )
         },
-        |seed, rate| sounds::parrot(seed).bake(0.3, rate, seed),
+        |seed, rate| Call::Parrot.bake(seed, rate),
     );
     for (index, call) in CALLS.into_iter().enumerate() {
         country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
