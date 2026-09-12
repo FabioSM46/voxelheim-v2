@@ -77,3 +77,21 @@ func TestCastleFurnitureReservationsKeepFloorAndStandingHeadroom(t *testing.T) {
 		}
 	}
 }
+
+func TestEastCastleRoomRoutesStayTwoCellsWideOnEveryFloor(t *testing.T) {
+	t.Parallel()
+	s := SchematicFor(BuildingKeep)
+	// These are the public floor-plan reservations, not coordinates derived from
+	// whichever air cells the drawing happens to contain.
+	for _, y := range []int{0, 7, 14, 21, 28} {
+		for _, r := range [][4]int{{49, 50, 24, 38}, {37, 56, 24, 25}, {37, 38, 6, 19}, {45, 48, 20, 25}} {
+			for x := r[0]; x <= r[1]; x++ {
+				for z := r[2]; z <= r[3]; z++ {
+					if !standableCell(s, x, y, z) {
+						t.Fatalf("east route cell (%d,%d,%d) lacks standing clearance", x, y, z)
+					}
+				}
+			}
+		}
+	}
+}

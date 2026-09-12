@@ -100,17 +100,21 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 	}
 }
 
-func TestCastleWestFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
+func TestCastleMainFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
 	for turn := range 4 {
 		t.Run(fmt.Sprint(turn), func(t *testing.T) {
 			c := castleTerrain{turn: turn}
-			for _, west := range []bool{true} {
+			for _, west := range []bool{true, false} {
 				side, near, far := 14.5, 7.5, 11.5
 				top := 21
 				if !west {
-					side, near, far, top = 49.5, 51.5, 55.5, 28
+					side, near, far, top = 49.5, 52.5, 55.5, 28
 				}
-				route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {side, 0, 43.5}, {side, 0, 37.5}, {near, 0, 37.5}}
+				door := side
+				if !west {
+					door = 46.5
+				}
+				route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {door, 0, 43.5}, {door, 0, 37.5}, {side, 0, 37.5}, {near, 0, 37.5}}
 				for floor := 0; floor < top; floor += 7 {
 					x, z := near, 29.5
 					if (floor/7)%2 == 1 {
@@ -118,7 +122,11 @@ func TestCastleWestFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
 					}
 					route = append(route, [3]float64{x, float64(floor + 7), z})
 					y := float64(floor + 7)
-					route = append(route, [3]float64{side, y, z}, [3]float64{side, y, 24.5}, [3]float64{16.5, y, 24.5}, [3]float64{16.5, y, 22.5}, [3]float64{16.5, y, 24.5}, [3]float64{side, y, 24.5}, [3]float64{side, y, z}, [3]float64{x, y, z})
+					roomX := 16.5
+					if !west {
+						roomX = 46.5
+					}
+					route = append(route, [3]float64{side, y, z}, [3]float64{side, y, 24.5}, [3]float64{roomX, y, 24.5}, [3]float64{roomX, y, 22.5}, [3]float64{roomX, y, 24.5}, [3]float64{side, y, 24.5}, [3]float64{side, y, z}, [3]float64{x, y, z})
 					if floor+7 < top {
 						nextX := far
 						if (floor/7)%2 == 1 {
