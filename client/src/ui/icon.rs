@@ -501,8 +501,9 @@ const SHOVEL: [IconPart; 4] = [
 
 /// Armour laid flat: a broad chest plate with two shoulders and a narrowed waist.
 ///
-/// The picture of every armour item that is not a sculpted piece — the leather set today —
-/// told apart by the item registry's colour. A sculpted piece draws [`armour_parts`] instead.
+/// The picture of every armour item that is not a sculpted piece, told apart by the item
+/// registry's colour. Every armour row in this build names a set, so each draws
+/// [`armour_parts`] instead; this is what a row naming none would fall back to.
 const ARMOUR: [IconPart; 3] = [
     IconPart {
         left: 27.0,
@@ -871,8 +872,299 @@ pub(crate) fn armour_parts(style: ArmourStyle, piece: ArmourPiece) -> &'static [
         (ArmourStyle::Rusty, ArmourPiece::Head) => &RUSTY_HELM,
         (ArmourStyle::Rusty, ArmourPiece::Chest) => &RUSTY_CUIRASS,
         (ArmourStyle::Rusty, ArmourPiece::Legs) => &RUSTY_GREAVES,
+        (ArmourStyle::Leather, ArmourPiece::Head) => &LEATHER_CAP,
+        (ArmourStyle::Leather, ArmourPiece::Chest) => &LEATHER_JERKIN,
+        (ArmourStyle::Leather, ArmourPiece::Legs) => &LEATHER_LEGGINGS,
     }
 }
+
+/// The leather cap, face on: a soft dome with the stitched seam over its crown, a folded brim
+/// with its stitched edge, two side flaps tied at their feet and a chin strap between them —
+/// with the face left open, as the worn cap leaves it.
+const LEATHER_CAP: [IconPart; 9] = [
+    IconPart {
+        left: 24.0,
+        top: 16.0,
+        width: 52.0,
+        height: 36.0,
+        radius: 45.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 48.5,
+        top: 17.0,
+        width: 3.0,
+        height: 27.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 22.0,
+        top: 44.0,
+        width: 13.0,
+        height: 30.0,
+        radius: 30.0,
+        shade: -0.05,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 65.0,
+        top: 44.0,
+        width: 13.0,
+        height: 30.0,
+        radius: 30.0,
+        shade: -0.05,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 22.0,
+        top: 69.0,
+        width: 13.0,
+        height: 4.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 65.0,
+        top: 69.0,
+        width: 13.0,
+        height: 4.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 30.0,
+        top: 76.0,
+        width: 40.0,
+        height: 5.0,
+        radius: 30.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 18.0,
+        top: 42.0,
+        width: 64.0,
+        height: 10.0,
+        radius: 30.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 21.0,
+        top: 45.5,
+        width: 58.0,
+        height: 2.5,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The leather jerkin laid flat: a body of hide with rounded shoulders, laced up the front, two
+/// straps crossing the chest with a buckle high on each, and a buckled belt over a flared skirt.
+const LEATHER_JERKIN: [IconPart; 13] = [
+    IconPart {
+        left: 16.0,
+        top: 20.0,
+        width: 24.0,
+        height: 16.0,
+        radius: 40.0,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 60.0,
+        top: 20.0,
+        width: 24.0,
+        height: 16.0,
+        radius: 40.0,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 26.0,
+        top: 20.0,
+        width: 48.0,
+        height: 56.0,
+        radius: 12.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 24.0,
+        top: 72.0,
+        width: 52.0,
+        height: 14.0,
+        radius: 16.0,
+        shade: 0.12,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 48.5,
+        top: 24.0,
+        width: 3.0,
+        height: 42.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 45.0,
+        top: 30.0,
+        width: 10.0,
+        height: 2.5,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 45.0,
+        top: 58.0,
+        width: 10.0,
+        height: 2.5,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 47.0,
+        top: 18.0,
+        width: 6.0,
+        height: 56.0,
+        rotation: 0.6,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 47.0,
+        top: 18.0,
+        width: 6.0,
+        height: 56.0,
+        rotation: -0.6,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 24.0,
+        top: 68.0,
+        width: 52.0,
+        height: 6.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 45.0,
+        top: 67.0,
+        width: 10.0,
+        height: 8.0,
+        radius: 10.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 54.0,
+        top: 30.5,
+        width: 8.0,
+        height: 8.0,
+        radius: 10.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 38.0,
+        top: 30.5,
+        width: 8.0,
+        height: 8.0,
+        radius: 10.0,
+        shade: 0.30,
+        ..IconPart::PLAIN
+    },
+];
+
+/// The leather leggings side by side: two legs of hide with a lace line down each outer side,
+/// a padded knee, a strap under it and a turned cuff at each ankle.
+const LEATHER_LEGGINGS: [IconPart; 10] = [
+    IconPart {
+        left: 22.0,
+        top: 18.0,
+        width: 20.0,
+        height: 64.0,
+        radius: 12.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 18.0,
+        width: 20.0,
+        height: 64.0,
+        radius: 12.0,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 23.0,
+        top: 22.0,
+        width: 2.5,
+        height: 54.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 74.5,
+        top: 22.0,
+        width: 2.5,
+        height: 54.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 20.0,
+        top: 78.0,
+        width: 24.0,
+        height: 8.0,
+        radius: 25.0,
+        shade: 0.15,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 56.0,
+        top: 78.0,
+        width: 24.0,
+        height: 8.0,
+        radius: 25.0,
+        shade: 0.15,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 22.0,
+        top: 58.0,
+        width: 20.0,
+        height: 4.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 58.0,
+        top: 58.0,
+        width: 20.0,
+        height: 4.0,
+        shade: -0.45,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 20.0,
+        top: 40.0,
+        width: 24.0,
+        height: 16.0,
+        radius: 40.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 56.0,
+        top: 40.0,
+        width: 24.0,
+        height: 16.0,
+        radius: 40.0,
+        shade: 0.25,
+        ..IconPart::PLAIN
+    },
+];
 
 pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
     match shape {
@@ -1413,8 +1705,8 @@ mod tests {
             }
         }
         assert_eq!(
-            sculpted, 3,
-            "the rusty helm, cuirass and greaves are the sculpted pieces"
+            sculpted, 6,
+            "the rusty and the leather head, chest and leg pieces are the sculpted pieces"
         );
     }
 

@@ -998,10 +998,15 @@ is therefore a variant, an arm and a module beside `armour/rusty.rs` — never a
 comparison. Every style is cut inside the cell `placed_armour` gives its segment, which is what
 keeps the pivots, the walk cycle and the envelope unchanged, and the tests read that off the built
 vertices rather than off the tables. A sculpted look carries texture coordinates in its livery's
-band and its material carries the livery image; recesses are a darker vertex colour. **A closed helm
-hides the hair**: every hair model reaches half a notch above the helmet's cell, and that cell is
+band and its material carries the livery image; recesses are a darker vertex colour. The leather set
+(`armour/leather.rs`) has no livery and draws its two leathers, the hide and the straps, laces and
+stitching over it, as two vertex shades (`Tone::Plate` and `Tone::Strap`). **Headgear cut inside the
+helmet's cell hides the hair**: every hair model reaches half a notch above that cell, and the cell is
 not armour's to grow, so `ArmourStyle::hides_hair` is the switch and
-`every_hair_model_reaches_above_the_helmets_cell` pins the reason for it. The ground drop and the
+`every_hair_model_reaches_above_the_helmets_cell` pins the reason for it. **A style may leave the
+body showing on purpose** — the leather cap leaves the face open — and says so with
+`ArmourStyle::openings`, the one exception the containment test accepts; `no_part_closes_a_declared_opening`
+holds every declared opening open. The ground drop and the
 third-person fist draw a sculpted piece from the same segment meshes, merged and scaled by
 `armour::piece_mesh`, and the cell draws a per-piece picture, `icon::armour_parts`, keyed on set and
 piece the way every other picture is keyed on shape.

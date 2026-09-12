@@ -34,6 +34,7 @@
 //! neutral texel instead. The recesses are darker by a vertex colour, which multiplies the
 //! material's colour and its livery alike.
 
+mod leather;
 mod rusty;
 
 use bevy::asset::RenderAssetUsages;
@@ -54,12 +55,15 @@ pub(crate) enum ArmourStyle {
     /// Old plate, worn: a knight's helm, a cuirass with pauldrons, segmented vambraces and
     /// greaves with knee cops. See [`rusty`].
     Rusty,
+    /// Worked hide: a stitched cap with a brim, a laced and strapped jerkin, strapped bracers
+    /// and leggings with a padded knee. See [`leather`].
+    Leather,
 }
 
 impl ArmourStyle {
     /// Every style, for the sweeps. Hand-written for the reason `ItemShape::ALL` is.
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 1] = [Self::Rusty];
+    pub(crate) const ALL: [Self; 2] = [Self::Rusty, Self::Leather];
 
     /// The parts one segment of this style is cut from.
     ///
@@ -67,6 +71,21 @@ impl ArmourStyle {
     fn parts(self, segment: ArmourSegment) -> &'static [Part] {
         match self {
             Self::Rusty => rusty::parts(segment),
+            Self::Leather => leather::parts(segment),
+        }
+    }
+
+    /// Where one segment of this style deliberately shows the body under it.
+    ///
+    /// **A declaration to the containment test, and nothing a mesh reads.** Every other point
+    /// of a covered body piece has to lie inside some part; a point inside an opening does not,
+    /// and `no_part_closes_a_declared_opening` holds the style to leaving it open. A closed helm
+    /// declares none; a cap with a brim declares the face.
+    #[cfg(test)]
+    fn openings(self, segment: ArmourSegment) -> &'static [Opening] {
+        match self {
+            Self::Rusty => &[],
+            Self::Leather => leather::openings(segment),
         }
     }
 
@@ -80,7 +99,28 @@ impl ArmourStyle {
     pub(super) const fn hides_hair(self) -> bool {
         match self {
             Self::Rusty => rusty::HIDES_HAIR,
+            Self::Leather => leather::HIDES_HAIR,
         }
+    }
+}
+
+/// A box of a segment's cell, in the sheet's notches, where a style leaves the body showing.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Opening {
+    pub(super) x: (f32, f32),
+    pub(super) y: (f32, f32),
+    pub(super) z: (f32, f32),
+}
+
+#[cfg(test)]
+impl Opening {
+    /// Whether a point in the sheet's notches is inside this opening.
+    pub(super) fn holds(self, point: Vec3) -> bool {
+        const SLACK: f32 = 1e-3;
+        let inside =
+            |value: f32, (low, high): (f32, f32)| value >= low - SLACK && value <= high + SLACK;
+        inside(point.x, self.x) && inside(point.y, self.y) && inside(point.z, self.z)
     }
 }
 
@@ -198,11 +238,23 @@ pub(super) fn piece_mesh(look: ArmourLook, piece: ArmourPiece, longest: f32) -> 
 /// the core of a plate is the same metal in shadow, so it keeps the livery's rust under it.
 const RECESS_SHADE: f32 = 0.55;
 
-/// Which surface one part is: the plate a player sees, or the core showing through a gap.
+/// How dark a strap, a lace or a line of stitching is drawn over the hide it is laid on.
+///
+/// **Darker leather, not a shadow**: lighter than a recess, because a strap stands proud of the
+/// hide and catches the same light, and dark enough to read as a second leather at the
+/// distance a body is hardest to read.
+const STRAP_SHADE: f32 = 0.62;
+
+/// Which surface one part is: the plate or hide a player sees, the core showing through a gap,
+/// or darker leather laid over the hide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tone {
+    /// The outer surface: a plate of the rusty set, the hide of the leather set.
     Plate,
+    /// The core of a plated segment, in shadow between its plates.
     Recess,
+    /// A strap, lace, tie or seam of the leather set, standing proud of the hide.
+    Strap,
 }
 
 impl Tone {
@@ -210,6 +262,7 @@ impl Tone {
         match self {
             Self::Plate => 1.0,
             Self::Recess => RECESS_SHADE,
+            Self::Strap => STRAP_SHADE,
         }
     }
 }
@@ -630,7 +683,9 @@ mod tests {
     /// as the piece it wraps, not in the walk cycle either.
     ///
     /// Read against the parts rather than the triangles: every corner, edge midpoint and face
-    /// centre of each covered box, clipped to the height the cell spans, lies in some solid.
+    /// centre of each covered box, clipped to the height the cell spans, lies in some solid —
+    /// or in an opening the style declares, which `no_part_closes_a_declared_opening` holds it
+    /// to leaving open.
     #[test]
     fn the_body_under_a_sculpted_segment_stays_inside_it() {
         for style in ArmourStyle::ALL {
@@ -651,7 +706,11 @@ mod tests {
                                 style
                                     .parts(segment)
                                     .iter()
-                                    .any(|part| contains(*part, point)),
+                                    .any(|part| contains(*part, point))
+                                    || style
+                                        .openings(segment)
+                                        .iter()
+                                        .any(|opening| opening.holds(point)),
                                 "{style:?} {segment:?} leaves {piece:?} showing at {point}"
                             );
                         }
@@ -791,25 +850,79 @@ mod tests {
         }
     }
 
-    /// Every sculpted segment shows both a plate and a recess, and the recess is the darker.
+    /// Every sculpted segment shows its outer surface and something darker on it: the rusty
+    /// set a plate and a recess, the leather set hide and a strap.
     #[test]
-    fn every_segment_has_plates_and_darker_recesses() {
-        assert!(Tone::Recess.shade() < Tone::Plate.shade());
+    fn every_segment_has_a_surface_and_a_darker_tone() {
+        for darker in [Tone::Recess, Tone::Strap] {
+            assert!(darker.shade() < Tone::Plate.shade(), "{darker:?}");
+            assert!(
+                darker.shade() > 0.0,
+                "{darker:?} is a surface in shadow, not a hole"
+            );
+        }
         assert!(
-            Tone::Recess.shade() > 0.0,
-            "a recess is metal in shadow, not a hole"
+            Tone::Recess.shade() < Tone::Strap.shade(),
+            "a strap stands proud of the hide and catches more light than a recess"
         );
         for style in ArmourStyle::ALL {
             for segment in ArmourSegment::ALL {
                 let parts = style.parts(segment);
-                for tone in [Tone::Plate, Tone::Recess] {
-                    assert!(
-                        parts.iter().any(|part| part.tone == tone),
-                        "{style:?} {segment:?} has no {tone:?}"
-                    );
+                assert!(
+                    parts.iter().any(|part| part.tone == Tone::Plate),
+                    "{style:?} {segment:?} has no outer surface"
+                );
+                assert!(
+                    parts.iter().any(|part| part.tone != Tone::Plate),
+                    "{style:?} {segment:?} is one flat tone"
+                );
+            }
+        }
+        assert!(
+            ArmourSegment::ALL.into_iter().all(|segment| {
+                rusty::parts(segment)
+                    .iter()
+                    .all(|part| part.tone != Tone::Strap)
+            }),
+            "the rusty set is plate, and plate has no straps"
+        );
+    }
+
+    /// **A declared opening is open**: no part of the segment reaches into it, and it lies in
+    /// the segment's cell. Without this an opening would be a way to excuse any gap at all.
+    #[test]
+    fn no_part_closes_a_declared_opening() {
+        let mut declared = 0;
+        for style in ArmourStyle::ALL {
+            for segment in ArmourSegment::ALL {
+                let cell = spans(placed_armour(segment.piece(), segment.cell()));
+                for opening in style.openings(segment) {
+                    declared += 1;
+                    let low = sheet_to_body(opening.x.0, opening.y.0, opening.z.1);
+                    let high = sheet_to_body(opening.x.1, opening.y.1, opening.z.0);
+                    for (axis, (cell_low, cell_high)) in cell.iter().enumerate() {
+                        assert!(
+                            low[axis] >= cell_low - 1e-5 && high[axis] <= cell_high + 1e-5,
+                            "{style:?} {segment:?} declares {opening:?} outside its cell"
+                        );
+                    }
+                    for part in style.parts(segment) {
+                        let rings = part.rings();
+                        let (y0, y1) = (rings[0].y, rings[rings.len() - 1].y);
+                        assert!(
+                            !(overlaps(part.x, opening.x)
+                                && overlaps((y0, y1), opening.y)
+                                && overlaps(part.z, opening.z)),
+                            "{style:?} {segment:?} part {part:?} reaches into {opening:?}"
+                        );
+                    }
                 }
             }
         }
+        assert!(
+            declared > 0,
+            "no style declares an opening, so this checks nothing"
+        );
     }
 
     /// A liveried segment samples only its own livery's band; an unliveried one only the
