@@ -58,10 +58,21 @@ fn band(gain: f32, attack: f32, decay: f32, hz: f32, q: f32) -> Layer {
 }
 
 pub(super) fn hoof(ground: MaterialClass) -> Sound {
-    // How long the hoof's own clop rings: rock gives it nothing to sink into.
+    // How long the hoof's own clop rings. Total over the enum for the same reason the arms
+    // below are: the wildcard this used to end with would have handed a new class the
+    // middle answer silently, which is exactly what it did to snow.
     let ring = match ground {
+        // Rock gives the clop nothing to sink into, so it is over quickly.
         MaterialClass::Stone | MaterialClass::Glass => 0.03,
-        _ => 0.05,
+        // Snow gives it nothing to ring *in*: the clop is swallowed where rock's is
+        // reflected, so this is the shortest of the three and not the brightest.
+        MaterialClass::Snow => 0.024,
+        MaterialClass::Earth
+        | MaterialClass::Sand
+        | MaterialClass::Wood
+        | MaterialClass::Foliage
+        | MaterialClass::Air
+        | MaterialClass::Water => 0.05,
     };
     // The hoof itself: a soft, dull clop. Two narrow bands of noise in the middle of the
     // spectrum, opened over four or five milliseconds so the onset is short without being a
@@ -80,6 +91,15 @@ pub(super) fn hoof(ground: MaterialClass) -> Sound {
         ],
         // Earth and grass take the clop in: a low, short band that muffles it.
         MaterialClass::Earth => vec![band(0.35, 0.005, 0.035, 420.0, 1.0)],
+        // Snow takes it in and gives nothing back. Two bands lower and narrower than
+        // earth's, so what is left of the clop sits below where soil answers, and both die
+        // faster than earth's one: a dull pack rather than a thud, with a low crunch of
+        // grains compacting under the hoof opening over eight milliseconds — grains give
+        // way over a few, where soil is struck in one.
+        MaterialClass::Snow => vec![
+            band(0.62, 0.006, 0.024, 330.0, 1.4),
+            band(0.30, 0.008, 0.016, 480.0, 2.2),
+        ],
         // A soft hiss of grains moving under the hoof.
         MaterialClass::Sand => vec![noise(0.35, 0.010, 0.07, 2600.0, FilterKind::Band)],
         // A hollow clop over a floor with air under it.
@@ -219,12 +239,13 @@ mod tests {
     use super::*;
     use crate::net::MiningTool;
     use crate::player::tool_audio::sounds::{STRIKE_SECONDS, strike};
-    use crate::world::palette::{self, DIRT, LEAVES, PLANKS, SAND, STONE};
+    use crate::world::palette::{self, DIRT, LEAVES, PLANKS, SAND, SNOW, STONE};
 
-    const GROUNDS: [MaterialClass; 8] = [
+    const GROUNDS: [MaterialClass; 9] = [
         MaterialClass::Air,
         MaterialClass::Stone,
         MaterialClass::Earth,
+        MaterialClass::Snow,
         MaterialClass::Sand,
         MaterialClass::Wood,
         MaterialClass::Foliage,
@@ -358,6 +379,94 @@ mod tests {
         );
     }
 
+    /// #1187: `SNOW` was classified `MaterialClass::Earth`, so a hoof in the north struck the
+    /// same soil the plains are made of. Snow now has an arm of its own, and this is what
+    /// "muffled" is asserted to mean rather than described as: less of the energy up where
+    /// an ear hears brightness, and the whole clop over sooner.
+    ///
+    /// Both directions are measured against **earth**, because earth is the arm snow used to
+    /// take — so a regression that reverted the classification fails here, where a test
+    /// against an absolute number would still pass.
+    #[test]
+    fn a_hoof_on_snow_is_duller_and_shorter_than_the_same_hoof_on_earth() {
+        let snow = samples(hoof(MaterialClass::Snow), HOOF_SECONDS);
+        let earth = samples(hoof(MaterialClass::Earth), HOOF_SECONDS);
+        let (snow_spectrum, earth_spectrum) = (spectrum(&snow), spectrum(&earth));
+        let (dull, earthy) = (centroid(&snow_spectrum), centroid(&earth_spectrum));
+        assert!(dull < earthy * 0.9, "snow {dull} Hz, earth {earthy} Hz");
+        assert!(
+            mean_time(&snow) < mean_time(&earth) * 0.9,
+            "snow {} s, earth {} s",
+            mean_time(&snow),
+            mean_time(&earth)
+        );
+        // Duller means less high end, not more low end: soft was not bought with a thump,
+        // which is the failure #1168 took the hoof out of once already. The share under
+        // 200 Hz stays inside the bound every ground is held to, and the share above
+        // 2 kHz — the brightness an ear reads — is the half that gave way instead.
+        let low = share_below(&snow_spectrum, 200.0);
+        assert!(low < 0.02, "snow: {low} of the energy under 200 Hz");
+        let bright = |spectrum: &[(f32, f64)]| 1.0 - share_below(spectrum, 2000.0);
+        assert!(
+            bright(&snow_spectrum) < bright(&earth_spectrum),
+            "snow {} above 2 kHz, earth {}",
+            bright(&snow_spectrum),
+            bright(&earth_spectrum)
+        );
+    }
+
+    /// The grounds [`ground`](super::ground) can actually answer with. Air and water are
+    /// deliberately absent: neither is solid, so the probe never returns them, and their arm
+    /// exists only to keep the match total. Holding a clop nobody can hear to a distinctness
+    /// bound would assert something the catalogue does not claim — and it would not pass:
+    /// air's quiet low band and earth's sit 0.77 apart, well inside the bound below. That is
+    /// a property this issue found rather than introduced.
+    const STOOD_ON: [MaterialClass; 7] = [
+        MaterialClass::Stone,
+        MaterialClass::Earth,
+        MaterialClass::Snow,
+        MaterialClass::Sand,
+        MaterialClass::Wood,
+        MaterialClass::Foliage,
+        MaterialClass::Glass,
+    ];
+
+    /// No two grounds a horse can stand on render the same clop — except the pair that
+    /// deliberately shares an arm, which is asserted *identical* rather than skipped, so a
+    /// pair that quietly stopped sharing fails here instead of passing as a difference.
+    #[test]
+    fn every_ground_a_horse_can_stand_on_renders_a_clop_of_its_own() {
+        let rendered = STOOD_ON.map(|ground| (ground, samples(hoof(ground), HOOF_SECONDS)));
+        // Stone and glass are one opinion about dense worked material.
+        let shares_an_arm = |a, b| {
+            let family = [MaterialClass::Stone, MaterialClass::Glass];
+            family.contains(&a) && family.contains(&b)
+        };
+        for (index, (a, first)) in rendered.iter().enumerate() {
+            for (b, second) in rendered.iter().skip(index + 1) {
+                let apart = difference(first, second);
+                if shares_an_arm(*a, *b) {
+                    assert_eq!(apart, 0.0, "{a:?} and {b:?} no longer share their arm");
+                } else {
+                    assert!(apart > 1.0, "{a:?} and {b:?} are {apart} apart");
+                }
+            }
+        }
+    }
+
+    /// And snow is apart from **every** other arm in the catalogue, the two unreachable ones
+    /// included. That is a stronger claim than the test above makes of any other ground, and
+    /// it is the one #1187 asks for: snow spent this client's whole history rendering another
+    /// material's clop, so "it is none of the others" is the regression worth pinning.
+    #[test]
+    fn snow_is_apart_from_every_other_arm_including_the_unreachable_ones() {
+        let snow = samples(hoof(MaterialClass::Snow), HOOF_SECONDS);
+        for ground in GROUNDS.into_iter().filter(|g| *g != MaterialClass::Snow) {
+            let apart = difference(&snow, &samples(hoof(ground), HOOF_SECONDS));
+            assert!(apart > 1.0, "snow and {ground:?} are {apart} apart");
+        }
+    }
+
     fn samples(sound: Sound, seconds: f32) -> Vec<f32> {
         sound.bake(seconds, 48_000, 7).unwrap().samples().to_vec()
     }
@@ -369,8 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn five_canonical_grounds_strike_distinctly() {
-        let strikes: Vec<_> = [STONE, DIRT, PLANKS, LEAVES, SAND]
+    fn six_canonical_grounds_strike_distinctly() {
+        let strikes: Vec<_> = [STONE, DIRT, SNOW, PLANKS, LEAVES, SAND]
             .into_iter()
             .map(|id| samples(hoof(palette::material_class(id)), HOOF_SECONDS))
             .collect();
@@ -607,16 +716,7 @@ mod tests {
     fn catalogue_is_bounded_at_every_supported_device_rate() {
         for rate in [8000, 44100, 48000, 192000] {
             let mut sounds = vec![(whinny(), WHINNY_SECONDS)];
-            for ground in [
-                MaterialClass::Air,
-                MaterialClass::Stone,
-                MaterialClass::Earth,
-                MaterialClass::Sand,
-                MaterialClass::Wood,
-                MaterialClass::Foliage,
-                MaterialClass::Glass,
-                MaterialClass::Water,
-            ] {
+            for ground in GROUNDS {
                 sounds.push((hoof(ground), HOOF_SECONDS));
             }
             for (sound, seconds) in sounds {

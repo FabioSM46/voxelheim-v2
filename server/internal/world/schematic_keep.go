@@ -40,12 +40,14 @@ import "slices"
 // say.** The doorway is a centred run on the +Z face; nothing standable and roofed is
 // unreachable from it; every anchor can be walked to. The last of those shaped the plan
 // more than taste did: the wall walk is cut through all four corner towers because a ring
-// severed by them is three dead ends, and the four spired towers are solid shafts because
-// a tower room nobody can enter is a room the drawing promises and never gives.
+// severed by them is three dead ends, and the western spired towers now have internal stairs to their upper rooms.
+// The eastern shafts remain solid until their separately verified delivery.
 //
 // The runes are [schematicLegend]: `b` the basalt footing, `K` and `k` the dressed wall
 // and its weathered course, `S` smooth trim, `R` the slate of every roof and spire, `D`
 // floorboards, `W` pale timber, `G` a window, `_` a room and `.` the terrain left alone.
+// Lowercase n/e/s/w are slate stairs with their high half in that cardinal direction.
+// Both wings now use two-wide shaped switchbacks; see docs/CASTLE_PLAN.md.
 // Rows run from the back (z=0) to the front (z=62, where the gate is), and each row runs
 // left to right along +X.
 var keepSchematic = mustSchematic(

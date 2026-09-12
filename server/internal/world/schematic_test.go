@@ -63,14 +63,18 @@ func TestEverySchematicHoldsOnlyTheThingsADrawingCanMean(t *testing.T) {
 		Thatch:      true,
 
 		// #680's eight, spent by the keep and by nothing else yet.
-		Basalt:           true,
-		BlackBrick:       true,
-		BlackBrickWorn:   true,
-		SmoothBlackStone: true,
-		SlateTile:        true,
-		DarkTimber:       true,
-		PaleTimber:       true,
-		DarkGlass:        true,
+		Basalt:                true,
+		BlackBrick:            true,
+		BlackBrickWorn:        true,
+		SmoothBlackStone:      true,
+		SlateTile:             true,
+		DarkTimber:            true,
+		PaleTimber:            true,
+		DarkGlass:             true,
+		SlateStairNorthBottom: true,
+		SlateStairEastBottom:  true,
+		SlateStairSouthBottom: true,
+		SlateStairWestBottom:  true,
 	}
 
 	for _, drawing := range everySchematic() {
@@ -238,8 +242,8 @@ func TestTheDrawingsSayWhatTheirCommentsSayTheySay(t *testing.T) {
 		{BuildingKeep, 8, 2, 4, DarkGlass, "a window on the west wing's back wall"},
 		{BuildingKeep, 8, 4, 4, PaleTimber, "the lintel over that window"},
 		{BuildingKeep, 16, 6, 22, DarkTimber, "the west wing's first-floor slab"},
-		{BuildingKeep, 8, 2, 33, DarkTimber, "a tread of the first flight"},
-		{BuildingKeep, 8, 3, 33, Air, "and the headroom over that tread"},
+		{BuildingKeep, 8, 3, 33, SlateStairNorthBottom, "a tread of the first flight"},
+		{BuildingKeep, 8, 4, 33, Air, "and the headroom over that tread"},
 		{BuildingKeep, 31, 20, 25, DarkTimber, "the bridge deck over the inner court"},
 		{BuildingKeep, 31, 21, 25, Air, "the bridge's own room"},
 		{BuildingKeep, 16, 28, 22, SlateTile, "the west wing's roof"},
@@ -691,7 +695,9 @@ func TestAPlacedBuildingIsItsDrawingMovedAndTurned(t *testing.T) {
 							continue
 						}
 						rx, rz := rotateCell(x, z, drawing.s.W, drawing.s.D, facing)
-						want[[3]int64{b.OriginX + int64(rx), b.OriginY + int64(y), b.OriginZ + int64(rz)}] = block
+						// Cardinal direction semantics are independently pinned by
+						// TestSchematicStairsTurnWithTheirHighHalf.
+						want[[3]int64{b.OriginX + int64(rx), b.OriginY + int64(y), b.OriginZ + int64(rz)}] = rotateSchematicBlock(block, facing)
 					}
 				}
 			}
@@ -899,8 +905,8 @@ func TestTheKeepHasNineFloorsAWallWalkAndABridgedCourtAndYouCanWalkToAllOfThem(t
 		{46, 14, 22, "the east keep's second floor"},
 		{46, 21, 22, "the east keep's third floor"},
 		{46, 28, 22, "the east keep's fourth floor"},
-		{8, 3, 33, "a tread of the west wing's first flight"},
-		{2, 7, 36, "the bailey stair to the wall walk"},
+		{8, 4, 33, "a tread of the west wing's first flight"},
+		{4, 7, 37, "the bailey stair to the wall walk"},
 		{1, 13, 30, "the wall walk, west"},
 		{61, 13, 30, "the wall walk, east"},
 		{31, 13, 1, "the wall walk, back"},
@@ -939,7 +945,7 @@ func TestTheKeepsFourSpiresRiseFromCorbelledShafts(t *testing.T) {
 		{"north-east", 50, 12, 7, 46, 67},
 		{"south-east", 42, 32, 6, 40, 58},
 	} {
-		if got := s.At(tower.cx, tower.shaft-4, tower.cz); got != BlackBrick {
+		if got := s.At(tower.cx+tower.r, tower.shaft-4, tower.cz); got != BlackBrick {
 			t.Errorf("the %s tower's shaft is block %d below its capital, want dressed brick", tower.name, got)
 		}
 		if got := s.At(tower.cx+tower.r+1, tower.shaft, tower.cz); got != SmoothBlackStone {
@@ -993,6 +999,8 @@ func TestTheCastleRunesNameTheCastleMaterials(t *testing.T) {
 		'W': PaleTimber,
 		'G': DarkGlass,
 		'U': RuneStone, 'v': PortalVeil, 'O': PortalHeart,
+		'n': SlateStairNorthBottom, 'e': SlateStairEastBottom,
+		's': SlateStairSouthBottom, 'w': SlateStairWestBottom,
 	}
 
 	if len(schematicLegend) != len(want) {

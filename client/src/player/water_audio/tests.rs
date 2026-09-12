@@ -63,8 +63,14 @@ impl Fixture {
     }
 
     fn frame(&self, millis: u64) -> Frame<'_> {
+        self.at(Duration::from_millis(millis))
+    }
+
+    /// A frame at an exact offset from the fixture's start, for the frame rates a
+    /// millisecond cannot express.
+    fn at(&self, elapsed: Duration) -> Frame<'_> {
         Frame {
-            now: self.now + Duration::from_millis(millis),
+            now: self.now + elapsed,
             store: &self.store,
             size: 32,
             eye: Some(&self.eye),
@@ -103,6 +109,127 @@ fn descent(drop: f32, holds: usize) -> Vec<f32> {
     }
     heights.extend(std::iter::repeat_n(1.5, holds));
     heights
+}
+
+/// Found in review on #1197. The box test is the server's `overlapsFluid`, whose
+/// `voxelSpan` is `floor(lo)` to `ceil(hi) - 1` — a half-open band. A face lying exactly on
+/// a voxel boundary therefore touches the voxel below it and not the one above, and
+/// flooring both ends instead reported water the box only grazed.
+#[test]
+fn a_face_exactly_on_a_voxel_boundary_touches_the_voxel_below_it_and_not_above() {
+    let air = || {
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            VoxelChunk::all_air(32),
+        );
+        store
+    };
+    // One sheet of water at y = 5 with nothing but air under it: an overhang, or the lip
+    // of a fall. A body whose top is exactly 5.0 does not touch it.
+    let mut above = air();
+    for x in 0..9 {
+        for z in 0..9 {
+            above.apply_block(BlockCoord { x, y: 5, z }, palette::WATER, 32);
+        }
+    }
+    let top_at_five = Vec3::new(4.5, 5.0 - PLAYER_HEIGHT, 4.5);
+    assert_eq!(top_at_five.y + PLAYER_HEIGHT, 5.0, "the top is integral");
+    assert!(!in_water(
+        &above,
+        top_at_five,
+        PLAYER_WIDTH,
+        PLAYER_HEIGHT,
+        32
+    ));
+    // A hair higher and it does: the box now reaches into voxel 5.
+    assert!(in_water(
+        &above,
+        top_at_five + Vec3::Y * 0.01,
+        PLAYER_WIDTH,
+        PLAYER_HEIGHT,
+        32
+    ));
+    // The same rule on the horizontal axes, where the mounted box makes it routine: a block
+    // wide and centred on 4.5 spans exactly [4.0, 5.0], so it is in voxel 4 and not in
+    // voxel 5 — and a body a hundredth further on is in both.
+    let mut beside = air();
+    for z in 0..9 {
+        beside.apply_block(BlockCoord { x: 5, y: 2, z }, palette::WATER, 32);
+    }
+    let centred = Vec3::new(4.5, 2.0, 4.5);
+    assert!(!in_water(
+        &beside,
+        centred,
+        MOUNTED_WIDTH,
+        MOUNTED_HEIGHT,
+        32
+    ));
+    assert!(in_water(
+        &beside,
+        centred + Vec3::X * 0.01,
+        MOUNTED_WIDTH,
+        MOUNTED_HEIGHT,
+        32
+    ));
+}
+
+/// Found in review on #1197. The downward speed used to be read from one frame's duration
+/// and thrown away when that duration fell under `FALL_WINDOW.0`, so on a client running
+/// faster than 500 Hz every entry was a [`Force::Step`] — a dive off a cliff sounding like
+/// a step off a bank, the acceptance criterion exactly inverted. The reference sample is
+/// now held across frames until it is old enough to divide by, so the same fall reads the
+/// same force at every frame rate.
+#[test]
+fn the_same_fall_is_the_same_force_at_every_frame_rate() {
+    let f = Fixture::new();
+    // 30 blocks a second of fall, sampled at 60, 500, 1000, 4000 and 100,000 frames a
+    // second. The last is far past anything real, and that is the point: the force must
+    // not depend on the rate at all.
+    for micros in [16_666u64, 2_000, 1_000, 250, 10] {
+        let mut waters = Waters::default();
+        let mut height = 4.0;
+        let mut frame = 0u64;
+        let mut entered = None;
+        while height > 1.4 && entered.is_none() {
+            let bodies = [f.drawn(height, false)];
+            let at = f.at(Duration::from_micros(frame * micros));
+            entered = waters
+                .observe(&at, &bodies)
+                .into_iter()
+                .filter_map(|(_, cue)| match cue {
+                    Cue::Splash { force, .. } => Some(force),
+                    Cue::Stroke { .. } => None,
+                })
+                .next();
+            height -= 30.0 * micros as f32 / 1_000_000.0;
+            frame += 1;
+        }
+        assert_eq!(
+            entered,
+            Some(Force::Dive),
+            "at {micros} µs a frame a 30 blocks-a-second fall read {entered:?}"
+        );
+    }
+    // And the long end of the window still filters: a reference older than FALL_WINDOW.1
+    // says nothing about how the body arrived, so the entry is the gentlest one.
+    let mut waters = Waters::default();
+    waters.observe(&f.frame(0), &[f.drawn(4.0, false)]);
+    let stale = waters.observe(&f.frame(2_000), &[f.drawn(1.5, false)]);
+    assert_eq!(
+        stale
+            .into_iter()
+            .filter_map(|(_, cue)| match cue {
+                Cue::Splash { force, .. } => Some(force),
+                Cue::Stroke { .. } => None,
+            })
+            .next(),
+        Some(Force::Step)
+    );
 }
 
 #[test]
@@ -346,16 +473,47 @@ fn strokes_follow_the_distance_swum_and_cease_when_the_swimmer_stops() {
     // A swimmer who stops is silent, however long they float there — including the slow
     // sink the server gives a body that does nothing, which is vertical and counts for
     // nothing here.
+    //
+    // **The descent has to be a real one or this guards nothing**, which is what the review
+    // of #1201 found: sinking a twentieth of a stride over the whole loop left every
+    // assertion below true even with the `.xz()` dropped from `observe`, so the one property
+    // this test is named for was unmeasured. The server's `SwimSinkSpeed` is -1.0 blocks a
+    // second, which at this cadence of one frame per 10 ms is 0.01 a frame; over 270 frames
+    // that is 2.7 blocks, more than two strides of descent. With the vertical excluded this
+    // is silent; count it and the first stroke lands around frame 130.
+    const SINK_PER_FRAME: f32 = 0.01;
+    const SINKING_FRAMES: u64 = 270;
+    assert!(
+        SINK_PER_FRAME * SINKING_FRAMES as f32 > STROKE_BLOCKS * 2.0,
+        "the descent must outrun a stride, or the horizontal-only rule is untested"
+    );
     let mut waters = Waters::default();
     let still = [f.drawn(2.0, false)];
     assert!(waters.observe(&f.frame(0), &still).is_empty());
-    for frame in 1..400u64 {
-        let sinking = [f.drawn(2.0 - frame as f32 * 0.0005, false)];
+    let depth = |frame: u64| 2.0 - frame as f32 * SINK_PER_FRAME;
+    for frame in 1..=SINKING_FRAMES {
+        let sinking = [f.drawn(depth(frame), false)];
         assert!(
             waters.observe(&f.frame(frame * 10), &sinking).is_empty(),
             "a motionless swimmer was heard to stroke"
         );
     }
+    // And it was still in the water the whole way down, which is the other half of the claim:
+    // the pool fills y = 1 and y = 2, so a 1.8-block box is wet while its feet stay above
+    // -0.8. One stride sideways at the depth it reached strokes — it could not if the body
+    // had quietly left the water and made the loop above vacuous a second way.
+    let swum_across = [Drawn {
+        key: f.body,
+        feet: Vec3::new(4.5 + STROKE_BLOCKS, depth(SINKING_FRAMES), 4.5),
+        mounted: false,
+    }];
+    assert_eq!(
+        waters
+            .observe(&f.frame((SINKING_FRAMES + 1) * 10), &swum_across)
+            .len(),
+        1,
+        "a stride sideways at the depth reached should stroke"
+    );
 
     // A frame delayed over three strides' worth of water is one stroke, never three — and
     // the credit it leaves behind is bounded, so the frames after it do not burst either:

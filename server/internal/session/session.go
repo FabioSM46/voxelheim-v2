@@ -255,6 +255,41 @@ func (p phase) String() string {
 	}
 }
 
+type staticPropArrivalResolver interface {
+	SafeStaticPropArrival([3]float64, [3]float64) ([3]float64, error)
+}
+
+// Normalize before Welcome and reuse the same authority in Join. Copy a restored
+// life rather than mutating the identity provider's record. Instance resumes retain
+// their existing WorldChange path and never call this overworld-only adjustment.
+func normalizeStaticPropArrival(sim staticPropArrivalResolver, cfg Config, fallback [3]float32, self Resolved) (Config, Resolved, error) {
+	pos := [3]float64{float64(cfg.Spawn[0]), float64(cfg.Spawn[1]), float64(cfg.Spawn[2])}
+	if self.Life != nil {
+		// A blocked finite pose may move; malformed persisted state must still fail.
+		if err := self.Life.Validate(); err != nil {
+			return cfg, self, err
+		}
+		pos = self.Life.Pos
+	}
+	safe, err := sim.SafeStaticPropArrival(pos, [3]float64{float64(fallback[0]), float64(fallback[1]), float64(fallback[2])})
+	if err != nil {
+		return cfg, self, err
+	}
+	if safe == pos {
+		return cfg, self, nil
+	}
+	if self.Life != nil {
+		life := *self.Life
+		life.Pos = safe
+		self.Life = &life
+	} else {
+		for axis := range 3 {
+			cfg.Spawn[axis] = float32(safe[axis])
+		}
+	}
+	return cfg, self, nil
+}
+
 // Welcome builds the last message of a handshake: the one that says a character is in
 // the world.
 //
@@ -1410,6 +1445,16 @@ func Serve(ctx context.Context, conn transport.Conn, cfg Config, timeouts Timeou
 					for axis, value := range returnPosition {
 						self.Life.Pos[axis] = float64(value)
 					}
+				}
+			}
+			if portalVisit == nil {
+				var arrivalErr error
+				welcomeCfg, self, arrivalErr = normalizeStaticPropArrival(sim, welcomeCfg, cfg.Spawn, self)
+				if arrivalErr != nil {
+					return arrivalErr
+				}
+				if self.Life == nil {
+					joinSpawn = welcomeCfg.Spawn
 				}
 			}
 			welcomeSelf := self

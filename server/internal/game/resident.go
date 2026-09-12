@@ -480,6 +480,9 @@ func (p *Player) InteractNPC(request protocol.NpcInteractRequest) (vnet.RefusalR
 	if distance := boxDistance(p.box(), residentBody.boxAt(r.pos)); math.IsNaN(distance) || distance > reach {
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is %.2f blocks away, past the reach of %.1f", r.name, distance, reach)
 	}
+	if !p.residentVisiblePastProps(r) {
+		return vnet.RefusalReasonNotAVendor, fmt.Errorf("resident is behind solid furniture")
+	}
 	if !vendorRole(r.role) {
 		return vnet.RefusalReasonNotAVendor, fmt.Errorf("%s is a %s and keeps no stall", r.name, r.role.String())
 	}
