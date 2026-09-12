@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bevy::prelude::KeyCode;
 
 use super::{
-    Bindings, Control, Corner, DefaultMount, DisplayMode, MonitorPreference, Settings,
+    Bindings, Control, Corner, DefaultMount, DisplayMode, HealthBars, MonitorPreference, Settings,
     VoiceAudience, VoiceMode, device_field, device_from_field, key_from_name, key_name,
     valid_monitor_identity,
 };
@@ -236,6 +236,7 @@ fn render(settings: &Settings) -> String {
         "readout-corner {}\n",
         settings.readout_corner.name()
     ));
+    out.push_str(&format!("health-bars {}\n", settings.health_bars.name()));
     for control in super::CONTROLS {
         // Unreachable: `Bindings::rebind` refuses a key the table does not name, and
         // every default is in it — `every_default_binding_is_a_key_this_screen_will_bind`
@@ -393,6 +394,11 @@ fn parse(text: &str) -> (Settings, Vec<String>) {
                 Some(parsed) => settings.readout_corner = parsed,
                 None => refuse("a corner"),
             },
+            // Absent from every file written before #1133, which therefore loads every bar.
+            "health-bars" => match HealthBars::from_name(value) {
+                Some(parsed) => settings.health_bars = parsed,
+                None => refuse("which health bars to draw"),
+            },
             "bind" => match (Control::from_name(value), extra.and_then(key_from_name)) {
                 (Some(control), Some(bound)) => named.push((control, bound)),
                 _ => refuse("a control and a key"),
@@ -549,6 +555,7 @@ mod tests {
         settings.adjust(Knob::VoiceMode, -1);
         settings.adjust(Knob::VoiceActivationThreshold, 3);
         settings.adjust(Knob::VoiceAudience, 1);
+        settings.adjust(Knob::HealthBars, 2);
         settings.toggle_vsync();
         settings.toggle_readout();
         settings.toggle_reduced_effects();
@@ -678,6 +685,63 @@ mod tests {
         );
         assert!(!reloaded.vsync(), "a malformed line took the next with it");
         assert_eq!(complaints.len(), 1, "{complaints:?}");
+    }
+
+    /// Every health-bar filter survives a restart, a file written before the line existed
+    /// loads every bar with each other line intact, and a value nothing can read costs that
+    /// one setting its default and no neighbour.
+    #[test]
+    fn the_health_bar_filter_round_trips_and_an_older_file_draws_every_bar() {
+        let scratch = Scratch::new("settings-health-bars");
+        let path = scratch.join("settings");
+        for bars in super::super::HEALTH_BARS {
+            let settings = Settings {
+                health_bars: bars,
+                ..Settings::default()
+            };
+            assert_eq!(save(&path, &settings), Ok(()));
+            let written = fs::read_to_string(&path).expect("the saved file");
+            assert!(
+                written.contains(&format!("health-bars {}\n", bars.name())),
+                "{written}"
+            );
+            let (reloaded, complaints) = load(&path);
+            assert_eq!(complaints, Vec::<String>::new(), "{bars:?}");
+            assert_eq!(reloaded.health_bars, bars);
+        }
+
+        // A file from before #1133: everything this client writes except the new line.
+        let mut previous = Settings::default();
+        previous.toggle_readout();
+        previous.cycle_readout_corner();
+        let older: String = render(&previous)
+            .lines()
+            .filter(|line| !line.starts_with("health-bars"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(&path, older).expect("a scratch file");
+        let (reloaded, complaints) = load(&path);
+        assert_eq!(complaints, Vec::<String>::new());
+        assert_eq!(reloaded.health_bars, HealthBars::All);
+        assert_eq!(
+            reloaded, previous,
+            "an older file lost a setting it did carry"
+        );
+
+        fs::write(&path, "health-bars enemies\nreadout on\n").expect("a scratch file");
+        let (reloaded, complaints) = load(&path);
+        assert_eq!(
+            reloaded.health_bars,
+            HealthBars::All,
+            "an unreadable filter was read as a narrower one"
+        );
+        assert!(reloaded.readout_shown(), "a bad line took the next with it");
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(complaints[0].contains("line 1"), "{complaints:?}");
+        assert!(
+            !complaints[0].contains("enemies"),
+            "a complaint carried the file's contents: {complaints:?}"
+        );
     }
 
     /// One unreadable line among the new audio settings costs that one setting and no other,
