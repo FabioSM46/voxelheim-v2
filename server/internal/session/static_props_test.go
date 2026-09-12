@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/game"
 	flatbuffers "github.com/google/flatbuffers/go"
@@ -12,6 +13,9 @@ type arrivalResolver struct{ blocked [3]float64 }
 
 func (r arrivalResolver) SafeStaticPropArrival(pos, fallback [3]float64) ([3]float64, error) {
 	if pos == r.blocked {
+		if fallback == r.blocked {
+			return pos, errors.New("blocked fallback")
+		}
 		return fallback, nil
 	}
 	return pos, nil
@@ -59,5 +63,21 @@ func TestStaticPropNormalizationCannotRepairMalformedSavedLife(t *testing.T) {
 	}
 	if !math.IsNaN(life.Pos[0]) {
 		t.Fatal("malformed saved record was mutated")
+	}
+}
+
+func TestStaticPropConfiguredSpawnFailsClosedButSeparateReturnCanRecover(t *testing.T) {
+	blocked := [3]float32{31.5, 64, 31.5}
+	cfg := Config{Spawn: blocked}
+	resolver := arrivalResolver{blocked: [3]float64{31.5, 64, 31.5}}
+	if _, _, err := normalizeStaticPropArrival(resolver, cfg, blocked, Resolved{}); err == nil {
+		t.Fatal("blocked configured spawn bypassed collision")
+	}
+	fallback := [3]float32{100.5, 64, 100.5}
+	// welcomeCfg may carry an ephemeral portal return while cfg.Spawn remains the
+	// ordinary world spawn. No saved Life exists in that path either.
+	normalized, self, err := normalizeStaticPropArrival(resolver, cfg, fallback, Resolved{})
+	if err != nil || normalized.Spawn != fallback || self.Life != nil {
+		t.Fatal("distinct safe world fallback did not replace blocked return")
 	}
 }

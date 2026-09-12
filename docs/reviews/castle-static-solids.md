@@ -3,6 +3,8 @@
 Part 2 of #1203 implements authoritative static furniture and its snapshot producer.
 The authored placement list remains empty until the renderer and final room acceptance
 land. This part does not activate invisible furniture or claim visual acceptance.
+Malformed authored catalogue rows return an error to simulation construction; they do
+not panic or silently drop a solid, and slot-level errors identify the offending slot.
 
 ## Contract and lifetime
 
@@ -55,6 +57,16 @@ the existing world spawn. Join uses the same authority; the saved record is copi
 not mutated. Respawn candidates also reject static furniture. Focused tests pin the
 Welcome/Join position, the first snapshot position, safe fallback, and unchanged
 unobstructed/instance behavior. This is a prop-only correction, not a new spawn search.
+
+A covered fallback is deliberately fail-closed: admission returns an error rather than
+placing a body inside furniture or searching an unspecified nearby column. For a new
+character the normal requested position and fallback are the same configured spawn,
+so malformed placement covering that spawn must be fixed before activation. A fresh
+instance return can instead supply a distinct `welcomeCfg.Spawn`, still without a saved
+life; that position can safely fall back to the ordinary world spawn. Tests pin both
+cases and check the actual capital catalogue against the world spawn over five seeds.
+Final activation must retain this check for the complete catalogue and verify the
+configured deployment spawn is clear before enabling furniture.
 
 ## Focused performance measurements
 

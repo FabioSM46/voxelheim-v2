@@ -521,8 +521,11 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 	}
 	var staticProps *staticPropIndex
 	if cached, ok := terrain.(*CacheTerrain); ok && !cached.cache.Finite() {
-		var err error
-		staticProps, err = newStaticPropIndex(world.CapitalStaticProps(worldSeed))
+		poses, err := world.CapitalStaticProps(worldSeed)
+		if err != nil {
+			return nil, fmt.Errorf("game: capital furniture: %w", err)
+		}
+		staticProps, err = newStaticPropIndex(poses)
 		if err != nil {
 			return nil, err
 		}

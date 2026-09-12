@@ -205,21 +205,17 @@ func (p PlacedStaticProp) Bounds(local PropBox) PropBox {
 
 // CapitalStaticProps is called once when the overworld simulation is constructed,
 // never while stepping a body or streaming a recipient's snapshot. Authored layout
-// errors fail startup rather than quietly dropping a solid the player could hit.
-func CapitalStaticProps(seed int64) []PlacedStaticProp {
+// errors return to simulation construction rather than dropping a solid the player could hit.
+func CapitalStaticProps(seed int64) ([]PlacedStaticProp, error) {
 	if len(keepStaticProps) == 0 {
-		return nil
+		return nil, nil
 	}
 	for _, building := range CapitalAt(seed).Buildings {
 		if building.Kind == BuildingKeep {
-			props, err := placeStaticProps(seed, building, keepStaticProps)
-			if err != nil {
-				panic(err)
-			}
-			return props
+			return placeStaticProps(seed, building, keepStaticProps)
 		}
 	}
-	panic("world: capital has no keep for static props")
+	return nil, fmt.Errorf("world: capital has no keep for static props")
 }
 
 func placeStaticProps(seed int64, building Building, poses []StaticPropPose) ([]PlacedStaticProp, error) {
@@ -237,21 +233,21 @@ func placeStaticProps(seed int64, building Building, poses []StaticPropPose) ([]
 	prefix := (HashLattice(seed+0x7F592183+building.OriginY, building.OriginX, building.OriginZ) & ((1 << 55) - 1)) << 9
 	for _, pose := range poses {
 		if pose.Slot == 0 || int(pose.Slot) > MaxCapitalProps || slots[pose.Slot] {
-			return nil, fmt.Errorf("world: duplicate or invalid static prop slot")
+			return nil, fmt.Errorf("world: duplicate or invalid static prop slot %d", pose.Slot)
 		}
 		slots[pose.Slot] = true
 		if pose.Kind < PropBanquetTable || pose.Kind > PropTableCandelabrum || pose.Facing < 1 || pose.Facing > 4 || pose.Variant > 3 {
-			return nil, fmt.Errorf("world: malformed static prop descriptor")
+			return nil, fmt.Errorf("world: malformed static prop descriptor at slot %d", pose.Slot)
 		}
 		if pose.X < 0 || pose.X >= s.W || pose.Y < 0 || pose.Y >= s.H || pose.Z < 0 || pose.Z >= s.D {
-			return nil, fmt.Errorf("world: static prop origin outside keep")
+			return nil, fmt.Errorf("world: static prop slot %d origin outside keep", pose.Slot)
 		}
 		x, z := rotateCell(pose.X, pose.Z, s.W, s.D, building.Facing)
 		p := PlacedStaticProp{ID: prefix | uint64(pose.Slot), Kind: pose.Kind, Origin: [3]int64{building.OriginX + int64(x), building.OriginY + int64(pose.Y), building.OriginZ + int64(z)}, Facing: 1 + (pose.Facing-1+uint8(building.Facing))%4, Variant: pose.Variant}
 		visual := p.Bounds(PropVisualBounds(p.Kind))
 		for axis := range 3 {
 			if visual.Min[axis] < -float64(BlockLimit) || visual.Max[axis] >= float64(BlockLimit) {
-				return nil, fmt.Errorf("world: static prop extent outside world")
+				return nil, fmt.Errorf("world: static prop slot %d extent outside world", pose.Slot)
 			}
 		}
 		result = append(result, p)

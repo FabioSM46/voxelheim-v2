@@ -297,3 +297,20 @@ func TestStaticPropArrivalAndRespawnAvoidNewFurniture(t *testing.T) {
 		t.Fatal("no-prop arrival changed")
 	}
 }
+
+func TestStaticPropActualCatalogueLeavesCapitalSpawnClear(t *testing.T) {
+	for _, seed := range []int64{0, 1, -42, 123, 8675309} {
+		poses, err := world.CapitalStaticProps(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		index, err := newStaticPropIndex(poses)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spawn := world.SpawnAt(seed)
+		if index.overlaps(playerBox([3]float64{float64(spawn[0]), float64(spawn[1]), float64(spawn[2])})) {
+			t.Fatalf("capital catalogue blocks configured spawn for seed%d", seed)
+		}
+	}
+}

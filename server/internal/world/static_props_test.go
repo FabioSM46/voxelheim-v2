@@ -151,3 +151,47 @@ func TestStaticPropBoundsMatchSharedRendererFixture(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticPropCornersComposeKeepAndAuthoredTurns(t *testing.T) {
+	schematic := SchematicFor(BuildingKeep)
+	// Independent continuous affine transforms of the whole keep, including the
+	// rectangular footprint translation. These do not call rotateCell or Bounds.
+	turns := [4][6]float64{
+		{1, 0, 0, 1, 0, 0}, {0, -1, 1, 0, float64(schematic.D), 0},
+		{-1, 0, 0, -1, float64(schematic.W), float64(schematic.D)},
+		{0, 1, -1, 0, 0, float64(schematic.W)},
+	}
+	local := PropCollisionBounds(PropThrone)[2] // asymmetric high back, away from origin
+	for keepTurn, turn := range turns {
+		for authored := uint8(1); authored <= 4; authored++ {
+			pose := StaticPropPose{Slot: 1, Kind: PropThrone, X: 20, Y: 7, Z: 11, Facing: authored}
+			building := Building{Kind: BuildingKeep, OriginX: -100, OriginY: 20, OriginZ: 200, Facing: Facing(keepTurn)}
+			placed, err := placeStaticProps(123, building, []StaticPropPose{pose})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := PropBox{Min: [3]float64{math.Inf(1), math.Inf(1), math.Inf(1)}, Max: [3]float64{math.Inf(-1), math.Inf(-1), math.Inf(-1)}}
+			sin, cos := math.Sincos(-float64(authored-1) * math.Pi / 2)
+			for _, x := range [2]float64{local.Min[0], local.Max[0]} {
+				for _, y := range [2]float64{local.Min[1], local.Max[1]} {
+					for _, z := range [2]float64{local.Min[2], local.Max[2]} {
+						// First turn the prop about its own cell centre, then the whole keep.
+						u := float64(pose.X) + .5 + x*cos + z*sin
+						v := float64(pose.Z) + .5 - x*sin + z*cos
+						corner := [3]float64{float64(building.OriginX) + turn[0]*u + turn[1]*v + turn[4], float64(building.OriginY) + float64(pose.Y) + y, float64(building.OriginZ) + turn[2]*u + turn[3]*v + turn[5]}
+						for axis := range 3 {
+							want.Min[axis] = min(want.Min[axis], corner[axis])
+							want.Max[axis] = max(want.Max[axis], corner[axis])
+						}
+					}
+				}
+			}
+			got := placed[0].Bounds(local)
+			for axis := range 3 {
+				if math.Abs(got.Min[axis]-want.Min[axis]) > 1e-10 || math.Abs(got.Max[axis]-want.Max[axis]) > 1e-10 {
+					t.Fatalf("keepturn%d authored%d: got%v want%v", keepTurn, authored, got, want)
+				}
+			}
+		}
+	}
+}
