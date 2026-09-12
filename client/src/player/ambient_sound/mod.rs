@@ -7,6 +7,7 @@ mod wildlife;
 use super::{
     Weather,
     ambience::Ambience,
+    birds::Bird,
     camera::{AimCamera, WorldCamera},
     sky::{self, SkyClock},
 };
@@ -21,7 +22,7 @@ use crate::{
 use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
 use sounds::Bed;
-use wildlife::WILDLIFE;
+use wildlife::{Habitat, Origin, WILDLIFE};
 
 /// How many wildlife lanes there are: one per row of [`WILDLIFE`] and never a number of its
 /// own, so a new species brings its lane, its gain and its target with it.
@@ -96,6 +97,12 @@ struct Inputs<'w, 's> {
     clock: Res<'w, SkyClock>,
     store: Option<Res<'w, ChunkStore>>,
     eyes: Query<'w, 's, &'static Transform, With<WorldCamera>>,
+    /// Every bird drawn right now, so a voice belonging to one can be placed at it.
+    ///
+    /// **Read-only and filtered `Without<WorldCamera>`**: Bevy cannot prove a camera is not a
+    /// bird, and this system already holds the camera's `Transform`. The same reason
+    /// `birds.rs`'s own `EyeOfTheFlock` exists.
+    flock: Query<'w, 's, (&'static Bird, &'static Transform), Without<WorldCamera>>,
 }
 
 fn update(input: Inputs, mut country: ResMut<Country>) {
@@ -147,6 +154,24 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         let gain = country.wildlife_gains[index];
         let call = voice.call;
         let profile = call.profile();
+        // Where this voice comes from — the rule `wildlife.rs` writes down, applied. A row
+        // that declares `Origin::Creature` is placed at the nearest drawn body of the flock it
+        // names; with no body to place it at, it falls back to the bearing, because a voice
+        // with no body is still ambience and silence is not the fallback.
+        //
+        // The radius and height are **zeroed** with the body, not kept: `Calls::update` adds
+        // them to the origin to make a bearing, and a hoot eleven blocks from the owl is the
+        // very thing placing it at the owl was for.
+        let body = match (voice.origin, voice.habitat) {
+            (Origin::Creature, Habitat::Flock(rows)) => {
+                nearest_body(&input.flock, rows, eye_position)
+            }
+            _ => None,
+        };
+        let (origin, radius, height) = match body {
+            Some(at) => (at, 0.0, 0.0),
+            None => (eye_position, profile.radius, profile.height),
+        };
         country.wildlife[index].update(
             mixer,
             CallFrame {
@@ -156,9 +181,9 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                 // without moving a call that ships today.
                 seed: seed.wrapping_add(voice.stream),
                 interval: profile.interval,
-                radius: profile.radius,
-                height: profile.height,
-                origin: eye_position,
+                radius,
+                height,
+                origin,
                 gain,
             },
             |source| {
@@ -174,6 +199,29 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
             |seed, rate| call.bake(seed, rate),
         );
     }
+}
+
+/// The drawn body of `rows` nearest the eye, if any is drawn at all.
+///
+/// **Nearest rather than first**, because a flock is several birds and the one a player is
+/// looking at is the one whose voice has to come from the right place. With two owls in the
+/// wood the far one's hoot arriving from the near one is a smaller error than a hoot on a
+/// bearing, but it is still an error, and picking the nearest costs one comparison a bird.
+///
+/// It reads the transform rather than recomputing `birds::place`, so a perched owl's hoot
+/// comes from the branch it is actually drawn on — the clamp and the perch both already
+/// applied — rather than from the circuit it would have been flying.
+fn nearest_body(
+    flock: &Query<(&Bird, &Transform), Without<WorldCamera>>,
+    rows: &[usize],
+    eye: Vec3,
+) -> Option<Vec3> {
+    flock
+        .iter()
+        .filter(|(bird, _)| rows.contains(&bird.species))
+        .map(|(_, at)| at.translation)
+        .filter(|at| at.is_finite())
+        .min_by(|a, b| a.distance_squared(eye).total_cmp(&b.distance_squared(eye)))
 }
 
 #[cfg(test)]
