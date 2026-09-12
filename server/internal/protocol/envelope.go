@@ -1090,6 +1090,9 @@ type EntitySnapshot struct {
 	// of view are the same fact on the wire.
 	Structures []StructureState
 
+	// StaticProps is the complete immutable decoration set for this recipient.
+	StaticProps []StaticPropState
+
 	// Vitals belongs to the session this snapshot is being encoded for, which is why
 	// this type is built per recipient rather than once per tick.
 	Vitals PlayerVitals
@@ -2318,6 +2321,9 @@ func ValidateEntitySnapshot(frame []byte) (err error) {
 	}
 	var snapshot vnet.EntitySnapshot
 	snapshot.Init(table.Bytes, table.Pos)
+	if err := validateStaticProps(&snapshot); err != nil {
+		return err
+	}
 
 	entities := make(map[uint64]struct{}, snapshot.EntitiesLength())
 	for i := 0; i < snapshot.EntitiesLength(); i++ {
@@ -3004,7 +3010,9 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 		accessibleLootOffset = b.EndVector(len(s.AccessibleLootCorpses))
 	}
 
+	staticPropsOffset := encodeStaticProps(b, s.StaticProps)
 	vnet.EntitySnapshotStart(b)
+	vnet.EntitySnapshotAddStaticProps(b, staticPropsOffset)
 	vnet.EntitySnapshotAddServerTick(b, s.Tick)
 	vnet.EntitySnapshotAddEntities(b, entitiesOffset)
 	vnet.EntitySnapshotAddDrops(b, dropsOffset)

@@ -29,7 +29,7 @@ use bevy::prelude::*;
 
 use crate::net::{
     CastState, EntityState, ItemDropState, MobAction, MobKind, MobState, MountKind, ProjectileKind,
-    ProjectileState, Snapshot, StructureState,
+    ProjectileState, Snapshot, StaticPropState, StructureState,
 };
 
 /// Where an entity should be drawn now.
@@ -469,6 +469,16 @@ impl SnapshotBuffer {
     pub fn structures(&self) -> &[StructureState] {
         match &self.latest {
             Some(latest) => &latest.snapshot.structures,
+            None => &[],
+        }
+    }
+
+    /// Immutable poses use only the newest complete snapshot; never interpolate them.
+    /// The renderer is supplied by the following #1203 part.
+    #[allow(dead_code)]
+    pub fn static_props(&self) -> &[StaticPropState] {
+        match &self.latest {
+            Some(latest) => &latest.snapshot.static_props,
             None => &[],
         }
     }
@@ -1004,6 +1014,71 @@ mod tests {
             start + INTERVAL,
         );
         assert_eq!(buffer.structures(), [tent(901, 9)]);
+    }
+
+    #[test]
+    fn static_prop_sets_reject_stale_snapshots_and_clear_on_world_change() {
+        use crate::net::StaticPropKind;
+        use crate::net::{BlockCoord, Facing};
+        let prop = StaticPropState {
+            prop_id: 7,
+            kind: StaticPropKind::Throne,
+            origin: BlockCoord { x: 12, y: 7, z: 15 },
+            facing: Facing::West,
+            variant: 3,
+        };
+        let mut buffer = SnapshotBuffer::default();
+        let now = Instant::now();
+        assert!(buffer.static_props().is_empty());
+        assert!(buffer.accept(
+            Snapshot {
+                server_tick: 10,
+                static_props: vec![prop],
+                ..Default::default()
+            },
+            now
+        ));
+        assert_eq!(buffer.static_props(), [prop]);
+        assert!(!buffer.accept(
+            Snapshot {
+                server_tick: 9,
+                ..Default::default()
+            },
+            now
+        ));
+        assert_eq!(buffer.static_props(), [prop]);
+        assert!(buffer.accept(
+            Snapshot {
+                server_tick: 11,
+                ..Default::default()
+            },
+            now
+        ));
+        assert!(
+            buffer.static_props().is_empty(),
+            "omission removes the old complete set"
+        );
+        buffer.accept(
+            Snapshot {
+                server_tick: 12,
+                static_props: vec![prop],
+                ..Default::default()
+            },
+            now,
+        );
+        buffer.clear();
+        assert!(
+            buffer.static_props().is_empty(),
+            "world/session reset cannot retain capital props"
+        );
+        assert!(buffer.accept(
+            Snapshot {
+                server_tick: 1,
+                ..Default::default()
+            },
+            now
+        ));
+        assert!(buffer.static_props().is_empty());
     }
 
     #[test]

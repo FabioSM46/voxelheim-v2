@@ -1678,6 +1678,48 @@ table MobHit {
   attacker_pos: Vec3;
 }
 
+/// Immutable capital decoration; never a crafting station or player-owned structure.
+/// Values are append-only. Fixtures 17..19 are reserved for the lighting follow-up.
+enum StaticPropKind : ubyte {
+  Unknown = 0,
+  BanquetTable = 1,
+  Chair = 2,
+  Bench = 3,
+  Throne = 4,
+  Bookcase = 5,
+  Desk = 6,
+  Counter = 7,
+  Barrel = 8,
+  EquipmentRack = 9,
+  CouncilTable = 10,
+  Rug = 11,
+  Runner = 12,
+  Banner = 13,
+  Shield = 14,
+  Trophy = 15,
+  FeastSetting = 16,
+  WallSconce = 17,
+  FloorCandelabrum = 18,
+  TableCandelabrum = 19
+}
+
+/// One immutable world-authored prop. A complete snapshot set, never a delta.
+/// Decoder invariants:
+/// - prop_id is nonzero and unique WITHIN static_props (a separate id namespace).
+/// - origin is present, with every component in [-16777216, 16777216).
+/// - kind and facing are known nonzero members; variant is 0..3.
+/// Origin places the floor plane at y and the horizontal centre at (x+0.5,z+0.5).
+/// North is -Z. Variant selects palette/detail only, never a different collision shape.
+/// Major furniture is solid on the server; textiles, tableware and fixtures are cosmetic.
+/// No ownership, targeting, inventory, loot, crafting, placement or removal requests exist.
+table StaticPropState {
+  prop_id: ulong;
+  kind: StaticPropKind;
+  origin: BlockCoord;
+  facing: Facing;
+  variant: ubyte;
+}
+
 /// What kind of thing a `StructureState` describes.
 ///
 /// Zero member for the same fail-closed reason as `MobKind.Unknown`: an unrecognised
@@ -2231,6 +2273,13 @@ table EntitySnapshot {
   /// Appended in V29. An older server's absent scalar would read as a fresh world's zero,
   /// which is a plausible but false lunar phase; the protocol version therefore moves.
   world_tick: ulong;
+
+  /// Complete relevant overworld decoration set. Absent/empty removes all old props.
+  /// At most 256 entries, checked before allocation: the world has exactly one capital,
+  /// whose authored catalogue (including fixtures) is bounded to 256 roots. Each entry
+  /// satisfies StaticPropState. Instances send none. Relevance covers every chunk the
+  /// prop spans, so losing its origin chunk alone does not remove a visible overhang.
+  static_props: [StaticPropState];
 }
 
 /// Everything the player is carrying, as the server holds it.

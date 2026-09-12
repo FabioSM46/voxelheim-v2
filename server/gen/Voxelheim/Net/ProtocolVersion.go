@@ -322,7 +322,10 @@ const (
 	/// and read nothing there but padding. A V41 client refuses a zero `max_health`, so
 	/// without the bump the peers would handshake cleanly and the first snapshot with a
 	/// player in it would end the session: V40's argument, on the hottest struct.
-	ProtocolVersionCurrent ProtocolVersion = 41
+	/// V42: immutable capital props are replicated independently of interactive structures.
+	/// Their solid bounds must be visible to the player. An older client silently drops
+	/// the vector and collides with invisible furniture, so this append owes a bump.
+	ProtocolVersionCurrent ProtocolVersion = 42
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{
