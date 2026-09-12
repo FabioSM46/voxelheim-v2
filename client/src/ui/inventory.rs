@@ -454,9 +454,7 @@ fn spawn_inventory_screen(mut commands: Commands) {
                                             },
                                         );
                                     });
-                                    pack.spawn(hint(
-                                        "Left click: move stack    Right click: split    E: close",
-                                    ));
+                                    pack.spawn(hint(PACK_HINT));
                                 });
 
                             content
@@ -762,11 +760,16 @@ fn recipe_heading(recipe: &Recipe) -> String {
     }
 }
 
+/// The pack tab's help line. Every gesture here is one `inventory_clicks` routes, so a
+/// shift-held left click, the drop, is named beside the move and the split. It is no longer
+/// than the line it replaced, so it still fits the width that line did.
+const PACK_HINT: &str = "Left: move   Right: split   Shift+Left: drop   E: close";
+
 /// The line of help under a tab's contents.
 ///
 /// One per tab rather than one for the screen, and the words are the ones that were on the
-/// single line before #177 — split so each half sits under the controls it describes,
-/// nothing added and nothing dropped.
+/// single line before #177 — split so each half sits under the controls it describes.
+/// The pack's line has since grown the shift-click drop, which had no hint at all.
 fn hint(text: &str) -> impl Bundle {
     (
         Text::new(text),
@@ -1898,6 +1901,22 @@ mod tests {
         assert!(
             !lines.iter().any(|line| line.contains("unknown item")),
             "a learned mount still fell through the registry: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_pack_hint_names_the_shift_click_drop() {
+        let mut app = app();
+        app.update();
+
+        let world = app.world_mut();
+        let mut texts = world.query::<&Text>();
+        let lines: Vec<_> = texts.iter(world).map(|text| text.0.clone()).collect();
+        assert!(lines.contains(&PACK_HINT.to_owned()), "{lines:?}");
+        assert!(PACK_HINT.contains("Shift+Left: drop"), "{PACK_HINT}");
+        assert!(
+            PACK_HINT.len() <= "Left click: move stack    Right click: split    E: close".len(),
+            "the pack hint grew wider than the line it replaced: {PACK_HINT}"
         );
     }
 
