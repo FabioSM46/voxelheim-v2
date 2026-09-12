@@ -32,13 +32,28 @@
 //! daylight owl should simply have dark eyes like everything else. Lit plus emissive gives
 //! both — the base colour darkens with the sky and the emissive term is what survives it.
 //!
-//! ## The fade is multiplied in
+//! ## The fade reaches the glow on its own, and must not be applied here
 //!
-//! `emissive` carries no alpha, so a fading creature whose eyes kept their full glow would
-//! leave two bright dots hanging in the air after the body had gone. `player/projectiles.rs`
-//! already solves this for its orb trail by scaling the emissive by the alpha it wants, and
-//! [`eyeshine_material`] does the same: one argument, applied to both terms, so the eyes
-//! arrive and leave with the creature that owns them.
+//! A fading creature whose eyes kept their full glow would leave two bright dots hanging in
+//! the air after the body had gone, so the glow has to follow the fade. **It already does, and
+//! scaling it here as well is the bug that was nearly shipped.** Two places apply the alpha to
+//! the emissive term before anything of ours could:
+//!
+//! - `bevy_pbr`'s own shader, in `pbr_functions.wgsl`: `var emissive_light = emissive.rgb *
+//!   output_color.a;` — the emissive is multiplied by the base colour's alpha inside the
+//!   fragment shader.
+//! - The fixed-function blend. [`AlphaMode::Blend`] resolves to `MeshPipelineKey::BLEND_ALPHA`
+//!   and then to `BlendState::ALPHA_BLENDING` (`bevy_pbr/src/render/mesh.rs`), whose colour
+//!   factors are `SrcAlpha` / `OneMinusSrcAlpha` — so the whole fragment output, the emissive
+//!   included, is multiplied by the alpha a second time.
+//!
+//! So the glow already reaches the screen at `glow × alpha²`. [`eyeshine_material`] therefore
+//! passes `glow` through **unscaled**; multiplying it here would make it `glow × alpha³` and
+//! the eyes would vanish long before the body they belong to — the opposite of the intent.
+//!
+//! `player/projectiles.rs` does scale its orb trail's emissive by alpha, and that is not a
+//! precedent for this: it is `AlphaMode::Add`, a different blend with different factors.
+//! Caught in review on #1216.
 
 use bevy::prelude::*;
 
@@ -80,12 +95,19 @@ pub(super) struct Eyeshine {
 /// `horse_eye_mesh` gives: at the angle an eye subtends the silhouette is a dot whatever its
 /// outline is, and two quads is eight vertices against a sphere's hundreds.
 ///
-/// **Both faces look along `-Z`**, which is where the creature is going and therefore where
-/// a player standing in front of it is. Bevy's `Rectangle` is authored in the `XY` plane
-/// facing `+Z`, so each is given a half turn about `Y`; that also reverses its winding, which
-/// is why [`eyeshine_material`] draws both sides. There is no separate "seen from behind"
-/// case and deliberately none: an eye is not visible from the back of a head, and a creature
-/// flying away from the player having no glint is the correct picture rather than a gap.
+/// **Both faces look along `-Z`**, which is where the creature is going and therefore where a
+/// player standing in front of it is. Bevy's `Rectangle` is authored in the `XY` plane facing
+/// `+Z`, so each is given a half turn about `Y`.
+///
+/// **That half turn does not reverse the winding, and an earlier version of this comment said
+/// it did.** A rotation is orientation-preserving — determinant `+1` — so after it the quad's
+/// stored normal is `-Z` *and* its winding is still counter-clockwise seen from `-Z`. The face
+/// is therefore front-facing from exactly the direction it looks, which is why this material
+/// keeps Bevy's default back-face culling: the eye is drawn from in front and culled from
+/// behind, which is the picture this module wants. There is no separate "seen from behind"
+/// case and deliberately none — a creature flying away from the player having no glint is
+/// correct rather than a gap. `a_half_turn_leaves_the_eye_front_facing_from_the_front` is what
+/// checks that rather than the prose. Caught in review on #1216.
 pub(super) fn eye_pair_mesh(eyes: Eyeshine) -> Mesh {
     let [mut left, right] = [-1.0_f32, 1.0].map(|side| {
         Mesh::from(Rectangle::new(eyes.size, eyes.size)).transformed_by(
@@ -99,16 +121,21 @@ pub(super) fn eye_pair_mesh(eyes: Eyeshine) -> Mesh {
 
 /// The material one pair of eyes wears, at `alpha` of the creature's fade.
 ///
-/// Both terms are scaled by the fade and not only the base colour — see the note on the fade
-/// at the head of this module. `cull_mode: None` because the half turn in [`eye_pair_mesh`]
-/// reverses the winding, and because it is what `player/birds.rs`'s plumage material does for
-/// the same reason: a winding mistake should look wrong rather than leave a hole.
+/// **Only the base colour carries the fade.** The glow is passed through unscaled because the
+/// renderer applies the alpha to it twice already — see the note on the fade at the head of
+/// this module for the two lines that do it.
+///
+/// **Back-face culling is Bevy's default and is deliberately left alone.** `player/birds.rs`'s
+/// plumage material sets `cull_mode: None`, but its reason does not transfer: that is a closed
+/// shell lofted through hand-authored rings, where drawing both faces turns a ring wound the
+/// wrong way into a shading mistake rather than a hole at forty blocks. A single quad has no
+/// rings to get wrong, and culling here is what makes "an eye is not visible from the back of
+/// a head" true rather than merely stated.
 pub(super) fn eyeshine_material(eyes: Eyeshine, alpha: f32) -> StandardMaterial {
     StandardMaterial {
         base_color: eyes.colour.with_alpha(alpha),
-        emissive: eyes.glow * alpha,
+        emissive: eyes.glow,
         alpha_mode: AlphaMode::Blend,
-        cull_mode: None,
         ..default()
     }
 }
@@ -214,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn the_glow_is_brighter_than_white_and_fades_with_the_creature() {
+    fn the_glow_is_brighter_than_white_and_the_renderer_applies_the_fade_to_it() {
         // The one number that makes an eye read at night: an emissive term that is not
         // bounded by one, which is what `structures.rs`'s rune says a glow has to be.
         let whole = eyeshine_material(SAMPLE, 1.0);
@@ -227,19 +254,56 @@ mod tests {
         // Lit, deliberately: an unlit eye is as bright at noon as at midnight.
         assert!(!whole.unlit, "eyeshine must still be darkened by the sky");
         assert_eq!(whole.alpha_mode, AlphaMode::Blend);
-
-        // And both terms take the fade, or a faded creature leaves two dots behind it.
-        let half = eyeshine_material(SAMPLE, 0.5);
-        assert_eq!(half.emissive, SAMPLE.glow * 0.5);
-        assert_eq!(half.base_color.alpha(), 0.5);
-        // Scaling a `LinearRgba` scales its alpha too, so this is deliberately not compared
-        // against `LinearRgba::BLACK` — that constant is opaque black and this is the absence
-        // of a glow. The three components are the claim.
-        let gone = eyeshine_material(SAMPLE, 0.0);
+        // Bevy's default culling, deliberately kept — see `eyeshine_material`.
         assert_eq!(
-            (gone.emissive.red, gone.emissive.green, gone.emissive.blue),
-            (0.0, 0.0, 0.0)
+            whole.cull_mode,
+            Some(bevy::render::render_resource::Face::Back)
         );
-        assert_eq!(gone.base_color.alpha(), 0.0);
+
+        // **The fade lives on the base colour alone**, and this asserts the emissive does
+        // *not* move with it. `pbr_functions.wgsl` multiplies the emissive by
+        // `output_color.a` inside the shader and `BlendState::ALPHA_BLENDING` multiplies the
+        // whole output by the alpha again, so a glow scaled here too would reach the screen
+        // at `glow * alpha^3` and the eyes would be gone long before the body. This was
+        // scaled, and was caught in review on #1216.
+        for alpha in [0.0, 0.25, 0.5, 1.0] {
+            let material = eyeshine_material(SAMPLE, alpha);
+            assert_eq!(
+                material.emissive, SAMPLE.glow,
+                "the glow moved with the fade at alpha {alpha}, which the renderer already does"
+            );
+            assert_eq!(material.base_color.alpha(), alpha);
+        }
+    }
+
+    #[test]
+    fn a_half_turn_leaves_the_eye_front_facing_from_the_front() {
+        // The claim `eye_pair_mesh` used to get wrong: the half turn about `Y` that aims the
+        // quad at `-Z` is a rotation, so it preserves orientation and cannot reverse the
+        // winding. That is what lets this material keep back-face culling and still be seen —
+        // and it is why "an eye is not visible from the back of a head" is true rather than
+        // merely written down.
+        let mesh = eye_pair_mesh(SAMPLE);
+        let points = points(&mesh);
+        let normals = normals(&mesh);
+        let Some(bevy::mesh::Indices::U32(indices)) = mesh.indices() else {
+            panic!("an eyeshine mesh is a U32 triangle list")
+        };
+        let mut faces = 0usize;
+        for triangle in indices.chunks_exact(3) {
+            let [a, b, c] = [0, 1, 2].map(|at| points[triangle[at] as usize]);
+            let wound = (b - a).cross(c - a).normalize_or_zero();
+            assert!(
+                wound.dot(Vec3::NEG_Z) > 0.99,
+                "a face is wound {wound}, so culling would hide it from the front"
+            );
+            // And the stored normal agrees with the winding, which is the other half: a face
+            // lit from one side and culled from the other is the failure this pair catches.
+            for corner in triangle {
+                assert!(wound.dot(normals[*corner as usize]) > 0.99);
+            }
+            faces += 1;
+        }
+        assert_eq!(faces, 4, "two quads, two triangles each");
     }
 }
