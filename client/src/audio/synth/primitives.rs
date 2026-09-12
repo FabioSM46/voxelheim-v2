@@ -19,8 +19,78 @@ pub enum Noise {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Exciter {
-    Oscillator { wave: Wave, hz: f32 },
+    Oscillator {
+        wave: Wave,
+        hz: f32,
+    },
     Noise(Noise),
+    /// An oscillator whose frequency moves while it sounds.
+    Glide(Glide),
+}
+
+/// How a [`Glide`] travels between its two frequencies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Curve {
+    /// Equal hertz in equal time.
+    Linear,
+    /// Equal musical interval in equal time: the midpoint is the geometric mean, which is
+    /// how a voice falls.
+    Exponential,
+}
+
+/// Sinusoidal frequency modulation. `depth` is a fraction of the frequency the glide has
+/// reached, so a flutter stays the same interval wide as the pitch falls under it, and it
+/// opens linearly from nothing over `onset` seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vibrato {
+    pub hz: f32,
+    pub depth: f32,
+    pub onset: f32,
+}
+
+impl Vibrato {
+    pub const NONE: Self = Self {
+        hz: 0.0,
+        depth: 0.0,
+        onset: 0.0,
+    };
+}
+
+/// A waveform from `from` to `to` hertz over `seconds`, holding `to` afterwards, with a
+/// vibrato around wherever it is. The phase is accumulated from the instantaneous
+/// frequency, so the waveform never jumps however fast the frequency moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Glide {
+    pub wave: Wave,
+    pub from: f32,
+    pub to: f32,
+    pub seconds: f32,
+    pub curve: Curve,
+    pub vibrato: Vibrato,
+}
+
+impl Glide {
+    /// The instantaneous frequency `seconds` after the sound starts.
+    pub(super) fn hz_at(self, seconds: f64) -> f64 {
+        let (from, to) = (f64::from(self.from), f64::from(self.to));
+        let progress = (seconds / f64::from(self.seconds)).min(1.0);
+        let centre = match self.curve {
+            Curve::Linear => from + (to - from) * progress,
+            Curve::Exponential => from * (to / from).powf(progress),
+        };
+        let opened = if self.vibrato.onset > 0.0 {
+            (seconds / f64::from(self.vibrato.onset)).min(1.0)
+        } else {
+            1.0
+        };
+        let swing = (TAU * f64::from(self.vibrato.hz) * seconds).sin();
+        centre * (1.0 + f64::from(self.vibrato.depth) * opened * swing)
+    }
+
+    /// The highest frequency the glide can reach, vibrato included.
+    pub(super) fn peak(self) -> f32 {
+        self.from.max(self.to) * (1.0 + self.vibrato.depth)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,6 +129,21 @@ impl Envelope {
     }
 }
 
+fn shape(wave: Wave, phase: f64) -> f64 {
+    match wave {
+        Wave::Sine => (TAU * phase).sin(),
+        Wave::Saw => 2.0 * phase - 1.0,
+        Wave::Square => {
+            if phase < 0.5 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        Wave::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct Generator {
     exciter: Exciter,
@@ -67,13 +152,15 @@ pub(super) struct Generator {
     random: u64,
     brown: f64,
     pole: f64,
+    rate: f64,
+    elapsed: u64,
 }
 
 impl Generator {
     pub(super) fn new(exciter: Exciter, seed: u64, rate: u32) -> Self {
         let step = match exciter {
             Exciter::Oscillator { hz, .. } => f64::from(hz) / f64::from(rate),
-            Exciter::Noise(_) => 0.0,
+            Exciter::Noise(_) | Exciter::Glide(_) => 0.0,
         };
         Self {
             exciter,
@@ -82,6 +169,8 @@ impl Generator {
             random: seed,
             brown: 0.0,
             pole: 1.0 - (-TAU * 40.0 / f64::from(rate)).exp(),
+            rate: f64::from(rate),
+            elapsed: 0,
         }
     }
 
@@ -90,18 +179,14 @@ impl Generator {
             Exciter::Oscillator { wave, .. } => {
                 let phase = self.phase;
                 self.phase = (phase + self.step).fract();
-                match wave {
-                    Wave::Sine => (TAU * phase).sin(),
-                    Wave::Saw => 2.0 * phase - 1.0,
-                    Wave::Square => {
-                        if phase < 0.5 {
-                            1.0
-                        } else {
-                            -1.0
-                        }
-                    }
-                    Wave::Triangle => 1.0 - 4.0 * (phase - 0.5).abs(),
-                }
+                shape(wave, phase)
+            }
+            Exciter::Glide(glide) => {
+                let phase = self.phase;
+                let hz = glide.hz_at(self.elapsed as f64 / self.rate);
+                self.elapsed = self.elapsed.saturating_add(1);
+                self.phase = (phase + hz / self.rate).fract();
+                shape(glide.wave, phase)
             }
             Exciter::Noise(kind) => {
                 // SplitMix64: an explicitly specified integer stream, including seed zero.
