@@ -1838,6 +1838,61 @@ pub(super) fn night_now(clock: &SkyClock, session: &Session) -> Option<f32> {
     ))
 }
 
+/// The share of the night at which one half of the day hands over to the other.
+///
+/// It is the roost the flock used to compare [`night_now`] against on its own, moved here
+/// because it was never the birds' constant: a nocturnal species is abroad on the other side
+/// of exactly the same number.
+pub(super) const PERIOD_SWITCH: f32 = 0.5;
+
+/// Which half of the day a creature belongs to.
+///
+/// **One declared answer to "when is this abroad", read by both tables that need one**: the
+/// wildlife table in `player/ambient_sound/wildlife.rs`, which crossfades a voice in and out
+/// over the twilight, and the bird table in `player/birds.rs`, which spawns a flock or does
+/// not. Both read [`night_now`] and neither compares it to a constant of its own — the same
+/// reason `night_now` itself exists rather than a second reading of the clock.
+///
+/// There is no `Always` variant, and its absence is deliberate: nothing in this client is
+/// abroad around the clock yet, and an unconstructed variant would be a claim about content
+/// that has not been written. Add it with the first creature that needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Period {
+    /// Abroad while the sun is up: the vulture, the rattlesnake, the macaw.
+    Day,
+    /// Abroad after dark: the wolf, the cricket, the crow that answers for the sand at night.
+    Night,
+}
+
+impl Period {
+    /// How much of this period has arrived, as a crossfade weight in `0..=1`.
+    ///
+    /// The two periods sum to one at every hour, which is what makes a country's day voice
+    /// and its night voice cross at dusk rather than both falling silent or both sounding.
+    pub(super) fn share(self, night: f32) -> f32 {
+        let night = night.clamp(0.0, 1.0);
+        match self {
+            Self::Day => 1.0 - night,
+            Self::Night => night,
+        }
+    }
+
+    /// Whether a creature of this period is abroad at all, for a lane that needs a yes or a
+    /// no rather than a crossfade — a flock spawns or does not.
+    ///
+    /// **`None` is abroad in every period**, which is the behaviour [`night_now`]'s own
+    /// documentation describes: a world that declares no day length has no night to roost
+    /// through, and neither has a session whose first snapshot has not landed. Flying a
+    /// nocturnal flock there is the same answer as flying a diurnal one — an empty sky is
+    /// what a missing clock must never cost.
+    pub(super) fn abroad(self, night: Option<f32>) -> bool {
+        night.is_none_or(|night| match self {
+            Self::Day => night < PERIOD_SWITCH,
+            Self::Night => night >= PERIOD_SWITCH,
+        })
+    }
+}
+
 /// The colour a submerged camera clears to and fades into.
 fn submerged_sky() -> Color {
     Color::srgb(UNDERWATER_SKY[0], UNDERWATER_SKY[1], UNDERWATER_SKY[2])

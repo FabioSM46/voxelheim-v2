@@ -2,11 +2,11 @@
 //! Nothing here is sent or read by gameplay. No climate or biome is inferred.
 mod controller;
 mod sounds;
+mod wildlife;
 
 use super::{
     Weather,
-    ambience::{Ambience, GroundLook},
-    birds,
+    ambience::Ambience,
     camera::{AimCamera, WorldCamera},
     sky::{self, SkyClock},
 };
@@ -20,10 +20,12 @@ use crate::{
 };
 use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
-use sounds::{Bed, CALLS, Call};
+use sounds::Bed;
+use wildlife::WILDLIFE;
 
-/// The macaw's row in [`birds::BIRDS`], which is appended to and never reordered.
-const PARROT: usize = 0;
+/// How many wildlife lanes there are: one per row of [`WILDLIFE`] and never a number of its
+/// own, so a new species brings its lane, its gain and its target with it.
+const VOICES: usize = WILDLIFE.len();
 
 const BEDS: [Bed; 5] = [
     Bed::Rain,
@@ -36,10 +38,8 @@ const BEDS: [Bed; 5] = [
 #[derive(Resource, Default)]
 struct Country {
     beds: [BedVoice; 5],
-    wildlife: [Calls; 5],
-    wildlife_gains: [f32; 5],
-    calls: Calls,
-    day_gain: f32,
+    wildlife: [Calls; VOICES],
+    wildlife_gains: [f32; VOICES],
 }
 
 pub(super) fn register(app: &mut App) {
@@ -55,15 +55,12 @@ pub(super) fn register(app: &mut App) {
 #[derive(Debug, PartialEq)]
 struct Targets {
     beds: [f32; 5],
-    wildlife: [f32; 5],
-    day: f32,
+    /// One gain per row of [`WILDLIFE`], in the table's order. Nothing here knows which row
+    /// is which creature — that is the point of the table.
+    wildlife: [f32; VOICES],
 }
 
 fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Targets {
-    let green = f32::from(u8::from(ambience.ground == GroundLook::Grass));
-    let sand = f32::from(u8::from(ambience.ground == GroundLook::Sand));
-    let snow_country = f32::from(u8::from(ambience.ground == GroundLook::Snow));
-    let night = night.clamp(0.0, 1.0);
     let (rain, snow) = weather.map_or((0.0, 0.0), |weather| {
         let strength = f32::from(weather.intensity) / 255.0;
         match weather.kind {
@@ -72,9 +69,6 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
             WeatherKind::Clear | WeatherKind::Sandstorm => (0.0, 0.0),
         }
     });
-    // The macaw is heard only where the bird table flies it: wooded grass. An open plain has
-    // no species and another country has another one, and neither hosts the call (#1176).
-    let parrot = birds::species_for(ambience) == Some(PARROT);
     let (sand_wind, ice_wind) = weather.map_or((0.0, 0.0), |weather| {
         let strength = f32::from(weather.intensity) / 255.0;
         match weather.kind {
@@ -85,15 +79,10 @@ fn targets(ambience: &Ambience, night: f32, weather: Option<WeatherState>) -> Ta
     });
     Targets {
         beds: [rain, rain * rain, snow, sand_wind, ice_wind],
-        wildlife: [
-            sand * (1.0 - night),
-            sand * night,
-            snow_country * (1.0 - night),
-            snow_country * night,
-            // The same green-ground night the cricket bed was gated on, now a sparse call.
-            green * night,
-        ],
-        day: (1.0 - night) * f32::from(u8::from(parrot)),
+        // Country × hour comes out of the table, not out of an expression per lane: each
+        // row answers for its own habitat and its own half of the day, so the weather above
+        // decides a bed and never a creature.
+        wildlife: WILDLIFE.map(|voice| voice.gain(ambience, night)),
     }
 }
 
@@ -150,44 +139,22 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
             || bed.description(),
         );
     }
-    country.day_gain +=
-        (target.day - country.day_gain) * (1.0 - (-dt / controller::FADE_SECONDS).exp());
-    let gain = country.day_gain;
-    let parrot = Call::Parrot.profile();
-    country.calls.update(
-        mixer,
-        CallFrame {
-            dt,
-            seed,
-            interval: parrot.interval,
-            radius: parrot.radius,
-            height: parrot.height,
-            origin: eye_position,
-            gain,
-        },
-        |source| {
-            let cover = spatial::occlusion(store, size, eye_position, source).max(cover);
-            spatial::place(
-                eye_position,
-                spatial::listener_yaw(eye.rotation),
-                source,
-                parrot.range,
-                cover,
-            )
-        },
-        |seed, rate| Call::Parrot.bake(seed, rate),
-    );
-    for (index, call) in CALLS.into_iter().enumerate() {
+    // One lane per row of the table, the macaw's included: it had a lane of its own until a
+    // habitat could be something other than the ground, and folding it in changed no seed.
+    for (index, voice) in WILDLIFE.iter().enumerate() {
         country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
             * (1.0 - (-dt / controller::FADE_SECONDS).exp());
         let gain = country.wildlife_gains[index];
+        let call = voice.call;
         let profile = call.profile();
         country.wildlife[index].update(
             mixer,
             CallFrame {
                 dt,
                 // Distinct streams keep simultaneous dusk calls from sharing their bearings.
-                seed: seed.wrapping_add(0x9860 + index as u64),
+                // The salt is the row's, so the table may be appended to or reordered
+                // without moving a call that ships today.
+                seed: seed.wrapping_add(voice.stream),
                 interval: profile.interval,
                 radius: profile.radius,
                 height: profile.height,

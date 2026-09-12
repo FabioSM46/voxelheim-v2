@@ -50,9 +50,14 @@ impl Bed {
     }
 }
 
-/// Off-screen presentation, never a creature. Snow's daytime bird is the eagle
-/// already selected by birds::species_for; these descriptions spawn no entities.
-#[derive(Clone, Copy, Debug)]
+/// A voice, and nothing but a voice. These descriptions spawn no entities: snow's daytime
+/// bird is the eagle already selected by birds::species_for, and the macaw's body comes from
+/// `birds.rs`.
+///
+/// **Where each of these is heard, and when, is not here** — it is one row of
+/// [`super::wildlife::WILDLIFE`], which is also where the rule about where a voice
+/// originates is written down. This enum is the sound; that table is the creature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Call {
     Rattlesnake,
     Crow,
@@ -61,18 +66,8 @@ pub(super) enum Call {
     /// Green country at night: an occasional cricket, not a continuous wall of them.
     Cricket,
     /// The macaw's squawk, heard by day only where `birds::species_for` answers the macaw.
-    /// Not one of [`CALLS`]: its gate is the bird table's, not the ground's alone, so it keeps
-    /// the day lane of its own.
     Parrot,
 }
-
-pub(super) const CALLS: [Call; 5] = [
-    Call::Rattlesnake,
-    Call::Crow,
-    Call::Eagle,
-    Call::Wolf,
-    Call::Cricket,
-];
 
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
 /// duration by a wide margin; even dusk leaves the desert mostly silent.

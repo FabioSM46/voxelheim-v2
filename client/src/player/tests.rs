@@ -6134,6 +6134,37 @@ fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
     );
 }
 
+/// The roost is a row's own half of the day rather than a constant the loop applies to every
+/// row, which is the whole of what #1189 changed about the flock. Written against
+/// `sky::Period` rather than against a species this client does not ship: the owl and the bat
+/// are later issues, and what has to be true before them is that declaring one nocturnal is a
+/// table row and not a branch in `keep_the_flock`.
+#[test]
+fn the_flight_period_is_a_row_and_a_nocturnal_row_would_invert_the_roost() {
+    use crate::player::sky::{PERIOD_SWITCH, Period};
+
+    // Every species that exists today flies by day, which is why the roost test above still
+    // reads the same. A row that changes this changes the sky and must say so.
+    assert!(
+        birds::BIRDS.iter().all(|row| row.flies == Period::Day),
+        "a bird row now flies at night and the roost test above no longer covers it"
+    );
+
+    // The switch, from both sides, including the exact boundary the old constant used.
+    assert!(Period::Day.abroad(Some(0.0)));
+    assert!(Period::Day.abroad(Some(PERIOD_SWITCH - 0.01)));
+    assert!(!Period::Day.abroad(Some(PERIOD_SWITCH)));
+    assert!(!Period::Day.abroad(Some(1.0)));
+    assert!(!Period::Night.abroad(Some(0.0)));
+    assert!(Period::Night.abroad(Some(PERIOD_SWITCH)));
+    assert!(Period::Night.abroad(Some(1.0)));
+
+    // A world with no time of day roosts nothing: `night_now`'s `None` flew the birds before
+    // there was a period to read and it flies every period now. An empty sky is what a
+    // missing clock must never cost.
+    assert!(Period::Day.abroad(None) && Period::Night.abroad(None));
+}
+
 #[test]
 fn a_submerged_eye_hides_the_birds_without_retiring_them() {
     // Hidden, not faded: going under water is a thing the eye does, and coming back up must

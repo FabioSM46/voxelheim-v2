@@ -1,8 +1,13 @@
 use super::*;
 use crate::audio::{Bus, MAX_SOURCES, Mixer, Sink, VOICE_RESERVE};
 use crate::net::{ChunkCoord, SessionParams};
+use crate::player::ambience::GroundLook;
+use crate::player::birds;
+use crate::player::sky::{PERIOD_SWITCH, Period};
 use crate::world::{VoxelChunk, palette};
+use sounds::Call;
 use std::sync::Arc;
+use wildlife::{Habitat, PARROT, Voice, row_of};
 
 struct Buffer(Vec<f32>);
 impl Sink for Buffer {
@@ -29,15 +34,32 @@ fn grass() -> Ambience {
 fn weather(kind: WeatherKind, intensity: u8) -> Option<WeatherState> {
     Some(WeatherState { kind, intensity })
 }
+/// How loudly one creature is heard, named by the creature rather than by its lane: the
+/// tests ask about the cricket, and which row the cricket is in is the table's business.
+fn gain_of(target: &Targets, call: Call) -> f32 {
+    target.wildlife[row_of(call)]
+}
 
 #[test]
 fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
     let day = targets(&grass(), 0.0, None);
     let dusk = targets(&grass(), 0.5, None);
     let night = targets(&grass(), 1.0, None);
-    assert_eq!((day.day, day.wildlife[4]), (1.0, 0.0));
-    assert_eq!((dusk.day, dusk.wildlife[4]), (0.5, 0.5));
-    assert_eq!((night.day, night.wildlife[4]), (0.0, 1.0));
+    assert_eq!(
+        (gain_of(&day, Call::Parrot), gain_of(&day, Call::Cricket)),
+        (1.0, 0.0)
+    );
+    assert_eq!(
+        (gain_of(&dusk, Call::Parrot), gain_of(&dusk, Call::Cricket)),
+        (0.5, 0.5)
+    );
+    assert_eq!(
+        (
+            gain_of(&night, Call::Parrot),
+            gain_of(&night, Call::Cricket)
+        ),
+        (0.0, 1.0)
+    );
     assert_eq!(
         night.beds, [0.0; 5],
         "crickets are no longer a continuous bed"
@@ -51,8 +73,8 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
             0.5,
             None,
         );
-        assert_eq!(v.day, 0.0);
-        assert_eq!(v.wildlife[4], 0.0);
+        assert_eq!(gain_of(&v, Call::Parrot), 0.0);
+        assert_eq!(gain_of(&v, Call::Cricket), 0.0);
         assert_eq!(v.beds, [0.0; 5]);
     }
     let plain = Ambience {
@@ -62,9 +84,24 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
     assert_eq!(birds::species_for(&grass()), Some(PARROT));
     // No biome, temperature, terrain seed or gameplay facts enter this selector. Trees decide
     // only whether the macaw is there to be heard.
-    let a = targets(&grass(), 0.3, weather(WeatherKind::Rain, 120));
-    let b = targets(&plain, 0.3, weather(WeatherKind::Rain, 120));
-    assert_eq!((a.beds, a.wildlife), (b.beds, b.wildlife));
+    //
+    // That used to be assertable as "the two countries have identical wildlife", because the
+    // macaw's gain was a field of its own and the array held only ground-gated lanes. It is
+    // now a row like any other, so the same claim is made the only way it still can be: the
+    // beds are equal, and the macaw's is the one and only lane the trees move.
+    let wood = targets(&grass(), 0.3, weather(WeatherKind::Rain, 120));
+    let plain = targets(&plain, 0.3, weather(WeatherKind::Rain, 120));
+    assert_eq!(wood.beds, plain.beds);
+    let moved: Vec<Call> = WILDLIFE
+        .iter()
+        .filter(|voice| gain_of(&wood, voice.call) != gain_of(&plain, voice.call))
+        .map(|voice| voice.call)
+        .collect();
+    assert_eq!(moved, vec![Call::Parrot]);
+    assert_eq!(
+        (gain_of(&wood, Call::Parrot), gain_of(&plain, Call::Parrot)),
+        (0.7, 0.0)
+    );
 }
 
 /// #1176: the day call played on every sunny grass tile, because a treeless plain has no
@@ -93,7 +130,7 @@ fn the_macaw_is_heard_by_day_only_where_the_bird_table_flies_it() {
                 let expected = if macaw { 1.0 - night } else { 0.0 };
                 for weather in [None, weather(WeatherKind::Rain, 200)] {
                     assert_eq!(
-                        targets(&country, night, weather).day,
+                        gain_of(&targets(&country, night, weather), Call::Parrot),
                         expected,
                         "wooded {wooded}, night {night}"
                     );
@@ -107,12 +144,16 @@ fn the_macaw_is_heard_by_day_only_where_the_bird_table_flies_it() {
         ..grass()
     };
     assert_eq!(
-        targets(&plain, 0.0, None).day,
+        gain_of(&targets(&plain, 0.0, None), Call::Parrot),
         0.0,
         "an open plain is silent"
     );
-    assert_eq!(targets(&grass(), 0.0, None).day, 1.0);
-    assert_eq!(targets(&grass(), 1.0, None).day, 0.0, "no macaw at night");
+    assert_eq!(gain_of(&targets(&grass(), 0.0, None), Call::Parrot), 1.0);
+    assert_eq!(
+        gain_of(&targets(&grass(), 1.0, None), Call::Parrot),
+        0.0,
+        "no macaw at night"
+    );
 }
 
 /// Ten minutes of the real system at 0.1 s a tick, on the world's own seed: the ambience,
@@ -348,7 +389,8 @@ fn session_and_camera_lifetime_bound_all_country_sources() {
         .spawn((WorldCamera, Transform::default()))
         .id();
     app.update();
-    assert_eq!(app.world().resource::<Country>().day_gain, 0.0);
+    let macaw = row_of(Call::Parrot);
+    assert_eq!(app.world().resource::<Country>().wildlife_gains[macaw], 0.0);
     app.insert_resource(session());
     for _ in 0..20 {
         app.world_mut()
@@ -357,10 +399,10 @@ fn session_and_camera_lifetime_bound_all_country_sources() {
         app.update();
         energy(&AudioMixer::from_shared_for_test(shared.clone()), 800);
     }
-    assert!(app.world().resource::<Country>().day_gain > 0.5);
+    assert!(app.world().resource::<Country>().wildlife_gains[macaw] > 0.5);
     app.world_mut().despawn(camera);
     app.update();
-    assert_eq!(app.world().resource::<Country>().day_gain, 0.0);
+    assert_eq!(app.world().resource::<Country>().wildlife_gains[macaw], 0.0);
     app.world_mut().remove_resource::<Session>();
     app.update();
     energy(&AudioMixer::from_shared_for_test(shared.clone()), 12000);
@@ -381,17 +423,24 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
         ([6.0, 16.0], 4.0, -1.2, 0.45, 24.0)
     );
     assert!(profile.seconds < profile.interval[0]);
-    assert!(matches!(CALLS[4], sounds::Call::Cricket));
+    assert_eq!(
+        (
+            WILDLIFE[row_of(Call::Cricket)].habitat,
+            WILDLIFE[row_of(Call::Cricket)].period
+        ),
+        (Habitat::Ground(GroundLook::Grass), Period::Night),
+        "the cricket's row moved"
+    );
     for night in [0.0, 0.25, 1.0] {
         for wooded in [false, true] {
             let green = Ambience {
                 ground: GroundLook::Grass,
                 wooded,
             };
-            assert_eq!(targets(&green, night, None).wildlife[4], night);
+            assert_eq!(gain_of(&targets(&green, night, None), Call::Cricket), night);
             for kind in [WeatherKind::Rain, WeatherKind::Snow, WeatherKind::Blizzard] {
                 assert_eq!(
-                    targets(&green, night, weather(kind, 255)).wildlife[4],
+                    gain_of(&targets(&green, night, weather(kind, 255)), Call::Cricket),
                     night
                 );
             }
@@ -401,7 +450,7 @@ fn crickets_are_a_call_gated_on_the_green_night_the_bed_used() {
                 ground,
                 wooded: true,
             };
-            assert_eq!(targets(&country, night, None).wildlife[4], 0.0);
+            assert_eq!(gain_of(&targets(&country, night, None), Call::Cricket), 0.0);
         }
     }
 }
@@ -479,11 +528,17 @@ fn prolonged_source_pressure_does_not_spend_the_recovery_fade() {
 #[test]
 fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground() {
     for wooded in [false, true] {
-        for (ground, first) in [(GroundLook::Sand, 0), (GroundLook::Snow, 2)] {
+        for (ground, [by_day, by_night]) in [
+            (GroundLook::Sand, [Call::Rattlesnake, Call::Crow]),
+            (GroundLook::Snow, [Call::Eagle, Call::Wolf]),
+        ] {
             let country = Ambience { ground, wooded };
             for (night, expected) in [(0.0, [1.0, 0.0]), (0.5, [0.5, 0.5]), (1.0, [0.0, 1.0])] {
                 let target = targets(&country, night, None);
-                assert_eq!(&target.wildlife[first..first + 2], &expected);
+                assert_eq!(
+                    [gain_of(&target, by_day), gain_of(&target, by_night)],
+                    expected
+                );
                 assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0);
                 assert_eq!(
                     target.beds, [0.0; 5],
@@ -502,11 +557,18 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             }
         }
     }
+    // Wooded grass at dusk is the one cell with two voices in it: the macaw going quiet as
+    // the cricket comes up, each at half, and no other country's creature sounding at all.
+    let dusk = targets(&grass(), 0.5, None);
     assert_eq!(
-        targets(&grass(), 0.5, None).wildlife,
-        [0.0, 0.0, 0.0, 0.0, 0.5]
+        (gain_of(&dusk, Call::Parrot), gain_of(&dusk, Call::Cricket)),
+        (0.5, 0.5)
     );
-    assert_eq!(targets(&Ambience::default(), 0.5, None).wildlife, [0.0; 5]);
+    assert_eq!(dusk.wildlife.iter().sum::<f32>(), 1.0);
+    assert_eq!(
+        targets(&Ambience::default(), 0.5, None).wildlife,
+        [0.0; VOICES]
+    );
     assert_eq!(
         birds::species_for(&Ambience {
             ground: GroundLook::Snow,
@@ -542,7 +604,7 @@ fn storm_winds_scale_independently_and_blizzard_keeps_the_existing_snowfall() {
 fn new_descriptions_are_audible_distinct_seeded_and_have_silent_edges() {
     for rate in [8000, 48000, 192000] {
         let mut signatures = Vec::new();
-        for call in CALLS.into_iter().chain([sounds::Call::Parrot]) {
+        for call in WILDLIFE.iter().map(|voice| voice.call) {
             let render = |seed| call.bake(seed, rate).unwrap();
             let first = render(7);
             let samples = first.samples();
@@ -630,7 +692,7 @@ fn wildlife_sequence(
 
 #[test]
 fn shipped_calls_are_sparse_irregular_reproducible_and_world_placed() {
-    for call in CALLS.into_iter().chain([sounds::Call::Parrot]) {
+    for call in WILDLIFE.iter().map(|voice| voice.call) {
         let first = wildlife_sequence(call, 17, 1.0, 1.0);
         assert_eq!(first, wildlife_sequence(call, 17, 1.0, 1.0));
         assert_ne!(first.0, wildlife_sequence(call, 39, 1.0, 1.0).0);
@@ -702,20 +764,142 @@ fn crossing_countries_fades_outgoing_calls_while_incoming_calls_rise() {
     for _ in 0..120 {
         step(&mut app);
     }
-    assert!(app.world().resource::<Country>().wildlife_gains[0] > 0.99);
+    let (sand, snow) = (row_of(Call::Rattlesnake), row_of(Call::Eagle));
+    assert!(app.world().resource::<Country>().wildlife_gains[sand] > 0.99);
     app.world_mut().resource_mut::<Ambience>().ground = GroundLook::Snow;
     step(&mut app);
     let gains = app.world().resource::<Country>().wildlife_gains;
-    assert!(gains[0] > 0.9 && gains[0] < 1.0);
-    assert!(gains[2] > 0.0 && gains[2] < 0.1);
+    assert!(gains[sand] > 0.9 && gains[sand] < 1.0);
+    assert!(gains[snow] > 0.0 && gains[snow] < 0.1);
     for _ in 0..120 {
         step(&mut app);
     }
     let gains = app.world().resource::<Country>().wildlife_gains;
-    assert!(gains[0] < 0.01 && gains[2] > 0.99);
+    assert!(gains[sand] < 0.01 && gains[snow] > 0.99);
     app.world_mut().despawn(camera);
     app.update();
-    assert_eq!(app.world().resource::<Country>().wildlife_gains, [0.0; 5]);
+    assert_eq!(
+        app.world().resource::<Country>().wildlife_gains,
+        [0.0; VOICES]
+    );
     energy(&AudioMixer::from_shared_for_test(shared.clone()), 12000);
     assert_eq!(energy(&AudioMixer::from_shared_for_test(shared), 800), 0.0);
+}
+
+/// The table is the whole of the country × hour mapping, so the mapping is what is asserted:
+/// every ground look the client can answer, in both halves of the day, against the creature
+/// that belongs there and silence everywhere else.
+#[test]
+fn the_table_answers_every_country_and_half_of_the_day() {
+    let expected = |ground, wooded, night: f32| -> Vec<Call> {
+        match (ground, wooded, night >= PERIOD_SWITCH) {
+            (GroundLook::Sand, _, false) => vec![Call::Rattlesnake],
+            (GroundLook::Sand, _, true) => vec![Call::Crow],
+            (GroundLook::Snow, _, false) => vec![Call::Eagle],
+            (GroundLook::Snow, _, true) => vec![Call::Wolf],
+            // Wooded grass is the one cell with a seen-and-heard species in it.
+            (GroundLook::Grass, true, false) => vec![Call::Parrot],
+            (GroundLook::Grass, false, false) => vec![],
+            (GroundLook::Grass, _, true) => vec![Call::Cricket],
+            // Not enough loaded evidence is silence, never a default creature.
+            (GroundLook::Unknown, _, _) => vec![],
+        }
+    };
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            for night in [0.0, 1.0] {
+                let target = targets(&Ambience { ground, wooded }, night, None);
+                let sounding: Vec<Call> = WILDLIFE
+                    .iter()
+                    .zip(target.wildlife)
+                    .filter(|(_, gain)| *gain > 0.0)
+                    .map(|(voice, _)| voice.call)
+                    .collect();
+                assert_eq!(
+                    sounding,
+                    expected(ground, wooded, night),
+                    "{ground:?}, wooded {wooded}, night {night}"
+                );
+            }
+        }
+    }
+}
+
+/// Two properties of the table itself, each of which a new row can break silently.
+///
+/// A shared stream salt would make two creatures call together on the same bearing; a voice
+/// whose habitat is a flock but whose period is not that flock's would be a call from a
+/// species that is not in the air.
+#[test]
+fn every_voice_has_its_own_stream_and_agrees_with_the_flock_it_belongs_to() {
+    for (index, voice) in WILDLIFE.iter().enumerate() {
+        assert_eq!(
+            WILDLIFE
+                .iter()
+                .filter(|other| other.stream == voice.stream)
+                .count(),
+            1,
+            "{:?} shares its stream salt",
+            voice.call
+        );
+        assert_eq!(row_of(voice.call), index, "{:?} is in two rows", voice.call);
+        if let Habitat::Flock(species) = voice.habitat {
+            assert_eq!(
+                voice.period,
+                birds::BIRDS[species].flies,
+                "{:?} is heard when its flock is not flying",
+                voice.call
+            );
+        }
+    }
+    assert_eq!(
+        WILDLIFE[row_of(Call::Parrot)].habitat,
+        Habitat::Flock(PARROT),
+        "the macaw's voice is gated on the bird table, not on the ground"
+    );
+}
+
+/// The half of the day is a property of the row, so a species declared nocturnal is silent by
+/// day without anything else in the lane knowing it exists. Written against a row this
+/// client does not ship — the owl, the bat and the lynx are later issues — because the point
+/// is that the mechanism is already there for them.
+#[test]
+fn a_species_declared_nocturnal_is_not_heard_by_day() {
+    let owl = Voice {
+        call: Call::Crow,
+        habitat: Habitat::Ground(GroundLook::Grass),
+        period: Period::Night,
+        stream: 0xB00,
+    };
+    let wood = grass();
+    assert_eq!(
+        owl.gain(&wood, 0.0),
+        0.0,
+        "a nocturnal voice sounded by day"
+    );
+    assert_eq!(owl.gain(&wood, 1.0), 1.0);
+    assert_eq!(owl.gain(&wood, 0.5), 0.5, "it crossfades over the twilight");
+    // And its day-lit neighbour is the exact complement at every hour, so dusk hands over
+    // rather than leaving a gap.
+    let day = Voice {
+        period: Period::Day,
+        ..owl
+    };
+    for night in [0.0, 0.25, 0.5, 0.75, 1.0] {
+        assert_eq!(owl.gain(&wood, night) + day.gain(&wood, night), 1.0);
+    }
+    // An unclamped curve cannot push a gain outside the lane's range.
+    assert_eq!(day.gain(&wood, -3.0), 1.0);
+    assert_eq!(day.gain(&wood, 7.0), 0.0);
+    // Nothing sounds where the habitat is not, whichever half of the day it is.
+    let elsewhere = Ambience {
+        ground: GroundLook::Sand,
+        wooded: false,
+    };
+    assert_eq!(owl.gain(&elsewhere, 1.0), 0.0);
 }

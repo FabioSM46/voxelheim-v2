@@ -1,6 +1,5 @@
 //! Every ambient bed and call, pinned (see `audio::synth::pin`). A call's seed
 //! varies per play, so each is pinned at three seeds that reach different variations.
-use super::sounds::{CALLS, Call};
 use super::*;
 use crate::audio::synth::pin;
 
@@ -16,7 +15,8 @@ fn every_ambient_sound_renders_identically_to_its_pin() {
             pin::continuous(&bed.description(), 0.75, 7),
         ));
     }
-    for call in CALLS.into_iter().chain([Call::Parrot]) {
+    // In the table's order, which is why every row below is still where it was.
+    for call in WILDLIFE.iter().map(|voice| voice.call) {
         for seed in SEEDS {
             // The lane's own bake: the cricket's syllables and the macaw's squawks struck
             // apart, every other call baked whole.
