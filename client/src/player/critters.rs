@@ -1522,6 +1522,21 @@ pub(super) fn keep_the_critters(
             break;
         };
         let (generation, age) = generation_of(species, slot, elapsed);
+        // **A slot with no life left is not stood up**, and the guard is the exact negation of
+        // the retirement `run_the_critters` applies: a critter spawned inside its own fade
+        // window is retired on the same frame, despawns two frames later, and — because a
+        // leaving critter never claims `taken[slot]` — is stood up again immediately, at the
+        // cost of a `surface_under` probe, a `trunk_near` ring search and an entity with a
+        // child, every frame until the generation rolls. `CRITTER_COUNT_MAX` bounds how many
+        // exist at once but not how often they are built, and this window is a quarter of
+        // every slot's time, so the churn is the normal case rather than a corner.
+        //
+        // It is also what makes `trunk_near`'s own "paid once" true: that doc says the ring
+        // search runs when a critter is stood up and never again, which is a claim about how
+        // often a critter is stood up.
+        if age + CRITTER_FADE_SECONDS >= species.life {
+            continue;
+        }
         let seed = seed_on_the_far_side(cell_seed, slot, generation, anchor, bias);
         // The ground under where this critter's forage begins, which is what both the trunk
         // search and the first frame's height are measured from. No ground, no critter: the
