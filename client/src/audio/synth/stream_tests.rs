@@ -102,6 +102,26 @@ fn a_pure_tone_cannot_be_mistaken_for_a_nonrepeating_bed() {
 }
 
 #[test]
+fn a_gated_layer_cannot_be_mistaken_for_a_nonrepeating_bed() {
+    // Noise, audible and sustained, so the noise check passes on its own — the gate is the
+    // only thing wrong with it, and once it winds up to `to` it strikes strictly periodically.
+    let mut gated = sound(Exciter::Noise(Noise::White));
+    gated.layers[0].gate = Some(Gate {
+        from: 40.0,
+        to: 40.0,
+        seconds: 0.1,
+        curve: Curve::Linear,
+        duty: 0.2,
+    });
+    assert_eq!(gated.continuous(48_000, 0).unwrap_err(), Error::GatedBed);
+    // The same description bakes: a struck sound is where a gate belongs.
+    assert!(gated.bake(1.0, 48_000, 0).is_ok());
+    // And the bed it was made from is still a bed once the gate is gone.
+    gated.layers[0].gate = None;
+    assert!(gated.continuous(48_000, 0).is_ok());
+}
+
+#[test]
 fn baked_playback_preserves_samples_across_ring_refills_and_drains_the_last_sample() {
     let mixer = Arc::new(Mixer::new());
     mixer.set_format(44_100, 1);

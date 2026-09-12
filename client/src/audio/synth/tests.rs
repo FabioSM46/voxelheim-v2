@@ -52,6 +52,7 @@ pub(super) fn sound(exciter: Exciter) -> Sound {
                 release: 0.01,
             },
             filter: None,
+            gate: None,
         }],
     }
 }
@@ -301,6 +302,144 @@ fn a_release_longer_than_the_bake_is_rejected_instead_of_silencing_the_clip() {
     oversized.envelope.release = 0.1001;
     described.layers.push(oversized);
     assert_eq!(described.bake(0.1, 48_000, 0).unwrap_err(), Error::Envelope);
+}
+
+/// #1184: a gate is the layer's own amplitude struck open and shut. The whole of its effect is
+/// a multiplication of the layer it sits on, so the same description baked with and without one
+/// differs by exactly the gate's shape — full where it opens, falling linearly across the duty,
+/// and **exact** zero for the rest of every period, because the gate is applied after the
+/// filter and no resonant tail may smear a gap into a dip.
+///
+/// 125 openings a second at 8 kHz is a period of exactly 64 samples, and a quarter duty opens
+/// for exactly 16 of them: a rate whose phase step is a power of two, so this test's arithmetic
+/// is the renderer's and not an approximation of it.
+#[test]
+fn a_gate_strikes_its_layer_open_and_shut_between_exact_silences() {
+    let (rate, duty) = (8_000, 0.25);
+    let mut described = sound(Exciter::Noise(Noise::White));
+    described.layers[0].envelope = Envelope {
+        attack: 0.001,
+        decay: 0.0,
+        sustain: 1.0,
+        release: 0.001,
+    };
+    let open = described.bake(0.5, rate, 9).unwrap();
+    described.layers[0].gate = Some(Gate {
+        from: 125.0,
+        to: 125.0,
+        seconds: 0.1,
+        curve: Curve::Linear,
+        duty,
+    });
+    let struck = described.bake(0.5, rate, 9).unwrap();
+    let mut silent = 0usize;
+    for (index, (sounded, gated)) in open.samples().iter().zip(struck.samples()).enumerate() {
+        let phase = (index % 64) as f32 / 64.0;
+        let want = if phase < duty {
+            1.0 - phase / duty
+        } else {
+            silent += 1;
+            0.0
+        };
+        assert!(
+            (gated - sounded * want).abs() < 1e-7,
+            "sample {index}: {gated} is not {sounded} times {want}"
+        );
+    }
+    // Three quarters of every period is silence, and it is exact rather than quiet: the layer
+    // it gates is noise, which is never exactly zero of its own accord.
+    let count = struck.samples().len();
+    assert!(silent.abs_diff(count * 3 / 4) < 64, "{silent} of {count}");
+    assert!(struck.samples().iter().filter(|v| **v == 0.0).count() >= silent);
+    assert!(open.samples().iter().filter(|v| **v == 0.0).count() < 8);
+
+    // A gate whose rate climbs strikes more often at the end than at the start.
+    described.layers[0].gate = Some(Gate {
+        from: 50.0,
+        to: 390.0,
+        seconds: 0.5,
+        curve: Curve::Linear,
+        duty,
+    });
+    let winding = described.bake(0.5, rate, 9).unwrap();
+    let openings = |half: &[f32]| {
+        half.windows(2)
+            .filter(|pair| pair[0] == 0.0 && pair[1] != 0.0)
+            .count()
+    };
+    let samples = winding.samples();
+    let (first, last) = samples.split_at(samples.len() / 2);
+    assert!(
+        openings(last) > openings(first) * 2,
+        "{} openings then {}",
+        openings(first),
+        openings(last)
+    );
+}
+
+/// Every bound a gate has, refused before anything is allocated, the way every other field is.
+/// A duty of one is refused with the rest: a gate that never closes is a gain, and a gain is
+/// what the layer already has.
+#[test]
+fn a_gate_outside_its_bounds_is_refused_before_rendering() {
+    let good = Gate {
+        from: 60.0,
+        to: 90.0,
+        seconds: 0.3,
+        curve: Curve::Exponential,
+        duty: 0.2,
+    };
+    let refused = |gate: Gate| {
+        let mut described = sound(Exciter::Noise(Noise::White));
+        described.layers[0].gate = Some(gate);
+        described.bake(0.5, 8_000, 0)
+    };
+    assert!(refused(good).is_ok());
+    // A twentieth of the sample rate, so the shortest opening still holds a sample of its own.
+    let limit = 8_000.0 * MAX_GATE_FRACTION;
+    assert!((limit - 400.0).abs() < f32::EPSILON);
+    for bad in [
+        Gate {
+            from: f32::NAN,
+            ..good
+        },
+        Gate { from: 0.0, ..good },
+        Gate {
+            to: f32::INFINITY,
+            ..good
+        },
+        Gate {
+            to: limit + 1.0,
+            ..good
+        },
+        Gate {
+            seconds: 0.0,
+            ..good
+        },
+        Gate {
+            seconds: 61.0,
+            ..good
+        },
+        Gate { duty: 0.0, ..good },
+        Gate { duty: 0.04, ..good },
+        Gate { duty: 1.0, ..good },
+        Gate {
+            duty: f32::NAN,
+            ..good
+        },
+    ] {
+        assert_eq!(refused(bad).unwrap_err(), Error::Gate, "{bad:?}");
+    }
+    // Both ends obey the bound, and the bound follows the rate: what 8 kHz refuses, 48 kHz
+    // renders.
+    let mut fast = sound(Exciter::Noise(Noise::White));
+    fast.layers[0].gate = Some(Gate {
+        from: limit + 1.0,
+        to: limit + 1.0,
+        ..good
+    });
+    assert_eq!(fast.bake(0.5, 8_000, 0).unwrap_err(), Error::Gate);
+    assert!(fast.bake(0.5, 48_000, 0).is_ok());
 }
 
 fn glide(from: f32, to: f32, curve: Curve, vibrato: Vibrato) -> Glide {

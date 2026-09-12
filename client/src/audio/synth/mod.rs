@@ -4,6 +4,8 @@
 //! should prefer sine/noise for bright transients where aliasing would be objectionable.
 //! A glide is the one exciter whose frequency moves: a fall or rise between two pitches with
 //! an optional vibrato, its phase accumulated sample by sample so the waveform never steps.
+//! A gate is the one field that shapes a layer many times a second rather than once: a layer
+//! struck open and shut, for a voice that is a sequence of impacts rather than a held sound.
 
 // The arrival chime consumes baked sine layers; #984–#987 and #999 consume the other
 // primitives and continuous/playback APIs. Public items in this binary crate otherwise
@@ -16,14 +18,21 @@ mod primitives;
 pub use continuous::Continuous;
 #[allow(unused_imports)]
 pub use playback::{Playback, Rendering, StartError, Status};
-use primitives::{Biquad, Generator};
+use primitives::{Biquad, Gating, Generator};
 // Following content issues consume the rest of this synthesis vocabulary.
 #[allow(unused_imports)]
-pub use primitives::{Curve, Envelope, Exciter, Filter, FilterKind, Glide, Noise, Vibrato, Wave};
+pub use primitives::{
+    Curve, Envelope, Exciter, Filter, FilterKind, Gate, Glide, Noise, Vibrato, Wave,
+};
 use std::sync::Arc;
 
 pub const MAX_LAYERS: usize = 16;
 pub const MAX_BAKED_SECONDS: f32 = 10.0;
+
+/// How many times a second a [`Gate`] may open, as a fraction of the sample rate: a twentieth,
+/// so the shortest opening a gate can describe still holds a sample of its own at the lowest
+/// supported rate.
+const MAX_GATE_FRACTION: f32 = 0.05;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
@@ -31,6 +40,9 @@ pub struct Layer {
     pub gain: f32,
     pub envelope: Envelope,
     pub filter: Option<Filter>,
+    /// Struck open and shut rather than sounded continuously. Applied after the filter, so a
+    /// resonant tail cannot smear the silence between two openings into a dip.
+    pub gate: Option<Gate>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,8 +58,10 @@ pub enum Error {
     Gain,
     Envelope,
     Filter,
+    Gate,
     Duration,
     ContinuousNeedsNoise,
+    GatedBed,
 }
 
 fn bounded(value: f32, low: f32, high: f32) -> bool {
@@ -184,6 +198,18 @@ impl Sound {
             {
                 return Err(Error::Filter);
             }
+            // Both ends of a gate's rate obey the same bound, and the duty stays strictly
+            // under one: a gate that never closes is a gain, and this field is not one.
+            if let Some(gate) = layer.gate {
+                let limit = rate as f32 * MAX_GATE_FRACTION;
+                if !(bounded(gate.from, 0.1, limit)
+                    && bounded(gate.to, 0.1, limit)
+                    && bounded(gate.seconds, 0.001, 60.0)
+                    && bounded(gate.duty, 0.05, 0.9))
+                {
+                    return Err(Error::Gate);
+                }
+            }
         }
         Ok(())
     }
@@ -200,6 +226,7 @@ impl Sound {
                 ),
                 envelope: layer.envelope,
                 filter: layer.filter.map(|filter| Biquad::new(filter, rate)),
+                gate: layer.gate.map(|gate| Gating::new(gate, rate)),
                 gain: f64::from(layer.gain),
             })
             .collect()
@@ -226,16 +253,24 @@ struct CompiledLayer {
     generator: Generator,
     envelope: Envelope,
     filter: Option<Biquad>,
+    gate: Option<Gating>,
     gain: f64,
 }
 
 impl CompiledLayer {
     fn next(&mut self) -> f64 {
         let input = self.generator.next();
-        self.filter
+        let filtered = self
+            .filter
             .as_mut()
-            .map_or(input, |filter| filter.next(input))
-            * self.gain
+            .map_or(input, |filter| filter.next(input));
+        // The gate advances every sample whether or not the layer has one, because its phase
+        // is a property of elapsed time and not of how loud the layer happens to be.
+        let gated = self
+            .gate
+            .as_mut()
+            .map_or(filtered, |gate| filtered * gate.next());
+        gated * self.gain
     }
 }
 

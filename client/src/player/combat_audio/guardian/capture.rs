@@ -429,6 +429,7 @@ fn review_spatial_and_party(directory: &Path) {
                     sustain: 1.0,
                     release: 0.02,
                 },
+                gate: None,
                 filter: None,
             }],
         };

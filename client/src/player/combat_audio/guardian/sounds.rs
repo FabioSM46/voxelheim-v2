@@ -69,6 +69,7 @@ pub(in super::super) fn tone(hz: f32, gain: f32, attack: f32, decay: f32) -> Lay
         },
         gain,
         envelope: envelope(attack, decay),
+        gate: None,
         filter: None,
     }
 }
@@ -77,6 +78,7 @@ pub(in super::super) fn grit(hz: f32, gain: f32, attack: f32, decay: f32, q: f32
         exciter: Exciter::Noise(Noise::White),
         gain,
         envelope: envelope(attack, decay),
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::Band,
             hz,

@@ -42,6 +42,7 @@ fn description() -> Sound {
                     sustain: 0.0,
                     release: 0.02,
                 },
+                gate: None,
                 filter: None,
             })
             .collect(),

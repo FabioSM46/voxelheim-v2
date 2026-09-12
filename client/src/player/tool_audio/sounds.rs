@@ -20,6 +20,7 @@ fn noise(gain: f32, attack: f32, decay: f32, hz: f32, kind: FilterKind) -> Layer
             sustain: 0.0,
             release: 0.015,
         },
+        gate: None,
         filter: Some(Filter { kind, hz, q: 0.7 }),
     }
 }
@@ -37,6 +38,7 @@ fn tone(hz: f32, gain: f32, decay: f32) -> Layer {
             sustain: 0.0,
             release: 0.015,
         },
+        gate: None,
         filter: None,
     }
 }
