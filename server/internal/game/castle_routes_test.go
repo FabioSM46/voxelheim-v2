@@ -178,3 +178,46 @@ func TestCastleCourtStairAndCurtainCircuitNeedNoJump(t *testing.T) {
 		}
 	}
 }
+
+func TestCastleWesternSpireLookoutsAreReachedByWalking(t *testing.T) {
+	for _, tower := range []struct{ cx, cz, lookout float64 }{{10, 12, 35}, {20, 32, 29}} {
+		route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {14.5, 0, 43.5}, {14.5, 0, 37.5}, {7.5, 0, 37.5}, {7.5, 7, 29.5}, {11.5, 7, 29.5}, {11.5, 14, 37.5}, {7.5, 14, 37.5}, {7.5, 21, 29.5}, {14.5, 21, 29.5}}
+		if tower.cx == 10 {
+			route = append(route, [3]float64{14.5, 21, 24.5}, [3]float64{16.5, 21, 24.5}, [3]float64{16.5, 21, 19.5}, [3]float64{17.5, 21, 19.5}, [3]float64{17.5, 21, 9.5})
+		}
+		route = append(route, [3]float64{tower.cx - 2.5, 21, tower.cz - 2.5})
+		for i, floor := 0, 21.0; floor < tower.lookout; i, floor = i+1, floor+3 {
+			height := math.Min(3, tower.lookout-floor)
+			x, z := tower.cx-2.5, tower.cz+2.5
+			if i%2 == 1 {
+				x, z = tower.cx+2.5, tower.cz-2.5
+			}
+			if height < 3 {
+				z = tower.cz - 0.5 + height
+			}
+			route = append(route, [3]float64{x, floor + height, z})
+			if floor+height < tower.lookout {
+				nextX := tower.cx + 2.5
+				if i%2 == 1 {
+					nextX = tower.cx - 2.5
+				}
+				route = append(route, [3]float64{nextX, floor + height, z})
+			}
+		}
+		route = append(route, [3]float64{tower.cx - 2.5, tower.lookout, tower.cz + 2.5}, [3]float64{tower.cx + 1.5, tower.lookout, tower.cz + 2.5})
+		for i := len(route) - 2; i >= 0; i-- {
+			route = append(route, route[i])
+		}
+		for lane := range 2 {
+			walk := append([][3]float64(nil), route...)
+			for i := range walk {
+				if walk[i][0] == tower.cx-2.5 || walk[i][0] == tower.cx+2.5 {
+					walk[i][0] += float64(lane)
+				}
+			}
+			for turn := range 4 {
+				t.Run(fmt.Sprintf("tower%.0f/lane%d/rotation%d", tower.cx, lane, turn), func(t *testing.T) { walkCastle(t, castleTerrain{turn: turn}, walk) })
+			}
+		}
+	}
+}

@@ -945,7 +945,7 @@ func TestTheKeepsFourSpiresRiseFromCorbelledShafts(t *testing.T) {
 		{"north-east", 50, 12, 7, 46, 67},
 		{"south-east", 42, 32, 6, 40, 58},
 	} {
-		if got := s.At(tower.cx, tower.shaft-4, tower.cz); got != BlackBrick {
+		if got := s.At(tower.cx+tower.r, tower.shaft-4, tower.cz); got != BlackBrick {
 			t.Errorf("the %s tower's shaft is block %d below its capital, want dressed brick", tower.name, got)
 		}
 		if got := s.At(tower.cx+tower.r+1, tower.shaft, tower.cz); got != SmoothBlackStone {
