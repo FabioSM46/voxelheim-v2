@@ -226,7 +226,13 @@ fn the_same_fall_is_the_same_force_at_every_frame_rate() {
     for phase in 0..24u64 {
         let mut waters = Waters::default();
         let micros = 100u64;
-        let jitter = |frame: u64| if frame.is_multiple_of(2) { 0.002 } else { -0.002 };
+        let jitter = |frame: u64| {
+            if frame.is_multiple_of(2) {
+                0.002
+            } else {
+                -0.002
+            }
+        };
         let mut entered = None;
         for frame in 0..(phase + 4000) {
             // Hovering clear of the water for `phase` frames, then walking in at half a
