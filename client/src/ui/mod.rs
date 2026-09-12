@@ -27,6 +27,7 @@ mod login;
 mod loot;
 mod map;
 mod menu;
+mod overhead;
 mod party;
 mod prompt;
 mod servers;
@@ -242,6 +243,7 @@ impl Plugin for UiPlugin {
                     leaving::LeavingUiPlugin,
                     cast::CastUiPlugin,
                     encounters::EncounterUiPlugin,
+                    overhead::OverheadUiPlugin,
                     voice::VoiceUiPlugin,
                 ),
                 // Nested for the reason the groups around it are: the tuple is at
