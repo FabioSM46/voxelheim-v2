@@ -1,5 +1,7 @@
 //! Small descriptions rather than assets: every continuous layer advances fresh noise.
-use crate::audio::synth::{Envelope, Exciter, Filter, FilterKind, Layer, Noise, Sound, Wave};
+use crate::audio::synth::{
+    self, Baked, Envelope, Exciter, Filter, FilterKind, Layer, Noise, Sound, Wave,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Bed {
@@ -111,14 +113,21 @@ pub(super) struct CallProfile {
     pub range: f32,
 }
 
-/// How many chirps one cricket call carries: one to three, from its seed.
-pub(super) fn chirps(seed: u64) -> u32 {
-    1 + ((seed >> 8) % 3) as u32
+/// How many syllables one cricket call carries: two or three, from its seed — a "cri-cri".
+pub(super) fn syllables(seed: u64) -> usize {
+    2 + ((seed >> 8) % 2) as usize
 }
 
-/// Chirps per second within one call, 3.2 to 4.0, from its seed.
-fn chirp_rate(seed: u64) -> f32 {
-    3.2 + ((seed >> 16) % 81) as f32 / 100.0
+/// How long one cricket syllable sounds.
+pub(super) const SYLLABLE_SECONDS: f32 = 0.06;
+
+/// Where each syllable of a call starts: one every 0.15 to 0.19 s, from its seed, so every
+/// syllable is followed by at least 90 ms of silence before the next one.
+pub(super) fn syllable_onsets(seed: u64) -> Vec<f32> {
+    let period = 0.15 + ((seed >> 16) % 41) as f32 / 1000.0;
+    (0..syllables(seed))
+        .map(|index| index as f32 * period)
+        .collect()
 }
 
 impl Call {
@@ -128,9 +137,9 @@ impl Call {
             Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
             Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
             Self::Wolf => ([35.0, 79.0], 26.0, 0.0, 3.8, 96.0),
-            // In the grass a few blocks off. The longest call, three chirps at the slowest
-            // rate, closes at 4 / 3.2 = 1.25 s, inside the baked 1.3 s.
-            Self::Cricket => ([6.0, 20.0], 4.0, -1.2, 1.3, 24.0),
+            // In the grass a few blocks off. The longest call, three syllables at the slowest
+            // spacing, ends at 2 * 0.19 + 0.06 = 0.44 s, inside the baked 0.45 s.
+            Self::Cricket => ([6.0, 16.0], 4.0, -1.2, 0.45, 24.0),
         };
         CallProfile {
             interval,
@@ -138,6 +147,23 @@ impl Call {
             height,
             seconds,
             range,
+        }
+    }
+
+    /// One call rendered at the device's rate, from its seed. Every call is its description
+    /// baked once for its profile's length — except the cricket, whose description is one
+    /// syllable, struck at each of [`syllable_onsets`] with silence between.
+    pub(super) fn bake(self, seed: u64, rate: u32) -> Result<Baked, synth::Error> {
+        let seconds = self.profile().seconds;
+        match self {
+            Self::Cricket => self.description(seed).bake_at(
+                &syllable_onsets(seed),
+                SYLLABLE_SECONDS,
+                seconds,
+                rate,
+                seed,
+            ),
+            _ => self.description(seed).bake(seconds, rate, seed),
         }
     }
 
@@ -157,14 +183,8 @@ impl Call {
             Self::Crow => (0.025, 0.28, 0.05, 0.12),
             Self::Eagle => (0.015, 0.4, 0.0, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
-            // The tones below pulse at t = n / rate. The attack peaks on the pulse at 1 / rate
-            // and the decay reaches zero on the peak of the pulse at (chirps + 1) / rate, so
-            // `chirps(seed)` pulses sound, each softer than the one before. The pulse at t = 0
-            // rises under the attack ramp: a faint lead-in, under a tenth of the loudest.
-            Self::Cricket => {
-                let rate = chirp_rate(seed);
-                (1.0 / rate, chirps(seed) as f32 / rate, 0.0, 0.02)
-            }
+            // One syllable: a quick scrape that settles and is cut off before the next.
+            Self::Cricket => (0.005, 0.025, 0.85, 0.02),
         };
         let envelope = Envelope {
             attack,
@@ -238,16 +258,19 @@ impl Call {
                     },
                 ]
             }
-            // Five sines one chirp rate apart, weighted 1-4-6-4-1, sum to 16·cos⁴(π·rate·t)
-            // times a carrier: a sharp pulse every 1/rate with true silence between pulses,
-            // without an onset primitive. The top partial stays under 8 kHz's 3.6 kHz bound.
+            // The cricket voice from before #1145, which was right in timbre and wrong only in
+            // never stopping: white noise through a narrow band (q 8) near 3.2 kHz, a scraped
+            // shimmer rather than #1145's pure whistle. Four such bands side by side, not one:
+            // a syllable is sixty milliseconds rather than a bed, and uncorrelated bands add
+            // level as well as width. The top band stays under 8 kHz's 3.6 kHz bound.
             Self::Cricket => {
-                let hz = 3000.0 + variation * 200.0;
-                let rate = chirp_rate(seed);
-                [1.0, 4.0, 6.0, 4.0, 1.0]
+                let hz = 3000.0 + variation * 100.0;
+                [0.0, 150.0, 300.0, 450.0]
                     .into_iter()
-                    .enumerate()
-                    .map(|(k, weight)| tone(hz + k as f32 * rate, 0.018 * weight, envelope))
+                    .map(|offset| Layer {
+                        envelope,
+                        ..noise(Noise::White, 1.0, FilterKind::Band, hz + offset, 8.0)
+                    })
                     .collect()
             }
         };
@@ -258,6 +281,7 @@ impl Call {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::spatial;
     fn stream(bed: Bed, rate: u32, seed: u64) -> Vec<f32> {
         let mut stream = bed.description().continuous(rate, seed).unwrap();
         let mut output = vec![0.0; rate as usize * 2];
@@ -302,74 +326,151 @@ mod tests {
         }
     }
 
-    /// Count the pulses actually rendered, from the samples rather than from `chirps`:
-    /// a 5 ms peak envelope must rise past a fifth of the loudest pulse, and fall back
-    /// under a twentieth before another pulse is counted.
-    fn rendered_chirps(seed: u64, rate: u32) -> u32 {
-        let call = Call::Cricket
-            .description(seed)
-            .bake(Call::Cricket.profile().seconds, rate, seed)
-            .unwrap();
-        let envelope: Vec<f32> = call
-            .samples()
-            .chunks(rate as usize / 200)
-            .map(|window| window.iter().fold(0.0, |peak, v| v.abs().max(peak)))
-            .collect();
-        let loudest = envelope.iter().copied().fold(0.0, f32::max);
-        let (mut count, mut armed) = (0, true);
-        for level in envelope {
-            if armed && level > loudest * 0.2 {
-                count += 1;
-                armed = false;
-            } else if level < loudest * 0.05 {
-                armed = true;
-            }
-        }
-        count
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0, |peak, v| v.abs().max(peak))
     }
 
+    fn scramble(seed: u64) -> u64 {
+        super::super::controller::scramble(seed)
+    }
+
+    /// The syllables actually rendered, as `(first, last)` sounding sample: runs of sound
+    /// separated by at least 20 ms of exact silence. Band-passed noise crosses zero, but never
+    /// holds it for twenty milliseconds.
+    fn rendered_syllables(samples: &[f32], rate: u32) -> Vec<(usize, usize)> {
+        let gap = rate as usize / 50;
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        for (index, _) in samples.iter().enumerate().filter(|(_, v)| **v != 0.0) {
+            match found.last_mut() {
+                Some((_, last)) if index - *last <= gap => *last = index,
+                _ => found.push((index, index)),
+            }
+        }
+        found
+    }
+
+    /// #1161: an occasional "cri-cri". A call is two or three short syllables with real
+    /// silence between them — not #1145's one to three faint pulses, and not a trill.
     #[test]
-    fn a_cricket_call_is_one_to_three_rendered_chirps() {
-        let mut seen = [false; 3];
-        for seed in 0..60u64 {
-            let seed = super::super::controller::scramble(seed);
-            let expected = chirps(seed);
-            assert!((1..=3).contains(&expected));
-            seen[expected as usize - 1] = true;
-            assert!((3.2..=4.0).contains(&chirp_rate(seed)));
+    fn a_cricket_call_is_two_or_three_syllables_with_silence_between() {
+        let mut seen = [false; 2];
+        for seed in (0..60u64).map(scramble) {
+            let expected = syllables(seed);
+            seen[expected - 2] = true;
             for rate in [8000, 48000] {
-                assert_eq!(
-                    rendered_chirps(seed, rate),
-                    expected,
-                    "seed {seed} at {rate}"
-                );
+                let call = Call::Cricket.bake(seed, rate).unwrap();
+                let found = rendered_syllables(call.samples(), rate);
+                assert_eq!(found.len(), expected, "seed {seed} at {rate}: {found:?}");
+                for (first, last) in &found {
+                    let seconds = (last - first) as f32 / rate as f32;
+                    assert!(
+                        seconds > 0.03 && seconds <= SYLLABLE_SECONDS,
+                        "seed {seed} at {rate}: a {seconds} s syllable"
+                    );
+                }
+                for pair in found.windows(2) {
+                    let silence = (pair[1].0 - pair[0].1) as f32 / rate as f32;
+                    assert!(
+                        silence >= 0.08,
+                        "seed {seed} at {rate}: {silence} s between syllables"
+                    );
+                }
             }
         }
-        assert_eq!(seen, [true; 3], "every chirp count occurs");
+        assert_eq!(seen, [true; 2], "both syllable counts occur");
     }
 
+    /// The share of a sound's energy within 60 Hz of its loudest frequency between 1 and 4 kHz.
+    /// Goertzel's recurrence per DFT bin, so no crate and any length. A pure tone keeps nearly
+    /// all of its energy on one frequency however it is enveloped; a scraped band spreads it.
+    fn tonal_share(samples: &[f32], rate: u32) -> f32 {
+        let n = samples.len();
+        let bin = |hz: f32| (hz * n as f32 / rate as f32).round() as usize;
+        let power: Vec<(usize, f64)> = (bin(1000.0)..bin(4000.0).min(n / 2))
+            .map(|k| {
+                let coefficient = 2.0 * (std::f64::consts::TAU * k as f64 / n as f64).cos();
+                let (mut s1, mut s2) = (0.0f64, 0.0f64);
+                for &x in samples {
+                    let s0 = f64::from(x) + coefficient * s1 - s2;
+                    s2 = s1;
+                    s1 = s0;
+                }
+                (k, s1 * s1 + s2 * s2 - coefficient * s1 * s2)
+            })
+            .collect();
+        let loudest = power
+            .iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map_or(0, |(k, _)| *k);
+        let near = power
+            .iter()
+            .filter(|(k, _)| k.abs_diff(loudest) <= bin(60.0))
+            .map(|(_, p)| p)
+            .sum::<f64>();
+        // Parseval: the positive half of the spectrum holds n / 2 times the sample energy.
+        let energy: f64 = samples.iter().map(|x| f64::from(*x).powi(2)).sum();
+        (near / (energy * n as f64 / 2.0)) as f32
+    }
+
+    /// The owner's report on #1161: the cricket had become "just a whistle", a pure tone.
+    /// The voice from before #1145 was a band of noise, and that is what a call is again. The
+    /// negative control is the point: the same syllables voiced as a sine — the whistle — fail
+    /// the same measurement, so the floor separates the two rather than passing everything.
     #[test]
-    fn the_cricket_envelope_ends_on_a_pulse_peak_inside_the_baked_call() {
-        // The longest call, three chirps at the slowest rate, reaches zero at 4 / 3.2 s.
-        // The 0.02 s release is the buffer's last, so the two must not overlap.
-        let seconds = Call::Cricket.profile().seconds;
-        assert!(4.0 / 3.2 + 0.02 <= seconds);
-        for seed in 0..60u64 {
-            let seed = super::super::controller::scramble(seed);
-            let rate = chirp_rate(seed);
-            assert!((chirps(seed) + 1) as f32 / rate + 0.02 <= seconds);
-            let call = Call::Cricket
-                .description(seed)
-                .bake(seconds, 48000, seed)
-                .unwrap();
-            let peak = |samples: &[f32]| samples.iter().fold(0.0f32, |p, v| v.abs().max(p));
-            let loudest = peak(call.samples());
-            // The pulse at t = 0 rises under the attack ramp: x·cos⁴(πx) peaks near 0.095
-            // over its half period, so it is faint rather than silent.
-            let lead_in = peak(&call.samples()[..(0.5 / rate * 48000.0) as usize]);
+    fn a_cricket_chirp_is_a_scraped_band_and_not_a_whistle() {
+        let profile = Call::Cricket.profile();
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Cricket.bake(seed, 8000).unwrap();
+            let share = tonal_share(call.samples(), 8000);
             assert!(
-                lead_in > loudest * 0.05 && lead_in < loudest * 0.15,
-                "seed {seed}: lead-in {lead_in} of {loudest}"
+                share < 0.4,
+                "seed {seed}: {share} of the energy on one frequency"
+            );
+        }
+        let seed = scramble(7);
+        let whistle = Sound {
+            layers: vec![Layer {
+                exciter: Exciter::Oscillator {
+                    wave: Wave::Sine,
+                    hz: 3200.0,
+                },
+                gain: 0.5,
+                envelope: Call::Cricket.description(seed).layers[0].envelope,
+                filter: None,
+            }],
+        }
+        .bake_at(
+            &syllable_onsets(seed),
+            SYLLABLE_SECONDS,
+            profile.seconds,
+            8000,
+            seed,
+        )
+        .unwrap();
+        let share = tonal_share(whistle.samples(), 8000);
+        assert!(share > 0.8, "a whistle measured {share}");
+    }
+
+    /// Heard where the lane places it — `radius` out and `height` down, faded by the same
+    /// `spatial::attenuation` every placed sound is — before the Ambience bus, at the 48 kHz a
+    /// device usually runs. #1145's call peaked near 0.12 here. The RMS is over the syllables,
+    /// because the silence between them is the design rather than a lack of level.
+    #[test]
+    fn a_cricket_call_placed_at_its_radius_is_clearly_heard() {
+        let profile = Call::Cricket.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..60u64).map(scramble) {
+            let call = Call::Cricket.bake(seed, 48000).unwrap();
+            let heard: Vec<f32> = call.samples().iter().map(|v| v * gain).collect();
+            let voiced: Vec<f32> = rendered_syllables(&heard, 48000)
+                .into_iter()
+                .flat_map(|(first, last)| heard[first..=last].to_vec())
+                .collect();
+            let rms = (voiced.iter().map(|v| v * v).sum::<f32>() / voiced.len() as f32).sqrt();
+            assert!(
+                peak(&heard) >= 0.2 && rms >= 0.05,
+                "seed {seed}: peak {}, rms {rms}",
+                peak(&heard)
             );
         }
     }

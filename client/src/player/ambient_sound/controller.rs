@@ -2,7 +2,7 @@
 use crate::audio::{
     AudioMixer, Bus,
     spatial::Placement,
-    synth::{Playback, Rendering, Sound, Status},
+    synth::{self, Baked, Playback, Rendering, Sound, Status},
 };
 use bevy::prelude::*;
 
@@ -19,7 +19,6 @@ pub(super) struct CallFrame {
     pub interval: [f32; 2],
     pub radius: f32,
     pub height: f32,
-    pub seconds: f32,
     pub origin: Vec3,
     pub gain: f32,
 }
@@ -107,12 +106,16 @@ pub(super) struct Calls {
 impl Calls {
     /// At most one call per frame, no catch-up burst after a stall. The position stays
     /// anchored for its short lifetime. Rate/device changes drop the old one-shot.
+    ///
+    /// `bake` renders a call from its seed at the device's rate. The lane takes a rendering
+    /// rather than a description because a call need not be one description baked once: a
+    /// cricket's syllables are one description struck several times (#1161).
     pub(super) fn update(
         &mut self,
         mixer: &AudioMixer,
         frame: CallFrame,
         place: impl Fn(Vec3) -> Placement,
-        describe: impl FnOnce(u64) -> Sound,
+        bake: impl FnOnce(u64, u32) -> Result<Baked, synth::Error>,
     ) {
         let CallFrame {
             dt,
@@ -120,7 +123,6 @@ impl Calls {
             interval,
             radius,
             height,
-            seconds,
             origin,
             gain,
         } = frame;
@@ -136,8 +138,7 @@ impl Calls {
             let source = origin + Vec3::new(angle.cos() * radius, height, angle.sin() * radius);
             let mut placement = place(source);
             placement.gain *= gain;
-            self.playing = describe(seed)
-                .bake(seconds, mixer.sample_rate(), seed)
+            self.playing = bake(seed, mixer.sample_rate())
                 .ok()
                 .and_then(|sound| {
                     Playback::start(mixer, Bus::Ambience, Rendering::Baked(sound), placement).ok()
@@ -183,12 +184,11 @@ mod tests {
                     interval: [0.7, 2.5],
                     radius: 7.0,
                     height: 5.0,
-                    seconds: 0.3,
                     origin: Vec3::ZERO,
                     gain,
                 },
                 |_| Placement::UNPOSITIONED,
-                sounds::parrot,
+                |seed, rate| sounds::parrot(seed).bake(0.3, rate, seed),
             );
             let mut buffer = Buffer(vec![0.0; 800]);
             shared.render(&mut buffer);
