@@ -135,19 +135,39 @@ The layout deliberately mirrors the server's packages — `frame.rs` ↔ `intern
 counterpart on each side. The dependency direction is one-way: `ui`, `world` and `player` depend
 on `net`, never the reverse, and nothing outside `net` touches a socket.
 
-**Every edge from `player` to `world` is narrow and read-only, and there are six**:
+**Every edge from `player` to `world` is narrow and read-only, and there are eight**:
 `player/target.rs` reads `ChunkStore`, because aiming is a question about voxels and the store is
 the authority on which of those exist; `player/camera.rs` reads it for the same question one step
 further on, so the third-person boom stops at a wall instead of going through it;
 `player/sky.rs` reads it for exactly one voxel — the one the eye is inside — because water is the
 one block that changes what the sky looks like; `player/wards.rs` reads that same answer to hide
 its presentation under water; `player/ambience.rs` reads a coarse lattice of loaded columns to
-describe their cosmetic ground look; and `player/items.rs` asks `palette` for a terrain
+describe their cosmetic ground look; `player/birds.rs` reads one bounded column under each bird,
+because an altitude measured from the eye's anchor says nothing about the ridge the bird is
+crossing and the clearance is what holds it clear of one; `player/critters.rs` reads the same kind
+of column under each critter for the opposite sign — a bird is lifted *off* the surface and a
+critter is placed *on* it — plus a bounded ring search for the trunk that ends a critter's life;
+and `player/items.rs` asks `palette` for a terrain
 swatch when an item deliberately reuses one. The first-person hand takes its skin colour from the
 local player's server-sent `Appearance`, not from a terrain approximation. **No edge writes world
-state, and no edge points back from `world` to `player`.** A seventh, in either direction, is a
-design question rather than an import. The five that read the store all resolve their voxel
-through `ChunkStore::block_at`, the one place a world coordinate becomes a block id.
+state, and no edge points back from `world` to `player`.** A ninth, in either direction, is a
+design question rather than an import.
+
+**This count said six and had been wrong since #640**, which gave the flock its ground clearance
+and therefore gave `player/birds.rs` a `ChunkStore` read that nobody added to this paragraph. It
+was found by #1190, the issue that added the seventh, whose author went looking for the design
+question the sentence above promises and discovered that the arithmetic was already stale. The
+lesson is the one this repository keeps paying for: **a number in prose is a claim about the
+world, and a claim nothing checks goes quietly out of date.** It is also why this one is worth
+keeping as a count rather than softening to "several" — a wrong number is noticed and a vague one
+never is.
+
+The seven that read the store resolve their voxel through `ChunkStore::block_at` or through the
+two questions `world/mod.rs` owns about one — `solid_at` for what stops a body, `targetable_at`
+for what the crosshair finds. Which of the three a reader wants is the reader's question and not a
+detail: `birds.rs` deliberately does **not** use `solid_at`, because a bird must be seen to clear
+a lake surface and a leaf canopy while solidity excludes both, and `critters.rs` deliberately
+does, because what a squirrel stands on is exactly what would hold a body up.
 
 **The last of those is the client's one opinion about what an item looks like, and every
 renderer reads it rather than owning a second one.** `items::item_linear_rgba` answers which
