@@ -627,13 +627,15 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         livery: None,
         armour_style: None,
     },
+    // The leather set, sculpted as stitched and strapped hide (#1131). No livery: its two
+    // leathers, the hide and the darker straps over it, are vertex shades of this one colour.
     ItemDisplay {
         item_id: ITEM_LEATHER_CAP,
         name: "leather cap",
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
-        armour_style: None,
+        armour_style: Some(ArmourStyle::Leather),
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_JERKIN,
@@ -641,7 +643,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
-        armour_style: None,
+        armour_style: Some(ArmourStyle::Leather),
     },
     ItemDisplay {
         item_id: ITEM_LEATHER_LEGGINGS,
@@ -649,7 +651,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
         shape: ItemShape::Armour,
         colour: ItemColour::Leather,
         livery: None,
-        armour_style: None,
+        armour_style: Some(ArmourStyle::Leather),
     },
     // The rusty set: the starter blade's metal, worn. Both the colour and the livery are the
     // rusty sword's. The set is sculpted (#1130), and on a body and on the ground its plates

@@ -1932,14 +1932,15 @@ fn hair_visibility(app: &mut App, entity_id: u64) -> Visibility {
         .expect("the body draws hair")
 }
 
-/// **The rusty set is sculpted on a body and the leather set keeps the overlay cuboid**
-/// (#1130), read off the running wardrobe rather than off the builder.
+/// **Both armour sets are sculpted on a body** (#1130, #1131), read off the running wardrobe
+/// rather than off the builder.
 ///
-/// A sculpted piece wears the livery image the hand, the cell and the drop sample, and a closed
-/// helm hides the hair under it. Swapping the helm for a cap in place swaps the meshes and shows
-/// the hair again, without respawning the body.
+/// The rusty set wears the livery image the hand, the cell and the drop sample; the leather set
+/// has no livery and its material stays untextured. The helm and the cap both hide the hair
+/// under them. Swapping one set for the other in place swaps every mesh without respawning the
+/// body, and taking the headgear off shows the hair again.
 #[test]
-fn a_sculpted_set_swaps_in_place_and_its_helm_hides_the_hair() {
+fn a_sculpted_set_swaps_in_place_and_its_headgear_hides_the_hair() {
     let mut app = headless_player();
     let appearance = an_appearance(HairModel::Braided);
     let rusty = [
@@ -1968,13 +1969,13 @@ fn a_sculpted_set_swaps_in_place_and_its_helm_hides_the_hair() {
     );
     app.update();
 
-    let sculpted = armour_of(&mut app, 99);
-    let plain = armour_of(&mut app, 98);
-    assert_eq!(sculpted.len(), ArmourSegment::ALL.len());
-    assert_eq!(plain.len(), ArmourSegment::ALL.len());
+    let plated = armour_of(&mut app, 99);
+    let hide = armour_of(&mut app, 98);
+    assert_eq!(plated.len(), ArmourSegment::ALL.len());
+    assert_eq!(hide.len(), ArmourSegment::ALL.len());
     let image = app.world().resource::<Liveries>().material_image();
-    for ((segment, sculpted_mesh, sculpted_material), (_, plain_mesh, plain_material)) in
-        sculpted.iter().zip(&plain)
+    for ((segment, plated_mesh, plated_material), (_, hide_mesh, hide_material)) in
+        plated.iter().zip(&hide)
     {
         let meshes = app.world().resource::<Assets<Mesh>>();
         let vertices = |handle: &Handle<Mesh>| {
@@ -1983,14 +1984,17 @@ fn a_sculpted_set_swaps_in_place_and_its_helm_hides_the_hair() {
                 .expect("the overlay mesh exists")
                 .count_vertices()
         };
-        assert_eq!(
-            vertices(plain_mesh),
-            24,
-            "leather {segment:?} is no longer the overlay cuboid"
+        assert!(
+            vertices(hide_mesh) > 24,
+            "leather {segment:?} is still the overlay cuboid"
         );
         assert!(
-            vertices(sculpted_mesh) > 24,
+            vertices(plated_mesh) > 24,
             "rusty {segment:?} is still the overlay cuboid"
+        );
+        assert_ne!(
+            plated_mesh, hide_mesh,
+            "{segment:?} is one mesh in both sets"
         );
         let materials = app.world().resource::<Assets<StandardMaterial>>();
         let texture = |handle: &Handle<StandardMaterial>| {
@@ -2000,22 +2004,28 @@ fn a_sculpted_set_swaps_in_place_and_its_helm_hides_the_hair() {
                 .base_color_texture
                 .clone()
         };
-        assert_eq!(texture(sculpted_material), Some(image.clone()));
-        assert_eq!(texture(plain_material), None);
+        assert_eq!(texture(plated_material), Some(image.clone()));
+        assert_eq!(texture(hide_material), None);
     }
     assert_eq!(hair_visibility(&mut app, 99), Visibility::Hidden);
-    assert_eq!(hair_visibility(&mut app, 98), Visibility::Inherited);
+    assert_eq!(hair_visibility(&mut app, 98), Visibility::Hidden);
 
     let body = body_of(&mut app, 99);
     describe_wearing(&mut app, 99, appearance, leather);
     app.update();
     assert_eq!(body_of(&mut app, 99), body, "the body was respawned");
-    assert_eq!(armour_of(&mut app, 99), plain);
+    assert_eq!(armour_of(&mut app, 99), hide);
+    assert_eq!(hair_visibility(&mut app, 99), Visibility::Hidden);
+
+    let bareheaded = [0, leather[1], leather[2], 0];
+    describe_wearing(&mut app, 99, appearance, bareheaded);
+    app.update();
+    assert_eq!(body_of(&mut app, 99), body, "the body was respawned");
     assert_eq!(hair_visibility(&mut app, 99), Visibility::Inherited);
 
     describe_wearing(&mut app, 99, appearance, rusty);
     app.update();
-    assert_eq!(armour_of(&mut app, 99), sculpted);
+    assert_eq!(armour_of(&mut app, 99), plated);
     assert_eq!(hair_visibility(&mut app, 99), Visibility::Hidden);
 }
 

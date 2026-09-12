@@ -1310,14 +1310,15 @@ mod tests {
         );
     }
 
-    /// **A dropped sculpted piece is the mesh it is worn as** (#1130): the helm, the cuirass
-    /// with both vambraces, and both greaves, each merged from the body's own segment meshes
-    /// and scaled to a drop — while an armour item with no set keeps the shape's plate.
+    /// **A dropped sculpted piece is the mesh it is worn as** (#1130, #1131): each set's head,
+    /// chest (with both sleeves) and leg pieces, merged from the body's own segment meshes and
+    /// scaled to a drop — so no armour item in this build drops as the shape's plate.
     #[test]
     fn a_dropped_sculpted_piece_is_the_mesh_it_is_worn_as() {
         use super::super::appearance::ArmourSegment;
         use crate::player::crafting::{
-            ITEM_LEATHER_CAP, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM,
+            ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS, ITEM_RUSTY_CUIRASS,
+            ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM,
         };
 
         let mut app = headless_player();
@@ -1330,17 +1331,15 @@ mod tests {
             .find(|(key, _)| *key == (ItemShape::Armour, None))
             .map(|(_, mesh)| mesh.clone())
             .expect("the armour shape has a drop mesh");
-        assert_eq!(
-            visuals.mesh_for(ITEM_LEATHER_CAP),
-            plate,
-            "the leather cap no longer drops as the armour plate"
-        );
 
         let mut seen = Vec::new();
         for (item_id, piece) in [
             (ITEM_RUSTY_HELM, ArmourPiece::Head),
             (ITEM_RUSTY_CUIRASS, ArmourPiece::Chest),
             (ITEM_RUSTY_GREAVES, ArmourPiece::Legs),
+            (ITEM_LEATHER_CAP, ArmourPiece::Head),
+            (ITEM_LEATHER_JERKIN, ArmourPiece::Chest),
+            (ITEM_LEATHER_LEGGINGS, ArmourPiece::Legs),
         ] {
             let handle = visuals.mesh_for(item_id);
             assert_ne!(handle, plate, "item {item_id} still drops as the plate");
