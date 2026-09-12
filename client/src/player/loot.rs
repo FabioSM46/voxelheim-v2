@@ -79,6 +79,7 @@ impl Plugin for LootPlugin {
             .add_systems(
                 Update,
                 send_loot_intents
+                    .after(super::static_props::StaticPropsSet::Sync)
                     .after(ApplyInputMode)
                     .after(ApplySnapshots)
                     // After this frame's station pick, so the key is resolved against what
@@ -162,6 +163,7 @@ struct LootIntent<'w> {
     gate: InputGate<'w>,
     session: Option<Res<'w, Session>>,
     buffer: Res<'w, SnapshotBuffer>,
+    solids: Option<Res<'w, super::static_props::StaticPropSolids>>,
     appearances: Option<Res<'w, Appearances>>,
     station: Option<Res<'w, StationTarget>>,
     cadence: Res<'w, InputCadence>,
@@ -181,6 +183,7 @@ fn send_loot_intents(
         gate,
         session,
         buffer,
+        solids,
         appearances,
         station,
         cadence,
@@ -290,8 +293,12 @@ fn send_loot_intents(
     // **One request, and it states nothing.** Whether that entity keeps a stall, whether
     // the player is close enough by the server's own measure and whether anything opens
     // are all the server's — `MAX_REACH` here only decides which intent is originated.
-    if let Some(entity_id) = buffer.nearest_resident(session.0.entity_id, MAX_REACH)
-        && let Some(outbound) = outbound.as_deref_mut()
+    if let Some(entity_id) = buffer.nearest_resident(session.0.entity_id, MAX_REACH, |from, to| {
+        let eye = Vec3::Y * super::constants::EYE_HEIGHT;
+        solids
+            .as_deref()
+            .is_none_or(|solids| solids.line_is_clear(from + eye, to + eye))
+    }) && let Some(outbound) = outbound.as_deref_mut()
     {
         outbound.send(encode_npc_interact_request(&NpcInteractRequest {
             entity_id,
@@ -1161,6 +1168,60 @@ mod tests {
             assert!(
                 root.payload_as_portal_request().is_none(),
                 "Interact asked for a crossing"
+            );
+        }
+    }
+    #[test]
+    fn resident_intents_use_eye_visibility_and_skip_a_hidden_nearest_resident() {
+        use crate::net::{BlockCoord, Facing, StaticPropKind, StaticPropState};
+        for (kind, expected) in [
+            (StaticPropKind::Bookcase, RESIDENT + 1),
+            (StaticPropKind::BanquetTable, RESIDENT),
+        ] {
+            let mut farther = villager(RESIDENT + 1, 0.0);
+            farther.pos[2] = 3.0;
+            let seen = Snapshot {
+                server_tick: 2,
+                entities: vec![me()],
+                mobs: vec![villager(RESIDENT, 2.0), farther],
+                static_props: vec![StaticPropState {
+                    prop_id: 1,
+                    kind,
+                    origin: BlockCoord { x: 1, y: 64, z: 0 },
+                    facing: Facing::East,
+                    variant: 0,
+                }],
+                ..default()
+            };
+            let mut app = app_seeing(Snapshot {
+                server_tick: 1,
+                ..default()
+            });
+            app.add_plugins(InputPlugin);
+            let (outbound, frames) = Outbound::to_a_test(8);
+            app.insert_resource(outbound);
+            app.init_resource::<Assets<Mesh>>()
+                .init_resource::<Assets<StandardMaterial>>();
+            super::super::static_props::register(&mut app);
+            // Bootstrap owns the first frame: InputGate rejects a newly changed mode.
+            app.update();
+            assert!(
+                app.world_mut()
+                    .resource_mut::<SnapshotBuffer>()
+                    .accept(seen, Instant::now())
+            );
+            let sent = keyboard_frame(
+                &mut app,
+                &frames,
+                [key_event(KeyCode::KeyF, ButtonState::Pressed, false)],
+            );
+            assert_eq!(
+                sent,
+                vec![encode_npc_interact_request(&NpcInteractRequest {
+                    entity_id: expected,
+                    client_tick: 0
+                })],
+                "{kind:?}"
             );
         }
     }
