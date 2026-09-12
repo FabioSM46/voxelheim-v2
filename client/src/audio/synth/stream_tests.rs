@@ -317,3 +317,115 @@ fn continuous_cpu_budget() {
         }
     }
 }
+
+/// `bake_parts` refuses the same shapes `bake_at` does, and one more: a strike whose own
+/// length runs past the buffer. Per-strike lengths make that reachable where one shared
+/// length could not.
+#[test]
+fn bake_parts_refuses_a_strike_that_would_not_fit() {
+    let sound = Sound {
+        layers: vec![Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz: 440.0,
+            },
+            gain: 0.5,
+            envelope: Envelope {
+                attack: 0.01,
+                decay: 0.05,
+                sustain: 0.5,
+                release: 0.02,
+            },
+            filter: None,
+            gate: None,
+        }],
+    };
+    // No strike at all, and more than the layer bound.
+    assert_eq!(
+        sound.bake_parts(&[], 1.0, 48_000, 0).err(),
+        Some(Error::Layers)
+    );
+    let many: Vec<(f32, f32)> = (0..MAX_LAYERS + 1).map(|_| (0.0, 0.1)).collect();
+    assert_eq!(
+        sound.bake_parts(&many, 1.0, 48_000, 0).err(),
+        Some(Error::Layers)
+    );
+
+    // A strike longer than the buffer, and one that starts early enough but ends late.
+    assert_eq!(
+        sound.bake_parts(&[(0.0, 2.0)], 1.0, 48_000, 0).err(),
+        Some(Error::Duration)
+    );
+    assert_eq!(
+        sound.bake_parts(&[(0.8, 0.5)], 1.0, 48_000, 0).err(),
+        Some(Error::Duration)
+    );
+    // A negative onset, and a strike shorter than the floor.
+    assert_eq!(
+        sound.bake_parts(&[(-0.1, 0.2)], 1.0, 48_000, 0).err(),
+        Some(Error::Duration)
+    );
+    assert_eq!(
+        sound.bake_parts(&[(0.0, 0.0)], 1.0, 48_000, 0).err(),
+        Some(Error::Duration)
+    );
+    // **The one `bake_at` could never express**: a first strike that fits and a second that
+    // does not. One shared length made this unreachable, so it is new surface and is checked.
+    assert_eq!(
+        sound
+            .bake_parts(&[(0.0, 0.2), (0.5, 0.8)], 1.0, 48_000, 0)
+            .err(),
+        Some(Error::Duration)
+    );
+    // And the pair that does fit renders, with both edges at silence.
+    let ok = sound
+        .bake_parts(&[(0.0, 0.2), (0.5, 0.4)], 1.0, 48_000, 0)
+        .unwrap();
+    assert_eq!(ok.samples().first(), Some(&0.0));
+    assert_eq!(ok.samples().last(), Some(&0.0));
+    assert!(ok.samples().iter().any(|v| v.abs() > 0.01));
+}
+
+/// Strikes of different lengths really are different lengths, measured on the rendered
+/// buffer rather than trusted from the arguments.
+#[test]
+fn a_longer_strike_sounds_for_longer_than_a_shorter_one() {
+    let sound = Sound {
+        layers: vec![Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz: 300.0,
+            },
+            gain: 0.6,
+            envelope: Envelope {
+                attack: 0.01,
+                decay: 0.02,
+                sustain: 0.9,
+                release: 0.01,
+            },
+            filter: None,
+            gate: None,
+        }],
+    };
+    let rate = 48_000;
+    let baked = sound
+        .bake_parts(&[(0.0, 0.15), (0.5, 0.40)], 1.0, rate, 0)
+        .unwrap();
+    // Runs of sound separated by at least 20 ms of exact silence.
+    let gap = rate as usize / 50;
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (index, _) in baked
+        .samples()
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v != 0.0)
+    {
+        match runs.last_mut() {
+            Some((_, last)) if index - *last <= gap => *last = index,
+            _ => runs.push((index, index)),
+        }
+    }
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    let length = |(first, last): (usize, usize)| (last - first) as f32 / rate as f32;
+    assert!(length(runs[1]) > length(runs[0]) * 2.0, "{runs:?}");
+}

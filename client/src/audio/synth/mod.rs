@@ -125,23 +125,66 @@ impl Sound {
         rate: u32,
         seed: u64,
     ) -> Result<Baked, Error> {
-        if onsets.is_empty() || onsets.len() > MAX_LAYERS {
+        let parts: Vec<(f32, f32)> = onsets.iter().map(|onset| (*onset, length)).collect();
+        self.bake_parts(&parts, seconds, rate, seed)
+    }
+
+    /// This sound struck at each `(onset, length)` of `parts`, summed into one `seconds`-long
+    /// buffer — [`Sound::bake_at`] with a length **per strike** rather than one for all.
+    ///
+    /// **Why the general form exists.** Every call written before it is a run of syllables
+    /// that are alike: a cricket's two or three scrapes, a macaw's one or two squawks. An
+    /// owl's is not — its call is a short note and then a longer one, and that inequality is
+    /// most of what makes it read as an owl rather than as a stutter. It could not be said
+    /// with one `length`, and the alternatives were worse. A [`Gate`] opens instantly and
+    /// falls linearly, which is a knock rather than a hoot. Staggering envelopes inside one
+    /// description leaves a dip where the silence has to be, and "silence between" is the
+    /// property [`Sound::bake_at`] exists to give in the first place.
+    ///
+    /// [`Sound::bake_at`] is this function with every length the same, so nothing it has ever
+    /// produced moves: the same strikes, in the same order, from the same seeds, summed into
+    /// the same buffer.
+    ///
+    /// **What holds that is `ambient_sound/pins.rs`, and it is worth saying which test does
+    /// not.** A golden buffer captured before the change is the only thing that can fail on a
+    /// regression here, and the pins are exactly that: every shipped call's rows are
+    /// byte-identical across the generalisation. An `assert_eq!` between `bake_at` and
+    /// `bake_parts` is **not** a guard — `bake_at` delegates to `bake_parts`, so both sides
+    /// are the same code and the assertion holds however broken that code is. One was written
+    /// and caught in review on #1219;
+    /// `each_strike_lands_at_its_own_onset_for_its_own_length_from_its_own_seed` is what
+    /// replaced it, and it checks this function's placement against `bake` instead.
+    ///
+    /// Each strike is baked exactly as [`Sound::bake`] would and draws its own noise — the
+    /// seed plus the strike's index — so a noise syllable is not one grain replayed. Every
+    /// strike must end inside the buffer, which keeps both edges of the call at exact
+    /// silence; one that would not, a negative onset, or no strike at all is refused. At most
+    /// [`MAX_LAYERS`] strikes, the same bound one description's layers have.
+    pub fn bake_parts(
+        &self,
+        parts: &[(f32, f32)],
+        seconds: f32,
+        rate: u32,
+        seed: u64,
+    ) -> Result<Baked, Error> {
+        if parts.is_empty() || parts.len() > MAX_LAYERS {
             return Err(Error::Layers);
         }
         if !bounded(seconds, 0.002, MAX_BAKED_SECONDS)
-            || !bounded(length, 0.002, seconds)
-            || onsets
-                .iter()
-                .any(|onset| !bounded(*onset, 0.0, seconds - length))
+            || parts.iter().any(|(onset, length)| {
+                !bounded(*length, 0.002, seconds) || !bounded(*onset, 0.0, seconds - length)
+            })
         {
             return Err(Error::Duration);
         }
-        let strikes = (0..onsets.len())
-            .map(|index| self.bake(length, rate, seed.wrapping_add(index as u64)))
+        let strikes = parts
+            .iter()
+            .enumerate()
+            .map(|(index, (_, length))| self.bake(*length, rate, seed.wrapping_add(index as u64)))
             .collect::<Result<Vec<_>, _>>()?;
         let count = (f64::from(seconds) * f64::from(rate)).round() as usize;
         let mut samples = vec![0.0f32; count];
-        for (onset, strike) in onsets.iter().zip(&strikes) {
+        for ((onset, _), strike) in parts.iter().zip(&strikes) {
             let start = ((f64::from(*onset) * f64::from(rate)).round() as usize).min(count);
             for (sample, value) in samples[start..].iter_mut().zip(strike.samples()) {
                 *sample = (*sample + value).clamp(-1.0, 1.0);
