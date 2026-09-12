@@ -3283,13 +3283,9 @@ mod tests {
                     let home = home_of(species, seed, anchor);
                     // The furthest a probe can put a branch from home: the search radius plus
                     // the probe square's own half-span, on both horizontal axes at once.
-                    let reach = PERCH_SEARCH + (PERCH_PROBE_SIDE - 1) as f32 / 2.0
-                        * PERCH_PROBE_SPACING as f32;
-                    let seat = Some(Vec3::new(
-                        home.x + reach,
-                        home.y + offset,
-                        home.z + reach,
-                    ));
+                    let reach = PERCH_SEARCH
+                        + (PERCH_PROBE_SIDE - 1) as f32 / 2.0 * PERCH_PROBE_SPACING as f32;
+                    let seat = Some(Vec3::new(home.x + reach, home.y + offset, home.z + reach));
                     for sample in 0..=SAMPLES {
                         let at = perched(species, seed, sample as f32 * DT, anchor, seat) - anchor;
                         assert!(
