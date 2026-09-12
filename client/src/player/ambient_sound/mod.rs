@@ -158,7 +158,6 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
             interval: [0.7, 2.5],
             radius: 7.0,
             height: 5.0,
-            seconds: 0.3,
             origin: eye_position,
             gain,
         },
@@ -172,7 +171,7 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                 cover,
             )
         },
-        sounds::parrot,
+        |seed, rate| sounds::parrot(seed).bake(0.3, rate, seed),
     );
     for (index, call) in CALLS.into_iter().enumerate() {
         country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
@@ -188,7 +187,6 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                 interval: profile.interval,
                 radius: profile.radius,
                 height: profile.height,
-                seconds: profile.seconds,
                 origin: eye_position,
                 gain,
             },
@@ -202,7 +200,7 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                     cover,
                 )
             },
-            |seed| call.description(seed),
+            |seed, rate| call.bake(seed, rate),
         );
     }
 }

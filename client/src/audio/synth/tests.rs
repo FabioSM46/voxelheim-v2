@@ -1,6 +1,45 @@
 use super::*;
 use std::f64::consts::TAU;
 
+/// #1161: a call of separate syllables. Each strike lands at its onset as exactly the buffer
+/// `bake` gives for its own seed, with exact silence between and after, and a strike that
+/// cannot end inside the buffer is refused rather than cut short.
+#[test]
+fn a_sound_struck_at_several_onsets_is_each_strike_in_place_with_silence_between() {
+    let described = sound(Exciter::Noise(Noise::White));
+    let (length, rate) = (0.05, 8000);
+    let call = described
+        .bake_at(&[0.0, 0.2], length, 0.3, rate, 9)
+        .unwrap();
+    let samples = call.samples();
+    assert_eq!((samples.len(), call.sample_rate()), (2400, rate));
+    let first = described.bake(length, rate, 9).unwrap();
+    let second = described.bake(length, rate, 10).unwrap();
+    assert_eq!(&samples[..400], first.samples());
+    assert_eq!(&samples[1600..2000], second.samples());
+    assert_ne!(first.samples(), second.samples(), "one grain replayed");
+    assert!(
+        samples[400..1600]
+            .iter()
+            .chain(&samples[2000..])
+            .all(|v| *v == 0.0)
+    );
+    for (onsets, seconds, error) in [
+        (&[0.26][..], 0.3, Error::Duration),
+        (&[-0.01][..], 0.3, Error::Duration),
+        (&[0.0][..], 0.04, Error::Duration),
+        (&[][..], 0.3, Error::Layers),
+        (&[0.0; MAX_LAYERS + 1][..], 0.3, Error::Layers),
+    ] {
+        assert_eq!(
+            described
+                .bake_at(onsets, length, seconds, rate, 9)
+                .unwrap_err(),
+            error
+        );
+    }
+}
+
 pub(super) fn sound(exciter: Exciter) -> Sound {
     Sound {
         layers: vec![Layer {
