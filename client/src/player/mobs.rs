@@ -140,6 +140,36 @@ pub(super) const fn body(kind: MobKind) -> Body {
     }
 }
 
+/// How a creature is presented to a player reading a fight: one that fights, one that can
+/// be hit and does not fight back, or one nobody is meant to hit.
+///
+/// **A presentation column, not a rule.** It picks the colour of the bar `ui/overhead.rs`
+/// draws over a body, and nothing else reads it: whether a swing lands, whether a creature
+/// hunts and whether anything may be hit at all are the server's, and none of it is sent
+/// because of this. The server has no hostility flag, deliberately (#1133).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hostility {
+    /// Hunts players. Drawn red.
+    Hostile,
+    /// Can be hit, never fights back. Drawn yellow.
+    Passive,
+    /// Not a creature anybody fights: a resident or a paddock horse. No bar.
+    Neutral,
+}
+
+/// The hostility column of this registry, beside [`body`] and on its terms: total over
+/// [`MobKind`] with no wildcard arm, so a new species does not compile until somebody has
+/// said how its bar reads.
+pub(crate) const fn hostility(kind: MobKind) -> Hostility {
+    match kind {
+        MobKind::Draugr | MobKind::Vargr | MobKind::VargrGuardian | MobKind::DraugrKing => {
+            Hostility::Hostile
+        }
+        MobKind::Deer => Hostility::Passive,
+        MobKind::Villager | MobKind::Horse => Hostility::Neutral,
+    }
+}
+
 /// How much of a draugr's height the head takes.
 const HEAD_EDGE: f32 = 0.34;
 

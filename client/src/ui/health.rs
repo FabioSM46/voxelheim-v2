@@ -142,7 +142,9 @@ pub(super) const HEALTH_BAR_BOTTOM: f32 = ENERGY_BAR_BOTTOM + BAR_HEIGHT + VITAL
 
 /// The empty part of the bar. The same near-black the empty inventory cells use, so the
 /// HUD reads as one surface.
-const BAR_TRACK: Color = Color::srgba(0.055, 0.065, 0.080, 0.94);
+///
+/// `pub(super)` since #1133: `ui/overhead.rs` draws its small bars on the same track.
+pub(super) const BAR_TRACK: Color = Color::srgba(0.055, 0.065, 0.080, 0.94);
 
 /// What health is drawn in. `pub(super)` so `ui/energy.rs` can hold its own fill apart
 /// from this one in a test rather than in a sentence.

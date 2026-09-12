@@ -432,6 +432,21 @@ impl SnapshotBuffer {
             .is_some_and(|latest| latest.snapshot.dead_players.contains(&entity_id))
     }
 
+    /// The server's `(health, max_health)` for one player in the newest snapshot.
+    ///
+    /// Read, never interpolated: a health value has no in-between for a bar to show, and
+    /// the newest snapshot is the complete answer. `None` when that snapshot does not name
+    /// the player.
+    pub fn player_health(&self, entity_id: u64) -> Option<(u16, u16)> {
+        self.latest
+            .as_ref()?
+            .snapshot
+            .entities
+            .iter()
+            .find(|state| state.entity_id == entity_id)
+            .map(|state| (state.health, state.max_health))
+    }
+
     pub fn player_is_blocking(&self, entity_id: u64) -> bool {
         self.latest
             .as_ref()

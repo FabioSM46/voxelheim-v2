@@ -229,6 +229,16 @@ impl HealthBars {
     fn from_name(name: &str) -> Option<Self> {
         HEALTH_BARS.into_iter().find(|bars| bars.name() == name)
     }
+
+    /// Whether this filter draws the green bars: the other players.
+    pub const fn draws_friends(self) -> bool {
+        matches!(self, Self::All | Self::FriendsOnly)
+    }
+
+    /// Whether this filter draws the red and yellow bars: what can be fought.
+    pub const fn draws_enemies(self) -> bool {
+        matches!(self, Self::All | Self::EnemiesOnly)
+    }
 }
 
 /// Where a readout may be put.
@@ -1730,6 +1740,11 @@ impl Settings {
     /// Which attached display the window should use.
     pub const fn monitor(&self) -> &MonitorPreference {
         &self.monitor
+    }
+
+    /// Which over-head health bars are drawn.
+    pub const fn health_bars(&self) -> HealthBars {
+        self.health_bars
     }
 
     /// Whether the frame-rate readout is on screen.
