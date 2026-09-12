@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 42;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 43;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -343,10 +343,13 @@ impl ProtocolVersion {
     /// V42: immutable capital props are replicated independently of interactive structures.
     /// Their solid bounds must be visible to the player. An older client silently drops
     /// the vector and collides with invisible furniture, so this append owes a bump.
-    pub const Current: Self = Self(42);
+    /// V43: chunk block ids 58/59 describe open iron grilles. Older clients would
+    /// render and predict these unknown ids as full cubes, hiding the openings and
+    /// disagreeing with authoritative bar collision despite unchanged RLE bytes.
+    pub const Current: Self = Self(43);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 42;
+    pub const ENUM_MAX: u16 = 43;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

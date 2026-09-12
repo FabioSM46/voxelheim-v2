@@ -596,7 +596,7 @@ func clearLineOfSight(t Terrain, from, to [3]float64) bool {
 	}
 
 	for {
-		if t.Solid(voxel[0], voxel[1], voxel[2]) {
+		if t.Solid(voxel[0], voxel[1], voxel[2]) && solidVoxelBlocksSight(t, voxel, from, to) {
 			return false
 		}
 		if voxel == last {
