@@ -62,16 +62,26 @@ clear; interior dressing awaits the furnishing follow-up.
 
 Elevated entries lead to internal two-wide switchbacks and rooms under the
 capitals. Lower supporting masonry remains solid; spire tips are decorative.
-Tower furniture pockets will be specified after the completed flights are
-verified. Preserve the differentiated silhouettes and the tallest eastern spire.
+The western interiors are implemented. Each uses a 7 × 7 core: NW X7–13/Z9–15
+and SW X17–23/Z29–35, entered at Y21. Two-wide flights alternate sides, rising
+three blocks between landings, with a final two-block rise into the lookout.
+The NW portal uses X13–18/Z9–10; the SW portal X14–18/Z29–30.
+
+Western lookout furniture pockets are **NW X9–11/Z12–13 at Y35** and
+**SW X19–21/Z32–33 at Y29**. The complete southern two-wide route, NW Z14–15
+and SW Z34–35, stays clear across each core. Guards enclose the northern and
+eastern stair openings; keep the emerging western flight unobstructed.
+South-facing glass slits provide a view above an intact sill; the lighting
+follow-up owns their grille replacement. Eastern tower furniture pockets await
+verified flights. Preserve the differentiated silhouettes and tallest eastern spire.
 
 ## Delivery and verification
 
-Issue #1202 is delivered in independently verified changes. The first three changes
+Issue #1202 is delivered in independently verified changes. The first four changes
 implement **both main-wing staircases, the courtyard stair and the complete
-two-wide curtain circuit through four corner lookouts**, together with oriented
-schematic placement. Spire interiors and final renderer captures follow in
-subsequent changes.
+two-wide curtain circuit through four corner lookouts, and both western spire
+interiors**, together with oriented schematic placement. Eastern spire interiors
+and final renderer captures follow in subsequent changes.
 The plans above reserve their space; they do not claim that those changes have
 already been built.
 

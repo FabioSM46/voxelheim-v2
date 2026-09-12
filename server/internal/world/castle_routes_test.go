@@ -136,3 +136,44 @@ func TestCastleCurtainAndCornerLookoutsKeepTwoWideGuardedRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestWestTowerLandingsLookoutGuardsAndFurnitureReservations(t *testing.T) {
+	t.Parallel()
+	s := SchematicFor(BuildingKeep)
+	for _, tower := range []struct{ x, z, lookout int }{{10, 12, 35}, {20, 32, 29}} {
+		for i, y := 0, 21; y < tower.lookout; i, y = i+1, y+3 {
+			z0 := tower.z - 3
+			if i%2 == 1 {
+				z0 = tower.z + 2
+			}
+			for x := tower.x - 3; x <= tower.x+3; x++ {
+				for z := z0; z <= z0+1; z++ {
+					if !standableCell(s, x, y, z) {
+						t.Fatalf("tower landing (%d,%d,%d) obstructed", x, y, z)
+					}
+				}
+			}
+		}
+		// The two southern rows are circulation, while this central pocket is
+		// reserved for furniture; both stay independent of the emerging flight.
+		for _, r := range [][4]int{{tower.x - 1, tower.x + 1, tower.z, tower.z + 1}, {tower.x - 3, tower.x + 3, tower.z + 2, tower.z + 3}} {
+			for x := r[0]; x <= r[1]; x++ {
+				for z := r[2]; z <= r[3]; z++ {
+					if !standableCell(s, x, tower.lookout, z) {
+						t.Fatalf("lookout reservation (%d,%d,%d) obstructed", x, tower.lookout, z)
+					}
+				}
+			}
+		}
+		for x := tower.x + 2; x <= tower.x+3; x++ {
+			if !Solid(s.At(x, tower.lookout, tower.z)) {
+				t.Fatalf("lookout return-flight opening (%d,%d,%d) lacks guard", x, tower.lookout, tower.z)
+			}
+		}
+		for x := tower.x - 1; x <= tower.x+3; x++ {
+			if !Solid(s.At(x, tower.lookout, tower.z-1)) {
+				t.Fatalf("lookout stair opening at (%d,%d,%d) lacks guard", x, tower.lookout, tower.z-1)
+			}
+		}
+	}
+}
