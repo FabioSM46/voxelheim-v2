@@ -181,13 +181,167 @@ fn squawk(variation: f32, envelope: Envelope) -> Vec<Layer> {
     ]
 }
 
+/// The wolf's call, end to end. Its [`CallProfile`] length is named here because the howl's
+/// one pitch line is drawn across exactly that long: the two cannot drift apart.
+pub(super) const HOWL_SECONDS: f32 = 3.8;
+
+/// How far the howl's rough twin sits above the voice: at 310 to 365 Hz, 2% beats at 6 to 7 Hz,
+/// the slow waver of a voice held near the top of its range rather than a second note.
+const HOWL_DETUNE: f32 = 1.02;
+
+/// The gesture one howl makes, from its seed: the pitch it opens on, how far it arches above
+/// its falling line, how long that arch takes from nothing back to nothing, how slowly the rise
+/// opens, and where the falling line closes as a fraction of where it starts.
+struct Howl {
+    hz: f32,
+    arch: f32,
+    span: f32,
+    onset: f32,
+    close: f32,
+}
+
+/// The seed spread across the gesture's parameters. Each one reads its own field of a single
+/// multiplication rather than its own shift of the seed: the pins exercise small literal seeds
+/// whose high bytes are all zero, and a bare shift would hand several of them one gesture.
+fn spread(seed: u64) -> u64 {
+    (seed ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0xd134_2543_de82_ef95)
+}
+
+/// A howl's gesture. The rise differs per seed in size (`arch`) and in how it opens (`onset`);
+/// the fall differs in size (`arch` and `close` together) and in timing (`span`, which places
+/// the top a little before half of it).
+///
+/// `span` is deliberately shorter than [`HOWL_SECONDS`]: the arch is back at nothing around
+/// three seconds in and slightly under it by the end, so the last second of the call is an
+/// audible fall rather than a fall crammed into the release. Measured across the seeds, the
+/// pitch tops out between 1.1 and 1.6 s and closes between half and three quarters of where it
+/// opened.
+fn howl_gesture(seed: u64) -> Howl {
+    let spread = spread(seed);
+    Howl {
+        hz: 310.0 + (seed % 101) as f32 / 100.0 * 55.0,
+        arch: 0.22 + ((spread >> 16) % 17) as f32 / 100.0,
+        span: 2.60 + ((spread >> 28) % 101) as f32 / 100.0,
+        onset: 0.50 + ((spread >> 40) % 56) as f32 / 100.0,
+        close: 0.80 + ((spread >> 52) % 11) as f32 / 100.0,
+    }
+}
+
+/// The one pitch track every voiced layer of the howl follows, at a harmonic of it.
+///
+/// A line falls slowly from `hz` to `close` of it across the whole call, and a single
+/// half-cycle of vibrato `span` long arches the pitch `arch` above that line and away again.
+/// The arch is flat across its top, which is the held note in the middle of a howl; the falling
+/// line underneath it is what makes the close lower than the opening rather than equal to it,
+/// and `span` ending before the call does is what puts the fall inside the call.
+///
+/// Every harmonic has the same curve and the same *fractional* arch, so the partials stay
+/// locked together as one voice instead of beating against each other.
+fn howl_pitch(howl: &Howl, harmonic: f32, wave: Wave) -> Glide {
+    Glide {
+        wave,
+        from: howl.hz * harmonic,
+        to: howl.hz * howl.close * harmonic,
+        seconds: HOWL_SECONDS,
+        curve: Curve::Exponential,
+        vibrato: Vibrato {
+            hz: 0.5 / howl.span,
+            depth: howl.arch,
+            onset: howl.onset,
+        },
+    }
+}
+
+/// One howl of a wolf: a voice calling across a valley, not a note held for four seconds.
+///
+/// - **A pitch contour.** Every voiced layer rides one [`howl_pitch`]: the pitch rises about a
+///   sixth into the call, holds within a few percent of its top for a second or so, and falls
+///   away a third below that top. Both halves of the gesture vary with the seed.
+/// - **Formants, not a harmonic series.** Three bands stand for a throat — the chest at 520 Hz
+///   that carries the fundamental, the vowel at 1150 Hz that gives it a mouth, and a 2350 Hz
+///   edge that opens late — and the waves under them are triangles and saws whose dense
+///   harmonics the bands pick out, so the colour moves as the pitch walks across them.
+/// - **Roughness and breath.** A twin [`HOWL_DETUNE`] above the chest voice beats with it at a
+///   few hertz, and noise through the same three bands over a low wash fills the spectrum
+///   between the harmonics rather than leaving it empty.
+///
+/// Every band, and every frequency a glide reaches with its arch, stays under 3.6 kHz: 0.45 of
+/// the lowest supported rate, so the description bakes at an 8 kHz device.
+fn howl(seed: u64, envelope: Envelope) -> Vec<Layer> {
+    let howl = howl_gesture(seed);
+    // Each band opens later and settles further into the call than the one below it, so the
+    // howl brightens as it reaches its top instead of arriving whole.
+    let voice = |harmonic, wave, gain, formant, q, attack, decay, sustain| Layer {
+        exciter: Exciter::Glide(howl_pitch(&howl, harmonic, wave)),
+        gain,
+        envelope: Envelope {
+            attack,
+            decay,
+            sustain,
+            ..envelope
+        },
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, kind, formant, q, attack| Layer {
+        envelope: Envelope {
+            attack,
+            decay: 1.6,
+            sustain: 0.5,
+            ..envelope
+        },
+        ..noise(Noise::White, gain, kind, formant, q)
+    };
+    vec![
+        // The chest, and the waver of a voice held there.
+        voice(1.0, Wave::Triangle, 0.52, 520.0, 0.9, 0.8, 1.9, 0.42),
+        voice(
+            HOWL_DETUNE,
+            Wave::Triangle,
+            0.19,
+            520.0,
+            0.9,
+            1.0,
+            1.9,
+            0.42,
+        ),
+        // The vowel: a saw read through a narrower band, and a third partial to seat it.
+        voice(1.0, Wave::Saw, 0.26, 1150.0, 1.2, 1.1, 1.7, 0.45),
+        voice(3.0, Wave::Sine, 0.14, 1150.0, 1.2, 1.4, 1.6, 0.45),
+        // The edge, last to arrive and first to go.
+        voice(1.0, Wave::Saw, 0.10, 2350.0, 2.0, 1.7, 1.4, 0.30),
+        // The air the voice is made of. The three bands are wide (a low q) and a fourth layer
+        // is low-passed rather than banded, because what fills the spectrum between the
+        // harmonics has to cover the gaps between the formants too: three narrow bands leave
+        // 1.6 to 2.1 kHz and everything above 2.6 kHz empty, and empty bins are what a
+        // flatness measurement reads as a note.
+        breath(0.15, FilterKind::Band, 520.0, 0.9, 0.7),
+        breath(0.14, FilterKind::Band, 1150.0, 1.0, 1.0),
+        breath(0.07, FilterKind::Band, 2350.0, 1.0, 1.5),
+        breath(0.06, FilterKind::Low, 3400.0, 0.7, 1.2),
+        // The low wash the call sits on.
+        Layer {
+            envelope: Envelope {
+                attack: 0.9,
+                decay: 2.0,
+                sustain: 0.45,
+                ..envelope
+            },
+            ..noise(Noise::Brown, 0.20, FilterKind::Low, 620.0, 0.7)
+        },
+    ]
+}
+
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
             Self::Rattlesnake => ([12.0, 31.0], 5.0, -1.3, 0.8, 24.0),
             Self::Crow => ([17.0, 43.0], 12.0, 3.0, 0.55, 48.0),
             Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
-            Self::Wolf => ([35.0, 79.0], 26.0, 0.0, 3.8, 96.0),
+            Self::Wolf => ([35.0, 79.0], 26.0, 0.0, HOWL_SECONDS, 96.0),
             // In the grass a few blocks off. The longest call, three syllables at the slowest
             // spacing, ends at 2 * 0.19 + 0.06 = 0.44 s, inside the baked 0.45 s.
             Self::Cricket => ([6.0, 16.0], 4.0, -1.2, 0.45, 24.0),
@@ -295,34 +449,9 @@ impl Call {
                     ),
                 ]
             }
-            // A slowly opening harmonic vowel with a soft breath. Staggered partial
-            // envelopes change the colour across the howl without a new synth primitive.
-            Self::Wolf => {
-                let hz = 310.0 + variation * 55.0;
-                vec![
-                    tone(hz, 0.44, envelope),
-                    tone(
-                        hz * 2.0,
-                        0.22,
-                        Envelope {
-                            attack: 1.3,
-                            ..envelope
-                        },
-                    ),
-                    tone(
-                        hz * 3.01,
-                        0.08,
-                        Envelope {
-                            attack: 1.8,
-                            ..envelope
-                        },
-                    ),
-                    Layer {
-                        envelope,
-                        ..noise(Noise::White, 0.06, FilterKind::Band, 650.0, 1.0)
-                    },
-                ]
-            }
+            // A voice with a pitch contour, not a harmonic stack whose colour opens: see
+            // [`howl`]. The gesture is read from the whole seed rather than from `variation`.
+            Self::Wolf => howl(seed, envelope),
             // The cricket voice from before #1145, which was right in timbre and wrong only in
             // never stopping: white noise through a narrow band (q 8) near 3.2 kHz, a scraped
             // shimmer rather than #1145's pure whistle. Four such bands side by side, not one:
@@ -815,6 +944,357 @@ mod tests {
             }
         }
         assert_eq!(seen, [true; 2], "both squawk counts occur");
+    }
+
+    /// The rate every howl measurement below renders at. A rate the synthesiser accepts, chosen
+    /// for the tracker rather than for a device: high enough that a 300 Hz period is fifty
+    /// samples and a parabola through its neighbours resolves the contour to a fraction of a
+    /// percent, low enough that an autocorrelation over three hundred and eighty windows of a
+    /// 3.8 s call is cheap. The pins and the carry test cover the rates a device opens at.
+    const HOWL_RATE: u32 = 16000;
+
+    /// The pitch a voiced passage is at, every ten milliseconds, from a forty-millisecond
+    /// window: the shortest lag between `low` and `high` hertz whose normalised autocorrelation
+    /// comes within a tenth of the best, placed between samples by a parabola through its two
+    /// neighbours. The shortest such lag rather than the best, so a period twice as long never
+    /// reads as an octave's fall. Windows under a twentieth of the loudest one's energy are
+    /// skipped: a howl's long attack and longer release have no pitch worth reading.
+    ///
+    /// Autocorrelation rather than [`dominant_track`]'s spectral peak, which is what the
+    /// squawk uses: a howl's fundamental sits near 300 Hz, and no window short enough to follow
+    /// the gesture resolves a 40 Hz move down there, while its period is fifty samples and
+    /// reads exactly. The whinny's tracker (#1160) is the same instrument at a faster tempo.
+    fn pitch_track(samples: &[f32], rate: u32, low: f32, high: f32) -> Vec<(f32, f32)> {
+        let window = rate as usize * 4 / 100;
+        let hop = rate as usize / 100;
+        let shortest = (rate as f32 / high) as usize;
+        let longest = (rate as f32 / low).ceil() as usize;
+        let energy = |frame: &[f32]| frame.iter().map(|v| v * v).sum::<f32>();
+        let starts: Vec<usize> = (0..samples.len().saturating_sub(window + longest + 2))
+            .step_by(hop)
+            .collect();
+        let loudest = starts
+            .iter()
+            .map(|start| energy(&samples[*start..start + window]))
+            .fold(0.0, f32::max);
+        starts
+            .into_iter()
+            .filter_map(|start| {
+                let frame = &samples[start..start + window];
+                if energy(frame) < loudest * 0.05 {
+                    return None;
+                }
+                let correlation = |lag: usize| {
+                    let later = &samples[start + lag..start + lag + window];
+                    let (mut cross, mut here, mut there) = (0.0f64, 0.0f64, 0.0f64);
+                    for (x, y) in frame.iter().zip(later) {
+                        let (x, y) = (f64::from(*x), f64::from(*y));
+                        cross += x * y;
+                        here += x * x;
+                        there += y * y;
+                    }
+                    cross / (here * there).sqrt()
+                };
+                let r: Vec<f64> = (0..=longest + 1)
+                    .map(|lag| {
+                        if lag + 1 < shortest {
+                            0.0
+                        } else {
+                            correlation(lag)
+                        }
+                    })
+                    .collect();
+                let best = r[shortest..=longest]
+                    .iter()
+                    .copied()
+                    .fold(f64::MIN, f64::max);
+                let lag = (shortest..=longest).find(|lag| {
+                    r[*lag] >= best * 0.9 && r[*lag] >= r[lag - 1] && r[*lag] >= r[lag + 1]
+                })?;
+                let (before, at, after) = (r[lag - 1], r[lag], r[lag + 1]);
+                let offset = 0.5 * (before - after) / (before - 2.0 * at + after);
+                Some((
+                    (start + window / 2) as f32 / rate as f32,
+                    (f64::from(rate) / (lag as f64 + offset)) as f32,
+                ))
+            })
+            .collect()
+    }
+
+    /// The gesture a pitch track makes: where it starts, its top and when it reaches it, where
+    /// it ends, and how long it stays within 4% of that top. The hold is the span from the
+    /// first such window to the last, which is the held middle of a call whose pitch rises once
+    /// and falls once — and would overstate a track that wandered up to its top twice.
+    fn contour(track: &[(f32, f32)]) -> (f32, f32, f32, f32, f32) {
+        let (time, top) = track
+            .iter()
+            .copied()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        let held: Vec<f32> = track
+            .iter()
+            .filter(|(_, hz)| *hz >= top * 0.96)
+            .map(|(at, _)| *at)
+            .collect();
+        let hold = held[held.len() - 1] - held[0];
+        (track[0].1, top, time, track[track.len() - 1].1, hold)
+    }
+
+    /// The howl's voiced layers alone, baked at [`HOWL_RATE`]: the pitch without the breath, so
+    /// a tracker reads the voice rather than the noise around it — as [`voiced_squawk`] does.
+    fn voiced_howl(seed: u64) -> Vec<f32> {
+        Sound {
+            layers: Call::Wolf
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .collect(),
+        }
+        .bake(HOWL_SECONDS, HOWL_RATE, seed)
+        .unwrap()
+        .samples()
+        .to_vec()
+    }
+
+    /// The call #1185 replaced, verbatim: three sine partials at `hz`, twice it and 3.01 times
+    /// it, the upper two fading in at 1.3 s and 1.8 s, over a soft band of breath at 650 Hz.
+    /// The staggered attacks change the colour across the call, which was the intent; the pitch
+    /// never moves, which is what was wrong with it.
+    fn old_wolf(seed: u64) -> Sound {
+        let variation = (seed % 101) as f32 / 100.0;
+        let envelope = Envelope {
+            attack: 0.8,
+            decay: 1.8,
+            sustain: 0.35,
+            release: 1.2,
+        };
+        let tone = |hz, gain, envelope| Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz,
+            },
+            gain,
+            envelope,
+            filter: None,
+        };
+        let hz = 310.0 + variation * 55.0;
+        Sound {
+            layers: vec![
+                tone(hz, 0.44, envelope),
+                tone(
+                    hz * 2.0,
+                    0.22,
+                    Envelope {
+                        attack: 1.3,
+                        ..envelope
+                    },
+                ),
+                tone(
+                    hz * 3.01,
+                    0.08,
+                    Envelope {
+                        attack: 1.8,
+                        ..envelope
+                    },
+                ),
+                Layer {
+                    envelope,
+                    ..noise(Noise::White, 0.06, FilterKind::Band, 650.0, 1.0)
+                },
+            ],
+        }
+    }
+
+    /// The old stack's three partials alone, baked as [`voiced_howl`] bakes the new voice, so
+    /// both tracks are read by the same instrument from the same kind of input.
+    fn voiced_old_wolf(seed: u64) -> Vec<f32> {
+        Sound {
+            layers: old_wolf(seed).layers[..3].to_vec(),
+        }
+        .bake(HOWL_SECONDS, HOWL_RATE, seed)
+        .unwrap()
+        .samples()
+        .to_vec()
+    }
+
+    /// The band a howl's fundamental stays inside for the whole call and no partial of it ever
+    /// enters: from below the lowest the falling line reaches to above the top of the arch.
+    fn howl_band(seed: u64) -> (f32, f32) {
+        let hz = howl_gesture(seed).hz;
+        (hz * 0.46, hz * 1.45)
+    }
+
+    /// #1185: the howl was three sines at fixed frequencies whose upper partials faded in —
+    /// the construction of a brass instrument, and what it sounded like. The pitch now moves:
+    /// it rises into the call, holds within a few percent of its top for about a second, and
+    /// falls away well below where it started, and no ten milliseconds of it jumps, which is
+    /// the whinny's rule (#1160) at a slower tempo. The negative control is the point: the
+    /// stack it replaced, quoted verbatim in [`old_wolf`], sits on one pitch and is read by the
+    /// same tracker over the same band, so the floor separates the two rather than passing
+    /// everything.
+    #[test]
+    fn a_howl_rises_holds_and_falls_where_a_static_stack_does_not() {
+        for seed in (0..8u64).map(scramble) {
+            let (low, high) = howl_band(seed);
+            let track = pitch_track(&voiced_howl(seed), HOWL_RATE, low, high);
+            assert!(
+                track.len() >= 200,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let (first, top, time, last, hold) = contour(&track);
+            assert!(
+                top >= first * 1.10,
+                "seed {seed}: rises from {first} to only {top} Hz"
+            );
+            assert!(
+                top >= last * 1.20,
+                "seed {seed}: falls from {top} to only {last} Hz"
+            );
+            assert!(
+                (0.8..=2.4).contains(&time),
+                "seed {seed}: tops out at {time} s"
+            );
+            assert!(hold >= 0.5, "seed {seed}: holds its top for only {hold} s");
+            for pair in track.windows(2) {
+                let step = (pair[1].1 / pair[0].1 - 1.0).abs();
+                assert!(step < 0.06, "seed {seed}: a {step} step between {pair:?}");
+            }
+        }
+        for seed in (0..4u64).map(scramble) {
+            let (low, high) = howl_band(seed);
+            let track = pitch_track(&voiced_old_wolf(seed), HOWL_RATE, low, high);
+            let (first, top, _, last, _) = contour(&track);
+            assert!(
+                top < first * 1.02 && top < last * 1.02,
+                "seed {seed}: the old stack moved from {first} through {top} to {last} Hz"
+            );
+        }
+    }
+
+    /// Two howls are two gestures rather than one gesture at two volumes: the rise differs in
+    /// size and in when it tops out, and the fall differs in how far it goes. Measured from the
+    /// rendered voice, not read back from the description, because a parameter that varies and
+    /// never reaches the output is not a varying sound.
+    ///
+    /// Across these eight seeds the rise spans 1.135 to 1.267, the top falls between 1.29 and
+    /// 1.56 s, and the fall spans 1.256 to 1.412 — ratios of 1.12, 1.21 and 1.12. The floors
+    /// below sit under each, and the point of three of them is that a gesture cannot satisfy
+    /// them all by being loud.
+    #[test]
+    fn no_two_howls_make_the_same_gesture() {
+        let measured: Vec<(f32, f32, f32)> = (0..8u64)
+            .map(scramble)
+            .map(|seed| {
+                let (low, high) = howl_band(seed);
+                let track = pitch_track(&voiced_howl(seed), HOWL_RATE, low, high);
+                let (first, top, time, last, _) = contour(&track);
+                (top / first, time, top / last)
+            })
+            .collect();
+        let spread = |pick: fn(&(f32, f32, f32)) -> f32| {
+            let values: Vec<f32> = measured.iter().map(pick).collect();
+            let (low, high) = (
+                values.iter().copied().fold(f32::MAX, f32::min),
+                values.iter().copied().fold(f32::MIN, f32::max),
+            );
+            high / low
+        };
+        assert!(spread(|g| g.0) > 1.05, "every rise is the same size");
+        assert!(
+            spread(|g| g.1) > 1.10,
+            "every rise tops out at the same time"
+        );
+        assert!(spread(|g| g.2) > 1.05, "every fall is the same size");
+    }
+
+    /// The owner's rule is that a sound is realistic, never a note (#1161, #1176), and the howl
+    /// was an exact harmonic series of sines. It is now a voice: three formant bands over
+    /// textured waves, with breath through the same bands filling the spectrum between the
+    /// harmonics. The negative control is the stack it replaced, which keeps its energy on a
+    /// few frequencies with nothing between them and fails the same measurement.
+    ///
+    /// The floor is 0.02 rather than the squawk's 0.15, and the reason is the length of the
+    /// call rather than anything about the voice: [`flatness`] takes one periodogram of the
+    /// whole buffer, so 3.8 s at 8 kHz is twelve thousand bins where a 0.85 s squawk is under
+    /// three, and a harmonic that fills a bin in the short call is a spike between empty ones
+    /// in the long one. What matters is the separation, which is wide and measured: these eight
+    /// seeds come out between 0.043 and 0.294, and the two controls at 0.0013 and 0.0000.
+    #[test]
+    fn a_howl_is_a_voiced_throat_and_not_a_harmonic_stack() {
+        for seed in (0..8u64).map(scramble) {
+            let call = Call::Wolf.bake(seed, 8000).unwrap();
+            let flat = flatness(call.samples(), 8000);
+            let tonal = tonal_share(call.samples(), 8000);
+            assert!(
+                flat > 0.02 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+            let old = old_wolf(seed).bake(HOWL_SECONDS, 8000, seed).unwrap();
+            let stack = Sound {
+                layers: old_wolf(seed).layers[..3].to_vec(),
+            }
+            .bake(HOWL_SECONDS, 8000, seed)
+            .unwrap();
+            for (name, note) in [("the old call", old), ("its sines alone", stack)] {
+                let flat = flatness(note.samples(), 8000);
+                assert!(flat < 0.005, "seed {seed}: {name} measured flatness {flat}");
+            }
+        }
+    }
+
+    /// Heard where the night lane places it — twenty-six blocks out and level, faded by the
+    /// same `spatial::attenuation` every placed sound is. Every frequency the description names
+    /// or reaches stays at or under 3.6 kHz, which is what lets it bake at an 8 kHz device at
+    /// all; it never clips, and starts and ends at exact silence, at every device rate.
+    ///
+    /// The heard floor is 0.03 and not the macaw's 0.06, because twenty-six blocks on a
+    /// 96-block range is `attenuation(26, 96) == 0.0573`: a sound that peaked at the 0.85 this
+    /// test forbids would still only be heard at 0.0487, so 0.06 is not a level the wolf's
+    /// placement can reach at all, and a test asserting it would be asserting about the lane
+    /// rather than about the call. 0.03 is 62% of the most anything can be heard at from there,
+    /// and the howl comes out between 0.034 and 0.042 — 0.59 to 0.73 before placement, the
+    /// lower end at 192 kHz. No claim is made here that it is louder than the stack it
+    /// replaced, which peaked at 0.585 and was heard at 0.0335: it sits in the same band, and a
+    /// comparison of two peaks is not a comparison of two loudnesses anyway — the old call was
+    /// three bare sines and this one is a voice behind formant bands.
+    #[test]
+    fn a_wolf_call_carries_to_its_range_without_clipping_at_any_rate() {
+        let profile = Call::Wolf.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..12u64).map(scramble) {
+            for layer in &Call::Wolf.description(seed).layers {
+                // `Glide::peak`, which gates the bake, is private to `audio::synth`; the highest
+                // frequency a glide reaches is its further end lifted by the whole arch.
+                let top = match layer.exciter {
+                    Exciter::Glide(glide) => glide.from.max(glide.to) * (1.0 + glide.vibrato.depth),
+                    _ => 0.0,
+                };
+                let band = layer.filter.map_or(0.0, |filter| filter.hz);
+                assert!(
+                    top <= 3600.0 && band <= 3600.0,
+                    "seed {seed}: a glide reaching {top} Hz through a {band} Hz band"
+                );
+            }
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Wolf.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.03,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
     }
 
     /// Heard where the day lane places it — seven blocks out and five up, faded by the same
