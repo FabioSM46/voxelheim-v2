@@ -152,7 +152,21 @@ mod tests {
             })
             .collect();
         let entries = b.create_vector(&entries);
-        let vitals = fb::PlayerVitals::create(&mut b, &fb::PlayerVitalsArgs::default());
+        let vitals = fb::PlayerVitals::create(
+            &mut b,
+            &fb::PlayerVitalsArgs {
+                health: 100,
+                max_health: 100,
+                hunger: 100,
+                max_hunger: 100,
+                energy: 100,
+                max_energy: 100,
+                level: 1,
+                experience_to_next: 50,
+                life_state: fb::LifeState::Alive,
+                ..Default::default()
+            },
+        );
         let snapshot = fb::EntitySnapshot::create(
             &mut b,
             &fb::EntitySnapshotArgs {
@@ -161,8 +175,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        b.finish(snapshot, None);
-        decode(&flatbuffers::root::<fb::EntitySnapshot>(b.finished_data()).unwrap())
+        let frame = super::super::finish_envelope(
+            b,
+            fb::Payload::EntitySnapshot,
+            snapshot.as_union_value(),
+        );
+        match super::super::decode(&frame)? {
+            super::super::Message::Snapshot(snapshot) => Ok(snapshot.static_props),
+            _ => panic!("static props must cross the ordinary snapshot decoder"),
+        }
     }
     #[test]
     fn every_kind_pose_and_variant_survives_without_interpolation() {

@@ -1708,6 +1708,7 @@ enum StaticPropKind : ubyte {
 /// - prop_id is nonzero and unique WITHIN static_props (a separate id namespace).
 /// - origin is present, with every component in [-16777216, 16777216).
 /// - kind and facing are known nonzero members; variant is 0..3.
+///
 /// Origin places the floor plane at y and the horizontal centre at (x+0.5,z+0.5).
 /// North is -Z. Variant selects palette/detail only, never a different collision shape.
 /// Major furniture is solid on the server; textiles, tableware and fixtures are cosmetic.
