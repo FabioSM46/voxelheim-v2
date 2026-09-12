@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"fmt"
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 	flatbuffers "github.com/google/flatbuffers/go"
 	"testing"
 )
@@ -114,5 +116,32 @@ func TestStaticPropsUseTheCompleteEnvelopeValidationPath(t *testing.T) {
 	snapshot.StaticProps = append(snapshot.StaticProps, prop)
 	if err := ValidateEntitySnapshot(EncodeEntitySnapshot(snapshot)); err == nil {
 		t.Fatal("envelope validator skipped duplicate static props")
+	}
+}
+
+// The schema and Rust decoder freeze this interval independently of world generation.
+// A world-size change must not silently broaden or narrow the wire contract.
+func TestStaticPropOriginBoundsMatchSchema(t *testing.T) {
+	const schemaLimit = 1 << 24
+	if world.BlockLimit != schemaLimit {
+		t.Fatalf("world.BlockLimit = %d; StaticPropState schema requires %d", world.BlockLimit, schemaLimit)
+	}
+	for axis := 0; axis < 3; axis++ {
+		for _, boundary := range []struct {
+			coordinate int32
+			accepted   bool
+		}{
+			{-schemaLimit - 1, false}, {-schemaLimit, true},
+			{schemaLimit - 1, true}, {schemaLimit, false},
+		} {
+			t.Run(fmt.Sprintf("axis%d/%d", axis, boundary.coordinate), func(t *testing.T) {
+				prop := StaticPropState{PropID: 1, Kind: vnet.StaticPropKindChair, Facing: vnet.FacingNorth}
+				prop.Origin[axis] = boundary.coordinate
+				err := validateStaticProps(staticPropSnapshot(t, []StaticPropState{prop}))
+				if (err == nil) != boundary.accepted {
+					t.Fatalf("coordinate acceptance = %t, want %t: %v", err == nil, boundary.accepted, err)
+				}
+			})
+		}
 	}
 }
