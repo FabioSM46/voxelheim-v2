@@ -115,7 +115,7 @@ fn low(hz: f32) -> Filter {
 /// the surface, through a band narrow enough to be a plink and made rough by a saw's
 /// harmonics walking across it. A sine here would be a note, which is the one thing a
 /// water sound must not be.
-fn bubble(from: f32, gain: f32, onset: f32, seconds: f32) -> Layer {
+fn bubble(from: f32, gain: f32, swell: f32, seconds: f32) -> Layer {
     Layer {
         exciter: Exciter::Glide(Glide {
             wave: Wave::Saw,
@@ -131,7 +131,7 @@ fn bubble(from: f32, gain: f32, onset: f32, seconds: f32) -> Layer {
         }),
         gain,
         envelope: Envelope {
-            attack: onset.max(0.004),
+            attack: swell.max(0.004),
             decay: seconds,
             sustain: 0.0,
             release: 0.02,
@@ -209,9 +209,18 @@ pub(super) fn splash(mounted: bool, force: Force) -> Sound {
             low(240.0),
         ),
     ];
-    // Bubbles rising out of the gurgle, each starting later than the one before it, and
-    // each smaller — so the last one to leave is the highest. A heavier entry takes more
-    // water down with it and so lets more bubbles back up.
+    // Bubbles rising out of the gurgle, each swelling in more slowly than the one before it,
+    // and each smaller — so the last one to be heard is the highest. A heavier entry takes
+    // more water down with it and so lets more bubbles back up.
+    //
+    // **They swell at different rates; they do not start at different times**, and the
+    // difference was worth correcting rather than describing loosely. `Envelope` is
+    // attack/decay/sustain/release with no delay, so `attack` is a swell measured from the
+    // start of the sound and every layer begins at t = 0. A real sequence would need an
+    // offset the envelope does not have, and adding one would touch every catalogue's pins
+    // for a flourish no acceptance criterion asks for. A slower swell under a smaller, higher
+    // bubble still reads as a later one. Raised in review on the assembled #1188 head, where
+    // the comment claimed an arrival order the code never produced.
     let biggest = if mounted { 300.0 } else { 430.0 };
     let count = match force {
         Force::Step => 2,

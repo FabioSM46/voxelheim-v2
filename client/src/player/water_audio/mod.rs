@@ -84,7 +84,20 @@ const SURFACE_HEIGHT: f32 = 0.2;
 /// [`Force::Step`] on any client running faster than 500 Hz — the acceptance criterion
 /// exactly inverted, a dive off a cliff sounding like a step off a bank. So the sample a
 /// speed is measured against is **held across frames until it is this old** rather than
-/// replaced every frame, and the window is frame-rate independent at both ends.
+/// replaced every frame.
+///
+/// **Holding it is not enough on its own, and the review of the assembled #1188 head is where
+/// that was caught.** Retiring the reference once it aged past this floor and re-anchoring to
+/// the current frame put its age back to zero, so the window at an entry was whatever had
+/// accumulated since the last re-anchor — anywhere from one frame to this floor, with its
+/// *lower* end still set by the frame rate. The first fix read as frame-rate independent and
+/// measured the same quotient a constant-velocity fall gives at any window, which is why
+/// `the_same_fall_is_the_same_force_at_every_frame_rate` could not see it.
+///
+/// A sample is therefore promoted into the reference only once it has *itself* aged past this
+/// floor, and the frame that promotes it becomes the next candidate rather than the reference.
+/// The reference is then between one and two of these windows old for any body observed that
+/// long, whatever the frame rate, and it is never this frame.
 ///
 /// The long end stays a filter on the sample: a reference older than this says nothing about
 /// how the body arrived, and an entry measured against one is the gentlest entry rather than
@@ -146,8 +159,15 @@ struct Seen {
     /// against the fall reference below: a stride is how far the body actually swam, frame by
     /// frame, where an entry's speed needs a window with a length to it.
     feet: Vec3,
+    /// The reference an entry's downward speed is measured against: at least
+    /// [`FALL_WINDOW`]`.0` old for any body observed that long, never this frame.
     fall_from: Vec3,
     fall_at: Instant,
+    /// The sample waiting to become that reference, promoted once it has itself aged into the
+    /// window. Holding one behind is what keeps the reference from ever being re-anchored to
+    /// the current frame, which is the whole of the guarantee.
+    next_from: Vec3,
+    next_at: Instant,
     /// How far this body has swum since its last stroke, in blocks. Zero out of water.
     swum: f32,
 }
@@ -203,7 +223,10 @@ pub(super) fn in_water(
         if !low.is_finite() || !high.is_finite() {
             return None;
         }
-        Some((low.floor() as i32)..=(high.ceil() as i32 - 1))
+        // `as i32` saturates, so a very negative `high` lands on `i32::MIN`, where a bare
+        // `- 1` panics in debug and wraps to `i32::MAX` in release — and the loop below would
+        // then walk four billion voxels of an absent chunk while the frame waits.
+        Some((low.floor() as i32)..=(high.ceil() as i32).saturating_sub(1))
     };
     let (Some(xs), Some(ys), Some(zs)) = (
         span(feet.x - half, feet.x + half),
@@ -334,17 +357,23 @@ impl Waters {
             let (width, height) = body.size();
             let wet = in_water(frame.store, body.feet, width, height, frame.size);
             let before = self.seen.get(&body.key).copied();
-            // The fall reference, carried forward until it is old enough to divide by. See
-            // `FALL_WINDOW`: a frame is not a window, and at a high frame rate the two
-            // differ by enough to turn every dive into a step.
+            // The fall reference, advanced by promoting a candidate that is already old
+            // enough rather than by re-anchoring to this frame. See `FALL_WINDOW`.
             let (mut fall_from, mut fall_at) = (body.feet, frame.now);
+            let (mut next_from, mut next_at) = (body.feet, frame.now);
             if let Some(before) = before {
-                let age = frame
+                let candidate = frame
                     .now
-                    .saturating_duration_since(before.fall_at)
+                    .saturating_duration_since(before.next_at)
                     .as_secs_f32();
-                if age < FALL_WINDOW.0 {
+                if candidate >= FALL_WINDOW.0 {
+                    // The candidate has aged into the window, so it becomes the reference and
+                    // this frame becomes the next candidate. The reference it replaces was
+                    // older still, so the age never drops below the window.
+                    (fall_from, fall_at) = (before.next_from, before.next_at);
+                } else {
                     (fall_from, fall_at) = (before.fall_from, before.fall_at);
+                    (next_from, next_at) = (before.next_from, before.next_at);
                 }
             }
             let mut swum = 0.0;
@@ -403,6 +432,8 @@ impl Waters {
                     feet: body.feet,
                     fall_from,
                     fall_at,
+                    next_from,
+                    next_at,
                     swum,
                 },
             );

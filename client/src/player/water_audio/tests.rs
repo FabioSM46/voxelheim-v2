@@ -215,6 +215,43 @@ fn the_same_fall_is_the_same_force_at_every_frame_rate() {
             "at {micros} µs a frame a 30 blocks-a-second fall read {entered:?}"
         );
     }
+    // A slow walk in, jittered by interpolation, is a step at any frame rate — and this is
+    // the case the test above cannot see. A constant-velocity fall gives the same quotient
+    // over every window length, so it passes whatever the window is; noise does not. At
+    // 10,000 frames a second a 0.002-block jitter read over one frame's 100 µs is 40 blocks a
+    // second, four times DIVE_SPEED, so a body strolling in at half a block a second would be
+    // heard to dive. Every phase is run because the reference advances on its own cycle: with
+    // the reference re-anchored to the current frame, as it was before the assembled-head
+    // review, some phases put a single frame under the quotient and this fails there.
+    for phase in 0..24u64 {
+        let mut waters = Waters::default();
+        let micros = 100u64;
+        let jitter = |frame: u64| if frame.is_multiple_of(2) { 0.002 } else { -0.002 };
+        let mut entered = None;
+        for frame in 0..(phase + 4000) {
+            // Hovering clear of the water for `phase` frames, then walking in at half a
+            // block a second. The jitter rides on both, as an interpolated position does.
+            let fallen = frame.saturating_sub(phase) as f32 * 0.5 * micros as f32 / 1e6;
+            let bodies = [f.drawn(3.2 - fallen + jitter(frame), false)];
+            let at = f.at(Duration::from_micros(frame * micros));
+            entered = waters
+                .observe(&at, &bodies)
+                .into_iter()
+                .filter_map(|(_, cue)| match cue {
+                    Cue::Splash { force, .. } => Some(force),
+                    Cue::Stroke { .. } => None,
+                })
+                .next();
+            if entered.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            entered,
+            Some(Force::Step),
+            "at phase {phase} a jittered walk into the water read {entered:?}"
+        );
+    }
     // And the long end of the window still filters: a reference older than FALL_WINDOW.1
     // says nothing about how the body arrived, so the entry is the gentlest one.
     let mut waters = Waters::default();
