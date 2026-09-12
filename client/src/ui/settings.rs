@@ -8,7 +8,7 @@
 //! [`read_settings_keys`] runs after it — so the press that closes this screen cannot also
 //! resume play, and the key being bound cannot also fire the control it is taken from.
 //!
-//! **The screen is two tabs and the area under them never changes size.** That is a stated
+//! **The screen is four tabs and the area under them never changes size.** That is a stated
 //! layout decision rather than a coincidence: `ui/inventory.rs` lays its strip out above a
 //! column whose height is whatever the visible half needs, so the panel — strip included —
 //! moves when a player switches tabs, which is what #251 is about. Here the content area is
@@ -467,6 +467,7 @@ const fn reset_label(tab: Tab) -> &'static str {
         Tab::Controls => "RESET CONTROLS",
         Tab::Graphics => "RESET GRAPHICS",
         Tab::Audio => "RESET AUDIO",
+        Tab::Ui => "RESET INTERFACE",
     }
 }
 
@@ -703,7 +704,8 @@ const fn bus_of(knob: Knob) -> Option<Bus> {
         | Knob::VoiceDucking
         | Knob::VoiceMode
         | Knob::VoiceActivationThreshold
-        | Knob::VoiceAudience => None,
+        | Knob::VoiceAudience
+        | Knob::HealthBars => None,
     }
 }
 
@@ -730,6 +732,18 @@ fn rows_of(tab: Tab) -> Vec<Row> {
         Tab::Controls => rows.extend(CONTROLS.into_iter().map(Row::Binding)),
         Tab::Graphics => rows.extend([
             Row::Toggle("Vertical sync", SettingsAction::ToggleVsync, Reading::Vsync),
+            // A visual switch, so it lives with what the screen draws. It removes optional
+            // boss flourishes and never a cue: see `player::encounters::ReducedEffects`.
+            Row::Toggle(
+                "Reduced effects",
+                SettingsAction::ToggleReducedEffects,
+                Reading::ReducedEffects,
+            ),
+        ]),
+        // Under the health-bar select that `KNOBS` already put first: the readout is the
+        // other thing painted over the world rather than part of it, which is why it moved
+        // here from Graphics in #1133.
+        Tab::Ui => rows.extend([
             Row::Toggle(
                 "FPS readout",
                 SettingsAction::ToggleReadout,
@@ -739,13 +753,6 @@ fn rows_of(tab: Tab) -> Vec<Row> {
                 "Readout corner",
                 SettingsAction::CycleCorner,
                 Reading::ReadoutCorner,
-            ),
-            // A visual switch, so it lives with what the screen draws. It removes optional
-            // boss flourishes and never a cue: see `player::encounters::ReducedEffects`.
-            Row::Toggle(
-                "Reduced effects",
-                SettingsAction::ToggleReducedEffects,
-                Reading::ReducedEffects,
             ),
         ]),
         Tab::Audio => rows.extend([
@@ -3563,7 +3570,10 @@ mod tests {
     /// test is not a row since #1126: it is the `TEST` in the Master volume row.
     #[test]
     fn the_audio_tab_is_after_graphics_and_holds_its_own_rows() {
-        assert_eq!(Tab::ALL, [Tab::Controls, Tab::Graphics, Tab::Audio]);
+        assert_eq!(
+            Tab::ALL,
+            [Tab::Controls, Tab::Graphics, Tab::Audio, Tab::Ui]
+        );
 
         let labels: Vec<&str> = rows_of(Tab::Audio).iter().map(|row| row.label()).collect();
         assert_eq!(
@@ -3586,7 +3596,7 @@ mod tests {
                 "Voices"
             ]
         );
-        for other in [Tab::Controls, Tab::Graphics] {
+        for other in [Tab::Controls, Tab::Graphics, Tab::Ui] {
             assert!(
                 !rows_of(other)
                     .iter()
@@ -3867,6 +3877,42 @@ mod tests {
             "off",
             "reduced effects moved vertical sync"
         );
+    }
+
+    /// **The Interface tab: the health-bar select, then the readout and its corner**, each
+    /// reading back what pressing it did, and its reset putting exactly those three back.
+    ///
+    /// The readout rows moved here from Graphics in #1133, so this is also the assertion that
+    /// they left: a Graphics row still carrying either would be a toggle drawn twice, and a
+    /// Graphics reset still reaching the readout would reach past its own tab.
+    #[test]
+    fn the_interface_tab_holds_the_health_bars_and_the_readout_and_resets_only_them() {
+        let labels: Vec<&str> = rows_of(Tab::Ui).iter().map(|row| row.label()).collect();
+        assert_eq!(labels, vec!["Health bars", "FPS readout", "Readout corner"]);
+        for other in [Tab::Controls, Tab::Graphics, Tab::Audio] {
+            assert!(
+                !rows_of(other)
+                    .iter()
+                    .any(|row| matches!(row.label(), "FPS readout" | "Readout corner")),
+                "a readout row is still on {other:?}"
+            );
+        }
+        assert_eq!(reset_label(Tab::Ui), "RESET INTERFACE");
+
+        let mut app = screen_app();
+        press_tab(&mut app, Tab::Ui);
+        assert_eq!(shown_tabs(&mut app), vec![Tab::Ui]);
+        assert_eq!(
+            reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
+            "all v"
+        );
+
+        press_select(&mut app, Knob::HealthBars);
+        press_select_option(&mut app, Knob::HealthBars, 1);
+        assert_eq!(
+            reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
+            "enemies only v"
+        );
 
         assert_eq!(reading_of(&mut app, Reading::Readout), "off");
         press(&mut app, SettingsAction::ToggleReadout);
@@ -3883,6 +3929,34 @@ mod tests {
                 .readout_corner()
                 .name()
                 .to_owned()
+        );
+
+        // Something on Graphics too, so a reset that reached past its tab would show.
+        press(&mut app, SettingsAction::ToggleVsync);
+        press(&mut app, SettingsAction::Reset(Tab::Graphics));
+        assert_eq!(
+            reading_of(&mut app, Reading::Readout),
+            "on",
+            "resetting graphics moved the readout"
+        );
+        assert_eq!(
+            reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
+            "enemies only v",
+            "resetting graphics moved the health-bar filter"
+        );
+
+        press(&mut app, SettingsAction::ToggleVsync);
+        press(&mut app, SettingsAction::Reset(Tab::Ui));
+        let after = app.world().resource::<Settings>().clone();
+        assert_eq!(
+            reading_of(&mut app, Reading::SelectControl(Knob::HealthBars)),
+            "all v"
+        );
+        assert!(!after.readout_shown(), "the readout did not come back");
+        assert_eq!(after.readout_corner(), Settings::default().readout_corner());
+        assert!(
+            !after.vsync(),
+            "resetting the interface moved vertical sync"
         );
     }
 
@@ -3959,7 +4033,8 @@ mod tests {
             Settings::default().render_distance()
         );
         assert!(after.vsync(), "vsync did not come back");
-        assert!(!after.readout_shown(), "the readout did not come back");
+        // The readout is on the Interface tab since #1133, and survives this reset.
+        assert_eq!(after.readout_shown(), before.readout_shown());
         assert_eq!(
             after.bindings(),
             before.bindings(),

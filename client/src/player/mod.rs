@@ -147,6 +147,9 @@ pub(crate) use constants::EYE_HEIGHT;
 // reason; `audio/spatial.rs` casts the occlusion rays through it in #854. What is exported
 // is the function and not the module, so the aiming machinery around it stays private.
 pub(crate) use target::raycast;
+// The hostility column of the mob registry, read by `ui/overhead.rs` to colour a bar and by
+// nothing that decides anything.
+pub(crate) use mobs::{Hostility, hostility};
 pub use target::{ApplyMiningFeedback, HealTargetHint, MiningFeedback};
 pub use trade::{PlayerTradeClick, PlayerTradeEnded, PlayerTradePromptRequest, PlayerTradeWindow};
 pub use vendor::{SHIFT_COUNT, VendorTradeClick, VendorWindow};
@@ -199,7 +202,7 @@ const APPEARANCE_GRACE: Duration = Duration::from_secs(2);
 
 /// A fixed screen-space size keeps labels legible everywhere one is drawn at all.
 const NAME_PLATE_WIDTH: f32 = 240.0;
-const NAME_PLATE_HEIGHT: f32 = 28.0;
+pub(crate) const NAME_PLATE_HEIGHT: f32 = 28.0;
 const NAME_PLATE_FONT_SIZE: f32 = 16.0;
 const NAME_PLATE_GAP: f32 = 0.14;
 /// Bound text layout on Unicode scalar boundaries without adding a grapheme crate.
@@ -1321,11 +1324,22 @@ struct NamePlate(u64);
 /// the plate off with a clear line of sight and the distance rule plainly satisfied. The
 /// band belongs to the distance rule, so it is judged against the distance rule's own
 /// history and against nothing else.
+///
+/// `pub(crate)` since #1133, fields still private: `ui/overhead.rs` gates its bars through
+/// [`step_plate_sight`] with one of these per bar, so a bar and a plate cannot drift apart on
+/// reach, line of sight or dwell.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct PlateSight {
+pub(crate) struct PlateSight {
     shown: bool,
     dwell: u8,
     near: bool,
+}
+
+impl PlateSight {
+    /// The settled answer: whether the element this gates is drawn.
+    pub(crate) const fn shown(self) -> bool {
+        self.shown
+    }
 }
 
 /// Marks the body belonging to this session. Exactly one entity ever has it.
@@ -2639,6 +2653,30 @@ fn name_plate_anchor(body: &Transform) -> Vec3 {
     let envelope = body_envelope();
     let top = envelope.centre.y + envelope.size.y / 2.0 + NAME_PLATE_GAP;
     body.transform_point(Vec3::Y * top)
+}
+
+/// Where an over-head bar over a player standing at `feet` is anchored: the name plate's own
+/// point, so the bar and the plate are judged by one reach and one line of sight.
+pub(crate) fn player_overhead_anchor(feet: Vec3) -> Vec3 {
+    name_plate_anchor(&Transform::from_translation(feet))
+}
+
+/// Where an over-head bar over a creature standing at `feet` is anchored: the plate's gap
+/// above the top of the box its species is mirrored with.
+pub(crate) fn mob_overhead_anchor(kind: crate::net::MobKind, feet: Vec3) -> Vec3 {
+    feet + Vec3::Y * (mobs::body(kind).height + NAME_PLATE_GAP)
+}
+
+/// One frame of a plate's two sight rules and its dwell, for a screen element gated exactly
+/// as a name plate is — the same two calls [`position_name_plates`] makes per plate.
+pub(crate) fn step_plate_sight(
+    sight: PlateSight,
+    eye: Vec3,
+    anchor: Vec3,
+    solid: impl FnMut(IVec3) -> bool,
+) -> PlateSight {
+    let (near, wanted) = name_plate_is_in_sight(eye, anchor, sight.near, solid);
+    settle_plate_sight(PlateSight { near, ..sight }, wanted)
 }
 
 /// The limit this plate is currently judged against, in blocks.

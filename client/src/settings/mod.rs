@@ -134,10 +134,17 @@ pub enum Tab {
     /// The mouse sensitivity and the key bindings. What the screen opens on.
     #[default]
     Controls,
-    /// The eight graphics values and the frame-rate readout.
+    /// The eight graphics values, vertical sync and reduced effects.
     Graphics,
     /// How loud the game is, and the speaker test that proves it.
     Audio,
+    /// What is painted over the world rather than the world itself: which over-head health
+    /// bars are drawn, and the frame-rate readout and its corner.
+    ///
+    /// **The readout moved here from Graphics in #1133**, and its reset moved with it. It
+    /// never changed a pixel of the world — it is a line of text in a corner — so a
+    /// "reset graphics" that also switched it off was reaching past what its label says.
+    Ui,
 }
 
 impl Tab {
@@ -145,9 +152,9 @@ impl Tab {
     ///
     /// A hand-written list, for the reason `ui/inventory.rs`'s `InventoryTab::ALL` is one:
     /// no stable Rust enumerates an enum's variants. What keeps it honest is that
-    /// [`Self::label`] and [`Settings::reset`] both match with no wildcard arm, so a third
+    /// [`Self::label`] and [`Settings::reset`] both match with no wildcard arm, so a fifth
     /// tab is a build failure until it has a name and a set of defaults of its own.
-    pub const ALL: [Self; 3] = [Self::Controls, Self::Graphics, Self::Audio];
+    pub const ALL: [Self; 4] = [Self::Controls, Self::Graphics, Self::Audio, Self::Ui];
 
     /// What a player reads on the tab.
     pub const fn label(self) -> &'static str {
@@ -155,7 +162,82 @@ impl Tab {
             Self::Controls => "CONTROLS",
             Self::Graphics => "GRAPHICS",
             Self::Audio => "AUDIO",
+            Self::Ui => "INTERFACE",
         }
+    }
+}
+
+/// Which over-head health bars are drawn.
+///
+/// **A filter over colours, not over kinds of creature**, and that is what keeps this module
+/// a leaf: "friends" is every bar drawn green and "enemies" every bar drawn red or yellow.
+/// Which entity gets which colour is `ui/overhead.rs`'s presentation table, and the server
+/// never hears about any of it — hiding a bar hides a bar, and nothing about who may be hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HealthBars {
+    /// Every bar the presentation table draws.
+    #[default]
+    All,
+    /// Red and yellow bars only: what can be fought.
+    EnemiesOnly,
+    /// Green bars only: the other players.
+    FriendsOnly,
+    /// No over-head bar at all.
+    None,
+}
+
+/// Every health-bar filter, in the order the select lists them.
+///
+/// Widest first, so stepping down the list is stepping towards a quieter screen — the
+/// direction a player reaching for this knob is reaching in.
+const HEALTH_BARS: [HealthBars; 4] = [
+    HealthBars::All,
+    HealthBars::EnemiesOnly,
+    HealthBars::FriendsOnly,
+    HealthBars::None,
+];
+
+/// One press of the health-bar filter.
+const HEALTH_BARS_STEP: i32 = 1;
+
+/// Which bars are drawn before anybody changes it: all of them, because a fight is read
+/// from the bars and the player who never opens this tab should still be able to read one.
+const DEFAULT_HEALTH_BARS: HealthBars = HealthBars::All;
+
+impl HealthBars {
+    /// What the file calls it.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::EnemiesOnly => "enemies-only",
+            Self::FriendsOnly => "friends-only",
+            Self::None => "none",
+        }
+    }
+
+    /// What the settings screen prints for it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::EnemiesOnly => "enemies only",
+            Self::FriendsOnly => "friends only",
+            Self::None => "none",
+        }
+    }
+
+    /// The filter `name` denotes, if it denotes one.
+    fn from_name(name: &str) -> Option<Self> {
+        HEALTH_BARS.into_iter().find(|bars| bars.name() == name)
+    }
+
+    /// Whether this filter draws the green bars: the other players.
+    pub const fn draws_friends(self) -> bool {
+        matches!(self, Self::All | Self::FriendsOnly)
+    }
+
+    /// Whether this filter draws the red and yellow bars: what can be fought.
+    pub const fn draws_enemies(self) -> bool {
+        matches!(self, Self::All | Self::EnemiesOnly)
     }
 }
 
@@ -579,10 +661,12 @@ pub enum Knob {
     VoiceMode,
     VoiceActivationThreshold,
     VoiceAudience,
+    /// Which over-head health bars are drawn. See [`HealthBars`].
+    HealthBars,
 }
 
 /// Every knob, in the order the settings screen lists them.
-pub const KNOBS: [Knob; 19] = [
+pub const KNOBS: [Knob; 20] = [
     Knob::LookSensitivity,
     Knob::WindowMode,
     Knob::Monitor,
@@ -605,6 +689,7 @@ pub const KNOBS: [Knob; 19] = [
     Knob::VoiceMode,
     Knob::VoiceActivationThreshold,
     Knob::VoiceAudience,
+    Knob::HealthBars,
 ];
 
 impl Knob {
@@ -630,6 +715,7 @@ impl Knob {
             Self::VoiceMode => "Voice",
             Self::VoiceActivationThreshold => "Voice threshold",
             Self::VoiceAudience => "Heard by",
+            Self::HealthBars => "Health bars",
         }
     }
 
@@ -658,6 +744,7 @@ impl Knob {
             | Self::VoiceMode
             | Self::VoiceActivationThreshold
             | Self::VoiceAudience => Tab::Audio,
+            Self::HealthBars => Tab::Ui,
         }
     }
 
@@ -675,7 +762,8 @@ impl Knob {
             | Self::OutputDevice
             | Self::InputDevice
             | Self::VoiceMode
-            | Self::VoiceAudience => true,
+            | Self::VoiceAudience
+            | Self::HealthBars => true,
             Self::LookSensitivity
             | Self::RenderDistance
             | Self::FieldOfView
@@ -1585,6 +1673,7 @@ pub struct Settings {
     voice_mode: VoiceMode,
     voice_activation_threshold: f32,
     voice_audience: VoiceAudience,
+    health_bars: HealthBars,
 }
 
 impl Default for Settings {
@@ -1617,6 +1706,7 @@ impl Default for Settings {
             voice_mode: DEFAULT_VOICE_MODE,
             voice_activation_threshold: DEFAULT_VOICE_ACTIVATION_THRESHOLD,
             voice_audience: DEFAULT_VOICE_AUDIENCE,
+            health_bars: DEFAULT_HEALTH_BARS,
         }
     }
 }
@@ -1650,6 +1740,11 @@ impl Settings {
     /// Which attached display the window should use.
     pub const fn monitor(&self) -> &MonitorPreference {
         &self.monitor
+    }
+
+    /// Which over-head health bars are drawn.
+    pub const fn health_bars(&self) -> HealthBars {
+        self.health_bars
     }
 
     /// Whether the frame-rate readout is on screen.
@@ -2005,6 +2100,17 @@ impl Settings {
                     as usize;
                 self.voice_audience = VOICE_AUDIENCES[moved];
             }
+            Knob::HealthBars => {
+                let current = HEALTH_BARS
+                    .iter()
+                    .position(|bars| *bars == self.health_bars)
+                    .unwrap_or_default() as i64;
+                let moved = current
+                    .saturating_add(i64::from(steps).saturating_mul(i64::from(HEALTH_BARS_STEP)))
+                    .clamp(0, HEALTH_BARS.len().saturating_sub(1) as i64)
+                    as usize;
+                self.health_bars = HEALTH_BARS[moved];
+            }
         }
     }
 
@@ -2050,6 +2156,7 @@ impl Settings {
                 format!("{:.0} dB", self.voice_activation_threshold)
             }
             Knob::VoiceAudience => self.voice_audience.label().to_owned(),
+            Knob::HealthBars => self.health_bars.label().to_owned(),
         }
     }
 
@@ -2091,6 +2198,11 @@ impl Settings {
                 &VOICE_AUDIENCES,
                 self.voice_audience,
                 VoiceAudience::label,
+            )),
+            Knob::HealthBars => Some(KnobOptions::closed(
+                &HEALTH_BARS,
+                self.health_bars,
+                HealthBars::label,
             )),
             Knob::LookSensitivity
             | Knob::RenderDistance
@@ -2171,8 +2283,6 @@ impl Settings {
             Tab::Graphics => {
                 self.window_mode = defaults.window_mode;
                 self.monitor = defaults.monitor;
-                self.readout_shown = defaults.readout_shown;
-                self.readout_corner = defaults.readout_corner;
                 self.render_distance = defaults.render_distance;
                 self.field_of_view = defaults.field_of_view;
                 self.vsync = defaults.vsync;
@@ -2195,6 +2305,11 @@ impl Settings {
                 self.voice_mode = defaults.voice_mode;
                 self.voice_activation_threshold = defaults.voice_activation_threshold;
                 self.voice_audience = defaults.voice_audience;
+            }
+            Tab::Ui => {
+                self.health_bars = defaults.health_bars;
+                self.readout_shown = defaults.readout_shown;
+                self.readout_corner = defaults.readout_corner;
             }
         }
     }
@@ -3168,6 +3283,7 @@ mod tests {
             settings.toggle_readout();
             settings.toggle_reduced_effects();
             settings.cycle_readout_corner();
+            settings.adjust(Knob::HealthBars, 2);
             settings.set_default_mount(DefaultMount::Brown);
             settings
         };
@@ -3181,9 +3297,18 @@ mod tests {
         assert_eq!(after.monitor(), &DEFAULT_MONITOR);
         assert_eq!(after.frame_cap(), NO_FRAME_CAP);
         assert!(after.vsync());
-        assert!(!after.readout_shown());
         assert!(!after.reduced_effects());
-        assert_eq!(after.readout_corner(), Corner::default());
+        // The readout is the Interface tab's since #1133, so a Graphics reset leaves it.
+        assert_eq!(
+            after.readout_shown(),
+            before.readout_shown(),
+            "resetting graphics moved the readout"
+        );
+        assert_eq!(
+            after.readout_corner(),
+            before.readout_corner(),
+            "resetting graphics moved the readout corner"
+        );
         assert!((after.field_of_view() - DEFAULT_FIELD_OF_VIEW).abs() < f32::EPSILON);
         assert!((after.fog_start() - DEFAULT_FOG_START).abs() < f32::EPSILON);
         assert!((after.brightness() - 1.0).abs() < f32::EPSILON);
@@ -3290,6 +3415,75 @@ mod tests {
         }
         assert_eq!(after.vsync(), before.vsync());
         assert_eq!(after.readout_corner(), before.readout_corner());
+
+        // And the fourth: the interface back — the health-bar filter, the readout and its
+        // corner — and nothing on the three tabs beside it.
+        let mut after = moved();
+        after.reset(Tab::Ui);
+        assert_eq!(after.health_bars, DEFAULT_HEALTH_BARS);
+        assert_eq!(after.readout_shown(), Settings::default().readout_shown());
+        assert_eq!(after.readout_corner(), Corner::default());
+        assert_eq!(
+            after.bindings(),
+            before.bindings(),
+            "resetting the interface cleared a key binding"
+        );
+        for knob in KNOBS.into_iter().filter(|knob| knob.tab() != Tab::Ui) {
+            assert_eq!(
+                after.reading(knob),
+                before.reading(knob),
+                "resetting the interface moved {knob:?}"
+            );
+        }
+        assert_eq!(after.vsync(), before.vsync());
+        assert_eq!(after.reduced_effects(), before.reduced_effects());
+        assert_eq!(after.music_on(), before.music_on());
+        assert_eq!(after.mono_audio(), before.mono_audio());
+        assert_eq!(after.default_mount(), before.default_mount());
+        // And in the other direction: no other tab's reset reaches the filter.
+        for tab in [Tab::Controls, Tab::Graphics, Tab::Audio] {
+            let mut after = moved();
+            after.reset(tab);
+            assert_eq!(
+                after.health_bars, before.health_bars,
+                "resetting {tab:?} moved the health-bar filter"
+            );
+        }
+    }
+
+    /// **The health-bar filter is four values in a fixed order**, stopping at both ends,
+    /// starting on the one that draws every bar, and each value reads back from the name the
+    /// file writes for it and from no other spelling.
+    #[test]
+    fn the_health_bar_filter_steps_through_four_values_and_starts_on_all() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.health_bars, HealthBars::All);
+        assert_eq!(settings.reading(Knob::HealthBars), "all");
+        assert_eq!(Knob::HealthBars.tab(), Tab::Ui);
+
+        for (steps, expected, reading) in [
+            (1, HealthBars::EnemiesOnly, "enemies only"),
+            (1, HealthBars::FriendsOnly, "friends only"),
+            (1, HealthBars::None, "none"),
+            // Past the end is the end, not a wrap back to every bar.
+            (5, HealthBars::None, "none"),
+            (-9, HealthBars::All, "all"),
+        ] {
+            settings.adjust(Knob::HealthBars, steps);
+            assert_eq!(settings.health_bars, expected, "after {steps}");
+            assert_eq!(settings.reading(Knob::HealthBars), reading);
+        }
+
+        settings.adjust(Knob::HealthBars, 3);
+        settings.reset(Tab::Ui);
+        assert_eq!(settings.health_bars, DEFAULT_HEALTH_BARS);
+
+        for bars in HEALTH_BARS {
+            assert_eq!(HealthBars::from_name(bars.name()), Some(bars));
+        }
+        for nonsense in ["", "enemies only", "All", "friends", "off"] {
+            assert_eq!(HealthBars::from_name(nonsense), None, "{nonsense}");
+        }
     }
 
     /// **A reset is a whole assignment or nothing**, which is why it goes through
@@ -3609,7 +3803,7 @@ mod tests {
             monitors: &monitors,
             devices: &devices,
         };
-        let expected: [(Knob, &[&str]); 6] = [
+        let expected: [(Knob, &[&str]); 7] = [
             (Knob::WindowMode, &["borderless", "windowed"]),
             (
                 Knob::Monitor,
@@ -3628,6 +3822,10 @@ mod tests {
                 &["off", "push to talk", "voice activation"],
             ),
             (Knob::VoiceAudience, &["everyone", "party only"]),
+            (
+                Knob::HealthBars,
+                &["all", "enemies only", "friends only", "none"],
+            ),
         ];
         assert_eq!(
             expected.len(),
