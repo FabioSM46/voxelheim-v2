@@ -1,13 +1,13 @@
 use super::*;
 use crate::audio::{Bus, MAX_SOURCES, Mixer, Sink, VOICE_RESERVE};
-use crate::net::{ChunkCoord, SessionParams};
+use crate::net::{ChunkCoord, SessionParams, WorldClock};
 use crate::player::ambience::GroundLook;
 use crate::player::birds;
 use crate::player::sky::{PERIOD_SWITCH, Period};
 use crate::world::{VoxelChunk, palette};
 use sounds::Call;
 use std::sync::Arc;
-use wildlife::{Habitat, PARROT, Voice, row_of};
+use wildlife::{Habitat, PARROT, VULTURE, Voice, row_of};
 
 struct Buffer(Vec<f32>);
 impl Sink for Buffer {
@@ -29,6 +29,15 @@ fn grass() -> Ambience {
     Ambience {
         ground: GroundLook::Grass,
         wooded: true,
+    }
+}
+/// Bare sand: the country the rattlesnake and the condor share by day and nothing holds at
+/// night. Treeless, because the desert's two gates — the ground and `BIRDS[VULTURE]` — both
+/// answer the same whether or not there are trees.
+fn sand() -> Ambience {
+    Ambience {
+        ground: GroundLook::Sand,
+        wooded: false,
     }
 }
 fn weather(kind: WeatherKind, intensity: u8) -> Option<WeatherState> {
@@ -372,6 +381,55 @@ fn session() -> Session {
         voice_range_blocks: 32.0,
     })
 }
+/// A session whose server declares a day, so `sky::night_now` answers something other than
+/// `None`. The numbers are `player/tests.rs`'s: a 24,000-tick day whose night runs from
+/// 14,400 to 21,600.
+fn session_with_a_clock() -> Session {
+    let mut session = session();
+    session.0.clock = WorldClock {
+        day_length_ticks: 24_000,
+        night_start_ticks: 14_400,
+        night_end_ticks: 21_600,
+    };
+    session
+}
+
+/// Ten minutes of the real system over one country at one half of the day: the ambience, the
+/// clock, every lane of [`WILDLIFE`] and each profile together. Returns each tick's energy.
+///
+/// The clock is anchored by hand rather than delivered as a snapshot — this module owns no net
+/// thread, and `sky::night_now` reads the anchor either way. Deep night and midday are each
+/// thousands of ticks from the nearest twilight, so the real seconds the six thousand updates
+/// take (twenty ticks each) cannot walk the hour into the other half.
+fn a_simulated_day_at(ambience: Ambience, night: bool) -> Vec<f32> {
+    let mixer = mixer();
+    let shared = mixer.shared_for_test().clone();
+    let mut clock = SkyClock::default();
+    clock.anchor(
+        if night { 18_000 } else { 7_200 },
+        std::time::Instant::now(),
+    );
+    let mut app = App::new();
+    app.insert_resource(mixer)
+        .insert_resource(Time::<()>::default())
+        .insert_resource(ambience)
+        .insert_resource(session_with_a_clock())
+        .init_resource::<Weather>()
+        .insert_resource(clock)
+        .init_resource::<ChunkStore>();
+    register(&mut app);
+    app.world_mut().spawn((WorldCamera, Transform::default()));
+    (0..6000)
+        .map(|_| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(100));
+            app.update();
+            energy(&AudioMixer::from_shared_for_test(shared.clone()), 800)
+        })
+        .collect()
+}
+
 #[test]
 fn session_and_camera_lifetime_bound_all_country_sources() {
     let mixer = mixer();
@@ -527,35 +585,68 @@ fn prolonged_source_pressure_does_not_spend_the_recovery_fade() {
 
 #[test]
 fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground() {
-    for wooded in [false, true] {
-        for (ground, [by_day, by_night]) in [
-            (GroundLook::Sand, [Call::Rattlesnake, Call::Crow]),
-            (GroundLook::Snow, [Call::Eagle, Call::Wolf]),
+    let unmoved_by_weather = |country: &Ambience, night: f32, wildlife: [f32; VOICES]| {
+        for kind in [
+            WeatherKind::Rain,
+            WeatherKind::Sandstorm,
+            WeatherKind::Blizzard,
         ] {
-            let country = Ambience { ground, wooded };
-            for (night, expected) in [(0.0, [1.0, 0.0]), (0.5, [0.5, 0.5]), (1.0, [0.0, 1.0])] {
-                let target = targets(&country, night, None);
-                assert_eq!(
-                    [gain_of(&target, by_day), gain_of(&target, by_night)],
-                    expected
-                );
-                assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0);
-                assert_eq!(
-                    target.beds, [0.0; 5],
-                    "quiet countries have no creature drone"
-                );
-                for kind in [
-                    WeatherKind::Rain,
-                    WeatherKind::Sandstorm,
-                    WeatherKind::Blizzard,
-                ] {
-                    assert_eq!(
-                        targets(&country, night, weather(kind, 255)).wildlife,
-                        target.wildlife
-                    );
-                }
-            }
+            assert_eq!(targets(country, night, weather(kind, 255)).wildlife, wildlife);
         }
+    };
+    for wooded in [false, true] {
+        // Snow is the country whose two halves still hand one voice over to one voice.
+        let snow = Ambience {
+            ground: GroundLook::Snow,
+            wooded,
+        };
+        for (night, expected) in [(0.0, [1.0, 0.0]), (0.5, [0.5, 0.5]), (1.0, [0.0, 1.0])] {
+            let target = targets(&snow, night, None);
+            assert_eq!(
+                [gain_of(&target, Call::Eagle), gain_of(&target, Call::Wolf)],
+                expected
+            );
+            assert_eq!(target.wildlife.iter().sum::<f32>(), 1.0);
+            assert_eq!(
+                target.beds, [0.0; 5],
+                "quiet countries have no creature drone"
+            );
+            unmoved_by_weather(&snow, night, target.wildlife);
+        }
+        // Sand no longer fits that shape and #1186 is why: its day has **two** voices — the
+        // rattlesnake on the ground and the condor in the vulture's air — and its night has
+        // none at all, the crow having retired from a country no crow lives in. So the total
+        // is the claim, and at night the claim is zero.
+        let sand = Ambience {
+            ground: GroundLook::Sand,
+            wooded,
+        };
+        for (night, by_day) in [(0.0, 1.0), (0.5, 0.5), (1.0, 0.0)] {
+            let target = targets(&sand, night, None);
+            assert_eq!(
+                [
+                    gain_of(&target, Call::Condor),
+                    gain_of(&target, Call::Rattlesnake)
+                ],
+                [by_day; 2],
+                "both of the desert's day voices follow the same half of the day"
+            );
+            assert_eq!(
+                target.wildlife.iter().sum::<f32>(),
+                by_day * 2.0,
+                "nothing answers for the desert night"
+            );
+            assert_eq!(
+                target.beds, [0.0; 5],
+                "quiet countries have no creature drone"
+            );
+            unmoved_by_weather(&sand, night, target.wildlife);
+        }
+        assert_eq!(
+            targets(&sand, 1.0, None).wildlife,
+            [0.0; VOICES],
+            "the desert night is silent, not quietly crowed at"
+        );
     }
     // Wooded grass at dusk is the one cell with two voices in it: the macaw going quiet as
     // the cricket comes up, each at half, and no other country's creature sounding at all.
@@ -793,8 +884,12 @@ fn crossing_countries_fades_outgoing_calls_while_incoming_calls_rise() {
 fn the_table_answers_every_country_and_half_of_the_day() {
     let expected = |ground, wooded, night: f32| -> Vec<Call> {
         match (ground, wooded, night >= PERIOD_SWITCH) {
-            (GroundLook::Sand, _, false) => vec![Call::Rattlesnake],
-            (GroundLook::Sand, _, true) => vec![Call::Crow],
+            // In the table's order: the condor is a seen-and-heard row and sits above the
+            // ground-only ones.
+            (GroundLook::Sand, _, false) => vec![Call::Condor, Call::Rattlesnake],
+            // #1186: the crow is gone and the mice and bats that belong here are a later
+            // issue. This empty vector is the gap, asserted rather than papered over.
+            (GroundLook::Sand, _, true) => vec![],
             (GroundLook::Snow, _, false) => vec![Call::Eagle],
             (GroundLook::Snow, _, true) => vec![Call::Wolf],
             // Wooded grass is the one cell with a seen-and-heard species in it.
@@ -828,6 +923,78 @@ fn the_table_answers_every_country_and_half_of_the_day() {
             }
         }
     }
+}
+
+/// #1186: the condor is the griffon vulture's voice, so its row is gated on the bird table
+/// rather than on the ground — the choice the issue left open, made here and asserted here.
+///
+/// **The two gates coincide today and the test says so rather than hiding it**: `BIRDS[VULTURE]`
+/// requires sand and no woodland, which is exactly `Habitat::Ground(Sand)`, so the declaration
+/// buys no behaviour now. What it buys is that it cannot come apart later — if that row ever
+/// gains a condition, the call follows the bird instead of the sound lane keeping its own
+/// opinion about where the species lives, which is what #1176 cost.
+#[test]
+fn the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture() {
+    let row = &birds::BIRDS[VULTURE];
+    assert!(
+        row.ground == GroundLook::Sand && !row.requires_wooded,
+        "VULTURE no longer names the griffon vulture's row"
+    );
+    assert_eq!(
+        WILDLIFE[row_of(Call::Condor)].habitat,
+        Habitat::Flock(VULTURE),
+        "the condor's voice is gated on the bird table, not on the ground"
+    );
+    let mut heard = 0;
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            let country = Ambience { ground, wooded };
+            let vulture = birds::species_for(&country) == Some(VULTURE);
+            heard += usize::from(vulture);
+            // The gates coincide: where the flock flies is where the ground is sand.
+            assert_eq!(vulture, ground == GroundLook::Sand);
+            for night in [0.0, 0.25, 1.0] {
+                let expected = if vulture { 1.0 - night } else { 0.0 };
+                for weather in [None, weather(WeatherKind::Sandstorm, 255)] {
+                    assert_eq!(
+                        gain_of(&targets(&country, night, weather), Call::Condor),
+                        expected,
+                        "{ground:?}, wooded {wooded}, night {night}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(heard, 2, "sand is the vulture's, trees or none");
+    assert_eq!(
+        gain_of(&targets(&sand(), 1.0, None), Call::Condor),
+        0.0,
+        "no condor at night"
+    );
+}
+
+/// Ten minutes of the real system over a desert at night: the lane the crow held is empty, so
+/// nothing at all is heard. The complement of the day, which is asserted beside it so the
+/// silence is shown to be the hour rather than a broken system.
+#[test]
+fn a_simulated_desert_night_is_silent_and_its_day_is_not() {
+    let night = a_simulated_day_at(sand(), true);
+    assert!(
+        night.iter().all(|level| *level == 0.0),
+        "the desert night sounded: the crow's lane is meant to be empty (#1186)"
+    );
+    let day = a_simulated_day_at(sand(), false);
+    assert!(
+        day.iter().any(|level| *level > 0.0),
+        "the desert day is the rattlesnake's and the condor's"
+    );
+    let silent = day.iter().filter(|level| **level == 0.0).count();
+    assert!(silent > 5000, "{silent} of 6000 ticks silent");
 }
 
 /// Two properties of the table itself, each of which a new row can break silently.
@@ -867,11 +1034,13 @@ fn every_voice_has_its_own_stream_and_agrees_with_the_flock_it_belongs_to() {
 /// The half of the day is a property of the row, so a species declared nocturnal is silent by
 /// day without anything else in the lane knowing it exists. Written against a row this
 /// client does not ship — the owl, the bat and the lynx are later issues — because the point
-/// is that the mechanism is already there for them.
+/// is that the mechanism is already there for them. The call it borrows is a stand-in and
+/// nothing rests on which one it is: the row — grass at night, gated on the ground — is what
+/// this client does not ship, and the assertions below read `gain` and never a sample.
 #[test]
 fn a_species_declared_nocturnal_is_not_heard_by_day() {
     let owl = Voice {
-        call: Call::Crow,
+        call: Call::Eagle,
         habitat: Habitat::Ground(GroundLook::Grass),
         period: Period::Night,
         stream: 0xB00,
