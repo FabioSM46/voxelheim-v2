@@ -157,6 +157,14 @@ pub(super) fn whinny() -> Sound {
     // One falling, fluttering pitch through the formants of a long head: the nasal band high
     // at 2.8 kHz carries the squeal and is gone within half a second; 1.4 kHz is the body of
     // the call; 700 Hz grows as the pitch falls into it, and a breath takes over at the end.
+    //
+    // A voice is not a note, so each band is textured rather than a clean partial. At the nose,
+    // a saw's dense harmonics are picked out by a narrow band: a rasp that moves as the pitch
+    // walks its harmonics across the band, where one sine would whistle. In the body, a saw
+    // three and a half percent above the voice beats against it at 44 Hz falling to 16 Hz —
+    // the roughness of a throat, not a second note. Through both, noise shaped by the same
+    // bands is the air the voice is made of.
+    //
     // The close's breath is low-passed rather than banded: a band's skirts fall only 6 dB an
     // octave, and on white noise they would carry the close brighter than the squeal.
     let band = |hz, q| Filter {
@@ -171,7 +179,11 @@ pub(super) fn whinny() -> Sound {
     };
     Sound {
         layers: vec![
-            formant(pitch(2.0, Wave::Sine), 0.22, 2800.0, 1.4, (0.02, 0.40, 0.0)),
+            // The nose.
+            formant(pitch(1.0, Wave::Saw), 0.10, 2800.0, 2.0, (0.02, 0.45, 0.0)),
+            formant(pitch(2.0, Wave::Sine), 0.12, 2800.0, 1.4, (0.02, 0.40, 0.0)),
+            breath(Noise::White, 0.12, band(2800.0, 3.0), 0.02, 0.45),
+            // The body, and its roughness.
             formant(
                 pitch(1.0, Wave::Triangle),
                 0.26,
@@ -180,13 +192,22 @@ pub(super) fn whinny() -> Sound {
                 (0.04, 1.10, 0.05),
             ),
             formant(
+                pitch(1.035, Wave::Saw),
+                0.07,
+                1400.0,
+                1.1,
+                (0.04, 1.00, 0.05),
+            ),
+            breath(Noise::White, 0.20, band(1400.0, 3.0), 0.04, 1.05),
+            // The chest the pitch falls into.
+            formant(
                 pitch(1.0, Wave::Triangle),
                 0.20,
                 700.0,
                 0.9,
                 (0.15, 1.00, 0.30),
             ),
-            breath(Noise::White, 0.10, band(1800.0, 0.8), 0.03, 1.1),
+            // The breath that closes it.
             breath(Noise::White, 0.35, low(900.0), 0.85, 0.40),
             breath(Noise::Brown, 1.0, low(500.0), 0.90, 0.30),
         ],
@@ -531,10 +552,21 @@ mod tests {
         }
     }
 
+    /// A voice is textured, never a note: the call is one pitch track — every voiced layer the
+    /// same fall and the same flutter — made rough by a saw's harmonics through a formant, and
+    /// airy by noise through the formants as well. Clean partials alone would whistle.
     #[test]
-    fn the_whinny_is_one_pitch_track_of_gentle_partials_through_formants() {
-        let voiced: Vec<_> = whinny()
-            .layers
+    fn the_whinny_is_one_textured_pitch_track_through_formants() {
+        let layers = whinny().layers;
+        let aspirated = layers.iter().any(|layer| {
+            matches!(layer.exciter, Exciter::Noise(_))
+                && matches!(
+                    layer.filter,
+                    Some(Filter { kind: FilterKind::Band, hz, .. }) if (1200.0..=3200.0).contains(&hz)
+                )
+        });
+        assert!(aspirated, "no air through the formants");
+        let voiced: Vec<_> = layers
             .into_iter()
             .filter_map(|layer| match layer.exciter {
                 Exciter::Glide(glide) => Some((glide, layer.filter)),
@@ -543,14 +575,14 @@ mod tests {
             })
             .collect();
         assert!(voiced.len() >= 3);
+        assert!(
+            voiced.iter().any(|(glide, _)| glide.wave == Wave::Saw),
+            "no rasp: every partial is a clean waveform"
+        );
         let (first, _) = voiced[0];
         let mut formants = vec![];
         for (glide, filter) in voiced {
-            assert!(
-                matches!(glide.wave, Wave::Sine | Wave::Triangle),
-                "{glide:?}"
-            );
-            // Every partial is a harmonic of one track: the same fall, the same flutter.
+            // Every partial rides one track: the same fall, the same flutter.
             assert!((glide.to / glide.from - first.to / first.from).abs() < 1e-6);
             assert_eq!(
                 (glide.seconds, glide.curve, glide.vibrato),
