@@ -348,4 +348,7 @@ fn update(mut state: ResMut<CombatAudio>, mut inputs: Inputs) {
 }
 
 #[cfg(test)]
+mod pins;
+
+#[cfg(test)]
 mod tests;

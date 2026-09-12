@@ -114,6 +114,9 @@ fn play_arrival(
 }
 
 #[cfg(test)]
+mod pins;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::audio::{Mixer, mixer::Sink};

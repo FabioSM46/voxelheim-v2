@@ -302,3 +302,225 @@ fn a_release_longer_than_the_bake_is_rejected_instead_of_silencing_the_clip() {
     described.layers.push(oversized);
     assert_eq!(described.bake(0.1, 48_000, 0).unwrap_err(), Error::Envelope);
 }
+
+fn glide(from: f32, to: f32, curve: Curve, vibrato: Vibrato) -> Glide {
+    Glide {
+        wave: Wave::Sine,
+        from,
+        to,
+        seconds: 0.8,
+        curve,
+        vibrato,
+    }
+}
+
+/// The frequency a rendered sine is at, once per cycle: the reciprocal of the time between
+/// two rising zero crossings, each placed between its two samples by linear interpolation,
+/// and stamped at the middle of that cycle.
+fn frequency_track(glide: Glide, rate: u32, seconds: f64) -> Vec<(f64, f64)> {
+    let mut generator = Generator::new(Exciter::Glide(glide), 0, rate);
+    let count = (seconds * f64::from(rate)) as usize;
+    let samples: Vec<f64> = (0..count).map(|_| generator.next()).collect();
+    let crossings: Vec<f64> = samples
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| pair[0] < 0.0 && pair[1] >= 0.0)
+        .map(|(index, pair)| (index as f64 + pair[0] / (pair[0] - pair[1])) / f64::from(rate))
+        .collect();
+    crossings
+        .windows(2)
+        .map(|pair| ((pair[0] + pair[1]) / 2.0, 1.0 / (pair[1] - pair[0])))
+        .collect()
+}
+
+#[test]
+fn a_glide_travels_its_curve_monotonically_and_holds_where_it_ends() {
+    for rate in [8_000, 44_100, 48_000, 96_000] {
+        for curve in [Curve::Linear, Curve::Exponential] {
+            for (from, to) in [(300.0, 1200.0), (1200.0, 300.0)] {
+                let glide = glide(from, to, curve, Vibrato::NONE);
+                let track = frequency_track(glide, rate, 1.0);
+                let rising = to > from;
+                for pair in track.windows(2) {
+                    let (earlier, later) = (pair[0].1, pair[1].1);
+                    // Monotonic within one percent: at 8 kHz a 1200 Hz cycle is under seven
+                    // samples, and interpolating its crossings measures 0.5% of noise.
+                    if rising {
+                        assert!(later > earlier * 0.99, "{rate} {curve:?}: {pair:?}");
+                    } else {
+                        assert!(later < earlier * 1.01, "{rate} {curve:?}: {pair:?}");
+                    }
+                }
+                for (time, hz) in &track {
+                    let want = glide.hz_at(*time);
+                    assert!(
+                        (hz - want).abs() < want * 0.015,
+                        "{rate} {curve:?} {from}->{to}: {hz} Hz at {time} s, want {want}"
+                    );
+                }
+                let (first, last) = (track[0].1, track[track.len() - 1].1);
+                assert!((first - f64::from(from)).abs() < f64::from(from) * 0.02);
+                assert!((last - f64::from(to)).abs() < f64::from(to) * 0.01);
+            }
+        }
+        // The two curves part in the middle: 750 Hz and the geometric mean, 600 Hz.
+        let linear = glide(300.0, 1200.0, Curve::Linear, Vibrato::NONE);
+        let exponential = glide(300.0, 1200.0, Curve::Exponential, Vibrato::NONE);
+        // Within the f32 the duration is written in.
+        assert!((linear.hz_at(0.4) - 750.0).abs() < 1e-3);
+        assert!((exponential.hz_at(0.4) - 600.0).abs() < 1e-3);
+    }
+}
+
+#[test]
+fn a_vibrato_swings_at_its_rate_and_depth_and_opens_over_its_onset() {
+    for rate in [44_100, 48_000] {
+        let vibrato = Vibrato {
+            hz: 6.0,
+            depth: 0.04,
+            onset: 0.0,
+        };
+        let track = frequency_track(glide(1000.0, 1000.0, Curve::Linear, vibrato), rate, 1.0);
+        let highest = track.iter().map(|(_, hz)| *hz).fold(0.0, f64::max);
+        let lowest = track.iter().map(|(_, hz)| *hz).fold(f64::MAX, f64::min);
+        assert!((highest - 1040.0).abs() < 4.0, "{rate}: highest {highest}");
+        assert!((lowest - 960.0).abs() < 4.0, "{rate}: lowest {lowest}");
+        let swings = track
+            .windows(2)
+            .filter(|pair| (pair[0].1 - 1000.0).signum() != (pair[1].1 - 1000.0).signum())
+            .count();
+        // Six cycles a second cross the centre twelve times.
+        assert!((11..=13).contains(&swings), "{rate}: {swings} crossings");
+
+        let opening = Vibrato {
+            onset: 0.5,
+            ..vibrato
+        };
+        let track = frequency_track(glide(1000.0, 1000.0, Curve::Linear, opening), rate, 1.0);
+        let widest = |from: f64, to: f64| {
+            track
+                .iter()
+                .filter(|(time, _)| (from..to).contains(time))
+                .map(|(_, hz)| (hz - 1000.0).abs())
+                .fold(0.0, f64::max)
+        };
+        assert!(widest(0.0, 0.1) < 10.0, "{rate}: {}", widest(0.0, 0.1));
+        assert!(widest(0.5, 1.0) > 36.0, "{rate}: {}", widest(0.5, 1.0));
+    }
+}
+
+#[test]
+fn a_glide_never_steps_and_a_steady_one_is_the_oscillator_bit_for_bit() {
+    let fluttering = Vibrato {
+        hz: 12.0,
+        depth: 0.08,
+        onset: 0.1,
+    };
+    for rate in [8_000, 44_100, 48_000, 192_000] {
+        let falling = glide(1500.0, 400.0, Curve::Exponential, fluttering);
+        let mut generator = Generator::new(Exciter::Glide(falling), 0, rate);
+        let bound = TAU * f64::from(falling.peak()) / f64::from(rate) + 1e-9;
+        let mut previous = generator.next();
+        for _ in 1..rate {
+            let sample = generator.next();
+            // A sine moves by no more than its phase step, which is its frequency's.
+            assert!((sample - previous).abs() <= bound, "{rate}");
+            previous = sample;
+        }
+        for wave in [Wave::Sine, Wave::Saw, Wave::Square, Wave::Triangle] {
+            let steady = Glide {
+                wave,
+                ..glide(440.0, 440.0, Curve::Exponential, Vibrato::NONE)
+            };
+            let mut glide = Generator::new(Exciter::Glide(steady), 0, rate);
+            let mut oscillator = Generator::new(Exciter::Oscillator { wave, hz: 440.0 }, 0, rate);
+            for _ in 0..rate / 10 {
+                assert_eq!(glide.next().to_bits(), oscillator.next().to_bits());
+            }
+        }
+        let baked = Sound {
+            layers: vec![Layer {
+                exciter: Exciter::Glide(falling),
+                ..sound(Exciter::Noise(Noise::White)).layers[0].clone()
+            }],
+        }
+        .bake(1.0, rate, 0)
+        .unwrap();
+        assert_eq!(baked.samples()[0], 0.0);
+        assert_eq!(*baked.samples().last().unwrap(), 0.0);
+        assert!(
+            baked
+                .samples()
+                .iter()
+                .all(|v| v.is_finite() && v.abs() <= 1.0)
+        );
+    }
+}
+
+#[test]
+fn a_glide_outside_the_oscillator_bounds_is_refused_before_rendering() {
+    let good = glide(
+        800.0,
+        300.0,
+        Curve::Linear,
+        Vibrato {
+            hz: 10.0,
+            depth: 0.05,
+            onset: 0.2,
+        },
+    );
+    let refused = |glide: Glide| {
+        let mut described = sound(Exciter::Glide(glide));
+        described.layers[0].envelope.release = 0.01;
+        described.bake(0.1, 8_000, 0)
+    };
+    assert!(refused(good).is_ok());
+    let limit = 8_000.0 * 0.45;
+    for bad in [
+        Glide {
+            from: f32::NAN,
+            ..good
+        },
+        Glide { to: 0.0, ..good },
+        Glide {
+            to: limit + 1.0,
+            ..good
+        },
+        Glide {
+            seconds: 0.0,
+            ..good
+        },
+        Glide {
+            seconds: f32::INFINITY,
+            ..good
+        },
+        // Each end is inside the bound, and the vibrato carries the peak over it.
+        Glide {
+            from: limit,
+            ..good
+        },
+        Glide {
+            vibrato: Vibrato {
+                depth: 0.6,
+                ..good.vibrato
+            },
+            ..good
+        },
+        Glide {
+            vibrato: Vibrato {
+                hz: -1.0,
+                ..good.vibrato
+            },
+            ..good
+        },
+        Glide {
+            vibrato: Vibrato {
+                onset: f32::NAN,
+                ..good.vibrato
+            },
+            ..good
+        },
+    ] {
+        assert_eq!(refused(bad).unwrap_err(), Error::Exciter, "{bad:?}");
+    }
+}

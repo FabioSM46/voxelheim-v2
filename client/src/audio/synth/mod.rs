@@ -2,6 +2,8 @@
 //! Baked buffers retain that rate: playback must never reinterpret them at another rate.
 //! Oscillators are elementary waveforms (saw/square/triangle are not band-limited); authors
 //! should prefer sine/noise for bright transients where aliasing would be objectionable.
+//! A glide is the one exciter whose frequency moves: a fall or rise between two pitches with
+//! an optional vibrato, its phase accumulated sample by sample so the waveform never steps.
 
 // The arrival chime consumes baked sine layers; #984–#987 and #999 consume the other
 // primitives and continuous/playback APIs. Public items in this binary crate otherwise
@@ -17,7 +19,7 @@ pub use playback::{Playback, Rendering, StartError, Status};
 use primitives::{Biquad, Generator};
 // Following content issues consume the rest of this synthesis vocabulary.
 #[allow(unused_imports)]
-pub use primitives::{Envelope, Exciter, Filter, FilterKind, Noise, Wave};
+pub use primitives::{Curve, Envelope, Exciter, Filter, FilterKind, Glide, Noise, Vibrato, Wave};
 use std::sync::Arc;
 
 pub const MAX_LAYERS: usize = 16;
@@ -150,6 +152,22 @@ impl Sound {
             {
                 return Err(Error::Exciter);
             }
+            // Every frequency a glide passes through, vibrato included, obeys the
+            // oscillator's own bound; a depth under one half keeps the phase moving forwards.
+            if let Exciter::Glide(glide) = layer.exciter {
+                let limit = rate as f32 * 0.45;
+                let vibrato = glide.vibrato;
+                if !(bounded(glide.from, 0.01, limit)
+                    && bounded(glide.to, 0.01, limit)
+                    && bounded(glide.seconds, 0.001, 60.0)
+                    && bounded(vibrato.hz, 0.0, 40.0)
+                    && bounded(vibrato.depth, 0.0, 0.5)
+                    && bounded(vibrato.onset, 0.0, 60.0)
+                    && glide.peak() <= limit)
+                {
+                    return Err(Error::Exciter);
+                }
+            }
             if !bounded(layer.gain, 0.0, 1.0) {
                 return Err(Error::Gain);
             }
@@ -220,6 +238,9 @@ impl CompiledLayer {
             * self.gain
     }
 }
+
+#[cfg(test)]
+pub(crate) mod pin;
 
 #[cfg(test)]
 mod tests;

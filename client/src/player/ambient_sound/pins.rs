@@ -1,0 +1,66 @@
+//! Every ambient bed and call, pinned (see `audio::synth::pin`). A call's seed
+//! varies per play, so each is pinned at three seeds that reach different variations.
+use super::sounds::{CALLS, parrot};
+use super::*;
+use crate::audio::synth::pin;
+
+const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
+
+#[test]
+fn every_ambient_sound_renders_identically_to_its_pin() {
+    let mut rendered = vec![];
+    for bed in BEDS {
+        // Past the half-second attack, into the sustained bed.
+        rendered.push((
+            format!("bed {bed:?}"),
+            pin::continuous(&bed.description(), 0.75, 7),
+        ));
+    }
+    for call in CALLS {
+        for seed in SEEDS {
+            // The lane's own bake: the cricket's syllables struck apart, every other call
+            // baked whole.
+            let hash = pin::across_rates(|rate| {
+                call.bake(seed, rate)
+                    .expect("a call bakes")
+                    .samples()
+                    .to_vec()
+            });
+            rendered.push((format!("call {call:?} {seed:#x}"), hash));
+        }
+    }
+    for seed in SEEDS {
+        rendered.push((
+            format!("parrot {seed:#x}"),
+            pin::baked(&parrot(seed), 0.3, seed),
+        ));
+    }
+    pin::assert_pins(&rendered, PINS);
+}
+
+#[rustfmt::skip]
+const PINS: &[pin::Row] = &[
+    ("bed Rain", 75075, [16.15316, 3.12591, 14.87466, 9.23113]),
+    ("bed DrivingRain", 75075, [-11.56035, 6.66040, -12.80555, 7.48990]),
+    ("bed Snowfall", 75075, [-0.23368, -0.16214, -0.42965, 0.19438]),
+    ("bed Sandstorm", 75075, [-1.45337, 10.80610, -8.46829, -3.19566]),
+    ("bed Blizzard", 75075, [-1.95516, 1.33949, -4.73817, -1.78786]),
+    ("call Rattlesnake 0x0", 80080, [19.46269, 12.79654, -16.03915, 21.34987]),
+    ("call Rattlesnake 0x10203", 80080, [16.49917, 16.00056, -31.09798, 14.97779]),
+    ("call Rattlesnake 0xfedcba9876543210", 80080, [-10.86395, -3.75266, -3.84044, -3.49364]),
+    ("call Crow 0x0", 55055, [47.69889, 10.45412, -22.87443, 24.07085]),
+    ("call Crow 0x10203", 55055, [6.96192, -25.30306, 5.82284, 46.13588]),
+    ("call Crow 0xfedcba9876543210", 55055, [-21.81715, 15.99740, -25.17112, 26.64207]),
+    ("call Eagle 0x0", 65065, [28.98983, 6.86640, 46.32582, 55.42906]),
+    ("call Eagle 0x10203", 65065, [6.99825, -15.24564, 9.69421, -21.02498]),
+    ("call Eagle 0xfedcba9876543210", 65065, [1.20862, -37.04444, 13.56195, -17.38928]),
+    ("call Wolf 0x0", 380380, [-48.15280, 19.58573, -109.64794, -53.43318]),
+    ("call Wolf 0x10203", 380380, [-120.48972, 20.45395, -132.55769, -14.62536]),
+    ("call Wolf 0xfedcba9876543210", 380380, [156.38050, 173.75575, -157.00243, -78.42733]),
+    ("call Cricket 0x0", 45045, [18.27520, -3.10288, -4.44538, -43.16450]),
+    ("call Cricket 0x10203", 45045, [-3.81560, 6.62133, 4.83353, 20.00880]),
+    ("call Cricket 0xfedcba9876543210", 45045, [-14.74555, 6.99188, 16.89307, 31.56857]),
+    ("parrot 0x0", 30030, [-1.88147, 4.64971, 1.14186, -9.89350]),
+    ("parrot 0x10203", 30030, [4.06720, 5.48371, -8.13336, 5.47562]),
+    ("parrot 0xfedcba9876543210", 30030, [7.07907, 7.66294, -6.97357, 2.13390]),
+];
