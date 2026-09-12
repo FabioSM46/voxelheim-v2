@@ -21,6 +21,15 @@ pockets. The two banquet groups use the east hall's western/eastern pockets;
 the X45–48/Z20–25 central approach remains clear. Cosmetic rugs may cross it.
 The carpenter's existing (16,0,22) standing slot remains clear.
 
+## Audience dais
+
+The E7 west pocket contains a one-block-high platform at X38–41/Z20–23:
+its standing height is **Y8**, with west-high shaped stairs at X42/Z20–23.
+The X43–44 approach remains at Y7 and joins the X45–48 central aisle. This is
+the explicit exception to the otherwise flat E7 furnishing pockets. The throne
+placement uses (40,8,21), facing east; leave X42 and the approach free of solids.
+The cross-room route Z24–25 remains unchanged.
+
 ## Main stairs and access
 
 West stairs occupy X6–13/Z27–38. Two-wide flights alternate between X7–8
@@ -71,19 +80,28 @@ Western lookout furniture pockets are **NW X9–11/Z12–13 at Y35** and
 **SW X19–21/Z32–33 at Y29**. The complete southern two-wide route, NW Z14–15
 and SW Z34–35, stays clear across each core. Guards enclose the northern and
 eastern stair openings; keep the emerging western flight unobstructed.
-South-facing glass slits provide a view above an intact sill; the lighting
-follow-up owns their grille replacement. Eastern tower furniture pockets await
-verified flights. Preserve the differentiated silhouettes and tallest eastern spire.
+South-facing glass slits reserve viewing apertures above intact sills; the
+lighting follow-up replaces their opaque placeholder blocks with grilles.
+
+The eastern cores are NE X47–53/Z9–15 and SE X39–45/Z29–35, entered from Y28.
+Three-block flights alternate sides, ending with a final one-block rise into
+the Y41/Y35 rooms. NE access follows the central aisle to Z19, the north corridor
+to Z11–12, then turns through X45–46 into the northern landing. SE access uses
+X45–50/Z29–30. Furniture pockets are **NE X49–51/Z12–13 at Y41** and
+**SE X41–43/Z32–33 at Y35**. Keep the complete southern two-wide routes clear.
+Northern parapets and raised eastern guard beams protect the return-flight
+openings: a standing body cannot enter from either side, while the lower flight
+retains its necessary headroom. Preserve the differentiated external silhouettes.
 
 ## Delivery and verification
 
-Issue #1202 is delivered in independently verified changes. The first four changes
+Issue #1202 is delivered in independently verified changes. The five architecture changes
 implement **both main-wing staircases, the courtyard stair and the complete
-two-wide curtain circuit through four corner lookouts, and both western spire
-interiors**, together with oriented schematic placement. Eastern spire interiors
-and final renderer captures follow in subsequent changes.
-The plans above reserve their space; they do not claim that those changes have
-already been built.
+two-wide curtain circuit through four corner lookouts, all four spired tower
+interiors and the audience dais**, together with oriented schematic placement.
+Final renderer evidence follows in a separate acceptance delivery, with its
+server-authored fixture and camera settings. Geometry verification is complete;
+visual acceptance is not claimed by these five architecture changes.
 
 The main-wing route test drives the real `Player.step` with ordinary walking intent,
 production gravity and no jump input, from the gate up every flight, into each

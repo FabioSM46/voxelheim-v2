@@ -221,3 +221,88 @@ func TestCastleWesternSpireLookoutsAreReachedByWalking(t *testing.T) {
 		}
 	}
 }
+
+func TestCastleEasternSpireLookoutsAreReachedByWalking(t *testing.T) {
+	for _, tower := range []struct{ cx, cz, lookout float64 }{{50, 12, 41}, {42, 32, 35}} {
+		route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {46.5, 0, 43.5}, {46.5, 0, 37.5}, {49.5, 0, 37.5}, {52.5, 0, 37.5}, {52.5, 7, 29.5}, {55.5, 7, 29.5}, {55.5, 14, 37.5}, {52.5, 14, 37.5}, {52.5, 21, 29.5}, {55.5, 21, 29.5}, {55.5, 28, 37.5}, {49.5, 28, 37.5}, {49.5, 28, 24.5}}
+		if tower.cx == 50 {
+			route = append(route, [3]float64{46.5, 28, 24.5}, [3]float64{46.5, 28, 19.5}, [3]float64{37.5, 28, 19.5}, [3]float64{37.5, 28, 11.5}, [3]float64{45.5, 28, 11.5}, [3]float64{45.5, 28, 9.5})
+		} else {
+			route = append(route, [3]float64{49.5, 28, 29.5})
+		}
+		route = append(route, [3]float64{tower.cx - 2.5, 28, tower.cz - 2.5})
+		for i, floor := 0, 28.0; floor < tower.lookout; i, floor = i+1, floor+3 {
+			height := math.Min(3, tower.lookout-floor)
+			x, z := tower.cx-2.5, tower.cz+2.5
+			if i%2 == 1 {
+				x, z = tower.cx+2.5, tower.cz-2.5
+			}
+			if height < 3 {
+				z = tower.cz - 0.5 + height
+			}
+			route = append(route, [3]float64{x, floor + height, z})
+			if floor+height < tower.lookout {
+				nextX := tower.cx + 2.5
+				if i%2 == 1 {
+					nextX = tower.cx - 2.5
+				}
+				route = append(route, [3]float64{nextX, floor + height, z})
+			}
+		}
+		route = append(route, [3]float64{tower.cx - 2.5, tower.lookout, tower.cz + 2.5}, [3]float64{tower.cx + 1.5, tower.lookout, tower.cz + 2.5})
+		for i := len(route) - 2; i >= 0; i-- {
+			route = append(route, route[i])
+		}
+		for lane := range 2 {
+			walk := append([][3]float64(nil), route...)
+			for i := range walk {
+				if walk[i][0] == tower.cx-2.5 || walk[i][0] == tower.cx+2.5 {
+					walk[i][0] += float64(lane)
+				}
+			}
+			for turn := range 4 {
+				t.Run(fmt.Sprintf("tower%.0f/lane%d/rotation%d", tower.cx, lane, turn), func(t *testing.T) { walkCastle(t, castleTerrain{turn: turn}, walk) })
+			}
+		}
+	}
+}
+
+func TestEastLookoutGuardsPreventWalkingIntoReturnFlight(t *testing.T) {
+	for _, tower := range []struct{ x, z, y float64 }{{50, 12, 41}, {42, 32, 35}} {
+		for _, approach := range [][2][3]float64{
+			{{tower.x + 1.5, tower.y, tower.z + 0.5}, {tower.x + 3.5, tower.y, tower.z + 0.5}},
+			{{tower.x + 2.5, tower.y, tower.z + 2.5}, {tower.x + 2.5, tower.y, tower.z + 0.5}},
+		} {
+			for turn := range 4 {
+				c := castleTerrain{turn: turn}
+				start, target := c.point(approach[0]), c.point(approach[1])
+				p := &Player{sim: &Sim{idleLimit: 10000}, pos: start, lifeState: vnet.LifeStateAlive, health: 100, hunger: 100}
+				for range 100 {
+					dx, dz := target[0]-p.pos[0], target[2]-p.pos[2]
+					length := math.Hypot(dx, dz)
+					p.current = intent{moveX: dx / length, moveZ: -dz / length}
+					p.idleTicks = 0
+					p.step(1/float64(DefaultTickRate), c)
+					if math.Abs(p.pos[1]-start[1]) > 0.02 || p.health != 100 || overlaps(c, p.box()) {
+						t.Fatalf("tower guard did not keep standing player safe: %v -> %v", start, p.pos)
+					}
+				}
+				if math.Hypot(target[0]-p.pos[0], target[2]-p.pos[2]) < 1 {
+					t.Fatal("player crossed the guarded opening")
+				}
+			}
+		}
+	}
+}
+
+func TestCastleAudienceDaisIsReachedWithoutJumping(t *testing.T) {
+	for _, z := range []float64{21.5, 22.5} {
+		route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 43.5}, {46.5, 0, 43.5}, {46.5, 0, 37.5}, {49.5, 0, 37.5}, {52.5, 0, 37.5}, {52.5, 7, 29.5}, {49.5, 7, 29.5}, {49.5, 7, 24.5}, {46.5, 7, 24.5}, {46.5, 7, z}, {43.5, 7, z}, {41.5, 8, z}}
+		for i := len(route) - 2; i >= 0; i-- {
+			route = append(route, route[i])
+		}
+		for turn := range 4 {
+			t.Run(fmt.Sprintf("lane%.1f/rotation%d", z, turn), func(t *testing.T) { walkCastle(t, castleTerrain{turn: turn}, route) })
+		}
+	}
+}
