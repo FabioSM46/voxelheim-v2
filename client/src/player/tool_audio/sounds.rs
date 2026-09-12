@@ -6,7 +6,7 @@ use crate::{
     world::palette::MaterialClass,
 };
 
-pub(super) const STRIKE_SECONDS: f32 = 0.24;
+pub(in crate::player) const STRIKE_SECONDS: f32 = 0.24;
 pub(super) const BREAK_SECONDS: f32 = 0.38;
 pub(super) const SWING_SECONDS: f32 = 0.20;
 
@@ -41,7 +41,7 @@ fn tone(hz: f32, gain: f32, decay: f32) -> Layer {
     }
 }
 
-pub(super) fn strike(tool: MiningTool, material: MaterialClass) -> Sound {
+pub(in crate::player) fn strike(tool: MiningTool, material: MaterialClass) -> Sound {
     // Hand: soft low thud. Shovel: broadband scrape with a hollow plate transient.
     // Pick: long inharmonic metal ring. Axe: short woody knock with a cutting edge.
     let mut layers = match tool {
