@@ -1,7 +1,7 @@
 //! Small descriptions rather than assets: every continuous layer advances fresh noise.
 use crate::audio::synth::{
-    self, Baked, Curve, Envelope, Exciter, Filter, FilterKind, Glide, Layer, Noise, Sound, Vibrato,
-    Wave,
+    self, Baked, Curve, Envelope, Exciter, Filter, FilterKind, Gate, Glide, Layer, Noise, Sound,
+    Vibrato, Wave,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +23,7 @@ fn noise(noise: Noise, gain: f32, kind: FilterKind, hz: f32, q: f32) -> Layer {
             sustain: 1.0,
             release: 0.8,
         },
+        gate: None,
         filter: Some(Filter { kind, hz, q }),
     }
 }
@@ -155,6 +156,7 @@ fn squawk(variation: f32, envelope: Envelope) -> Vec<Layer> {
         }),
         gain,
         envelope,
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::Band,
             hz: formant,
@@ -293,6 +295,7 @@ fn howl(seed: u64, envelope: Envelope) -> Vec<Layer> {
             hz: formant,
             q,
         }),
+        gate: None,
     };
     let breath = |gain, kind, formant, q, attack| Layer {
         envelope: Envelope {
@@ -341,6 +344,61 @@ fn howl(seed: u64, envelope: Envelope) -> Vec<Layer> {
             ..noise(Noise::Brown, 0.20, FilterKind::Low, 620.0, 0.7)
         },
     ]
+}
+
+/// The slowest and the fastest a rattle's train of clicks runs, in clicks a second. A real
+/// rattle is dense; every wind-up starts and ends inside this band, and both ends stay far
+/// under the gate's own bound of a twentieth of the sample rate — 400 at the 8 kHz a device
+/// may open at.
+const RATTLE_SLOWEST: f32 = 42.0;
+const RATTLE_FASTEST: f32 = 88.0;
+
+/// How long one click lasts, as a fraction of its own period: about four milliseconds at the
+/// slowest rate and two at the fastest, so every opening is an impact and four fifths of every
+/// period is exact silence.
+const RATTLE_DUTY: f32 = 0.18;
+
+/// The three bands one click is coloured by — a dry body, the buzz that carries, and the dust
+/// at the top — as `(gain, hertz, q)`. White noise through all three and no oscillator
+/// anywhere, because a rattle has no pitch; the highest band stays under 3.6 kHz, 0.45 of the
+/// lowest supported rate, so the whole description bakes at 8 kHz.
+const RATTLE_BANDS: [(f32, f32, f32); 3] =
+    [(0.5, 1150.0, 0.9), (0.62, 2050.0, 1.1), (0.34, 3150.0, 1.3)];
+
+/// One rattlesnake's rattle: a train of dry clicks that winds up, holds, and falls away.
+///
+/// - **A train, not a tone.** Every layer is white noise through one of [`RATTLE_BANDS`],
+///   struck open and shut by a single shared [`Gate`]. The three layers carry the same gate
+///   description, so their openings coincide exactly and each one is a single click with three
+///   colours rather than three clicks a listener could count apart.
+/// - **A wind-up no two seeds share.** The gate's rate climbs from `from` to `to` over
+///   `seconds`, and all three come off different slices of the seed: the rate it starts at, the
+///   rate it reaches, and how long it takes to get there are independent, so the span and its
+///   duration are not one number wearing two hats.
+/// - **Loudness that moves with it.** The call's envelope rises over its attack and settles to
+///   its sustain, and the bake's own release fades the end of it away.
+///
+/// The gate is what makes this describable at all: [`Sound::bake_at`] strikes a description
+/// again at each onset, and a one-second rattle needs tens of strikes where that is bounded by
+/// sixteen.
+fn rattle(variation: f32, seed: u64, envelope: Envelope) -> Vec<Layer> {
+    let gate = Gate {
+        from: RATTLE_SLOWEST + variation * 13.0,
+        to: RATTLE_FASTEST - ((seed >> 24) % 15) as f32,
+        seconds: 0.26 + ((seed >> 40) % 23) as f32 / 100.0,
+        // Equal proportion in equal time: a rattle accelerates the way it is wound up, rather
+        // than by the same number of clicks a second every second.
+        curve: Curve::Exponential,
+        duty: RATTLE_DUTY,
+    };
+    RATTLE_BANDS
+        .into_iter()
+        .map(|(gain, hz, q)| Layer {
+            envelope,
+            gate: Some(gate),
+            ..noise(Noise::White, gain, FilterKind::Band, hz, q)
+        })
+        .collect()
 }
 
 impl Call {
@@ -401,10 +459,13 @@ impl Call {
             },
             gain,
             envelope,
+            gate: None,
             filter: None,
         };
         let (attack, decay, sustain, release) = match self {
-            Self::Rattlesnake => (0.025, 0.2, 0.7, 0.2),
+            // A rattle is wound up rather than started: the level climbs over a tenth of a
+            // second, settles high, and the bake's release takes the last quarter away.
+            Self::Rattlesnake => (0.1, 0.22, 0.82, 0.25),
             Self::Crow => (0.025, 0.28, 0.05, 0.12),
             Self::Eagle => (0.015, 0.4, 0.0, 0.1),
             Self::Wolf => (0.8, 1.8, 0.35, 1.2),
@@ -420,18 +481,7 @@ impl Call {
             release,
         };
         let layers = match self {
-            // Close partials beat at rattle speed, under a dry band of noise.
-            Self::Rattlesnake => {
-                let hz = 2300.0 + variation * 250.0;
-                vec![
-                    tone(hz, 0.08, envelope),
-                    tone(hz + 29.0, 0.08, envelope),
-                    Layer {
-                        envelope,
-                        ..noise(Noise::White, 0.24, FilterKind::Band, 2700.0, 2.0)
-                    },
-                ]
-            }
+            Self::Rattlesnake => rattle(variation, seed, envelope),
             Self::Crow => {
                 let hz = 560.0 + variation * 100.0;
                 vec![
@@ -639,6 +689,7 @@ mod tests {
                 },
                 gain: 0.5,
                 envelope: Call::Cricket.description(seed).layers[0].envelope,
+                gate: None,
                 filter: None,
             }],
         }
@@ -697,6 +748,7 @@ mod tests {
                     },
                     gain: 0.16,
                     envelope,
+                    gate: None,
                     filter: None,
                 },
                 Layer {
@@ -706,6 +758,7 @@ mod tests {
                     },
                     gain: 0.07,
                     envelope,
+                    gate: None,
                     filter: None,
                 },
                 Layer {
@@ -1116,6 +1169,7 @@ mod tests {
             gain,
             envelope,
             filter: None,
+            gate: None,
         };
         let hz = 310.0 + variation * 55.0;
         Sound {
@@ -1140,6 +1194,41 @@ mod tests {
                 Layer {
                     envelope,
                     ..noise(Noise::White, 0.06, FilterKind::Band, 650.0, 1.0)
+                },
+            ],
+        }
+    }
+
+    /// The call #1184 replaced, verbatim: two sine partials 29 Hz apart near 2.3 kHz under one
+    /// band of noise. Two close sines beating is a tremolo on a tone, which is what the owner
+    /// heard as an electronic buzz, and it is the negative control for every measurement below.
+    fn old_rattlesnake(seed: u64) -> Sound {
+        let variation = (seed % 101) as f32 / 100.0;
+        let hz = 2300.0 + variation * 250.0;
+        let envelope = Envelope {
+            attack: 0.025,
+            decay: 0.2,
+            sustain: 0.7,
+            release: 0.2,
+        };
+        let tone = |hz| Layer {
+            exciter: Exciter::Oscillator {
+                wave: Wave::Sine,
+                hz,
+            },
+            gain: 0.08,
+            envelope,
+            filter: None,
+            gate: None,
+        };
+        Sound {
+            layers: vec![
+                tone(hz),
+                tone(hz + 29.0),
+                Layer {
+                    envelope,
+                    gate: None,
+                    ..noise(Noise::White, 0.24, FilterKind::Band, 2700.0, 2.0)
                 },
             ],
         }
@@ -1379,6 +1468,76 @@ mod tests {
         }
     }
 
+    /// The gate the rattle's description carries, read back from it. Every layer carries the
+    /// same one, which is what makes the three bands one click rather than three.
+    fn rattle_gate(seed: u64) -> Gate {
+        let layers = Call::Rattlesnake.description(seed).layers;
+        let gate = layers[0].gate.expect("a rattle is gated");
+        for layer in &layers {
+            assert_eq!(layer.gate, Some(gate), "the bands do not share one gate");
+            assert!(
+                matches!(layer.exciter, Exciter::Noise(Noise::White)),
+                "a rattle has a pitch: {:?}",
+                layer.exciter
+            );
+        }
+        gate
+    }
+
+    /// Where each click of a rendered rattle starts. Every layer carries the same gate, so a
+    /// closed gate is applied after the filter and is exact zero in the sum; a click is a run
+    /// of sounding samples after at least four such zeros. The real gaps are four fifths of a
+    /// period — seventy samples at 8 kHz and four hundred at 48 — so four is a margin against
+    /// a sum that happens to land on zero mid-click, not a threshold anything depends on.
+    fn rendered_clicks(samples: &[f32]) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut silence = usize::MAX;
+        for (index, value) in samples.iter().enumerate() {
+            if *value == 0.0 {
+                silence = silence.saturating_add(1);
+            } else {
+                if silence >= 4 {
+                    starts.push(index);
+                }
+                silence = 0;
+            }
+        }
+        starts
+    }
+
+    /// The amplitude envelope of `samples`, decimated to a thousand readings a second: the
+    /// absolute value through a one-pole at 250 Hz, kept every `rate / 1000`th sample. A click
+    /// train's envelope is a periodic train in its own right; a held band's is a nearly steady
+    /// level carrying the noise's own wideband flutter.
+    fn amplitude_envelope(samples: &[f32], rate: u32) -> Vec<f32> {
+        let pole = 1.0 - (-std::f32::consts::TAU * 250.0 / rate as f32).exp();
+        let step = (rate / 1000) as usize;
+        let mut level = 0.0;
+        samples
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                level += pole * (value.abs() - level);
+                (index % step == 0).then_some(level)
+            })
+            .collect()
+    }
+
+    /// The share of an amplitude envelope's *varying* energy that lies between `low` and `high`
+    /// hertz, out of everything from 5 Hz to 480. This is the measurement that separates a train
+    /// of impacts from a held band: a gate puts nearly all of that energy on its own rate and
+    /// that rate's harmonics, while a filtered band of noise has no rate at all and spreads the
+    /// same energy thinly across the whole range. The mean is removed first, so a loud sound and
+    /// a quiet one of the same shape measure alike.
+    fn modulation_share(samples: &[f32], rate: u32, low: f32, high: f32) -> f64 {
+        let envelope = amplitude_envelope(samples, rate);
+        let mean = envelope.iter().sum::<f32>() / envelope.len() as f32;
+        let varying: Vec<f32> = envelope.iter().map(|value| value - mean).collect();
+        let inside: f64 = band_power(&varying, 1000, low, high).iter().sum();
+        let across: f64 = band_power(&varying, 1000, 5.0, 480.0).iter().sum();
+        inside / across
+    }
+
     /// Heard where the day lane places it — seven blocks out and five up, faded by the same
     /// `spatial::attenuation` every placed sound is. A macaw carries: the squawk peaks near 0.6
     /// before placement at 48 kHz and near 0.44 at 8 kHz, where the call it replaced peaked near
@@ -1400,6 +1559,142 @@ mod tests {
                 );
                 assert!(
                     peak(samples) * gain >= 0.06,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// #1184: the owner's rule is that a sound is realistic, never a note, and the desert's day
+    /// call was two sines 29 Hz apart beating under a band of noise — a tremolo on a tone, which
+    /// is why it read as an electronic buzz. A rattle is a train of impacts: its energy sits in
+    /// its own *modulation*, on the gate's rate and that rate's harmonics, and the gaps between
+    /// its clicks are silence rather than a dip. The negative control is the point: the call it
+    /// replaced, quoted verbatim, fails both halves of the measurement — it has no clicks to
+    /// count, and what modulation it has is the noise band's own flutter plus a 29 Hz beat,
+    /// spread across the whole range instead of concentrated on a rate.
+    #[test]
+    fn a_rattle_is_a_train_of_dry_clicks_and_not_a_beating_pair_of_sines() {
+        let seconds = Call::Rattlesnake.profile().seconds;
+        for seed in (0..16u64).map(scramble) {
+            for rate in [8000, 48000] {
+                let call = Call::Rattlesnake.bake(seed, rate).unwrap();
+                let clicks = rendered_clicks(call.samples());
+                let density = clicks.len() as f32 / seconds;
+                assert!(
+                    (40.0..=90.0).contains(&density),
+                    "seed {seed} at {rate}: {density} clicks a second"
+                );
+            }
+            let call = Call::Rattlesnake.bake(seed, 8000).unwrap();
+            let samples = call.samples();
+            // Measured over forty seeds: 0.73 to 0.79 of the modulation sits on the click rate
+            // and its harmonics, where the call this replaced reaches at most 0.37. And a rattle
+            // has no pitch at all — at most 0.08 of its energy on one frequency against the old
+            // call's 0.65 at least, a flatness of 0.45 at worst against the old call's 0.07.
+            let share = modulation_share(samples, 8000, 30.0, 200.0);
+            let (tonal, flat) = (tonal_share(samples, 8000), flatness(samples, 8000));
+            assert!(
+                share > 0.6 && tonal < 0.2 && flat > 0.3,
+                "seed {seed}: modulation {share}, {tonal} on one frequency, flatness {flat}"
+            );
+            let old = old_rattlesnake(seed).bake(seconds, 8000, seed).unwrap();
+            let old = old.samples();
+            let density = rendered_clicks(old).len() as f32 / seconds;
+            let share = modulation_share(old, 8000, 30.0, 200.0);
+            let (tonal, flat) = (tonal_share(old, 8000), flatness(old, 8000));
+            assert!(
+                density < 40.0 && share < 0.5 && tonal > 0.4 && flat < 0.15,
+                "seed {seed}: the old call measured {density} clicks a second, modulation \
+                 {share}, {tonal} on one frequency, flatness {flat}"
+            );
+        }
+    }
+
+    /// The rattle is wound up rather than switched on: the click rate climbs and the level rises
+    /// with it, and both come off the seed, so two rattlesnakes heard in one crossing are not
+    /// the same recording. The gate's three numbers are read from independent slices of the seed
+    /// — the rate it starts at, the rate it reaches, and how long it takes — so the span and its
+    /// duration are not one number wearing two hats.
+    #[test]
+    fn a_rattle_winds_up_and_falls_away_and_no_two_seeds_wind_up_alike() {
+        let mut winds = std::collections::HashSet::new();
+        for seed in (0..40u64).map(scramble) {
+            let gate = rattle_gate(seed);
+            assert!(
+                gate.from >= RATTLE_SLOWEST
+                    && gate.from < gate.to
+                    && gate.to <= RATTLE_FASTEST
+                    && (0.2..0.6).contains(&gate.seconds),
+                "seed {seed}: {gate:?}"
+            );
+            winds.insert((
+                gate.from.to_bits(),
+                gate.to.to_bits(),
+                gate.seconds.to_bits(),
+            ));
+
+            let call = Call::Rattlesnake.bake(seed, 8000).unwrap();
+            let samples = call.samples();
+            // The train speeds up: the last five intervals are shorter than the first five.
+            let gaps: Vec<usize> = rendered_clicks(samples)
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .collect();
+            let mean = |gaps: &[usize]| gaps.iter().sum::<usize>() as f32 / gaps.len() as f32;
+            let (early, late) = (mean(&gaps[..5]), mean(&gaps[gaps.len() - 5..]));
+            assert!(
+                late < early * 0.92,
+                "seed {seed}: {early} samples between early clicks, {late} between late ones"
+            );
+            // And the level rises out of nothing and falls away again.
+            let rms = |from: f32, to: f32| {
+                let window = &samples[(from * 8000.0) as usize..(to * 8000.0) as usize];
+                (window.iter().map(|v| v * v).sum::<f32>() / window.len() as f32).sqrt()
+            };
+            let held = rms(0.35, 0.45);
+            assert!(
+                rms(0.0, 0.06) < held * 0.75 && rms(0.74, 0.8) < held * 0.75,
+                "seed {seed}: {} then {held} then {}",
+                rms(0.0, 0.06),
+                rms(0.74, 0.8)
+            );
+        }
+        // All forty are distinct as measured; the floor leaves room for a collision rather than
+        // asserting a property of these particular seeds.
+        assert!(winds.len() >= 36, "{} distinct wind-ups in 40", winds.len());
+    }
+
+    /// Heard where the lane places it — five blocks out and a block down in the sand, faded by
+    /// the same `spatial::attenuation` every placed sound is. It never clips and starts and ends
+    /// at exact silence at every device rate, 8 kHz included: that the 8 kHz bake succeeds at all
+    /// is the proof that no band and no gate rate crosses its bound.
+    ///
+    /// The two floors are measured over forty seeds at five rates. The peak reaches 0.79 at
+    /// worst, against the 0.85 asserted. Heard, it is 0.195 at 8 kHz and 0.176 at 48 — where the
+    /// call it replaced was about 0.105 — and falls to 0.059 at 192 kHz, because a band of white
+    /// noise carries less amplitude per sample the finer the sample grid is. That worst case is
+    /// what the 0.055 floor sits under, and it is the reason this one number is below the 0.06
+    /// the macaw's test uses rather than equal to it.
+    #[test]
+    fn a_rattlesnake_call_carries_to_its_coil_without_clipping_at_any_rate() {
+        let profile = Call::Rattlesnake.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Rattlesnake.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.055,
                     "seed {seed} at {rate}: heard at {}",
                     peak(samples) * gain
                 );

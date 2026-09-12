@@ -105,6 +105,7 @@ fn hammer() -> Sound {
             },
             gain,
             envelope: envelope(0.001, 0.26, 0.0, 0.015),
+            gate: None,
             filter: None,
         })
         .collect();
@@ -112,6 +113,7 @@ fn hammer() -> Sound {
         exciter: Exciter::Noise(Noise::White),
         gain: 0.24,
         envelope: envelope(0.001, 0.025, 0.0, 0.015),
+        gate: None,
         filter: None,
     });
     Sound { layers }
@@ -123,6 +125,7 @@ fn pop() -> Sound {
             exciter: Exciter::Noise(Noise::White),
             gain: 0.36,
             envelope: envelope(0.001, 0.014, 0.0, 0.004),
+            gate: None,
             filter: Some(Filter {
                 kind: FilterKind::High,
                 hz: 850.0,
@@ -140,6 +143,7 @@ fn fire() -> Sound {
             exciter: Exciter::Noise(Noise::Brown),
             gain: 0.26,
             envelope: envelope(0.1, 0.0, 1.0, 0.1),
+            gate: None,
             filter: Some(Filter {
                 kind: FilterKind::Low,
                 hz: 1800.0,
@@ -156,6 +160,7 @@ fn scrape() -> Sound {
         exciter: Exciter::Noise(Noise::White),
         gain,
         envelope: envelope(attack, decay, 0.0, 0.02),
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::Band,
             hz,
@@ -183,6 +188,7 @@ fn tap() -> Sound {
             },
             gain,
             envelope: envelope(0.001, 0.12, 0.0, 0.01),
+            gate: None,
             filter: None,
         })
         .collect();
@@ -190,6 +196,7 @@ fn tap() -> Sound {
         exciter: Exciter::Noise(Noise::White),
         gain: 0.10,
         envelope: envelope(0.001, 0.008, 0.0, 0.004),
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::High,
             hz: 2000.0,
@@ -210,6 +217,7 @@ fn hum() -> Sound {
         },
         gain,
         envelope: sustained,
+        gate: None,
         filter: None,
     };
     Sound {
@@ -220,6 +228,7 @@ fn hum() -> Sound {
                 exciter: Exciter::Noise(Noise::Brown),
                 gain: 0.15,
                 envelope: sustained,
+                gate: None,
                 filter: Some(Filter {
                     kind: FilterKind::Low,
                     hz: 240.0,
