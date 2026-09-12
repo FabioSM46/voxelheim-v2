@@ -131,6 +131,17 @@ func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T)
 		default:
 		}
 	}
+	// **Seeing the WorldChange does not mean the next frame is read in the new world.** The
+	// session discards the one read it had outstanding when the world changed, because that
+	// frame may have been sent for the old world (TestWorldChangeRejectsAnOutstandingOldWorldRead).
+	// A walk stops the moment the transition is seen, so that read can still be waiting, and a
+	// take sent next would be the frame it discards, answered by nothing (#1172). A client's
+	// input loop keeps sending, so its next input is that frame; this does the same with one
+	// standing input. Frames are read in order and only one read is outstanding at a time, so the
+	// take behind it is always read in the world the transition named.
+	afterCrossing := func() {
+		conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: walkClientTicks.Add(1)})
+	}
 
 	conn.in <- take
 	waitUntil(t, "the take before entering to be refused", func() bool { return refused(vnet.RefusedActionTakeLoot) == 1 })
@@ -141,6 +152,7 @@ func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T)
 	if change.WorldID != runID {
 		t.Fatalf("entered world %d, want the owed run %d", change.WorldID, runID)
 	}
+	afterCrossing()
 	conn.in <- take
 	select {
 	case got := <-consumed:
@@ -164,6 +176,7 @@ func TestALootTakeBecomesABossRewardClaimOnlyInsideItsDungeonVisit(t *testing.T)
 		t.Fatal("the exit did not return to the open world")
 	}
 
+	afterCrossing()
 	conn.in <- take
 	waitUntil(t, "the take after leaving to be refused", func() bool { return refused(vnet.RefusedActionTakeLoot) == 2 })
 	noClaim("after leaving")
