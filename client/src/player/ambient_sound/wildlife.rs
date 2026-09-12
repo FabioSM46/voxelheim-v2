@@ -47,12 +47,20 @@ pub(super) enum Habitat {
     /// The country's ground look alone, wooded or not. A creature with no body needs no
     /// more than this: the rattlesnake is heard over sand because the ground is sand.
     Ground(GroundLook),
-    /// Exactly where [`birds::species_for`] answers one row of [`birds::BIRDS`].
+    /// Exactly the country one named row of [`birds::BIRDS`] flies over.
     ///
     /// **For a creature that is seen as well as heard**, whose gate is the table that draws
     /// it rather than the ground alone — the macaw needs trees, and the bird table is where
     /// that is already written down. #1176 is what happens when the sound lane keeps its own
     /// opinion about where a visible species lives: the day call played on every sunny plain.
+    ///
+    /// **It asks the row it names, and it used to ask which row came first.** That was
+    /// `birds::species_for(ambience) == Some(species)`, which is the same answer only while
+    /// each country has one bird row; #1191 gave wooded grass and snow a night row each, and
+    /// a first-match query can never answer for the second of them. Naming the row and asking
+    /// it is also the reading that keeps the hour out of the habitat, which is what
+    /// [`Voice::period`] below is for: the crossfade over the twilight belongs to the period
+    /// and a habitat that flipped at `PERIOD_SWITCH` would put a hard edge underneath it.
     Flock(usize),
 }
 
@@ -61,7 +69,7 @@ impl Habitat {
     fn present(self, ambience: &Ambience) -> bool {
         match self {
             Self::Ground(ground) => ambience.ground == ground,
-            Self::Flock(species) => birds::species_for(ambience) == Some(species),
+            Self::Flock(species) => birds::BIRDS[species].flies_over(ambience),
         }
     }
 }

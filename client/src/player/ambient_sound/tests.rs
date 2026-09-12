@@ -81,7 +81,7 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
         wooded: false,
         ..grass()
     };
-    assert_eq!(birds::species_for(&grass()), Some(PARROT));
+    assert!(birds::BIRDS[PARROT].flies_over(&grass()));
     // No biome, temperature, terrain seed or gameplay facts enter this selector. Trees decide
     // only whether the macaw is there to be heard.
     //
@@ -124,7 +124,10 @@ fn the_macaw_is_heard_by_day_only_where_the_bird_table_flies_it() {
     ] {
         for wooded in [false, true] {
             let country = Ambience { ground, wooded };
-            let macaw = birds::species_for(&country) == Some(PARROT);
+            // The row named, asked directly. It was `species_for(..) == Some(PARROT)`, a
+            // first-match query that #1191 made unanswerable for a second row over one
+            // country — see `Habitat::Flock`.
+            let macaw = birds::BIRDS[PARROT].flies_over(&country);
             heard += usize::from(macaw);
             for night in [0.0, 0.25, 1.0] {
                 let expected = if macaw { 1.0 - night } else { 0.0 };
@@ -569,11 +572,15 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
         targets(&Ambience::default(), 0.5, None).wildlife,
         [0.0; VOICES]
     );
+    // By day, because snow has two rows since #1191 and only the hour tells them apart.
     assert_eq!(
-        birds::species_for(&Ambience {
-            ground: GroundLook::Snow,
-            wooded: false
-        }),
+        birds::species_now(
+            &Ambience {
+                ground: GroundLook::Snow,
+                wooded: false
+            },
+            Some(0.0)
+        ),
         Some(2)
     );
 }
