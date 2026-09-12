@@ -68,7 +68,19 @@ func TestCastleFurnitureReservationsKeepFloorAndStandingHeadroom(t *testing.T) {
 			for _, r := range wing.rectangles {
 				for x := r[0]; x <= r[1]; x++ {
 					for z := r[2]; z <= r[3]; z++ {
-						if !standableCell(s, x, y, z) {
+						standing := y
+						if y == 7 && z >= 20 && z <= 23 {
+							if x >= 38 && x <= 41 {
+								standing = 8
+							}
+							if x == 42 {
+								if s.At(x, y, z) != SlateStairWestBottom {
+									t.Fatal("dais approach lost shaped stair")
+								}
+								continue
+							}
+						}
+						if !standableCell(s, x, standing, z) {
 							t.Fatalf("reserved furniture cell (%d,%d,%d) lost floor or headroom", x, y, z)
 						}
 					}
@@ -173,6 +185,49 @@ func TestWestTowerLandingsLookoutGuardsAndFurnitureReservations(t *testing.T) {
 		for x := tower.x - 1; x <= tower.x+3; x++ {
 			if !Solid(s.At(x, tower.lookout, tower.z-1)) {
 				t.Fatalf("lookout stair opening at (%d,%d,%d) lacks guard", x, tower.lookout, tower.z-1)
+			}
+		}
+	}
+}
+
+func TestEastTowerLandingsLookoutGuardsAndFurnitureReservations(t *testing.T) {
+	t.Parallel()
+	s := SchematicFor(BuildingKeep)
+	for _, tower := range []struct{ x, z, lookout int }{{50, 12, 41}, {42, 32, 35}} {
+		for i, y := 0, 28; y < tower.lookout; i, y = i+1, y+3 {
+			z0 := tower.z - 3
+			if i%2 == 1 {
+				z0 = tower.z + 2
+			}
+			for x := tower.x - 3; x <= tower.x+3; x++ {
+				for z := z0; z <= z0+1; z++ {
+					if !standableCell(s, x, y, z) {
+						t.Fatalf("east landing (%d,%d,%d) obstructed", x, y, z)
+					}
+				}
+			}
+		}
+		for _, r := range [][4]int{{tower.x - 1, tower.x + 1, tower.z, tower.z + 1}, {tower.x - 3, tower.x + 3, tower.z + 2, tower.z + 3}} {
+			for x := r[0]; x <= r[1]; x++ {
+				for z := r[2]; z <= r[3]; z++ {
+					if !standableCell(s, x, tower.lookout, z) {
+						t.Fatalf("east lookout reservation (%d,%d,%d) obstructed", x, tower.lookout, z)
+					}
+				}
+			}
+		}
+		for x := tower.x - 1; x <= tower.x+1; x++ {
+			if !Solid(s.At(x, tower.lookout, tower.z-1)) {
+				t.Fatal("north lookout guard missing")
+			}
+		}
+		// The raised beam blocks a standing body entering from the lookout,
+		// while preserving the last return flight's headroom underneath.
+		for x := tower.x + 2; x <= tower.x+3; x++ {
+			for z := tower.z - 1; z <= tower.z+1; z++ {
+				if !Solid(s.At(x, tower.lookout+1, z)) {
+					t.Fatal("return flight guard beam missing")
+				}
 			}
 		}
 	}
