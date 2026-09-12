@@ -705,6 +705,7 @@ mod tests {
         (species.life / DT).ceil() as usize
     }
 
+    #[test]
     /// A store over every chunk a box of `reach` around `centre` touches, holding whatever
     /// `block_at` names at each voxel and air wherever it names [`palette::AIR`].
     ///
