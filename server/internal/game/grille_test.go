@@ -49,16 +49,16 @@ func TestSightFindsBarsAndPassesTheirGaps(t *testing.T) {
 			if clearLineOfSight(terrain, from, to) == tc.blocked {
 				t.Errorf("DDA block %d ray %g: wrong visibility", block, tc.x)
 			}
-			if got := voxelBlocksSight(terrain, voxel, from, to); got != tc.blocked {
+			if got := solidVoxelBlocksSight(terrain, voxel, from, to); got != tc.blocked {
 				t.Errorf("block %d ray %g: blocked=%v", block, tc.x, got)
 			}
 		}
 	}
 	terrain := blockTerrain{blocks: map[[3]int64]world.Block{voxel: world.SlateSlabBottom}}
-	if voxelBlocksSight(terrain, voxel, [3]float64{-1, 1.75, 0.5}, [3]float64{2, 1.75, 0.5}) {
+	if solidVoxelBlocksSight(terrain, voxel, [3]float64{-1, 1.75, 0.5}, [3]float64{2, 1.75, 0.5}) {
 		t.Error("empty slab half blocked sight")
 	}
-	if !voxelBlocksSight(terrain, voxel, [3]float64{-1, 1.25, 0.5}, [3]float64{2, 1.25, 0.5}) {
+	if !solidVoxelBlocksSight(terrain, voxel, [3]float64{-1, 1.25, 0.5}, [3]float64{2, 1.25, 0.5}) {
 		t.Error("slab surface did not block sight")
 	}
 }
@@ -148,5 +148,57 @@ func TestAuthoritativeProjectilesMeetBarsAndPassGrilleGaps(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func BenchmarkVoxelLineOfSight(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		block world.Block
+		y, z  float64
+	}{
+		{"empty", world.Air, 1.5, 0.5}, {"wall", world.Stone, 1.5, 0.5},
+		{"grille_bar", world.IronGrilleZ, 1.5, 0.25}, {"grille_gap", world.IronGrilleZ, 1.5, 0.5},
+		{"slab_empty", world.SlateSlabBottom, 1.75, 0.5}, {"slab_solid", world.SlateSlabBottom, 1.25, 0.5},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			terrain := blockTerrain{blocks: map[[3]int64]world.Block{{4, 1, 0}: tc.block}}
+			for b.Loop() {
+				clearLineOfSight(terrain, [3]float64{0.5, tc.y, tc.z}, [3]float64{8.5, tc.y, tc.z})
+			}
+		})
+	}
+}
+
+// Collision readers reuse the revision-checked voxel memo instead of a second Peek.
+type memoSightTerrain struct {
+	blockTerrain
+	reads int
+}
+
+func (t *memoSightTerrain) Block(_, _, _ int64) (world.Block, bool) {
+	panic("LOS bypassed collision memo")
+}
+func (t *memoSightTerrain) collisionBlock(x, y, z int64) (world.Block, bool) {
+	t.reads++
+	return t.blockTerrain.Block(x, y, z)
+}
+func TestSightReusesCollisionBlockReaderForOpaqueWall(t *testing.T) {
+	terrain := &memoSightTerrain{blockTerrain: blockTerrain{blocks: map[[3]int64]world.Block{{0, 1, 0}: world.Stone}}}
+	if clearLineOfSight(terrain, [3]float64{-1, 1.5, 0.5}, [3]float64{2, 1.5, 0.5}) || terrain.reads != 1 {
+		t.Fatalf("opaque wall visibility or memo reads: %d", terrain.reads)
+	}
+}
+func TestSightIntentionallyUsesEmptySlabAndStairSpace(t *testing.T) {
+	slab := blockTerrain{blocks: map[[3]int64]world.Block{{0, 1, 0}: world.SlateSlabBottom}}
+	if !clearLineOfSight(slab, [3]float64{-1, 1.75, 0.5}, [3]float64{2, 1.75, 0.5}) {
+		t.Fatal("empty slab half blocked LOS")
+	}
+	stair := blockTerrain{blocks: map[[3]int64]world.Block{{0, 1, 0}: world.SlateStairEastBottom}}
+	if !clearLineOfSight(stair, [3]float64{0.25, 1.75, -1}, [3]float64{0.25, 1.75, 2}) {
+		t.Fatal("empty upper stair half blocked LOS")
+	}
+	if clearLineOfSight(stair, [3]float64{0.75, 1.75, -1}, [3]float64{0.75, 1.75, 2}) {
+		t.Fatal("occupied upper stair half passed LOS")
 	}
 }

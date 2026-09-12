@@ -1006,7 +1006,24 @@ fn half_grid_shape(block: BlockId) -> bool {
     palette::is_architectural_shape(block) && !palette::is_grille(block)
 }
 
-fn push_grille(mesh: &mut SurfaceMesh, cell: [usize; 3], block: BlockId) {
+fn push_grille(
+    mesh: &mut SurfaceMesh,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    cell: [usize; 3],
+    block: BlockId,
+) {
+    // Only full-height end caps touch a voxel boundary. Full opaque cubes cover
+    // those caps completely; sparse neighbours must never hide an exposed bar.
+    let covered_caps = [false, true].map(|positive| {
+        palette::is_greedy_opaque(stepped_block(
+            chunk,
+            neighbours,
+            cell,
+            1,
+            if positive { 1 } else { -1 },
+        ))
+    });
     let (bars, count) = palette::collision_bounds(block);
     for bar in &bars[..count] {
         let min = std::array::from_fn::<_, 3, _>(|axis| {
@@ -1019,6 +1036,9 @@ fn push_grille(mesh: &mut SurfaceMesh, cell: [usize; 3], block: BlockId) {
             let u = (axis + 1) % 3;
             let v = (axis + 2) % 3;
             for positive in [false, true] {
+                if axis == 1 && covered_caps[usize::from(positive)] {
+                    continue;
+                }
                 let mut a = min;
                 a[axis] = if positive { max[axis] } else { min[axis] };
                 let mut b = a;
@@ -1054,7 +1074,7 @@ fn build_architecture(mesh: &mut SurfaceMesh, chunk: &VoxelChunk, neighbours: &N
                 let cell = [x, y, z];
                 let block = chunk.block(cell);
                 if palette::is_grille(block) {
-                    push_grille(mesh, cell, block);
+                    push_grille(mesh, chunk, neighbours, cell, block);
                 } else if half_grid_shape(block) {
                     push_architectural_shape(mesh, chunk, neighbours, cell, block);
                     for axis in 0..3 {
@@ -3394,6 +3414,56 @@ mod tests {
                     assert_eq!(actual.colors, baseline.colors);
                     assert_eq!(actual.indices, baseline.indices);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn grille_caps_cull_only_against_full_opaque_y_neighbours() {
+        for block in [palette::IRON_GRILLE_X, palette::IRON_GRILLE_Z] {
+            for positive in [false, true] {
+                for border in [false, true] {
+                    for (neighbour, expected) in [
+                        (palette::STONE, 10),
+                        (palette::AIR, 12),
+                        (palette::IRON_GRILLE_X, 12),
+                        (palette::IRON_GRILLE_Z, 12),
+                        (palette::SLATE_SLAB_BOTTOM, 12),
+                        (palette::SLATE_SLAB_TOP, 12),
+                        (palette::SLATE_STAIR_NORTH_BOTTOM, 12),
+                    ] {
+                        let size = if border { 1 } else { 3 };
+                        let mut chunk = single_block(size, block);
+                        let cell = [size / 2; 3];
+                        let neighbours = if border {
+                            across(1, positive, single_block(1, neighbour))
+                        } else {
+                            chunk.set(1, if positive { 2 } else { 0 }, 1, neighbour);
+                            alone()
+                        };
+                        let mut mesh = SurfaceMesh::default();
+                        push_grille(&mut mesh, &chunk, &neighbours, cell, block);
+                        assert_eq!(
+                            mesh.quad_count(),
+                            expected,
+                            "block {block} neighbour {neighbour} positive {positive} border {border}"
+                        );
+                        let culled_normal = normal(1, positive);
+                        if expected == 10 {
+                            assert!(!mesh.normals.contains(&culled_normal));
+                        }
+                    }
+                }
+            }
+            let chunk = single_block(1, block);
+            for neighbours in [alone(), across(1, true, solid(2, palette::STONE))] {
+                let mut mesh = SurfaceMesh::default();
+                push_grille(&mut mesh, &chunk, &neighbours, [0; 3], block);
+                assert_eq!(
+                    mesh.quad_count(),
+                    12,
+                    "missing or mismatched neighbour leaves caps exposed"
+                );
             }
         }
     }

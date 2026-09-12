@@ -2,15 +2,20 @@ package game
 
 import "github.com/FabioSM46/voxelheim-v2/server/internal/world"
 
-// voxelBlocksSight refines a solid voxel into the same occupied boxes movement and
+// solidVoxelBlocksSight refines a voxel already proven solid into the same occupied boxes movement and
 // projectiles consume. Missing terrain and synthetic solidity remain full blockers.
 // The caller still traverses every voxel crossed by the segment, without sampling.
-func voxelBlocksSight(t Terrain, voxel [3]int64, from, to [3]float64) bool {
-	if !t.Solid(voxel[0], voxel[1], voxel[2]) {
-		return false
+func solidVoxelBlocksSight(t Terrain, voxel [3]int64, from, to [3]float64) bool {
+	var block world.Block
+	var resident bool
+	if reader, ok := t.(collisionBlockReader); ok {
+		block, resident = reader.collisionBlock(voxel[0], voxel[1], voxel[2])
+	} else {
+		block, resident = t.Block(voxel[0], voxel[1], voxel[2])
 	}
-	block, resident := t.Block(voxel[0], voxel[1], voxel[2])
-	if !resident || !world.Solid(block) {
+	// DDA already established that the segment visits this solid voxel. Ordinary
+	// cubes need no bounds/intersection work; only real shapes refine that answer.
+	if !resident || world.ShapeOf(block).Kind == world.ShapeCube || !world.Solid(block) {
 		return true
 	}
 	bounds, n := world.CollisionBounds(block)
