@@ -591,7 +591,10 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             WeatherKind::Sandstorm,
             WeatherKind::Blizzard,
         ] {
-            assert_eq!(targets(country, night, weather(kind, 255)).wildlife, wildlife);
+            assert_eq!(
+                targets(country, night, weather(kind, 255)).wildlife,
+                wildlife
+            );
         }
     };
     for wooded in [false, true] {

@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 41;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 43;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -340,10 +340,16 @@ impl ProtocolVersion {
     /// and read nothing there but padding. A V41 client refuses a zero `max_health`, so
     /// without the bump the peers would handshake cleanly and the first snapshot with a
     /// player in it would end the session: V40's argument, on the hottest struct.
-    pub const Current: Self = Self(41);
+    /// V42: immutable capital props are replicated independently of interactive structures.
+    /// Their solid bounds must be visible to the player. An older client silently drops
+    /// the vector and collides with invisible furniture, so this append owes a bump.
+    /// V43: chunk block ids 58/59 describe open iron grilles. Older clients would
+    /// render and predict these unknown ids as full cubes, hiding the openings and
+    /// disagreeing with authoritative bar collision despite unchanged RLE bytes.
+    pub const Current: Self = Self(43);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 41;
+    pub const ENUM_MAX: u16 = 43;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

@@ -523,7 +523,12 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // 28 → 29: rare ruins, their narrow ground blend and excavated antechambers.
 // Version 30 replaces the first dungeon chamber with two connected arenas.
 // Version 31 opens the runic thresholds and protects their authored masonry.
-const WorldgenVersion uint32 = 31
+// 31 → 32: oriented slate stairs and the capital west wing circulation.
+// 32 → 33: the capital east wing staircases and their room access.
+// 33 → 34: shaped courtyard stairs and two-wide curtain/corner lookouts.
+// 34 → 35: internal west spire stairs and accessible upper lookout rooms.
+// 35 → 36: internal east spire stairs, guarded lookouts and audience dais.
+const WorldgenVersion uint32 = 36
 
 // Generate builds the chunk at coord for seed.
 //

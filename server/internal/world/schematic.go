@@ -257,6 +257,10 @@ var schematicLegend = map[rune]Block{
 	'D': DarkTimber,
 	'W': PaleTimber,
 	'G': DarkGlass,
+	'n': SlateStairNorthBottom,
+	'e': SlateStairEastBottom,
+	's': SlateStairSouthBottom,
+	'w': SlateStairWestBottom,
 }
 
 // mustSchematic turns layer literals into a [Schematic], and panics on a drawing that
@@ -346,6 +350,26 @@ func rotateCell(x, z, w, d int, facing Facing) (int, int) {
 	}
 }
 
+// rotateSchematicBlock turns a stair's high half with its cell. Slabs and cubes
+// have no horizontal orientation. Facing and ShapeFacing both advance clockwise.
+func rotateSchematicBlock(block Block, facing Facing) Block {
+	if facing > FacingPlusX {
+		return block // rotateCell also treats an unknown facing as the original.
+	}
+	if (block == IronGrilleX || block == IronGrilleZ) && facing%2 == 1 {
+		if block == IronGrilleX {
+			return IronGrilleZ
+		}
+		return IronGrilleX
+	}
+	for _, first := range [...]Block{SlateStairNorthBottom, SlateStairNorthTop} {
+		if block >= first && block < first+4 {
+			return first + (block-first+Block(facing))%4
+		}
+	}
+	return block
+}
+
 // PlacedAnchor is one of a building's slots in world coordinates.
 //
 // **The reason this package computes anchors at all.** internal/world creates no
@@ -427,7 +451,7 @@ func visitSchematic(b Building, visit func(x, y, z int64, block Block)) {
 					continue
 				}
 				rx, rz := rotateCell(x, z, s.W, s.D, b.Facing)
-				visit(b.OriginX+int64(rx), b.OriginY+int64(y), b.OriginZ+int64(rz), block)
+				visit(b.OriginX+int64(rx), b.OriginY+int64(y), b.OriginZ+int64(rz), rotateSchematicBlock(block, b.Facing))
 			}
 		}
 	}

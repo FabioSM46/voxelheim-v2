@@ -415,9 +415,17 @@ fn raycast_with(
                         .iter()
                         .filter_map(|bounds| {
                             let min = floor
-                                + Vec3::from_array(bounds.min.map(|value| f32::from(value) * 0.5));
+                                + Vec3::from_array(
+                                    bounds
+                                        .min
+                                        .map(|value| f32::from(value) / palette::BOUNDS_SCALE),
+                                );
                             let max = floor
-                                + Vec3::from_array(bounds.max.map(|value| f32::from(value) * 0.5));
+                                + Vec3::from_array(
+                                    bounds
+                                        .max
+                                        .map(|value| f32::from(value) / palette::BOUNDS_SCALE),
+                                );
                             ray_box_hit(origin, direction, min, max)
                         })
                         .min_by(|left, right| left.0.total_cmp(&right.0));
@@ -1180,6 +1188,32 @@ mod tests {
     /// arithmetic in the way.
     fn middle_of(voxel: IVec3) -> Vec3 {
         voxel.as_vec3() + Vec3::splat(0.5)
+    }
+
+    #[test]
+    fn grille_rays_hit_bars_but_continue_through_gaps() {
+        for block in [palette::IRON_GRILLE_X, palette::IRON_GRILLE_Z] {
+            let (width, depth) = if block == palette::IRON_GRILLE_X {
+                (0, 2)
+            } else {
+                (2, 0)
+            };
+            for (offset, hit) in [(0.25, true), (0.5, false), (0.75, true)] {
+                let mut origin = Vec3::splat(0.5);
+                origin[width] = offset;
+                origin[depth] = -1.0;
+                let mut direction = Vec3::ZERO;
+                direction[depth] = 1.0;
+                let found = raycast_blocks(origin, direction, 3.0, |v| {
+                    if v == IVec3::ZERO {
+                        block
+                    } else {
+                        palette::AIR
+                    }
+                });
+                assert_eq!(found.is_some(), hit, "block {block}, ray {offset}");
+            }
+        }
     }
 
     #[test]

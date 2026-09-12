@@ -310,8 +310,8 @@ func TestTheRiverGoldenChunkStillHoldsATerracedChannel(t *testing.T) {
 func TestWorldgenVersionRecordsTheFeatureBreak(t *testing.T) {
 	t.Parallel()
 
-	if WorldgenVersion != 31 {
-		t.Fatalf("WorldgenVersion = %d, want 31 after the runic portals", WorldgenVersion)
+	if WorldgenVersion != 36 {
+		t.Fatalf("WorldgenVersion = %d, want 36 after the east tower interiors and audience dais", WorldgenVersion)
 	}
 }
 

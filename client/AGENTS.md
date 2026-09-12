@@ -1953,10 +1953,22 @@ gain and the filter apply and the pan is skipped, rather than averaging the pair
 hard-panned voice 3 dB quieter for no reason a listener could act on.
 
 **Generated sound is described under `audio/synth/`, separately from capture DSP.** A `Sound`
-names bounded layers (exciter, gain, envelope and optional filter). `bake` renders a shared
+names bounded layers (exciter, gain, envelope, an optional filter and an optional gate). `bake`
+renders a shared
 buffer once at the mixer rate; `continuous` retains only generator state and requires sustained
 noise so a periodic tone cannot masquerade as a non-repeating bed. Both validate before
 allocating. Filtering precedes the final envelope, so even a resonant tail ends at zero.
+
+**A `Gate` is the one primitive that shapes a layer many times a second**, and it is what a
+description reaches for when a voice is a sequence of impacts rather than a held sound — the
+rattlesnake's rattle (#1184), and any later grain. Its rate travels between two values along a
+`Curve` exactly as a `Glide`'s pitch does, and its duty is bounded strictly under one, because a
+gate that never closes is a gain and the layer already has one of those. **It is applied after
+the filter**, so a resonant tail cannot smear the silence between two openings into a dip: the
+gaps in a gated layer are exact zeros, which is what lets a test count clicks rather than
+estimate them. `bake_at` is the other way to strike a description repeatedly and does not
+compete with it — a strike there is a whole independent bake, bounded by `MAX_LAYERS`, so it
+serves a call of two or three syllables and not a train of sixty a second.
 
 `Rendering::Baked` and `Rendering::Continuous` make that choice visible to `Playback::start`.
 The producer claims once, pumps at most one ring capacity per Update, preserves pending samples,
