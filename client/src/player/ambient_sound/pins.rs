@@ -4,7 +4,10 @@ use super::sounds::{CALLS, Call};
 use super::*;
 use crate::audio::synth::pin;
 
-const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
+/// Visible to the catalogue's own tests so a content test can run *these* seeds rather than a
+/// second copy of them: the seeds a pin table pins are the ones a regression in seed handling
+/// lands on, so the wolf's gesture tests read this list directly (#1200).
+pub(super) const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
 
 #[test]
 fn every_ambient_sound_renders_identically_to_its_pin() {

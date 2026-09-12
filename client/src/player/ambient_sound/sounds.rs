@@ -189,20 +189,33 @@ pub(super) const HOWL_SECONDS: f32 = 3.8;
 /// the slow waver of a voice held near the top of its range rather than a second note.
 const HOWL_DETUNE: f32 = 1.02;
 
-/// The gesture one howl makes, from its seed: the pitch it opens on, how far it arches above
-/// its falling line, how long that arch takes from nothing back to nothing, how slowly the rise
-/// opens, and where the falling line closes as a fraction of where it starts.
+/// The gesture one howl makes, from its seed.
+///
+/// Units matter here and two of these five are fractions while two are seconds, so each says
+/// which it is. `onset` in particular is **seconds**, not a fraction of anything: `Vibrato`
+/// documents it as "opens linearly from nothing over `onset` seconds" and bounds it at 60,
+/// which is why a value over 1.0 is ordinary rather than out of contract.
 struct Howl {
+    /// The pitch the call opens on, in hertz.
     hz: f32,
+    /// How far the arch lifts the pitch above its falling line, as a fraction of that line —
+    /// this is the vibrato's `depth`, which the synthesiser bounds at 0.5.
     arch: f32,
+    /// How long the arch takes from nothing back to nothing, in seconds.
     span: f32,
+    /// How long the arch takes to open from nothing, in seconds.
     onset: f32,
+    /// Where the falling line ends, as a fraction of where it starts.
     close: f32,
 }
 
 /// The seed spread across the gesture's parameters. Each one reads its own field of a single
 /// multiplication rather than its own shift of the seed: the pins exercise small literal seeds
 /// whose high bytes are all zero, and a bare shift would hand several of them one gesture.
+///
+/// `no_two_howls_make_the_same_gesture` is where that claim is held to account, and it took the
+/// review of #1200 to make it so: the test ran scrambled seeds alone, which a bare shift spreads
+/// perfectly well, so nothing there could have failed on a revert of this function.
 fn spread(seed: u64) -> u64 {
     (seed ^ 0x9e37_79b9_7f4a_7c15).wrapping_mul(0xd134_2543_de82_ef95)
 }
@@ -953,6 +966,24 @@ mod tests {
     /// 3.8 s call is cheap. The pins and the carry test cover the rates a device opens at.
     const HOWL_RATE: u32 = 16000;
 
+    /// Every seed the howl measurements run: the three the pin table pins, read from
+    /// `pins::SEEDS` itself rather than copied, and then eight scrambled ones.
+    ///
+    /// The pinned seeds are here because they are the only seeds a regression in [`spread`]
+    /// could land on, and a suite that ran scrambled seeds alone could not see one. A
+    /// scrambled seed has its high bytes set, so reading the gesture straight off `seed >> 28`
+    /// and its neighbours distributes those perfectly well; the entire justification for mixing
+    /// the seed first is the literal `0x0` and `0x10203`, whose high bytes are zero. Raised on
+    /// the review of #1200, and it is this repository's recurring defect one layer out: a guard
+    /// whose inputs cannot reach the thing it guards reads exactly like one whose inputs can.
+    ///
+    /// Pinned first, so `no_two_howls_make_the_same_gesture` can slice them back off the front.
+    fn howl_seeds() -> impl Iterator<Item = u64> {
+        super::super::pins::SEEDS
+            .into_iter()
+            .chain((0..8u64).map(scramble))
+    }
+
     /// The pitch a voiced passage is at, every ten milliseconds, from a forty-millisecond
     /// window: the shortest lag between `low` and `high` hertz whose normalised autocorrelation
     /// comes within a tenth of the best, placed between samples by a parabola through its two
@@ -963,7 +994,20 @@ mod tests {
     /// Autocorrelation rather than [`dominant_track`]'s spectral peak, which is what the
     /// squawk uses: a howl's fundamental sits near 300 Hz, and no window short enough to follow
     /// the gesture resolves a 40 Hz move down there, while its period is fifty samples and
-    /// reads exactly. The whinny's tracker (#1160) is the same instrument at a faster tempo.
+    /// reads exactly.
+    ///
+    /// **The whinny's tracker (#1160) is the same technique, and deliberately not the same
+    /// numbers** — it fixes a 30 ms window at one rate over a 300–1800 Hz band with a 4% energy
+    /// gate, where this one takes the rate and the band as arguments, opens the window to 40 ms
+    /// and gates at 5%, because the register it reads is an octave and a half lower. Raised on
+    /// the review of #1200 as a duplication that could drift: it can, and what that would cost
+    /// is worth stating exactly. **It cannot invalidate anything measured here.** Both the howl
+    /// and the [`old_wolf`] control go through *this* function, on the same band, in the same
+    /// test — the comparison is internal to one copy, so the whinny's copy changing underneath
+    /// it changes nothing. What duplication costs is a fix applied twice, and unifying the two
+    /// would mean editing `client/src/player/mount_audio/`, which #1185 puts out of scope. No
+    /// `TODO` with an invented issue number is left behind for it: a stand-in is exactly what
+    /// this repository does not do, so the note is here and the follow-up is the owner's call.
     fn pitch_track(samples: &[f32], rate: u32, low: f32, high: f32) -> Vec<(f32, f32)> {
         let window = rate as usize * 4 / 100;
         let hop = rate as usize / 100;
@@ -1135,7 +1179,7 @@ mod tests {
     /// everything.
     #[test]
     fn a_howl_rises_holds_and_falls_where_a_static_stack_does_not() {
-        for seed in (0..8u64).map(scramble) {
+        for seed in howl_seeds() {
             let (low, high) = howl_band(seed);
             let track = pitch_track(&voiced_howl(seed), HOWL_RATE, low, high);
             assert!(
@@ -1162,7 +1206,7 @@ mod tests {
                 assert!(step < 0.06, "seed {seed}: a {step} step between {pair:?}");
             }
         }
-        for seed in (0..4u64).map(scramble) {
+        for seed in howl_seeds() {
             let (low, high) = howl_band(seed);
             let track = pitch_track(&voiced_old_wolf(seed), HOWL_RATE, low, high);
             let (first, top, _, last, _) = contour(&track);
@@ -1178,14 +1222,14 @@ mod tests {
     /// rendered voice, not read back from the description, because a parameter that varies and
     /// never reaches the output is not a varying sound.
     ///
-    /// Across these eight seeds the rise spans 1.135 to 1.267, the top falls between 1.29 and
-    /// 1.56 s, and the fall spans 1.256 to 1.412 — ratios of 1.12, 1.21 and 1.12. The floors
-    /// below sit under each, and the point of three of them is that a gesture cannot satisfy
-    /// them all by being loud.
+    /// Across the eight scrambled seeds the rise spans 1.135 to 1.267, the top falls between
+    /// 1.29 and 1.56 s, and the fall spans 1.256 to 1.412 — ratios of 1.12, 1.21 and 1.12. The
+    /// floors below sit under each, and the point of having three of them is that a gesture
+    /// cannot satisfy them all by being loud. The three pinned seeds run here as well and land
+    /// in the same bands; what they are here to guard is the block at the end of this test.
     #[test]
     fn no_two_howls_make_the_same_gesture() {
-        let measured: Vec<(f32, f32, f32)> = (0..8u64)
-            .map(scramble)
+        let measured: Vec<(f32, f32, f32)> = howl_seeds()
             .map(|seed| {
                 let (low, high) = howl_band(seed);
                 let track = pitch_track(&voiced_howl(seed), HOWL_RATE, low, high);
@@ -1207,6 +1251,48 @@ mod tests {
             "every rise tops out at the same time"
         );
         assert!(spread(|g| g.2) > 1.05, "every fall is the same size");
+
+        // And the pinned seeds in particular — the seeds a regression in [`spread`] is the only
+        // thing that could reach, since the spreads above are measured over scrambled seeds
+        // whose high bytes are set and which a bare shift distributes perfectly well.
+        //
+        // This one assertion reads the gesture's parameters rather than the rendered triple, and
+        // that is a measurement rather than a preference. Seeds `0x0` and `0xfedcba9876543210`
+        // come out only 1.3% apart in the rendered rise and 1.3% in the time of the top, because
+        // `spread` happens to hand them a near-identical arch (0.36 against 0.35) and span (3.44
+        // against 3.43) — a collision by luck, not by construction, and harmless because a seed
+        // reaching this from the lane is scrambled first. But it means a rendered-triple guard
+        // would have to sit under 1%, which is no separation at all from the 0.8% a reverted
+        // `spread` leaves, so the rendered numbers cannot be what carries this claim.
+        //
+        // The parameters can, because a revert is exact there rather than approximate: read
+        // straight off the raw seed, `0x0` and `0x10203` share span, onset and close outright
+        // and differ in arch alone (0.22 against 0.23). One differing field of four *is* the
+        // collapse, so two is the floor — and that fails on the revert while every assertion
+        // above it still passes. The rendered half of the claim, that the variety reaches the
+        // output at all, is what the three spreads above measure, over these seeds included.
+        let pinned: Vec<Howl> = super::super::pins::SEEDS
+            .into_iter()
+            .map(howl_gesture)
+            .collect();
+        for (index, one) in pinned.iter().enumerate() {
+            for other in &pinned[index + 1..] {
+                let differing = [
+                    one.arch != other.arch,
+                    one.span != other.span,
+                    one.onset != other.onset,
+                    one.close != other.close,
+                ]
+                .into_iter()
+                .filter(|differs| *differs)
+                .count();
+                assert!(
+                    differing >= 2,
+                    "two pinned seeds agree in {} of four gesture fields",
+                    4 - differing
+                );
+            }
+        }
     }
 
     /// The owner's rule is that a sound is realistic, never a note (#1161, #1176), and the howl
@@ -1219,11 +1305,12 @@ mod tests {
     /// call rather than anything about the voice: [`flatness`] takes one periodogram of the
     /// whole buffer, so 3.8 s at 8 kHz is twelve thousand bins where a 0.85 s squawk is under
     /// three, and a harmonic that fills a bin in the short call is a spike between empty ones
-    /// in the long one. What matters is the separation, which is wide and measured: these eight
-    /// seeds come out between 0.043 and 0.294, and the two controls at 0.0013 and 0.0000.
+    /// in the long one. What matters is the separation, which is wide and measured: the eight
+    /// scrambled seeds come out between 0.043 and 0.294, the three pinned ones inside that, and
+    /// the two controls at 0.0013 and 0.0000.
     #[test]
     fn a_howl_is_a_voiced_throat_and_not_a_harmonic_stack() {
-        for seed in (0..8u64).map(scramble) {
+        for seed in howl_seeds() {
             let call = Call::Wolf.bake(seed, 8000).unwrap();
             let flat = flatness(call.samples(), 8000);
             let tonal = tonal_share(call.samples(), 8000);
@@ -1263,7 +1350,7 @@ mod tests {
     fn a_wolf_call_carries_to_its_range_without_clipping_at_any_rate() {
         let profile = Call::Wolf.profile();
         let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
-        for seed in (0..12u64).map(scramble) {
+        for seed in howl_seeds() {
             for layer in &Call::Wolf.description(seed).layers {
                 // `Glide::peak`, which gates the bake, is private to `audio::synth`; the highest
                 // frequency a glide reaches is its further end lifted by the whole arch.
