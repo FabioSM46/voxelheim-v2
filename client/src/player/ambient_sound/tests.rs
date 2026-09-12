@@ -903,3 +903,36 @@ fn a_species_declared_nocturnal_is_not_heard_by_day() {
     };
     assert_eq!(owl.gain(&elsewhere, 1.0), 0.0);
 }
+
+/// The table's order is the order the lanes claim mixer slots in, and slots run out: `Music`,
+/// `Sfx` and `Ambience` hold at most `MAX_SOURCES - VOICE_RESERVE` between them, and
+/// `Bus::steal_order` lets a claimant steal only *strictly beneath* itself — `Ambience` is the
+/// bottom rank, so an ambience lane can never steal from a peer and a call that finds the
+/// world's slots full is dropped rather than queued.
+///
+/// So a creature the player can see claims before one nobody can, which is both the order
+/// that shipped and the one the origin rule argues for: a voice falling silent while its
+/// animal is on screen is the worse failure. Wooded grass at dusk is where it is reachable —
+/// the macaw and the cricket both sit at half.
+#[test]
+fn a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot() {
+    let seen = |voice: &Voice| matches!(voice.habitat, Habitat::Flock(_));
+    let last_seen = WILDLIFE.iter().rposition(seen);
+    let first_unseen = WILDLIFE.iter().position(|voice| !seen(voice));
+    assert!(
+        last_seen < first_unseen,
+        "a seen-and-heard row sits below a ground-only one, so it now loses a contested slot"
+    );
+    // Ambience cannot take a slot from ambience, which is why the order decides it at all.
+    assert!(Bus::Ambience.steal_order() < Bus::Sfx.steal_order());
+    assert_eq!(Bus::Ambience.steal_order(), Some(0));
+    // Both of them sound at once in exactly one cell, which is the cell that made it matter.
+    let dusk = targets(&grass(), 0.5, None);
+    assert_eq!(
+        (gain_of(&dusk, Call::Parrot), gain_of(&dusk, Call::Cricket)),
+        (0.5, 0.5)
+    );
+    // And the macaw is still the first lane updated, exactly as it was when it had a lane of
+    // its own ahead of the five ground ones.
+    assert_eq!(row_of(Call::Parrot), 0);
+}

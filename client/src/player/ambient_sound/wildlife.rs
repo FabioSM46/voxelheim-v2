@@ -80,15 +80,19 @@ pub(super) struct Voice {
     pub(super) period: Period,
     /// The salt that makes this row's bearings and intervals its own stream.
     ///
-    /// **Data rather than the row's position**, for two reasons. It lets the table be
-    /// appended to, reordered or split without moving a single call that ships today — which
-    /// is what let the macaw's bespoke lane fold into this table bit-for-bit, since its lane
-    /// was seeded with the world seed unsalted and says so here with a `0`. And it makes
-    /// "two creatures calling at dusk must not share a bearing" a property of the row rather
-    /// than an index arithmetic in the update loop.
+    /// **Data rather than the row's position**, for two reasons. It lets a row be appended,
+    /// moved or split without moving a single call that ships today — which is what let the
+    /// macaw's bespoke lane fold into this table bit-for-bit, since its lane was seeded with
+    /// the world seed unsalted and says so here with a `0`. And it makes "two creatures
+    /// calling at dusk must not share a bearing" a property of the row rather than an index
+    /// arithmetic in the update loop.
+    ///
+    /// It is what makes the *seeds* position-independent, and nothing more: the table's order
+    /// is still load-bearing for slot arbitration, which is the paragraph on [`WILDLIFE`].
     ///
     /// A new row takes a salt no other row uses;
-    /// `every_voice_has_its_own_stream_and_its_own_country_and_hour` is what holds that.
+    /// `every_voice_has_its_own_stream_and_agrees_with_the_flock_it_belongs_to` is what holds
+    /// that.
     pub(super) stream: u64,
 }
 
@@ -104,9 +108,37 @@ pub(super) struct Voice {
 /// loaded evidence" is silence, exactly as it is an empty sky in [`birds::BIRDS`], rather
 /// than a default creature.
 ///
-/// The order is the order the lanes are updated in and the order `pins.rs` renders; it is
-/// otherwise free, because every row carries its own [`Voice::stream`].
+/// ## The order is the claim order, and it is load-bearing
+///
+/// The update loop walks this table in order and each lane claims its own mixer slot, so the
+/// order decides who wins a contested one. That is not hypothetical arbitration: `Music`,
+/// `Sfx` and `Ambience` hold at most `MAX_SOURCES - VOICE_RESERVE` (8 of 16) between them,
+/// and `Bus::steal_order` ranks `Ambience` lowest with stealing "strictly beneath" the
+/// claimant — so an ambience lane can never steal from a peer. When the world's slots are
+/// full the call that asks first is heard and the next one is **dropped, not queued**
+/// (`audio/mixer.rs`).
+///
+/// So the rows are ordered **seen-and-heard first**: every [`Habitat::Flock`] row precedes
+/// every [`Habitat::Ground`] row, and
+/// `a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot` holds it. A voice
+/// falling silent while the player is watching the animal that owns it is a worse failure
+/// than an off-screen call going unheard — which is the same reasoning as the origin rule at
+/// the top of this file. It is also the order that shipped, so no contested slot changes
+/// hands: the macaw's lane was updated before the five ground lanes and still is.
+///
+/// A new species that is drawn as well as heard belongs with the macaw, above the ground-only
+/// rows. `pins.rs` renders in this order too; seeds do not depend on it ([`Voice::stream`]).
 pub(super) const WILDLIFE: [Voice; 6] = [
+    // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
+    // plain has no species and another country has another one, and neither hosts the call
+    // (#1176). It had a lane of its own until the table could hold a habitat that is not the
+    // ground's; the `0` salt is that lane's seed, kept so not one squawk moved.
+    Voice {
+        call: Call::Parrot,
+        habitat: Habitat::Flock(PARROT),
+        period: Period::Day,
+        stream: 0,
+    },
     Voice {
         call: Call::Rattlesnake,
         habitat: Habitat::Ground(GroundLook::Sand),
@@ -137,16 +169,6 @@ pub(super) const WILDLIFE: [Voice; 6] = [
         habitat: Habitat::Ground(GroundLook::Grass),
         period: Period::Night,
         stream: 0x9864,
-    },
-    // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
-    // plain has no species and another country has another one, and neither hosts the call
-    // (#1176). It had a lane of its own until the table could hold a habitat that is not the
-    // ground's; the `0` salt is that lane's seed, kept so not one squawk moved.
-    Voice {
-        call: Call::Parrot,
-        habitat: Habitat::Flock(PARROT),
-        period: Period::Day,
-        stream: 0,
     },
 ];
 
