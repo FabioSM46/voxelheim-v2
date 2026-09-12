@@ -314,6 +314,9 @@ impl Rhythm {
 }
 
 #[cfg(test)]
+mod pins;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

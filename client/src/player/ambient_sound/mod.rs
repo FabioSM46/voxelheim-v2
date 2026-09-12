@@ -208,4 +208,7 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
 }
 
 #[cfg(test)]
+mod pins;
+
+#[cfg(test)]
 mod tests;

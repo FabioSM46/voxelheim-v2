@@ -176,6 +176,9 @@ impl CompiledLayer {
 }
 
 #[cfg(test)]
+pub(crate) mod pin;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

@@ -413,4 +413,7 @@ fn update(
 }
 
 #[cfg(test)]
+mod pins;
+
+#[cfg(test)]
 mod tests;
