@@ -777,8 +777,17 @@ fn perch_column(species: &BirdSpecies, seed: u64, elapsed: f32, anchor: Vec3) ->
 /// that declined to perch because the wood it is sitting in had not streamed yet.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TreeTop {
-    /// The top face of the highest tree found in the window.
-    Found(f32),
+    /// Where the highest tree in the window is: the centre of its own column, at its top
+    /// face.
+    ///
+    /// **The whole position and not merely the height**, which is the difference between a
+    /// bird on a branch and a bird hovering beside one. The probe searches a square of
+    /// columns and answers with the tallest; using that height over the *centre* column's
+    /// `x`/`z` draws the bird in open air whenever the centre is lower than its neighbour or
+    /// is a gap in the canopy — and bridging a gap is the reason the probe is a square at
+    /// all. Caught in review on #1215, where `wood()`'s uniform canopy made every column
+    /// answer alike and hid it.
+    Found(Vec3),
     /// Every chunk the window crosses was read, and there is no tree in it.
     Bare,
     /// A chunk the window crosses is not loaded, so there is no answer at all.
@@ -810,7 +819,7 @@ fn tree_top_near(store: &ChunkStore, column: Vec3, chunk_size: usize) -> TreeTop
     let high = voxel_of(column.y + PERCH_HEADROOM);
     let centre = IVec2::new(voxel_of(column.x), voxel_of(column.z));
     let span = (PERCH_PROBE_SIDE - 1) / 2 * PERCH_PROBE_SPACING;
-    let mut best: Option<f32> = None;
+    let mut best: Option<Vec3> = None;
     for step in 0..PERCH_PROBE_SIDE * PERCH_PROBE_SIDE {
         let x = centre.x + (step % PERCH_PROBE_SIDE) * PERCH_PROBE_SPACING - span;
         let z = centre.y + (step / PERCH_PROBE_SIDE) * PERCH_PROBE_SPACING - span;
@@ -826,8 +835,12 @@ fn tree_top_near(store: &ChunkStore, column: Vec3, chunk_size: usize) -> TreeTop
             }
             let block = store.block_at(BlockCoord { x, y, z }, chunk_size);
             if matches!(block, palette::LOG | palette::LEAVES) {
-                // The voxel spans `[y, y + 1)`, so its top face is what a bird sits on.
-                best = Some(best.map_or((y + 1) as f32, |top: f32| top.max((y + 1) as f32)));
+                // The voxel spans `[y, y + 1)`, so its top face is what a bird sits on, and
+                // the middle of the voxel is where in that column it sits.
+                let found = Vec3::new(x as f32 + 0.5, (y + 1) as f32, z as f32 + 0.5);
+                if best.is_none_or(|top: Vec3| found.y > top.y) {
+                    best = Some(found);
+                }
                 break;
             }
         }
@@ -851,17 +864,31 @@ struct Seat {
     /// The cycle this was resolved for, or `None` for a bird that has not resolved one yet —
     /// either at spawn, or because every attempt so far crossed an unloaded chunk.
     cycle: Option<i64>,
-    /// The leaf top found, or `None` for a cycle that looked and found no tree. **A resolved
-    /// answer either way**: finding no tree, a bird does not perch.
-    top: Option<f32>,
+    /// Where the branch is — the whole point, not just its height — or `None` for a cycle
+    /// that looked and found no tree. **A resolved answer either way**: finding no tree, a
+    /// bird does not perch.
+    ///
+    /// It carries the position rather than the height so that it cannot drift apart from the
+    /// column it was measured at. Two separate defects on #1215 were both that drift: a
+    /// height used over the probe's centre column instead of the winning one, and a height
+    /// held from a previous cycle beside a new cycle's column.
+    at: Option<Vec3>,
 }
 
 impl Seat {
     /// This frame's seat: the one already resolved for this cycle, or a fresh probe.
     ///
-    /// An [`TreeTop::Unread`] probe changes nothing and leaves the cycle unresolved, so the
-    /// next frame tries again — which is what makes a wood that streams in halfway through
-    /// the circuit still get perched on.
+    /// An [`TreeTop::Unread`] probe leaves the cycle **unresolved**, so the next frame tries
+    /// again — which is what makes a wood that streams in halfway through the circuit still
+    /// get perched on.
+    ///
+    /// **Unresolved means `Seat::default()`, not "keep what we had".** It returned `self`, and
+    /// `self` at that point is a seat resolved for an *earlier* cycle: the guard above only
+    /// reaches the probe when the cycle has changed. So the old branch's position was kept
+    /// while [`perch_column`] had already moved to the new cycle's column, and the bird flew
+    /// to a tree that had been measured somewhere else. It cost nothing to keep, either —
+    /// the blend is zero for the whole leading quarter of a cycle, which is what that quarter
+    /// is for. Caught in review on #1215.
     fn resolved(
         self,
         ground: Option<(&ChunkStore, usize)>,
@@ -882,15 +909,16 @@ impl Seat {
         };
         let column = perch_column(species, seed, elapsed, anchor);
         match tree_top_near(store, column, chunk_size) {
-            TreeTop::Found(top) => Self {
+            TreeTop::Found(at) => Self {
                 cycle: Some(cycle),
-                top: Some(top),
+                at: Some(at),
             },
             TreeTop::Bare => Self {
                 cycle: Some(cycle),
-                top: None,
+                at: None,
             },
-            TreeTop::Unread => self,
+            // Nothing measured, nothing kept — see the note above.
+            TreeTop::Unread => Self::default(),
         }
     }
 }
@@ -901,8 +929,13 @@ impl Seat {
 /// [`perch_blend`] is zero — which is what keeps the three rows that shipped untouched by a
 /// pattern they do not use.
 ///
-/// `seat` is the top face of this cycle's tree, or `None` where there is none to sit on. With
-/// no seat the bird is left on its circuit: **finding no tree, it does not perch.**
+/// `seat` is where this cycle's branch is — the top face of the tree the probe actually found,
+/// at that tree's own column — or `None` where there is none to sit on. With no seat the bird
+/// is left on its circuit: **finding no tree, it does not perch.**
+///
+/// **It is the probe's column and not [`perch_column`]'s.** The probe searches a square and
+/// answers with the tallest tree in it, which is very often not the column at the centre; the
+/// two were paired for a while and put the bird in the air over a canopy gap.
 ///
 /// At a blend of one the answer is the seat exactly, and it is *still* — both terms are
 /// constant across the held segment, so an owl on a branch does not drift by a bit. That is
@@ -912,16 +945,14 @@ fn perched(
     seed: u64,
     elapsed: f32,
     anchor: Vec3,
-    seat: Option<f32>,
+    seat: Option<Vec3>,
 ) -> Vec3 {
     let cruise = place(species, seed, elapsed, anchor);
     let blend = perch_blend(species, seed, elapsed);
-    let Some(top) = seat.filter(|_| blend > 0.0) else {
+    let Some(branch) = seat.filter(|_| blend > 0.0) else {
         return cruise;
     };
-    let column = perch_column(species, seed, elapsed, anchor);
-    let seat = Vec3::new(column.x, top + PERCH_SEAT, column.z);
-    cruise.lerp(seat, blend)
+    cruise.lerp(branch + Vec3::Y * PERCH_SEAT, blend)
 }
 
 // ---------------------------------------------------------------------------
@@ -1978,7 +2009,7 @@ pub(super) fn fly_the_flock(
         // `place`, and the clamp below is the third: the store is not an argument to `place`
         // and the perch needs one, which is exactly the reasoning the clamp already carries.
         let cruising = place(species, bird.seed, elapsed, bird.anchor);
-        let position = perched(species, bird.seed, elapsed, bird.anchor, seat.top);
+        let position = perched(species, bird.seed, elapsed, bird.anchor, seat.at);
         let settling = perch_blend(species, bird.seed, elapsed);
         // The clamp: a named step over the drawn point, never a fifth argument to `place`. It
         // moves the bird up and never sideways, and it yields to a bird that is landing —
@@ -2014,7 +2045,7 @@ pub(super) fn fly_the_flock(
             bird.seed,
             elapsed + HEADING_STEP,
             bird.anchor,
-            seat.top,
+            seat.at,
         ) - position;
         if let Ok(heading) = Dir3::new(ahead) {
             transform.look_to(heading.as_vec3(), Vec3::Y);
@@ -2886,7 +2917,7 @@ mod tests {
         // **drawn** path across a whole landing, which is where a piecewise function is most
         // likely to have a corner in it. The seat is a fixed height, as a real one is.
         let anchor = Vec3::new(16.0, 80.0, 16.0);
-        let seat = Some(anchor.y + 4.0);
+        let seat = Some(Vec3::new(anchor.x + 3.0, anchor.y + 4.0, anchor.z - 2.0));
         let mut landed = 0usize;
         for species in perchers() {
             for seed in 0..8u64 {
@@ -2915,7 +2946,7 @@ mod tests {
         // "Holds still" is the part the old design had no place for, and it has to be exact:
         // an owl that drifts by a bit a frame is an owl sliding off its branch.
         let anchor = Vec3::new(16.0, 80.0, 16.0);
-        let seat = Some(anchor.y + 4.0);
+        let seat = Some(Vec3::new(anchor.x + 3.0, anchor.y + 4.0, anchor.z - 2.0));
         for species in perchers() {
             for seed in 0..8u64 {
                 let seed = mix(seed, 0x5717);
@@ -2993,7 +3024,7 @@ mod tests {
                 let seat =
                     Seat::default().resolved(Some((&store, CHUNK)), species, seed, 0.0, anchor);
                 assert_eq!(
-                    seat.top,
+                    seat.at.map(|at| at.y),
                     Some(canopy),
                     "row {index} did not find the canopy over its own box"
                 );
@@ -3006,7 +3037,7 @@ mod tests {
                         continue;
                     }
                     let belly =
-                        perched(species, seed, elapsed, anchor, seat.top).y - drop * species.size;
+                        perched(species, seed, elapsed, anchor, seat.at).y - drop * species.size;
                     // On it: the lowest drawn point is at or just above the leaf top, and
                     // never more than a tenth of a block of daylight under it.
                     assert!(
@@ -3023,6 +3054,80 @@ mod tests {
                 }
             }
             assert!(sat > 0, "row {index} never reached its perch");
+        }
+    }
+
+    /// **A bird sits on the tree the probe found, not over the column it searched from.**
+    ///
+    /// The canopy here is deliberately not uniform: one tall tree, and a hole where the
+    /// search centres. `wood()` gives every column the same height, so it cannot tell the
+    /// winning column's `x`/`z` from the centre's — which is exactly how a bird drawn hovering
+    /// in a canopy gap passed review. Caught on #1215.
+    #[test]
+    fn a_bird_perches_on_the_column_the_probe_found_not_the_one_it_searched_from() {
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let species = &BIRDS[OWL_WOOD];
+        for seed in 0..8u64 {
+            let seed = mix(seed, 0x60DE);
+            // A moment this bird is actually sitting, and the cycle that moment belongs to.
+            // The seed offsets the phase, so elapsed zero is rarely inside a hold.
+            let sitting = (0..(3.0 * PERCH_CYCLE_SECONDS / DT) as usize)
+                .map(|sample| sample as f32 * DT)
+                .find(|elapsed| perch_blend(species, seed, *elapsed) == 1.0)
+                .expect("an owl perches inside three cycles");
+            let cycle = perch_cycle(seed, sitting).0;
+            let column = perch_column(species, seed, sitting, anchor);
+            let centre = IVec2::new(voxel_of(column.x), voxel_of(column.z));
+            // One tree, two columns away from the centre on both axes — inside the probe's
+            // square and nowhere near its middle. Everything else, the centre included, is
+            // air, so a probe that reported the centre would be pointing at a gap.
+            let tree = IVec2::new(centre.x + 2, centre.y + 2);
+            // Integral, so the highest leaf voxel is [top - 1, top) and its top face is
+            // exactly `top` — a fractional height would land the face a voxel higher.
+            let top = (column.y + 3.0).floor();
+            let store = terrain(anchor, BIRD_RANGE + 8.0, palette::LEAVES, |at| {
+                at.x == tree.x && at.z == tree.y && (at.y as f32) < top
+            });
+
+            let TreeTop::Found(found) = tree_top_near(&store, column, CHUNK) else {
+                panic!("the one tree in the window was not found")
+            };
+            // The tree's own column, not the search centre's.
+            assert_eq!(
+                (found.x, found.z),
+                (tree.x as f32 + 0.5, tree.y as f32 + 0.5),
+                "the probe reported the column it searched from"
+            );
+            assert_ne!(
+                (found.x.floor() as i32, found.z.floor() as i32),
+                (centre.x, centre.y),
+                "the fixture is not distinguishing: the tree is at the centre"
+            );
+            assert_eq!(found.y, top);
+
+            // And the bird is drawn over that column while it is sitting — so a probe of the
+            // ground directly under it finds the tree rather than air.
+            let seat =
+                Seat::default().resolved(Some((&store, CHUNK)), species, seed, sitting, anchor);
+            let mut sat = 0usize;
+            for sample in 0..(3.0 * PERCH_CYCLE_SECONDS / DT) as usize {
+                let elapsed = sample as f32 * DT;
+                if perch_cycle(seed, elapsed).0 != cycle
+                    || perch_blend(species, seed, elapsed) != 1.0
+                {
+                    continue;
+                }
+                let at = perched(species, seed, elapsed, anchor, seat.at);
+                assert_eq!((at.x, at.z), (found.x, found.z));
+                assert_eq!(at.y, top + PERCH_SEAT);
+                assert_eq!(
+                    surface_under(&store, at, at.y, CHUNK),
+                    GroundUnder::Surface(top),
+                    "there is no tree under the perched bird"
+                );
+                sat += 1;
+            }
+            assert!(sat > 0, "the bird never reached its perch");
         }
     }
 
@@ -3046,7 +3151,7 @@ mod tests {
                 let seat =
                     Seat::default().resolved(Some((&bare, CHUNK)), species, seed, 0.0, anchor);
                 assert_eq!(
-                    (seat.cycle, seat.top),
+                    (seat.cycle, seat.at),
                     (Some(0), None),
                     "a bare country left the seat unresolved rather than answering 'no tree'"
                 );
@@ -3055,7 +3160,7 @@ mod tests {
                 for sample in 0..(PERCH_CYCLE_SECONDS / DT) as usize {
                     let elapsed = sample as f32 * DT;
                     assert_eq!(
-                        perched(species, seed, elapsed, anchor, seat.top),
+                        perched(species, seed, elapsed, anchor, seat.at),
                         place(species, seed, elapsed, anchor),
                         "a bird with no tree left its circuit at {elapsed}"
                     );
@@ -3094,8 +3199,25 @@ mod tests {
             0.0,
             anchor,
         );
-        assert_eq!(arrived.top, Some(canopy));
+        assert_eq!(arrived.at.map(|at| at.y), Some(canopy));
         assert_eq!(arrived.cycle, Some(0));
+
+        // **And a resolved seat is dropped rather than carried into the next cycle.** This is
+        // the half that was wrong: `TreeTop::Unread` returned `self`, and by the time the
+        // probe is reached at all the cycle has changed — so the previous cycle's branch was
+        // kept beside the new cycle's column, and the bird flew to a tree measured somewhere
+        // else entirely. Caught in review on #1215.
+        let later = PERCH_CYCLE_SECONDS;
+        assert_ne!(
+            perch_cycle(0x0_0417, later).0,
+            perch_cycle(0x0_0417, 0.0).0,
+            "the fixture never crosses a cycle boundary"
+        );
+        assert_eq!(
+            arrived.resolved(Some((&nothing, CHUNK)), species, 0x0_0417, later, anchor),
+            Seat::default(),
+            "an unread probe kept the previous cycle's branch"
+        );
     }
 
     #[test]
@@ -3109,7 +3231,7 @@ mod tests {
         let species = &BIRDS[OWL_WOOD];
         let seed = mix(3, 0xCAFE);
         let resolved = Seat::default().resolved(Some((&store, CHUNK)), species, seed, 0.0, anchor);
-        assert!(resolved.top.is_some());
+        assert!(resolved.at.is_some());
 
         // Every frame of this cycle answers the same seat, and re-resolving is the identity.
         let (cycle, _) = perch_cycle(seed, 0.0);
@@ -3159,7 +3281,15 @@ mod tests {
                 // The extremes of what the probe window could ever answer.
                 for offset in [-PERCH_HEADROOM, 0.0, PERCH_HEADROOM] {
                     let home = home_of(species, seed, anchor);
-                    let seat = Some(home.y + offset);
+                    // The furthest a probe can put a branch from home: the search radius plus
+                    // the probe square's own half-span, on both horizontal axes at once.
+                    let reach = PERCH_SEARCH + (PERCH_PROBE_SIDE - 1) as f32 / 2.0
+                        * PERCH_PROBE_SPACING as f32;
+                    let seat = Some(Vec3::new(
+                        home.x + reach,
+                        home.y + offset,
+                        home.z + reach,
+                    ));
                     for sample in 0..=SAMPLES {
                         let at = perched(species, seed, sample as f32 * DT, anchor, seat) - anchor;
                         assert!(
@@ -3223,11 +3353,11 @@ mod tests {
         let column = perch_column(species, 0x0_0417, 0.0, anchor);
         for block in [palette::LOG, palette::LEAVES] {
             let store = terrain(anchor, BIRD_RANGE + 8.0, block, |at| (at.y as f32) < 84.0);
-            assert_eq!(
-                tree_top_near(&store, column, CHUNK),
-                TreeTop::Found(84.0),
-                "block {block} was not accepted as a perch"
-            );
+            let found = tree_top_near(&store, column, CHUNK);
+            let TreeTop::Found(at) = found else {
+                panic!("block {block} was not accepted as a perch: {found:?}")
+            };
+            assert_eq!(at.y, 84.0);
         }
         for block in [
             palette::STONE,
