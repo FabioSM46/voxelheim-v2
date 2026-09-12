@@ -328,8 +328,8 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 
 	// V39 appends StructureKind's three benches: the runestone's argument at V26, an enum
 	// member inside StructureState.kind whose decoder refuses what it cannot name.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 42 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 42", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 43 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 43", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,

@@ -325,7 +325,10 @@ const (
 	/// V42: immutable capital props are replicated independently of interactive structures.
 	/// Their solid bounds must be visible to the player. An older client silently drops
 	/// the vector and collides with invisible furniture, so this append owes a bump.
-	ProtocolVersionCurrent ProtocolVersion = 42
+	/// V43: chunk block ids 58/59 describe open iron grilles. Older clients would
+	/// render and predict these unknown ids as full cubes, hiding the openings and
+	/// disagreeing with authoritative bar collision despite unchanged RLE bytes.
+	ProtocolVersionCurrent ProtocolVersion = 43
 )
 
 var EnumNamesProtocolVersion = map[ProtocolVersion]string{

@@ -10772,7 +10772,7 @@ mod tests {
         // refuses to go without, which a V39 server never sends.
         // V41 puts health on `EntityState`: a non-zero `max_health` this client refuses to
         // go without, where a V40 server's snapshot carries only padding.
-        assert_eq!(fb::ProtocolVersion::Current.0, 42);
+        assert_eq!(fb::ProtocolVersion::Current.0, 43);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
