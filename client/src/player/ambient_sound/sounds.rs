@@ -545,10 +545,18 @@ impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
             Self::Rattlesnake => ([12.0, 31.0], 5.0, -1.3, 0.8, 24.0),
-            Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.65, 96.0),
+            // The 0.55 s fall plus the 0.14 s release ends inside the baked 0.74 s, leaving
+            // 0.05 s of arrival pitch held open before the close. **It was 0.65 s, which did
+            // not fit**: the release began at 0.51 s, four hundredths *before* the glide had
+            // finished falling, so the cry was at 44% of its peak and dropping at the moment
+            // it reached its lowest pitch — the envelope-shaped fall this issue set out to
+            // replace, reintroduced by a length rather than by a description.
+            // `a_raptor_cry_finishes_falling_before_its_release_begins` is what now holds it.
+            Self::Eagle => ([9.0, 24.0], 18.0, 35.0, 0.74, 96.0),
             // High over the sand, in the band `BIRDS[VULTURE]` circles in (25 to 45 blocks),
             // and **sparser than the eagle**: a bird that calls seldom, as the issue asks. The
-            // 0.8 s fall plus the 0.1 s release ends inside the baked 0.95 s.
+            // 0.8 s fall plus the 0.1 s release ends inside the baked 0.95 s, the same 0.05 s
+            // of held arrival.
             Self::Condor => ([26.0, 58.0], 24.0, 30.0, 0.95, 96.0),
             Self::Wolf => ([35.0, 79.0], 26.0, 0.0, HOWL_SECONDS, 96.0),
             // In the grass a few blocks off. The longest call, three syllables at the slowest
@@ -1361,9 +1369,20 @@ mod tests {
     }
 
     /// A cry with its voice made clean: every voiced layer the same glide as a sine, no
-    /// filter, and no breath. **The falling contour survives; the rasp and the air do not** —
-    /// which is what makes it the negative control this issue asks for and not merely a
-    /// quieter sound. `clean_squawk` is the same transform on the macaw.
+    /// filter, and no breath.
+    ///
+    /// **What survives is the whole gesture — the falling contour *and* its rasp**, since
+    /// `..glide` keeps every field but `wave`, and [`Scream::rasp`] is that glide's `vibrato`.
+    /// What is removed is the sawtooth's dense harmonics, the formant bands that shape them,
+    /// and the breath beside them: the timbre, and nothing about the movement.
+    ///
+    /// **That is deliberate, and it is what makes this a control worth having.** A control
+    /// that also dropped the vibrato would differ from the real cry in two ways at once, and
+    /// passing it would no longer say which of the two the measurement reads. Keeping the
+    /// movement identical leaves texture as the only difference, so the floor that separates
+    /// them is measuring texture — which is the claim
+    /// `a_raptor_scream_is_harsh_and_broadband_and_not_a_note` makes. `clean_squawk` is the
+    /// same transform on the macaw, and keeps its arch for the same reason.
     fn clean_scream(call: Call, seed: u64) -> Sound {
         Sound {
             layers: call
@@ -1385,9 +1404,17 @@ mod tests {
         }
     }
 
-    /// One cry's voiced layers alone, baked over the fall at 8 kHz: the pitch without the
-    /// breath, so a tracker reads the voice rather than the noise around it.
-    fn voiced_scream(call: Call, spec: &Scream, seed: u64) -> Vec<f32> {
+    /// One cry's voiced layers alone, baked at 8 kHz **for the length the lane actually bakes
+    /// it** — `profile().seconds`, not the glide's own `seconds`: the pitch without the breath,
+    /// so a tracker reads the voice rather than the noise around it.
+    ///
+    /// **The length is the point, and it used to be the glide's.** Reading the contour over
+    /// exactly the fall meant the measurement could not see what happened after the fall, or
+    /// under a release that started before it ended — which is precisely the defect
+    /// `a_raptor_cry_finishes_falling_before_its_release_begins` now catches, and which this
+    /// test was structurally blind to while it chose its own duration. A test that renders a
+    /// sound differently from the way the game renders it is measuring a different sound.
+    fn voiced_scream(call: Call, seed: u64) -> Vec<f32> {
         Sound {
             layers: call
                 .description(seed)
@@ -1396,7 +1423,7 @@ mod tests {
                 .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
                 .collect(),
         }
-        .bake(spec.seconds, 8000, seed)
+        .bake(call.profile().seconds, 8000, seed)
         .unwrap()
         .samples()
         .to_vec()
@@ -1526,19 +1553,33 @@ mod tests {
 
     /// Both cries descend, and neither arches. A squawk rises into itself and falls out of it;
     /// a scream falls the whole way, which is the one contour difference between the two
-    /// constructions. Read on the voiced layers alone, inside a band the fundamental stays in
-    /// for the whole fall and its second harmonic never enters.
+    /// constructions. Read on the voiced layers alone, over the **whole baked call** and inside
+    /// a band the fundamental stays in for the entire fall and its second harmonic never
+    /// enters.
+    ///
+    /// Three claims, and the third only became readable once this stopped baking the glide's
+    /// own length and started baking the profile's: the cry falls, it never arches, and after
+    /// the fall it **holds its arrival** rather than drifting on — which is the audible half of
+    /// `a_raptor_cry_finishes_falling_before_its_release_begins`.
     #[test]
     fn a_raptor_scream_falls_the_whole_way_through() {
         for (call, spec) in RAPTORS {
             for seed in (0..12u64).map(scramble) {
                 let hz = scream_pitch(call, seed);
-                let track = dominant_track(
-                    &voiced_scream(call, spec, seed),
-                    8000,
-                    hz * spec.fall * 0.9,
-                    hz * 1.15,
-                );
+                let (low, high) = (hz * spec.fall * 0.9, hz * 1.15);
+                let track = dominant_track(&voiced_scream(call, seed), 8000, low, high);
+                // A reading pinned to either end of the search band is the tracker reporting
+                // "no pitch found in here", not a pitch: `dominant_track` returns the best of a
+                // 5 Hz grid, so when a window's spectrum is smeared — the eagle's 38 Hz rasp is
+                // 1.1 cycles inside a 30 ms window, and the tail is quiet — the argmax can land
+                // on the boundary. Four such windows out of sixty-six are what made the raw max
+                // read 1191 Hz on a cry whose glide never exceeds 1078. They are dropped rather
+                // than trusted; every window that carries a pitch is kept.
+                let grid = 5.0;
+                let track: Vec<(f32, f32)> = track
+                    .into_iter()
+                    .filter(|(_, hz)| *hz > low + grid && *hz < high - grid)
+                    .collect();
                 assert!(
                     track.len() >= 20,
                     "{call:?} seed {seed}: {} voiced windows",
@@ -1566,7 +1607,59 @@ mod tests {
                     time <= track[quarter].0,
                     "{call:?} seed {seed}: peaks at {time} s — a scream falls, it does not arch"
                 );
+                // The arrival is held: every window after the fall sits within a fifth of the
+                // pitch the glide lands on, so the tail is a held note under a closing envelope
+                // rather than a pitch still moving when the sound is taken away.
+                let arrival = hz * spec.fall;
+                for (time, pitch) in track.iter().filter(|(t, _)| *t > spec.seconds) {
+                    assert!(
+                        (pitch - arrival).abs() <= arrival * 0.2,
+                        "{call:?} seed {seed}: {pitch} Hz at {time} s, {arrival} Hz expected"
+                    );
+                }
             }
+        }
+    }
+
+    /// A cry reaches its lowest pitch before its close begins, with the arrival held open in
+    /// between — the property both descriptions are written for and neither was checked
+    /// against.
+    ///
+    /// **`Sound::bake` starts the release `release` seconds before the buffer ends**, so the
+    /// three numbers that decide this live in three places: the glide's `seconds` in a
+    /// [`Scream`] row, the envelope's `release` in `description`, and the buffer length in
+    /// `profile`. Nothing connected them, and the eagle did not satisfy it — a 0.55 s fall
+    /// and a 0.14 s release in a 0.65 s bake put the release 0.04 s *inside* the fall, so the
+    /// cry was at 44% of its peak and dropping when it reached its lowest pitch. That is an
+    /// envelope-shaped fall, which is the defect this issue replaced a description to remove;
+    /// it survived as an arithmetic between three files (#1214 review).
+    ///
+    /// The margin is required to be positive rather than merely non-negative: a cry that
+    /// begins closing at the exact instant it stops falling has no arrival, and "held open
+    /// while the pitch falls, closed quickly" then describes a corner rather than a sound.
+    #[test]
+    fn a_raptor_cry_finishes_falling_before_its_release_begins() {
+        for (call, spec) in RAPTORS {
+            let profile = call.profile();
+            // Every layer of a scream carries the one envelope, so any of them reports it —
+            // and that they agree is worth asserting rather than assuming.
+            let layers = call.description(7).layers;
+            let release = layers[0].envelope.release;
+            assert!(
+                layers.iter().all(|layer| layer.envelope.release == release),
+                "{call:?}'s layers close at different times"
+            );
+            let held = profile.seconds - release - spec.seconds;
+            assert!(
+                held > 0.0,
+                "{call:?}: a {} s fall and a {release} s release in a {} s bake leave {held} s \
+                 of held arrival — the release begins {} s before the fall ends",
+                spec.seconds,
+                profile.seconds,
+                -held
+            );
+            // And it is an audible hold rather than a rounding: both birds carry 0.05 s.
+            assert!(held >= 0.04, "{call:?} holds its arrival for only {held} s");
         }
     }
 

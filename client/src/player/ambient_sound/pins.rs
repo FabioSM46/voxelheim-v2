@@ -58,9 +58,12 @@ const PINS: &[pin::Row] = &[
     ("call Rattlesnake 0x0", 80080, [-6.97348, -2.07740, 6.56404, -3.78326]),
     ("call Rattlesnake 0x10203", 80080, [-10.04333, -0.44017, 1.13749, -2.26129]),
     ("call Rattlesnake 0xfedcba9876543210", 80080, [12.91951, 14.30284, 1.62295, 4.91613]),
-    ("call Eagle 0x0", 65065, [35.65365, -5.13499, 8.04474, -24.25516]),
-    ("call Eagle 0x10203", 65065, [19.66230, -66.71479, 8.96137, 4.20640]),
-    ("call Eagle 0xfedcba9876543210", 65065, [-8.26418, -20.59444, -7.51273, 11.02523]),
+    // The eagle's three moved a second time, in the review of this pull request: its bake grew
+    // from 0.65 s to 0.74 s so that the 0.55 s fall and the 0.14 s release stop overlapping,
+    // which is why the sample count below is 74074 where the other calls' are unchanged.
+    ("call Eagle 0x0", 74074, [54.32723, -36.38857, -12.58745, 11.60847]),
+    ("call Eagle 0x10203", 74074, [-0.11002, -12.20113, 1.50655, -3.38921]),
+    ("call Eagle 0xfedcba9876543210", 74074, [24.23985, 19.10018, -3.29602, 18.51908]),
     ("call Wolf 0x0", 380380, [294.73353, -3.58899, 33.95288, 15.38056]),
     ("call Wolf 0x10203", 380380, [-286.83836, 92.49962, 27.00282, -49.48961]),
     ("call Wolf 0xfedcba9876543210", 380380, [0.08069, -35.75515, 193.97934, 153.31113]),

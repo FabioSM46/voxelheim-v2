@@ -146,10 +146,17 @@ pub(super) const WILDLIFE: [Voice; 6] = [
         period: Period::Day,
         stream: 0,
     },
-    // The condor, heard by day exactly where the bird table flies the griffon vulture: bare
-    // sand. **Gated on the flock rather than on the ground, and that is the choice #1186
-    // made.** Today the two gates coincide — `BIRDS[VULTURE]` requires sand and no woodland,
-    // which is the whole of `Habitat::Ground(Sand)` — so the declaration buys no behaviour
+    // The condor, heard by day exactly where the bird table flies the griffon vulture: sand,
+    // trees or none. **Gated on the flock rather than on the ground, and that is the choice
+    // #1186 made.** Today the two gates coincide — `BIRDS[VULTURE]` requires sand and is
+    // *indifferent* to woodland, `requires_wooded: false` being the absence of a requirement
+    // rather than a prohibition, so the vulture flies over wooded sand exactly as it does over
+    // bare. That indifference is precisely what makes the row equal to
+    // `Habitat::Ground(Sand)`; a row that forbade trees would cover less than the ground does
+    // and the two gates would *not* coincide.
+    // `the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture` asserts the
+    // equality over both values of `wooded` rather than leaving it to this sentence — so the
+    // declaration buys no behaviour
     // now and buys the only thing that matters later: this voice *is* that bird's, so the
     // sound and the silhouette cannot come to disagree when a row gains a condition. #1176 is
     // what that disagreement costs when the sound lane keeps its own opinion.
