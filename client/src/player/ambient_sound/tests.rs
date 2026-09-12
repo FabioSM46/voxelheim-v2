@@ -1064,3 +1064,80 @@ fn one_owl_voice_answers_for_both_of_the_bird_tables_owl_rows() {
     };
     assert_eq!(owl.gain(&plain, 1.0), 0.0);
 }
+
+/// **The night's lanes sum, and the sum is bounded — measured at the worst alignment there
+/// is, not at whichever one a ten-minute run happened to produce.**
+///
+/// Raised in review on #1219: the wood at night now carries a cricket at full gain *and* an
+/// owl at full gain, where before every cell summed to one crossfading lane. Each call is only
+/// asserted to peak below 0.85 on its own and the pins bake each row in isolation, so nothing
+/// bounded the combined output.
+///
+/// **Driving two lanes for ten minutes is the wrong instrument, and that is worth recording.**
+/// It was tried first and reported a peak of 0.7699 for both pairs — identical to four decimal
+/// places, which is the tell: that is the owl alone, because with a 30–90 s interval against
+/// the cricket's 6–16 s the two calls simply never landed on top of each other in the sample
+/// taken. A test that passes because the bad case did not occur proves nothing about the bad
+/// case.
+///
+/// So this slides one call across the other and takes the worst alignment, which is an upper
+/// bound on anything the scheduler can ever produce. The owl is given the loudest placement it
+/// can have — at its own body, distance zero, no attenuation, which is exactly what
+/// `Origin::Creature` made reachable — and its partner the attenuation of its own profile.
+///
+/// **Measured: an owl over a cricket reaches 0.883 and an owl over a wolf 0.690.** Neither
+/// clips, and the number worth keeping is the first one: twelve percent of headroom is not
+/// much, so a third night voice in either country, a louder hoot, or a shorter fallback radius
+/// for the cricket is the change that brings this down — and it fails here when it does,
+/// rather than in somebody's headphones.
+#[test]
+fn the_loudest_alignment_of_two_night_voices_does_not_clip() {
+    let rate = 8000;
+    // Every pair that can sound together after dark: the owl is heard in the wood and in the
+    // north, and each of those countries has a ground voice at night.
+    for partner in [Call::Cricket, Call::Wolf] {
+        let partner_profile = partner.profile();
+        // Its own placement, which is the loudest that voice is ever heard at.
+        let partner_gain = spatial::attenuation(
+            partner_profile.radius.hypot(partner_profile.height),
+            partner_profile.range,
+        );
+        let mut worst: f32 = 0.0;
+        let mut worst_at = 0usize;
+        for seed in (0..6u64).map(controller::scramble) {
+            // The owl at its own body: distance zero, so attenuation is exactly one.
+            assert_eq!(spatial::attenuation(0.0, Call::Owl.profile().range), 1.0);
+            let owl = Call::Owl.bake(seed, rate).unwrap();
+            let other = partner.bake(seed, rate).unwrap();
+            let owl = owl.samples();
+            let other = other.samples();
+            // Slide the partner across the whole hoot, a millisecond at a time, and take the
+            // loudest sample any alignment produces.
+            let step = (rate / 1000).max(1) as usize;
+            for offset in (0..owl.len()).step_by(step) {
+                for (index, value) in other.iter().enumerate() {
+                    let Some(under) = owl.get(offset + index) else {
+                        break;
+                    };
+                    let summed = (under + value * partner_gain).abs();
+                    if summed > worst {
+                        worst = summed;
+                        worst_at = offset;
+                    }
+                }
+            }
+        }
+        // Not vacuous: the two really do overlap in the sweep, and the worst alignment is not
+        // the degenerate one where the partner sits entirely past the end of the hoot.
+        assert!(
+            worst > 0.0 && worst_at < 1000,
+            "worst {worst} at {worst_at}"
+        );
+        // The claim. A rendered sample outside [-1, 1] is a clipped one, and the mixer's
+        // buses are at unity here, so this bound is the whole of what reaches the device.
+        assert!(
+            worst <= 1.0,
+            "an owl over a {partner:?} reaches {worst} at the worst alignment, which clips"
+        );
+    }
+}

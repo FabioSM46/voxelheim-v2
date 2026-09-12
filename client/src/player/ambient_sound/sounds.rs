@@ -1993,48 +1993,65 @@ mod tests {
         }
     }
 
-    /// The generalisation `bake_parts` is, held to the sample: `bake_at` is it with one length
-    /// for every strike, so nothing any shipped call renders may have moved.
+    /// Each strike of a `bake_parts` call lands at **its own** onset, for **its own** length,
+    /// from **its own** seed.
     ///
-    /// It is checked here rather than only in the synth's own suite because these are the
-    /// descriptions that actually ship through `bake_at` — the cricket's syllables and the
-    /// macaw's squawks — and a claim about them is worth more than one about a fixture.
+    /// **This replaces a test that could not fail.** It was an `assert_eq!` between
+    /// `bake_at(..)` and `bake_parts(..)` over the shipped cricket and macaw, cited as proof
+    /// that no shipped sound had moved — but `bake_at` *is* `bake_parts` since the
+    /// generalisation: it builds the `(onset, length)` pairs and delegates. Both sides ran
+    /// identical code on identical inputs and were equal by construction, so the assertion
+    /// would have passed with a real bug in `bake_parts` sitting on both sides of it. Caught
+    /// in review on #1219.
+    ///
+    /// **The actual guard that no shipped sound moved is `pins.rs`**, whose cricket, macaw,
+    /// rattlesnake, crow, eagle and wolf rows are byte-identical across this change; only the
+    /// three new Owl rows are new. A golden buffer captured before the refactor is what can
+    /// fail, and the pins are that.
+    ///
+    /// What *this* checks is the contract the pins cannot see: that `bake_parts` places three
+    /// independent things correctly. The owl's two strikes do not overlap, so each region of
+    /// the buffer is exactly one strike and can be compared against a `Sound::bake` built
+    /// here — `bake` is not part of the generalisation, so the two sides are genuinely
+    /// different code. Mis-seed the second strike, place it at the wrong sample, or give it
+    /// the first one's length, and this fails.
     #[test]
-    fn bake_at_is_bake_parts_with_one_length_for_every_strike() {
-        for seed in (0..8u64).map(scramble) {
+    fn each_strike_lands_at_its_own_onset_for_its_own_length_from_its_own_seed() {
+        for seed in (0..6u64).map(scramble) {
             for rate in [8000, 48000] {
-                let cricket = Call::Cricket.description(seed);
-                let onsets = syllable_onsets(seed);
-                let parts: Vec<(f32, f32)> =
-                    onsets.iter().map(|at| (*at, SYLLABLE_SECONDS)).collect();
-                let total = Call::Cricket.profile().seconds;
-                assert_eq!(
-                    cricket
-                        .bake_at(&onsets, SYLLABLE_SECONDS, total, rate, seed)
-                        .unwrap()
-                        .samples(),
-                    cricket
-                        .bake_parts(&parts, total, rate, seed)
-                        .unwrap()
-                        .samples(),
-                    "the cricket moved"
-                );
+                let description = Call::Owl.description(seed);
+                let parts = hoot_parts();
+                // The premise the region-by-region comparison rests on, asserted rather than
+                // assumed: the two strikes do not overlap.
+                assert!(parts[0].0 + parts[0].1 < parts[1].0, "{parts:?}");
 
-                let macaw = Call::Parrot.description(seed);
-                let onsets = squawk_onsets(seed);
-                let parts: Vec<(f32, f32)> =
-                    onsets.iter().map(|at| (*at, SQUAWK_SECONDS)).collect();
-                let total = Call::Parrot.profile().seconds;
-                assert_eq!(
-                    macaw
-                        .bake_at(&onsets, SQUAWK_SECONDS, total, rate, seed)
-                        .unwrap()
-                        .samples(),
-                    macaw
-                        .bake_parts(&parts, total, rate, seed)
-                        .unwrap()
-                        .samples(),
-                    "the macaw moved"
+                let baked = description
+                    .bake_parts(&parts, HOOT_SECONDS, rate, seed)
+                    .unwrap();
+                let samples = baked.samples();
+                assert_eq!(samples.len(), (HOOT_SECONDS * rate as f32).round() as usize);
+
+                for (index, (onset, length)) in parts.iter().enumerate() {
+                    // Built from `bake`, which the generalisation did not touch, and seeded
+                    // the way `bake_parts` documents: the call's seed plus the strike's index.
+                    let alone = description
+                        .bake(*length, rate, seed.wrapping_add(index as u64))
+                        .unwrap();
+                    let start = (f64::from(*onset) * f64::from(rate)).round() as usize;
+                    assert_eq!(
+                        &samples[start..start + alone.samples().len()],
+                        alone.samples(),
+                        "seed {seed} at {rate}: strike {index} is not its own bake at {onset}s"
+                    );
+                }
+
+                // And everything outside the two strikes is exact silence — which is what
+                // makes the regions above the whole of the buffer rather than part of it.
+                let first_end = (f64::from(parts[0].1) * f64::from(rate)).round() as usize;
+                let second_start = (f64::from(parts[1].0) * f64::from(rate)).round() as usize;
+                assert!(
+                    samples[first_end..second_start].iter().all(|v| *v == 0.0),
+                    "seed {seed} at {rate}: the gap between the notes is not silent"
                 );
             }
         }

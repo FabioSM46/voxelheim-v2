@@ -143,8 +143,17 @@ impl Sound {
     ///
     /// [`Sound::bake_at`] is this function with every length the same, so nothing it has ever
     /// produced moves: the same strikes, in the same order, from the same seeds, summed into
-    /// the same buffer. `bake_at_is_bake_parts_with_one_length_for_every_strike` holds that
-    /// to the sample rather than to the eye.
+    /// the same buffer.
+    ///
+    /// **What holds that is `ambient_sound/pins.rs`, and it is worth saying which test does
+    /// not.** A golden buffer captured before the change is the only thing that can fail on a
+    /// regression here, and the pins are exactly that: every shipped call's rows are
+    /// byte-identical across the generalisation. An `assert_eq!` between `bake_at` and
+    /// `bake_parts` is **not** a guard — `bake_at` delegates to `bake_parts`, so both sides
+    /// are the same code and the assertion holds however broken that code is. One was written
+    /// and caught in review on #1219;
+    /// `each_strike_lands_at_its_own_onset_for_its_own_length_from_its_own_seed` is what
+    /// replaced it, and it checks this function's placement against `bake` instead.
     ///
     /// Each strike is baked exactly as [`Sound::bake`] would and draws its own noise — the
     /// seed plus the strike's index — so a noise syllable is not one grain replayed. Every
