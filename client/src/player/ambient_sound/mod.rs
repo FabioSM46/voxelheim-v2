@@ -22,7 +22,8 @@ use crate::{
 use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
 use sounds::Bed;
-use wildlife::WILDLIFE;
+use sounds::CallProfile;
+use wildlife::{Habitat, WILDLIFE};
 
 /// How many wildlife lanes there are: one per row of [`WILDLIFE`] and never a number of its
 /// own, so a new species brings its lane, its gain and its target with it.
@@ -105,6 +106,26 @@ struct Inputs<'w, 's> {
     critters: Query<'w, 's, (&'static Critter, &'static Transform), Without<WorldCamera>>,
 }
 
+/// Where one voice is heard from this frame: its creature's body when that creature is drawn,
+/// and the row's bearing circle when it is not.
+///
+/// Named and separate so the rule can be tested rather than only read. A body collapses the
+/// circle to nothing — radius and height both zero — because the sound is *at* the animal, not
+/// on a ring around the listener; leaving either non-zero would scatter a visible creature's
+/// voice away from it. Raised in review on #1221, where the lane's own arms were exercised by
+/// nothing and a swapped pair would have passed every test.
+fn voice_placement(
+    habitat: Habitat,
+    drawn: &[(usize, Vec3)],
+    eye_position: Vec3,
+    profile: &CallProfile,
+) -> (Vec3, f32, f32) {
+    match habitat.body(drawn, eye_position) {
+        Some(body) => (body, 0.0, 0.0),
+        None => (eye_position, profile.radius, profile.height),
+    }
+}
+
 fn update(input: Inputs, mut country: ResMut<Country>) {
     let (Some(mixer), Some(session), Some(eye), Some(store)) = (
         input.mixer.as_deref(),
@@ -169,10 +190,8 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         // height. Which of the two applies is a property of the creature rather than of the
         // frame — `Habitat::body` answers for the habitat and never looks at the clock — and
         // silence is not one of the options.
-        let (origin, radius, height) = match voice.habitat.body(&drawn, eye_position) {
-            Some(body) => (body, 0.0, 0.0),
-            None => (eye_position, profile.radius, profile.height),
-        };
+        let (origin, radius, height) =
+            voice_placement(voice.habitat, &drawn, eye_position, &profile);
         country.wildlife[index].update(
             mixer,
             CallFrame {

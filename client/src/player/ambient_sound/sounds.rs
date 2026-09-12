@@ -74,6 +74,26 @@ pub(super) enum Call {
     Squirrel,
 }
 
+impl Call {
+    /// Every variant, in declaration order. A file-wide rule is tested by walking this, so a
+    /// new variant joins those guarantees by existing rather than by somebody remembering to
+    /// add it to a list in a test. Raised in review on #1221, where the hand-written list was
+    /// the exact drift the rule existed to prevent.
+    ///
+    /// `every_call_is_in_all` holds it to that: it walks a value of every variant through an
+    /// exhaustive match, so a new variant stops the crate compiling until it is named there,
+    /// and asserts the list has no duplicates and the same length.
+    pub(super) const ALL: &'static [Self] = &[
+        Self::Rattlesnake,
+        Self::Crow,
+        Self::Eagle,
+        Self::Wolf,
+        Self::Cricket,
+        Self::Parrot,
+        Self::Squirrel,
+    ];
+}
+
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
 /// duration by a wide margin; even dusk leaves the desert mostly silent.
 pub(super) struct CallProfile {
@@ -2023,17 +2043,29 @@ mod tests {
     /// every call rather than only the new one: the rule is the file's, so a future row that
     /// forgets it fails here rather than aliasing on an 8 kHz device nobody tests on.
     #[test]
+    fn every_call_is_in_all() {
+        // Exhaustive on purpose: a new variant fails to compile here rather than quietly
+        // escaping every rule that walks `Call::ALL`.
+        for &call in Call::ALL {
+            match call {
+                Call::Rattlesnake
+                | Call::Crow
+                | Call::Eagle
+                | Call::Wolf
+                | Call::Cricket
+                | Call::Parrot
+                | Call::Squirrel => {}
+            }
+        }
+        let mut seen = Call::ALL.to_vec();
+        seen.dedup();
+        assert_eq!(seen.len(), Call::ALL.len(), "a call is listed twice in ALL");
+    }
+
+    #[test]
     fn no_call_reaches_a_frequency_the_lowest_rate_cannot_carry() {
         const CEILING: f32 = 3600.0;
-        for call in [
-            Call::Rattlesnake,
-            Call::Crow,
-            Call::Eagle,
-            Call::Wolf,
-            Call::Cricket,
-            Call::Parrot,
-            Call::Squirrel,
-        ] {
+        for &call in Call::ALL {
             for seed in (0..12u64).map(scramble) {
                 for layer in Call::description(call, seed).layers {
                     if let Some(filter) = layer.filter {

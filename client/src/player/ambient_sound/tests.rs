@@ -975,6 +975,45 @@ fn a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot() {
 /// frame, so this is asserted on the habitat rather than on a rendered frame: `Habitat::body`
 /// is the whole of the decision, and the lane does nothing with its answer but place a sound.
 #[test]
+fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circle() {
+    // `body` is tested in isolation below; this covers what the lane *does* with the answer,
+    // which nothing exercised before the review of #1221. A swapped pair of arms, or a radius
+    // left un-zeroed, would have passed every test in this file.
+    let eye = Vec3::new(10.0, 64.0, 10.0);
+    // The cricket's circle, because a voice that is placed at its body may legitimately carry
+    // no circle at all — and a zero one would make the second half of this test vacuous.
+    let profile = Call::Cricket.profile();
+    assert!(
+        profile.radius > 0.0 && profile.height != 0.0,
+        "the circle must be a real one or this test proves nothing"
+    );
+
+    // Drawn: at the animal, and the circle collapses to nothing so the sound does not scatter
+    // away from the creature the player is looking at.
+    let body = eye + Vec3::new(3.0, 0.0, -2.0);
+    assert_eq!(
+        super::voice_placement(Habitat::Critter(SQUIRREL), &[(SQUIRREL, body)], eye, &profile),
+        (body, 0.0, 0.0)
+    );
+
+    // Not drawn: the row's bearing circle about the listener, at the row's own numbers.
+    assert_eq!(
+        super::voice_placement(Habitat::Critter(SQUIRREL), &[], eye, &profile),
+        (eye, profile.radius, profile.height)
+    );
+
+    // A voice that belongs to no visible creature keeps the circle even with bodies drawn.
+    let cricket = WILDLIFE
+        .iter()
+        .find(|voice| voice.call == Call::Cricket)
+        .expect("the cricket is a row");
+    assert_eq!(
+        super::voice_placement(cricket.habitat, &[(SQUIRREL, body)], eye, &profile),
+        (eye, profile.radius, profile.height)
+    );
+}
+
+#[test]
 fn a_voice_that_belongs_to_a_visible_creature_is_placed_at_it() {
     let eye = Vec3::new(10.0, 64.0, 10.0);
     let squirrel = Habitat::Critter(SQUIRREL);
