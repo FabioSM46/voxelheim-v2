@@ -213,6 +213,10 @@ const (
 	RuneStone   Block = 55
 	PortalVeil  Block = 56
 	PortalHeart Block = 57
+
+	// Narrow vertical iron bars, with openings smaller than a standing body.
+	IronGrilleX Block = 58
+	IronGrilleZ Block = 59
 )
 
 // ShapeKind is the geometry a block occupies inside its voxel.
@@ -222,6 +226,7 @@ const (
 	ShapeCube ShapeKind = iota
 	ShapeSlab
 	ShapeStair
+	ShapeGrille
 )
 
 // ShapeHalf names which vertical half anchors a slab or stair.
@@ -266,6 +271,12 @@ var fullBlockBounds = BlockBounds{Max: [3]float64{1, 1, 1}}
 func ShapeOf(b Block) BlockShape {
 	shape := BlockShape{Kind: ShapeCube, Material: b}
 	switch b {
+	case IronGrilleX, IronGrilleZ:
+		shape.Kind = ShapeGrille
+		shape.Material = IronGrilleX
+		if b == IronGrilleZ {
+			shape.Facing = ShapeEast
+		}
 	case SlateSlabBottom:
 		shape.Kind = ShapeSlab
 		shape.Material = SlateTile
@@ -296,6 +307,16 @@ func CollisionBounds(b Block) ([2]BlockBounds, int) {
 
 	shape := ShapeOf(b)
 	switch shape.Kind {
+	case ShapeGrille:
+		for i := range 2 {
+			x := 0.2 + float64(i)*0.5
+			bounds[i] = BlockBounds{Min: [3]float64{x, 0, 0.45}, Max: [3]float64{x + 0.1, 1, 0.55}}
+			if b == IronGrilleZ {
+				bounds[i].Min[0], bounds[i].Min[2] = bounds[i].Min[2], bounds[i].Min[0]
+				bounds[i].Max[0], bounds[i].Max[2] = bounds[i].Max[2], bounds[i].Max[0]
+			}
+		}
+		return bounds, 2
 	case ShapeSlab:
 		if shape.Half == ShapeTop {
 			bounds[0] = BlockBounds{Min: [3]float64{0, 0.5, 0}, Max: [3]float64{1, 1, 1}}

@@ -345,9 +345,17 @@ pub(super) fn arrival_ready(world: &World, position: Vec3, size: usize) -> bool 
                 let (bounds, count) = super::palette::collision_bounds(store.block_at(cell, size));
                 for bound in &bounds[..count] {
                     let min = Vec3::new(x as f32, y as f32, z as f32)
-                        + Vec3::from_array(bound.min.map(|v| f32::from(v) * 0.5));
+                        + Vec3::from_array(
+                            bound
+                                .min
+                                .map(|v| f32::from(v) / super::palette::BOUNDS_SCALE),
+                        );
                     let max = Vec3::new(x as f32, y as f32, z as f32)
-                        + Vec3::from_array(bound.max.map(|v| f32::from(v) * 0.5));
+                        + Vec3::from_array(
+                            bound
+                                .max
+                                .map(|v| f32::from(v) / super::palette::BOUNDS_SCALE),
+                        );
                     if (position.y - max.y).abs() < 0.04
                         && position.x + half > min.x
                         && position.x - half < max.x

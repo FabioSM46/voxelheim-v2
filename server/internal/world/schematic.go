@@ -356,6 +356,12 @@ func rotateSchematicBlock(block Block, facing Facing) Block {
 	if facing > FacingPlusX {
 		return block // rotateCell also treats an unknown facing as the original.
 	}
+	if (block == IronGrilleX || block == IronGrilleZ) && facing%2 == 1 {
+		if block == IronGrilleX {
+			return IronGrilleZ
+		}
+		return IronGrilleX
+	}
 	for _, first := range [...]Block{SlateStairNorthBottom, SlateStairNorthTop} {
 		if block >= first && block < first+4 {
 			return first + (block-first+Block(facing))%4

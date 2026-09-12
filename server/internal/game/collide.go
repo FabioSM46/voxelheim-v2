@@ -9,12 +9,10 @@ import (
 // maxSubStep is the longest distance one axis may move between two overlap tests,
 // in blocks.
 //
-// This is what makes the collision non-tunnelling. Resolving a move by testing the
-// box at its destination only works while the destination is adjacent to the
-// origin: a step longer than a block can start outside a wall, end outside the far
-// side of it, and report no overlap at either end. Splitting the move into steps
-// well under a block removes that case by construction, and at a walk it is one
-// step per axis per tick anyway.
+// Sub-steps keep the swept voxel query and contact refinement local. At a walk it
+// is one step per axis per tick. Non-tunnelling comes from testing the complete
+// swept interval, since narrow shape members can fit between two endpoint boxes
+// even when the step is shorter than a voxel.
 const maxSubStep = 0.25
 
 // collisionSkin is how far short of a face a blocked move stops, in blocks.
@@ -359,11 +357,10 @@ func stepAxis(t Terrain, b box, axis int, delta, height float64, ordinary box) (
 // slideAxis moves the box along one axis, stopping at the first solid face.
 //
 // Precondition: b overlaps nothing. moveAndCollide establishes it, and each call
-// here preserves it — a sub-step that would overlap is replaced by a stop short of
-// the face it hit. That precondition is what makes the collision refinement below exact: the
-// only voxels a sub-step can newly touch are the ones in the layer its leading face
-// crossed into, because the other two axes did not move and one sub-step is shorter
-// than a block.
+// here preserves it — a sub-step whose swept box meets a solid shape is replaced
+// by a stop short of its first face. Only one axis moves, so the union of its start
+// and end boxes is the exact swept volume, including thin members inside a voxel.
+// The initially clear box makes the expanding sweep monotone for contact bisection.
 func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 	if delta == 0 {
 		return b, false
@@ -388,7 +385,11 @@ func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 		// it is about to become, and the search below leaves the same gap every detected
 		// collision leaves. Found by the first thing that had to climb out of the state
 		// rather than merely stand in it.
+		// Sweep the whole axis interval: a thin bar can lie between both endpoints.
+		// For a one-axis translation the union is the exact swept box.
 		probe := moved
+		probe.min[axis] = min(b.min[axis], moved.min[axis])
+		probe.max[axis] = max(b.max[axis], moved.max[axis])
 		if step > 0 {
 			probe.max[axis] += collisionSkin
 		} else {
@@ -399,7 +400,7 @@ func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 			continue
 		}
 
-		// A shaped block may have a face at a half coordinate, so the old integer
+		// A shaped block may have a face inside a voxel, so the old integer
 		// snap is no longer a complete answer. Bisect only the colliding sub-step;
 		// twenty divisions leave far less than collisionSkin of uncertainty.
 		clear, colliding := 0.0, 1.0
@@ -407,6 +408,8 @@ func slideAxis(t Terrain, b box, axis int, delta float64) (box, bool) {
 			mid := (clear + colliding) / 2
 			candidate := b.translate(axis, step*mid)
 			candidateProbe := candidate
+			candidateProbe.min[axis] = min(b.min[axis], candidate.min[axis])
+			candidateProbe.max[axis] = max(b.max[axis], candidate.max[axis])
 			if step > 0 {
 				candidateProbe.max[axis] += collisionSkin
 			} else {
@@ -585,7 +588,7 @@ func clearLineOfSight(t Terrain, from, to [3]float64) bool {
 	}
 
 	for {
-		if t.Solid(voxel[0], voxel[1], voxel[2]) {
+		if voxelBlocksSight(t, voxel, from, to) {
 			return false
 		}
 		if voxel == last {
