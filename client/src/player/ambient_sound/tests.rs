@@ -1304,17 +1304,21 @@ fn the_loudest_alignment_of_two_night_voices_does_not_clip() {
                 }
             }
         }
-        // Not vacuous: the two really do overlap in the sweep, and the worst alignment is not
-        // the degenerate one where the partner sits entirely past the end of the hoot.
-        assert!(
-            worst > 0.0 && worst_at < 1000,
-            "worst {worst} at {worst_at}"
-        );
+        // Not vacuous: some offset really did overlap, so `worst` is a sum of two calls rather
+        // than the 0.0 the inner loop leaves when the partner sits entirely past the hoot.
+        //
+        // It used to also require `worst_at < 1000`, which the review of the assembled head
+        // found does not guard that at all: the overlap claim is `worst > 0.0` on its own, and
+        // the extra conjunct silently demanded that the loudest alignment fall inside the
+        // first 125 ms. Nothing makes that true — the hoot's second note is the longer of the
+        // two, and were it ever to become the louder one this would fail as a clipping message
+        // about a sound that does not clip.
+        assert!(worst > 0.0, "the two calls never overlapped: {worst}");
         // The claim. A rendered sample outside [-1, 1] is a clipped one, and the mixer's
         // buses are at unity here, so this bound is the whole of what reaches the device.
         assert!(
             worst <= 1.0,
-            "an owl over a {partner:?} reaches {worst} at the worst alignment, which clips"
+            "an owl over a {partner:?} reaches {worst} at offset {worst_at}, which clips"
         );
     }
 }
