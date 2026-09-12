@@ -485,8 +485,11 @@ pub enum MaterialClass {
     Air,
     /// Rock, ore, brick, tile and worked stone. Dense and hard.
     Stone,
-    /// Loose ground: soil, gravel, snow. Solid, and nothing like rock.
+    /// Loose ground: soil and gravel. Solid, and nothing like rock.
     Earth,
+    /// Snow. Solid, and nothing like the soil it lies on: it absorbs far more of the high
+    /// end than any other ground and it compacts under a load rather than scattering.
+    Snow,
     /// Fine dry grains, acoustically distinct from packed soil.
     Sand,
     /// Cut and grown timber.
@@ -506,19 +509,25 @@ pub enum MaterialClass {
 /// server sent rather than deciding an unknown id is see-through, and stone is the class
 /// that assumes the least about a block being permeable.
 ///
-/// Three groupings are worth stating because they are choices rather than readings:
+/// Four groupings are worth stating because they are choices rather than readings:
 ///
 /// - **Gravel is earth, not stone.** It is loose aggregate rather than rock, and it sits
 ///   with the sand and soil it is found among.
 /// - **Ice is stone, not glass.** Glass here means worked transparent stock; ice is a
 ///   dense frozen slab, and being see-through is a rendering fact rather than a material
 ///   one.
+/// - **Ice does not move with snow either, and that is the same decision read twice.**
+///   [`SNOW`] leaves [`MaterialClass::Earth`] for [`MaterialClass::Snow`] because it is
+///   soft and dead underfoot; [`ICE`] stays with the stone it is already grouped with,
+///   because it is hard and bright underfoot and shares nothing with snow but the
+///   temperature. They are two materials that happen to be found together, not one class.
 /// - **Thatch is foliage, not wood.** A thatched roof is bundled straw — grown and porous,
 ///   which is what the class means, and nothing like a sawn plank.
 pub fn material_class(block: BlockId) -> MaterialClass {
     match block {
         AIR => MaterialClass::Air,
-        DIRT | GRASS | SNOW | GRAVEL => MaterialClass::Earth,
+        DIRT | GRASS | GRAVEL => MaterialClass::Earth,
+        SNOW => MaterialClass::Snow,
         SAND => MaterialClass::Sand,
         LOG | PLANKS | PALM_LOG | DARK_TIMBER | PALE_TIMBER => MaterialClass::Wood,
         LEAVES | PALM_FRONDS | BROAD_LEAVES | THATCH => MaterialClass::Foliage,
@@ -903,13 +912,18 @@ mod tests {
         }
     }
 
-    /// The three groupings the doc calls out as choices. Each of them is one id away from
+    /// The four groupings the doc calls out as choices. Each of them is one id away from
     /// a defensible different answer, which is why each gets an assertion.
     #[test]
-    fn the_three_judgement_calls_are_where_the_documentation_says() {
+    fn the_four_judgement_calls_are_where_the_documentation_says() {
         assert_eq!(material_class(GRAVEL), MaterialClass::Earth);
         assert_eq!(material_class(ICE), MaterialClass::Stone);
         assert_eq!(material_class(THATCH), MaterialClass::Foliage);
+        // Snow and ice are found together and are not one class: snow left earth for its
+        // own, ice stayed with stone. Asserted as a pair, because the mistake this guards
+        // against is the next reader assuming the cold ids move together.
+        assert_eq!(material_class(SNOW), MaterialClass::Snow);
+        assert_ne!(material_class(ICE), MaterialClass::Snow);
     }
 
     #[test]
@@ -929,6 +943,7 @@ mod tests {
         for class in [
             MaterialClass::Stone,
             MaterialClass::Earth,
+            MaterialClass::Snow,
             MaterialClass::Sand,
             MaterialClass::Wood,
             MaterialClass::Foliage,
@@ -960,7 +975,9 @@ mod tests {
             (SLATE_STAIR_NORTH_BOTTOM, MaterialClass::Stone),
             (COAL_ORE, MaterialClass::Stone),
             (DIRT, MaterialClass::Earth),
-            (SNOW, MaterialClass::Earth),
+            (GRAVEL, MaterialClass::Earth),
+            (SNOW, MaterialClass::Snow),
+            (ICE, MaterialClass::Stone),
             (SAND, MaterialClass::Sand),
             (LOG, MaterialClass::Wood),
             (PLANKS, MaterialClass::Wood),

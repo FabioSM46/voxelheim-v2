@@ -2,10 +2,11 @@
 use super::*;
 use crate::audio::synth::pin;
 
-const GROUNDS: [MaterialClass; 8] = [
+const GROUNDS: [MaterialClass; 9] = [
     MaterialClass::Air,
     MaterialClass::Stone,
     MaterialClass::Earth,
+    MaterialClass::Snow,
     MaterialClass::Sand,
     MaterialClass::Wood,
     MaterialClass::Foliage,
@@ -39,6 +40,7 @@ const PINS: &[pin::Row] = &[
     ("hoof Air", 16016, [-0.36095, 3.51984, 0.77844, 2.50563]),
     ("hoof Stone", 16016, [6.86085, 7.85808, 4.46710, -2.89134]),
     ("hoof Earth", 16016, [2.07080, 4.01297, -0.32366, 3.09828]),
+    ("hoof Snow", 16016, [2.05144, 2.24701, -1.62244, 0.80970]),
     ("hoof Sand", 16016, [-5.23344, 7.32789, 4.03183, 8.41880]),
     ("hoof Wood", 16016, [-2.79734, 3.53200, -3.22070, -3.16936]),
     ("hoof Foliage", 16016, [7.71461, 2.02446, 1.89802, 2.50821]),
