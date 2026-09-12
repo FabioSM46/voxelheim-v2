@@ -38,6 +38,19 @@ The east north route is X37–38/Z6–19, with the future tower-entry corridor
 X37–44/Z11–12. Cross-room routes use Z24–25 across X6–24 (west) and
 X37–56 (east), joined across the bridge at Y21.
 
+## Courtyard stair and curtain lookouts
+
+The courtyard stair rises northwards on X4–5/Z43–31, from feet Y0 to Y13.
+X3/X6 guard its sides. Its upper landing X1–5/Z29–30 opens directly onto the
+western curtain; the stair lies beside the widened deck so the deck does not
+cut its sloping headroom. Ground access passes south of the castle at Z44–46.
+
+At feet Y13 the continuous two-wide circuit occupies X1–2 and X60–61 on the
+west/east, and Z1–2 and Z60–61 on the north/south. The existing exterior masonry
+and inner parapets guard it. Each corner contains a sheltered 7 × 7 lookout:
+X1–7 or X55–61 combined with Z1–7 or Z55–61. Their outer two-wide circuit stays
+clear; interior dressing awaits the furnishing follow-up.
+
 ## Tower destinations
 
 | Tower axis X/Z | Entry standing Y | Lookout standing Y | Capital / tip Y |
@@ -54,10 +67,11 @@ verified. Preserve the differentiated silhouettes and the tallest eastern spire.
 
 ## Delivery and verification
 
-Issue #1202 is delivered in independently verified changes. The first two changes
-implement **west and east main-wing stairs and their access**, together with
-oriented schematic placement. The widened curtain/corner rooms, spire interiors
-and final renderer captures follow in subsequent changes.
+Issue #1202 is delivered in independently verified changes. The first three changes
+implement **both main-wing staircases, the courtyard stair and the complete
+two-wide curtain circuit through four corner lookouts**, together with oriented
+schematic placement. Spire interiors and final renderer captures follow in
+subsequent changes.
 The plans above reserve their space; they do not claim that those changes have
 already been built.
 
@@ -66,5 +80,6 @@ production gravity and no jump input, from the gate up every flight, into each
 upper room, and back down, in all four rotations. It crosses chunk boundaries and checks overlap,
 step height and fall damage. Separate world tests inspect actual placed stair
 orientations and all furniture-pocket floor/headroom reservations. World-level
-room connectivity continues to guard the rest of the existing castle, including
-its still-unconverted routes.
+room connectivity continues to guard the rest of the existing castle. A separate
+real-player circuit checks both courtyard tread lanes and both curtain lanes,
+all four corner lookouts, and descent to the gate in all four rotations.

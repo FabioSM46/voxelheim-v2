@@ -150,3 +150,31 @@ func TestCastleMainFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
 		})
 	}
 }
+
+func TestCastleCourtStairAndCurtainCircuitNeedNoJump(t *testing.T) {
+	route := [][3]float64{{31.5, 0, 62.5}, {31.5, 0, 46.5}, {4.5, 0, 46.5}, {4.5, 0, 44.5}, {4.5, 13, 30.5}, {1.5, 13, 30.5}, {1.5, 13, 4.5}, {4.5, 13, 4.5}, {4.5, 13, 1.5}, {58.5, 13, 1.5}, {58.5, 13, 4.5}, {61.5, 13, 4.5}, {61.5, 13, 58.5}, {58.5, 13, 58.5}, {58.5, 13, 61.5}, {4.5, 13, 61.5}, {4.5, 13, 58.5}, {1.5, 13, 58.5}, {1.5, 13, 30.5}, {4.5, 13, 30.5}, {4.5, 0, 44.5}, {4.5, 0, 46.5}, {31.5, 0, 46.5}, {31.5, 0, 62.5}}
+	for lane := range 2 {
+		for turn := range 4 {
+			t.Run(fmt.Sprintf("lane%d/rotation%d", lane, turn), func(t *testing.T) {
+				walkCastle(t, castleTerrain{turn: turn}, route)
+			})
+		}
+		// Walk the other tread and curtain lanes as well, including every corner
+		// transition. Keep the route independent of the schematic's air search.
+		for i := range route {
+			for axis := range 3 {
+				if axis == 1 {
+					continue
+				}
+				switch route[i][axis] {
+				case 1.5:
+					route[i][axis] = 2.5
+				case 61.5:
+					route[i][axis] = 60.5
+				case 4.5:
+					route[i][axis] = 5.5
+				}
+			}
+		}
+	}
+}

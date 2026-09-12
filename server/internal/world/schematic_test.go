@@ -906,7 +906,7 @@ func TestTheKeepHasNineFloorsAWallWalkAndABridgedCourtAndYouCanWalkToAllOfThem(t
 		{46, 21, 22, "the east keep's third floor"},
 		{46, 28, 22, "the east keep's fourth floor"},
 		{8, 4, 33, "a tread of the west wing's first flight"},
-		{2, 7, 36, "the bailey stair to the wall walk"},
+		{4, 7, 37, "the bailey stair to the wall walk"},
 		{1, 13, 30, "the wall walk, west"},
 		{61, 13, 30, "the wall walk, east"},
 		{31, 13, 1, "the wall walk, back"},
