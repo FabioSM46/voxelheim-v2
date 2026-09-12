@@ -2928,7 +2928,13 @@ Recorded here so the next reader does not mistake them for oversights:
   and permits the one rejoin, so the countdown wins the race exactly where the server decided it.
 
   The flag is dropped *before* the dial that consumes it can fail, so a rejoin that is itself
-  refused is a refusal a player can read rather than the first turn of a loop. The list is fetched
+  refused is a refusal a player can read rather than the first turn of a loop — whichever state
+  armed it: `connect_on_request` once consumed it only from `Choosing`, and the rejoin a leave arms
+  from `Disconnected` was written and refused again on every frame (#1175). **A rejoin that cannot
+  proceed still ends the session.** A name refusal keeps `Choosing` and the form mounted for the
+  dial about to replace it, so a route that is missing, a row no longer listed or a thread that
+  will not start must take `CharacterChoice` down and leave `Disconnected` or `Rejected`; before
+  #1175 each left the character screen over a session that no longer existed. The list is fetched
   again over a fresh connection rather than reused, because what the server holds may have changed,
   and going back through `RejoinBy::Row` rather than a remembered address is what keeps the
   certificate verified against the same row it was verified against the first time.
