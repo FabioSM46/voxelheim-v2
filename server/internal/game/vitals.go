@@ -532,6 +532,9 @@ func (p *Player) settlementRespawnLocked() ([3]float64, bool) {
 // The caller holds sim.mu.
 func (s *Sim) respawnColumnFitsLocked(bd body, pos [3]float64, ground int64) bool {
 	column := bd.boxAt(pos)
+	if s.staticProps.overlaps(column) {
+		return false
+	}
 	x0, x1 := voxelSpan(column.min[0], column.max[0])
 	z0, z1 := voxelSpan(column.min[2], column.max[2])
 	top := int64(math.Ceil(column.max[1])) - 1

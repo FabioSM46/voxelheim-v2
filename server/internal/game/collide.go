@@ -97,7 +97,8 @@ type collisionBlockReader interface {
 // Not safe for concurrent use, deliberately — see the memo below. One instance
 // belongs to one tick loop.
 type CacheTerrain struct {
-	cache *world.Cache
+	cache       *world.Cache
+	staticProps *staticPropIndex
 
 	// The chunk the previous lookup landed in. A player's box spans one or two chunks
 	// and a tick asks about a few dozen voxels inside them, so remembering the last
@@ -433,6 +434,9 @@ func overlaps(t Terrain, b box) bool {
 	if b.beyondTheWorld() {
 		return true
 	}
+	if provider, ok := t.(interface{ staticPropOverlap(box) bool }); ok && provider.staticPropOverlap(b) {
+		return true
+	}
 	return anyVoxel(b, func(x, y, z int64) bool {
 		if !t.Solid(x, y, z) {
 			return false
@@ -553,6 +557,10 @@ func pointBeyondTheWorld(p [3]float64) bool {
 // Non-generating, like every other terrain read on the tick.
 func clearLineOfSight(t Terrain, from, to [3]float64) bool {
 	if pointBeyondTheWorld(from) || pointBeyondTheWorld(to) {
+		return false
+	}
+
+	if staticPropsBlockRay(t, from, to) {
 		return false
 	}
 
