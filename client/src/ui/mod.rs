@@ -31,6 +31,7 @@ mod overhead;
 mod party;
 mod prompt;
 mod servers;
+mod session_ended;
 mod sessions;
 mod settings;
 mod station;
@@ -275,6 +276,7 @@ impl Plugin for UiPlugin {
                     sessions::SessionsUiPlugin,
                     settings::SettingsScreenPlugin,
                     status::StatusUiPlugin,
+                    session_ended::SessionEndedUiPlugin,
                 ),
             ));
 
@@ -429,6 +431,7 @@ struct Overlays<'w> {
     state: Option<Res<'w, ConnectionState>>,
     cancellation: Option<Res<'w, LeaveCancellation>>,
     world: Option<Res<'w, crate::world::transition::CurrentWorld>>,
+    rejoining: Option<Res<'w, crate::net::Rejoining>>,
 }
 
 impl Overlays<'_> {
@@ -442,6 +445,12 @@ impl Overlays<'_> {
                 self.list.as_deref(),
                 self.state.as_deref(),
                 self.sign_in.as_deref(),
+            )
+            || session_ended::session_ended_is_up(
+                self.state.as_deref(),
+                self.list.as_deref(),
+                self.sign_in.as_deref(),
+                self.rejoining.is_some(),
             )
     }
 
@@ -495,9 +504,10 @@ fn choose_input_mode(
     // behind them, so a click meant for a control would otherwise also reach the world as
     // a mining or attack intent. `Menu` is the mode that already means "this frame's
     // input is not for the world", so this reuses the gate rather than adding a second
-    // one — and `Escape` cannot leave it, because none of the three is dismissible: the
+    // one — and `Escape` cannot leave it, because none of the four is dismissible: the
     // login screen has no "not now", the server list is where a client with no session
-    // belongs, and a session that has been sent a character list is waiting for one.
+    // belongs, a session that has been sent a character list is waiting for one, and the
+    // session-ended screen is where an ending with no list to land on belongs (#1175).
     if overlays.any_is_up() {
         reject_prompt(&mut modals.prompt, &mut modals.prompt_answers);
         set_mode(&mut mode, InputMode::Menu);

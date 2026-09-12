@@ -47,7 +47,7 @@ struct LoginStatus;
 
 /// Above the pause menu's 40, because a client that is not signed in has nothing
 /// for the pause menu to be about yet.
-const LOGIN_LAYER: i32 = 50;
+pub(super) const LOGIN_LAYER: i32 = 50;
 
 const BUTTON: Color = Color::srgb(0.35, 0.40, 0.85);
 const BUTTON_HOVERED: Color = Color::srgb(0.44, 0.49, 0.93);

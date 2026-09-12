@@ -17,7 +17,9 @@
 //! of servers with no way back to the one they had been on. `RECONNECT` is that way
 //! back: it is up exactly while there is an address to return to, it dials nothing
 //! until it is pressed, and it sits beside the rows rather than over them so picking a
-//! different server stays one click away (#627).
+//! different server stays one click away (#627). A launch with no list has no rows to sit
+//! beside, and there the same button is drawn centred by `ui/session_ended.rs` — whose
+//! absence was a black window with nothing to press (#1175).
 //!
 //! Nothing here decides anything. A row writes a [`ConnectRequest`] naming the server;
 //! the network boundary owns the socket, the address and the certificate to expect at
@@ -77,7 +79,46 @@ struct RetryButton;
 /// that has never dialled anything names no server and would be a control that could
 /// only do nothing.
 #[derive(Component)]
-struct ReconnectButton;
+pub(super) struct ReconnectButton;
+
+/// Spawns one [`ReconnectButton`] into a column, laid out only once there is a way back.
+///
+/// **Shared by both screens that offer it**: this list, and the centred screen
+/// `ui/session_ended.rs` draws on a launch with no list (#1175). Every instance answers to
+/// the one rule in [`show_reconnect`] and the one press in [`reconnect_action`], so the two
+/// screens cannot come to disagree about when a way back exists. `extra` is whatever the
+/// caller finds its own instance by.
+///
+/// It is `Display::None` until there is somewhere to go back to — `Visibility::Hidden`
+/// would leave its 44 pixels of gap in the column, which is the trap `ui/character.rs`
+/// documents.
+pub(super) fn spawn_reconnect(panel: &mut ChildSpawnerCommands<'_>, extra: impl Bundle) {
+    panel
+        .spawn((
+            ReconnectButton,
+            Button,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Px(44.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                display: Display::None,
+                ..default()
+            },
+            BackgroundColor(BUTTON),
+            extra,
+        ))
+        .with_child((
+            Text::new(RECONNECT_LABEL),
+            TextFont {
+                font_size: FontSize::Px(18.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            TextShadow::default(),
+        ));
+}
 
 /// The line under the rows: why there are none, or why the last connection did not
 /// happen.
@@ -183,34 +224,8 @@ fn spawn_server_list(mut commands: Commands) {
                     ));
                     // Between the line and the refresh, which is the order a dropped
                     // player reads in: why the session ended, the way straight back
-                    // into it, and only then the way to look for a different one. It
-                    // is `Display::None` until there is somewhere to go back to —
-                    // `Visibility::Hidden` would leave its 44 pixels of gap in the
-                    // column, which is the trap `ui/character.rs` documents.
-                    panel
-                        .spawn((
-                            ReconnectButton,
-                            Button,
-                            Node {
-                                width: Val::Percent(100.0),
-                                height: Val::Px(44.0),
-                                align_items: AlignItems::Center,
-                                justify_content: JustifyContent::Center,
-                                border_radius: BorderRadius::all(Val::Px(4.0)),
-                                display: Display::None,
-                                ..default()
-                            },
-                            BackgroundColor(BUTTON),
-                        ))
-                        .with_child((
-                            Text::new(RECONNECT_LABEL),
-                            TextFont {
-                                font_size: FontSize::Px(18.0),
-                                ..default()
-                            },
-                            TextColor(Color::WHITE),
-                            TextShadow::default(),
-                        ));
+                    // into it, and only then the way to look for a different one.
+                    spawn_reconnect(panel, ());
                     panel
                         .spawn((
                             RetryButton,
