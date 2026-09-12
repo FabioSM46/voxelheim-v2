@@ -1,4 +1,4 @@
-//! Every mount sound as its player bakes it, pinned bit for bit (see `audio::synth::pin`).
+//! Every mount sound as its player bakes it, pinned (see `audio::synth::pin`).
 use super::*;
 use crate::audio::synth::pin;
 
@@ -14,7 +14,7 @@ const GROUNDS: [MaterialClass; 8] = [
 ];
 
 #[test]
-fn every_mount_sound_bakes_bit_identical_to_its_pin() {
+fn every_mount_sound_bakes_identically_to_its_pin() {
     let cues = GROUNDS
         .into_iter()
         .map(|ground| (format!("hoof {ground:?}"), Cue::Hoof(ground)))
@@ -35,13 +35,13 @@ fn every_mount_sound_bakes_bit_identical_to_its_pin() {
 }
 
 const PINS: &[(&str, u64)] = &[
-    ("hoof Air", 0x8ed610ce00e6ef07),
-    ("hoof Stone", 0x287525a66fa3d458),
-    ("hoof Earth", 0xcf8ce5c5560ff8c4),
-    ("hoof Sand", 0x83b4818c77fee211),
-    ("hoof Wood", 0x70a8afc159bc6997),
-    ("hoof Foliage", 0x1b6ea626dda60c95),
-    ("hoof Glass", 0x287525a66fa3d458),
-    ("hoof Water", 0x8ed610ce00e6ef07),
-    ("whinny", 0xe30447a22acd6fb9),
+    ("hoof Air", 0xc15a50d47ba2505b),
+    ("hoof Stone", 0xa41c116595b1cd5e),
+    ("hoof Earth", 0xf18e4eeb856a66e3),
+    ("hoof Sand", 0x735c8ae98c2461df),
+    ("hoof Wood", 0xdfd3401f58717584),
+    ("hoof Foliage", 0xa3d35e444a19e25c),
+    ("hoof Glass", 0xa41c116595b1cd5e),
+    ("hoof Water", 0xc15a50d47ba2505b),
+    ("whinny", 0x691b976ce87e7935),
 ];

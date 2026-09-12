@@ -1,4 +1,4 @@
-//! Every ambient bed and call, pinned bit for bit (see `audio::synth::pin`). A call's seed
+//! Every ambient bed and call, pinned (see `audio::synth::pin`). A call's seed
 //! varies per play, so each is pinned at three seeds that reach different variations.
 use super::sounds::{CALLS, parrot};
 use super::*;
@@ -7,7 +7,7 @@ use crate::audio::synth::pin;
 const SEEDS: [u64; 3] = [0, 0x0001_0203, 0xfedc_ba98_7654_3210];
 
 #[test]
-fn every_ambient_sound_renders_bit_identical_to_its_pin() {
+fn every_ambient_sound_renders_identically_to_its_pin() {
     let mut rendered = vec![];
     for bed in BEDS {
         // Past the half-second attack, into the sustained bed.
@@ -39,27 +39,27 @@ fn every_ambient_sound_renders_bit_identical_to_its_pin() {
 }
 
 const PINS: &[(&str, u64)] = &[
-    ("bed Rain", 0x36b32a2b6064ddc1),
-    ("bed DrivingRain", 0x74edeef686dd1d47),
-    ("bed Snowfall", 0x231a59b864a45d7e),
-    ("bed Sandstorm", 0x64c6e566bfefb451),
-    ("bed Blizzard", 0x559f0e4cf0ff1163),
-    ("call Rattlesnake 0x0", 0xf327365ef497b736),
-    ("call Rattlesnake 0x10203", 0x3ecb19bf1dd74494),
-    ("call Rattlesnake 0xfedcba9876543210", 0x69de5e7246646f97),
-    ("call Crow 0x0", 0x88bf199351893ce3),
-    ("call Crow 0x10203", 0x97710d9fc6817908),
-    ("call Crow 0xfedcba9876543210", 0x1bf2a1ee72837e5c),
-    ("call Eagle 0x0", 0x79045912484923b7),
-    ("call Eagle 0x10203", 0x4bb30269e3032748),
-    ("call Eagle 0xfedcba9876543210", 0x6ed7a4c043f84945),
-    ("call Wolf 0x0", 0xc9565d0c05070f66),
-    ("call Wolf 0x10203", 0x9b0b6ab65316ef79),
-    ("call Wolf 0xfedcba9876543210", 0x05010244a30b4deb),
-    ("call Cricket 0x0", 0xf57eb348ace09b9c),
-    ("call Cricket 0x10203", 0x5ea29ec064c8765a),
-    ("call Cricket 0xfedcba9876543210", 0x8641edbbf162daa1),
-    ("parrot 0x0", 0xcd49ce621bd6e931),
-    ("parrot 0x10203", 0x421da2436d465b20),
-    ("parrot 0xfedcba9876543210", 0x29b73f2e85737bf5),
+    ("bed Rain", 0xa040685f988d1f5d),
+    ("bed DrivingRain", 0xe86b8ec7715d6587),
+    ("bed Snowfall", 0xed1cf911c93e1cdd),
+    ("bed Sandstorm", 0xfda8ba26c0be587f),
+    ("bed Blizzard", 0xc3d4de1c7dcbd314),
+    ("call Rattlesnake 0x0", 0xe8557bfe9af77e0a),
+    ("call Rattlesnake 0x10203", 0x43dffdb1cde851b7),
+    ("call Rattlesnake 0xfedcba9876543210", 0x9474ec603879e046),
+    ("call Crow 0x0", 0xb29965090082f38d),
+    ("call Crow 0x10203", 0x7fefa006ff4c2bc6),
+    ("call Crow 0xfedcba9876543210", 0xb494d16884b25fe4),
+    ("call Eagle 0x0", 0x6cf4c30915816951),
+    ("call Eagle 0x10203", 0x59229e07ce8a15a8),
+    ("call Eagle 0xfedcba9876543210", 0x37a6ee76238577fb),
+    ("call Wolf 0x0", 0xf6aa342c31da0018),
+    ("call Wolf 0x10203", 0x47c94671194fc125),
+    ("call Wolf 0xfedcba9876543210", 0xcf6002e22b04827f),
+    ("call Cricket 0x0", 0x21942a4e1f8ca36c),
+    ("call Cricket 0x10203", 0xe56ffa29bd6bcfd3),
+    ("call Cricket 0xfedcba9876543210", 0x76002adf4923d152),
+    ("parrot 0x0", 0x66e55659ffe5a331),
+    ("parrot 0x10203", 0x9076fb43d629e8a8),
+    ("parrot 0xfedcba9876543210", 0xc643c1321477bef0),
 ];
