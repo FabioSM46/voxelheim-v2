@@ -1851,8 +1851,12 @@ enum RejoinBy {
 /// It is removed by whichever dial consumes it, before that dial can fail. So a rejoin
 /// that is itself refused reports the refusal and stops, which is what keeps this one
 /// return rather than a retry policy — `client/AGENTS.md` still says there is none.
+///
+/// **Public for its presence and nothing else.** `ui/session_ended.rs` must not draw an
+/// ending over the frames between a deliberate leave's close and the dial that replaces it;
+/// nothing outside this module inserts or removes it.
 #[derive(Resource, Debug, Default)]
-struct Rejoining;
+pub struct Rejoining;
 
 /// The local presentation clock for a server-owned leave duration.
 ///
