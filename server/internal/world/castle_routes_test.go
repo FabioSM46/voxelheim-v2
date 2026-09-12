@@ -95,3 +95,44 @@ func TestEastCastleRoomRoutesStayTwoCellsWideOnEveryFloor(t *testing.T) {
 		}
 	}
 }
+
+func TestCastleCurtainAndCornerLookoutsKeepTwoWideGuardedRoutes(t *testing.T) {
+	t.Parallel()
+	s := SchematicFor(BuildingKeep)
+	for _, r := range [][4]int{
+		{1, 2, 1, 61}, {60, 61, 1, 61}, {1, 61, 1, 2}, {1, 61, 60, 61},
+		{1, 7, 1, 7}, {55, 61, 1, 7}, {1, 7, 55, 61}, {55, 61, 55, 61},
+		{1, 5, 29, 30},
+	} {
+		for x := r[0]; x <= r[1]; x++ {
+			for z := r[2]; z <= r[3]; z++ {
+				if !standableCell(s, x, 13, z) {
+					t.Fatalf("curtain/lookout (%d,13,%d) lost floor or standing clearance", x, z)
+				}
+			}
+		}
+	}
+	for step := range 13 {
+		z := 43 - step
+		for x := 4; x <= 5; x++ {
+			if s.At(x, step, z) != SlateStairNorthBottom {
+				t.Fatalf("bailey tread (%d,%d,%d) is not a north stair", x, step, z)
+			}
+		}
+		for _, x := range []int{3, 6} {
+			if !Solid(s.At(x, step+1, z)) {
+				t.Fatalf("bailey guard (%d,%d,%d) missing", x, step+1, z)
+			}
+		}
+	}
+	for n := 9; n <= 53; n++ {
+		for _, cell := range [][2]int{{3, n}, {59, n}, {n, 3}, {n, 59}} {
+			if cell[0] == 3 && (cell[1] == 29 || cell[1] == 30) {
+				continue
+			}
+			if !Solid(s.At(cell[0], 13, cell[1])) {
+				t.Fatalf("curtain inner parapet (%d,13,%d) missing", cell[0], cell[1])
+			}
+		}
+	}
+}

@@ -525,7 +525,8 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // Version 31 opens the runic thresholds and protects their authored masonry.
 // 31 → 32: oriented slate stairs and the capital west wing circulation.
 // 32 → 33: the capital east wing staircases and their room access.
-const WorldgenVersion uint32 = 33
+// 33 → 34: shaped courtyard stairs and two-wide curtain/corner lookouts.
+const WorldgenVersion uint32 = 34
 
 // Generate builds the chunk at coord for seed.
 //
