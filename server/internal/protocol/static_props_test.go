@@ -99,3 +99,20 @@ func TestStaticPropsRefuseMalformedDescriptors(t *testing.T) {
 		t.Fatal("accepted missing origin")
 	}
 }
+
+func TestStaticPropsUseTheCompleteEnvelopeValidationPath(t *testing.T) {
+	prop := StaticPropState{PropID: 1, Kind: vnet.StaticPropKindThrone, Facing: vnet.FacingWest}
+	snapshot := EntitySnapshot{
+		// The same number may identify a player and a prop: namespaces are separate.
+		Entities:    []EntityState{{EntityID: 1, Health: 100, MaxHealth: 100}},
+		Vitals:      PlayerVitals{Health: 100, MaxHealth: 100, LifeState: vnet.LifeStateAlive},
+		StaticProps: []StaticPropState{prop},
+	}
+	if err := ValidateEntitySnapshot(EncodeEntitySnapshot(snapshot)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.StaticProps = append(snapshot.StaticProps, prop)
+	if err := ValidateEntitySnapshot(EncodeEntitySnapshot(snapshot)); err == nil {
+		t.Fatal("envelope validator skipped duplicate static props")
+	}
+}
