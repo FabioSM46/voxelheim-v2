@@ -32,6 +32,7 @@
 //! | `mod.rs` | input sampling, the send cadence, the bodies the snapshots drive |
 //! | `ambience.rs` | the cosmetic ground look read from loaded voxels around the eye |
 //! | `birds.rs` | the ambient birds: the species table, the flight paths and the flap |
+//! | `critters.rs` | the ambient ground creatures: the species table, the gaits, the ground they stand on and the climb that ends a life |
 //! | `interpolate.rs` | the two-snapshot buffer and the interpolation — pure, no Bevy world |
 //! | `drops.rs` | authoritative drop spawn/despawn and cosmetic cube motion |
 //! | `hands.rs` | the camera-space held item and its cosmetic swing |
@@ -56,6 +57,7 @@ mod combat;
 mod combat_audio;
 mod constants;
 mod crafting;
+mod critters;
 mod drops;
 pub(crate) mod encounters;
 mod hands;
