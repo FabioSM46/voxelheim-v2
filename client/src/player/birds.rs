@@ -22,9 +22,9 @@
 //! a replacement for one the anchor left behind is seeded on the far side of the move, so
 //! nothing appears in the view the player is walking into. Two conditions stop the flock
 //! outright, both read from `player/sky.rs` so that "it is night" and "the eye is under
-//! water" have one answer in this client rather than two: the birds roost once
-//! [`NIGHT_ROOST`] of the night has arrived, and they are hidden — not faded — while the eye
-//! is submerged.
+//! water" have one answer in this client rather than two: a bird roosts once the half of the
+//! day its row declares in [`BirdSpecies::flies`] has handed over, and they are hidden — not
+//! faded — while the eye is submerged.
 //!
 //! ## How high a bird is, and the one thing that overrides it
 //!
@@ -68,7 +68,7 @@ use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
-use super::sky::{self, SkyClock};
+use super::sky::{self, Period, SkyClock};
 use crate::net::{BlockCoord, ChunkCoord, Session};
 use crate::world::{ChunkStore, palette};
 
@@ -110,9 +110,6 @@ const BIRD_SEED: u64 = 0xB1BD_5EED_A17E_0F73;
 
 /// How far a wing swings either side of level, in radians.
 const FLAP_AMPLITUDE_RADIANS: f32 = 0.55;
-
-/// The share of the night at which the flock roosts.
-const NIGHT_ROOST: f32 = 0.5;
 
 /// How many re-seeds are tried before a replacement is accepted wherever it fell.
 ///
@@ -210,6 +207,17 @@ pub(super) struct BirdSpecies {
     /// Whether the look also has to be wooded. Parrots need trees, so an open plain has no
     /// parrots and a wood in the plains does.
     pub(super) requires_wooded: bool,
+    /// The half of the day this row is in the air.
+    ///
+    /// **A row's own, not a constant applied to every row.** The flock used to stop at a
+    /// fixed share of the night, which is the right answer for all three species that exist
+    /// and the wrong one for the first owl or bat: those fly at night by definition, so
+    /// *when* a bird flies belongs beside *where* it flies rather than inside the loop that
+    /// spawns it. The enum is [`Period`] — the same one the wildlife table's voices declare
+    /// in `ambient_sound/wildlife.rs` — so a nocturnal species and its call read one
+    /// definition of the half of the day, and the share it changes hands at is
+    /// [`super::sky::PERIOD_SWITCH`].
+    pub(super) flies: Period,
     /// How many of them fly together.
     pub(super) flock: RangeInclusive<u8>,
     /// How far above the anchor they fly, in blocks.
@@ -315,6 +323,7 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
     BirdSpecies {
         ground: GroundLook::Grass,
         requires_wooded: true,
+        flies: Period::Day,
         flock: 3..=5,
         altitude: 4.0..=12.0,
         // A macaw, and the only row whose real wingspan this is: at twelve blocks it already
@@ -336,6 +345,7 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
     BirdSpecies {
         ground: GroundLook::Sand,
         requires_wooded: false,
+        flies: Period::Day,
         flock: 2..=4,
         altitude: 25.0..=45.0,
         // A griffon vulture's own 2.6 m, which at forty-five blocks is 3.3°.
@@ -353,6 +363,7 @@ pub(super) const BIRDS: [BirdSpecies; 3] = [
     BirdSpecies {
         ground: GroundLook::Snow,
         requires_wooded: false,
+        flies: Period::Day,
         flock: 1..=2,
         altitude: 35.0..=60.0,
         // Larger than any eagle alive, because it flies fifteen blocks higher than the
@@ -1237,17 +1248,13 @@ pub(super) fn keep_the_flock(
     let anchor = anchor_of(cell);
     let elapsed = time.elapsed_secs();
 
-    // Roosted at night, and only when the server keeps a clock: `night_now` answers `None`
-    // for a world with no time of day, which flies them all day rather than never.
-    let roosting = session
+    // Roosted outside its own half of the day, and only when the server keeps a clock:
+    // `night_now` answers `None` for a world with no time of day, which flies every row all
+    // day rather than never — see [`Period::abroad`].
+    let night = session
         .as_deref()
-        .and_then(|session| sky::night_now(&clock, session))
-        .is_some_and(|night| night >= NIGHT_ROOST);
-    let wanted = if roosting {
-        None
-    } else {
-        species_for(&ambience)
-    };
+        .and_then(|session| sky::night_now(&clock, session));
+    let wanted = species_for(&ambience).filter(|index| BIRDS[*index].flies.abroad(night));
     let flock_seed = cell_seed(cell);
     // Read before the retirement pass, because how many this cell wants is what decides how
     // many of the previous cell's birds may stay.
