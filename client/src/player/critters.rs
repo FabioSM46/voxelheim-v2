@@ -29,9 +29,9 @@
 //! **Three things are new, and they are the whole of this module's interest.**
 //!
 //! - **The ground is the path rather than an obstacle.** A bird is *lifted* off the terrain
-//!   by [`birds`]'s clearance; a critter is *placed on* it. That is the same column probe
-//!   with the opposite sign and a far tighter tolerance — [`surface_under`] and
-//!   [`next_stand`] — and it means [`place`] cannot answer a critter's height at all. It
+//!   by `birds.rs`'s clearance; a critter is *placed on* it. That is the same column probe
+//!   with the opposite sign and a far tighter tolerance — `surface_under` and
+//!   `next_stand` (part two) — and it means [`place`] cannot answer a critter's height at all. It
 //!   answers where a critter is on the **horizontal plane**, and the terrain answers the
 //!   rest. Every box invariant here is therefore horizontal, which is the one structural
 //!   difference from `birds.rs` a reader has to hold on to.
@@ -41,9 +41,9 @@
 //!   [`generation_of`] is how that is expressed without storing a birth time: the life
 //!   window is a *function of the session clock*, so the critter alive in one slot at one
 //!   moment is decided by arithmetic rather than remembered.
-//! - **The climb needs a trunk, and a trunk is a fact about the world.** [`trunk_near`]
+//! - **The climb needs a trunk, and a trunk is a fact about the world.** `trunk_near` (part two)
 //!   looks for one when a critter is stood up, and that answer is written into the component
-//!   once and never again — the same category of spawn-time constant as `Critter::anchor` (part two).
+//!   once and never again — the same category of spawn-time constant as `Critter::anchor` (part three).
 //!   A critter that finds none simply fades where it is, and that is a real branch rather
 //!   than an unreachable one: `a_critter_with_no_trunk_forages_and_fades_where_it_is`
 //!   asserts it.
@@ -86,8 +86,8 @@
 //! against a 90,000 review cap, and a truncated review is one that comes back having read
 //! neither half.
 
-// **Removed by part two, and only by part two.** Nothing in this half has a caller in a
-// shipped build yet: the systems that would call it are what part two adds. It is scoped to
+// **Removed by part three, and only by part three.** Nothing in this half has a caller in a
+// shipped build yet: the systems that would call it are what part three adds. It is scoped to
 // this module and to this one lint, which is the form `client/AGENTS.md` asks for when a lint
 // has to be silenced at all — never a wider set and never workspace-wide — and it is the same
 // bargain `net/codec.rs` strikes for an outbound contract that ships before its consumer.
@@ -95,7 +95,7 @@
 // It is a blanket rather than forty-odd attributes because *every* item here is in that
 // position, and forty copies of one comment would say less than this one does. The risk it
 // carries is the honest one: while it is here, genuinely dead code would not be reported
-// either. That is bounded by its lifetime — part two deletes this line and the compiler then
+// either. That is bounded by its lifetime — part three deletes this line and the compiler then
 // has an opinion about every item below.
 #![allow(dead_code)]
 
@@ -157,7 +157,7 @@ const CRITTER_SEED: u64 = 0x5C01_7715_C0DE_1A75;
 
 /// How many re-seeds are tried before a replacement is accepted wherever it fell.
 ///
-/// The flock's [`birds`] reasoning applies unchanged: each try is one hash, about half land on
+/// The flock's `birds.rs` reasoning applies unchanged: each try is one hash, about half land on
 /// the far side, and the fallback is a real branch that
 /// `a_replacement_is_seeded_on_the_far_side_of_the_move` asserts.
 const FAR_SIDE_TRIES: u64 = 12;
@@ -189,7 +189,7 @@ const SCURRY_LEG_SECONDS: RangeInclusive<f32> = 1.8..=3.0;
 /// touches `1.5 * d / t`, not `d / t`. The longest dash is the diagonal of the waypoint box,
 /// `2 * SCURRY_SPREAD * sqrt(2)` = 4.24 blocks, over `0.6 * 1.8` = 1.08 seconds: 5.89 blocks a
 /// second at the peak, plus [`FORAGE_TRAVEL`] where the two happen to align. That is what
-/// [`CritterSpecies::max_speed`] is 6.5 for, and
+/// `CritterSpecies::max_speed` is 6.5 for, and
 /// `a_critter_moves_no_faster_than_its_row_allows` is what measures it rather than trusting
 /// this paragraph.
 const SCURRY_DASH_SHARE: f32 = 0.6;
@@ -348,7 +348,7 @@ impl CritterSpecies {
     }
 }
 
-/// Every kind of critter there is. Appended to, never reordered: `Critter::species` (part two) is an
+/// Every kind of critter there is. Appended to, never reordered: `Critter::species` (part three) is an
 /// index into this table and a critter alive across a reorder would change species on the
 /// ground.
 ///
@@ -474,18 +474,18 @@ fn generation_of(species: &CritterSpecies, slot: usize, elapsed: f32) -> (i64, f
 /// **Four of the five are fixed when the critter is stood up** — the row, the seed, the
 /// anchor and the trunk — and `age` is the clock. That is the flock's claim with one more
 /// constant in it, and the extra constant is the trunk, because where a tree is cannot be
-/// derived from a hash: [`trunk_near`] reads it out of the world once. A critter whose trunk
+/// derived from a hash: `trunk_near` (part two) reads it out of the world once. A critter whose trunk
 /// is `None` forages for its whole life and never rises, which is the documented fallback.
 ///
 /// **`trunk` must be within [`TRUNK_REACH`] of where this critter's forage ends**, which is
-/// what [`trunk_near`] answers within and what `keep_the_critters` searches from. It is a
+/// what `trunk_near` (part two) answers within and what `keep_the_critters` searches from. It is a
 /// precondition rather than a clamp because the approach's speed is derived from it: a trunk
 /// twice as far is an approach that walks twice as fast, and
 /// `a_critter_moves_no_faster_than_its_row_allows` would rather fail than have this function
 /// quietly cover for a caller that broke the chain.
 ///
 /// **The `y` it answers is the anchor's, and means nothing.** A critter's height is the
-/// ground's answer plus its climb, which [`next_stand`] and [`climb_rise`] own; everything
+/// ground's answer plus its climb, which `next_stand` (part two) and [`climb_rise`] own; everything
 /// here is `x` and `z`. Continuity is the property that matters and it is pinned —
 /// `a_critter_moves_no_faster_than_its_row_allows` walks every row's whole life at sixty
 /// samples a second and fails on a step longer than `max_speed * dt`.
@@ -694,7 +694,7 @@ mod tests {
     const DT: f32 = 1.0 / 60.0;
     /// The fastest a critter may be drawn climbing, in blocks per second.
     ///
-    /// A separate bound from [`CritterSpecies::max_speed`] because it bounds a separate
+    /// A separate bound from `CritterSpecies::max_speed` because it bounds a separate
     /// number: the gait's bound is on [`place`], which is horizontal, and the rise is a named
     /// step over it that `place` never sees. Nine blocks over 2.39 seconds is 3.77 on average
     /// and 5.65 at a smoothstep's peak, so six is the bound with the same one-and-a-half
@@ -705,15 +705,12 @@ mod tests {
         (species.life / DT).ceil() as usize
     }
 
-    #[test]
-    /// A store over every chunk a box of `reach` around `centre` touches, holding whatever
-    /// `block_at` names at each voxel and air wherever it names [`palette::AIR`].
+    /// The species gate: a row answers for the look it names, an unknown look gets nothing,
+    /// and no row lives on an answer that means "there is no answer".
     ///
-    /// Synthetic on purpose: the ground step's whole input is "what is in this column", so a
-    /// terrain a test can state in one closure is the only fixture it needs. It is
-    /// `birds.rs`'s clamp fixture with the block moved *into* the closure rather than beside
-    /// it, which is what the trunk search needs: a wood is a floor **and** a log, and two
-    /// kinds of block in one store cannot be stated by a predicate over one.
+    /// The only coverage of `species_for`'s `None` on sand and snow — the macaw-parity test
+    /// below asserts the two tables agree rather than asserting either one's answer.
+    #[test]
     fn one_row_per_look_and_no_row_answers_an_unknown_one() {
         assert_eq!(species_for(&Ambience::default()), None);
         assert_eq!(
