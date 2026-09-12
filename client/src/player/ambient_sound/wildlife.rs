@@ -36,9 +36,12 @@
 //! shipped sound comes from and belongs to the issue that adds a creature which needs it, not
 //! to the refactor that wrote the rule down.
 
+use bevy::prelude::Vec3;
+
 use super::sounds::Call;
 use crate::player::ambience::{Ambience, GroundLook};
 use crate::player::birds;
+use crate::player::critters;
 use crate::player::sky::Period;
 
 /// What makes a voice present where the eye is.
@@ -47,6 +50,16 @@ pub(super) enum Habitat {
     /// The country's ground look alone, wooded or not. A creature with no body needs no
     /// more than this: the rattlesnake is heard over sand because the ground is sand.
     Ground(GroundLook),
+    /// Exactly where [`critters::species_for`] answers one row of [`critters::CRITTERS`].
+    ///
+    /// **The ground half of "seen and heard"**, and the first habitat on the near side of the
+    /// origin rule at the top of this file: a critter is drawn where the player can walk up to
+    /// it, so its voice is placed at its body rather than on a circle. It is a variant of its
+    /// own rather than a `Ground` row with the same look, for the reason [`Habitat::Flock`]
+    /// is: the table that *draws* the species is where its habitat is already written down,
+    /// and a sound lane keeping a second opinion about where a visible species lives is
+    /// exactly #1176.
+    Critter(usize),
     /// Exactly where [`birds::species_for`] answers one row of [`birds::BIRDS`].
     ///
     /// **For a creature that is seen as well as heard**, whose gate is the table that draws
@@ -61,6 +74,7 @@ impl Habitat {
     fn present(self, ambience: &Ambience) -> bool {
         match self {
             Self::Ground(ground) => ambience.ground == ground,
+            Self::Critter(species) => critters::species_for(ambience) == Some(species),
             Self::Flock(species) => birds::species_for(ambience) == Some(species),
         }
     }
@@ -102,7 +116,7 @@ pub(super) struct Voice {
 /// |---|---|---|
 /// | sand | rattlesnake | crow |
 /// | snow | eagle | wolf |
-/// | grass | macaw, where the bird table flies it | cricket |
+/// | grass | macaw, where the bird table flies it; squirrel, where the critter table stands it | cricket |
 ///
 /// `GroundLook::Unknown` is deliberately absent and so is the open plain's day: "not enough
 /// loaded evidence" is silence, exactly as it is an empty sky in [`birds::BIRDS`], rather
@@ -118,8 +132,8 @@ pub(super) struct Voice {
 /// full the call that asks first is heard and the next one is **dropped, not queued**
 /// (`audio/mixer.rs`).
 ///
-/// So the rows are ordered **seen-and-heard first**: every [`Habitat::Flock`] row precedes
-/// every [`Habitat::Ground`] row, and
+/// So the rows are ordered **seen-and-heard first**: every [`Habitat::Flock`] and
+/// [`Habitat::Critter`] row precedes every [`Habitat::Ground`] row, and
 /// `a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot` holds it. A voice
 /// falling silent while the player is watching the animal that owns it is a worse failure
 /// than an off-screen call going unheard — which is the same reasoning as the origin rule at
@@ -128,7 +142,16 @@ pub(super) struct Voice {
 ///
 /// A new species that is drawn as well as heard belongs with the macaw, above the ground-only
 /// rows. `pins.rs` renders in this order too; seeds do not depend on it ([`Voice::stream`]).
-pub(super) const WILDLIFE: [Voice; 6] = [
+///
+/// **The squirrel is the first row to take that instruction**, and it is worth saying why it
+/// is not a `Ground(Grass)` row even though a squirrel is on the ground. `Ground` means "the
+/// country's look is the whole of what makes this voice present", which is true of a creature
+/// nobody can see and false of one the player can walk up to: the squirrel's gate is the table
+/// that stands it there, and its voice comes from its body. Placing it among the ground rows
+/// would also put it below the cricket in the claim order, which is the one outcome the
+/// paragraph above exists to prevent — a squirrel scolding three blocks away falling silent so
+/// that an unseen cricket can be heard.
+pub(super) const WILDLIFE: [Voice; 7] = [
     // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
     // plain has no species and another country has another one, and neither hosts the call
     // (#1176). It had a lane of its own until the table could hold a habitat that is not the
@@ -138,6 +161,15 @@ pub(super) const WILDLIFE: [Voice; 6] = [
         habitat: Habitat::Flock(PARROT),
         period: Period::Day,
         stream: 0,
+    },
+    // The squirrel, heard by day exactly where the critter table stands it: the same wooded
+    // grass the macaw needs, read from the same `Ambience::wooded`. Second rather than sixth
+    // because it is seen as well as heard — see the claim order above.
+    Voice {
+        call: Call::Squirrel,
+        habitat: Habitat::Critter(SQUIRREL),
+        period: Period::Day,
+        stream: 0x9865,
     },
     Voice {
         call: Call::Rattlesnake,
@@ -174,6 +206,39 @@ pub(super) const WILDLIFE: [Voice; 6] = [
 
 /// The macaw's row in [`birds::BIRDS`], which is appended to and never reordered.
 pub(super) const PARROT: usize = 0;
+
+/// The squirrel's row in [`critters::CRITTERS`], which is appended to and never reordered.
+pub(super) const SQUIRREL: usize = 0;
+
+impl Habitat {
+    /// The body this habitat's voice should come from, if one is drawn.
+    ///
+    /// **The first half of the origin rule at the top of this file, as one function.** A
+    /// [`Habitat::Critter`] row answers the nearest drawn critter of its own species, because
+    /// the nearest is the one the player is most likely to be looking at and a voice arriving
+    /// from the far one while a near one sits in front of them is the same bug the rule
+    /// describes. Every other habitat answers `None` and keeps the bearing.
+    ///
+    /// **The macaw deliberately answers `None` too**, though it is drawn. Moving a shipped
+    /// sound from a bearing to a body changes where it comes from, and this file has said
+    /// since the table was written that the change belongs to the issue that needs it rather
+    /// than to the one that wrote the rule down. Nothing about the macaw's lane moves here,
+    /// which is also what keeps its three pin rows untouched.
+    pub(super) fn body(self, drawn: &[(usize, Vec3)], eye: Vec3) -> Option<Vec3> {
+        let Self::Critter(species) = self else {
+            return None;
+        };
+        drawn
+            .iter()
+            .filter(|(row, _)| *row == species)
+            .min_by(|a, b| {
+                (a.1 - eye)
+                    .length_squared()
+                    .total_cmp(&(b.1 - eye).length_squared())
+            })
+            .map(|(_, at)| *at)
+    }
+}
 
 impl Voice {
     /// How loudly this voice belongs where the eye is, right now: its habitat's yes or no

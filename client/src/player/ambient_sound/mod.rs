@@ -8,6 +8,7 @@ use super::{
     Weather,
     ambience::Ambience,
     camera::{AimCamera, WorldCamera},
+    critters::Critter,
     sky::{self, SkyClock},
 };
 use crate::{
@@ -96,6 +97,12 @@ struct Inputs<'w, 's> {
     clock: Res<'w, SkyClock>,
     store: Option<Res<'w, ChunkStore>>,
     eyes: Query<'w, 's, &'static Transform, With<WorldCamera>>,
+    /// Every critter drawn right now, for the half of the origin rule that places a voice at
+    /// the creature it belongs to. Read-only and by row, so this lane knows *which species is
+    /// where* without knowing anything else about one — it holds no opinion about where a
+    /// critter lives, which is `critters::CRITTERS`'s to answer and `Habitat::Critter`'s to
+    /// ask (#1176 is what a second opinion costs).
+    critters: Query<'w, 's, (&'static Critter, &'static Transform), Without<WorldCamera>>,
 }
 
 fn update(input: Inputs, mut country: ResMut<Country>) {
@@ -141,12 +148,31 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
     }
     // One lane per row of the table, the macaw's included: it had a lane of its own until a
     // habitat could be something other than the ground, and folding it in changed no seed.
+    // Where each species is drawn, gathered once rather than per lane. Empty when nothing is
+    // on the ground, which is the fallback branch the origin rule names: a voice with no body
+    // keeps its bearing, because silence is never the fallback.
+    let drawn: Vec<(usize, Vec3)> = input
+        .critters
+        .iter()
+        .map(|(critter, at)| (critter.species, at.translation))
+        .collect();
     for (index, voice) in WILDLIFE.iter().enumerate() {
         country.wildlife_gains[index] += (target.wildlife[index] - country.wildlife_gains[index])
             * (1.0 - (-dt / controller::FADE_SECONDS).exp());
         let gain = country.wildlife_gains[index];
         let call = voice.call;
         let profile = call.profile();
+        // **The origin rule, and the whole of where it is applied.** A voice whose creature is
+        // drawn is placed *at that creature*: the origin is its body and the bearing circle
+        // collapses to nothing, so the sound moves when it moves and is occluded by what
+        // stands between. A voice with no body keeps the row's bearing at the row's radius and
+        // height. Which of the two applies is a property of the creature rather than of the
+        // frame — `Habitat::body` answers for the habitat and never looks at the clock — and
+        // silence is not one of the options.
+        let (origin, radius, height) = match voice.habitat.body(&drawn, eye_position) {
+            Some(body) => (body, 0.0, 0.0),
+            None => (eye_position, profile.radius, profile.height),
+        };
         country.wildlife[index].update(
             mixer,
             CallFrame {
@@ -156,9 +182,9 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
                 // without moving a call that ships today.
                 seed: seed.wrapping_add(voice.stream),
                 interval: profile.interval,
-                radius: profile.radius,
-                height: profile.height,
-                origin: eye_position,
+                radius,
+                height,
+                origin,
                 gain,
             },
             |source| {
