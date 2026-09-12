@@ -21,6 +21,17 @@ const FIRE_RANGE: f32 = 12.0;
 /// The hammer is a bright transient over silence; below unity it stays in the yard it is in.
 const FORGE_GAIN: f32 = 0.6;
 const FIRE_GAIN: f32 = 1.0;
+/// The benches are quiet work, heard by whoever is standing at them rather than across the
+/// yard: every one carries less far than a fire, and the assertion keeps it that way.
+const LEATHER_RANGE: f32 = 8.0;
+const ARMOUR_RANGE: f32 = 10.0;
+const ENCHANTING_RANGE: f32 = 6.0;
+const LEATHER_GAIN: f32 = 0.5;
+const ARMOUR_GAIN: f32 = 0.45;
+const ENCHANTING_GAIN: f32 = 0.7;
+const _: () = assert!(
+    LEATHER_RANGE <= FIRE_RANGE && ARMOUR_RANGE <= FIRE_RANGE && ENCHANTING_RANGE <= FIRE_RANGE
+);
 /// Half the world's eight slots leaves room for wilderness beds and effects. At most two
 /// of each kind prevents a row of forges from erasing the fires. The mixer may grant fewer,
 /// always protects its Voice/Master reserve, and may revoke this lower-priority ambience.
@@ -45,11 +56,17 @@ impl Candidate {
         let kind = match structure.kind {
             StructureKind::Forge => Kind::Forge,
             StructureKind::Campfire if structure.lit => Kind::Fire,
-            _ => return None,
+            StructureKind::LeatherBench => Kind::Leather,
+            StructureKind::ArmourBench => Kind::Armour,
+            StructureKind::EnchantingTable => Kind::Enchanting,
+            StructureKind::Campfire | StructureKind::Tent | StructureKind::Runestone => {
+                return None;
+            }
         };
         let anchor = structure.anchor;
         // Anchor is the ground voxel. The source is half a block above its top, centred
-        // horizontally on the anvil/fire rather than inside the floor that supports it.
+        // horizontally on the anchor cell — the anvil, the fire, the cuirass form or the
+        // lectern — rather than inside the floor that supports it.
         let origin = Vec3::new(
             anchor.x as f32 + 0.5,
             anchor.y as f32 + 1.5,
@@ -92,6 +109,18 @@ fn carry(kind: Kind) -> Carry {
             range: FIRE_RANGE,
             gain: FIRE_GAIN,
         },
+        Kind::Leather => Carry {
+            range: LEATHER_RANGE,
+            gain: LEATHER_GAIN,
+        },
+        Kind::Armour => Carry {
+            range: ARMOUR_RANGE,
+            gain: ARMOUR_GAIN,
+        },
+        Kind::Enchanting => Carry {
+            range: ENCHANTING_RANGE,
+            gain: ENCHANTING_GAIN,
+        },
     }
 }
 
@@ -111,13 +140,9 @@ fn nearest(structures: &[StructureState], eye: Vec3) -> Vec<Candidate> {
                 .is_lt()
         });
         selected.insert(index, candidate);
-        let mut forges = 0;
-        let mut fires = 0;
+        let mut counts = [0; Kind::COUNT];
         selected.retain(|candidate| {
-            let count = match candidate.kind {
-                Kind::Forge => &mut forges,
-                Kind::Fire => &mut fires,
-            };
+            let count = &mut counts[candidate.kind.index()];
             *count += 1;
             *count <= PER_KIND
         });

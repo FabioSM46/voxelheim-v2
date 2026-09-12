@@ -587,7 +587,7 @@ impl StructureKind {
     /// to draw them. V39's three benches are accepted before they have models, on the
     /// precedent `MobKind::VargrGuardian` set: the server really places them from V39 on,
     /// and refusing a member it really sends would end the session the first time somebody
-    /// put a bench down in view. Their footprints are mirrored and their models are #1129.
+    /// put a bench down in view. Their footprints were mirrored then; their models are #1129.
     fn from_wire(value: fb::StructureKind) -> Option<Self> {
         match value {
             fb::StructureKind::Tent => Some(Self::Tent),

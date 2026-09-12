@@ -397,12 +397,79 @@ fn a_village_forge_across_the_settlement_is_silent_from_its_edge() {
     assert_eq!(ids(&inside), vec![4]);
 }
 
+/// Every kind a recipe is made at makes a working sound, read off the recipe mirror so a
+/// new station arriving silent fails here; and the ones that are not stations — a tent, a
+/// runestone — make none. The campfire is a station and is heard while lit; a doused one
+/// is the douse test's.
+#[test]
+fn every_craft_station_has_a_sound_and_no_other_structure_does() {
+    let eye = Vec3::new(4.5, 4.5, 4.5);
+    for kind in [
+        StructureKind::Tent,
+        StructureKind::Forge,
+        StructureKind::Campfire,
+        StructureKind::Runestone,
+        StructureKind::LeatherBench,
+        StructureKind::ArmourBench,
+        StructureKind::EnchantingTable,
+    ] {
+        let station = crate::player::recipes_made_at(Some(kind)).next().is_some();
+        let heard = Candidate::from_structure(&structure(1, kind, 4), eye);
+        assert_eq!(heard.is_some(), station, "{kind:?}");
+    }
+    for (structure_kind, kind) in [
+        (StructureKind::LeatherBench, Kind::Leather),
+        (StructureKind::ArmourBench, Kind::Armour),
+        (StructureKind::EnchantingTable, Kind::Enchanting),
+    ] {
+        let candidate = Candidate::from_structure(&structure(1, structure_kind, 4), eye)
+            .expect("a bench beside the listener is heard");
+        assert_eq!(candidate.kind, kind);
+    }
+}
+
+#[test]
+fn the_benches_carry_no_further_than_a_fire_and_no_louder_than_a_fire() {
+    for (kind, range, gain) in [
+        (Kind::Leather, 8.0, 0.5),
+        (Kind::Armour, 10.0, 0.45),
+        (Kind::Enchanting, 6.0, 0.7),
+    ] {
+        assert_eq!(carry(kind), Carry { range, gain });
+        assert!(range <= FIRE_RANGE && gain <= FIRE_GAIN, "{kind:?}");
+    }
+}
+
+#[test]
+fn each_bench_is_heard_beside_it_on_its_side_and_silent_past_its_range() {
+    for (kind, range) in [
+        (StructureKind::LeatherBench, LEATHER_RANGE),
+        (StructureKind::ArmourBench, ARMOUR_RANGE),
+        (StructureKind::EnchantingTable, ENCHANTING_RANGE),
+    ] {
+        // Two blocks to the listener's right; long enough to include a pause and a stroke.
+        let (mut app, mixer) = fixture(vec![structure(1, kind, 6)], None);
+        let near = hear(&mut app, &mixer, 800);
+        assert!(
+            near[1] > 0.0 && near[0] < near[1] * 0.01,
+            "{kind:?} beside the listener: {near:?}"
+        );
+        // The eye is at x = 4.5 and a structure at x sounds from x + 0.5.
+        snapshot(&mut app, vec![structure(1, kind, 4 + range as i32)]);
+        assert_eq!(hear(&mut app, &mixer, 100), [0.0; 2], "{kind:?}");
+        assert!(ids(&app).is_empty());
+    }
+}
+
 #[test]
 fn no_city_source_is_admitted_or_placed_outside_the_distance_curve() {
     let origin = Vec3::new(0.5, 4.5, 4.5);
     for (structure_kind, kind) in [
         (StructureKind::Forge, Kind::Forge),
         (StructureKind::Campfire, Kind::Fire),
+        (StructureKind::LeatherBench, Kind::Leather),
+        (StructureKind::ArmourBench, Kind::Armour),
+        (StructureKind::EnchantingTable, Kind::Enchanting),
     ] {
         let carry = carry(kind);
         for step in 0..=160 {
