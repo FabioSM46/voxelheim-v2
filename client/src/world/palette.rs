@@ -134,6 +134,14 @@ pub const WINTER_BRAMBLE: BlockId = 54;
 pub const RUNE_STONE: BlockId = 55;
 pub const PORTAL_VEIL: BlockId = 56;
 pub const PORTAL_HEART: BlockId = 57;
+/// Vertical iron bars arranged along X; the second orientation swaps X and Z.
+pub const IRON_GRILLE_X: BlockId = 58;
+pub const IRON_GRILLE_Z: BlockId = 59;
+pub const BOUNDS_SCALE: f32 = 20.0;
+const IRON_GRILLE_LINEAR: [f32; 3] = [0.055, 0.065, 0.075];
+pub const fn is_grille(block: BlockId) -> bool {
+    matches!(block, IRON_GRILLE_X | IRON_GRILLE_Z)
+}
 
 pub fn is_portal(block: BlockId) -> bool {
     matches!(block, PORTAL_VEIL | PORTAL_HEART)
@@ -145,6 +153,7 @@ pub enum ShapeKind {
     Cube,
     Slab,
     Stair,
+    Grille,
 }
 
 /// The vertical half a slab or stair is anchored to.
@@ -172,11 +181,11 @@ pub struct BlockShape {
     pub material: BlockId,
 }
 
-/// One axis-aligned piece of a block shape, in half-block coordinates.
+/// One axis-aligned piece of a block shape, in twentieth-block coordinates.
 ///
 /// The server carries the same bounds as floats in local voxel coordinates. Keeping
-/// this mirror on the exact `0..=2` half-grid makes every comparison integer while
-/// still describing the only boundaries slabs and stairs use.
+/// this mirror on the exact `0..=20` grid makes every comparison integer while
+/// also describing the narrow bars of a grille without float comparisons.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BlockBounds {
     pub min: [u8; 3],
@@ -185,7 +194,7 @@ pub struct BlockBounds {
 
 const FULL_BLOCK_BOUNDS: BlockBounds = BlockBounds {
     min: [0, 0, 0],
-    max: [2, 2, 2],
+    max: [20, 20, 20],
 };
 
 /// Decodes geometry and material; unknown ids fail closed as solid cubes.
@@ -197,6 +206,13 @@ pub const fn shape_of(block: BlockId) -> BlockShape {
         material: block,
     };
     match block {
+        IRON_GRILLE_X | IRON_GRILLE_Z => {
+            shape.kind = ShapeKind::Grille;
+            shape.material = IRON_GRILLE_X;
+            if block == IRON_GRILLE_Z {
+                shape.facing = ShapeFacing::East;
+            }
+        }
         SLATE_SLAB_BOTTOM => {
             shape.kind = ShapeKind::Slab;
             shape.material = SLATE_TILE;
@@ -247,6 +263,20 @@ pub fn collision_bounds(block: BlockId) -> ([BlockBounds; 2], usize) {
 
     let shape = shape_of(block);
     match shape.kind {
+        ShapeKind::Grille => {
+            for (i, bar) in bounds.iter_mut().enumerate() {
+                let x = 4 + i as u8 * 10;
+                *bar = BlockBounds {
+                    min: [x, 0, 9],
+                    max: [x + 2, 20, 11],
+                };
+                if block == IRON_GRILLE_Z {
+                    bar.min.swap(0, 2);
+                    bar.max.swap(0, 2);
+                }
+            }
+            (bounds, 2)
+        }
         ShapeKind::Cube => {
             bounds[0] = FULL_BLOCK_BOUNDS;
             (bounds, 1)
@@ -254,13 +284,13 @@ pub fn collision_bounds(block: BlockId) -> ([BlockBounds; 2], usize) {
         ShapeKind::Slab => {
             bounds[0] = if shape.half == ShapeHalf::Top {
                 BlockBounds {
-                    min: [0, 1, 0],
-                    max: [2, 2, 2],
+                    min: [0, 10, 0],
+                    max: [20, 20, 20],
                 }
             } else {
                 BlockBounds {
                     min: [0, 0, 0],
-                    max: [2, 1, 2],
+                    max: [20, 10, 20],
                 }
             };
             (bounds, 1)
@@ -268,31 +298,31 @@ pub fn collision_bounds(block: BlockId) -> ([BlockBounds; 2], usize) {
         ShapeKind::Stair => {
             bounds[0] = if shape.half == ShapeHalf::Top {
                 BlockBounds {
-                    min: [0, 1, 0],
-                    max: [2, 2, 2],
+                    min: [0, 10, 0],
+                    max: [20, 20, 20],
                 }
             } else {
                 BlockBounds {
                     min: [0, 0, 0],
-                    max: [2, 1, 2],
+                    max: [20, 10, 20],
                 }
             };
             bounds[1] = if shape.half == ShapeHalf::Top {
                 BlockBounds {
                     min: [0, 0, 0],
-                    max: [2, 1, 2],
+                    max: [20, 10, 20],
                 }
             } else {
                 BlockBounds {
-                    min: [0, 1, 0],
-                    max: [2, 2, 2],
+                    min: [0, 10, 0],
+                    max: [20, 20, 20],
                 }
             };
             match shape.facing {
-                ShapeFacing::North => bounds[1].max[2] = 1,
-                ShapeFacing::East => bounds[1].min[0] = 1,
-                ShapeFacing::South => bounds[1].min[2] = 1,
-                ShapeFacing::West => bounds[1].max[0] = 1,
+                ShapeFacing::North => bounds[1].max[2] = 10,
+                ShapeFacing::East => bounds[1].min[0] = 10,
+                ShapeFacing::South => bounds[1].min[2] = 10,
+                ShapeFacing::West => bounds[1].max[0] = 10,
             }
             (bounds, 2)
         }
@@ -301,12 +331,12 @@ pub fn collision_bounds(block: BlockId) -> ([BlockBounds; 2], usize) {
 
 /// Whether one of the eight half-block cells is occupied by `block`.
 pub fn occupies_half(block: BlockId, half: [u8; 3]) -> bool {
-    if half.iter().any(|coordinate| *coordinate >= 2) {
+    if is_grille(block) || half.iter().any(|coordinate| *coordinate >= 2) {
         return false;
     }
     let (bounds, count) = collision_bounds(block);
     bounds[..count].iter().any(|bounds| {
-        (0..3).all(|axis| half[axis] >= bounds.min[axis] && half[axis] < bounds.max[axis])
+        (0..3).all(|axis| half[axis] * 10 >= bounds.min[axis] && half[axis] * 10 < bounds.max[axis])
     })
 }
 
@@ -464,7 +494,7 @@ pub fn is_solid(block: BlockId) -> bool {
 /// this predicate and [`is_solid`] are false for it: a bush is no longer a
 /// rendering-only exception to either.
 pub fn is_opaque(block: BlockId) -> bool {
-    block != AIR && !is_water(block) && !is_cover(block) && !is_portal(block)
+    !is_grille(block) && block != AIR && !is_water(block) && !is_cover(block) && !is_portal(block)
 }
 
 /// What a block is made of.
@@ -544,7 +574,7 @@ pub fn material_class(block: BlockId) -> MaterialClass {
 /// The palette in the order a reader wants to see it. Test-only: production code
 /// asks [`linear_rgba`] about one block at a time.
 #[cfg(test)]
-pub const PALETTE: [BlockId; 57] = [
+pub const PALETTE: [BlockId; 59] = [
     STONE,
     DIRT,
     GRASS,
@@ -602,6 +632,8 @@ pub const PALETTE: [BlockId; 57] = [
     RUNE_STONE,
     PORTAL_VEIL,
     PORTAL_HEART,
+    IRON_GRILLE_X,
+    IRON_GRILLE_Z,
 ];
 
 /// How much of what is behind it a voxel of water lets through — 0 is invisible, 1 is a
@@ -861,6 +893,8 @@ pub fn linear_rgba(block: BlockId) -> [f32; 4] {
         DARK_TIMBER => DARK_TIMBER_LINEAR,
         PALE_TIMBER => PALE_TIMBER_LINEAR,
         DARK_GLASS => DARK_GLASS_LINEAR,
+        IRON_GRILLE_X => IRON_GRILLE_LINEAR,
+        IRON_GRILLE_Z => IRON_GRILLE_LINEAR,
         SLATE_SLAB_BOTTOM => SLATE_SLAB_BOTTOM_LINEAR,
         SLATE_SLAB_TOP => SLATE_SLAB_TOP_LINEAR,
         SLATE_STAIR_NORTH_BOTTOM => SLATE_STAIR_NORTH_BOTTOM_LINEAR,
@@ -885,6 +919,34 @@ mod tests {
 
     /// Everything the water family holds is water and nothing else is, so a caller that
     /// wants to know whether a voxel is a liquid never has to enumerate eleven ids.
+    #[test]
+    fn grille_bounds_are_sparse_and_never_cull_neighbours() {
+        for block in [IRON_GRILLE_X, IRON_GRILLE_Z] {
+            assert!(is_solid(block));
+            assert!(!is_opaque(block));
+            assert!(!is_greedy_opaque(block));
+            let (bars, count) = collision_bounds(block);
+            assert_eq!(count, 2);
+            let (width, depth) = if block == IRON_GRILLE_X {
+                (0, 2)
+            } else {
+                (2, 0)
+            };
+            assert_eq!(bars[0].min[width], 4);
+            assert_eq!(bars[0].max[width], 6);
+            assert_eq!(bars[1].min[width], 14);
+            assert_eq!(bars[1].max[width], 16);
+            for bar in bars {
+                assert_eq!((bar.min[depth], bar.max[depth]), (9, 11));
+            }
+            for axis in 0..3 {
+                for positive in [false, true] {
+                    assert_eq!(opaque_face_mask(block, axis, positive), 0);
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_water_family_is_exactly_the_water_class() {
         for block in 0..=(WINTER_BRAMBLE + 8) {
@@ -1081,7 +1143,7 @@ mod tests {
         assert!(!is_opaque(AIR));
         assert!(!is_opaque(WATER));
         for block in PALETTE {
-            if is_water(block) || is_cover(block) || is_portal(block) {
+            if is_water(block) || is_cover(block) || is_portal(block) || is_grille(block) {
                 assert!(!is_opaque(block), "block {block} must hide nothing");
                 continue;
             }
@@ -1136,7 +1198,7 @@ mod tests {
     #[test]
     fn every_declared_block_id_has_a_colour() {
         let unknown = [UNKNOWN_LINEAR[0], UNKNOWN_LINEAR[1], UNKNOWN_LINEAR[2], 1.0];
-        for block in 1..=PORTAL_HEART {
+        for block in 1..=IRON_GRILLE_Z {
             assert_ne!(
                 linear_rgba(block),
                 unknown,
@@ -1232,11 +1294,11 @@ mod tests {
     fn slate_shape_bounds_are_the_servers_half_block_collision_boxes() {
         let lower = BlockBounds {
             min: [0, 0, 0],
-            max: [2, 1, 2],
+            max: [20, 10, 20],
         };
         let upper = BlockBounds {
-            min: [0, 1, 0],
-            max: [2, 2, 2],
+            min: [0, 10, 0],
+            max: [20, 20, 20],
         };
         assert_eq!(
             collision_bounds(SLATE_SLAB_BOTTOM),
@@ -1250,28 +1312,28 @@ mod tests {
         let directional = [
             BlockBounds {
                 min: [0, 0, 0],
-                max: [2, 2, 1],
+                max: [20, 20, 10],
             },
             BlockBounds {
-                min: [1, 0, 0],
-                max: [2, 2, 2],
+                min: [10, 0, 0],
+                max: [20, 20, 20],
             },
             BlockBounds {
-                min: [0, 0, 1],
-                max: [2, 2, 2],
+                min: [0, 0, 10],
+                max: [20, 20, 20],
             },
             BlockBounds {
                 min: [0, 0, 0],
-                max: [1, 2, 2],
+                max: [10, 20, 20],
             },
         ];
         for (offset, direction) in directional.into_iter().enumerate() {
             let bottom = SLATE_STAIR_NORTH_BOTTOM + offset as BlockId;
             let top = SLATE_STAIR_NORTH_TOP + offset as BlockId;
             let mut bottom_high = direction;
-            bottom_high.min[1] = 1;
+            bottom_high.min[1] = 10;
             let mut top_low = direction;
-            top_low.max[1] = 1;
+            top_low.max[1] = 10;
             assert_eq!(collision_bounds(bottom), ([lower, bottom_high], 2));
             assert_eq!(collision_bounds(top), ([upper, top_low], 2));
         }
