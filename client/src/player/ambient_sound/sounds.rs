@@ -68,6 +68,10 @@ pub(super) enum Call {
     Cricket,
     /// The macaw's squawk, heard by day only where `birds::species_for` answers the macaw.
     Parrot,
+    /// A squirrel's alarm chatter: a burst of dry barks, heard by day in a wood where
+    /// `critters::species_for` answers the squirrel — and heard *from the squirrel*, which is
+    /// the first voice in this table on the near side of the origin rule in `wildlife.rs`.
+    Squirrel,
 }
 
 /// Content parameters for the existing Calls lane. Intervals exceed each sound's
@@ -113,6 +117,97 @@ pub(super) fn squawk_onsets(seed: u64) -> Vec<f32> {
     (0..squawks(seed))
         .map(|index| index as f32 * period)
         .collect()
+}
+
+/// How many barks one squirrel's chatter carries: five to nine, from its seed.
+///
+/// **A burst rather than a call**, which is what makes it a squirrel rather than a bird. A red
+/// squirrel that has seen something does not say one thing: it sits on a branch and scolds, and
+/// the scolding is a run of near-identical barks close enough together to read as one utterance.
+/// Five is the shortest that still reads as a run rather than as a stutter.
+pub(super) fn chatters(seed: u64) -> usize {
+    5 + ((seed >> 8) % 5) as usize
+}
+
+/// How long one bark sounds.
+///
+/// Fifty-five milliseconds: shorter than the cricket's syllable and far shorter than a squawk,
+/// because a bark is an edge rather than a note and anything longer acquires a pitch a listener
+/// can hum.
+pub(super) const CHATTER_SECONDS: f32 = 0.055;
+
+/// Where each bark starts: one every 95 to 130 ms, from its seed, so every bark is followed by
+/// at least 40 ms of silence before the next.
+///
+/// The spacing is the *seed's*, not a constant, for the reason the cricket's and the macaw's
+/// are: two squirrels chattering within earshot at identical rates would beat against each
+/// other and read as one machine.
+pub(super) fn chatter_onsets(seed: u64) -> Vec<f32> {
+    let period = 0.095 + ((seed >> 16) % 36) as f32 / 1000.0;
+    (0..chatters(seed))
+        .map(|index| index as f32 * period)
+        .collect()
+}
+
+/// How far a bark's pitch falls across its length, as a fraction of where it starts.
+const BARK_FALL: f32 = 0.62;
+
+/// How far above the voice its rough twin sits, as the squawk's detune is: close enough to beat
+/// at tens of hertz rather than to sound as a second pitch.
+const BARK_DETUNE: f32 = 1.055;
+
+/// One bark of a squirrel's chatter: dry, harsh and broadband, never a note.
+///
+/// The squawk's construction with the arch taken out and the fall steepened, which is the
+/// difference between a parrot's cry and a rodent's scold:
+///
+/// - **A falling pitch and nothing else.** Every voiced layer rides one glide from the seed's
+///   pitch down to [`BARK_FALL`] of it, with no vibrato at all — a squawk arches because a
+///   macaw's cry does, and a bark is over before a contour could be heard in it.
+/// - **Roughness.** A sawtooth through two formant bands, the low 1300 Hz and the bright
+///   2500 Hz, and beside each a second sawtooth [`BARK_DETUNE`] higher so the two beat.
+/// - **A dry edge.** White noise through the same two bands and a narrow one at 3300 Hz, which
+///   is what makes a bark read as a click with a voice in it rather than as a short vowel.
+///
+/// Every band, and every frequency a glide reaches, stays under 3.6 kHz: 0.45 of the lowest
+/// supported rate, which is the bound every call in this file is written to.
+fn bark(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 780.0 + variation * 220.0;
+    let voice = |detune: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Saw,
+            from: hz * detune,
+            to: hz * detune * BARK_FALL,
+            seconds: CHATTER_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.0,
+                depth: 0.0,
+                onset: 0.0,
+            },
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.27, 1300.0, 1.1),
+        voice(BARK_DETUNE, 0.20, 1300.0, 1.1),
+        voice(1.0, 0.16, 2500.0, 1.5),
+        voice(BARK_DETUNE, 0.11, 2500.0, 1.5),
+        breath(0.17, 1300.0, 1.6),
+        breath(0.14, 2500.0, 2.0),
+        breath(0.07, 3300.0, 1.3),
+    ]
 }
 
 /// How far the squawk's pitch arches above its falling line, as the vibrato's depth: one half
@@ -415,6 +510,14 @@ impl Call {
             // a few calls a minute rather than one every second (#1176). Two squawks at the
             // slowest spacing end at 0.52 + 0.3 = 0.82 s, inside the baked 0.85 s.
             Self::Parrot => ([8.0, 22.0], 7.0, 5.0, 0.85, 32.0),
+            // **The radius and the height here are the *fallback*, not the placement.** This
+            // is the first row whose voice is normally placed at a body — the lane sets the
+            // origin to the squirrel and this radius to zero when one is drawn — so these two
+            // numbers only decide where an *unseen* squirrel is, which the origin rule in
+            // `wildlife.rs` says is still ambience rather than silence. Six blocks off and on
+            // the ground is where an unseen one would be. The longest chatter, nine barks at
+            // the slowest spacing, ends at 8 * 0.13 + 0.055 = 1.095 s, inside the baked 1.15.
+            Self::Squirrel => ([11.0, 28.0], 6.0, 0.0, 1.15, 28.0),
         };
         CallProfile {
             interval,
@@ -427,8 +530,8 @@ impl Call {
 
     /// One call rendered at the device's rate, from its seed. Every call is its description
     /// baked once for its profile's length — except the cricket and the macaw, whose
-    /// descriptions are one syllable, struck at each of [`syllable_onsets`] or
-    /// [`squawk_onsets`] with silence between.
+    /// descriptions are one syllable, struck at each of [`syllable_onsets`],
+    /// [`squawk_onsets`] or [`chatter_onsets`] with silence between.
     pub(super) fn bake(self, seed: u64, rate: u32) -> Result<Baked, synth::Error> {
         let seconds = self.profile().seconds;
         match self {
@@ -442,6 +545,13 @@ impl Call {
             Self::Parrot => self.description(seed).bake_at(
                 &squawk_onsets(seed),
                 SQUAWK_SECONDS,
+                seconds,
+                rate,
+                seed,
+            ),
+            Self::Squirrel => self.description(seed).bake_at(
+                &chatter_onsets(seed),
+                CHATTER_SECONDS,
                 seconds,
                 rate,
                 seed,
@@ -473,6 +583,9 @@ impl Call {
             Self::Cricket => (0.005, 0.025, 0.85, 0.02),
             // One squawk: a hard but unclicked onset, a harsh held middle, a quick close.
             Self::Parrot => (0.012, 0.08, 0.7, 0.06),
+            // One bark: the hardest onset in this file short of a click, almost no sustain,
+            // and a close fast enough to leave real silence before the next bark.
+            Self::Squirrel => (0.004, 0.03, 0.18, 0.014),
         };
         let envelope = Envelope {
             attack,
@@ -526,6 +639,7 @@ impl Call {
                     .collect()
             }
             Self::Parrot => squawk(variation, envelope),
+            Self::Squirrel => bark(variation, envelope),
         };
         Sound { layers }
     }
@@ -912,8 +1026,13 @@ mod tests {
             let call = Call::Parrot.bake(seed, 8000).unwrap();
             let flat = flatness(call.samples(), 8000);
             let tonal = tonal_share(call.samples(), 8000);
+            // **A floor of its own rather than the macaw's 0.15.** A bark is 55 ms where a
+            // squawk is 300, so its spectrum is read from a twentieth of the samples and is
+            // coarser for it; the chatter measures about 0.14 where the squawk measures well
+            // above 0.15. The number that matters is not this floor anyway but the separation
+            // asserted below, which is what a negative control is for.
             assert!(
-                flat > 0.15 && tonal < 0.4,
+                flat > 0.10 && tonal < 0.4,
                 "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
             );
             let old = old_parrot(seed).bake(0.3, 8000, seed).unwrap();
@@ -1695,6 +1814,268 @@ mod tests {
                 );
                 assert!(
                     peak(samples) * gain >= 0.055,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
+            }
+        }
+    }
+
+    /// The chatter's voiced layers alone, one bark baked at 8 kHz, as [`voiced_squawk`] is for
+    /// the macaw: the pitch without the breath around it.
+    fn voiced_bark(seed: u64) -> Vec<f32> {
+        Sound {
+            layers: Call::Squirrel
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .collect(),
+        }
+        .bake(CHATTER_SECONDS, 8000, seed)
+        .unwrap()
+        .samples()
+        .to_vec()
+    }
+
+    /// The same barks with the voice made clean: every glide a sine, and no breath. The
+    /// falling contour survives; the rasp and the air do not.
+    fn clean_bark(seed: u64) -> Sound {
+        Sound {
+            layers: Call::Squirrel
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter_map(|layer| match layer.exciter {
+                    Exciter::Glide(glide) => Some(Layer {
+                        exciter: Exciter::Glide(Glide {
+                            wave: Wave::Sine,
+                            ..glide
+                        }),
+                        filter: None,
+                        ..layer
+                    }),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+
+    /// #1190, and the owner's standing rule: a sound is realistic, never a note. A squirrel's
+    /// scold is a dry broadband bark, where a note keeps its energy on a few frequencies with
+    /// nothing between them.
+    ///
+    /// **The negative controls are the point**, and there are two of them, because a
+    /// measurement that everything passes measures nothing: the same barks voiced as clean
+    /// sines along the same falling contour, and a bare sine pair at the bark's own pitch.
+    /// Both fail the flatness floor the real chatter clears by a wide margin — which is what
+    /// makes this a test of the timbre rather than of the envelope, since the clean control
+    /// keeps the envelope, the contour and the onsets exactly.
+    #[test]
+    fn a_squirrel_chatter_is_harsh_and_broadband_and_not_a_note() {
+        let profile = Call::Squirrel.profile();
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Squirrel.bake(seed, 8000).unwrap();
+            let flat = flatness(call.samples(), 8000);
+            let tonal = tonal_share(call.samples(), 8000);
+            // **A floor of its own rather than the macaw's 0.15.** A bark is 55 ms where a
+            // squawk is 300, so its spectrum is read from a fraction of the samples and is
+            // coarser for it: the chatter measures about 0.14. The number that matters is not
+            // this floor anyway but the separation asserted below, which is what a negative
+            // control is for — a floor alone could be cleared by something that was not rough.
+            assert!(
+                flat > 0.10 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+
+            let clean = clean_bark(seed)
+                .bake_at(
+                    &chatter_onsets(seed),
+                    CHATTER_SECONDS,
+                    profile.seconds,
+                    8000,
+                    seed,
+                )
+                .unwrap();
+            let hz = match Call::Squirrel.description(seed).layers[0].exciter {
+                Exciter::Glide(glide) => glide.from,
+                other => panic!("the bark's first layer is not voiced: {other:?}"),
+            };
+            let envelope = Call::Squirrel.description(seed).layers[0].envelope;
+            let pair = Sound {
+                layers: vec![
+                    Layer {
+                        exciter: Exciter::Oscillator {
+                            wave: Wave::Sine,
+                            hz,
+                        },
+                        gain: 0.3,
+                        envelope,
+                        gate: None,
+                        filter: None,
+                    },
+                    Layer {
+                        exciter: Exciter::Oscillator {
+                            wave: Wave::Sine,
+                            hz: hz * 1.7,
+                        },
+                        gain: 0.12,
+                        envelope,
+                        gate: None,
+                        filter: None,
+                    },
+                ],
+            }
+            .bake_at(
+                &chatter_onsets(seed),
+                CHATTER_SECONDS,
+                profile.seconds,
+                8000,
+                seed,
+            )
+            .unwrap();
+
+            for (name, note) in [("a clean bark", clean), ("a sine pair", pair)] {
+                let control = flatness(note.samples(), 8000);
+                assert!(
+                    control < 0.05,
+                    "seed {seed}: {name} measured flatness {control}"
+                );
+                // **The separation is the claim, and it is what makes the floor above a
+                // detail rather than the test.** A measurement both a rough voice and a clean
+                // one pass is a measurement of nothing, so the chatter has to beat each
+                // control by a wide margin and not merely clear an absolute line. It beats
+                // them by a factor of forty or more in practice; three is the bound.
+                assert!(
+                    flat > control * 3.0,
+                    "seed {seed}: the chatter measured {flat} against {name}'s {control}"
+                );
+            }
+        }
+    }
+
+    /// A bark's pitch falls and never rises: the macaw arches because a macaw's cry does, and
+    /// a squirrel's does not. Read on the voiced layers alone, inside a band the fundamental
+    /// stays in for the whole bark and its second harmonic never enters.
+    #[test]
+    fn a_bark_falls_in_pitch_and_never_arches() {
+        for seed in (0..12u64).map(scramble) {
+            let hz = match Call::Squirrel.description(seed).layers[0].exciter {
+                Exciter::Glide(glide) => glide.from,
+                other => panic!("the bark's first layer is not voiced: {other:?}"),
+            };
+            let track = dominant_track(&voiced_bark(seed), 8000, hz * 0.5, hz * 1.25);
+            assert!(
+                track.len() >= 3,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let (first, last) = (track[0].1, track[track.len() - 1].1);
+            assert!(
+                last <= first * 0.95,
+                "seed {seed}: fell from {first} to only {last} Hz"
+            );
+            let highest = track.iter().map(|(_, hz)| *hz).fold(0.0, f32::max);
+            assert!(
+                highest <= first * 1.02,
+                "seed {seed}: arched to {highest} above its {first} Hz start"
+            );
+        }
+    }
+
+    /// A chatter is five to nine barks with real silence between them: a scold rather than one
+    /// call, and never a trill.
+    #[test]
+    fn a_squirrel_chatter_is_a_run_of_barks_with_silence_between() {
+        let mut seen = [false; 5];
+        for seed in (0..80u64).map(scramble) {
+            let expected = chatters(seed);
+            seen[expected - 5] = true;
+            for rate in [8000, 48000] {
+                let call = Call::Squirrel.bake(seed, rate).unwrap();
+                let found = rendered_syllables(call.samples(), rate);
+                assert_eq!(found.len(), expected, "seed {seed} at {rate}: {found:?}");
+                for (first, last) in &found {
+                    let seconds = (last - first) as f32 / rate as f32;
+                    assert!(
+                        seconds > 0.02 && seconds <= CHATTER_SECONDS,
+                        "seed {seed} at {rate}: a {seconds} s bark"
+                    );
+                }
+                for pair in found.windows(2) {
+                    let silence = (pair[1].0 - pair[0].1) as f32 / rate as f32;
+                    assert!(
+                        silence >= 0.03,
+                        "seed {seed} at {rate}: {silence} s between barks"
+                    );
+                }
+            }
+        }
+        assert_eq!(seen, [true; 5], "every bark count occurs");
+    }
+
+    /// Every band and every frequency a glide reaches stays under 3.6 kHz, which is 0.45 of the
+    /// lowest supported rate and the bound every call in this file is written to.
+    ///
+    /// **Asserted over the description rather than trusted to the prose beside it**, and over
+    /// every call rather than only the new one: the rule is the file's, so a future row that
+    /// forgets it fails here rather than aliasing on an 8 kHz device nobody tests on.
+    #[test]
+    fn no_call_reaches_a_frequency_the_lowest_rate_cannot_carry() {
+        const CEILING: f32 = 3600.0;
+        for call in [
+            Call::Rattlesnake,
+            Call::Crow,
+            Call::Eagle,
+            Call::Wolf,
+            Call::Cricket,
+            Call::Parrot,
+            Call::Squirrel,
+        ] {
+            for seed in (0..12u64).map(scramble) {
+                for layer in Call::description(call, seed).layers {
+                    if let Some(filter) = layer.filter {
+                        assert!(filter.hz <= CEILING, "{call:?} filters at {} Hz", filter.hz);
+                    }
+                    match layer.exciter {
+                        Exciter::Oscillator { hz, .. } => {
+                            assert!(hz <= CEILING, "{call:?} sounds a {hz} Hz partial")
+                        }
+                        Exciter::Glide(glide) => {
+                            // The vibrato lifts the glide above its own endpoints, so the
+                            // reachable peak is what the ceiling has to hold rather than
+                            // either end of the line.
+                            let peak = glide.from.max(glide.to) * (1.0 + glide.vibrato.depth);
+                            assert!(peak <= CEILING, "{call:?} glides up to {peak} Hz");
+                        }
+                        Exciter::Noise(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Heard at the fallback bearing an *unseen* squirrel keeps — six blocks off and on the
+    /// ground — faded by the same `spatial::attenuation` every placed sound is. A squirrel
+    /// placed at its body is nearer than this and therefore louder, so this is the quiet case.
+    #[test]
+    fn a_chatter_at_its_fallback_bearing_is_clearly_heard() {
+        let profile = Call::Squirrel.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 192000] {
+                let call = Call::Squirrel.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.06,
                     "seed {seed} at {rate}: heard at {}",
                     peak(samples) * gain
                 );

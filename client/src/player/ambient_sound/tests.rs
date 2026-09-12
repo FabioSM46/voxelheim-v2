@@ -7,7 +7,7 @@ use crate::player::sky::{PERIOD_SWITCH, Period};
 use crate::world::{VoxelChunk, palette};
 use sounds::Call;
 use std::sync::Arc;
-use wildlife::{Habitat, PARROT, Voice, row_of};
+use wildlife::{Habitat, PARROT, SQUIRREL, Voice, row_of};
 
 struct Buffer(Vec<f32>);
 impl Sink for Buffer {
@@ -97,11 +97,17 @@ fn sky_curve_crossfades_and_ground_alone_selects_green_country() {
         .filter(|voice| gain_of(&wood, voice.call) != gain_of(&plain, voice.call))
         .map(|voice| voice.call)
         .collect();
-    assert_eq!(moved, vec![Call::Parrot]);
-    assert_eq!(
-        (gain_of(&wood, Call::Parrot), gain_of(&plain, Call::Parrot)),
-        (0.7, 0.0)
-    );
+    // Two lanes the trees move since #1190, not one: the macaw in the canopy and the squirrel
+    // under it. Both read the same `Ambience::wooded` through the table that draws them, which
+    // is the whole of what trees decide here — no bed moves, and no other country's voice does.
+    assert_eq!(moved, vec![Call::Parrot, Call::Squirrel]);
+    for call in [Call::Parrot, Call::Squirrel] {
+        assert_eq!(
+            (gain_of(&wood, call), gain_of(&plain, call)),
+            (0.7, 0.0),
+            "{call:?}"
+        );
+    }
 }
 
 /// #1176: the day call played on every sunny grass tile, because a treeless plain has no
@@ -183,11 +189,18 @@ fn a_simulated_day(ambience: Ambience) -> Vec<f32> {
         .collect()
 }
 
-/// #1176: one call every 0.7 to 2.5 s was close to a continuous bed. A day in the macaw's
-/// wood now hears a few calls a minute, and most of every minute is silence; an open plain
-/// hears nothing at all.
+/// #1176: one call every 0.7 to 2.5 s was close to a continuous bed. A day in the wood now
+/// hears a few calls a minute, and most of every minute is silence; an open plain hears
+/// nothing at all.
+///
+/// **Two voices share that wood since #1190**, so the rate this measures is their sum: the
+/// macaw calls every 8 to 22 s and the squirrel every 11 to 28, which is about four and about
+/// three a minute, less whatever the counter merges when the two overlap. The band is widened
+/// to admit it rather than the test narrowed to the macaw, because what this test is actually
+/// for is the #1176 property — that a wood is mostly silent — and that is a claim about
+/// everything audible in it rather than about one lane.
 #[test]
-fn a_simulated_day_in_a_wood_hears_a_few_squawks_a_minute_and_a_plain_hears_none() {
+fn a_simulated_day_in_a_wood_hears_a_few_calls_a_minute_and_a_plain_hears_none() {
     let levels = a_simulated_day(grass());
     // A call is at most 0.85 s and the next starts at least 8 s later, so a sound after two
     // silent seconds is a new call.
@@ -203,7 +216,7 @@ fn a_simulated_day_in_a_wood_hears_a_few_squawks_a_minute_and_a_plain_hears_none
     }
     let per_minute = calls as f32 / 10.0;
     assert!(
-        (2.0..=6.0).contains(&per_minute),
+        (2.0..=9.0).contains(&per_minute),
         "{per_minute} calls a minute"
     );
     let silent = levels.iter().filter(|level| **level == 0.0).count();
@@ -557,14 +570,21 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             }
         }
     }
-    // Wooded grass at dusk is the one cell with two voices in it: the macaw going quiet as
-    // the cricket comes up, each at half, and no other country's creature sounding at all.
+    // Wooded grass at dusk is the cell where the day hands over to the night: the macaw and
+    // the squirrel going quiet together as the cricket comes up, each at half, and no other
+    // country's creature sounding at all. The sum is one per *period* rather than one
+    // outright, which is what `Period::share` promises — two day voices and one night voice
+    // crossing at dusk is 1.5, and it was 1.0 when the wood had one of each.
     let dusk = targets(&grass(), 0.5, None);
     assert_eq!(
-        (gain_of(&dusk, Call::Parrot), gain_of(&dusk, Call::Cricket)),
-        (0.5, 0.5)
+        (
+            gain_of(&dusk, Call::Parrot),
+            gain_of(&dusk, Call::Squirrel),
+            gain_of(&dusk, Call::Cricket)
+        ),
+        (0.5, 0.5, 0.5)
     );
-    assert_eq!(dusk.wildlife.iter().sum::<f32>(), 1.0);
+    assert_eq!(dusk.wildlife.iter().sum::<f32>(), 1.5);
     assert_eq!(
         targets(&Ambience::default(), 0.5, None).wildlife,
         [0.0; VOICES]
@@ -797,8 +817,10 @@ fn the_table_answers_every_country_and_half_of_the_day() {
             (GroundLook::Sand, _, true) => vec![Call::Crow],
             (GroundLook::Snow, _, false) => vec![Call::Eagle],
             (GroundLook::Snow, _, true) => vec![Call::Wolf],
-            // Wooded grass is the one cell with a seen-and-heard species in it.
-            (GroundLook::Grass, true, false) => vec![Call::Parrot],
+            // Wooded grass is the one cell with seen-and-heard species in it, and since
+            // #1190 there are two of them: the macaw in the canopy and the squirrel under it,
+            // both gated on the same `Ambience::wooded`. In table order, which is claim order.
+            (GroundLook::Grass, true, false) => vec![Call::Parrot, Call::Squirrel],
             (GroundLook::Grass, false, false) => vec![],
             (GroundLook::Grass, _, true) => vec![Call::Cricket],
             // Not enough loaded evidence is silence, never a default creature.
@@ -916,7 +938,12 @@ fn a_species_declared_nocturnal_is_not_heard_by_day() {
 /// the macaw and the cricket both sit at half.
 #[test]
 fn a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot() {
-    let seen = |voice: &Voice| matches!(voice.habitat, Habitat::Flock(_));
+    // **Both habitats that name a creature the eye can find**, not just the flock. A squirrel
+    // is drawn where the player can walk up to it, so a `Critter` row is as much a
+    // seen-and-heard row as a `Flock` one — and reading this predicate as "flock" would let a
+    // critter row sink below the ground rows while the test went on passing, which is the one
+    // outcome the claim order exists to prevent.
+    let seen = |voice: &Voice| matches!(voice.habitat, Habitat::Flock(_) | Habitat::Critter(_));
     let last_seen = WILDLIFE.iter().rposition(seen);
     let first_unseen = WILDLIFE.iter().position(|voice| !seen(voice));
     assert!(
@@ -933,6 +960,95 @@ fn a_creature_that_can_be_seen_claims_its_slot_before_one_that_cannot() {
         (0.5, 0.5)
     );
     // And the macaw is still the first lane updated, exactly as it was when it had a lane of
-    // its own ahead of the five ground ones.
+    // its own ahead of the five ground ones; the squirrel took the row under it rather than
+    // displacing it, so no contested slot changed hands.
     assert_eq!(row_of(Call::Parrot), 0);
+    assert_eq!(row_of(Call::Squirrel), 1);
+    // Not vacuous: there is a seen row and an unseen one for the order to be about.
+    assert!(WILDLIFE.iter().any(seen) && WILDLIFE.iter().any(|voice| !seen(voice)));
+}
+
+/// The origin rule in `wildlife.rs`, as the two answers it gives.
+///
+/// **A voice whose creature is drawn comes from that creature; one whose creature is not keeps
+/// its bearing.** Which of the two applies is a property of the creature rather than of the
+/// frame, so this is asserted on the habitat rather than on a rendered frame: `Habitat::body`
+/// is the whole of the decision, and the lane does nothing with its answer but place a sound.
+#[test]
+fn a_voice_that_belongs_to_a_visible_creature_is_placed_at_it() {
+    let eye = Vec3::new(10.0, 64.0, 10.0);
+    let squirrel = Habitat::Critter(SQUIRREL);
+
+    // Nothing drawn: no body, so the lane falls back to the bearing. Silence is never the
+    // fallback, which is why this answers `None` rather than suppressing the voice.
+    assert_eq!(squirrel.body(&[], eye), None);
+    // A critter of another row is not this row's body.
+    assert_eq!(squirrel.body(&[(1, Vec3::ZERO)], eye), None);
+
+    // Drawn: the body, and the *nearest* one when several are, because the nearest is the one
+    // the player is most likely to be looking at.
+    let near = eye + Vec3::new(3.0, 0.0, 0.0);
+    let far = eye + Vec3::new(-20.0, 0.0, 12.0);
+    assert_eq!(squirrel.body(&[(SQUIRREL, near)], eye), Some(near));
+    assert_eq!(
+        squirrel.body(&[(SQUIRREL, far), (SQUIRREL, near)], eye),
+        Some(near),
+        "the far squirrel spoke over the near one"
+    );
+    // And it is nearest to the *eye* rather than to the origin, which a bare `length()` would
+    // get wrong for any player who has walked away from 0, 0. The vantage is chosen so the two
+    // orderings disagree: from here `far` is the closer of the two, while measured from the
+    // origin it is the further — so a comparison on length alone answers `near` and puts the
+    // chatter in the wrong squirrel.
+    let vantage = Vec3::new(-12.0, 64.0, 20.0);
+    assert!(
+        far.length() > near.length(),
+        "the two squirrels order the same way from the origin, so this proves nothing"
+    );
+    assert_eq!(
+        squirrel.body(&[(SQUIRREL, far), (SQUIRREL, near)], vantage),
+        Some(far)
+    );
+
+    // Every other habitat keeps its bearing, the macaw included: it is drawn, but moving a
+    // shipped sound from a bearing to a body is a change to where it comes from, and
+    // `wildlife.rs` has said since the table was written that it belongs to the issue that
+    // needs it. Nothing about the macaw's lane moved here, which is what kept its pins intact.
+    for habitat in [
+        Habitat::Flock(PARROT),
+        Habitat::Ground(GroundLook::Grass),
+        Habitat::Ground(GroundLook::Sand),
+        Habitat::Ground(GroundLook::Snow),
+    ] {
+        assert_eq!(
+            habitat.body(&[(SQUIRREL, near)], eye),
+            None,
+            "{habitat:?} took a body it does not own"
+        );
+    }
+}
+
+/// The squirrel is heard exactly where it is drawn, and the two tables are what agree on it.
+#[test]
+fn the_squirrel_is_heard_exactly_where_the_critter_table_stands_it() {
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            let ambience = Ambience { ground, wooded };
+            let heard = gain_of(&targets(&ambience, 0.0, None), Call::Squirrel) > 0.0;
+            let drawn = crate::player::critters::species_for(&ambience) == Some(SQUIRREL);
+            assert_eq!(
+                heard, drawn,
+                "{ground:?}/{wooded}: heard {heard}, drawn {drawn}"
+            );
+        }
+    }
+    // And it is a day voice: the same wood after dark has the cricket instead.
+    let night = targets(&grass(), 1.0, None);
+    assert_eq!(gain_of(&night, Call::Squirrel), 0.0);
+    assert!(gain_of(&night, Call::Cricket) > 0.0);
 }
