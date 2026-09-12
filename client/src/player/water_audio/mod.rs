@@ -61,11 +61,22 @@ const OCCLUSION_PERIOD: Duration = Duration::from_millis(100);
 /// Where an entry is heard from, above the feet: at the surface the body went through,
 /// which is where the water is thrown from.
 const SPLASH_HEIGHT: f32 = 0.2;
-/// The frame gaps a downward speed may be read from, in seconds. Shorter than the first is
-/// a division that magnifies interpolation noise into a dive; longer than the second and
-/// the body could have done anything in between. Outside the window the entry is the
-/// gentlest one there is rather than a guess.
-const SPEED_WINDOW: (f32, f32) = (0.002, 0.25);
+/// The shortest and longest windows a downward speed may be read over, in seconds.
+///
+/// **The short end is a floor on the window, not a filter on the frame**, and that
+/// distinction is the whole of what the review of #1197 found. Dividing one frame's fall by
+/// one frame's duration is only as good as the duration: at a thousand frames a second the
+/// quotient turns a fraction of a block of interpolation noise into a dive, which is why a
+/// floor exists at all. But *discarding* the sample under that floor made every entry a
+/// [`Force::Step`] on any client running faster than 500 Hz — the acceptance criterion
+/// exactly inverted, a dive off a cliff sounding like a step off a bank. So the sample a
+/// speed is measured against is **held across frames until it is this old** rather than
+/// replaced every frame, and the window is frame-rate independent at both ends.
+///
+/// The long end stays a filter on the sample: a reference older than this says nothing about
+/// how the body arrived, and an entry measured against one is the gentlest entry rather than
+/// a guess.
+const FALL_WINDOW: (f32, f32) = (0.002, 0.25);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cue {
@@ -82,11 +93,15 @@ struct Voice {
 }
 
 /// One drawn body as the last frame that looked saw it.
+///
+/// The position and the instant here are the **fall reference**, not last frame's: held
+/// across frames until the reference is [`FALL_WINDOW`]`.0` old rather than replaced every
+/// frame, so the speed at an entry is read over a real window however fast the client runs.
 #[derive(Clone, Copy)]
 struct Seen {
     in_water: bool,
-    feet: Vec3,
-    at: Instant,
+    fall_from: Vec3,
+    fall_at: Instant,
 }
 
 #[derive(Resource, Default)]
@@ -119,6 +134,15 @@ pub(super) fn reset_world(world: &mut World) {
 /// hold reads as air through [`ChunkStore::block_at`] and therefore as not water, which is
 /// the same direction the server's `Terrain.Fluid` answers an absent chunk in — a body over
 /// unloaded world is not reported as swimming.
+///
+/// **The span is the server's arithmetic and not an approximation of it.** `voxelSpan` in
+/// `server/internal/game/collide.go` is `floor(lo)` to `ceil(hi) - 1`, which is a half-open
+/// band: a face lying exactly on a voxel boundary touches the voxel *below* it and not the
+/// one above. Flooring both ends instead differs at an integral maximum, and that is not a
+/// corner case here — the mounted box is a whole block wide, so every block-centred x and z
+/// lands on one, and a body whose feet sit 0.2 above a boundary has an integral top. The
+/// direction it was wrong in was the expensive one: a splash for a body the server calls
+/// dry, from a water voxel the box only grazed. Found in review on #1197.
 pub(super) fn in_water(
     store: &ChunkStore,
     feet: Vec3,
@@ -128,11 +152,10 @@ pub(super) fn in_water(
 ) -> bool {
     let half = width * 0.5;
     let span = |low: f32, high: f32| {
-        let (low, high) = (low.floor(), high.floor());
         if !low.is_finite() || !high.is_finite() {
             return None;
         }
-        Some((low as i32)..=(high as i32))
+        Some((low.floor() as i32)..=(high.ceil() as i32 - 1))
     };
     let (Some(xs), Some(ys), Some(zs)) = (
         span(feet.x - half, feet.x + half),
@@ -249,19 +272,41 @@ impl Waters {
         for &body in bodies {
             let (width, height) = body.size();
             let wet = in_water(frame.store, body.feet, width, height, frame.size);
-            let now = Seen {
-                in_water: wet,
-                feet: body.feet,
-                at: frame.now,
-            };
-            let before = self.seen.insert(body.key, now);
+            let before = self.seen.get(&body.key).copied();
+            // The fall reference, carried forward until it is old enough to divide by. See
+            // `FALL_WINDOW`: a frame is not a window, and at a high frame rate the two
+            // differ by enough to turn every dive into a step.
+            let (mut fall_from, mut fall_at) = (body.feet, frame.now);
+            if let Some(before) = before {
+                let age = frame
+                    .now
+                    .saturating_duration_since(before.fall_at)
+                    .as_secs_f32();
+                if age < FALL_WINDOW.0 {
+                    (fall_from, fall_at) = (before.fall_from, before.fall_at);
+                }
+            }
+            self.seen.insert(
+                body.key,
+                Seen {
+                    in_water: wet,
+                    fall_from,
+                    fall_at,
+                },
+            );
             if let Some(before) = before
                 && wet
                 && !before.in_water
             {
-                let gap = frame.now.saturating_duration_since(before.at).as_secs_f32();
-                let down = if (SPEED_WINDOW.0..=SPEED_WINDOW.1).contains(&gap) {
-                    (before.feet.y - body.feet.y) / gap
+                let window = frame
+                    .now
+                    .saturating_duration_since(before.fall_at)
+                    .as_secs_f32();
+                // A window of no length is the one case there is nothing to divide by: the
+                // gentlest entry, never a guess. Everything else is a real measurement over
+                // a window the reference above guarantees the length of.
+                let down = if window > 0.0 && window <= FALL_WINDOW.1 {
+                    (before.fall_from.y - body.feet.y) / window
                 } else {
                     0.0
                 };

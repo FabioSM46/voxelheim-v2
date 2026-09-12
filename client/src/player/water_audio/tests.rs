@@ -61,8 +61,14 @@ impl Fixture {
     }
 
     fn frame(&self, millis: u64) -> Frame<'_> {
+        self.at(Duration::from_millis(millis))
+    }
+
+    /// A frame at an exact offset from the fixture's start, for the frame rates a
+    /// millisecond cannot express.
+    fn at(&self, elapsed: Duration) -> Frame<'_> {
         Frame {
-            now: self.now + Duration::from_millis(millis),
+            now: self.now + elapsed,
             store: &self.store,
             size: 32,
             eye: Some(&self.eye),
@@ -101,6 +107,118 @@ fn descent(drop: f32, holds: usize) -> Vec<f32> {
     }
     heights.extend(std::iter::repeat_n(1.5, holds));
     heights
+}
+
+/// Found in review on #1197. The box test is the server's `overlapsFluid`, whose
+/// `voxelSpan` is `floor(lo)` to `ceil(hi) - 1` — a half-open band. A face lying exactly on
+/// a voxel boundary therefore touches the voxel below it and not the one above, and
+/// flooring both ends instead reported water the box only grazed.
+#[test]
+fn a_face_exactly_on_a_voxel_boundary_touches_the_voxel_below_it_and_not_above() {
+    let air = || {
+        let mut store = ChunkStore::default();
+        store.insert(
+            ChunkCoord {
+                cx: 0,
+                cy: 0,
+                cz: 0,
+            },
+            VoxelChunk::all_air(32),
+        );
+        store
+    };
+    // One sheet of water at y = 5 with nothing but air under it: an overhang, or the lip
+    // of a fall. A body whose top is exactly 5.0 does not touch it.
+    let mut above = air();
+    for x in 0..9 {
+        for z in 0..9 {
+            above.apply_block(BlockCoord { x, y: 5, z }, palette::WATER, 32);
+        }
+    }
+    let top_at_five = Vec3::new(4.5, 5.0 - PLAYER_HEIGHT, 4.5);
+    assert_eq!(top_at_five.y + PLAYER_HEIGHT, 5.0, "the top is integral");
+    assert!(!in_water(
+        &above,
+        top_at_five,
+        PLAYER_WIDTH,
+        PLAYER_HEIGHT,
+        32
+    ));
+    // A hair higher and it does: the box now reaches into voxel 5.
+    assert!(in_water(
+        &above,
+        top_at_five + Vec3::Y * 0.01,
+        PLAYER_WIDTH,
+        PLAYER_HEIGHT,
+        32
+    ));
+    // The same rule on the horizontal axes, where the mounted box makes it routine: a block
+    // wide and centred on 4.5 spans exactly [4.0, 5.0], so it is in voxel 4 and not in
+    // voxel 5 — and a body a hundredth further on is in both.
+    let mut beside = air();
+    for z in 0..9 {
+        beside.apply_block(BlockCoord { x: 5, y: 2, z }, palette::WATER, 32);
+    }
+    let centred = Vec3::new(4.5, 2.0, 4.5);
+    assert!(!in_water(
+        &beside,
+        centred,
+        MOUNTED_WIDTH,
+        MOUNTED_HEIGHT,
+        32
+    ));
+    assert!(in_water(
+        &beside,
+        centred + Vec3::X * 0.01,
+        MOUNTED_WIDTH,
+        MOUNTED_HEIGHT,
+        32
+    ));
+}
+
+/// Found in review on #1197. The downward speed used to be read from one frame's duration
+/// and thrown away when that duration fell under `FALL_WINDOW.0`, so on a client running
+/// faster than 500 Hz every entry was a [`Force::Step`] — a dive off a cliff sounding like
+/// a step off a bank, the acceptance criterion exactly inverted. The reference sample is
+/// now held across frames until it is old enough to divide by, so the same fall reads the
+/// same force at every frame rate.
+#[test]
+fn the_same_fall_is_the_same_force_at_every_frame_rate() {
+    let f = Fixture::new();
+    // 30 blocks a second of fall, sampled at 60, 500, 1000, 4000 and 100,000 frames a
+    // second. The last is far past anything real, and that is the point: the force must
+    // not depend on the rate at all.
+    for micros in [16_666u64, 2_000, 1_000, 250, 10] {
+        let mut waters = Waters::default();
+        let mut height = 4.0;
+        let mut frame = 0u64;
+        let mut entered = None;
+        while height > 1.4 && entered.is_none() {
+            let bodies = [f.drawn(height, false)];
+            let at = f.at(Duration::from_micros(frame * micros));
+            entered = waters
+                .entries(&at, &bodies)
+                .into_iter()
+                .map(|(_, force)| force)
+                .next();
+            height -= 30.0 * micros as f32 / 1_000_000.0;
+            frame += 1;
+        }
+        assert_eq!(
+            entered,
+            Some(Force::Dive),
+            "at {micros} µs a frame a 30 blocks-a-second fall read {entered:?}"
+        );
+    }
+    // And the long end of the window still filters: a reference older than FALL_WINDOW.1
+    // says nothing about how the body arrived, so the entry is the gentlest one.
+    let mut waters = Waters::default();
+    waters.entries(&f.frame(0), &[f.drawn(4.0, false)]);
+    let stale = waters.entries(&f.frame(2_000), &[f.drawn(1.5, false)]);
+    assert_eq!(
+        stale.into_iter().map(|(_, force)| force).next(),
+        Some(Force::Step)
+    );
 }
 
 #[test]
