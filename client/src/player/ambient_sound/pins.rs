@@ -18,11 +18,15 @@ fn every_ambient_sound_renders_bit_identical_to_its_pin() {
     }
     for call in CALLS {
         for seed in SEEDS {
-            let seconds = call.profile().seconds;
-            rendered.push((
-                format!("call {call:?} {seed:#x}"),
-                pin::baked(&call.description(seed), seconds, seed),
-            ));
+            // The lane's own bake: the cricket's syllables struck apart, every other call
+            // baked whole.
+            let hash = pin::across_rates(|rate| {
+                call.bake(seed, rate)
+                    .expect("a call bakes")
+                    .samples()
+                    .to_vec()
+            });
+            rendered.push((format!("call {call:?} {seed:#x}"), hash));
         }
     }
     for seed in SEEDS {
@@ -52,9 +56,9 @@ const PINS: &[(&str, u64)] = &[
     ("call Wolf 0x0", 0xc9565d0c05070f66),
     ("call Wolf 0x10203", 0x9b0b6ab65316ef79),
     ("call Wolf 0xfedcba9876543210", 0x05010244a30b4deb),
-    ("call Cricket 0x0", 0x0f5218c29a09bb3d),
-    ("call Cricket 0x10203", 0xf16735b0bc9842a5),
-    ("call Cricket 0xfedcba9876543210", 0xb1616ddedfa5b1c4),
+    ("call Cricket 0x0", 0xf57eb348ace09b9c),
+    ("call Cricket 0x10203", 0x5ea29ec064c8765a),
+    ("call Cricket 0xfedcba9876543210", 0x8641edbbf162daa1),
     ("parrot 0x0", 0xcd49ce621bd6e931),
     ("parrot 0x10203", 0x421da2436d465b20),
     ("parrot 0xfedcba9876543210", 0x29b73f2e85737bf5),
