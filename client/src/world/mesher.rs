@@ -1001,6 +1001,64 @@ pub fn mesh_chunk(chunk: &VoxelChunk, neighbours: &Neighbours) -> ChunkMesh {
     mesh
 }
 
+// Grilles are architectural shapes for rays, but never occupy a whole half-cell.
+fn half_grid_shape(block: BlockId) -> bool {
+    palette::is_architectural_shape(block) && !palette::is_grille(block)
+}
+
+fn push_grille(
+    mesh: &mut SurfaceMesh,
+    chunk: &VoxelChunk,
+    neighbours: &Neighbours,
+    cell: [usize; 3],
+    block: BlockId,
+) {
+    // Only full-height end caps touch a voxel boundary. Full opaque cubes cover
+    // those caps completely; sparse neighbours must never hide an exposed bar.
+    let covered_caps = [false, true].map(|positive| {
+        palette::is_greedy_opaque(stepped_block(
+            chunk,
+            neighbours,
+            cell,
+            1,
+            if positive { 1 } else { -1 },
+        ))
+    });
+    let (bars, count) = palette::collision_bounds(block);
+    for bar in &bars[..count] {
+        let min = std::array::from_fn::<_, 3, _>(|axis| {
+            cell[axis] as f32 + f32::from(bar.min[axis]) / palette::BOUNDS_SCALE
+        });
+        let max = std::array::from_fn::<_, 3, _>(|axis| {
+            cell[axis] as f32 + f32::from(bar.max[axis]) / palette::BOUNDS_SCALE
+        });
+        for axis in 0..3 {
+            let u = (axis + 1) % 3;
+            let v = (axis + 2) % 3;
+            for positive in [false, true] {
+                if axis == 1 && covered_caps[usize::from(positive)] {
+                    continue;
+                }
+                let mut a = min;
+                a[axis] = if positive { max[axis] } else { min[axis] };
+                let mut b = a;
+                b[u] = max[u];
+                let mut c = b;
+                c[v] = max[v];
+                let mut d = a;
+                d[v] = max[v];
+                let corners = if positive { [a, b, c, d] } else { [a, d, c, b] };
+                mesh.push_quad(
+                    corners,
+                    normal(axis, positive),
+                    palette::linear_rgba(block),
+                    None,
+                );
+            }
+        }
+    }
+}
+
 /// Adds slabs and stairs to the opaque surface on their exact half-block grid.
 ///
 /// Ordinary cubes remain in the full-block greedy sweep above. Shapes are sparse,
@@ -1015,7 +1073,9 @@ fn build_architecture(mesh: &mut SurfaceMesh, chunk: &VoxelChunk, neighbours: &N
             for x in 0..size {
                 let cell = [x, y, z];
                 let block = chunk.block(cell);
-                if palette::is_architectural_shape(block) {
+                if palette::is_grille(block) {
+                    push_grille(mesh, chunk, neighbours, cell, block);
+                } else if half_grid_shape(block) {
                     push_architectural_shape(mesh, chunk, neighbours, cell, block);
                     for axis in 0..3 {
                         for positive in [false, true] {
@@ -1063,7 +1123,7 @@ fn build_architecture(mesh: &mut SurfaceMesh, chunk: &VoxelChunk, neighbours: &N
                     let mut neighbour_cell = cell;
                     neighbour_cell[axis] = if positive { 0 } else { size - 1 };
                     let shape = across.block(neighbour_cell);
-                    if palette::is_architectural_shape(shape) {
+                    if half_grid_shape(shape) {
                         push_cube_shape_interface(
                             mesh, chunk, neighbours, cell, cube, axis, positive, shape,
                         );
@@ -2569,7 +2629,7 @@ fn build_masks(
                 // Opaque below, see-through above: the face belongs to the opaque
                 // voxel and points along +axis. "See-through" is air or water,
                 // which is what keeps the lake bed's top.
-                (true, false) if below_is_ours && !palette::is_architectural_shape(positive) => {
+                (true, false) if below_is_ours && !half_grid_shape(positive) => {
                     Some(Face {
                         block: negative,
                         positive: true,
@@ -2590,25 +2650,23 @@ fn build_masks(
                         ),
                     })
                 }
-                (false, true) if above_is_ours && !palette::is_architectural_shape(negative) => {
-                    Some(Face {
-                        block: positive,
-                        positive: false,
-                        geometry: FaceGeometry::Full,
-                        flow: None,
-                        occlusion: occlusion_at(
-                            chunk,
-                            neighbours,
-                            axis,
-                            u,
-                            v,
-                            false,
-                            plane as isize - 1,
-                            i,
-                            j,
-                        ),
-                    })
-                }
+                (false, true) if above_is_ours && !half_grid_shape(negative) => Some(Face {
+                    block: positive,
+                    positive: false,
+                    geometry: FaceGeometry::Full,
+                    flow: None,
+                    occlusion: occlusion_at(
+                        chunk,
+                        neighbours,
+                        axis,
+                        u,
+                        v,
+                        false,
+                        plane as isize - 1,
+                        i,
+                        j,
+                    ),
+                }),
                 // See-through on both sides: nothing. Opaque on both sides: an
                 // interior face, which is what greedy meshing exists never to emit.
                 // What is left is a face whose opaque side is across the border, and
@@ -3341,6 +3399,98 @@ mod tests {
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0],
         ]
+    }
+
+    #[test]
+    fn grilles_leave_adjacent_cube_faces_and_ambient_occlusion_unchanged() {
+        for block in [palette::IRON_GRILLE_X, palette::IRON_GRILLE_Z] {
+            let stone = single_block(1, palette::STONE);
+            let baseline = mesh_chunk(&stone, &alone());
+            for axis in 0..3 {
+                for positive in [false, true] {
+                    let neighbour = single_block(1, block);
+                    let actual = mesh_chunk(&stone, &across(axis, positive, neighbour));
+                    assert_eq!(actual.positions, baseline.positions);
+                    assert_eq!(actual.colors, baseline.colors);
+                    assert_eq!(actual.indices, baseline.indices);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grille_caps_cull_only_against_full_opaque_y_neighbours() {
+        for block in [palette::IRON_GRILLE_X, palette::IRON_GRILLE_Z] {
+            for positive in [false, true] {
+                for border in [false, true] {
+                    for (neighbour, expected) in [
+                        (palette::STONE, 10),
+                        (palette::AIR, 12),
+                        (palette::IRON_GRILLE_X, 12),
+                        (palette::IRON_GRILLE_Z, 12),
+                        (palette::SLATE_SLAB_BOTTOM, 12),
+                        (palette::SLATE_SLAB_TOP, 12),
+                        (palette::SLATE_STAIR_NORTH_BOTTOM, 12),
+                    ] {
+                        let size = if border { 1 } else { 3 };
+                        let mut chunk = single_block(size, block);
+                        let cell = [size / 2; 3];
+                        let neighbours = if border {
+                            across(1, positive, single_block(1, neighbour))
+                        } else {
+                            chunk.set(1, if positive { 2 } else { 0 }, 1, neighbour);
+                            alone()
+                        };
+                        let mut mesh = SurfaceMesh::default();
+                        push_grille(&mut mesh, &chunk, &neighbours, cell, block);
+                        assert_eq!(
+                            mesh.quad_count(),
+                            expected,
+                            "block {block} neighbour {neighbour} positive {positive} border {border}"
+                        );
+                        let culled_normal = normal(1, positive);
+                        if expected == 10 {
+                            assert!(!mesh.normals.contains(&culled_normal));
+                        }
+                    }
+                }
+            }
+            let chunk = single_block(1, block);
+            for neighbours in [alone(), across(1, true, solid(2, palette::STONE))] {
+                let mut mesh = SurfaceMesh::default();
+                push_grille(&mut mesh, &chunk, &neighbours, [0; 3], block);
+                assert_eq!(
+                    mesh.quad_count(),
+                    12,
+                    "missing or mismatched neighbour leaves caps exposed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grille_mesh_draws_exact_bars_without_a_cube_or_backface_errors() {
+        for block in [palette::IRON_GRILLE_X, palette::IRON_GRILLE_Z] {
+            let mesh = mesh_chunk(&single_block(SIZE, block), &alone());
+            assert_eq!(mesh.quad_count(), 12);
+            for q in 0..mesh.quad_count() {
+                let geometric = winding_normal(&mesh, q);
+                let normal = mesh.normals[q * 4];
+                assert!((0..3).map(|i| geometric[i] * normal[i]).sum::<f32>() > 0.0);
+            }
+            let width = if block == palette::IRON_GRILLE_X {
+                0
+            } else {
+                2
+            };
+            let centre = (SIZE / 2) as f32;
+            // No triangle fills the opening: all vertices belong to one bar.
+            for q in 0..mesh.quad_count() {
+                let (min, max) = quad_extent(&mesh, q, width);
+                assert!(max - min <= 0.101);
+                assert!(min >= centre + 0.199 && max <= centre + 0.801);
+            }
+        }
     }
 
     #[test]

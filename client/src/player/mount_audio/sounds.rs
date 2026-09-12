@@ -22,6 +22,7 @@ fn noise(gain: f32, attack: f32, decay: f32, hz: f32, kind: FilterKind) -> Layer
             sustain: 0.0,
             release: 0.015,
         },
+        gate: None,
         filter: Some(Filter { kind, hz, q: 0.7 }),
     }
 }
@@ -40,6 +41,7 @@ fn tone(hz: f32, gain: f32, decay: f32) -> Layer {
             sustain: 0.0,
             release: 0.015,
         },
+        gate: None,
         filter: None,
     }
 }
@@ -48,6 +50,7 @@ fn tone(hz: f32, gain: f32, decay: f32) -> Layer {
 /// its skirts carry a clop's energy far above and below the middle it is centred on.
 fn band(gain: f32, attack: f32, decay: f32, hz: f32, q: f32) -> Layer {
     Layer {
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::Band,
             hz,
@@ -150,6 +153,7 @@ fn formant(glide: Glide, gain: f32, hz: f32, q: f32, envelope: (f32, f32, f32)) 
             sustain,
             release: 0.03,
         },
+        gate: None,
         filter: Some(Filter {
             kind: FilterKind::Band,
             hz,
@@ -169,6 +173,7 @@ fn breath(kind: Noise, gain: f32, filter: Filter, attack: f32, decay: f32) -> La
             sustain: 0.0,
             release: 0.03,
         },
+        gate: None,
         filter: Some(filter),
     }
 }

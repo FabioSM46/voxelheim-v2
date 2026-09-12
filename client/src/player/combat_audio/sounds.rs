@@ -126,12 +126,14 @@ impl Cue {
                     exciter: Exciter::Oscillator { wave, hz },
                     gain: tone,
                     envelope,
+                    gate: None,
                     filter: None,
                 },
                 Layer {
                     exciter: Exciter::Noise(Noise::White),
                     gain: noise,
                     envelope,
+                    gate: None,
                     filter: Some(Filter {
                         kind: FilterKind::Band,
                         hz: cutoff,
