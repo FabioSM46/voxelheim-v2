@@ -390,8 +390,18 @@ pub fn place(
 ///
 /// One block of stone is the whole of the effect — a wall is a wall, and a second course of
 /// masonry behind the first changes nothing a listener could name. The rest are fractions of
-/// that: earth is nearly as good, sawn timber lets a good deal through, a hedge or a
-/// thatched roof barely interrupts a shout, and glass is the thinnest thing this world has.
+/// that: earth is nearly as good, a bank of snow a little less so, sawn timber lets a good
+/// deal through, a hedge or a thatched roof barely interrupts a shout, and glass is the
+/// thinnest thing this world has.
+///
+/// **Snow is under earth rather than beside it, and that is a judgement about mass.** Snow
+/// absorbs a shout far more readily than soil does, which is the whole reason it is its own
+/// class — but absorbing is what a *surface* does to a sound arriving at it, and this
+/// function answers a different question: how much of a voice one block's worth of the
+/// substance takes out of a ray passing through. A metre of snow is a fraction of the mass
+/// of a metre of packed soil, so it stops less of one, and a bank of it is closer to timber
+/// than to a wall. A material that is duller underfoot and thinner to shout through is not a
+/// contradiction; it is the two questions being different.
 ///
 /// **Air and water are unreachable through [`occlusion`] and are still answered**, because a
 /// total function over the enum is what stops a later class from silently taking the wrong
@@ -404,6 +414,7 @@ pub fn occlusion_weight(class: MaterialClass) -> f32 {
         MaterialClass::Air | MaterialClass::Water => 0.0,
         MaterialClass::Stone => 1.0,
         MaterialClass::Earth | MaterialClass::Sand => 0.9,
+        MaterialClass::Snow => 0.75,
         MaterialClass::Wood => 0.6,
         MaterialClass::Foliage => 0.3,
         MaterialClass::Glass => 0.2,
@@ -1074,10 +1085,13 @@ mod tests {
     fn the_weights_are_ordered_by_how_solid_a_material_is() {
         let stone = occlusion_weight(MaterialClass::Stone);
         let earth = occlusion_weight(MaterialClass::Earth);
+        let snow = occlusion_weight(MaterialClass::Snow);
         let wood = occlusion_weight(MaterialClass::Wood);
         let foliage = occlusion_weight(MaterialClass::Foliage);
         let glass = occlusion_weight(MaterialClass::Glass);
         assert!(stone > earth, "{stone} vs {earth}");
+        assert!(earth > snow, "{earth} vs {snow}");
+        assert!(snow > wood, "{snow} vs {wood}");
         assert!(earth > wood, "{earth} vs {wood}");
         assert!(wood > foliage, "{wood} vs {foliage}");
         assert!(foliage > glass, "{foliage} vs {glass}");

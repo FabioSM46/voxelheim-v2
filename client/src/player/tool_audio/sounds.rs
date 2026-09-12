@@ -69,6 +69,14 @@ pub(in crate::player) fn strike(tool: MiningTool, material: MaterialClass) -> So
             vec![tone(1237.0, 0.20, 0.17), tone(2131.0, 0.13, 0.11)]
         }
         MaterialClass::Earth => vec![noise(0.65, 0.002, 0.07, 400.0, FilterKind::Low)],
+        // Snow packs where soil scatters, and this arm is chosen rather than inherited:
+        // lower and slower to open than earth's, so an implement sinks into it instead of
+        // landing on it, with a quiet granular squeak of the grains being pressed together
+        // over the top. Longer than earth's, because the giving way outlasts the impact.
+        MaterialClass::Snow => vec![
+            noise(0.58, 0.014, 0.115, 290.0, FilterKind::Low),
+            noise(0.17, 0.022, 0.065, 950.0, FilterKind::Band),
+        ],
         MaterialClass::Wood => vec![tone(410.0, 0.27, 0.10), tone(735.0, 0.12, 0.06)],
         MaterialClass::Foliage => vec![noise(0.60, 0.025, 0.19, 1900.0, FilterKind::High)],
         MaterialClass::Sand => vec![noise(0.70, 0.045, 0.17, 2800.0, FilterKind::Band)],
@@ -106,7 +114,19 @@ pub(super) fn swing(weapon: bool) -> Sound {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::palette::{self, DIRT, LOG, SAND, STONE};
+    use crate::world::palette::{self, DIRT, LOG, SAND, SNOW, STONE};
+
+    const MATERIALS: [MaterialClass; 9] = [
+        MaterialClass::Air,
+        MaterialClass::Stone,
+        MaterialClass::Earth,
+        MaterialClass::Snow,
+        MaterialClass::Sand,
+        MaterialClass::Wood,
+        MaterialClass::Foliage,
+        MaterialClass::Glass,
+        MaterialClass::Water,
+    ];
 
     fn samples(sound: Sound, seconds: f32) -> Vec<f32> {
         sound.bake(seconds, 48_000, 7).unwrap().samples().to_vec()
@@ -130,14 +150,14 @@ mod tests {
         }
     }
     #[test]
-    fn five_canonical_materials_render_distinctly_for_each_implement() {
+    fn six_canonical_materials_render_distinctly_for_each_implement() {
         for tool in [
             MiningTool::Hand,
             MiningTool::Shovel,
             MiningTool::Pickaxe,
             MiningTool::Axe,
         ] {
-            let blocks = [STONE, DIRT, LOG, palette::LEAVES, SAND];
+            let blocks = [STONE, DIRT, SNOW, LOG, palette::LEAVES, SAND];
             let sounds: Vec<_> = blocks
                 .into_iter()
                 .map(|id| samples(strike(tool, palette::material_class(id)), STRIKE_SECONDS))
@@ -153,6 +173,42 @@ mod tests {
             crate::audio::spatial::occlusion_weight(palette::material_class(DIRT))
         );
     }
+    /// #1187: snow was classified as earth, so every implement in the north struck soil.
+    /// Snow now carries an arm of its own, and this is the assertion that it was *chosen*
+    /// rather than copied. Both comparisons hold the tool fixed, so whatever differs is the
+    /// material's contribution and not the implement's, and the collapse is checked as well
+    /// as the strike because [`breaking`] appends to whatever the strike built.
+    #[test]
+    fn snow_contributes_its_own_layers_rather_than_earths() {
+        // One tool, so every layer the two sounds do not share is one the material added.
+        let layers = |material| strike(MiningTool::Hand, material).layers;
+        assert_ne!(layers(MaterialClass::Snow), layers(MaterialClass::Earth));
+        for (a, b) in [
+            (
+                samples(
+                    strike(MiningTool::Hand, MaterialClass::Snow),
+                    STRIKE_SECONDS,
+                ),
+                samples(
+                    strike(MiningTool::Hand, MaterialClass::Earth),
+                    STRIKE_SECONDS,
+                ),
+            ),
+            (
+                samples(
+                    breaking(MiningTool::Hand, MaterialClass::Snow),
+                    BREAK_SECONDS,
+                ),
+                samples(
+                    breaking(MiningTool::Hand, MaterialClass::Earth),
+                    BREAK_SECONDS,
+                ),
+            ),
+        ] {
+            assert!(difference(&a, &b) > 1.0, "{}", difference(&a, &b));
+        }
+    }
+
     #[test]
     fn collapse_has_energy_after_the_strike_and_swings_are_not_impacts() {
         let strike = samples(
@@ -178,16 +234,7 @@ mod tests {
                 MiningTool::Pickaxe,
                 MiningTool::Axe,
             ] {
-                for material in [
-                    MaterialClass::Air,
-                    MaterialClass::Stone,
-                    MaterialClass::Earth,
-                    MaterialClass::Sand,
-                    MaterialClass::Wood,
-                    MaterialClass::Foliage,
-                    MaterialClass::Glass,
-                    MaterialClass::Water,
-                ] {
+                for material in MATERIALS {
                     for (sound, seconds) in [
                         (strike(tool, material), STRIKE_SECONDS),
                         (breaking(tool, material), BREAK_SECONDS),
