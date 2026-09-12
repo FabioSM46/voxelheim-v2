@@ -20,8 +20,10 @@ fn key() -> Entity {
     World::new().spawn_empty().id()
 }
 
-/// A pool: stone at y = 0 over a nine-by-nine patch, water filling y = 1 and y = 2, and
-/// air above it. The listener stands on the bank four blocks to the pool's left.
+/// A pool: stone at y = 0 under water filling y = 1 and y = 2, air above it, twenty-four
+/// blocks along x and nine along z — long enough for a mounted swimmer to cross four of
+/// its own strides without reaching the far bank. The listener stands on the bank four
+/// blocks to the pool's left.
 struct Fixture {
     now: Instant,
     store: ChunkStore,
@@ -41,7 +43,7 @@ impl Fixture {
             },
             VoxelChunk::all_air(32),
         );
-        for x in 0..9 {
+        for x in 0..24 {
             for z in 0..9 {
                 store.apply_block(BlockCoord { x, y: 0, z }, palette::STONE, 32);
                 for y in 1..3 {
@@ -145,14 +147,14 @@ fn the_body_box_is_in_water_when_any_voxel_it_touches_is() {
     // does not.
     assert!(in_water(
         &f.store,
-        feet(9.2, 2.0),
+        feet(24.2, 2.0),
         MOUNTED_WIDTH,
         MOUNTED_HEIGHT,
         32
     ));
     assert!(!in_water(
         &f.store,
-        feet(11.0, 2.0),
+        feet(26.0, 2.0),
         MOUNTED_WIDTH,
         MOUNTED_HEIGHT,
         32
@@ -300,6 +302,103 @@ fn another_players_entry_is_panned_on_sfx_and_muted_with_it() {
     let mut waters = Waters::default();
     far.hear(&mut waters, 10, &descent(0.5, 4), false);
     assert!(waters.playing.is_empty());
+}
+
+/// The cues a body swimming `blocks` along +X at the surface produces, one frame per
+/// hundredth of a block, starting from a frame already in the water so no entry sounds.
+///
+/// Read from [`Waters::observe`] rather than from the voices it starts: the mechanism under
+/// test is which cues a swim produces, and a started voice retires on its own schedule.
+fn swim(waters: &mut Waters, f: &Fixture, blocks: f32, mounted: bool) -> Vec<Cue> {
+    let frames = (blocks * 100.0).round() as usize;
+    let at = |x: f32| {
+        [Drawn {
+            key: f.body,
+            feet: Vec3::new(x, 2.0, 4.5),
+            mounted,
+        }]
+    };
+    assert!(waters.observe(&f.frame(0), &at(0.5)).is_empty(), "an entry");
+    (1..=frames)
+        .flat_map(|frame| {
+            let bodies = at(0.5 + frame as f32 / 100.0);
+            waters.observe(&f.frame(frame as u64 * 10), &bodies)
+        })
+        .map(|(_, cue)| cue)
+        .collect()
+}
+
+#[test]
+fn strokes_follow_the_distance_swum_and_cease_when_the_swimmer_stops() {
+    let f = Fixture::new();
+    // The rate follows the distance and therefore the speed: under a stride is silent, and
+    // n strides and a half are n strokes. The half is there so the count is not read at a
+    // stride's exact boundary, where a hundredth of a block either way would decide it.
+    let strokes = |blocks, mounted| swim(&mut Waters::default(), &f, blocks, mounted).len();
+    assert_eq!(strokes(STROKE_BLOCKS * 0.9, false), 0);
+    assert_eq!(strokes(STROKE_BLOCKS * 1.5, false), 1);
+    assert_eq!(strokes(STROKE_BLOCKS * 4.5, false), 4);
+    // A mounted swimmer strokes at half the rate over the same water: slower, as the
+    // acceptance criterion asks, because its stride is twice as long.
+    assert_eq!(strokes(MOUNTED_STROKE_BLOCKS * 4.5, true), 4);
+    assert_eq!(strokes(STROKE_BLOCKS * 4.5, true), 2);
+
+    // A swimmer who stops is silent, however long they float there — including the slow
+    // sink the server gives a body that does nothing, which is vertical and counts for
+    // nothing here.
+    let mut waters = Waters::default();
+    let still = [f.drawn(2.0, false)];
+    assert!(waters.observe(&f.frame(0), &still).is_empty());
+    for frame in 1..400u64 {
+        let sinking = [f.drawn(2.0 - frame as f32 * 0.0005, false)];
+        assert!(
+            waters.observe(&f.frame(frame * 10), &sinking).is_empty(),
+            "a motionless swimmer was heard to stroke"
+        );
+    }
+
+    // A frame delayed over three strides' worth of water is one stroke, never three — and
+    // the credit it leaves behind is bounded, so the frames after it do not burst either:
+    // half a stride of real swimming still has to happen first.
+    let mut waters = Waters::default();
+    let swimmer = |x: f32| {
+        [Drawn {
+            key: f.body,
+            feet: Vec3::new(x, 2.0, 4.5),
+            mounted: false,
+        }]
+    };
+    let far = 0.5 + STROKE_BLOCKS * 3.5;
+    waters.observe(&f.frame(0), &swimmer(0.5));
+    assert_eq!(waters.observe(&f.frame(200), &swimmer(far)).len(), 1);
+    let after: Vec<Cue> = (1..=20u64)
+        .flat_map(|frame| {
+            let crept = far + frame as f32 * 0.01;
+            waters.observe(&f.frame(200 + frame * 10), &swimmer(crept))
+        })
+        .map(|(_, cue)| cue)
+        .collect();
+    assert!(
+        after.is_empty(),
+        "the delayed frame left a burst behind: {after:?}"
+    );
+}
+
+#[test]
+fn a_stroke_is_a_stroke_cue_and_a_mounted_swimmer_a_mounted_one() {
+    let f = Fixture::new();
+    for mounted in [false, true] {
+        let mut waters = Waters::default();
+        let stride = if mounted {
+            MOUNTED_STROKE_BLOCKS
+        } else {
+            STROKE_BLOCKS
+        };
+        assert_eq!(
+            swim(&mut waters, &f, stride * 1.5, mounted),
+            [Cue::Stroke { mounted }]
+        );
+    }
 }
 
 fn session() -> Session {
