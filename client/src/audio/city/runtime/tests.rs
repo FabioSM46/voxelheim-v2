@@ -428,6 +428,42 @@ fn every_craft_station_has_a_sound_and_no_other_structure_does() {
     }
 }
 
+/// The per-kind cap holds for every kind, the benches included: three of each bench in
+/// earshot keeps at most the nearest two of each kind and never more than the allowance.
+#[test]
+fn the_shortlist_keeps_at_most_two_of_each_bench_kind_nearest_first() {
+    let eye = Vec3::new(4.5, 4.5, 4.5);
+    let mut scene = Vec::new();
+    for (offset, kind) in [
+        StructureKind::LeatherBench,
+        StructureKind::ArmourBench,
+        StructureKind::EnchantingTable,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Zero, one and two blocks from the listener.
+        for step in 0..3 {
+            let id = (offset * 10 + step) as u64 + 1;
+            scene.push(structure(id, kind, 4 + step as i32));
+        }
+    }
+    scene.reverse();
+    let shortlist = nearest(&scene, eye);
+    assert!(shortlist.len() <= CITY_SOURCES);
+    for kind in [Kind::Leather, Kind::Armour, Kind::Enchanting] {
+        let of_kind: Vec<_> = shortlist
+            .iter()
+            .filter(|candidate| candidate.kind == kind)
+            .collect();
+        assert!(of_kind.len() <= PER_KIND, "{kind:?}: {}", of_kind.len());
+        assert!(
+            of_kind.iter().all(|candidate| candidate.distance < 2.0),
+            "{kind:?} kept its farthest bench over a nearer one"
+        );
+    }
+}
+
 #[test]
 fn the_benches_carry_no_further_than_a_fire_and_no_louder_than_a_fire() {
     for (kind, range, gain) in [

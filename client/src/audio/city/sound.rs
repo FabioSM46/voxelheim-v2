@@ -28,19 +28,6 @@ impl Kind {
         Self::Armour,
         Self::Enchanting,
     ];
-
-    /// A dense index, for per-kind counters.
-    pub(super) const COUNT: usize = 5;
-
-    pub(super) fn index(self) -> usize {
-        match self {
-            Self::Forge => 0,
-            Self::Fire => 1,
-            Self::Leather => 2,
-            Self::Armour => 3,
-            Self::Enchanting => 4,
-        }
-    }
 }
 
 /// One set of transient buffers per output rate, shared by every audible structure.
@@ -486,13 +473,5 @@ mod tests {
                 assert_ne!(whole, chunks, "{kind:?} at {rate}");
             }
         }
-    }
-
-    #[test]
-    fn every_kind_has_a_distinct_index_below_the_count() {
-        let mut indices: Vec<_> = Kind::ALL.iter().map(|kind| kind.index()).collect();
-        indices.sort_unstable();
-        indices.dedup();
-        assert_eq!(indices, (0..Kind::COUNT).collect::<Vec<_>>());
     }
 }

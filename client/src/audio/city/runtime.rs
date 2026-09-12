@@ -140,12 +140,23 @@ fn nearest(structures: &[StructureState], eye: Vec3) -> Vec<Candidate> {
                 .is_lt()
         });
         selected.insert(index, candidate);
-        let mut counts = [0; Kind::COUNT];
-        selected.retain(|candidate| {
-            let count = &mut counts[candidate.kind.index()];
-            *count += 1;
-            *count <= PER_KIND
-        });
+        // Nearest first, so a candidate is dropped when PER_KIND nearer ones of its kind are
+        // already kept. Counted off the shortlist itself rather than a per-kind table: there
+        // is no index for a new kind to fall outside, and at most CITY_SOURCES + 1 entries
+        // this allocates nothing.
+        let mut kept = 0;
+        while kept < selected.len() {
+            let kind = selected[kept].kind;
+            let nearer = selected[..kept]
+                .iter()
+                .filter(|other| other.kind == kind)
+                .count();
+            if nearer < PER_KIND {
+                kept += 1;
+            } else {
+                selected.remove(kept);
+            }
+        }
         selected.truncate(CITY_SOURCES);
     }
     selected
