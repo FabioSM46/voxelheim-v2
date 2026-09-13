@@ -1371,6 +1371,39 @@ fn the_mouse_is_heard_exactly_where_the_critter_table_stands_it_and_only_after_d
     );
 }
 
+/// #1192: the wolves' eyes and the wolf's howl belong to one country and one hour, and to
+/// nothing more. The eyes read no lane and no call — this is where the two are held together, by
+/// asking both the same questions.
+#[test]
+fn the_eyes_watch_from_where_and_when_the_howl_is_heard() {
+    use crate::player::watchers;
+    let wolf = &WILDLIFE[row_of(Call::Wolf)];
+    assert_eq!(wolf.habitat, Habitat::Ground(watchers::WATCHED_FROM));
+    assert_eq!(wolf.period, watchers::WATCHING);
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            let country = Ambience { ground, wooded };
+            for night in [0.0, 0.25, 0.49, PERIOD_SWITCH, 0.75, 1.0] {
+                // The howl is the louder of the country's two halves once its share passes the
+                // switch, which is the moment the eyes light.
+                let howls = wolf.gain(&country, night) >= PERIOD_SWITCH;
+                assert_eq!(
+                    watchers::watching(&country, Some(night)),
+                    howls,
+                    "{ground:?}/{wooded} at night {night}"
+                );
+            }
+            // The lane reads a server with no clock as day, and so do the eyes.
+            assert!(!watchers::watching(&country, None));
+        }
+    }
+}
+
 /// "The squeak comes from the mouse, and is sparse." Driven through the shipped scheduler for
 /// ten minutes with a mouse drawn: a few calls a minute, sparser than the cricket, and **every
 /// one of them started at the mouse** — which is the lane's own placement answer fed to the
