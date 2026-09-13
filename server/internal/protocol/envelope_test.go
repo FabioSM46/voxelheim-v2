@@ -328,8 +328,11 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 
 	// V39 appends StructureKind's three benches: the runestone's argument at V26, an enum
 	// member inside StructureState.kind whose decoder refuses what it cannot name.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 43 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 43", got)
+	// V44 appends DrawRequest, which a V43 server cannot name, and changes
+	// AttackRequest.slot to mean the main hand: a V43 client naming its hotbar slot would
+	// have every swing dropped after a clean handshake.
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 44 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 44", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
@@ -415,6 +418,9 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 		// receives no timeline, draws no telegraph, and reads an attack off the animation
 		// already landing on it. See ProtocolVersion in schemas/common.fbs.
 		vnet.PayloadEncounterTimeline,
+		// V44's bow draw, client -> server. A V43 server cannot name the tag and closes
+		// the session, so it carries the bump with AttackRequest.slot's new meaning.
+		vnet.PayloadDrawRequest,
 	}
 	for index, payload := range want {
 		if got := byte(payload); got != byte(index+1) {
@@ -2823,12 +2829,13 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		// members rather than one, because they are separate requests with separate
 		// answers. Mine sits beside the reserved MineBlock = 2 rather than replacing it:
 		// removing or renumbering that one would relabel every refusal already sent.
-		"RefusedAction.Edit":        {byte(vnet.RefusedActionEdit), 17},
-		"RefusedAction.Mine":        {byte(vnet.RefusedActionMine), 18},
-		"RefusedAction.Mount":       {byte(vnet.RefusedActionMount), 19},
-		"RefusedAction.PlayerTrade": {byte(vnet.RefusedActionPlayerTrade), 20},
-		"RefusedAction.CrossPortal": {byte(vnet.RefusedActionCrossPortal), 21},
-		"RefusedAction.Energy":      {byte(vnet.RefusedActionEnergy), 22},
+		"RefusedAction.Edit":          {byte(vnet.RefusedActionEdit), 17},
+		"RefusedAction.Mine":          {byte(vnet.RefusedActionMine), 18},
+		"RefusedAction.Mount":         {byte(vnet.RefusedActionMount), 19},
+		"RefusedAction.PlayerTrade":   {byte(vnet.RefusedActionPlayerTrade), 20},
+		"RefusedAction.CrossPortal":   {byte(vnet.RefusedActionCrossPortal), 21},
+		"RefusedAction.Energy":        {byte(vnet.RefusedActionEnergy), 22},
+		"RefusedAction.MoveInventory": {byte(vnet.RefusedActionMoveInventory), 23},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, want %d", name, pair[0], pair[1])
@@ -2843,8 +2850,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 	// drop could answer — that slot is empty, that item wears out, you are dead — is about
 	// the asking player's own pack, which they already hold a complete InventoryState of. So
 	// seventeen is the count, and it is what says nobody added another for a removal.
-	if got := len(vnet.EnumNamesRefusedAction); got != 23 {
-		t.Errorf("RefusedAction has %d members, want 23 — a removal is refused in silence by design", got)
+	if got := len(vnet.EnumNamesRefusedAction); got != 24 {
+		t.Errorf("RefusedAction has %d members, want 24 — a removal is refused in silence by design", got)
 	}
 
 	if got := byte(vnet.RefusalReasonUnknown); got != 0 {
@@ -2909,7 +2916,10 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 		"EntryOfferUnknown":           {byte(vnet.RefusalReasonEntryOfferUnknown), 52},
 		// V40's one, appended inside the low group: out of energy is the player's own
 		// state answering a legal swing no, and waiting is the thing they can do.
-		"NotEnoughEnergy":   {byte(vnet.RefusalReasonNotEnoughEnergy), 53},
+		"NotEnoughEnergy": {byte(vnet.RefusalReasonNotEnoughEnergy), 53},
+		// V44's one, appended inside the low group: the player's own equipment answered
+		// a legal move no, and taking one item off is the thing they can do.
+		"HandsOccupied":     {byte(vnet.RefusalReasonHandsOccupied), 54},
 		"MalformedNoAnchor": {byte(vnet.RefusalReasonMalformedNoAnchor), 64},
 		"MalformedFacing":   {byte(vnet.RefusalReasonMalformedFacing), 65},
 		"MalformedSlot":     {byte(vnet.RefusalReasonMalformedSlot), 66},
@@ -2919,8 +2929,8 @@ func TestRefusalEnumsFailClosedAndKeepTheirTwoGroups(t *testing.T) {
 			t.Errorf("RefusalReason.%s = %d, want %d", name, pair[0], pair[1])
 		}
 	}
-	if got := len(vnet.EnumNamesRefusalReason); got != 58 {
-		t.Errorf("RefusalReason has %d members, want 58 — a new one needs a decision, not a test edit", got)
+	if got := len(vnet.EnumNamesRefusalReason); got != 59 {
+		t.Errorf("RefusalReason has %d members, want 59 — a new one needs a decision, not a test edit", got)
 	}
 }
 
@@ -3093,6 +3103,93 @@ func TestBlockRequestRoundTripsAsHeldIntent(t *testing.T) {
 	}
 	if *msg.Block != want {
 		t.Errorf("BlockRequest = %+v, want %+v", *msg.Block, want)
+	}
+}
+
+// V44's appended fields and union member, read through the generated bindings because no
+// server code writes or reads them yet: the main hand is #1235 and the draw is #1237. An
+// appended field reads as zero from a table that never wrote it, which is what a V43 peer
+// sends, and survives encoding when present.
+func TestProtocolV44AppendedFieldsReadZeroWhenAbsentAndSurviveEncoding(t *testing.T) {
+	t.Parallel()
+
+	b := flatbuffers.NewBuilder(0)
+	vnet.PlayerVitalsStart(b)
+	vnet.PlayerVitalsAddMaxHealth(b, 100)
+	b.Finish(vnet.PlayerVitalsEnd(b))
+	if got := vnet.GetRootAsPlayerVitals(b.FinishedBytes(), 0).DrawProgress(); got != 0 {
+		t.Errorf("absent draw_progress = %d, want 0 (not drawing)", got)
+	}
+	for _, want := range []byte{1, 128, 255} {
+		b := flatbuffers.NewBuilder(0)
+		vnet.PlayerVitalsStart(b)
+		vnet.PlayerVitalsAddEnergy(b, 40)
+		vnet.PlayerVitalsAddDrawProgress(b, want)
+		b.Finish(vnet.PlayerVitalsEnd(b))
+		vitals := vnet.GetRootAsPlayerVitals(b.FinishedBytes(), 0)
+		if got := vitals.DrawProgress(); got != want {
+			t.Errorf("draw_progress = %d, want %d", got, want)
+		}
+		if got := vitals.Energy(); got != 40 {
+			t.Errorf("energy = %d beside draw_progress %d, want 40", got, want)
+		}
+	}
+
+	b = flatbuffers.NewBuilder(0)
+	vnet.PlayerAppearanceStart(b)
+	vnet.PlayerAppearanceAddWornOffhand(b, 310)
+	b.Finish(vnet.PlayerAppearanceEnd(b))
+	absent := vnet.GetRootAsPlayerAppearance(b.FinishedBytes(), 0)
+	if got := absent.WornMainhand(); got != 0 {
+		t.Errorf("absent worn_mainhand = %d, want 0 (an empty hand)", got)
+	}
+	if got := absent.WornOffhand(); got != 310 {
+		t.Errorf("worn_offhand = %d, want 310", got)
+	}
+	b = flatbuffers.NewBuilder(0)
+	vnet.PlayerAppearanceStart(b)
+	vnet.PlayerAppearanceAddWornOffhand(b, 310)
+	vnet.PlayerAppearanceAddWornMainhand(b, math.MaxUint16)
+	b.Finish(vnet.PlayerAppearanceEnd(b))
+	present := vnet.GetRootAsPlayerAppearance(b.FinishedBytes(), 0)
+	if got := present.WornMainhand(); got != math.MaxUint16 {
+		t.Errorf("worn_mainhand = %d, want %d", got, math.MaxUint16)
+	}
+	if got := present.WornOffhand(); got != 310 {
+		t.Errorf("worn_offhand = %d beside a main hand, want 310", got)
+	}
+
+	for _, active := range []bool{true, false} {
+		b := flatbuffers.NewBuilder(0)
+		vnet.DrawRequestStart(b)
+		vnet.DrawRequestAddActive(b, active)
+		vnet.DrawRequestAddClientTick(b, math.MaxUint32)
+		request := vnet.DrawRequestEnd(b)
+		vnet.EnvelopeStart(b)
+		vnet.EnvelopeAddPayloadType(b, vnet.PayloadDrawRequest)
+		vnet.EnvelopeAddPayload(b, request)
+		b.Finish(vnet.EnvelopeEnd(b))
+
+		envelope := vnet.GetRootAsEnvelope(b.FinishedBytes(), 0)
+		if got := envelope.PayloadType(); got != vnet.PayloadDrawRequest {
+			t.Fatalf("payload type = %s, want DrawRequest", got)
+		}
+		var table flatbuffers.Table
+		if !envelope.Payload(&table) {
+			t.Fatal("DrawRequest payload is absent")
+		}
+		var decoded vnet.DrawRequest
+		decoded.Init(table.Bytes, table.Pos)
+		if decoded.Active() != active || decoded.ClientTick() != math.MaxUint32 {
+			t.Errorf("DrawRequest = {active %t, tick %d}, want {active %t, tick %d}", decoded.Active(), decoded.ClientTick(), active, uint32(math.MaxUint32))
+		}
+	}
+
+	if got := vnet.EnumNamesRefusedAction[vnet.RefusedActionMoveInventory]; got != "MoveInventory" {
+		t.Errorf("RefusedAction 23 is named %q, want MoveInventory", got)
+	}
+	if got := vnet.EnumNamesRefusalReason[vnet.RefusalReasonHandsOccupied]; got != "HandsOccupied" {
+		t.Errorf("RefusalReason 54 is named %q, want HandsOccupied", got)
 	}
 }
 
