@@ -1293,6 +1293,166 @@ class ReviewBodyMarkerTests(unittest.TestCase):
         )
 
 
+class _StormPR(_RecordingPR):
+    """GitHub as #1222 met it: a review carrying inline comments dies after the retries.
+
+    `refuse_body_only` extends the refusal to a request with no inline comments, which is
+    the case where degrading has nothing left to take out.
+    """
+
+    def __init__(self, files=None, refuse_body_only=False,
+                 failure=lambda: deepseek_review.RequestException("too many 500 error responses")):
+        super().__init__(files)
+        self.refuse_body_only = refuse_body_only
+        self.failure = failure
+        self.attempts = []
+
+    def create_review(self, **kwargs):
+        self.attempts.append(kwargs)
+        if kwargs.get("comments") or self.refuse_body_only:
+            raise self.failure()
+        self.posted.append(kwargs)
+
+
+class ReviewPostingFailureTests(unittest.TestCase):
+    """
+    A generated review must reach the pull request or fail the run loudly (#1241).
+
+    On #1222 `create_review` met repeated 500s three runs in a row. PyGithub raises
+    requests' RetryError for that, the old handler caught only GithubException and only
+    degraded when the message mentioned a line, so the review was lost with a traceback —
+    and the failed `review` job then pinned the pull request at needs-work, which only a
+    successful run could clear.
+    """
+
+    _ONE_INLINE_ONE_GENERAL = (
+        '{"review_complete": false, "comments": ['
+        '{"path": "server/internal/a.go", "line": 1, "body": "Off by one."},'
+        '{"path": null, "line": null, "body": "The retry budget is unbounded."}]}'
+    )
+
+    def setUp(self):
+        self._real_call = deepseek_review.call_deepseek
+
+    def tearDown(self):
+        deepseek_review.call_deepseek = self._real_call
+
+    def _review(self, pr, raw):
+        deepseek_review.call_deepseek = lambda *args, **kwargs: raw
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+        return out.getvalue()
+
+    def test_commentable_lines_follow_the_hunks(self):
+        patch = (
+            "@@ -10,3 +20,4 @@\n ctx\n-gone\n+new\n+new2\n ctx2\n"
+            "@@ -50 +60,2 @@\n+a\n\\ No newline at end of file\n b"
+        )
+        self.assertEqual({20, 21, 22, 23, 60, 61}, deepseek_review.commentable_lines(patch))
+        self.assertEqual(set(), deepseek_review.commentable_lines(None))
+
+    def test_a_refused_review_degrades_to_a_body_the_merge_gate_still_counts(self):
+        failures = {
+            "500 storm": lambda: deepseek_review.RequestException("too many 500 error responses"),
+            "422": lambda: deepseek_review.GithubException(422, {"message": "Unprocessable"}, {}),
+        }
+        for name, failure in failures.items():
+            with self.subTest(failure=name):
+                pr = _StormPR(failure=failure)
+                log = self._review(pr, self._ONE_INLINE_ONE_GENERAL)
+
+                self.assertEqual(2, len(pr.attempts), "one full attempt, then one degraded")
+                self.assertEqual(1, len(pr.posted), "the degraded review must reach the PR")
+                posted = pr.posted[0]
+                self.assertFalse(posted.get("comments"), "the degraded review carries no anchors")
+                self.assertEqual("COMMENT", posted["event"])
+                # Stamped and never clean: it is the round it was, and it carries findings.
+                self.assertTrue(posted["body"].startswith(deepseek_review.FULL_REVIEW_MARKER))
+                self.assertNotIn(deepseek_review.NO_FINDINGS_MARKER, posted["body"])
+                # The shell helper's structural test: prose left once the marker is
+                # stripped is an unread finding, so the lost threads still block.
+                self.assertNotEqual(
+                    "", posted["body"].replace(deepseek_review.FULL_REVIEW_MARKER, "").strip()
+                )
+                # Nothing generated was dropped, and the refused one keeps its location.
+                self.assertIn("Off by one.", posted["body"])
+                self.assertIn("`server/internal/a.go:1`", posted["body"])
+                self.assertIn("The retry budget is unbounded.", posted["body"])
+                # The log says what was sent and which part GitHub refused.
+                self.assertIn("inline 1: server/internal/a.go:1", log)
+                self.assertIn("GitHub refused the review", log)
+                self.assertIn("Retrying without the 1 inline comment(s)", log)
+                self.assertIn("GitHub refused the inline comments, accepted the body", log)
+        self.assertIn("too many 500 error responses", self._review(
+            _StormPR(), self._ONE_INLINE_ONE_GENERAL))
+
+    def test_when_the_body_is_refused_too_the_run_fails_and_prints_every_finding(self):
+        long_finding = "A finding longer than any log excerpt. " * 30
+        raw = json.dumps({"review_complete": False, "comments": [
+            {"path": "server/internal/a.go", "line": 1, "body": long_finding},
+        ]})
+        pr = _StormPR(refuse_body_only=True)
+        deepseek_review.call_deepseek = lambda *args, **kwargs: raw
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaisesRegex(RuntimeError, "both with its inline comments"):
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual([], pr.posted)
+        # In full: the log is the only copy left once no review could carry it.
+        self.assertIn(long_finding, out.getvalue())
+        self.assertIn("finding 1 at server/internal/a.go:1", out.getvalue())
+
+    def test_a_refused_body_only_review_fails_instead_of_passing_silently(self):
+        raw = '{"review_complete": false, "comments": [{"path": null, "line": null, "body": "Unbounded."}]}'
+        pr = _StormPR(refuse_body_only=True)
+        deepseek_review.call_deepseek = lambda *args, **kwargs: raw
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            with self.assertRaisesRegex(RuntimeError, "body-only request"):
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+        self.assertEqual(1, len(pr.attempts), "nothing is left to degrade")
+        self.assertIn("Unbounded.", out.getvalue())
+
+    def test_an_anchor_outside_every_hunk_is_posted_as_a_general_comment(self):
+        pr = _RecordingPR()  # server/internal/a.go changes only line 1
+        log = self._review(
+            pr,
+            '{"review_complete": false, "comments": ['
+            '{"path": "server/internal/a.go", "line": 40, "body": "Off by one."}]}',
+        )
+
+        self.assertEqual(1, len(pr.posted))
+        self.assertFalse(pr.posted[0].get("comments"))
+        self.assertIn("`server/internal/a.go:40`", pr.posted[0]["body"])
+        self.assertIn("Off by one.", pr.posted[0]["body"])
+        self.assertIn("outside every hunk", log)
+
+    def test_an_anchor_in_a_file_without_a_patch_is_posted_as_a_general_comment(self):
+        pr = _RecordingPR([
+            _FakeFile("assets/texture.png", None, additions=0, deletions=0),
+            _FakeFile("server/internal/a.go", _patch_of(50, "a")),
+        ])
+        log = self._review(
+            pr,
+            '{"review_complete": false, "comments": ['
+            '{"path": "assets/texture.png", "line": 1, "body": "Wrong size."}]}',
+        )
+
+        self.assertFalse(pr.posted[0].get("comments"))
+        self.assertIn("`assets/texture.png:1`", pr.posted[0]["body"])
+        self.assertIn("no patch", log)
+
+    def test_a_clean_verdict_lost_to_a_500_storm_is_a_named_failure(self):
+        pr = _StormPR(refuse_body_only=True)
+        deepseek_review.call_deepseek = lambda *args, **kwargs: '{"review_complete": true, "comments": []}'
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "GitHub rejected the review that records it"):
+                deepseek_review.mode_full_review(None, None, pr, _BOT_USERNAME)
+
+
 # ─────────── Mode A wants an object, Mode B wants prose (legacy PR 57) ───────────
 
 
