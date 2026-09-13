@@ -6112,17 +6112,28 @@ fn the_flock_roosts_at_night_and_a_clockless_server_flies_it_all_day() {
         "a midday sky had no birds in it"
     );
 
-    // Deep night: they roost, and nothing new is spawned while they leave.
+    // Deep night: they roost, and since #1193 the desert night is the bats'. Before the bat
+    // this asserted an *empty* night sky; the roost it was measuring is still "every vulture
+    // leaves", and the bats arriving is the other half of the same handover.
+    let vulture = 1;
     deliver_at_tick_of_day(&mut app, 2, 18_000, Instant::now());
     app.update();
     assert!(
-        flock(&mut app).iter().all(|bird| bird.2 == 0.0),
+        flock(&mut app)
+            .iter()
+            .filter(|bird| bird.0 == vulture)
+            .all(|bird| bird.2 == 0.0),
         "a roosting flock was still wanted"
     );
     watch(&mut app, 40);
+    let night = flock(&mut app);
     assert!(
-        flock(&mut app).is_empty(),
+        night.iter().all(|bird| bird.0 != vulture),
         "the night sky kept its vultures"
+    );
+    assert!(
+        !night.is_empty() && night.iter().all(|bird| bird.0 == birds::BAT),
+        "the desert night is not the bats': {night:?}"
     );
 
     // The same look on a server that declares no day has no night to roost through.
@@ -6149,24 +6160,33 @@ fn the_flight_period_is_a_row_and_a_nocturnal_row_would_invert_the_roost() {
     // that test flies a *vulture* over sand, and sand has no night row, so what it measures —
     // a flock that empties its sky when the night arrives — is still exactly what it
     // measures. What it does not cover is a flock that *starts* at dusk, and
-    // `the_night_wood_and_the_night_north_fly_the_owl_and_the_desert_flies_nothing` in
+    // `the_night_wood_and_the_night_north_fly_the_owl_and_the_desert_night_has_no_owl` in
     // `birds.rs` is where that now lives.
     //
     // The tripwire stays rather than being deleted, narrowed to the claim the sand test
     // actually rests on: the country it flies over must go on having no night row.
-    assert!(
-        birds::BIRDS
-            .iter()
-            .filter(|row| row.ground == GroundLook::Sand)
-            .all(|row| row.flies == Period::Day),
-        "the desert gained a night row, so the roost test above no longer empties its sky"
+    //
+    // **And #1193 tripped it, with the bat.** Said, then: the roost test above no longer
+    // empties its sky. It measures that every vulture leaves when the night arrives, which is
+    // still the roost, and it now also asserts the bats replace them — so the one night row
+    // over sand has to be the bat and nothing else, or that assertion is about the wrong bird.
+    let desert_nights: Vec<usize> = (0..birds::BIRDS.len())
+        .filter(|row| {
+            birds::BIRDS[*row].ground == GroundLook::Sand
+                && birds::BIRDS[*row].flies == Period::Night
+        })
+        .collect();
+    assert_eq!(
+        desert_nights,
+        vec![birds::BAT],
+        "the desert's night rows moved, so the roost test above hands the sky to the wrong bird"
     );
     assert_eq!(
         birds::BIRDS
             .iter()
             .filter(|row| row.flies == Period::Night)
             .count(),
-        2,
+        3,
         "the nocturnal row count moved; say here what the roost test no longer covers"
     );
 
