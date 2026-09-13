@@ -220,4 +220,79 @@ mod tests {
         // A lane that may not begin a call is as silent as one with no gain, at full gain.
         assert!(calls(11, 1.0, false).iter().all(|s| *s == 0.0));
     }
+
+    /// A call is placed where its origin was at onset and stays there while the origin moves
+    /// (#1244). The origin here runs at the lynx's bolt, 15 blocks a second, with the radius
+    /// and height zeroed as they are for a call placed at a body: were the call to follow its
+    /// creature, the placements within one call would differ by 1.5 blocks a frame.
+    #[test]
+    fn a_call_stays_where_it_began_while_its_origin_moves() {
+        use std::cell::{Cell, RefCell};
+        let shared = Arc::new(Mixer::new());
+        shared.set_format(8000, 1);
+        let mixer = AudioMixer::from_shared_for_test(shared.clone());
+        let mut calls = Calls::default();
+        let tick = Cell::new(0usize);
+        let origins = RefCell::new(Vec::new());
+        // Every placement, tagged with the onset it belongs to: `place` is asked only at an
+        // onset and while that call is still sounding, so the tag is the latest onset's tick.
+        let placements: RefCell<Vec<(usize, Vec3)>> = RefCell::new(Vec::new());
+        let onset = Cell::new(None::<usize>);
+        for frame in 0..600 {
+            tick.set(frame);
+            let origin = Vec3::new(frame as f32 * 1.5, 70.0, -4.0);
+            origins.borrow_mut().push(origin);
+            calls.update(
+                &mixer,
+                CallFrame {
+                    dt: 0.1,
+                    seed: 11,
+                    interval: sounds::Call::Parrot.profile().interval,
+                    radius: 0.0,
+                    height: 0.0,
+                    origin,
+                    gain: 1.0,
+                    may_start: true,
+                },
+                |source| {
+                    placements
+                        .borrow_mut()
+                        .push((onset.get().unwrap_or(usize::MAX), source));
+                    Placement::UNPOSITIONED
+                },
+                |seed, rate| {
+                    // Onset: `place` has already been asked once for this call, before the bake.
+                    onset.set(Some(tick.get()));
+                    if let Some(last) = placements.borrow_mut().last_mut() {
+                        last.0 = tick.get();
+                    }
+                    sounds::Call::Parrot.bake(seed, rate)
+                },
+            );
+            let mut buffer = Buffer(vec![0.0; 800]);
+            shared.render(&mut buffer);
+        }
+        let placements = placements.into_inner();
+        let origins = origins.into_inner();
+        let mut onsets: Vec<usize> = placements.iter().map(|(onset, _)| *onset).collect();
+        onsets.dedup();
+        assert!(onsets.len() >= 2, "several calls to observe");
+        let mut sounded_while_moving = false;
+        for start in onsets {
+            let during: Vec<Vec3> = placements
+                .iter()
+                .filter(|(onset, _)| *onset == start)
+                .map(|(_, source)| *source)
+                .collect();
+            assert!(
+                during.iter().all(|source| *source == origins[start]),
+                "the call begun at frame {start} left its onset position"
+            );
+            sounded_while_moving |= during.len() > 2;
+        }
+        assert!(
+            sounded_while_moving,
+            "a call outlived several frames of a moving origin"
+        );
+    }
 }
