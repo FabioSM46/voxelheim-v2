@@ -156,7 +156,7 @@ pub(super) struct Voice {
 /// |  | day | night |
 /// |---|---|---|
 /// | sand | rattlesnake, and the condor where the bird table flies the vulture | mouse, where the critter table stands it |
-/// | snow | eagle | wolf |
+/// | snow | eagle; lynx, where the critter table stands it | wolf |
 /// | grass | macaw, where the bird table flies it; squirrel, where the critter table stands it | cricket |
 ///
 /// `GroundLook::Unknown` is deliberately absent and so is the open plain's day: "not enough
@@ -220,7 +220,7 @@ pub(super) struct Voice {
 /// run of the real scheduler reported the two pairs as identical to seven digits (the owl
 /// alone: at a 30–90 s interval against the cricket's 6–16 s they never once landed together)
 /// and so measured nothing at all.
-pub(super) const WILDLIFE: [Voice; 9] = [
+pub(super) const WILDLIFE: [Voice; 10] = [
     // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
     // plain has no species and another country has another one, and neither hosts the call
     // (#1176). It had a lane of its own until the table could hold a habitat that is not the
@@ -299,6 +299,26 @@ pub(super) const WILDLIFE: [Voice; 9] = [
         period: Period::Night,
         stream: 0x9868,
     },
+    // The lynx (#1194), heard by day exactly where the critter table stands it: snow, trees or
+    // none. Appended to the seen-and-heard rows below the mouse and above every ground-only row,
+    // for the claim-order reason on this table, and placed at its own body — a yowl arriving from
+    // a bearing while the lynx is plainly bolting across the snow over there is the bug the
+    // origin rule describes. `0x9869` is the next salt no row uses.
+    //
+    // **The eagle keeps the snow's day and is still heard.** Its row is untouched, a lane of its
+    // own below this one; the two share a country and an hour and nothing else. The lynx calls
+    // three times more sparsely, which is where the issue said the two voices would be kept from
+    // crowding each other — its range is the eagle's, because a yowl has to carry as far as a
+    // lynx can be seen — and
+    // `a_simulated_day_in_the_north_hears_a_few_yowls_from_the_lynx_and_the_eagle_alongside` is
+    // what shows both are heard.
+    Voice {
+        call: Call::Lynx,
+        habitat: Habitat::Critter(LYNX),
+        origin: Origin::Creature,
+        period: Period::Day,
+        stream: 0x9869,
+    },
     Voice {
         call: Call::Rattlesnake,
         habitat: Habitat::Ground(GroundLook::Sand),
@@ -338,6 +358,9 @@ pub(super) const SQUIRREL: usize = 0;
 
 /// The mouse's row there, appended after the squirrel's (#1192).
 pub(super) const MOUSE: usize = 1;
+
+/// The lynx's row there, appended after the mouse's (#1194).
+pub(super) const LYNX: usize = 2;
 
 impl Habitat {
     /// The body this habitat's voice should come from, if one is drawn.
