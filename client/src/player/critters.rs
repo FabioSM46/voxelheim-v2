@@ -55,13 +55,17 @@
 //! [`CRITTERS`], the systems are written against the table's length, and the motion families
 //! are an enum ([`Gait`]) rather than a branch per species. A mouse is a row with a smaller
 //! size and a shorter life; a creature that watches rather than forages is a second [`Gait`]
-//! and a row that names it. Nothing below reads `CRITTERS[0]` by its index outside the
-//! table's own tests.
+//! and a row that names it. #1192 is the first test of that claim: the mouse is a row, a
+//! [`Gait::Dash`] and a [`Tail::Cord`], and the one system change it needed is a third entity
+//! for a row that wears [`Eyeshine`]. Nothing below reads `CRITTERS[0]` by its index outside
+//! the table's own tests.
 //!
 //! ## Two entities and no asset
 //!
 //! A body lofted through nine cross-sections, and a tail as a child — one mesh each, so a
-//! critter is two draws and a full wood is eight. The tail is a child for the reason a bird's
+//! critter is two draws and a full wood is eight; a row that declares
+//! [`CritterSpecies::eyeshine`] adds the pair of faces `player/eyeshine.rs` builds as a third,
+//! so a mouse is three. The tail is a child for the reason a bird's
 //! wing is: it turns about its own root, which is cheaper to write and to read than
 //! recomputing its vertices, and `a_critter_is_two_draws_however_detailed_it_is` is what keeps
 //! a richer model from becoming a richer scene.
@@ -84,6 +88,7 @@ use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
+use super::eyeshine::{BLANK_EYES, Eyeshine, eye_pair_mesh, eyeshine_material};
 use super::sky::{self, Period, SkyClock};
 use crate::net::{BlockCoord, ChunkCoord, Session};
 use crate::world::{ChunkStore, palette};
@@ -175,6 +180,27 @@ const SCURRY_LEG_SECONDS: RangeInclusive<f32> = 1.8..=3.0;
 /// this paragraph.
 const SCURRY_DASH_SHARE: f32 = 0.6;
 
+/// A dashing critter's run, in blocks: how far each leg carries it along its bearing, how far a
+/// waypoint may swerve either side of that line, and how long one leg lasts.
+///
+/// **A run rather than a forage**, which is what a mouse on open sand does and a squirrel in a
+/// wood does not: it crosses the ground in short bursts with a freeze between them, and is gone.
+/// The waypoints march along one bearing — `birds::waypoint`'s dart legs laid out in a line —
+/// so consecutive legs share an end point and the path is continuous, as the scurry's is.
+///
+/// **The speed bound is derived rather than chosen.** The longest leg is
+/// `sqrt(STRIDE² + (2 · SWERVE)²)` = 1.22 blocks over [`DASH_SHARE`] of the shortest leg,
+/// 0.39 s, and a smoothstep peaks at one and a half times its average: 4.7 blocks a second,
+/// under the mouse row's `max_speed` of 5. Over a 4.68-second run that is five to eight legs,
+/// so a mouse crosses five to eight blocks — a short way, and well inside [`CRITTER_RANGE`]
+/// with [`HOME_SPREAD`] added.
+const DASH_STRIDE: f32 = 1.0;
+const DASH_SWERVE: f32 = 0.35;
+const DASH_LEG_SECONDS: RangeInclusive<f32> = 0.6..=0.9;
+
+/// How much of a dash leg is spent moving; the rest of it is the freeze.
+const DASH_SHARE: f32 = 0.65;
+
 /// How fast a foraging critter's centre travels, in blocks per second, and over how long.
 ///
 /// Without it a squirrel jitters about one point forever, which reads as a tethered animal.
@@ -243,14 +269,17 @@ const CLIMB_RISE: f32 = 9.0;
 /// How a critter moves over the ground.
 ///
 /// An enum rather than a branch per species, so the second and third critters are a row that
-/// names a gait rather than a copy of this module. Only one is written, because an
-/// unconstructed variant would be a claim about content nobody has authored — the same
+/// names a gait rather than a copy of this module. Every variant is one a row ships, because
+/// an unconstructed variant would be a claim about content nobody has authored — the same
 /// reasoning `sky::Period` gives for having no `Always`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Gait {
     /// Short dashes between waypoints with a held stillness between them, over a centre that
     /// browses slowly across the ground.
     Scurry,
+    /// A short run along one bearing, in dashes with a freeze between them, with no browse
+    /// under it: somewhere to be rather than somewhere to feed. See [`DASH_STRIDE`].
+    Dash,
 }
 
 /// One row of [`CRITTERS`]: everything about a kind of critter there is.
@@ -309,6 +338,11 @@ pub(super) struct CritterSpecies {
     pub(super) coats: &'static [(Color, Color)],
     /// How it moves.
     pub(super) gait: Gait,
+    /// The shape of its tail, and the pose that shape rests in.
+    pub(super) tail_shape: Tail,
+    /// The pair of eyes it wears, if any — the presentation `player/eyeshine.rs` shares with
+    /// the owl. `None` spawns no eye entity at all, so the squirrel is the two draws it was.
+    pub(super) eyeshine: Option<Eyeshine>,
     /// The fastest this row's gait can move it, in blocks per second.
     ///
     /// A bound rather than a speed, and **test-only** for the reason
@@ -384,7 +418,7 @@ impl CritterSpecies {
 /// Zero point five five blocks is also a little over life size: a red squirrel's body is about
 /// 0.22 m. The flock's eagle is stretched much further than that for the same reason, and it
 /// is named here rather than left to be re-derived.
-pub(super) const CRITTERS: [CritterSpecies; 1] = [
+pub(super) const CRITTERS: [CritterSpecies; 2] = [
     // The squirrel: wooded green country by day, on the same gate the macaw uses. It forages
     // across the ground, climbs a trunk, and is gone into the leaves.
     CritterSpecies {
@@ -406,6 +440,8 @@ pub(super) const CRITTERS: [CritterSpecies; 1] = [
             (Color::srgb(0.42, 0.19, 0.09), Color::srgb(0.50, 0.26, 0.12)),
         ],
         gait: Gait::Scurry,
+        tail_shape: Tail::Plume,
+        eyeshine: None,
         // The longest dash is the waypoint box's diagonal, 4.24 blocks, over
         // `SCURRY_DASH_SHARE` of the shortest leg, 1.08 s — times the 1.5 a smoothstep peaks
         // at, which is 5.89 — plus `FORAGE_TRAVEL` where the two align. The climb's approach
@@ -414,7 +450,65 @@ pub(super) const CRITTERS: [CritterSpecies; 1] = [
         #[cfg(test)]
         max_speed: 6.5,
     },
+    // The mouse: open sand after dark, trees or none. It appears, runs a short way across the
+    // ground in dashes, and goes to ground where it stops — `climbs: false` is the hole.
+    //
+    // **Its body is barely there, and that is the whole of the effect** (#1192): a dark coat,
+    // lit by the night sky like everything else, and a pair of eyes that is not.
+    //
+    // Sized by angle, as the squirrel is: 0.3 blocks is 5.7° at three blocks and 1.1° at the
+    // fifteen a mouse is usually met at — a shape up close and a smudge beyond. The life is six
+    // seconds because the run is short, and `forage_share` ends the run at 4.68 s, just before
+    // the fade begins at 4.75, so a mouse stops *and then* is gone rather than dissolving
+    // mid-dash.
+    CritterSpecies {
+        ground: GroundLook::Sand,
+        requires_wooded: false,
+        abroad: Period::Night,
+        count: 1..=2,
+        size: 0.3,
+        life: 6.0,
+        forage_share: 0.78,
+        climbs: false,
+        // A twitch of a thin tail rather than a flick of a plume.
+        flick_hz: 2.2,
+        body: Color::srgb(0.30, 0.25, 0.19),
+        tail: Color::srgb(0.38, 0.31, 0.26),
+        coats: &[(Color::srgb(0.24, 0.21, 0.18), Color::srgb(0.33, 0.28, 0.25))],
+        gait: Gait::Dash,
+        tail_shape: Tail::Cord,
+        eyeshine: Some(MOUSE_EYES),
+        // 4.7 at a dash's peak, derived at `DASH_STRIDE`.
+        #[cfg(test)]
+        max_speed: 5.0,
+    },
 ];
+
+/// The mouse's eyes: small, red, and the one part of a mouse a night eye finds.
+///
+/// In the model's own units, so at the mouse's 0.3-block scale each eye is 0.021 blocks across
+/// — larger than life, deliberately, for the reason the owl's are. That is 0.30° at four
+/// blocks, a glint, and 0.08° at fifteen, a pinprick, which is what a pair of eyes in the dark
+/// at that range is. They sit ahead of the head either side of the narrow muzzle, far enough out
+/// that the whole of each face, not just its centre, is outside the body's own shell: at the
+/// eyes' station the muzzle is 0.027 either side of the centre line, and each face's inner edge
+/// is at `spread - size / 2` = 0.03 — `a_critters_eyes_are_not_buried_in_its_own_head` measures
+/// the edges.
+///
+/// **The spread was 0.055, which put that inner edge at 0.02**, so a strip of each face sat inside
+/// the muzzle, behind its front surface and never drawn. The test measured the centres then, and
+/// the centres were clear; review on #1222 pointed out that a face is not its centre.
+///
+/// A rodent's eyeshine is red where an owl's is gold, and the glow's red component is over one
+/// for the reason `structures.rs`'s rune gives.
+const MOUSE_EYES: Eyeshine = Eyeshine {
+    spread: 0.065,
+    forward: 0.47,
+    rise: 0.14,
+    size: 0.07,
+    colour: Color::srgb(0.55, 0.20, 0.12),
+    glow: LinearRgba::rgb(2.8, 0.9, 0.4),
+};
 
 /// Which row [`Ambience`] is asking for, if any.
 ///
@@ -521,37 +615,45 @@ pub(super) fn place(
     forage.lerp(foot, smooth(approach))
 }
 
-/// Where a foraging critter is, `age` seconds in: a browsing centre with a scurry over it.
+/// Where a foraging critter is, `age` seconds in: a browsing centre with a scurry over it, or
+/// a run from its home.
 fn forage_at(species: &CritterSpecies, seed: u64, age: f32, anchor: Vec3) -> Vec3 {
     let home = home_of(seed, anchor);
-    // The browse: one direction per critter, held for the whole forage, so a squirrel works
-    // its way across a clearing rather than jittering about a tether.
-    let bearing = unit(seed, SALT_BEARING) * TAU;
-    let travelled = FORAGE_TRAVEL * age;
-    let centre = home + Vec3::new(bearing.cos(), 0.0, bearing.sin()) * travelled;
-    centre + scurry(species, seed, age)
-}
-
-/// How far one critter is from its browsing centre, `age` seconds in.
-fn scurry(species: &CritterSpecies, seed: u64, age: f32) -> Vec3 {
     match species.gait {
         Gait::Scurry => {
-            let leg = lerp(
-                *SCURRY_LEG_SECONDS.start(),
-                *SCURRY_LEG_SECONDS.end(),
-                unit(seed, SALT_LEG),
-            );
-            let progress = age / leg;
-            let index = progress.floor();
-            // The waypoint index is the leg number, so consecutive legs share an end point
-            // and the path is continuous across every boundary — `birds::offset`'s dart, on
-            // the plane and with a dash rather than a glide between the two.
-            let from = waypoint(seed, index as i64);
-            let to = waypoint(seed, index as i64 + 1);
-            let along = ((progress - index) / SCURRY_DASH_SHARE).min(1.0);
-            from.lerp(to, smooth(along))
+            // The browse: one direction per critter, held for the whole forage, so a squirrel
+            // works its way across a clearing rather than jittering about a tether.
+            let bearing = unit(seed, SALT_BEARING) * TAU;
+            let travelled = FORAGE_TRAVEL * age;
+            let centre = home + Vec3::new(bearing.cos(), 0.0, bearing.sin()) * travelled;
+            centre + legs(seed, age, &SCURRY_LEG_SECONDS, SCURRY_DASH_SHARE, waypoint)
         }
+        // No browse under a run: the legs themselves carry it along its bearing.
+        Gait::Dash => home + legs(seed, age, &DASH_LEG_SECONDS, DASH_SHARE, run_waypoint),
     }
+}
+
+/// How far one critter is from where its legs are measured from, `age` seconds in: a dash
+/// between consecutive waypoints over `share` of each leg, and stillness for the rest.
+///
+/// The waypoint index is the leg number, so consecutive legs share an end point and the path is
+/// continuous across every boundary — `birds::offset`'s dart, on the plane and with a dash
+/// rather than a glide between the two. Both gaits are this arithmetic with their own numbers
+/// and their own waypoints.
+fn legs(
+    seed: u64,
+    age: f32,
+    seconds: &RangeInclusive<f32>,
+    share: f32,
+    waypoint: fn(u64, i64) -> Vec3,
+) -> Vec3 {
+    let leg = lerp(*seconds.start(), *seconds.end(), unit(seed, SALT_LEG));
+    let progress = age / leg;
+    let index = progress.floor();
+    let from = waypoint(seed, index as i64);
+    let to = waypoint(seed, index as i64 + 1);
+    let along = ((progress - index) / share).min(1.0);
+    from.lerp(to, smooth(along))
 }
 
 /// The `index`th waypoint of a scurrying critter, relative to its browsing centre.
@@ -562,6 +664,16 @@ fn waypoint(seed: u64, index: i64) -> Vec3 {
         0.0,
         centred(leg, 1) * SCURRY_SPREAD,
     )
+}
+
+/// The `index`th waypoint of a dashing critter's run, relative to its home: `index` strides
+/// along its bearing, swerved a little to one side of the line.
+fn run_waypoint(seed: u64, index: i64) -> Vec3 {
+    let bearing = unit(seed, SALT_BEARING) * TAU;
+    let ahead = Vec3::new(bearing.cos(), 0.0, bearing.sin());
+    let across = Vec3::new(-ahead.z, 0.0, ahead.x);
+    let swerve = centred(mix(seed, index as u64 ^ SALT_WAYPOINT), 0) * DASH_SWERVE;
+    ahead * (index as f32 * DASH_STRIDE) + across * swerve
 }
 
 /// How far up its trunk a critter has climbed, `age` seconds into its life.
@@ -943,9 +1055,17 @@ fn group_size(species: &CritterSpecies, cell: u64) -> usize {
 #[derive(Resource, Debug)]
 pub(super) struct CritterVisuals {
     body: Handle<Mesh>,
-    tail: Handle<Mesh>,
+    /// One tail mesh per row of [`CRITTERS`], in that order: a squirrel's plume and a mouse's
+    /// cord are different shapes on the same body.
+    tails: [Handle<Mesh>; CRITTERS.len()],
     /// One `(body, tail)` pair per critter the ground can hold, claimed at spawn.
     pool: [(Handle<StandardMaterial>, Handle<StandardMaterial>); CRITTER_COUNT_MAX],
+    /// One eye-pair mesh per row that declares [`CritterSpecies::eyeshine`], `None` for a row
+    /// that does not — `birds::BirdVisuals::eyes`, for the ground.
+    eyes: [Option<Handle<Mesh>>; CRITTERS.len()],
+    /// One eye material per critter the ground can hold, claimed with the pool pair beside it,
+    /// because an eye fades with its own critter and a shared handle would fade two as one.
+    eye_pool: [Handle<StandardMaterial>; CRITTER_COUNT_MAX],
 }
 
 /// One critter. The root, and the only thing anything outside this module may see.
@@ -988,6 +1108,8 @@ pub(super) struct Critter {
     pool: usize,
     body_material: Handle<StandardMaterial>,
     tail_material: Handle<StandardMaterial>,
+    /// The eye pair's material, for a row that wears one. `None` spawns no eye entity.
+    eye_material: Option<Handle<StandardMaterial>>,
 }
 
 /// One tail, as a child of the critter it belongs to.
@@ -996,6 +1118,9 @@ pub(super) struct CritterTail {
     /// Its own copy of the row's flick, so the tail needs nothing from its parent and the two
     /// queries can be taken in one system without aliasing a `Transform`.
     flick_hz: f32,
+    /// Its own copy of its shape's resting angle and swing, for the same reason.
+    rest: f32,
+    swing: f32,
 }
 
 /// Builds the two meshes and every material any critter will ever wear.
@@ -1006,9 +1131,9 @@ pub(super) fn create_visuals(
 ) {
     commands.insert_resource(CritterVisuals {
         body: meshes.add(body_mesh()),
-        // Authored from its root outwards, so rotating the child about its own origin is the
-        // flick and nothing has to offset it.
-        tail: meshes.add(tail_mesh()),
+        // Each authored from its root outwards, so rotating the child about its own origin is
+        // the flick and nothing has to offset it.
+        tails: std::array::from_fn(|row| meshes.add(tail_mesh(CRITTERS[row].tail_shape))),
         // Colourless and invisible until a critter claims the pair and writes its coat in.
         pool: std::array::from_fn(|_| {
             (
@@ -1016,6 +1141,12 @@ pub(super) fn create_visuals(
                 materials.add(coat_material(Color::WHITE, 0.0)),
             )
         }),
+        eyes: std::array::from_fn(|row| {
+            CRITTERS[row]
+                .eyeshine
+                .map(|eyes| meshes.add(eye_pair_mesh(eyes)))
+        }),
+        eye_pool: std::array::from_fn(|_| materials.add(eyeshine_material(BLANK_EYES, 0.0))),
     });
 }
 
@@ -1326,6 +1457,74 @@ const _: () = assert!(
     "the flick is a sweep rather than a twitch"
 );
 
+/// The shape of a critter's tail, and the pose it rests in.
+///
+/// Two, because the two rows that exist have two: a squirrel's plume is the half of its
+/// silhouette that says squirrel, and the same plume on a mouse would say squirrel too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tail {
+    /// Bushy, and held up over the back in an arch — see [`tail_sections`].
+    Plume,
+    /// Thin, and trailed behind a little below level — see [`cord_sections`].
+    Cord,
+}
+
+impl Tail {
+    /// The sections this shape is lofted through, root first.
+    fn sections(self) -> [BodySection; 5] {
+        match self {
+            Self::Plume => tail_sections(),
+            Self::Cord => cord_sections(),
+        }
+    }
+
+    /// The component one tail of this shape carries, flicking at `flick_hz`.
+    fn component(self, flick_hz: f32) -> CritterTail {
+        let (rest, swing) = match self {
+            Self::Plume => (TAIL_REST_RADIANS, TAIL_FLICK_RADIANS),
+            Self::Cord => (CORD_REST_RADIANS, CORD_SWING_RADIANS),
+        };
+        CritterTail {
+            flick_hz,
+            rest,
+            swing,
+        }
+    }
+}
+
+/// The sections a mouse's tail is lofted through: a cord most of a body length long, round
+/// rather than a plume, tapering to almost nothing.
+///
+/// Authored along `+Z` from its root for the reason [`tail_sections`] is.
+fn cord_sections() -> [BodySection; 5] {
+    [
+        (0.00, 0.022),
+        (0.18, 0.017),
+        (0.36, 0.013),
+        (0.54, 0.009),
+        (0.72, 0.004),
+    ]
+    .map(|(z, half)| BodySection {
+        z,
+        half_width: half,
+        half_height: half,
+        lift: 0.0,
+    })
+}
+
+/// A mouse's tail rests a little *below* level, trailing behind it, and twitches rather than
+/// flicks. A positive turn about `X` takes `+Z` toward `-Y` — the opposite of the squirrel's
+/// arch — so the rest has to stay shallow enough that the tip never reaches the ground it is
+/// trailing over; `a_mouse_tail_is_a_thin_cord_that_trails_clear_of_the_ground` measures that
+/// at every swing.
+const CORD_REST_RADIANS: f32 = 0.10;
+const CORD_SWING_RADIANS: f32 = 0.06;
+
+const _: () = assert!(
+    CORD_REST_RADIANS > 0.0 && CORD_SWING_RADIANS < CORD_REST_RADIANS,
+    "a mouse's tail droops behind it and only twitches"
+);
+
 /// The body, as one mesh and therefore one draw.
 fn body_mesh() -> Mesh {
     let mut build = MeshBuild::default();
@@ -1337,10 +1536,11 @@ fn body_mesh() -> Mesh {
     build.finish()
 }
 
-/// The tail, lofted from its root out to its tip.
-fn tail_mesh() -> Mesh {
+/// One shape of tail, lofted from its root out to its tip.
+fn tail_mesh(shape: Tail) -> Mesh {
     let mut build = MeshBuild::default();
-    let rings: Vec<Vec<Vec3>> = tail_sections()
+    let rings: Vec<Vec<Vec3>> = shape
+        .sections()
         .iter()
         .map(|section| section.perimeter())
         .collect();
@@ -1355,8 +1555,8 @@ fn tail_mesh() -> Mesh {
 /// and would invert the winding — which `cull_mode: None` hides rather than fixes, which is
 /// exactly why it is not used.
 fn tail_turn(tail: &CritterTail, elapsed: f32) -> Quat {
-    let swing = (elapsed * tail.flick_hz * TAU).sin() * TAIL_FLICK_RADIANS;
-    Quat::from_rotation_x(TAIL_REST_RADIANS + swing)
+    let swing = (elapsed * tail.flick_hz * TAU).sin() * tail.swing;
+    Quat::from_rotation_x(tail.rest + swing)
 }
 
 /// Lit, blended and drawn from both faces.
@@ -1582,6 +1782,17 @@ pub(super) fn keep_the_critters(
         if let Some(mut material) = materials.get_mut(&tail_material) {
             *material = coat_material(tail_colour, 0.0);
         }
+        // The eye pair, for a row that wears one: the slot's own pooled material, written with
+        // this row's glow and faded in beside the coat — `birds::keep_the_flock`'s eyes, on the
+        // ground.
+        let eyes = species.eyeshine.zip(visuals.eyes[index].clone());
+        let eye_material = eyes.as_ref().map(|(eyeshine, _)| {
+            let handle = visuals.eye_pool[pool].clone();
+            if let Some(mut material) = materials.get_mut(&handle) {
+                *material = eyeshine_material(*eyeshine, 0.0);
+            }
+            handle
+        });
         let at = place(species, seed, age, anchor, trunk);
         let critter = commands
             .spawn((
@@ -1598,6 +1809,7 @@ pub(super) fn keep_the_critters(
                     pool,
                     body_material: body_material.clone(),
                     tail_material: tail_material.clone(),
+                    eye_material: eye_material.clone(),
                 },
                 Mesh3d(visuals.body.clone()),
                 MeshMaterial3d(body_material),
@@ -1608,13 +1820,17 @@ pub(super) fn keep_the_critters(
             .id();
         commands.entity(critter).with_children(|parent| {
             parent.spawn((
-                CritterTail {
-                    flick_hz: species.flick_hz,
-                },
-                Mesh3d(visuals.tail.clone()),
+                species.tail_shape.component(species.flick_hz),
+                Mesh3d(visuals.tails[index].clone()),
                 MeshMaterial3d(tail_material),
                 Transform::from_translation(TAIL_ROOT),
             ));
+            // A third entity, and only for a row that wears eyes. Authored in the model's own
+            // units, so the parent's scale sizes it, and nothing animates it: the glow is
+            // written into the material the parent already holds a handle to.
+            if let (Some((_, mesh)), Some(material)) = (eyes, eye_material) {
+                parent.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default()));
+            }
         });
     }
 }
@@ -1702,6 +1918,15 @@ pub(super) fn run_the_critters(
                     material.base_color = material.base_color.with_alpha(fade);
                 }
             }
+            // The eyes take the same fade, on their base colour alone: the renderer applies
+            // the alpha to the glow itself, twice — `player/eyeshine.rs` names the two lines.
+            if let (Some(handle), Some(eyeshine)) = (
+                critter.eye_material.clone(),
+                CRITTERS.get(critter.species).and_then(|row| row.eyeshine),
+            ) && let Some(mut material) = materials.get_mut(&handle)
+            {
+                *material = eyeshine_material(eyeshine, fade);
+            }
         }
 
         let species = &CRITTERS[critter.species];
@@ -1788,6 +2013,8 @@ mod tests {
     /// thing it has to settle is the change in ground as it scurries — a tenth of a second is
     /// six frames of [`STAND_STEP_SPEED`], which is a block and a half.
     const SETTLED: usize = 6;
+    /// The mouse's row, appended after the squirrel's and never moved.
+    const MOUSE: usize = 1;
 
     /// How many frames one whole life is, at sixty a second.
     fn life_frames(species: &CritterSpecies) -> usize {
@@ -1896,7 +2123,7 @@ mod tests {
     /// The species gate: a row answers for the look it names, an unknown look gets nothing,
     /// and no row lives on an answer that means "there is no answer".
     ///
-    /// The only coverage of `species_for`'s `None` on sand and snow — the macaw-parity test
+    /// The only coverage of `species_for`'s answer on sand and snow — the macaw-parity test
     /// below asserts the two tables agree rather than asserting either one's answer.
     #[test]
     fn one_row_per_look_and_no_row_answers_an_unknown_one() {
@@ -1916,15 +2143,30 @@ mod tests {
             }),
             Some(0)
         );
-        for ground in [GroundLook::Sand, GroundLook::Snow] {
-            for wooded in [false, true] {
-                assert_eq!(
-                    species_for(&Ambience { ground, wooded }),
-                    None,
-                    "{ground:?}/{wooded} got a critter it has no row for"
-                );
-            }
+        // The sand is the mouse's, trees or none (#1192), and the snow has no critter at all.
+        for wooded in [false, true] {
+            let sand = Ambience {
+                ground: GroundLook::Sand,
+                wooded,
+            };
+            assert_eq!(
+                species_for(&sand),
+                Some(MOUSE),
+                "sand/{wooded} has no mouse"
+            );
+            let snow = Ambience {
+                ground: GroundLook::Snow,
+                wooded,
+            };
+            assert_eq!(
+                species_for(&snow),
+                None,
+                "snow/{wooded} got a critter it has no row for"
+            );
         }
+        // And a mouse is abroad after dark, where the squirrel is abroad by day.
+        assert_eq!(CRITTERS[MOUSE].abroad, Period::Night);
+        assert_eq!(CRITTERS[0].abroad, Period::Day);
         assert!(
             CRITTERS.iter().all(|row| row.ground != GroundLook::Unknown),
             "no row may live on an answer that means there is no answer"
@@ -1943,7 +2185,8 @@ mod tests {
         ] {
             for wooded in [false, true] {
                 let ambience = Ambience { ground, wooded };
-                let squirrels = species_for(&ambience).is_some();
+                // The squirrel's row by name: the sand has a critter of its own now (#1192).
+                let squirrels = species_for(&ambience) == Some(0);
                 // #1191 replaced the first-match `species_for` with a per-row question, because
                 // a country may now have a day row and a night row; the macaw is the row the
                 // squirrel shares its wood with, so ask that row.
@@ -2804,7 +3047,11 @@ mod tests {
         // surface and of nothing else, so no cap was forgotten), and the volume that winding
         // encloses is positive — which is the whole of what "outward" means, and the one of
         // the three a mesh built inside out fails.
-        for (name, mesh) in [("body", body_mesh()), ("tail", tail_mesh())] {
+        for (name, mesh) in [
+            ("body", body_mesh()),
+            ("plume", tail_mesh(Tail::Plume)),
+            ("cord", tail_mesh(Tail::Cord)),
+        ] {
             let (positions, normals, triangles) = geometry(&mesh);
             let mut area = Vec3::ZERO;
             let mut volume = 0.0f32;
@@ -2946,7 +3193,7 @@ mod tests {
     fn a_tail_is_held_over_the_back_and_flicks_about_that_rest() {
         // The pose, which is most of what reads as a squirrel: the tail is up over the back
         // and twitches, rather than trailing behind and wagging.
-        let tail = CritterTail { flick_hz: 1.4 };
+        let tail = Tail::Plume.component(1.4);
         let tip = Vec3::new(0.0, 0.0, tail_sections()[4].z);
         let mut highest = f32::NEG_INFINITY;
         let mut lowest = f32::INFINITY;
@@ -2975,20 +3222,27 @@ mod tests {
         // **origin**, and `place` reads no part of `CritterSpecies::size` — so it would pass
         // with a squirrel the size of a hill. This is the half the size moves: the tail tip,
         // not the origin.
-        let mut reach = Vec3::ZERO;
+        let mut body = Vec3::ZERO;
         for point in points(&body_mesh()) {
-            reach = reach.max(point.abs());
-        }
-        // The tail wherever the flick takes it, rooted where it is rooted.
-        let tail = points(&tail_mesh());
-        for step in 0..=32u32 {
-            let turn = tail_turn(&CritterTail { flick_hz: 1.0 }, step as f32 / 4.0);
-            for point in &tail {
-                reach = reach.max((TAIL_ROOT + turn * *point).abs());
-            }
+            body = body.max(point.abs());
         }
         let anchor = Vec3::new(-512.0, 64.0, 512.0);
         for species in &CRITTERS {
+            let mut reach = body;
+            // The row's own tail wherever the flick takes it, rooted where it is rooted.
+            let tail = points(&tail_mesh(species.tail_shape));
+            for step in 0..=32u32 {
+                let turn = tail_turn(&species.tail_shape.component(1.0), step as f32 / 4.0);
+                for point in &tail {
+                    reach = reach.max((TAIL_ROOT + turn * *point).abs());
+                }
+            }
+            // And its eyes, which sit ahead of the head rather than on it.
+            if let Some(eyes) = species.eyeshine {
+                for point in points(&eye_pair_mesh(eyes)) {
+                    reach = reach.max(point.abs());
+                }
+            }
             // A whole turned critter is at most its longest axis from its origin, whichever
             // way `look_to` has it facing.
             let half = reach.max_element() * species.size;
@@ -3005,5 +3259,195 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The mouse
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_mouse_runs_a_short_way_in_dashes_and_stops_before_it_is_gone() {
+        // #1192: "they run a short way across the ground, squeak, and are gone". Three claims,
+        // each a number: the run is short, it is dashes with a freeze between them rather than
+        // a glide, and the mouse has stopped by the time it starts to fade — so it goes to
+        // ground where it is rather than dissolving mid-dash.
+        let mouse = &CRITTERS[MOUSE];
+        assert_eq!((mouse.gait, mouse.climbs), (Gait::Dash, false));
+        let fades_at = mouse.life - CRITTER_FADE_SECONDS;
+        assert!(
+            mouse.forage_seconds() <= fades_at,
+            "the run outlasts the moment the fade begins"
+        );
+        let anchor = Vec3::new(40.0, 70.0, -8.0);
+        for seed in 0..32u64 {
+            let seed = mix(seed, 0xD45);
+            let start = place(mouse, seed, 0.0, anchor, None);
+            let stop = place(mouse, seed, mouse.forage_seconds(), anchor, None);
+            let run = Vec3::new(stop.x - start.x, 0.0, stop.z - start.z).length();
+            assert!(
+                (3.0..=10.0).contains(&run),
+                "seed {seed}: a {run}-block run is not a short way"
+            );
+
+            let (mut still, mut moving) = (0usize, 0usize);
+            let mut previous = start;
+            for frame in 1..=(mouse.forage_seconds() / DT) as usize {
+                let now = place(mouse, seed, frame as f32 * DT, anchor, None);
+                if now == previous {
+                    still += 1;
+                } else {
+                    moving += 1;
+                }
+                previous = now;
+            }
+            // Dashes and freezes: a glide is never still, and a mouse that is mostly still is
+            // not running anywhere.
+            let total = still + moving;
+            assert!(
+                still * 5 >= total,
+                "seed {seed}: still for {still} of {total} frames, which is a glide"
+            );
+            assert!(
+                moving * 2 >= total,
+                "seed {seed}: moving for {moving} of {total} frames"
+            );
+
+            // From the moment the fade begins it does not move at all.
+            for frame in (fades_at / DT).ceil() as usize..=(mouse.life / DT) as usize {
+                assert_eq!(
+                    place(mouse, seed, frame as f32 * DT, anchor, None),
+                    stop,
+                    "seed {seed} moved while it faded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_mouse_is_a_pair_of_eyes_with_almost_nothing_behind_them() {
+        // "A mouse's eyes are visible at night and its body is barely so, which is the whole of
+        // the effect." The coat is dark, lit — so the night sky darkens it like everything
+        // else — and has no glow of its own; the eyes are the shared emissive pair.
+        let mouse = &CRITTERS[MOUSE];
+        let eyes = mouse.eyeshine.expect("a mouse wears eyeshine");
+        let glow = eyeshine_material(eyes, 1.0).emissive;
+        assert!(
+            glow.red > 1.0,
+            "a glow of {glow:?} is dimmer than a white wall"
+        );
+        for pair in std::iter::once((mouse.body, mouse.tail)).chain(mouse.coats.iter().copied()) {
+            for colour in [pair.0, pair.1] {
+                let coat = coat_material(colour, 1.0);
+                assert_eq!(coat.emissive, LinearRgba::BLACK, "a mouse's coat glows");
+                assert!(!coat.unlit, "a mouse's coat is not darkened by the night");
+                let srgb = colour.to_srgba();
+                assert!(
+                    srgb.red.max(srgb.green).max(srgb.blue) <= 0.4,
+                    "a {srgb:?} coat is not a dark one"
+                );
+            }
+        }
+        // The squirrel is a day creature and wears none, so it is still two draws.
+        assert!(CRITTERS[0].eyeshine.is_none());
+
+        // Near and small: a glint at the distance a mouse is met at, never a lamp.
+        let across = eyes.size * mouse.size;
+        let degrees = |blocks: f32| (across / blocks).atan().to_degrees();
+        assert!(
+            degrees(4.0) >= 0.25,
+            "{}° at four blocks does not read",
+            degrees(4.0)
+        );
+        assert!(
+            degrees(2.0) <= 1.0,
+            "{}° at two blocks is a lamp",
+            degrees(2.0)
+        );
+    }
+
+    #[test]
+    fn a_critters_eyes_are_not_buried_in_its_own_head() {
+        // A face inside the body's shell is drawn behind it and never seen, and nothing else
+        // fails on a glint that is not there. So each eye's **face** — a square of side
+        // `size` about its centre, which is what `eye_pair_mesh` draws — is measured against
+        // the body's cross-section at its own station along the model: clear of the section's
+        // widest reach to the side, or wholly above its top, or wholly below its bottom.
+        //
+        // It measured the centres until review on #1222, and the mouse's centres were clear
+        // while a strip of each face was inside the muzzle.
+        let sections = body_sections();
+        let clear = |eyes: Eyeshine| {
+            let z = -eyes.forward;
+            let pair = sections
+                .windows(2)
+                .find(|pair| (pair[0].z..=pair[1].z).contains(&z))
+                .expect("the eyes sit along the body");
+            let t = (z - pair[0].z) / (pair[1].z - pair[0].z);
+            let half_width = lerp(pair[0].half_width, pair[1].half_width, t);
+            let half_height = lerp(pair[0].half_height, pair[1].half_height, t);
+            let lift = lerp(pair[0].lift, pair[1].lift, t);
+            let half = eyes.size / 2.0;
+            eyes.spread - half > half_width
+                || eyes.rise - half > lift + half_height
+                || eyes.rise + half < lift - half_height
+        };
+        let mut measured = 0usize;
+        for species in &CRITTERS {
+            let Some(eyes) = species.eyeshine else {
+                continue;
+            };
+            assert!(
+                clear(eyes),
+                "{:?}'s eye faces reach inside its own head",
+                species.gait
+            );
+            // In the front of the animal, and clear of the ground it stands on.
+            assert!(eyes.forward > 0.25 && eyes.rise - eyes.size / 2.0 > 0.0);
+            measured += 1;
+        }
+        assert!(measured > 0, "no row wears eyes, so this measured nothing");
+        // **The negative control**: the spread the mouse shipped with, whose centres were clear
+        // and whose faces were not, must fail — or this is measuring centres again.
+        assert!(
+            !clear(Eyeshine {
+                spread: 0.055,
+                ..MOUSE_EYES
+            }),
+            "a face whose inner edge is inside the muzzle measured clear"
+        );
+    }
+
+    #[test]
+    fn a_mouse_tail_is_a_thin_cord_that_trails_clear_of_the_ground() {
+        // The plume's opposite on every axis the plume's tests measure: thin, long for its
+        // width, resting below level rather than arched over the back — and never swinging
+        // into the ground the mouse stands on, which a drooping tail is the one that can.
+        let cord = cord_sections();
+        let widest = cord
+            .iter()
+            .fold(0.0f32, |wide, section| wide.max(section.half_width));
+        let length = cord.last().expect("a tail has sections").z;
+        assert!(
+            widest <= tail_sections()[0].half_width,
+            "a cord {widest} wide is a plume"
+        );
+        assert!(
+            length >= widest * 20.0,
+            "a tail {length} long and {widest} wide is a stub"
+        );
+
+        let tail = Tail::Cord.component(CRITTERS[MOUSE].flick_hz);
+        let shell = points(&tail_mesh(Tail::Cord));
+        for step in 0..=64u32 {
+            let turn = tail_turn(&tail, step as f32 / 16.0);
+            let tip = TAIL_ROOT + turn * Vec3::new(0.0, 0.0, length);
+            assert!(tip.y < TAIL_ROOT.y, "a mouse's tail rose to {tip}");
+            for point in &shell {
+                let at = TAIL_ROOT + turn * *point;
+                assert!(at.y > 0.0, "a mouse's tail swept into the ground at {at}");
+            }
+        }
+        assert_eq!(CRITTERS[MOUSE].tail_shape, Tail::Cord);
+        assert_eq!(CRITTERS[0].tail_shape, Tail::Plume);
     }
 }

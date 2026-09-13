@@ -155,7 +155,7 @@ pub(super) struct Voice {
 ///
 /// |  | day | night |
 /// |---|---|---|
-/// | sand | rattlesnake, and the condor where the bird table flies the vulture | — |
+/// | sand | rattlesnake, and the condor where the bird table flies the vulture | mouse, where the critter table stands it |
 /// | snow | eagle | wolf |
 /// | grass | macaw, where the bird table flies it; squirrel, where the critter table stands it | cricket |
 ///
@@ -163,11 +163,11 @@ pub(super) struct Voice {
 /// loaded evidence" is silence, exactly as it is an empty sky in [`birds::BIRDS`], rather
 /// than a default creature.
 ///
-/// **The desert night is deliberately empty, and that is the one cell with nothing in it.**
-/// A crow held it until #1186, in a country no crow lives in; the night it belongs to is mice
-/// and bats, which needs a creature system and is a later issue. A wrong sound is worse than
-/// no sound, and an absent row is a visible gap where a placeholder would not be —
-/// `the_table_answers_every_country_and_half_of_the_day` asserts the silence by name.
+/// **The desert night is the mouse's, and only the mouse's.** A crow held it until #1186, in a
+/// country no crow lives in, and #1186 left it deliberately empty rather than fill it with a
+/// wrong sound; #1192 is the creature it was waiting for. The bat that shares that night
+/// (#1193) is seen and not heard, so it has no row — and the desert night is one voice, which
+/// is why the headroom measurement below has no pair to take there.
 ///
 /// ## The order is the claim order, and it is load-bearing
 ///
@@ -220,7 +220,7 @@ pub(super) struct Voice {
 /// run of the real scheduler reported the two pairs as identical to seven digits (the owl
 /// alone: at a 30–90 s interval against the cricket's 6–16 s they never once landed together)
 /// and so measured nothing at all.
-pub(super) const WILDLIFE: [Voice; 8] = [
+pub(super) const WILDLIFE: [Voice; 9] = [
     // The macaw, heard by day exactly where the bird table flies it: wooded grass. An open
     // plain has no species and another country has another one, and neither hosts the call
     // (#1176). It had a lane of its own until the table could hold a habitat that is not the
@@ -287,6 +287,18 @@ pub(super) const WILDLIFE: [Voice; 8] = [
         period: Period::Night,
         stream: 0x9866,
     },
+    // The mouse, heard after dark exactly where the critter table stands it: the sand, trees or
+    // none. **Appended to the seen-and-heard rows**, below the owl and above every ground-only
+    // row, for the claim-order reason on this table — and placed at its own body, because a
+    // squeak arriving from a bearing while the mouse's eyes are plainly over there is the bug
+    // the origin rule describes. `0x9868` is the next salt no row uses.
+    Voice {
+        call: Call::Mouse,
+        habitat: Habitat::Critter(MOUSE),
+        origin: Origin::Creature,
+        period: Period::Night,
+        stream: 0x9868,
+    },
     Voice {
         call: Call::Rattlesnake,
         habitat: Habitat::Ground(GroundLook::Sand),
@@ -323,6 +335,9 @@ pub(super) const PARROT: usize = 0;
 
 /// The squirrel's row in [`critters::CRITTERS`], which is appended to and never reordered.
 pub(super) const SQUIRREL: usize = 0;
+
+/// The mouse's row there, appended after the squirrel's (#1192).
+pub(super) const MOUSE: usize = 1;
 
 impl Habitat {
     /// The body this habitat's voice should come from, if one is drawn.

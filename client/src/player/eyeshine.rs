@@ -89,6 +89,22 @@ pub(super) struct Eyeshine {
     pub(super) glow: LinearRgba,
 }
 
+/// The eyeshine a pooled material is minted with: dark, and invisible.
+///
+/// Every pool entry is overwritten with its creature's own row the moment one claims it, so
+/// this is only ever what an unclaimed handle holds. It lives here rather than beside either
+/// pool because there are two of them — `player/birds.rs`'s and `player/critters.rs`'s — and a
+/// named constant rather than a literal because [`Eyeshine`] has six fields and a literal would
+/// read as a species.
+pub(super) const BLANK_EYES: Eyeshine = Eyeshine {
+    spread: 0.0,
+    forward: 0.0,
+    rise: 0.0,
+    size: 0.0,
+    colour: Color::BLACK,
+    glow: LinearRgba::BLACK,
+};
+
 /// The two faces, as one mesh and therefore one draw.
 ///
 /// A pair of squares rather than anything rounder, for the reason `player/horse.rs`'s

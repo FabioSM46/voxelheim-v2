@@ -63,6 +63,11 @@ const PINS: &[pin::Row] = &[
     ("call Owl 0x0", 135135, [15.08984, -20.25460, 65.84948, -94.47059]),
     ("call Owl 0x10203", 135135, [-8.50135, 43.55265, 8.14975, 19.76367]),
     ("call Owl 0xfedcba9876543210", 135135, [17.19547, 14.37376, -15.31686, -22.54483]),
+    // The mouse's three are new with #1192, and sit here for the reason the owl's do: the mouse
+    // is the fifth seen-and-heard row of `WILDLIFE`, appended below the owl.
+    ("call Mouse 0x0", 40040, [-12.03785, -12.64154, -4.40918, 6.36519]),
+    ("call Mouse 0x10203", 40040, [9.78313, -19.74657, 2.37813, 7.28347]),
+    ("call Mouse 0xfedcba9876543210", 40040, [19.68153, 3.16513, -19.03815, 14.74357]),
     // #1184 refreshed these three and only these three: the rattle is a gated click train.
     ("call Rattlesnake 0x0", 80080, [-6.97348, -2.07740, 6.56404, -3.78326]),
     ("call Rattlesnake 0x10203", 80080, [-10.04333, -0.44017, 1.13749, -2.26129]),
