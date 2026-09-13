@@ -58,7 +58,7 @@
 //! are eighteen draws either way, so rotating a child is cheaper to write and to read than
 //! recomputing vertices.
 
-use std::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
+use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 use std::ops::RangeInclusive;
 
 use bevy::asset::RenderAssetUsages;
@@ -131,6 +131,54 @@ const HOME_SPREAD: f32 = 20.0;
 /// `max_speed` is.
 const DART_SPREAD: Vec3 = Vec3::new(5.0, 1.5, 5.0);
 const DART_LEG_SECONDS: RangeInclusive<f32> = 2.0..=4.0;
+
+// ---------------------------------------------------------------------------
+// The flit
+// ---------------------------------------------------------------------------
+//
+// A bat is the macaw's dart made jerkier, and the three ways it is jerkier are three numbers
+// rather than a second idea. Its legs are **shorter** — under a second where the dart's are two
+// to four — so it changes direction several times as often. Their lengths are **irregular**: a
+// dart's legs all last one seed's period, while each flit leg starts at a jittered moment of
+// its own. And the turns are **sharp**, because consecutive waypoints are not independent
+// points in a box but bearings that swing most of a half turn each leg, so the path jinks back
+// across itself instead of wandering. A slow circuit under all of it moves the cloud of jinks
+// between the palms rather than leaving it hanging over one spot.
+//
+// It stays a pure function of a seed and a clock. The jitter is bounded below one, so the
+// start of leg `k + 1` is always after the start of leg `k` and the leg a moment belongs to is
+// found from the regular grid by looking one leg either side — nothing is accumulated.
+
+/// The half-extent of a flitting bird's waypoints around its moving centre, in blocks.
+///
+/// Horizontal is an ellipse of these radii and vertical a band, so the longest leg is the
+/// ellipse's width with the band's height on top: `sqrt(6² + 2.4²)`, 6.46 blocks.
+const FLIT_SPREAD: Vec3 = Vec3::new(3.0, 1.2, 3.0);
+
+/// The regular length of one flit leg, in seconds, and how far a leg's start may be moved off
+/// that grid, as a share of it.
+///
+/// A leg therefore lasts between `0.9 * (1 - 0.3)` and `0.9 * (1 + 0.3)` seconds — 0.63 to
+/// 1.17 — against the dart's two to four. Under one half is what keeps successive starts in
+/// order, and `flit_leg` relies on it; the assertion below is that reliance written down.
+const FLIT_LEG_SECONDS: f32 = 0.9;
+const FLIT_LEG_JITTER: f32 = 0.3;
+const _: () = assert!(FLIT_LEG_JITTER < 0.5);
+
+/// How far a flitting bird's bearing swings from one waypoint to the next, in radians, and how
+/// much either side of that a single leg may land.
+///
+/// 2.4 is 137.5° — the golden angle, near enough — so consecutive legs double back at a sharp
+/// angle and no run of them repeats. The jitter keeps a single turn from being predictable.
+const FLIT_TURN: f32 = 2.4;
+const FLIT_TURN_JITTER: f32 = 0.8;
+
+/// The radius and period of the slow circuit a flitting bird's jinks are centred on.
+///
+/// `TAU * 8 / 18` is 2.8 blocks a second: slow enough that the jinks are the motion a player
+/// reads, fast enough that a bat is between the palms rather than over one of them.
+const FLIT_CIRCUIT_RADIUS: f32 = 8.0;
+const FLIT_CIRCUIT_SECONDS: f32 = 18.0;
 
 /// How far a circling bird rises and falls, in blocks, and over how many turns.
 const SPIRAL_RISE: f32 = 3.0;
@@ -229,6 +277,79 @@ const PERCH_HEADROOM: f32 = 8.0;
 /// result rather than trusting the arithmetic.
 const PERCH_SEAT: f32 = 0.18;
 
+/// How many columns either side of the column's own a hanging bird probes for a palm.
+///
+/// Wider than [`PERCH_PROBE_SIDE`] because a palm is rarer than a tree and narrower than a
+/// canopy: a desert places one in several hundred columns, and a crown is a cross seven blocks
+/// long rather than a mass of leaves. Nine by nine at the same two-block spacing is a
+/// seventeen-block square, which is where an oasis stops being found only by luck. It still
+/// runs once per cycle, so the eighty-one columns cost one probe every minute and a half.
+///
+/// Plus [`PERCH_SEARCH`] and [`HOME_SPREAD`] the furthest seat is 38 blocks out, inside
+/// [`BIRD_RANGE`] — `a_perch_column_and_its_seat_stay_inside_the_box` walks it.
+const PALM_PROBE_SIDE: i32 = 9;
+
+/// How far below the frond's underside a hanging bird's **origin** sits, in wingspans.
+///
+/// Hanging, the model's `+Z` points up, so what touches the frond is the tip of the tail —
+/// authored at 0.310 of a wingspan behind the origin. This is that and a hundredth more, so the
+/// feet meet the frond rather than passing into it, and
+/// `a_bat_hangs_upside_down_under_a_frond_rather_than_in_it_or_below_it` measures the drawn
+/// model rather than this arithmetic. In wingspans rather than blocks, unlike [`PERCH_SEAT`],
+/// because what hangs below the frond is a length of the bird and scales with it.
+const HANG_DROP: f32 = 0.32;
+
+/// How far a hanging bird's wings are folded about the body's long axis, in radians.
+///
+/// Level wings on a body turned head-down would stand out from it like a kite. Turned most of a
+/// quarter turn toward the belly, both wings wrap the body — which is what a roosting bat does —
+/// and because the fold is about the model's own `Z`, the long axis, it moves no part of a wing
+/// higher than it was: the frond clearance above is unchanged by it.
+const HANG_WING_FOLD: f32 = 1.35;
+
+/// What a resting bird rests on, and which way up it does it.
+///
+/// **The perch family, with the orientation as a parameter rather than as a second family.**
+/// Approach, hold and leave are [`perch_blend`] for both; the seat is [`Seat`] for both; the
+/// search is [`tree_top_near`] for both. What differs is the handful of answers below — which
+/// blocks count, where on them the bird goes, and how it holds its body and wings once there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Roost {
+    /// On top of a tree, sitting upright: the owl.
+    Branch,
+    /// Under a palm's frond, hanging head down: the bat.
+    Palm,
+}
+
+impl Roost {
+    /// How many columns a side the search probes, and how far apart.
+    fn probe(self) -> (i32, i32) {
+        match self {
+            Self::Branch => (PERCH_PROBE_SIDE, PERCH_PROBE_SPACING),
+            Self::Palm => (PALM_PROBE_SIDE, PERCH_PROBE_SPACING),
+        }
+    }
+
+    /// How far above the found point the bird's origin is drawn, for a bird of span `size`.
+    ///
+    /// Positive for a bird sitting on the top face, negative for one hanging from the bottom
+    /// face — the one sign that turns a perch over.
+    fn seat_above(self, size: f32) -> f32 {
+        match self {
+            Self::Branch => PERCH_SEAT,
+            Self::Palm => -HANG_DROP * size,
+        }
+    }
+
+    /// The wing angle a fully rested bird holds, which the beat eases into as it lands.
+    fn wing_rest(self) -> f32 {
+        match self {
+            Self::Branch => 0.0,
+            Self::Palm => -HANG_WING_FOLD,
+        }
+    }
+}
+
 /// How much clear air a bird keeps under it, in blocks.
 ///
 /// A bird's altitude is measured from its anchor, and the anchor is the centre of the
@@ -283,6 +404,25 @@ pub(super) enum Flight {
     /// the block of notes above [`PERCH_CYCLE_SECONDS`] for the shape that lets it be both
     /// those things and still a pure function of a seed and a clock.
     Perch,
+    /// Short, irregular, sharply turning legs, and once a cycle a hang from a palm frond.
+    ///
+    /// The bat's: [`Flight::Dart`]'s relative with its legs cut shorter and its turns made
+    /// sharper — see the block of notes above [`FLIT_SPREAD`] — and [`Flight::Perch`]'s rest
+    /// turned upside down, through [`Roost::Palm`] rather than through a second family.
+    Flit,
+}
+
+impl Flight {
+    /// Where a bird flying this pattern rests once a cycle, if it rests at all.
+    ///
+    /// Exhaustive on purpose: a new pattern has to say whether it lands.
+    fn roost(self) -> Option<Roost> {
+        match self {
+            Self::Dart | Self::Circle | Self::Arc => None,
+            Self::Perch => Some(Roost::Branch),
+            Self::Flit => Some(Roost::Palm),
+        }
+    }
 }
 
 /// One row of [`BIRDS`]: everything about a kind of bird there is.
@@ -430,6 +570,7 @@ impl BirdSpecies {
 /// | vulture | 2.6 | 45 | 3.3° |
 /// | eagle | 3.0 | 60 | 2.9° |
 /// | owl | 1.6 | 14 | 6.5° |
+/// | bat | 0.6 | 12 | 2.9° |
 ///
 /// The three were 0.35, 0.9 and 1.0, which is 1.67°, 1.15° and 0.95° — an eagle two moons
 /// wide, which is what a spark is.
@@ -449,7 +590,7 @@ impl BirdSpecies {
 /// wingspan puts its raised wingtip 0.79 higher, leaving about a fifth of a block.
 /// `the_drawn_bird_stays_inside_its_box` asserts that sum in both directions — over the box
 /// fails, and so does a margin wide enough to mean the box stopped being the bound.
-pub(super) const BIRDS: [BirdSpecies; 5] = [
+pub(super) const BIRDS: [BirdSpecies; 6] = [
     // The parrot: small, bright, fast and low, and the only row that needs trees.
     BirdSpecies {
         ground: GroundLook::Grass,
@@ -567,7 +708,51 @@ pub(super) const BIRDS: [BirdSpecies; 5] = [
         max_speed: 9.0,
         eyeshine: Some(OWL_EYES),
     },
+    // The bat, over the sand after dark. Treeless sand as much as wooded: a bat hunts the open
+    // desert and only needs a palm to hang from, and a night without one is a bat that keeps
+    // flying rather than an empty sky.
+    //
+    // **Silent, and that is the row's decision rather than its omission.** A bat's voice is
+    // far above the 3.6 kHz the synth reaches (`audio/synth/mod.rs`), and anything under that
+    // ceiling would be some other animal. So no lane of `ambient_sound/wildlife.rs` names this
+    // row, no call describes it and no pin renders it —
+    // `no_lane_is_gated_on_the_bat_and_no_call_is_a_bat` is what fails if one is ever added.
+    //
+    // **And no eyes**: a bat is a shape against the night sky, not a pair of lights.
+    BirdSpecies {
+        ground: GroundLook::Sand,
+        requires_wooded: false,
+        flies: Period::Night,
+        flock: 2..=4,
+        // Low, because it hangs: a palm's crown is six to eight blocks over the sand, and the
+        // band has to put the probe window around it.
+        altitude: 5.0..=12.0,
+        // Twice a large fruit bat's span, for the reason the eagle is larger than any eagle:
+        // at twelve blocks a real one is a speck, and 0.6 subtends 2.9° there.
+        size: 0.6,
+        // Fast and fluttering, faster than any other row. The beat stops while it hangs, and
+        // the wings fold — see `wing_turn`.
+        flap_hz: 8.0,
+        body: Color::srgb(0.16, 0.12, 0.10),
+        wing: Color::srgb(0.24, 0.19, 0.16),
+        plumage: &[],
+        pattern: Flight::Flit,
+        // The longest leg, 6.46 blocks, over the shortest, 0.63 s, is 10.3; the circuit adds
+        // 2.8. The hang's blend adds at most `1.5 / (PERCH_APPROACH * PERCH_CYCLE_SECONDS)` of
+        // the distance to the seat, which the box bounds — the owl's argument, one row down.
+        #[cfg(test)]
+        max_speed: 18.0,
+        eyeshine: None,
+    },
 ];
+
+/// The bat's row, as a name rather than a number.
+///
+/// **Test-only, and deliberately so**: nothing that runs looks the bat up, because the bat has
+/// no voice to be gated on it — which is the one thing the regression test reading this in
+/// `ambient_sound/tests.rs` exists to keep true.
+#[cfg(test)]
+pub(super) const BAT: usize = 5;
 
 /// The two rows an owl is, as names rather than as numbers.
 ///
@@ -611,9 +796,9 @@ const OWL_EYES: Eyeshine = Eyeshine {
 ///
 /// [`GroundLook::Unknown`] and grass without trees both answer `None`: "not enough loaded
 /// evidence" and "an open plain" come out as an empty sky rather than as a default bird. So
-/// does a country whose only rows are abroad in the other half of the day — the desert after
-/// dark, which has a vulture row and nothing else, which is the acceptance criterion "absent
-/// from the desert entirely" holding because nobody wrote an owl row for sand.
+/// does a country whose only rows are abroad in the other half of the day. The desert after
+/// dark used to be that country and is the bat's since #1193; the owl is still absent from it
+/// entirely, because nobody wrote an owl row for sand.
 ///
 /// **The hour is part of the question and not a filter over the answer.** It was
 /// `species_for(..).filter(|row| row.flies.abroad(night))` in `keep_the_flock`, which is the
@@ -709,6 +894,18 @@ fn offset(species: &BirdSpecies, seed: u64, elapsed: f32) -> Vec3 {
                 PERCH_CRUISE_RADIUS * angle.sin(),
             )
         }
+        // Short irregular legs between jinking bearings, centred on a slow circuit — the notes
+        // above `FLIT_SPREAD`. Where it *hangs* is `perched`'s answer, as it is for the owl.
+        Flight::Flit => {
+            let (leg, progress) = flit_leg(seed, elapsed);
+            let circuit = TAU * (elapsed / FLIT_CIRCUIT_SECONDS + unit(seed, SALT_PHASE));
+            flit_waypoint(seed, leg).lerp(flit_waypoint(seed, leg + 1), progress)
+                + Vec3::new(
+                    FLIT_CIRCUIT_RADIUS * circuit.cos(),
+                    0.0,
+                    FLIT_CIRCUIT_RADIUS * circuit.sin(),
+                )
+        }
         Flight::Arc => {
             let radius = lerp(30.0, 40.0, unit(seed, SALT_RADIUS));
             let period = lerp(40.0, 60.0, unit(seed, SALT_PERIOD));
@@ -731,6 +928,49 @@ fn waypoint(seed: u64, index: i64) -> Vec3 {
         centred(leg, 0) * DART_SPREAD.x,
         centred(leg, 1) * DART_SPREAD.y,
         centred(leg, 2) * DART_SPREAD.z,
+    )
+}
+
+/// When flit leg `index` starts, in seconds: its place on the regular grid, moved later by a
+/// jitter of its own.
+fn flit_start(seed: u64, index: i64) -> f32 {
+    let jitter = unit(mix(seed, SALT_FLIT_LEG), index as u64) * FLIT_LEG_JITTER;
+    (index as f32 + jitter) * FLIT_LEG_SECONDS
+}
+
+/// Which flit leg `elapsed` falls in, and how far through it the bird is.
+///
+/// The grid cell `elapsed` is in holds either that cell's leg or the one before it, because a
+/// start is only ever moved *later*, and by less than half a leg — so one comparison finds the
+/// leg and nothing is walked or remembered. Consecutive legs share an end point, so the path is
+/// continuous across every boundary for the reason [`Flight::Dart`]'s is.
+fn flit_leg(seed: u64, elapsed: f32) -> (i64, f32) {
+    // `as i64` saturates rather than wrapping, the cast `offset`'s dart already relies on.
+    let cell = (elapsed / FLIT_LEG_SECONDS).floor() as i64;
+    let leg = if elapsed < flit_start(seed, cell) {
+        cell - 1
+    } else {
+        cell
+    };
+    let (from, to) = (flit_start(seed, leg), flit_start(seed, leg + 1));
+    (leg, ((elapsed - from) / (to - from)).clamp(0.0, 1.0))
+}
+
+/// The `index`th waypoint of a flitting bird, relative to the centre of its circuit.
+///
+/// **A bearing and a reach rather than a point in a box, because the bearing is what makes the
+/// turns sharp.** Leg `index` points [`FLIT_TURN`] further round than leg `index - 1`, give or
+/// take its own jitter, so every leg crosses back over the one before it. The bearing is the
+/// index times the turn rather than a running sum, so any leg is answered directly — and the
+/// index is folded into a few thousand first, so an f32 still resolves the angle hours in.
+fn flit_waypoint(seed: u64, index: i64) -> Vec3 {
+    let leg = mix(seed, index as u64 ^ SALT_FLIT_WAYPOINT);
+    let bearing = index.rem_euclid(4096) as f32 * FLIT_TURN + centred(leg, 0) * FLIT_TURN_JITTER;
+    let reach = lerp(0.45, 1.0, unit(leg, 1));
+    Vec3::new(
+        bearing.cos() * reach * FLIT_SPREAD.x,
+        centred(leg, 2) * FLIT_SPREAD.y,
+        bearing.sin() * reach * FLIT_SPREAD.z,
     )
 }
 
@@ -764,7 +1004,7 @@ fn perch_cycle(seed: u64, elapsed: f32) -> (i64, f32) {
 /// circuit and settles onto the branch. Its steepest slope is 1.5 at the midpoint, which is
 /// the number [`BirdSpecies::max_speed`] for the owl rows is argued from.
 fn perch_blend(species: &BirdSpecies, seed: u64, elapsed: f32) -> f32 {
-    if species.pattern != Flight::Perch {
+    if species.pattern.roost().is_none() {
         return 0.0;
     }
     let (_, phase) = perch_cycle(seed, elapsed);
@@ -820,6 +1060,9 @@ enum TreeTop {
     /// is a gap in the canopy — and bridging a gap is the reason the probe is a square at
     /// all. Caught in review on #1215, where `wood()`'s uniform canopy made every column
     /// answer alike and hid it.
+    ///
+    /// **For [`Roost::Palm`] the face is the bottom one**: the point is the underside of the
+    /// frond a bird hangs from, not the top of it.
     Found(Vec3),
     /// Every chunk the window crosses was read, and there is no tree in it.
     Bare,
@@ -841,36 +1084,66 @@ enum TreeTop {
 /// when the taller one appeared — a seat that changed under a sitting bird is worse than a
 /// cycle spent gliding. It costs one cycle at the edge of the loaded world and the leading
 /// quarter of a cycle is there to absorb exactly that.
-fn tree_top_near(store: &ChunkStore, column: Vec3, chunk_size: usize) -> TreeTop {
+///
+/// ## A palm is the same search asking a narrower question
+///
+/// [`Roost::Palm`] accepts **`PALM_FRONDS` and nothing else**, and only a frond with **air
+/// directly under it**, whose bottom face is what a bat hangs from. Each half of that is an
+/// acceptance criterion. `PALM_LOG` and `LOG` are distinct ids although `palette.rs` files both
+/// under `Wood`, so it is the id and not the material class that tells a palm from a conifer —
+/// and a bat does not hang from a conifer. And a frond with another block under it is the
+/// inside of a crown, or the one over the trunk: a bird hanging there would be drawn inside the
+/// canopy, so the search reads on down the column instead. The block under a frond is read with
+/// the same presence check as the frond itself, so an unloaded one is still no answer.
+fn tree_top_near(store: &ChunkStore, column: Vec3, chunk_size: usize, roost: Roost) -> TreeTop {
     if !column.is_finite() || chunk_size == 0 {
         return TreeTop::Unread;
     }
     let Ok(size) = i32::try_from(chunk_size) else {
         return TreeTop::Unread;
     };
+    // A voxel, or `None` for one in a chunk this session does not hold.
+    let read = |x: i32, y: i32, z: i32| {
+        let coord = ChunkCoord {
+            cx: x.div_euclid(size),
+            cy: y.div_euclid(size),
+            cz: z.div_euclid(size),
+        };
+        store
+            .get(coord)
+            .map(|_| store.block_at(BlockCoord { x, y, z }, chunk_size))
+    };
     let low = voxel_of(column.y - PERCH_HEADROOM);
     let high = voxel_of(column.y + PERCH_HEADROOM);
     let centre = IVec2::new(voxel_of(column.x), voxel_of(column.z));
-    let span = (PERCH_PROBE_SIDE - 1) / 2 * PERCH_PROBE_SPACING;
+    let (side, spacing) = roost.probe();
+    let span = (side - 1) / 2 * spacing;
     let mut best: Option<Vec3> = None;
-    for step in 0..PERCH_PROBE_SIDE * PERCH_PROBE_SIDE {
-        let x = centre.x + (step % PERCH_PROBE_SIDE) * PERCH_PROBE_SPACING - span;
-        let z = centre.y + (step / PERCH_PROBE_SIDE) * PERCH_PROBE_SPACING - span;
+    for step in 0..side * side {
+        let x = centre.x + (step % side) * spacing - span;
+        let z = centre.y + (step / side) * spacing - span;
         // Downwards, so the first hit in a column is that column's own top.
         for y in (low..=high).rev() {
-            let coord = ChunkCoord {
-                cx: x.div_euclid(size),
-                cy: y.div_euclid(size),
-                cz: z.div_euclid(size),
-            };
-            if store.get(coord).is_none() {
+            let Some(block) = read(x, y, z) else {
                 return TreeTop::Unread;
-            }
-            let block = store.block_at(BlockCoord { x, y, z }, chunk_size);
-            if matches!(block, palette::LOG | palette::LEAVES) {
-                // The voxel spans `[y, y + 1)`, so its top face is what a bird sits on, and
-                // the middle of the voxel is where in that column it sits.
-                let found = Vec3::new(x as f32 + 0.5, (y + 1) as f32, z as f32 + 0.5);
+            };
+            // The voxel spans `[y, y + 1)`: a sitting bird is on its top face at `y + 1`, and
+            // a hanging one is under its bottom face at `y`.
+            let face = match roost {
+                Roost::Branch => {
+                    matches!(block, palette::LOG | palette::LEAVES).then_some((y + 1) as f32)
+                }
+                Roost::Palm if block == palette::PALM_FRONDS => {
+                    let Some(below) = read(x, y - 1, z) else {
+                        return TreeTop::Unread;
+                    };
+                    (below == palette::AIR).then_some(y as f32)
+                }
+                Roost::Palm => None,
+            };
+            if let Some(face) = face {
+                // The middle of the voxel is where in that column the bird is.
+                let found = Vec3::new(x as f32 + 0.5, face, z as f32 + 0.5);
                 if best.is_none_or(|top: Vec3| found.y > top.y) {
                     best = Some(found);
                 }
@@ -930,9 +1203,9 @@ impl Seat {
         elapsed: f32,
         anchor: Vec3,
     ) -> Self {
-        if species.pattern != Flight::Perch {
+        let Some(roost) = species.pattern.roost() else {
             return Self::default();
-        }
+        };
         let (cycle, _) = perch_cycle(seed, elapsed);
         if self.cycle == Some(cycle) {
             return self;
@@ -941,7 +1214,7 @@ impl Seat {
             return self;
         };
         let column = perch_column(species, seed, elapsed, anchor);
-        match tree_top_near(store, column, chunk_size) {
+        match tree_top_near(store, column, chunk_size, roost) {
             TreeTop::Found(at) => Self {
                 cycle: Some(cycle),
                 at: Some(at),
@@ -982,10 +1255,63 @@ fn perched(
 ) -> Vec3 {
     let cruise = place(species, seed, elapsed, anchor);
     let blend = perch_blend(species, seed, elapsed);
-    let Some(branch) = seat.filter(|_| blend > 0.0) else {
+    let Some((branch, roost)) = seat.zip(species.pattern.roost()).filter(|_| blend > 0.0) else {
         return cruise;
     };
-    cruise.lerp(branch + Vec3::Y * PERCH_SEAT, blend)
+    // Above the top face for a bird that sits, below the bottom face for one that hangs.
+    cruise.lerp(branch + Vec3::Y * roost.seat_above(species.size), blend)
+}
+
+/// A hanging bird's rotation: head straight down, turned about the vertical by its own seed.
+///
+/// `-Z` is the beak, so a quarter turn about `X` by `-π/2` takes the beak to `-Y` and the tail
+/// to `+Y`, which is the frond — see [`HANG_DROP`]. The yaw is the seed's so that two bats under
+/// one crown do not face the same way, and it is the seed's rather than the arrival heading's
+/// so that a hanging bird's rotation is a pure function exactly as its position is.
+fn hanging_turn(seed: u64) -> Quat {
+    Quat::from_rotation_y(TAU * unit(seed, SALT_HANG_YAW)) * Quat::from_rotation_x(-FRAC_PI_2)
+}
+
+/// Which way a bird is turned, `elapsed` seconds in, given the rotation it was drawn with last.
+///
+/// **Facing along its drawn path, as every bird always has.** The heading is sampled from the
+/// same pure function rather than differenced against last frame, so a bird nothing drew for a
+/// hundred frames comes back facing correctly on the first one. Where the drawn path is exactly
+/// still — a perched owl — the difference is zero, `Dir3::new` refuses it, and `previous` is
+/// kept: an owl on a branch faces the way it came in.
+///
+/// **A bird that hangs is then leaned toward [`hanging_turn`] by its rest blend**, the rotation
+/// counterpart of [`perched`] leaning the position toward the seat: not at all on the flight,
+/// all the way at a blend of one — so a hanging bat is exactly head-down and exactly still — and
+/// a slerp in between, so it rolls over as it swoops up to the frond rather than flipping. A row
+/// that sits returns the heading's answer untouched, which is the whole of what this changes
+/// for the owl.
+fn turn_of(
+    species: &BirdSpecies,
+    seed: u64,
+    elapsed: f32,
+    anchor: Vec3,
+    seat: Option<Vec3>,
+    previous: Quat,
+) -> Quat {
+    let here = perched(species, seed, elapsed, anchor, seat);
+    let ahead = perched(species, seed, elapsed + HEADING_STEP, anchor, seat) - here;
+    let flying = Dir3::new(ahead).map_or(previous, |heading| {
+        Transform::IDENTITY
+            .looking_to(heading.as_vec3(), Vec3::Y)
+            .rotation
+    });
+    if species.pattern.roost() != Some(Roost::Palm) || seat.is_none() {
+        return flying;
+    }
+    let rested = perch_blend(species, seed, elapsed);
+    if rested >= 1.0 {
+        hanging_turn(seed)
+    } else if rested > 0.0 {
+        flying.slerp(hanging_turn(seed), rested)
+    } else {
+        flying
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1191,6 +1517,9 @@ const SALT_FLOCK: u64 = 9;
 const SALT_PERCH_PHASE: u64 = 10;
 const SALT_WAYPOINT: u64 = 0x9E37_79B9_7F4A_7C15;
 const SALT_PERCH_TREE: u64 = 0xD1CE_4E5B_9E37_79B9;
+const SALT_FLIT_LEG: u64 = 11;
+const SALT_HANG_YAW: u64 = 12;
+const SALT_FLIT_WAYPOINT: u64 = 0xF117_B47F_17E5_0DA7;
 
 /// SplitMix64's finalizer: an avalanche, not a generator.
 ///
@@ -1764,9 +2093,23 @@ fn wing_mesh() -> Mesh {
 /// dead the frame the bird touches the branch — an owl folding its wings as it lands. It is
 /// exactly zero across the held segment, which is what makes a sitting owl a silhouette
 /// rather than a bird flapping on the spot. Every row that does not perch scales by one.
+///
+/// **A hanging bird folds them as well**: the angle eases toward [`Roost::wing_rest`] by the
+/// same blend the beat eases out by, so a bat wraps its wings about itself as it takes hold and
+/// spreads them again as it drops away. A branch's rest is zero and adds nothing, so the owl is
+/// the owl to the bit.
 fn wing_turn(wing: &BirdWing, elapsed: f32) -> Quat {
-    let beating = 1.0 - perch_blend(&BIRDS[wing.species], wing.seed, elapsed);
-    let angle = (elapsed * wing.flap_hz * TAU).sin() * FLAP_AMPLITUDE_RADIANS * beating;
+    let species = &BIRDS[wing.species];
+    let rested = perch_blend(species, wing.seed, elapsed);
+    let mut angle = (elapsed * wing.flap_hz * TAU).sin() * FLAP_AMPLITUDE_RADIANS * (1.0 - rested);
+    if let Some(fold) = species
+        .pattern
+        .roost()
+        .map(Roost::wing_rest)
+        .filter(|fold| *fold != 0.0)
+    {
+        angle += fold * rested;
+    }
     Quat::from_rotation_z(if wing.left { PI - angle } else { angle })
 }
 
@@ -2138,27 +2481,20 @@ pub(super) fn fly_the_flock(
             bird.lift = lift;
         }
         transform.translation = position + Vec3::Y * lift;
-        // Which way it faces is the direction it is going, sampled from the same pure
-        // function rather than differenced against last frame — so a bird nothing drew for
-        // a hundred frames comes back facing correctly on the first one. Both samples are
-        // unclamped, so the heading stays the pattern's and a lift never tips a bird's nose
-        // up: the clearance changes where a bird is, not where it is going.
-        // **The drawn path, not the pattern's**, which is a change of nothing at all for the
-        // three rows that do not perch — `perched` is `place` to the bit for them — and is
-        // the whole of why a perched bird does not spin. Across the held segment the drawn
-        // path is exactly still, so the difference is zero, `Dir3::new` refuses it and the
-        // rotation the bird landed with is left on. An owl on a branch faces the way it came
-        // in, which is what a bird that has just alighted does.
-        let ahead = perched(
+        // Which way it faces is the direction it is going, and for a hanging bird head-down —
+        // `turn_of` says both. Both of its samples are unclamped, so the heading stays the
+        // pattern's and a lift never tips a bird's nose up: the clearance changes where a bird
+        // is, not where it is going. **The drawn path, not the pattern's**, which is a change
+        // of nothing at all for the three rows that do not rest — `perched` is `place` to the
+        // bit for them — and is the whole of why a perched bird does not spin.
+        transform.rotation = turn_of(
             species,
             bird.seed,
-            elapsed + HEADING_STEP,
+            elapsed,
             bird.anchor,
             seat.at,
-        ) - position;
-        if let Ok(heading) = Dir3::new(ahead) {
-            transform.look_to(heading.as_vec3(), Vec3::Y);
-        }
+            transform.rotation,
+        );
         debug_assert!(
             settling > 0.0 || position == cruising,
             "a bird that is not perching was drawn off its pattern"
@@ -2228,7 +2564,7 @@ mod tests {
     }
 
     #[test]
-    fn the_night_wood_and_the_night_north_fly_the_owl_and_the_desert_flies_nothing() {
+    fn the_night_wood_and_the_night_north_fly_the_owl_and_the_desert_night_has_no_owl() {
         // The acceptance criteria for where an owl is, read straight off the table. Two rows
         // because `BirdSpecies::ground` is one look and an owl is in two countries.
         assert_eq!(
@@ -2252,14 +2588,20 @@ mod tests {
         assert_eq!(species_now(&country(GroundLook::Snow, false), DAY), Some(2));
 
         // And absent from the desert entirely — at every hour, and because nobody wrote an
-        // owl row for sand rather than because something filtered one out.
-        assert_eq!(species_now(&country(GroundLook::Sand, false), NIGHT), None);
-        assert_eq!(species_now(&country(GroundLook::Sand, true), NIGHT), None);
+        // owl row for sand rather than because something filtered one out. **This said the
+        // desert night flew nothing until #1193**, which gave it the bat; what the criterion
+        // actually rests on is narrower and is what is asserted now: no *perching* row, and
+        // no owl, over sand.
+        for wooded in [false, true] {
+            let night = species_now(&country(GroundLook::Sand, wooded), NIGHT);
+            assert_ne!(night, Some(OWL_WOOD));
+            assert_ne!(night, Some(OWL_NORTH));
+        }
         assert!(
             !BIRDS
                 .iter()
-                .any(|row| row.ground == GroundLook::Sand && row.flies == Period::Night),
-            "the desert gained a night row and the criterion above is now vacuous"
+                .any(|row| row.ground == GroundLook::Sand && row.pattern == Flight::Perch),
+            "the desert gained an owl and the criterion above is now vacuous"
         );
 
         // An open plain has no owl either: the wood's row requires trees for the same reason
@@ -2286,6 +2628,11 @@ mod tests {
             species_now(&country(GroundLook::Snow, false), None),
             Some(2)
         );
+        // And a clockless desert its vulture, though it has a bat row too since #1193.
+        assert_eq!(
+            species_now(&country(GroundLook::Sand, false), None),
+            Some(1)
+        );
         assert!(
             BIRDS[..=2].iter().all(|row| row.flies == Period::Day)
                 && BIRDS[3..].iter().all(|row| row.flies == Period::Night),
@@ -2309,13 +2656,20 @@ mod tests {
             (6.0..7.0).contains(&owl),
             "the owl subtends {owl}° at its band top, not the 6.5 the table claims"
         );
-        for row in &BIRDS[..=2] {
+        for row in BIRDS.iter().filter(|row| row.pattern != Flight::Perch) {
             assert!(
                 subtends(row) < owl,
                 "{:?} now reads larger than the owl",
                 row.pattern
             );
         }
+        // The bat is inside the band every row but the owl is in: it is a shape at the top of
+        // its own altitude, which is where it spends every moment it is not hanging.
+        let bat = subtends(&BIRDS[BAT]);
+        assert!(
+            (2.5..4.5).contains(&bat),
+            "the bat subtends {bat}°, not the 2.9 the table claims"
+        );
         assert_eq!(
             subtends(&BIRDS[OWL_NORTH]),
             owl,
@@ -2524,6 +2878,19 @@ mod tests {
         block: BlockId,
         solid: impl Fn(IVec3) -> bool,
     ) -> ChunkStore {
+        landscape(
+            centre,
+            reach,
+            |at| {
+                if solid(at) { block } else { palette::AIR }
+            },
+        )
+    }
+
+    /// [`terrain`] for a fixture made of more than one block: whatever `block_at` answers,
+    /// wherever it answers it. A palm is sand, a trunk and fronds, and a closure that can only
+    /// say "solid or not" cannot build one.
+    fn landscape(centre: Vec3, reach: f32, block_at: impl Fn(IVec3) -> BlockId) -> ChunkStore {
         let span = CHUNK as i32;
         let low = (centre - Vec3::splat(reach)).floor().as_ivec3();
         let high = (centre + Vec3::splat(reach)).floor().as_ivec3();
@@ -2540,7 +2907,8 @@ mod tests {
                                     cy * span + ly as i32,
                                     cz * span + lz as i32,
                                 );
-                                if solid(at) {
+                                let block = block_at(at);
+                                if block != palette::AIR {
                                     chunk.set(lx, ly, lz, block);
                                 }
                             }
@@ -2945,9 +3313,15 @@ mod tests {
         })
     }
 
-    /// The owl rows, which are the only rows that perch.
+    /// The owl rows, which are the only rows that perch on top of something.
     fn perchers() -> impl Iterator<Item = &'static BirdSpecies> {
         BIRDS.iter().filter(|row| row.pattern == Flight::Perch)
+    }
+
+    /// Every row that rests once a cycle — the owls on a branch and the bat under a frond. The
+    /// motion family is one, so the properties of the blend are asked of all of them.
+    fn resters() -> impl Iterator<Item = &'static BirdSpecies> {
+        BIRDS.iter().filter(|row| row.pattern.roost().is_some())
     }
 
     #[test]
@@ -2955,7 +3329,7 @@ mod tests {
         // The property the whole design is bent around, and the one a stored phase would
         // take away: a bird nothing drew for a thousand frames is in exactly the right part
         // of its cycle on the next one. Asked out of order, twice, and far apart.
-        for species in perchers() {
+        for species in resters() {
             for seed in 0..8u64 {
                 let seed = mix(seed, 0x0_0417);
                 let mut asked: Vec<(f32, f32)> = Vec::new();
@@ -2984,7 +3358,7 @@ mod tests {
         // The acceptance criterion "it is not a bird that circles forever", as the shape of
         // the blend: a run of exactly zero, a rise, a run of exactly one, and a fall back to
         // exactly zero — all four reached inside one cycle, for every seed.
-        for species in perchers() {
+        for species in resters() {
             for seed in 0..12u64 {
                 let seed = mix(seed, 0xB12D);
                 let samples: Vec<f32> = (0..960)
@@ -3011,9 +3385,9 @@ mod tests {
                 assert!(samples.iter().all(|blend| (0.0..=1.0).contains(blend)));
             }
         }
-        // Every row that does not perch blends zero at every hour, which is what keeps the
+        // Every row that does not rest blends zero at every hour, which is what keeps the
         // three rows that shipped drawn exactly where `place` puts them.
-        for species in BIRDS.iter().filter(|row| row.pattern != Flight::Perch) {
+        for species in BIRDS.iter().filter(|row| row.pattern.roost().is_none()) {
             for step in 0..500 {
                 assert_eq!(perch_blend(species, 0xFACE, step as f32 * 0.61), 0.0);
             }
@@ -3028,7 +3402,7 @@ mod tests {
         let anchor = Vec3::new(16.0, 80.0, 16.0);
         let seat = Some(Vec3::new(anchor.x + 3.0, anchor.y + 4.0, anchor.z - 2.0));
         let mut landed = 0usize;
-        for species in perchers() {
+        for species in resters() {
             for seed in 0..8u64 {
                 let seed = mix(seed, 0x5EA7);
                 let mut previous = perched(species, seed, 0.0, anchor, seat);
@@ -3198,7 +3572,7 @@ mod tests {
                 at.x == tree.x && at.z == tree.y && (at.y as f32) < top
             });
 
-            let TreeTop::Found(found) = tree_top_near(&store, column, CHUNK) else {
+            let TreeTop::Found(found) = tree_top_near(&store, column, CHUNK, Roost::Branch) else {
                 panic!("the one tree in the window was not found")
             };
             // The tree's own column, not the search centre's.
@@ -3253,7 +3627,7 @@ mod tests {
                 let seed = mix(seed, 0xBA2E);
                 let column = perch_column(species, seed, 0.0, anchor);
                 assert_eq!(
-                    tree_top_near(&bare, column, CHUNK),
+                    tree_top_near(&bare, column, CHUNK, Roost::Branch),
                     TreeTop::Bare,
                     "stone was mistaken for a tree"
                 );
@@ -3287,7 +3661,15 @@ mod tests {
         let nothing = ChunkStore::default();
         let species = &BIRDS[OWL_WOOD];
         let column = perch_column(species, 0x0_0417, 0.0, anchor);
-        assert_eq!(tree_top_near(&nothing, column, CHUNK), TreeTop::Unread);
+        assert_eq!(
+            tree_top_near(&nothing, column, CHUNK, Roost::Branch),
+            TreeTop::Unread
+        );
+        assert_eq!(
+            tree_top_near(&nothing, column, CHUNK, Roost::Palm),
+            TreeTop::Unread,
+            "a desert nobody has streamed is not a desert with no palms"
+        );
 
         let unresolved =
             Seat::default().resolved(Some((&nothing, CHUNK)), species, 0x0_0417, 0.0, anchor);
@@ -3384,16 +3766,17 @@ mod tests {
         // circuit. The seat is somewhere else entirely, and it is the invariant every
         // retirement in `keep_the_flock` rests on — so it is checked on the drawn point.
         let anchor = Vec3::new(-512.0, 64.0, 512.0);
-        for species in perchers() {
+        for species in resters() {
+            let (side, spacing) = species.pattern.roost().expect("a rester rests").probe();
             for seed in 0..16u64 {
                 let seed = mix(seed, 0xB0A7);
                 // The extremes of what the probe window could ever answer.
                 for offset in [-PERCH_HEADROOM, 0.0, PERCH_HEADROOM] {
                     let home = home_of(species, seed, anchor);
                     // The furthest a probe can put a branch from home: the search radius plus
-                    // the probe square's own half-span, on both horizontal axes at once.
-                    let reach = PERCH_SEARCH
-                        + (PERCH_PROBE_SIDE - 1) as f32 / 2.0 * PERCH_PROBE_SPACING as f32;
+                    // the probe square's own half-span, on both horizontal axes at once — and
+                    // the palm's square is the wider of the two.
+                    let reach = PERCH_SEARCH + (side - 1) as f32 / 2.0 * spacing as f32;
                     let seat = Some(Vec3::new(home.x + reach, home.y + offset, home.z + reach));
                     for sample in 0..=SAMPLES {
                         let at = perched(species, seed, sample as f32 * DT, anchor, seat) - anchor;
@@ -3458,7 +3841,7 @@ mod tests {
         let column = perch_column(species, 0x0_0417, 0.0, anchor);
         for block in [palette::LOG, palette::LEAVES] {
             let store = terrain(anchor, BIRD_RANGE + 8.0, block, |at| (at.y as f32) < 84.0);
-            let found = tree_top_near(&store, column, CHUNK);
+            let found = tree_top_near(&store, column, CHUNK, Roost::Branch);
             let TreeTop::Found(at) = found else {
                 panic!("block {block} was not accepted as a perch: {found:?}")
             };
@@ -3470,10 +3853,12 @@ mod tests {
             palette::WATER,
             palette::SAND,
             palette::GRASS,
+            // A palm is not a tree an owl sits on: the palm rows are the bat's.
+            palette::PALM_FRONDS,
         ] {
             let store = terrain(anchor, BIRD_RANGE + 8.0, block, |at| (at.y as f32) < 84.0);
             assert_eq!(
-                tree_top_near(&store, column, CHUNK),
+                tree_top_near(&store, column, CHUNK, Roost::Branch),
                 TreeTop::Bare,
                 "block {block} was mistaken for a tree"
             );
@@ -3481,16 +3866,25 @@ mod tests {
     }
 
     #[test]
-    fn only_the_night_rows_have_eyes_and_the_day_rows_still_cost_three_draws() {
+    fn only_the_owls_have_eyes_and_the_day_rows_still_cost_three_draws() {
         // The eyeshine is an option so that a bird that flies by daylight spawns what it
         // always spawned: a body and two wings, three entities and three draws.
+        //
+        // **This was "only the night rows", and the bat is why it is not.** A night row was
+        // an owl for as long as the owls were the only ones; the bat flies at night too and is
+        // a shape against the sky rather than a pair of lights (#1193), so what carries eyes is
+        // the owl and no day row ever does.
         for (index, species) in BIRDS.iter().enumerate() {
             assert_eq!(
                 species.eyeshine.is_some(),
-                species.flies == Period::Night,
-                "row {index} disagrees with its own half of the day about having eyes"
+                index == OWL_WOOD || index == OWL_NORTH,
+                "row {index} has eyes it should not, or lacks the owl's"
             );
+            if species.flies == Period::Day {
+                assert!(species.eyeshine.is_none(), "day row {index} has eyes");
+            }
         }
+        assert_eq!(BIRDS[BAT].eyeshine, None, "the bat grew eyes");
         // And the owl's pair is a glint rather than a stray pixel: at its band top the eye
         // subtends about a third of a degree, which is a moon's width.
         let owl = &BIRDS[OWL_WOOD];
@@ -3515,6 +3909,546 @@ mod tests {
         assert_eq!(approach(2.0, 1.0, 0.25), 1.75);
         assert_eq!(approach(1.1, 1.0, 0.25), 1.0);
         assert_eq!(approach(1.0, 1.0, 0.25), 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // The bat
+    // -----------------------------------------------------------------------
+
+    /// A desert with one palm in it, voxel for voxel the shape `visitPalm` in
+    /// `internal/world/generate.go` grows: sand, a six-block trunk, a crown block over the
+    /// trunk, four arms of fronds three long whose tips droop a block, and the four diagonal
+    /// fronds beside the crown.
+    ///
+    /// `crown` is the crown row. Every frond on it except the one over the trunk has air under
+    /// it, so its bottom face — `crown` itself — is the highest thing a bat can hang from; the
+    /// drooping tips hang a block lower, and the frond over the trunk not at all.
+    fn oasis(anchor: Vec3, root: IVec2, crown: i32) -> ChunkStore {
+        let trunk_top = crown - 1;
+        let sand = trunk_top - 6;
+        landscape(anchor, BIRD_RANGE + 8.0, move |at| {
+            let (dx, dz) = (at.x - root.x, at.z - root.y);
+            let reach = dx.abs().max(dz.abs());
+            let on_an_arm = (dx == 0) != (dz == 0);
+            let frond = (reach == 0 && at.y == crown)
+                || (on_an_arm && reach < 3 && at.y == crown)
+                || (on_an_arm && reach == 3 && at.y == crown - 1)
+                || (dx.abs() == 1 && dz.abs() == 1 && at.y == crown);
+            if at.y <= sand {
+                palette::SAND
+            } else if reach == 0 && at.y <= trunk_top {
+                palette::PALM_LOG
+            } else if frond {
+                palette::PALM_FRONDS
+            } else {
+                palette::AIR
+            }
+        })
+    }
+
+    /// A moment the bat of `seed` is hanging, in a cycle that starts after the clock does —
+    /// so a walk from that cycle's start covers the whole of it.
+    fn hanging_moment(seed: u64) -> f32 {
+        (0..(4.0 * PERCH_CYCLE_SECONDS / DT) as usize)
+            .map(|sample| sample as f32 * DT)
+            .filter(|elapsed| perch_cycle(seed, *elapsed).0 >= 1)
+            .find(|elapsed| perch_blend(&BIRDS[BAT], seed, *elapsed) == 1.0)
+            .expect("a bat hangs inside four cycles")
+    }
+
+    /// How far above its own origin a **hanging** bird draws, in wingspans.
+    ///
+    /// The model turned by [`hanging_turn`] and its wings by [`wing_turn`] at the same moment —
+    /// the drawn pose, measured from the meshes, so [`HANG_DROP`] is checked against the body it
+    /// was derived from rather than against its own arithmetic.
+    fn hanging_reach(seed: u64, elapsed: f32) -> f32 {
+        let turn = hanging_turn(seed);
+        let mut top = f32::NEG_INFINITY;
+        for point in points(&body_mesh()) {
+            top = top.max((turn * point).y);
+        }
+        let wing = points(&wing_mesh());
+        for left in [false, true] {
+            let fold = wing_turn(
+                &BirdWing {
+                    left,
+                    flap_hz: BIRDS[BAT].flap_hz,
+                    species: BAT,
+                    seed,
+                },
+                elapsed,
+            );
+            for point in &wing {
+                top = top.max((turn * (fold * *point)).y);
+            }
+        }
+        top
+    }
+
+    #[test]
+    fn bats_fly_over_sand_at_night_and_nowhere_else() {
+        // The first acceptance criterion, read straight off the table: the desert's night row,
+        // trees or none, and the vulture's sky by day.
+        for wooded in [false, true] {
+            let desert = country(GroundLook::Sand, wooded);
+            assert_eq!(species_now(&desert, NIGHT), Some(BAT), "wooded {wooded}");
+            assert_eq!(
+                species_now(&desert, DAY),
+                Some(1),
+                "the desert by day is the vulture's, not the bat's"
+            );
+            // And absent from the other two countries at every hour, a clockless one included.
+            for ground in [GroundLook::Grass, GroundLook::Snow, GroundLook::Unknown] {
+                for hour in [DAY, NIGHT, None] {
+                    assert_ne!(
+                        species_now(&country(ground, wooded), hour),
+                        Some(BAT),
+                        "a bat over {ground:?} (wooded {wooded}) at {hour:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(BIRDS[BAT].pattern, Flight::Flit);
+        assert_eq!(
+            BIRDS
+                .iter()
+                .filter(|row| row.pattern == Flight::Flit)
+                .count(),
+            1,
+            "the row named BAT is not the one bat"
+        );
+    }
+
+    #[test]
+    fn a_flit_leg_is_found_without_walking_and_the_legs_are_irregular_and_short() {
+        let (shortest, longest) = (
+            FLIT_LEG_SECONDS * (1.0 - FLIT_LEG_JITTER),
+            FLIT_LEG_SECONDS * (1.0 + FLIT_LEG_JITTER),
+        );
+        let mut flit_length = 0.0f32;
+        let mut dart_length = 0.0f32;
+        for seed in 0..8u64 {
+            let seed = mix(seed, 0xF117);
+            let mut durations: Vec<f32> = Vec::new();
+            for leg in 0..400i64 {
+                let (from, to) = (flit_start(seed, leg), flit_start(seed, leg + 1));
+                let lasted = to - from;
+                assert!(
+                    (shortest - 1e-4..=longest + 1e-4).contains(&lasted),
+                    "seed {seed}: leg {leg} lasted {lasted}s"
+                );
+                durations.push(lasted);
+                // Every moment inside a leg is answered as that leg, without walking the ones
+                // before it — which is the claim `flit_leg` makes about its one comparison.
+                for elapsed in [from, lerp(from, to, 0.5), to - 1e-3] {
+                    assert_eq!(flit_leg(seed, elapsed).0, leg, "seed {seed} at {elapsed}");
+                }
+                flit_length += flit_waypoint(seed, leg + 1).distance(flit_waypoint(seed, leg));
+                dart_length += waypoint(seed, leg + 1).distance(waypoint(seed, leg));
+            }
+            // Irregular: the legs of one bat are not one length, where a dart's legs are all
+            // exactly its seed's period.
+            let (low, high) = durations
+                .iter()
+                .fold((f32::INFINITY, 0.0f32), |(low, high), lasted| {
+                    (low.min(*lasted), high.max(*lasted))
+                });
+            assert!(
+                low < FLIT_LEG_SECONDS * 0.8 && high > FLIT_LEG_SECONDS * 1.2,
+                "seed {seed}: every leg lasted between {low} and {high}s"
+            );
+            // Short: the longest flit leg is over before the shortest dart leg is.
+            assert!(high < *DART_LEG_SECONDS.start());
+        }
+        // And short in distance too, not only in time.
+        assert!(
+            flit_length < dart_length * 0.8,
+            "a flit leg averages {} blocks against the dart's {}",
+            flit_length / 3200.0,
+            dart_length / 3200.0
+        );
+    }
+
+    #[test]
+    fn a_bat_turns_sharper_and_more_often_than_the_macaw_darts() {
+        // The acceptance criterion "visibly not the glide of any existing bird", as two numbers
+        // measured off the drawn path at sixty frames a second: how many times a second it
+        // changes direction by more than twenty degrees between two frames, and how many
+        // radians of heading it turns through a second in all. Measured against the dart
+        // because the dart is its nearest relative; every other row glides.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let turning = |species: &BirdSpecies| {
+            let mut corners = 0usize;
+            let mut turned = 0.0f32;
+            for seed in 0..16u64 {
+                let seed = mix(seed, 0x7E57);
+                let mut before =
+                    place(species, seed, DT, anchor) - place(species, seed, 0.0, anchor);
+                for sample in 2..=SAMPLES {
+                    let elapsed = sample as f32 * DT;
+                    let velocity = place(species, seed, elapsed, anchor)
+                        - place(species, seed, elapsed - DT, anchor);
+                    let angle = before.angle_between(velocity);
+                    if angle.is_finite() {
+                        turned += angle;
+                        corners += usize::from(angle > 20.0f32.to_radians());
+                    }
+                    before = velocity;
+                }
+            }
+            let seconds = 16.0 * SAMPLES as f32 * DT;
+            (corners as f32 / seconds, turned / seconds)
+        };
+        let (bat_corners, bat_turn) = turning(&BIRDS[BAT]);
+        let (parrot_corners, parrot_turn) = turning(&BIRDS[0]);
+        assert!(
+            bat_corners > 2.5 * parrot_corners,
+            "a bat jinks {bat_corners} times a second against the macaw's {parrot_corners}"
+        );
+        assert!(
+            bat_turn > 2.5 * parrot_turn,
+            "a bat turns {bat_turn} rad/s against the macaw's {parrot_turn}"
+        );
+        // Every glider turns less than either, which is what "not the glide" means.
+        for row in [1, 2, OWL_WOOD] {
+            let (corners, _) = turning(&BIRDS[row]);
+            assert!(corners < bat_corners / 10.0, "row {row} jinks {corners}/s");
+        }
+    }
+
+    #[test]
+    fn a_bat_hangs_only_under_a_palm_frond_with_air_beneath_it() {
+        // "Hangs from an actual palm": `PALM_FRONDS` and nothing else — not a conifer's log,
+        // though `palette.rs` files both under wood, not leaves, not the palm's own trunk — and
+        // only from a frond's underside, never from inside a crown.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let column = Vec3::new(16.5, 84.0, 16.5);
+        let slab = |block: BlockId| {
+            landscape(anchor, BIRD_RANGE + 8.0, move |at| match at.y {
+                85 => block,
+                y if y < 60 => palette::SAND,
+                _ => palette::AIR,
+            })
+        };
+        // A uniform slab answers alike in every column, so the probe keeps the first it read;
+        // what is asserted is the face, and that the column is one the probe square holds.
+        let fronds = tree_top_near(&slab(palette::PALM_FRONDS), column, CHUNK, Roost::Palm);
+        let TreeTop::Found(under) = fronds else {
+            panic!("a frond slab was not hung from: {fronds:?}")
+        };
+        assert_eq!(
+            under.y, 85.0,
+            "the underside of a frond whose voxel is [85, 86) is at 85"
+        );
+        let half = ((PALM_PROBE_SIDE - 1) / 2 * PERCH_PROBE_SPACING) as f32;
+        assert!((under.x - column.x).abs() <= half && (under.z - column.z).abs() <= half);
+        for block in [
+            palette::LOG,
+            palette::LEAVES,
+            palette::BROAD_LEAVES,
+            palette::PALM_LOG,
+            palette::STONE,
+            palette::SAND,
+        ] {
+            assert_eq!(
+                tree_top_near(&slab(block), column, CHUNK, Roost::Palm),
+                TreeTop::Bare,
+                "a bat would hang from block {block}"
+            );
+        }
+        // Not from the air: every chunk read, nothing in the window.
+        let open = landscape(anchor, BIRD_RANGE + 8.0, |_| palette::AIR);
+        assert_eq!(
+            tree_top_near(&open, column, CHUNK, Roost::Palm),
+            TreeTop::Bare
+        );
+
+        // Not inside the canopy: a crown six fronds deep is hung from under its lowest frond,
+        // because each of the others has a frond under it.
+        let deep = landscape(anchor, BIRD_RANGE + 8.0, |at| match at.y {
+            80..=85 => palette::PALM_FRONDS,
+            _ => palette::AIR,
+        });
+        // Uniform again, so the face is what is asserted and not which column held it.
+        let crown = tree_top_near(&deep, column, CHUNK, Roost::Palm);
+        assert!(
+            matches!(crown, TreeTop::Found(under) if under.y == 80.0),
+            "a deep crown was hung from somewhere other than its underside: {crown:?}"
+        );
+        // And a crown over a trunk, with no air under any of it, is no hang at all.
+        let trunk = landscape(anchor, BIRD_RANGE + 8.0, |at| match at.y {
+            85 => palette::PALM_FRONDS,
+            y if y < 85 => palette::PALM_LOG,
+            _ => palette::AIR,
+        });
+        assert_eq!(
+            tree_top_near(&trunk, column, CHUNK, Roost::Palm),
+            TreeTop::Bare
+        );
+        // The owl's answer is the other roost's and is not moved by any of this: fronds are
+        // not a branch.
+        assert_eq!(
+            tree_top_near(&slab(palette::PALM_FRONDS), column, CHUNK, Roost::Branch),
+            TreeTop::Bare
+        );
+    }
+
+    #[test]
+    fn a_bat_hangs_upside_down_under_a_frond_rather_than_in_it_or_below_it() {
+        // "Hangs upside down from the top of a palm", on the palm the world actually grows,
+        // measured on the drawn model: the highest point of a head-down bat with its wings
+        // wrapped is at the frond's underside or just below it, never inside the frond and
+        // never with daylight between them.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let species = &BIRDS[BAT];
+        for seed in 0..8u64 {
+            let seed = mix(seed, 0x0BA7);
+            let hanging = hanging_moment(seed);
+            let cycle = perch_cycle(seed, hanging).0;
+            let column = perch_column(species, seed, hanging, anchor);
+            // Off the search's centre, so the column the bat hangs from is the palm's own.
+            let root = IVec2::new(voxel_of(column.x) + 3, voxel_of(column.z) - 2);
+            let crown = voxel_of(column.y) + 2;
+            let store = oasis(anchor, root, crown);
+            let seat =
+                Seat::default().resolved(Some((&store, CHUNK)), species, seed, hanging, anchor);
+            let Some(frond) = seat.at else {
+                panic!("seed {seed}: the palm in the window was not found")
+            };
+            assert_eq!(
+                frond.y, crown as f32,
+                "seed {seed}: not the crown's underside"
+            );
+            let (x, z) = (frond.x.floor() as i32, frond.z.floor() as i32);
+            assert_eq!(
+                store.block_at(BlockCoord { x, y: crown, z }, CHUNK),
+                palette::PALM_FRONDS,
+                "seed {seed}: there is no frond over the hanging bat"
+            );
+            assert_ne!(
+                (x, z),
+                (root.x, root.y),
+                "seed {seed}: a bat hung from the trunk"
+            );
+
+            let mut hung = 0usize;
+            for sample in 0..(5.0 * PERCH_CYCLE_SECONDS / DT) as usize {
+                let elapsed = sample as f32 * DT;
+                if perch_cycle(seed, elapsed).0 != cycle
+                    || perch_blend(species, seed, elapsed) != 1.0
+                {
+                    continue;
+                }
+                let at = perched(species, seed, elapsed, anchor, seat.at);
+                assert_eq!((at.x, at.z), (frond.x, frond.z));
+                let top = at.y + hanging_reach(seed, elapsed) * species.size;
+                assert!(
+                    top <= frond.y + 1e-3,
+                    "seed {seed}: the bat reaches {} into the frond",
+                    top - frond.y
+                );
+                assert!(
+                    top >= frond.y - 0.1,
+                    "seed {seed}: the bat hangs {} below the frond",
+                    frond.y - top
+                );
+                let turn = turn_of(species, seed, elapsed, anchor, seat.at, Quat::IDENTITY);
+                assert!(
+                    (turn * Vec3::NEG_Z).y < -0.999,
+                    "seed {seed}: a hanging bat is not head down"
+                );
+                hung += 1;
+            }
+            assert!(hung > 0, "seed {seed}: the bat never reached the palm");
+        }
+    }
+
+    #[test]
+    fn a_hanging_bat_holds_exactly_still_head_down_with_its_wings_wrapped() {
+        // "Stays a while": exactly still for the whole of one hold — position, rotation and
+        // both wings — and exactly the right way up for a bat, which is upside down.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let seat = Some(Vec3::new(anchor.x + 3.0, anchor.y + 4.0, anchor.z - 2.0));
+        let species = &BIRDS[BAT];
+        let mut facings: Vec<[u32; 2]> = Vec::new();
+        for seed in 0..8u64 {
+            let seed = mix(seed, 0x4A76);
+            let cycle = perch_cycle(seed, 0.0).0 + 1;
+            let held: Vec<f32> = (0..(3.0 * PERCH_CYCLE_SECONDS / DT) as usize)
+                .map(|sample| sample as f32 * DT)
+                .filter(|elapsed| perch_cycle(seed, *elapsed).0 == cycle)
+                .filter(|elapsed| perch_blend(species, seed, *elapsed) == 1.0)
+                .collect();
+            assert!(held.len() > 100, "seed {seed}: {} held frames", held.len());
+            let first = perched(species, seed, held[0], anchor, seat);
+            let turn = hanging_turn(seed);
+            for elapsed in &held {
+                assert_eq!(perched(species, seed, *elapsed, anchor, seat), first);
+                assert_eq!(
+                    turn_of(species, seed, *elapsed, anchor, seat, Quat::IDENTITY),
+                    turn,
+                    "seed {seed}: a hanging bat turned at {elapsed}"
+                );
+                for (left, angle) in [(false, -HANG_WING_FOLD), (true, PI + HANG_WING_FOLD)] {
+                    let wing = BirdWing {
+                        left,
+                        flap_hz: species.flap_hz,
+                        species: BAT,
+                        seed,
+                    };
+                    assert_eq!(
+                        wing_turn(&wing, *elapsed),
+                        Quat::from_rotation_z(angle),
+                        "seed {seed}: a hanging bat beat a wing at {elapsed}"
+                    );
+                }
+            }
+            assert!((turn * Vec3::NEG_Z).y < -0.999 && (turn * Vec3::Z).y > 0.999);
+            let back = turn * Vec3::Y;
+            facings.push([back.x.to_bits(), back.z.to_bits()]);
+        }
+        // Two bats under one crown do not all face the same way.
+        facings.sort_unstable();
+        facings.dedup();
+        assert!(facings.len() > 4, "the bats all hang facing one way");
+
+        // And a flitting bat beats its wings, faster than any other row.
+        let wing = BirdWing {
+            left: false,
+            flap_hz: species.flap_hz,
+            species: BAT,
+            seed: 7,
+        };
+        // Sampled across whole cycles, because a seed's first second may fall inside its hang.
+        let mut flying = 0usize;
+        let mut flapped = 0usize;
+        for sample in 0..(3.0 * PERCH_CYCLE_SECONDS / DT) as usize {
+            let elapsed = sample as f32 * DT;
+            if perch_blend(species, 7, elapsed) == 0.0 {
+                flying += 1;
+                flapped += usize::from(wing_turn(&wing, elapsed) != Quat::IDENTITY);
+            }
+        }
+        assert!(
+            flying > 0 && flapped > flying / 2,
+            "a flying bat did not flap"
+        );
+        assert!(BIRDS.iter().all(|row| row.flap_hz <= species.flap_hz));
+    }
+
+    #[test]
+    fn finding_no_palm_a_bat_keeps_flying_the_right_way_up() {
+        // "Finding none, it does not hang": over open dunes, and over a wood of plain logs with
+        // air under every one of them, the seat is resolved as none and the bat is exactly on
+        // its flight for the whole cycle — including the part it would have spent hanging, and
+        // including its rotation, which never turns it over in mid-air.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let dunes = terrain(anchor, BIRD_RANGE + 8.0, palette::SAND, |at| {
+            (at.y as f32) < anchor.y + 2.0
+        });
+        let logs = terrain(anchor, BIRD_RANGE + 8.0, palette::LOG, |at| {
+            at.y == anchor.y as i32 + 6
+        });
+        let species = &BIRDS[BAT];
+        for store in [&dunes, &logs] {
+            for seed in 0..8u64 {
+                let seed = mix(seed, 0xD00E);
+                let seat =
+                    Seat::default().resolved(Some((store, CHUNK)), species, seed, 0.0, anchor);
+                assert_eq!(
+                    (seat.cycle, seat.at),
+                    (Some(0), None),
+                    "seed {seed}: no palm, and not answered as 'no palm'"
+                );
+                for sample in 0..(PERCH_CYCLE_SECONDS / DT) as usize {
+                    let elapsed = sample as f32 * DT;
+                    if perch_cycle(seed, elapsed).0 != 0 {
+                        break;
+                    }
+                    assert_eq!(
+                        perched(species, seed, elapsed, anchor, seat.at),
+                        place(species, seed, elapsed, anchor),
+                        "seed {seed}: a bat with no palm left its flight at {elapsed}"
+                    );
+                    let turn = turn_of(species, seed, elapsed, anchor, seat.at, Quat::IDENTITY);
+                    assert!(
+                        (turn * Vec3::Y).y > -1e-3,
+                        "seed {seed}: a bat with no palm turned over at {elapsed}"
+                    );
+                }
+            }
+        }
+        // Not vacuous: across the seeds, some cycle reaches the part a bat with a palm would
+        // have spent hanging.
+        assert!(
+            (0..8u64).any(|seed| {
+                let seed = mix(seed, 0xD00E);
+                (0..(PERCH_CYCLE_SECONDS / DT) as usize).any(|sample| {
+                    let elapsed = sample as f32 * DT;
+                    perch_cycle(seed, elapsed).0 == 0 && perch_blend(species, seed, elapsed) == 1.0
+                })
+            }),
+            "no seed reached the part of its cycle it would have hung in, so this proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_bat_is_where_its_seed_and_the_clock_put_it_across_a_whole_hang_cycle() {
+        // The cosmetic rule, over the one part of a bat's life that reads terrain: walked
+        // forwards frame by frame through a whole cycle the way `fly_the_flock` walks it, and
+        // then asked backwards with nothing carried over — a fresh seat and no previous
+        // rotation — as a bat nothing drew until that frame would be. Both answer the same.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let species = &BIRDS[BAT];
+        let seed = mix(5, 0x5EED);
+        let hanging = hanging_moment(seed);
+        let cycle = perch_cycle(seed, hanging).0;
+        let column = perch_column(species, seed, hanging, anchor);
+        let store = oasis(
+            anchor,
+            IVec2::new(voxel_of(column.x) - 4, voxel_of(column.z) + 4),
+            voxel_of(column.y) + 1,
+        );
+        let start = (cycle as f32 - unit(seed, SALT_PERCH_PHASE)) * PERCH_CYCLE_SECONDS;
+        assert!(start >= 0.0);
+
+        let mut seat = Seat::default();
+        let mut turn = Quat::IDENTITY;
+        let mut walked = Vec::new();
+        for sample in 0..(PERCH_CYCLE_SECONDS / DT) as usize {
+            let elapsed = start + sample as f32 * DT;
+            seat = seat.resolved(Some((&store, CHUNK)), species, seed, elapsed, anchor);
+            turn = turn_of(species, seed, elapsed, anchor, seat.at, turn);
+            walked.push((
+                elapsed,
+                seat.at,
+                perched(species, seed, elapsed, anchor, seat.at),
+                turn,
+            ));
+        }
+        let hung = walked
+            .iter()
+            .filter(|(elapsed, at, ..)| at.is_some() && perch_blend(species, seed, *elapsed) == 1.0)
+            .count();
+        assert!(hung > 100, "the walk hung for {hung} frames");
+
+        for (elapsed, at, drawn, turned) in walked.iter().rev().step_by(7) {
+            let fresh =
+                Seat::default().resolved(Some((&store, CHUNK)), species, seed, *elapsed, anchor);
+            assert_eq!(fresh.at, *at, "the seat at {elapsed} depended on the walk");
+            assert_eq!(
+                perched(species, seed, *elapsed, anchor, fresh.at),
+                *drawn,
+                "the bat at {elapsed} depended on the walk"
+            );
+            if at.is_some() && perch_blend(species, seed, *elapsed) == 1.0 {
+                assert_eq!(
+                    turn_of(species, seed, *elapsed, anchor, fresh.at, Quat::IDENTITY),
+                    *turned,
+                    "a hanging bat's rotation at {elapsed} depended on the walk"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
