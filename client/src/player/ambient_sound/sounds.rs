@@ -83,6 +83,10 @@ pub(super) enum Call {
     /// where `critters::species_for` answers the mouse — and heard *from the mouse*. The highest
     /// voice in this table, and the one the 3.6 kHz ceiling binds hardest: see [`squeak`].
     Mouse,
+    /// A lynx's yowl: the harsh, rising, wavering cry of cats fighting, heard by day in snow
+    /// country where `critters::species_for` answers the lynx — and heard *from the lynx*. The
+    /// one voice in this table whose pitch climbs the whole way through: see [`yowl`].
+    Lynx,
 }
 
 impl Call {
@@ -108,6 +112,7 @@ impl Call {
         Self::Squirrel,
         Self::Owl,
         Self::Mouse,
+        Self::Lynx,
     ];
 }
 
@@ -871,6 +876,100 @@ fn hoot(variation: f32, envelope: Envelope) -> Vec<Layer> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// The lynx
+// ---------------------------------------------------------------------------
+
+/// How long a yowl's pitch climbs for. The glide holds its arrival afterwards, so this is the
+/// cry rather than the bake — and it ends before the release begins, which
+/// `a_yowl_finishes_rising_before_its_release_begins` holds.
+const YOWL_SECONDS: f32 = 1.05;
+
+/// Where a yowl's pitch line ends, as a multiple of where it starts: above one, which is the
+/// whole of how a yowl differs from a squawk, a scream and a whinny.
+const YOWL_RISE: f32 = 1.55;
+
+/// How far above the voice its rough twin sits: at 430 to 850 Hz along the climb, 4.5% beats at
+/// 19 to 38 Hz, the rasp of a throat forced rather than a second pitch.
+const YOWL_DETUNE: f32 = 1.045;
+
+/// The waver: a real vibrato rather than an arch, and the other half of what makes a cat.
+///
+/// **Seven cycles a second, opening over the first third of a second**, so the cry starts as a
+/// sound and becomes a wail. A squawk carries one half-cycle as its arch and a scream a shallow
+/// 38 Hz tremble as its rasp; this is between them in rate and wider than either in depth —
+/// seven percent either side of the line, which is the "how far the vibrato opens" the issue
+/// names.
+const YOWL_WAVER: Vibrato = Vibrato {
+    hz: 7.0,
+    depth: 0.07,
+    onset: 0.35,
+};
+
+/// One lynx's yowl: harsh, rising and wavering, never a note.
+///
+/// Built from the vocabulary [`squawk`] is this repository's worked example of, and different
+/// from it in exactly the two ways the issue asks for:
+///
+/// - **A rising contour.** Every voiced layer rides one exponential glide from the seed's pitch
+///   up to [`YOWL_RISE`] of it, so the cry climbs the whole way through. A squawk's pitch arches
+///   and falls, a scream's falls, and a whinny rides one falling track — this one goes up.
+/// - **A wide waver.** [`YOWL_WAVER`] on every voiced layer, so the partials waver together as one
+///   voice rather than beating against each other.
+/// - **Roughness.** A sawtooth's dense harmonics through two formant bands, a nasal 1150 Hz and a
+///   bright 2300 Hz, and beside each a second sawtooth [`YOWL_DETUNE`] higher so the two beat.
+/// - **Breath.** White noise through the same two formants and a hiss above them, so the spectrum
+///   between the harmonics is filled rather than empty.
+///
+/// **What the 3.6 kHz ceiling guarantees here, said exactly** — the finding review on #1222 made
+/// about the squeak, applied before anybody has to make it again. Every frequency a glide
+/// reaches with its waver stays far under it: the widest reach is
+/// `550 * YOWL_RISE * YOWL_DETUNE * (1 + YOWL_WAVER.depth)`, 953 Hz. Every band is *centred*
+/// under it, which is what `Sound::validate` bounds. A resonant band is a slope rather than a
+/// wall, and a sawtooth is not band-limited, so some energy does land above the line, and it is
+/// measured rather than claimed.
+/// At 8 kHz a yowl carries 0.06 to 0.08% of its energy above 3.6 kHz, against 0.22 to 0.29% for
+/// the same yowl with its top band centred on the ceiling itself. At 48 kHz, where no Nyquist cuts
+/// anything off, it is 3.1% — and moving the top band out to 4.5 kHz barely changes that, because
+/// at that rate what lies above the line is the sawtooth's own upper harmonics through the bands'
+/// skirts rather than any band: the construction the squawk and the eagle ship.
+/// `a_yowl_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more` holds the 8 kHz
+/// pair and the 48 kHz bound.
+fn yowl(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 430.0 + variation * 120.0;
+    let voice = |detune: f32, gain, formant, q| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Saw,
+            from: hz * detune,
+            to: hz * detune * YOWL_RISE,
+            seconds: YOWL_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: YOWL_WAVER,
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: Some(Filter {
+            kind: FilterKind::Band,
+            hz: formant,
+            q,
+        }),
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.26, 1150.0, 1.0),
+        voice(YOWL_DETUNE, 0.19, 1150.0, 1.0),
+        voice(1.0, 0.15, 2300.0, 1.4),
+        voice(YOWL_DETUNE, 0.11, 2300.0, 1.4),
+        breath(0.16, 1150.0, 1.5),
+        breath(0.14, 2300.0, 1.8),
+        breath(0.06, 3000.0, 1.3),
+    ]
+}
+
 impl Call {
     pub(super) fn profile(self) -> CallProfile {
         let (interval, radius, height, seconds, range) = match self {
@@ -925,6 +1024,37 @@ impl Call {
             // longest call, three squeaks at the slowest spacing, ends at 2 * 0.15 + 0.07 =
             // 0.37 s, inside the baked 0.40 s.
             Self::Mouse => ([18.0, 45.0], 5.0, 0.0, 0.40, 20.0),
+            // **Sparse, and sparser than the eagle it shares the snow's day with** (#1194) — and
+            // the sparseness comes from the lynx more than from this interval. A yowl may only
+            // begin while a lynx is drawn (`Origin::Body`), a lynx is drawn for at most its
+            // ten-second life of every forty-second window, and the lane holds its countdown at
+            // four seconds whenever it may not begin. So a lynx's first yowl comes about four
+            // seconds after it breaks cover, and a second one fits into its life only when the
+            // draw lands under six seconds — about one time in ten. A lynx in the player's cell
+            // every window is one yowl, now and then two, per forty seconds: about one and a half
+            // a minute, against the eagle's three and a half.
+            //
+            // **It was thirty to seventy-five seconds**, written while a yowl could still come
+            // from a bearing with no lynx drawn. Under the gating a countdown that starts at
+            // thirty never reaches zero inside a ten-second life, so that interval would have
+            // silenced the lynx altogether.
+            //
+            // `radius` and `height` are **never a placement**: a yowl with no lynx drawn is not
+            // heard at all. They are where a lynx is usually met, twenty-four blocks off on the
+            // snow, which is the distance
+            // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` measures the level at.
+            // The 1.05 s climb plus the 0.2 s release ends inside the baked 1.3 s, with 0.05 s of
+            // arrival held between.
+            //
+            // **The range is the eagle's ninety-six, and the interval is what keeps the two
+            // apart.** A yowl has to carry as far as a lynx can be seen: one is drawn up to 62.6
+            // blocks from the eye — `CRITTER_RANGE` out from an anchor the eye can be a cell's
+            // corner away from — and this was first written as sixty-four, at which a lynx
+            // standing forty blocks off was faded to 0.019 against the 0.031 the eagle overhead is
+            // faded to, and one sixty blocks off to 0.002.
+            // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` failing at twenty-four
+            // blocks is what said so.
+            Self::Lynx => ([4.0, 25.0], 24.0, 0.0, 1.3, 96.0),
         };
         CallProfile {
             interval,
@@ -1011,6 +1141,9 @@ impl Call {
             // One squeak: a sharp onset, a short held middle while the pitch drops, and a close
             // fast enough to leave real silence before the next.
             Self::Mouse => (0.006, 0.03, 0.55, 0.02),
+            // A yowl swells rather than strikes: a tenth of a second to open, a strained held
+            // body while the pitch climbs, and a short close.
+            Self::Lynx => (0.09, 0.25, 0.75, 0.2),
         };
         let envelope = Envelope {
             attack,
@@ -1048,6 +1181,7 @@ impl Call {
             Self::Squirrel => bark(variation, envelope),
             Self::Owl => hoot(variation, envelope),
             Self::Mouse => squeak(variation, envelope),
+            Self::Lynx => yowl(variation, envelope),
         };
         Sound { layers }
     }
@@ -2772,7 +2906,8 @@ mod tests {
                 | Call::Parrot
                 | Call::Squirrel
                 | Call::Owl
-                | Call::Mouse => {}
+                | Call::Mouse
+                | Call::Lynx => {}
             }
         }
         let mut seen = Call::ALL.to_vec();
@@ -3168,7 +3303,8 @@ mod tests {
             | Call::Parrot
             | Call::Squirrel
             | Call::Owl
-            | Call::Mouse => (0..101).collect(),
+            | Call::Mouse
+            | Call::Lynx => (0..101).collect(),
             // The howl reads `seed % 101` for its pitch and a slice of `spread(seed)` for its arch
             // (`howl_gesture`), and its highest glide rises with both. So every residue of the
             // one, plus a seed found to take both at their maximum at once — searched for here
@@ -3307,9 +3443,10 @@ mod tests {
         high / (energy * samples.len() as f64 / 2.0)
     }
 
-    /// The squeak with its highest band moved to be centred on `hz`, every other layer as it is.
-    fn squeak_with_its_top_band_at(seed: u64, hz: f32) -> Sound {
-        let description = Call::Mouse.description(seed);
+    /// A call with its highest band moved to be centred on `hz`, every other layer as it is — the
+    /// squeak's control, and the yowl's.
+    fn with_its_top_band_at(call: Call, seed: u64, hz: f32) -> Sound {
+        let description = call.description(seed);
         let top = description
             .layers
             .iter()
@@ -3359,7 +3496,7 @@ mod tests {
                     spill < bound,
                     "seed {seed} at {rate}: {spill} of the squeak's energy lies above 3.6 kHz"
                 );
-                let control = squeak_with_its_top_band_at(seed, control_hz)
+                let control = with_its_top_band_at(Call::Mouse, seed, control_hz)
                     .bake_at(&squeak_onsets(seed), SQUEAK_SECONDS, seconds, rate, seed)
                     .unwrap();
                 let over = share_above(control.samples(), rate, 3600.0);
@@ -3368,6 +3505,268 @@ mod tests {
                     "seed {seed} at {rate}: a top band centred at {control_hz} Hz spilled only \
                      {over} against the squeak's {spill}, so the bound separates nothing"
                 );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The lynx
+    // -----------------------------------------------------------------------
+
+    /// #1194, and the owner's standing rule: a sound is realistic, never a note. A yowl spreads
+    /// its energy across the whole band a cat's voice fills, where a note keeps it on a few
+    /// frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same yowl, the same rising contour and the same
+    /// waver, voiced as clean sines with no formant and no breath — [`clean_scream`]'s transform,
+    /// which keeps the movement so texture is the only difference — must **fail** the
+    /// measurement the yowl passes, or the floor separates nothing. Measured when this was
+    /// written: the yowl at 0.24 to 0.28, the control at zero to four decimal places.
+    #[test]
+    fn a_yowl_is_harsh_and_textured_and_not_a_note() {
+        let seconds = Call::Lynx.profile().seconds;
+        for seed in (0..20u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 8000).unwrap();
+            let flat = flatness(yowl.samples(), 8000);
+            let tonal = tonal_share(yowl.samples(), 8000);
+            assert!(
+                flat > 0.15 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+            let clean = clean_scream(Call::Lynx, seed)
+                .bake(seconds, 8000, seed)
+                .unwrap();
+            let control = flatness(clean.samples(), 8000);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates nothing"
+            );
+            assert!(
+                flat > control * 3.0,
+                "seed {seed}: the yowl measured {flat} against its clean control's {control}"
+            );
+        }
+    }
+
+    /// The pitch a yowl's glide starts from, read back from its description.
+    fn yowl_pitch(seed: u64) -> f32 {
+        match Call::Lynx.description(seed).layers[0].exciter {
+            Exciter::Glide(glide) => glide.from,
+            other => panic!("the yowl's first layer is not voiced: {other:?}"),
+        }
+    }
+
+    /// How many times a pitch track swings back by more than `depth` hertz: a reversal counts
+    /// once the pitch has moved `depth` against its direction from the last extreme it reached.
+    /// A line that only climbs swings back never; a waver swings back twice a cycle.
+    ///
+    /// **With hysteresis, and the reason is the instrument's grid rather than a taste.**
+    /// [`dominant_track`] reads on a 5 Hz grid, so a slow and perfectly clean climb flips between
+    /// two neighbouring grid points wherever the true pitch sits near their midpoint. The first
+    /// version of this counted every change of sign and read twelve such flips as twelve turns of
+    /// a waver that the glide under it did not have; its own control is what caught it.
+    fn swings(track: &[(f32, f32)], depth: f32) -> usize {
+        let Some(&(_, first)) = track.first() else {
+            return 0;
+        };
+        let (mut extreme, mut rising, mut count) = (first, None::<bool>, 0usize);
+        for &(_, hz) in &track[1..] {
+            match rising {
+                None if (hz - extreme).abs() > depth => {
+                    rising = Some(hz > extreme);
+                    extreme = hz;
+                }
+                None => {}
+                Some(up) if (hz > extreme) == up => extreme = hz,
+                Some(up) if (hz - extreme).abs() > depth => {
+                    count += 1;
+                    rising = Some(!up);
+                    extreme = hz;
+                }
+                Some(_) => {}
+            }
+        }
+        count
+    }
+
+    /// "A yowl climbs where a squawk and a whinny fall — and in how far the vibrato opens." Two
+    /// claims about the pitch track, each with its opposite beside it.
+    ///
+    /// Read on the first voice alone, as a sine with no band, for the reason the squeak's fall is:
+    /// a thirty-millisecond window cannot tell the twin 4.5% above from the voice, and read
+    /// together the tracker hops between them. The whole baked call is read, so the climb has to
+    /// be in the cry rather than in the attack.
+    ///
+    /// - **It rises**: the last quarter of the track sits a quarter above the first, and its
+    ///   highest reading is in the second half — where a squawk, read by the same instrument,
+    ///   ends below where it began.
+    /// - **It wavers**: the pitch swings back by more than 20 Hz at least eight times, where the
+    ///   same glide with its vibrato taken away never does. Twenty is four steps of the tracker's
+    ///   grid, over the one-step flips a clean climb makes (see [`swings`]), and under the 50 to
+    ///   100 Hz a yowl swings by once its waver has opened.
+    #[test]
+    fn a_yowl_rises_and_wavers_where_a_squawk_falls() {
+        let seconds = Call::Lynx.profile().seconds;
+        let track_of = |seed: u64, waver: Vibrato| {
+            let voice = clean_scream(Call::Lynx, seed)
+                .layers
+                .into_iter()
+                .take(1)
+                .map(|layer| match layer.exciter {
+                    Exciter::Glide(glide) => Layer {
+                        exciter: Exciter::Glide(Glide {
+                            vibrato: waver,
+                            ..glide
+                        }),
+                        ..layer
+                    },
+                    _ => layer,
+                })
+                .collect();
+            let baked = Sound { layers: voice }.bake(seconds, 8000, seed).unwrap();
+            let hz = yowl_pitch(seed);
+            dominant_track(baked.samples(), 8000, hz * 0.8, hz * YOWL_RISE * 1.2)
+        };
+        let mean =
+            |part: &[(f32, f32)]| part.iter().map(|(_, hz)| hz).sum::<f32>() / part.len() as f32;
+        for seed in (0..8u64).map(scramble) {
+            let track = track_of(seed, YOWL_WAVER);
+            assert!(
+                track.len() >= 60,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let quarter = track.len() / 4;
+            let (early, late) = (
+                mean(&track[..quarter]),
+                mean(&track[track.len() - quarter..]),
+            );
+            assert!(
+                late >= early * 1.25,
+                "seed {seed}: climbs from {early} to only {late} Hz"
+            );
+            let (time, _) = track
+                .iter()
+                .copied()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .unwrap();
+            assert!(
+                time >= track[track.len() / 2].0,
+                "seed {seed}: peaks at {time} s, in the first half of a cry that climbs"
+            );
+            let wavers = swings(&track, 20.0);
+            assert!(wavers >= 8, "seed {seed}: swings back only {wavers} times");
+
+            // The same glide with no waver climbs without ever swinging back.
+            let steady = track_of(
+                seed,
+                Vibrato {
+                    hz: 0.0,
+                    depth: 0.0,
+                    onset: 0.0,
+                },
+            );
+            assert_eq!(
+                swings(&steady, 20.0),
+                0,
+                "seed {seed}: a glide with no vibrato swung back, so swinging is not the waver"
+            );
+
+            // And the squawk, read by the same instrument, ends lower than it began.
+            let hz = squawk_pitch(seed);
+            let squawk = dominant_track(&voiced_squawk(seed), 8000, hz * 0.6, hz * 1.3);
+            assert!(
+                squawk[squawk.len() - 1].1 < squawk[0].1,
+                "seed {seed}: the squawk did not fall, so the comparison says nothing"
+            );
+        }
+    }
+
+    /// A yowl reaches the top of its climb before its close begins, with the arrival held open in
+    /// between — the property [`a_raptor_cry_finishes_falling_before_its_release_begins`] holds
+    /// for a scream, and for the same reason: a pitch still moving when the envelope starts to
+    /// take the sound away is a contour shaped by the envelope rather than by the voice.
+    #[test]
+    fn a_yowl_finishes_rising_before_its_release_begins() {
+        let layers = Call::Lynx.description(7).layers;
+        let release = layers[0].envelope.release;
+        assert!(
+            layers.iter().all(|layer| layer.envelope.release == release),
+            "the yowl's layers close at different times"
+        );
+        let held = Call::Lynx.profile().seconds - release - YOWL_SECONDS;
+        assert!(held >= 0.04, "a yowl holds its arrival for only {held} s");
+    }
+
+    /// **What the ceiling guarantees for a yowl, measured rather than claimed** — the squeak's
+    /// test (review on #1222), applied before a review has to ask.
+    ///
+    /// At 8 kHz, where the ceiling is what a device can carry, the yowl must spill little and the
+    /// same yowl with its top band centred on the ceiling must spill more, or the bound separates
+    /// nothing. Measured when this was written: 0.06 to 0.08% against 0.22 to 0.29%.
+    ///
+    /// **At 48 kHz there is a bound and no control, and that is the finding rather than an
+    /// omission.** The yowl measured 3.1% there, and the same yowl with its top band moved out to
+    /// 4.5 kHz measured 3.5% — a control that does not separate, because at that rate what lies
+    /// above the line is the sawtooth's own harmonics through the formants' skirts rather than any
+    /// band. The squeak is sines and noise, which is why its 48 kHz control does separate.
+    #[test]
+    fn a_yowl_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more() {
+        let seconds = Call::Lynx.profile().seconds;
+        for seed in (0..12u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 8000).unwrap();
+            let spill = share_above(yowl.samples(), 8000, 3600.0);
+            assert!(
+                spill < 0.0015,
+                "seed {seed}: {spill} of the yowl's energy lies above 3.6 kHz at 8 kHz"
+            );
+            let control = with_its_top_band_at(Call::Lynx, seed, 3600.0)
+                .bake(seconds, 8000, seed)
+                .unwrap();
+            let over = share_above(control.samples(), 8000, 3600.0);
+            assert!(
+                over > 0.0018 && over > spill * 2.0,
+                "seed {seed}: a top band centred on the ceiling spilled only {over} against the \
+                 yowl's {spill}, so the bound separates nothing"
+            );
+        }
+        for seed in (0..4u64).map(scramble) {
+            let yowl = Call::Lynx.bake(seed, 48000).unwrap();
+            let spill = share_above(yowl.samples(), 48000, 3600.0);
+            assert!(
+                spill < 0.05,
+                "seed {seed}: {spill} of the yowl's energy lies above 3.6 kHz at 48 kHz"
+            );
+        }
+    }
+
+    /// Heard twenty-four blocks off on the snow, faded by the same `spatial::attenuation` every
+    /// placed sound is, without clipping at any device rate.
+    ///
+    /// Twenty-four is about where a lynx is met, not a placement: a yowl is only ever heard from a
+    /// drawn lynx (`Origin::Body`), and a lynx is drawn twenty to forty-five blocks out, so this is
+    /// the middle of its range rather than its loud end.
+    #[test]
+    fn a_yowl_carries_across_the_snow_without_clipping_at_any_rate() {
+        let profile = Call::Lynx.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Lynx.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.03,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
+                );
+                assert_eq!(samples.first(), Some(&0.0));
+                assert_eq!(samples.last(), Some(&0.0));
             }
         }
     }

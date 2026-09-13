@@ -6621,7 +6621,9 @@ fn each_country_gets_only_the_critters_its_row_names() {
         (GroundLook::Grass, false, None),
         (GroundLook::Sand, true, Some(1)),
         (GroundLook::Sand, false, Some(1)),
-        (GroundLook::Snow, true, None),
+        // The snow is the lynx's, trees or none (#1194).
+        (GroundLook::Snow, true, Some(2)),
+        (GroundLook::Snow, false, Some(2)),
         (GroundLook::Unknown, false, None),
     ] {
         let mut app = squirrelwatching(ground, wooded);
@@ -7094,6 +7096,245 @@ fn a_critter_on_the_aim_line_is_not_what_the_crosshair_finds() {
             .iter()
             .any(|critter| critter.2 == 1.0 && critter.1 > 0.0),
         "aiming at a squirrel retired it"
+    );
+}
+
+/// A headless client on a server that keeps a day, standing on [`a_snowfield`] whose look is
+/// snow, at `tick_of_day`.
+fn lynx_country(tick_of_day: u32) -> App {
+    let mut app = standing_in_a_wood(headless_player_with_a_clock(), GroundLook::Snow, false);
+    app.insert_resource(a_snowfield());
+    deliver_at_tick_of_day(&mut app, 1, tick_of_day, Instant::now());
+    app
+}
+
+/// What one lynx is drawn as this frame: the highest point of any face of its body or its tail,
+/// where its origin is, the body's alpha, and whether it is visible.
+///
+/// **Read out of the assets the renderer draws**, not recomputed: the body mesh and the tail mesh
+/// by their handles, the tail's own rotation from its entity, the alpha from the material. A lynx
+/// whose meshes were missing, whose tail was never turned, or whose material stopped being written
+/// fails here rather than in a function that restates the systems.
+fn drawn_lynx(app: &App, lynx: Entity) -> (f32, f32, f32, Visibility) {
+    let world = app.world();
+    let entity = world.entity(lynx);
+    let transform = entity.get::<Transform>().expect("a lynx is placed");
+    let meshes = world.resource::<Assets<Mesh>>();
+    let positions = |handle: &Mesh3d| {
+        let mesh = meshes
+            .get(&handle.0)
+            .expect("a lynx is drawn from meshes that exist");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("a lynx mesh carries positions")
+        };
+        points
+            .iter()
+            .map(|point| Vec3::from_array(*point))
+            .collect::<Vec<_>>()
+    };
+    let mut top = positions(entity.get::<Mesh3d>().expect("a lynx's body is drawn"))
+        .into_iter()
+        .fold(f32::NEG_INFINITY, |high, at| high.max(at.y));
+    let children = entity.get::<Children>().expect("a lynx has a tail");
+    assert_eq!(children.len(), 1, "a lynx is a body and one tail");
+    for tail in children.iter() {
+        let tail = world.entity(tail);
+        let turned = tail.get::<Transform>().expect("a tail is placed");
+        for point in positions(tail.get::<Mesh3d>().expect("a lynx's tail is drawn")) {
+            top = top.max((turned.translation + turned.rotation * point).y);
+        }
+    }
+    let material = world
+        .resource::<Assets<StandardMaterial>>()
+        .get(
+            &entity
+                .get::<MeshMaterial3d<StandardMaterial>>()
+                .expect("a lynx has a coat")
+                .0,
+        )
+        .expect("a lynx's coat exists");
+    (
+        transform.translation.y + top * transform.scale.y,
+        transform.translation.y,
+        material.base_color.alpha(),
+        *entity.get::<Visibility>().expect("a lynx is drawn or not"),
+    )
+}
+
+#[test]
+fn a_lynx_breaks_cover_on_the_snow_by_day_and_goes_back_into_it() {
+    // #1194 end to end, on a server that keeps a day, over real snow: no lynx after dark; by day
+    // one lynx, rising out of the drift, standing whole on the snow and drawn, and going back
+    // under it before its coat has faded to nothing — and then an empty slot for the rest of its
+    // window rather than a second lynx.
+    let surface = CRITTER_SURFACE as f32;
+    let mut app = lynx_country(18_000);
+    watch(&mut app, 16);
+    assert!(wood(&mut app).is_empty(), "a lynx came out after dark");
+
+    deliver_at_tick_of_day(&mut app, 2, 7_200, Instant::now());
+    let mut seen: Option<Entity> = None;
+    let (mut rose, mut stood, mut sank, mut gone) = (false, false, false, false);
+    for frame in 0..130 {
+        app.update();
+        let alive = critter_entities(&mut app);
+        let Some(&lynx) = alive.first() else {
+            gone |= seen.is_some();
+            continue;
+        };
+        assert_eq!(alive.len(), 1, "frame {frame}: a lynx is alone");
+        assert!(
+            !gone,
+            "frame {frame}: a second lynx came out inside the window"
+        );
+        let (top, origin, alpha, visibility) = drawn_lynx(&app, lynx);
+        let critter = app
+            .world()
+            .entity(lynx)
+            .get::<critters::Critter>()
+            .expect("a lynx is a critter");
+        let (fade, wanted) = (critter.fade, critter.wanted);
+        if seen.is_none() {
+            // Its first drawn frame is under the snow: it breaks cover rather than appearing.
+            assert!(
+                top <= surface,
+                "a lynx appeared with its top at {top} over snow at {surface}"
+            );
+            rose = true;
+            seen = Some(lynx);
+        }
+        assert_eq!(seen, Some(lynx), "frame {frame}: the lynx changed");
+        if wanted == 1.0 && fade == 1.0 {
+            // Whole: on the snow exactly, seen above it, opaque, and visible.
+            assert_eq!(origin, surface, "a whole lynx stands at {origin}");
+            assert!(top > surface + 0.5, "a whole lynx is drawn {top} high");
+            assert!(alpha > 0.0 && visibility == Visibility::Visible);
+            stood = true;
+        }
+        if wanted == 0.0 && alpha > 0.0 && top <= surface {
+            sank = true;
+        }
+    }
+    assert!(rose, "no lynx broke cover by day");
+    assert!(stood, "the lynx never stood whole on the snow");
+    assert!(sank, "the lynx faded without going under the snow");
+    assert!(gone, "the lynx never went");
+}
+
+#[test]
+fn a_lynx_left_behind_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye() {
+    // A lynx could bolt at an eye that has left its cell, so it is not kept as a stray, and one
+    // on its way out stops where it was last drawn (review on #1242). Taken at its worst: the eye
+    // jumps into the next cell in the middle of the bolt, three blocks ahead of the lynx on the
+    // line it is running. Drawn by the clock alone it would run on through the eye; held, it
+    // sinks into the snow where it stood, and is gone.
+    let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
+    let mut app = lynx_country(7_200);
+    watch(&mut app, 16);
+    let before = critter_entities(&mut app);
+    let [lynx] = before[..] else {
+        panic!("{} lynxes in the snow by day", before.len());
+    };
+    let drawn_at = |app: &App| {
+        app.world().get_entity(lynx).ok().and_then(|entity| {
+            entity
+                .get::<Transform>()
+                .map(|transform| transform.translation)
+        })
+    };
+    let wanted = |app: &App| {
+        app.world().get_entity(lynx).ok().and_then(|entity| {
+            entity
+                .get::<critters::Critter>()
+                .map(|critter| critter.wanted)
+        })
+    };
+    assert_eq!(wanted(&app), Some(1.0));
+
+    // The bolt: the first frame the lynx covers more than half a block, which at a tenth of a
+    // second a frame is the second frame of an eight-frame bolt.
+    let mut last = drawn_at(&app).expect("the lynx is drawn");
+    let mut bolting = None;
+    for _ in 0..120 {
+        app.update();
+        let now = drawn_at(&app).expect("the lynx is drawn until its bolt");
+        if flat(now, last) > 0.5 {
+            bolting = Some((last, now));
+            break;
+        }
+        last = now;
+    }
+    let (was, now) = bolting.expect("the lynx never bolted");
+    let ahead = Vec3::new(now.x - was.x, 0.0, now.z - was.z).normalize();
+    let eye = Vec3::new(now.x, CRITTER_EYE.y, now.z) + ahead * 3.0;
+    let cell = |at: Vec3| (at / critters::CRITTER_ANCHOR_CELL).floor().xz();
+    assert_ne!(
+        cell(eye),
+        cell(CRITTER_EYE),
+        "the eye never left the lynx's cell"
+    );
+    put_the_eye_at(&mut app, eye);
+
+    let start = flat(now, eye);
+    let (mut drawn, mut sank) = (0usize, false);
+    for frame in 0..30 {
+        app.update();
+        let Some(at) = drawn_at(&app) else {
+            break;
+        };
+        assert_eq!(
+            wanted(&app),
+            Some(0.0),
+            "frame {frame}: a lynx left behind a cell away is still staying"
+        );
+        assert!(
+            flat(at, eye) >= start - 1e-3,
+            "frame {frame}: a leaving lynx closed from {start} to {} on the eye",
+            flat(at, eye)
+        );
+        sank |= at.y < CRITTER_SURFACE as f32;
+        drawn += 1;
+    }
+    assert!(drawn > 0 && sank, "the lynx did not sink where it stood");
+    assert!(drawn_at(&app).is_none(), "the lynx never went");
+}
+
+#[test]
+fn a_lynx_is_drawn_for_a_quarter_of_every_window_and_never_two_at_once() {
+    // "A lynx is about for ten seconds of every forty" is true only while the row stands up one
+    // slot: `generation_of` staggers each slot by a quarter of the window, and four slots of
+    // lynxes would be about for all of it (a measure-only review replay on #1242). So it is
+    // measured where it is drawn — the running client, frame by frame, over two whole windows
+    // after the first one opens — rather than argued from the row's count.
+    let row = &critters::CRITTERS[2];
+    assert_eq!(
+        row.count,
+        1..=1,
+        "the lynx row is not the one-slot row this measures"
+    );
+    let mut app = lynx_country(7_200);
+    let elapsed = |app: &App| app.world().resource::<Time>().elapsed_secs();
+    while elapsed(&app) < row.window {
+        app.update();
+    }
+    // A frame is a tenth of a second.
+    let frames = (row.window * 10.0) as usize * 2;
+    let (mut drawn, mut most) = (0usize, 0usize);
+    for _ in 0..frames {
+        app.update();
+        let lynxes = critter_entities(&mut app).len();
+        most = most.max(lynxes);
+        drawn += usize::from(lynxes > 0);
+    }
+    let share = drawn as f32 / frames as f32;
+    assert_eq!(most, 1, "{most} lynxes were drawn at once");
+    // Its life is a quarter of its window, and a lynx is drawn from its first frame to its last.
+    assert!(
+        (0.2..=0.3).contains(&share),
+        "a lynx was drawn for {share} of two windows, where its life is {} of one",
+        row.life / row.window
     );
 }
 

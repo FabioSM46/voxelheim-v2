@@ -24,7 +24,7 @@ use bevy::prelude::*;
 use controller::{BedFrame, BedVoice, CallFrame, Calls};
 use sounds::Bed;
 use sounds::CallProfile;
-use wildlife::{Habitat, Origin, WILDLIFE};
+use wildlife::{Habitat, Origin, Voice, WILDLIFE};
 
 /// How many wildlife lanes there are: one per row of [`WILDLIFE`] and never a number of its
 /// own, so a new species brings its lane, its gain and its target with it.
@@ -113,7 +113,9 @@ struct Inputs<'w, 's> {
 }
 
 /// Where one voice is heard from this frame: its creature's body when the row declares
-/// [`Origin::Creature`] and one is drawn, and the row's bearing circle otherwise.
+/// [`Origin::Creature`] or [`Origin::Body`] and one is drawn, and the row's bearing circle
+/// otherwise — except that an [`Origin::Body`] row with no body drawn answers `None`, which is
+/// silence rather than a bearing.
 ///
 /// Named and separate so the rule can be tested rather than only read. A body collapses the
 /// circle to nothing — radius and height both zero — because the sound is *at* the animal, not
@@ -124,7 +126,8 @@ struct Inputs<'w, 's> {
 /// **Both kinds of visible creature answer here.** A flock row names bird rows and a critter
 /// row names a critter row, and #1190 and #1191 arrived with one each; keeping two placement
 /// paths would have been two chances to forget to zero the circle. The fallback is the bearing
-/// rather than silence, which is the origin rule's own third bullet.
+/// rather than silence, which is the origin rule's own third bullet — for every row but an
+/// [`Origin::Body`] one, which is the exception that bullet now names.
 fn voice_placement(
     origin: Origin,
     habitat: Habitat,
@@ -132,17 +135,61 @@ fn voice_placement(
     critters: &[(usize, Vec3)],
     eye_position: Vec3,
     profile: &CallProfile,
-) -> (Vec3, f32, f32) {
+) -> Option<(Vec3, f32, f32)> {
     // `Origin` decides whether to ask at all; `Habitat::body` decides where, from the list
     // that draws that kind of creature. A `Bearing` row never asks, which is what keeps the
     // macaw's shipped placement exactly where it was.
     let body = match origin {
-        Origin::Creature => habitat.body(flock, critters, eye_position),
+        Origin::Creature | Origin::Body => habitat.body(flock, critters, eye_position),
         Origin::Bearing => None,
     };
-    match body {
-        Some(at) => (at, 0.0, 0.0),
-        None => (eye_position, profile.radius, profile.height),
+    match (body, origin) {
+        (Some(at), _) => Some((at, 0.0, 0.0)),
+        (None, Origin::Body) => None,
+        (None, Origin::Creature | Origin::Bearing) => {
+            Some((eye_position, profile.radius, profile.height))
+        }
+    }
+}
+
+/// This frame's [`CallFrame`] for one row of [`WILDLIFE`]: where its call is heard from, and
+/// whether a new one may begin.
+///
+/// **The whole of the glue between the table and the scheduler**, named so that a test drives
+/// the code `update` runs rather than a copy of it. A row whose [`voice_placement`] answers
+/// nothing — an [`Origin::Body`] row with no body drawn — may not begin a call, and its lane
+/// holds as a zero gain would; the circle it is handed then is never used.
+fn call_frame(
+    voice: &Voice,
+    flock: &[(usize, Vec3)],
+    critters: &[(usize, Vec3)],
+    eye_position: Vec3,
+    world_seed: u64,
+    dt: f32,
+    gain: f32,
+) -> CallFrame {
+    let profile = voice.call.profile();
+    let placed = voice_placement(
+        voice.origin,
+        voice.habitat,
+        flock,
+        critters,
+        eye_position,
+        &profile,
+    );
+    let (origin, radius, height) = placed.unwrap_or((eye_position, profile.radius, profile.height));
+    CallFrame {
+        dt,
+        // Distinct streams keep simultaneous dusk calls from sharing their bearings. The salt is
+        // the row's, so the table may be appended to or reordered without moving a call that
+        // ships today.
+        seed: world_seed.wrapping_add(voice.stream),
+        interval: profile.interval,
+        radius,
+        height,
+        origin,
+        gain,
+        may_start: placed.is_some(),
     }
 }
 
@@ -191,7 +238,7 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
     // habitat could be something other than the ground, and folding it in changed no seed.
     // Where each species is drawn, gathered once rather than per lane. Empty when nothing is
     // on the ground, which is the fallback branch the origin rule names: a voice with no body
-    // keeps its bearing, because silence is never the fallback.
+    // keeps its bearing — unless its row is heard only from a body, and is then silent.
     let drawn: Vec<(usize, Vec3)> = input
         .critters
         .iter()
@@ -215,33 +262,16 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         // `Origin::Creature` is placed at the nearest drawn body of the creature it names, so
         // the sound moves when it moves and is occluded by what stands between; every other row
         // keeps its bearing at the row's radius and height. Which of the two applies is a
-        // property of the creature rather than of the frame, and silence is not an option.
+        // property of the creature rather than of the frame. An `Origin::Body` row with no body
+        // drawn begins no call at all (#1194: the lynx is drawn ten seconds in forty, and a yowl
+        // from nowhere the other thirty is not a yowl from the lynx).
         //
         // The radius and height are **zeroed** with the body, not kept: `Calls::update` adds
         // them to the origin to make a bearing, and a hoot eleven blocks from the owl is the
         // very thing placing it at the owl was for.
-        let (origin, radius, height) = voice_placement(
-            voice.origin,
-            voice.habitat,
-            &flock_drawn,
-            &drawn,
-            eye_position,
-            &profile,
-        );
         country.wildlife[index].update(
             mixer,
-            CallFrame {
-                dt,
-                // Distinct streams keep simultaneous dusk calls from sharing their bearings.
-                // The salt is the row's, so the table may be appended to or reordered
-                // without moving a call that ships today.
-                seed: seed.wrapping_add(voice.stream),
-                interval: profile.interval,
-                radius,
-                height,
-                origin,
-                gain,
-            },
+            call_frame(voice, &flock_drawn, &drawn, eye_position, seed, dt, gain),
             |source| {
                 let cover = spatial::occlusion(store, size, eye_position, source).max(cover);
                 spatial::place(
