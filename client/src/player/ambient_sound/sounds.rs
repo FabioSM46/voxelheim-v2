@@ -79,6 +79,10 @@ pub(super) enum Call {
     Squirrel,
     /// The owl's two-part hoot, heard after dark wherever the bird table flies an owl.
     Owl,
+    /// A mouse's squeak: one to three short, high, thin squeaks, heard after dark on the sand
+    /// where `critters::species_for` answers the mouse — and heard *from the mouse*. The highest
+    /// voice in this table, and the one the 3.6 kHz ceiling binds hardest: see [`squeak`].
+    Mouse,
 }
 
 impl Call {
@@ -103,6 +107,7 @@ impl Call {
         Self::Parrot,
         Self::Squirrel,
         Self::Owl,
+        Self::Mouse,
     ];
 }
 
@@ -664,6 +669,94 @@ fn rattle(variation: f32, seed: u64, envelope: Envelope) -> Vec<Layer> {
 }
 
 // ---------------------------------------------------------------------------
+// The mouse
+// ---------------------------------------------------------------------------
+
+/// How many squeaks one mouse call carries: one to three, from its seed.
+pub(super) fn squeaks(seed: u64) -> usize {
+    1 + ((seed >> 8) % 3) as usize
+}
+
+/// How long one squeak sounds.
+///
+/// Seventy milliseconds: a squeak is a flick of pitch rather than a note, and long enough for
+/// its fall to be heard as one — a squirrel's bark is shorter and has no contour worth hearing.
+pub(super) const SQUEAK_SECONDS: f32 = 0.07;
+
+/// Where each squeak starts: one every 110 to 150 ms, from its seed, so every squeak is followed
+/// by at least 40 ms of silence before the next.
+pub(super) fn squeak_onsets(seed: u64) -> Vec<f32> {
+    let period = 0.11 + ((seed >> 16) % 41) as f32 / 1000.0;
+    (0..squeaks(seed))
+        .map(|index| index as f32 * period)
+        .collect()
+}
+
+/// Where a squeak's pitch line ends, as a fraction of where it starts.
+const SQUEAK_FALL: f32 = 0.82;
+
+/// How far one half-cycle of vibrato lifts the squeak above its falling line on the way: the
+/// pitch flicks up into the squeak and drops out of it.
+const SQUEAK_ARCH: f32 = 0.10;
+
+/// How far above the voice its rough twin sits: at 2.5 to 2.8 kHz, 3.5% beats at 90 to 100 Hz,
+/// a rasp in the voice rather than a second pitch.
+const SQUEAK_DETUNE: f32 = 1.035;
+
+/// One squeak of a mouse: short, high and thin, and never a note.
+///
+/// **A real mouse squeaks well above the 3.6 kHz ceiling, so this is built to read as a squeak
+/// under it rather than to reproduce its spectrum** — the cricket's narrow noise bands near
+/// 3.2 kHz are the worked example of that, and the rattle the most recent one:
+///
+/// - **A pitch contour.** Two voiced layers ride one glide from the seed's pitch down to
+///   [`SQUEAK_FALL`] of it, lifted by a single half-cycle of vibrato — a flick up and a drop.
+/// - **Sines, and that is the synthesiser's rule rather than a shortcut.** Its saw and triangle
+///   are not band-limited (`audio/synth/mod.rs` says so and says to prefer sine and noise for
+///   bright sounds), and at 2.5 kHz their harmonics would fold back down across an 8 kHz
+///   device. What makes the voice rough is the twin [`SQUEAK_DETUNE`] above it, beating at
+///   about a hundred hertz.
+/// - **Breath, most of the level.** White noise through two bands across the top of the ceiling
+///   and a wider one under them fills the band the squeak lives in, which is what separates it
+///   from the clean partials `a_squeak_is_thin_and_textured_and_not_a_note` builds as its
+///   negative control.
+///
+/// Every band, and every frequency a glide reaches with its arch, stays under 3.6 kHz: the
+/// widest reach is `2800 * SQUEAK_DETUNE * (1 + SQUEAK_ARCH)`, 3188 Hz.
+fn squeak(variation: f32, envelope: Envelope) -> Vec<Layer> {
+    let hz = 2500.0 + variation * 300.0;
+    let voice = |detune: f32, gain| Layer {
+        exciter: Exciter::Glide(Glide {
+            wave: Wave::Sine,
+            from: hz * detune,
+            to: hz * detune * SQUEAK_FALL,
+            seconds: SQUEAK_SECONDS,
+            curve: Curve::Exponential,
+            vibrato: Vibrato {
+                hz: 0.5 / SQUEAK_SECONDS,
+                depth: SQUEAK_ARCH,
+                onset: 0.0,
+            },
+        }),
+        gain,
+        envelope,
+        gate: None,
+        filter: None,
+    };
+    let breath = |gain, formant, q| Layer {
+        envelope,
+        ..noise(Noise::White, gain, FilterKind::Band, formant, q)
+    };
+    vec![
+        voice(1.0, 0.17),
+        voice(SQUEAK_DETUNE, 0.12),
+        breath(0.70, 2600.0, 3.0),
+        breath(0.55, 3250.0, 3.5),
+        breath(0.30, 2000.0, 2.0),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // The owl
 // ---------------------------------------------------------------------------
 
@@ -814,6 +907,15 @@ impl Call {
             // level against: the fallback is the *pessimistic* case, since a hoot placed at a
             // body is as close as the bird is.
             Self::Owl => ([30.0, 90.0], 8.0, 6.0, HOOT_SECONDS, 64.0),
+            // **Sparse, and that is the acceptance criterion**: a desert night is mostly silent,
+            // so eighteen to forty-five seconds between calls, each one to three squeaks.
+            //
+            // `radius` and `height` are the fallback only — a mouse is drawn, so its squeak is
+            // placed at its body — and put an unseen mouse five blocks off on the ground. The
+            // range is short because a mouse is small: nothing hears one across a valley. The
+            // longest call, three squeaks at the slowest spacing, ends at 2 * 0.15 + 0.07 =
+            // 0.37 s, inside the baked 0.40 s.
+            Self::Mouse => ([18.0, 45.0], 5.0, 0.0, 0.40, 20.0),
         };
         CallProfile {
             interval,
@@ -848,6 +950,13 @@ impl Call {
             Self::Squirrel => self.description(seed).bake_at(
                 &chatter_onsets(seed),
                 CHATTER_SECONDS,
+                seconds,
+                rate,
+                seed,
+            ),
+            Self::Mouse => self.description(seed).bake_at(
+                &squeak_onsets(seed),
+                SQUEAK_SECONDS,
                 seconds,
                 rate,
                 seed,
@@ -890,6 +999,9 @@ impl Call {
             // One note of a hoot: a soft swell rather than an onset, a held body, and a long
             // sigh out of it. The attack is what keeps an owl from sounding struck.
             Self::Owl => (0.055, 0.18, 0.62, 0.12),
+            // One squeak: a sharp onset, a short held middle while the pitch drops, and a close
+            // fast enough to leave real silence before the next.
+            Self::Mouse => (0.006, 0.03, 0.55, 0.02),
         };
         let envelope = Envelope {
             attack,
@@ -926,6 +1038,7 @@ impl Call {
             Self::Parrot => squawk(variation, envelope),
             Self::Squirrel => bark(variation, envelope),
             Self::Owl => hoot(variation, envelope),
+            Self::Mouse => squeak(variation, envelope),
         };
         Sound { layers }
     }
@@ -2649,7 +2762,8 @@ mod tests {
                 | Call::Cricket
                 | Call::Parrot
                 | Call::Squirrel
-                | Call::Owl => {}
+                | Call::Owl
+                | Call::Mouse => {}
             }
         }
         let mut seen = Call::ALL.to_vec();
@@ -2918,6 +3032,257 @@ mod tests {
                 assert!(
                     samples[first_end..second_start].iter().all(|v| *v == 0.0),
                     "seed {seed} at {rate}: the gap between the notes is not silent"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The mouse
+    // -----------------------------------------------------------------------
+
+    /// The squeak's voiced layers alone, as a clean control or as a pitch to track: every glide,
+    /// no breath and no band.
+    fn clean_squeak(seed: u64) -> Sound {
+        Sound {
+            layers: Call::Mouse
+                .description(seed)
+                .layers
+                .into_iter()
+                .filter(|layer| matches!(layer.exciter, Exciter::Glide(_)))
+                .map(|layer| Layer {
+                    filter: None,
+                    ..layer
+                })
+                .collect(),
+        }
+    }
+
+    /// The pitch a squeak's glide starts from, read back from its description.
+    fn squeak_pitch(seed: u64) -> f32 {
+        match Call::Mouse.description(seed).layers[0].exciter {
+            Exciter::Glide(glide) => glide.from,
+            other => panic!("the squeak's first layer is not voiced: {other:?}"),
+        }
+    }
+
+    /// #1192: a mouse call is one to three short squeaks with real silence between them — a
+    /// squeak, or a squeak-squeak, and never a trill.
+    #[test]
+    fn a_mouse_call_is_one_to_three_squeaks_with_silence_between() {
+        let mut seen = [false; 3];
+        for seed in (0..60u64).map(scramble) {
+            let expected = squeaks(seed);
+            seen[expected - 1] = true;
+            for rate in [8000, 48000] {
+                let call = Call::Mouse.bake(seed, rate).unwrap();
+                let found = rendered_syllables(call.samples(), rate);
+                assert_eq!(found.len(), expected, "seed {seed} at {rate}: {found:?}");
+                for (first, last) in &found {
+                    let seconds = (last - first) as f32 / rate as f32;
+                    assert!(
+                        seconds > 0.04 && seconds <= SQUEAK_SECONDS,
+                        "seed {seed} at {rate}: a {seconds} s squeak"
+                    );
+                }
+                for pair in found.windows(2) {
+                    let silence = (pair[1].0 - pair[0].1) as f32 / rate as f32;
+                    assert!(
+                        silence >= 0.035,
+                        "seed {seed} at {rate}: {silence} s between squeaks"
+                    );
+                }
+                assert_eq!(call.samples().first(), Some(&0.0));
+                assert_eq!(call.samples().last(), Some(&0.0));
+            }
+        }
+        assert_eq!(seen, [true; 3], "every squeak count occurs");
+    }
+
+    /// The owner's standing rule, applied to the highest voice there is: a sound is realistic,
+    /// never a note. A squeak's energy is spread across the top of the band an 8 kHz device can
+    /// carry; a note keeps it on a few frequencies with nothing between them.
+    ///
+    /// **The negative control is the point.** The same squeaks, the same contour, the same
+    /// onsets, voiced by their glides alone — clean partials, no breath — must **fail** the
+    /// measurement the squeak passes, and by a wide margin, or the floor separates nothing. The
+    /// band is the one a squeak lives in, 1.8 to 3.6 kHz, for the reason `flatness_between`
+    /// gives: read over a band the voice is not in, empty bins would condemn any voice.
+    #[test]
+    fn a_squeak_is_thin_and_textured_and_not_a_note() {
+        let profile = Call::Mouse.profile();
+        for seed in (0..20u64).map(scramble) {
+            let call = Call::Mouse.bake(seed, 8000).unwrap();
+            let flat = flatness_between(call.samples(), 8000, 1800.0, 3600.0);
+            let tonal = tonal_share(call.samples(), 8000);
+            assert!(
+                flat > 0.15 && tonal < 0.4,
+                "seed {seed}: flatness {flat}, {tonal} of the energy on one frequency"
+            );
+
+            let clean = clean_squeak(seed)
+                .bake_at(
+                    &squeak_onsets(seed),
+                    SQUEAK_SECONDS,
+                    profile.seconds,
+                    8000,
+                    seed,
+                )
+                .unwrap();
+            let control = flatness_between(clean.samples(), 8000, 1800.0, 3600.0);
+            assert!(
+                control < 0.05,
+                "seed {seed}: the clean control measured {control}, so the floor separates \
+                 nothing"
+            );
+            assert!(
+                flat > control * 3.0,
+                "seed {seed}: the squeak measured {flat} against its clean control's {control}"
+            );
+        }
+    }
+
+    /// The seeds that reach every pitch one call can make — **all of them**, as a finite set that
+    /// provably holds each call's highest and lowest glide, so a bound taken over it is a bound
+    /// over every seed rather than over a sample.
+    ///
+    /// Exhaustive on purpose, like `every_call_is_in_all`: a new call does not compile here until
+    /// it says how its pitch reads its seed.
+    fn every_pitch_seed(call: Call) -> Vec<u64> {
+        match call {
+            // Noise alone: no glide, so there is no pitch for a seed to move.
+            Call::Rattlesnake | Call::Cricket => vec![0],
+            // The pitch reads the seed only through `variation`, which is `seed % 101`: these
+            // hundred and one seeds are every value it can take.
+            Call::Eagle
+            | Call::Condor
+            | Call::Parrot
+            | Call::Squirrel
+            | Call::Owl
+            | Call::Mouse => (0..101).collect(),
+            // The howl reads `seed % 101` for its pitch and a slice of `spread(seed)` for its arch
+            // (`howl_gesture`), and its highest glide rises with both. So every residue of the
+            // one, plus a seed found to take both at their maximum at once — searched for here
+            // rather than assumed to exist.
+            Call::Wolf => {
+                let top = (0..100_000u64)
+                    .map(|step| 100 + 101 * step)
+                    .find(|seed| (spread(*seed) >> 16) % 17 == 16)
+                    .expect("a seed takes the howl's highest pitch and widest arch together");
+                (0..101).chain([top]).collect()
+            }
+        }
+    }
+
+    /// The highest pitch any glide of one call reaches at one seed, arch and detune included.
+    fn highest_glide(call: Call, seed: u64) -> f32 {
+        call.description(seed)
+            .layers
+            .into_iter()
+            .filter_map(|layer| match layer.exciter {
+                Exciter::Glide(glide) => {
+                    Some(glide.from.max(glide.to) * (1.0 + glide.vibrato.depth))
+                }
+                _ => None,
+            })
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Short and high means higher than anything else in the catalogue — **at every seed any call
+    /// can be handed** — and a squeak's pitch drops as it ends rather than sitting on a note.
+    ///
+    /// **This used to take the other calls' pitch from twelve seeds each**, which review on #1224
+    /// pointed out makes the claim a sample: a seed outside it could put another voice above the
+    /// squeak with this test still green. [`every_pitch_seed`] is the set that holds every pitch
+    /// there is, a wide scrambled sweep must never exceed what it finds, and the runner-up is
+    /// named so a regression in another voice's pitch shows here rather than inside the margin.
+    #[test]
+    fn a_squeak_is_the_highest_voice_there_is_and_falls_as_it_ends() {
+        let mut runner_up = (Call::Mouse, 0.0f32);
+        for &call in Call::ALL.iter().filter(|call| **call != Call::Mouse) {
+            let highest = every_pitch_seed(call)
+                .into_iter()
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            // The set is complete, and a wider sweep can only confirm it: nothing past it higher.
+            let swept = (0..1024u64)
+                .map(scramble)
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            assert!(
+                swept <= highest,
+                "{call:?} reached {swept} Hz outside the seeds said to hold its highest, {highest}"
+            );
+            if highest > runner_up.1 {
+                runner_up = (call, highest);
+            }
+        }
+        // The howl's third partial at its highest pitch and widest arch: 365 × 3 × 1.38.
+        assert_eq!(
+            runner_up.0,
+            Call::Wolf,
+            "the next highest voice is no longer the howl: {runner_up:?}"
+        );
+        let lowest = every_pitch_seed(Call::Mouse)
+            .into_iter()
+            .map(squeak_pitch)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            lowest * SQUEAK_FALL > runner_up.1,
+            "a squeak falling to {} Hz is not above {:?} at {} Hz",
+            lowest * SQUEAK_FALL,
+            runner_up.0,
+            runner_up.1
+        );
+
+        for seed in (0..12u64).map(scramble) {
+            let hz = squeak_pitch(seed);
+
+            // **The first voice alone, not its twin with it.** The twin sits 3.5% above and a
+            // thirty-millisecond window cannot tell the two apart, so read together the tracker
+            // hops between them and reports a fall of two or three percent where the voice
+            // falls five. Measured at 8 kHz on the voice alone the fall is 5.1 to 5.3% inside
+            // the four windows loud enough to read; three is the bound.
+            let voiced = Sound {
+                layers: clean_squeak(seed).layers.into_iter().take(1).collect(),
+            }
+            .bake(SQUEAK_SECONDS, 8000, seed)
+            .unwrap();
+            let track = dominant_track(voiced.samples(), 8000, hz * 0.7, hz * 1.2);
+            assert!(
+                track.len() >= 3,
+                "seed {seed}: {} voiced windows",
+                track.len()
+            );
+            let (first, last) = (track[0].1, track[track.len() - 1].1);
+            assert!(
+                last < first * 0.97,
+                "seed {seed}: fell from {first} to only {last} Hz"
+            );
+        }
+    }
+
+    /// Heard at the fallback bearing an *unseen* mouse keeps — five blocks off, on the ground —
+    /// faded by the same `spatial::attenuation` every placed sound is, without clipping at any
+    /// device rate. A mouse placed at its body is usually nearer and so louder.
+    #[test]
+    fn a_squeak_carries_a_few_blocks_without_clipping_at_any_rate() {
+        let profile = Call::Mouse.profile();
+        let gain = spatial::attenuation(profile.radius.hypot(profile.height), profile.range);
+        for seed in (0..20u64).map(scramble) {
+            for rate in [8000, 44100, 48000, 96000, 192000] {
+                let call = Call::Mouse.bake(seed, rate).unwrap();
+                let samples = call.samples();
+                assert!(samples.iter().all(|v| v.is_finite()));
+                assert!(
+                    peak(samples) < 0.85,
+                    "seed {seed} at {rate}: peaks at {}",
+                    peak(samples)
+                );
+                assert!(
+                    peak(samples) * gain >= 0.05,
+                    "seed {seed} at {rate}: heard at {}",
+                    peak(samples) * gain
                 );
             }
         }
