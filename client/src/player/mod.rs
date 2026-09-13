@@ -33,6 +33,7 @@
 //! | `ambience.rs` | the cosmetic ground look read from loaded voxels around the eye |
 //! | `birds.rs` | the ambient birds: the species table, the flight paths and the flap |
 //! | `critters.rs` | the ambient ground creatures: the species table, the gaits, the ground they stand on and the climb that ends a life |
+//! | `watchers.rs` | the distant wolves' eyes: a pair of lights on the snow's horizon after dark, which never comes nearer |
 //! | `interpolate.rs` | the two-snapshot buffer and the interpolation — pure, no Bevy world |
 //! | `drops.rs` | authoritative drop spawn/despawn and cosmetic cube motion |
 //! | `hands.rs` | the camera-space held item and its cosmetic swing |
@@ -86,6 +87,7 @@ mod tool_audio;
 mod trade;
 mod vendor;
 mod wards;
+mod watchers;
 mod water_audio;
 
 use std::collections::{HashMap, HashSet};
@@ -410,6 +412,7 @@ impl Plugin for PlayerPlugin {
                     precipitation::create_visuals,
                     birds::create_visuals,
                     critters::create_visuals,
+                    watchers::create_visuals,
                 ),
             )
             .add_systems(
@@ -533,6 +536,16 @@ impl Plugin for PlayerPlugin {
             .add_systems(
                 Update,
                 (critters::keep_the_critters, critters::run_the_critters)
+                    .chain()
+                    .after(camera::AimCamera)
+                    .after(ambience::sample_the_ground),
+            )
+            // The distant eyes, on the same order for the same reasons: measured from this
+            // frame's eye, gated on this frame's look, and chained so a pair lit this frame is
+            // faded and held to its floor on the frame it appears.
+            .add_systems(
+                Update,
+                (watchers::keep_the_watchers, watchers::run_the_watchers)
                     .chain()
                     .after(camera::AimCamera)
                     .after(ambience::sample_the_ground),
