@@ -7,7 +7,7 @@ use crate::player::sky::{PERIOD_SWITCH, Period};
 use crate::world::{VoxelChunk, palette};
 use sounds::Call;
 use std::sync::Arc;
-use wildlife::{Habitat, OWLS, Origin, PARROT, SQUIRREL, VULTURE, Voice, row_of};
+use wildlife::{Habitat, MOUSE, OWLS, Origin, PARROT, SQUIRREL, VULTURE, Voice, row_of};
 
 struct Buffer(Vec<f32>);
 impl Sink for Buffer {
@@ -647,8 +647,8 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
         }
         // Sand no longer fits that shape and #1186 is why: its day has **two** voices — the
         // rattlesnake on the ground and the condor in the vulture's air — and its night has
-        // none at all, the crow having retired from a country no crow lives in. So the total
-        // is the claim, and at night the claim is zero.
+        // one, the mouse (#1192), where the crow used to be. So the total is the claim: two
+        // day voices crossing one night voice.
         let sand = Ambience {
             ground: GroundLook::Sand,
             wooded,
@@ -664,9 +664,14 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
                 "both of the desert's day voices follow the same half of the day"
             );
             assert_eq!(
+                gain_of(&target, Call::Mouse),
+                1.0 - by_day,
+                "the mouse follows the night curve"
+            );
+            assert_eq!(
                 target.wildlife.iter().sum::<f32>(),
-                by_day * 2.0,
-                "nothing answers for the desert night"
+                by_day * 2.0 + (1.0 - by_day),
+                "the desert is its two day voices and its one night voice, and nothing else"
             );
             assert_eq!(
                 target.beds, [0.0; 5],
@@ -674,10 +679,12 @@ fn countries_and_twilight_select_their_own_calls_without_weather_deciding_ground
             );
             unmoved_by_weather(&sand, night, target.wildlife);
         }
+        let mut night = [0.0; VOICES];
+        night[row_of(Call::Mouse)] = 1.0;
         assert_eq!(
             targets(&sand, 1.0, None).wildlife,
-            [0.0; VOICES],
-            "the desert night is silent, not quietly crowed at"
+            night,
+            "the desert night is the mouse's alone, not quietly crowed at"
         );
     }
     // Wooded grass at dusk is the cell where the day hands over to the night, and it is now
@@ -932,9 +939,9 @@ fn the_table_answers_every_country_and_half_of_the_day() {
             // In the table's order: the condor is a seen-and-heard row and sits above the
             // ground-only ones.
             (GroundLook::Sand, _, false) => vec![Call::Condor, Call::Rattlesnake],
-            // #1186: the crow is gone and the mice and bats that belong here are a later
-            // issue. This empty vector is the gap, asserted rather than papered over.
-            (GroundLook::Sand, _, true) => vec![],
+            // #1186 retired the crow and left this cell empty; #1192's mouse fills it, trees
+            // or none. The bat that shares the night (#1193) is silent and has no row.
+            (GroundLook::Sand, _, true) => vec![Call::Mouse],
             (GroundLook::Snow, _, false) => vec![Call::Eagle],
             // The north at night is the owl and the wolf together: one is seen and heard and
             // claims first, which is the whole of why the table is ordered as it is.
@@ -1032,15 +1039,22 @@ fn the_condor_is_heard_by_day_only_where_the_bird_table_flies_the_vulture() {
     );
 }
 
-/// Ten minutes of the real system over a desert at night: the lane the crow held is empty, so
-/// nothing at all is heard. The complement of the day, which is asserted beside it so the
-/// silence is shown to be the hour rather than a broken system.
+/// Ten minutes of the real system over a desert at night: the mouse's lane, and nothing else.
+/// **A desert night is mostly silent** (#1192), so what is asserted is a few squeaks rather
+/// than a stream — every row of the table, the clock and the profile together, with no mouse
+/// drawn, so the squeaks come from the fallback bearing. The day is asserted beside it so the
+/// shape is shown to be the hour rather than a broken system.
 #[test]
-fn a_simulated_desert_night_is_silent_and_its_day_is_not() {
+fn a_simulated_desert_night_hears_a_few_squeaks_and_is_mostly_silent() {
     let night = a_simulated_day_at(sand(), true);
     assert!(
-        night.iter().all(|level| *level == 0.0),
-        "the desert night sounded: the crow's lane is meant to be empty (#1186)"
+        night.iter().any(|level| *level > 0.0),
+        "the desert night had no mouse in it"
+    );
+    let heard = night.iter().filter(|level| **level > 0.0).count();
+    assert!(
+        heard < 300,
+        "{heard} of 6000 ticks sounded, which is a stream rather than a desert night"
     );
     let day = a_simulated_day_at(sand(), false);
     assert!(
@@ -1325,6 +1339,104 @@ fn the_squirrel_is_heard_exactly_where_the_critter_table_stands_it() {
     assert!(gain_of(&night, Call::Cricket) > 0.0);
 }
 
+/// The mouse is heard exactly where it is drawn, and only after dark: the two tables agree on
+/// the country, and the row's period on the hour.
+#[test]
+fn the_mouse_is_heard_exactly_where_the_critter_table_stands_it_and_only_after_dark() {
+    for ground in [
+        GroundLook::Grass,
+        GroundLook::Sand,
+        GroundLook::Snow,
+        GroundLook::Unknown,
+    ] {
+        for wooded in [false, true] {
+            let ambience = Ambience { ground, wooded };
+            let heard = gain_of(&targets(&ambience, 1.0, None), Call::Mouse) > 0.0;
+            let drawn = crate::player::critters::species_for(&ambience) == Some(MOUSE);
+            assert_eq!(
+                heard, drawn,
+                "{ground:?}/{wooded}: heard {heard}, drawn {drawn}"
+            );
+            assert_eq!(
+                gain_of(&targets(&ambience, 0.0, None), Call::Mouse),
+                0.0,
+                "{ground:?}/{wooded}: a mouse squeaked by day"
+            );
+        }
+    }
+    assert_eq!(
+        WILDLIFE[row_of(Call::Mouse)].period,
+        crate::player::critters::CRITTERS[MOUSE].abroad,
+        "the squeak is heard in a different half of the day from the one the mouse is abroad in"
+    );
+}
+
+/// "The squeak comes from the mouse, and is sparse." Driven through the shipped scheduler for
+/// ten minutes with a mouse drawn: a few calls a minute, sparser than the cricket, and **every
+/// one of them started at the mouse** — which is the lane's own placement answer fed to the
+/// scheduler, not a second copy of it.
+#[test]
+fn a_simulated_desert_night_hears_a_few_squeaks_each_from_the_mouse() {
+    use std::cell::{Cell, RefCell};
+    let eye = Vec3::new(10.0, 64.0, 10.0);
+    let mouse = eye + Vec3::new(4.0, -1.5, -3.0);
+    let profile = Call::Mouse.profile();
+    let row = &WILDLIFE[row_of(Call::Mouse)];
+    // A squirrel drawn nearer the eye, so "the nearest critter" and "the nearest mouse" differ.
+    let drawn = [(SQUIRREL, eye + Vec3::X), (MOUSE, mouse)];
+    let (origin, radius, height) =
+        super::voice_placement(row.origin, row.habitat, &[], &drawn, eye, &profile);
+    assert_eq!((origin, radius, height), (mouse, 0.0, 0.0));
+
+    for seed in [17, 39, 1123] {
+        let mixer = mixer();
+        let mut calls = Calls::default();
+        let placed = Cell::new(Vec3::NAN);
+        let starts = RefCell::new(Vec::new());
+        let mut silent = 0usize;
+        for _ in 0..6000 {
+            calls.update(
+                &mixer,
+                CallFrame {
+                    dt: 0.1,
+                    seed,
+                    interval: profile.interval,
+                    radius,
+                    height,
+                    origin,
+                    gain: 1.0,
+                },
+                |source| {
+                    placed.set(source);
+                    spatial::place(eye, 0.0, source, profile.range, 0.0)
+                },
+                |seed, rate| {
+                    starts.borrow_mut().push(placed.get());
+                    Call::Mouse.bake(seed, rate)
+                },
+            );
+            silent += usize::from(energy(&mixer, 800) == 0.0);
+        }
+        let starts = starts.into_inner();
+        let per_minute = starts.len() as f32 / 10.0;
+        assert!(
+            (0.8..=3.5).contains(&per_minute),
+            "seed {seed}: {per_minute} calls a minute, which is not a mostly silent night"
+        );
+        assert!(
+            starts.iter().all(|at| *at == mouse),
+            "seed {seed}: a squeak started somewhere other than the mouse: {starts:?}"
+        );
+        let crickets = wildlife_sequence(Call::Cricket, seed, 1.0, 1.0).0.len();
+        assert!(
+            starts.len() * 2 < crickets,
+            "{} calls against {crickets} cri-cris",
+            starts.len()
+        );
+        assert!(silent > 5800, "seed {seed}: {silent} of 6000 ticks silent");
+    }
+}
+
 /// #1191: a night has a few hoots, not a chorus. The sparsest call in the table, driven
 /// through the shipped scheduler for ten minutes.
 #[test]
@@ -1385,9 +1497,10 @@ fn at_the_creature_is_only_declared_by_a_row_that_names_one() {
         }
     }
     assert_eq!(
-        placed, 2,
-        "the squirrel and the owl are placed at their own bodies today"
+        placed, 3,
+        "the squirrel, the owl and the mouse are placed at their own bodies today"
     );
+    assert_eq!(WILDLIFE[row_of(Call::Mouse)].origin, Origin::Creature);
     assert_eq!(WILDLIFE[row_of(Call::Owl)].origin, Origin::Creature);
 
     // **The macaw keeps the bearing**, which is the rule's own instruction: moving a shipped
