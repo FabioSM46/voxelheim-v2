@@ -60,10 +60,18 @@
 //! for a row that wears [`Eyeshine`]. Nothing below reads `CRITTERS[0]` by its index outside
 //! the table's own tests.
 //!
+//! #1194 is the second test, and the harder one, because the lynx's motion is a shape nothing
+//! here had: mostly still, then very fast, then gone. It is a third [`Gait`], a [`Frame`] on
+//! legs, a [`Tail::Bob`], and two row fields — [`CritterSpecies::window`], so a slot can stand
+//! empty between lives, and [`CritterSpecies::burrows`], so a life can end *into* the snow.
+//! The one system change is a lynx left behind by a move being retired rather than kept, and
+//! [`Gait::Ambush`] says why.
+//!
 //! ## Two entities and no asset
 //!
-//! A body lofted through nine cross-sections, and a tail as a child — one mesh each, so a
-//! critter is two draws and a full wood is eight; a row that declares
+//! A body lofted through cross-sections — a [`Frame`] per row, since a cat on legs is not a
+//! squirrel's crouch — and a tail as a child, one mesh each, so a critter is two draws and a
+//! full wood is eight; a row that declares
 //! [`CritterSpecies::eyeshine`] adds the pair of faces `player/eyeshine.rs` builds as a third,
 //! so a mouse is three. The tail is a child for the reason a bird's
 //! wing is: it turns about its own root, which is cheaper to write and to read than
@@ -201,6 +209,60 @@ const DASH_LEG_SECONDS: RangeInclusive<f32> = 0.6..=0.9;
 /// How much of a dash leg is spent moving; the rest of it is the freeze.
 const DASH_SHARE: f32 = 0.65;
 
+/// How far from its anchor an ambushing critter lies, in blocks: the near and far edge of the
+/// ring its home is drawn on.
+///
+/// **Far, and the distance is a proof rather than a taste.** A lynx must never bolt *toward* the
+/// player, and [`place`] is not told where the player is — only the anchor, which is the centre
+/// of the eye's cell. So the promise is made to every point the eye can occupy while that anchor
+/// holds: anywhere in the cell, up to [`EYE_REACH`] from its centre. A bolt runs along a straight
+/// line from home, and the distance to a point `P` never falls along it while
+/// `(home - P) · ahead >= 0` — which holds for every `P` in the cell exactly when
+/// `ring * cos(θ) >= EYE_REACH`, where `θ` is how far [`AMBUSH_ACROSS`] turns the bolt off the
+/// straight line out. The `const` assertion below is that inequality, and
+/// `a_lynx_never_bolts_toward_an_eye_anywhere_in_its_cell` walks it frame by frame.
+///
+/// It is also why a lynx is met at twenty-odd to forty blocks rather than at arm's length, which
+/// is where a wary cat is met anyway.
+const AMBUSH_RING_NEAR: f32 = 27.0;
+const AMBUSH_RING_FAR: f32 = 29.0;
+
+/// How far a bolt may turn off the line straight out from the anchor, as the tangent of the
+/// angle: 0.6 is 31°, so a lynx runs away or away-and-across, and never in.
+const AMBUSH_ACROSS: f32 = 0.6;
+
+/// The farthest an eye can be from its own anchor on the horizontal plane: a corner of its cell.
+const EYE_REACH: f32 = CRITTER_ANCHOR_CELL * FRAC_1_SQRT_2;
+
+// `ring * cos(θ) >= EYE_REACH`, with `cos(θ) = 1 / sqrt(1 + across²)` squared out so it needs no
+// square root and the compiler can hold it: 27² = 729 against 512 × 1.36 = 696.3.
+const _: () = assert!(
+    AMBUSH_RING_NEAR * AMBUSH_RING_NEAR
+        >= EYE_REACH * EYE_REACH * (1.0 + AMBUSH_ACROSS * AMBUSH_ACROSS),
+    "a lynx on the near edge of its ring could bolt toward an eye in its own cell"
+);
+
+/// How far one bolt carries a lynx, in blocks, and how long it takes.
+///
+/// **The speed is the number to get right** (#1194): fast enough to startle and bounded so it
+/// cannot outrun its range. A smoothstep peaks at one and a half times its average — the factor
+/// [`SCURRY_DASH_SHARE`] explains — so the bolt touches `1.5 * BOLT / BOLT_SECONDS`: 11.3 blocks
+/// a second for the shortest and 15 for the longest, a sprinting cat, under the row's
+/// `max_speed` of 15.5. The far ring plus the longest bolt plus the lynx's whole 7.2-second creep
+/// is 37.7, inside [`CRITTER_RANGE`] with the drawn body added — which
+/// `the_drawn_critter_stays_inside_its_horizontal_box` measures rather than trusts.
+const AMBUSH_BOLT_NEAR: f32 = 6.0;
+const AMBUSH_BOLT_FAR: f32 = 8.0;
+const AMBUSH_BOLT_SECONDS: f32 = 0.8;
+
+/// How fast an ambushing critter creeps while it waits, in blocks a second.
+///
+/// "Still or barely moving" — and barely rather than still, for one reason a player sees: a
+/// critter that never moves has no heading, so it would crouch facing wherever its model was
+/// authored and snap round when it bolts. A tenth of a block a second along the line it is about
+/// to run is a cat gathering itself, and it faces the right way the whole time.
+const AMBUSH_CREEP: f32 = 0.1;
+
 /// How fast a foraging critter's centre travels, in blocks per second, and over how long.
 ///
 /// Without it a squirrel jitters about one point forever, which reads as a tethered animal.
@@ -232,9 +294,10 @@ const STAND_PROBE_ABOVE: f32 = 8.0;
 /// its target reads as a wall of velocity, and a squirrel that jumps a block the instant it
 /// crosses a voxel edge is exactly that.
 ///
-/// **Twenty-four blocks a second, which is three times the fastest dash, and the factor is
-/// the point.** While the ground under a scurrying critter changes more slowly than this, the
-/// ease reaches it and sits on it exactly — so "a critter stands on the surface" is an
+/// **Twenty-four blocks a second, which is three times the fastest dash and still half again
+/// the lynx's bolt, and the margin is the point.** While the ground under a moving critter
+/// changes more slowly than this — a bolt at its 15-block peak over a one-in-one slope climbs 15
+/// a second — the ease reaches it and sits on it exactly — so "a critter stands on the surface" is an
 /// equality on rolling ground rather than a tolerance, and
 /// `a_critter_stands_on_flat_ground_exactly_and_on_broken_ground_within_a_voxel` asserts it as one. A vertical
 /// step of a single voxel is crossed in forty milliseconds, which is a hop rather than a
@@ -280,6 +343,21 @@ pub(super) enum Gait {
     /// A short run along one bearing, in dashes with a freeze between them, with no browse
     /// under it: somewhere to be rather than somewhere to feed. See [`DASH_STRIDE`].
     Dash,
+    /// An ambush (#1194): a long crouch that barely creeps, one short bolt away from the eye's
+    /// cell, and a hold where the bolt ended. **Piecewise in time rather than a velocity curve**,
+    /// and still a pure function of the seed — which is what keeps the lynx from being the first
+    /// creature with remembered state. See [`AMBUSH_RING_NEAR`] for why the bolt can never close
+    /// on the player, and [`ambush_travel`] for the three pieces.
+    ///
+    /// **A lynx left behind by a move is retired, where any other critter is kept as a stray.**
+    /// The promise not to bolt toward the player is made to the cell its anchor is the centre of;
+    /// once the eye has crossed into another cell, a lynx still crouched on the old ring could
+    /// bolt straight at it. `keep_the_critters` therefore takes it into the snow the frame its
+    /// anchor is left behind — the one gait-dependent line in that system. What is *not* claimed:
+    /// a lynx already mid-bolt when that happens finishes the bolt as it sinks, for at most the
+    /// 0.8 seconds a bolt lasts, and the eye that just walked thirty-two blocks is not guaranteed
+    /// to be on the far side of it.
+    Ambush,
 }
 
 /// One row of [`CRITTERS`]: everything about a kind of critter there is.
@@ -315,6 +393,15 @@ pub(super) struct CritterSpecies {
     /// birth time: the window is a function of the session clock, so the critter alive in a
     /// slot right now is arithmetic rather than memory.
     pub(super) life: f32,
+    /// How often a slot's critter comes round, in seconds: one [`CritterSpecies::life`], and then
+    /// nothing until the next window opens. Never shorter than the life.
+    ///
+    /// **Equal to the life for a squirrel and a mouse**, whose slots are never empty — and far
+    /// longer for a lynx, which is a creature somebody *happens* to see. It is the whole of why a
+    /// crossing of the north is not a procession of cats: a lynx is about for ten seconds of every
+    /// forty, and `keep_the_critters` stands nobody up in the rest because a slot past its life is
+    /// a slot inside its own fade window, which it already refuses.
+    pub(super) window: f32,
     /// What share of a life is spent foraging before the climb begins.
     ///
     /// The rest is the climb, and the last [`CRITTER_FADE_SECONDS`] of *that* are the fade —
@@ -327,6 +414,12 @@ pub(super) struct CritterSpecies {
     /// A squirrel climbs. A mouse will not: it goes into a hole, which from the outside is
     /// this row with `climbs: false` and nothing else changed.
     pub(super) climbs: bool,
+    /// Whether this row arrives out of the ground and leaves into it, rather than fading where it
+    /// stands. See [`burrow_sink`].
+    ///
+    /// A lynx does: "the creature reaches something and is gone", and in snow country that
+    /// something is the drift under it.
+    pub(super) burrows: bool,
     /// How often the tail completes one flick, in hertz.
     pub(super) flick_hz: f32,
     /// The row's own body and tail colours, and the first pair [`CritterSpecies::coat_at`]
@@ -338,6 +431,8 @@ pub(super) struct CritterSpecies {
     pub(super) coats: &'static [(Color, Color)],
     /// How it moves.
     pub(super) gait: Gait,
+    /// The shape of its body.
+    pub(super) frame: Frame,
     /// The shape of its tail, and the pose that shape rests in.
     pub(super) tail_shape: Tail,
     /// The pair of eyes it wears, if any — the presentation `player/eyeshine.rs` shares with
@@ -418,7 +513,7 @@ impl CritterSpecies {
 /// Zero point five five blocks is also a little over life size: a red squirrel's body is about
 /// 0.22 m. The flock's eagle is stretched much further than that for the same reason, and it
 /// is named here rather than left to be re-derived.
-pub(super) const CRITTERS: [CritterSpecies; 2] = [
+pub(super) const CRITTERS: [CritterSpecies; 3] = [
     // The squirrel: wooded green country by day, on the same gate the macaw uses. It forages
     // across the ground, climbs a trunk, and is gone into the leaves.
     CritterSpecies {
@@ -428,8 +523,10 @@ pub(super) const CRITTERS: [CritterSpecies; 2] = [
         count: 1..=3,
         size: 0.55,
         life: 20.0,
+        window: 20.0,
         forage_share: 0.72,
         climbs: true,
+        burrows: false,
         // A flick or two a second: the idle twitch of a tail held over the back, not a wag.
         flick_hz: 1.4,
         body: Color::srgb(0.55, 0.29, 0.13),
@@ -440,6 +537,7 @@ pub(super) const CRITTERS: [CritterSpecies; 2] = [
             (Color::srgb(0.42, 0.19, 0.09), Color::srgb(0.50, 0.26, 0.12)),
         ],
         gait: Gait::Scurry,
+        frame: Frame::Crouch,
         tail_shape: Tail::Plume,
         eyeshine: None,
         // The longest dash is the waypoint box's diagonal, 4.24 blocks, over
@@ -468,19 +566,64 @@ pub(super) const CRITTERS: [CritterSpecies; 2] = [
         count: 1..=2,
         size: 0.3,
         life: 6.0,
+        window: 6.0,
         forage_share: 0.78,
         climbs: false,
+        burrows: false,
         // A twitch of a thin tail rather than a flick of a plume.
         flick_hz: 2.2,
         body: Color::srgb(0.30, 0.25, 0.19),
         tail: Color::srgb(0.38, 0.31, 0.26),
         coats: &[(Color::srgb(0.24, 0.21, 0.18), Color::srgb(0.33, 0.28, 0.25))],
         gait: Gait::Dash,
+        frame: Frame::Crouch,
         tail_shape: Tail::Cord,
         eyeshine: Some(MOUSE_EYES),
         // 4.7 at a dash's peak, derived at `DASH_STRIDE`.
         #[cfg(test)]
         max_speed: 5.0,
+    },
+    // The lynx (#1194): snow country by day, trees or none, and alone. It breaks cover out of
+    // the drift, crouches, bolts once, and goes back into the snow where the bolt ended.
+    //
+    // **Sized by angle, as the others are, and at the distance it is actually met.** The ring a
+    // lynx lies on is 27 to 29 blocks out, so it is seen from about 20 to 45: 0.9 blocks nose to
+    // rump is 2.6° at twenty and 1.1° at forty-five — a shape, then a mark, which is a cat seen
+    // across open snow. A real lynx's body is about a metre.
+    //
+    // **White that is not the snow's white, and black where a lynx is black.** The coat is a warm
+    // off-white, 17% darker in luminance than `palette::SNOW` and yellower, so a lit lynx is a
+    // shape on a drift rather than a hole in it; the ear tufts and the tip of the tail are painted
+    // black into the meshes themselves, which is what makes it read at forty blocks.
+    // `a_lynx_is_white_with_black_markings_and_stands_out_against_the_snow` measures both.
+    //
+    // The life is ten seconds of a forty-second window: `forage_share` ends the bolt at 8.0 s,
+    // three quarters of a second before the fade begins at 8.75, so a lynx has stopped and *then*
+    // goes into the snow.
+    CritterSpecies {
+        ground: GroundLook::Snow,
+        requires_wooded: false,
+        abroad: Period::Day,
+        count: 1..=1,
+        size: 0.9,
+        life: 10.0,
+        window: 40.0,
+        forage_share: 0.8,
+        climbs: false,
+        burrows: true,
+        // A stub twitching, rather than a tail anybody would call a flick.
+        flick_hz: 0.7,
+        body: Color::srgb(0.90, 0.88, 0.84),
+        tail: Color::srgb(0.90, 0.88, 0.84),
+        // A greyer winter coat.
+        coats: &[(Color::srgb(0.84, 0.82, 0.79), Color::srgb(0.84, 0.82, 0.79))],
+        gait: Gait::Ambush,
+        frame: Frame::Stride,
+        tail_shape: Tail::Bob,
+        eyeshine: None,
+        // 15 at the longest bolt's peak, derived at `AMBUSH_BOLT_NEAR`.
+        #[cfg(test)]
+        max_speed: 15.5,
     },
 ];
 
@@ -557,13 +700,59 @@ fn home_of(seed: u64, anchor: Vec3) -> Vec3 {
 /// The stagger is the slot's share of a life, so the critters in one cell do not all vanish
 /// and re-appear on the same frame — which is what a shared window would do, and which reads
 /// as a scene being swapped rather than as animals coming and going.
+///
+/// **The window is [`CritterSpecies::window`], not the life**, and for a squirrel the two are the
+/// same number. For a lynx the age runs on past the life to the end of the window, and every
+/// consumer already treats an age past the life as "gone": the spawn guard refuses it, and the
+/// fade has already taken whoever was there.
 fn generation_of(species: &CritterSpecies, slot: usize, elapsed: f32) -> (i64, f32) {
-    let stagger = species.life * slot as f32 / CRITTER_COUNT_MAX as f32;
+    let stagger = species.window * slot as f32 / CRITTER_COUNT_MAX as f32;
     let since = elapsed + stagger;
     // `as i64` saturates rather than wrapping to nonsense on a clock nobody will run that
     // long anyway, which is the reasoning `birds::offset` gives for the same cast.
-    let generation = (since / species.life).floor();
-    (generation as i64, since - generation * species.life)
+    let generation = (since / species.window).floor();
+    (generation as i64, since - generation * species.window)
+}
+
+/// The point a critter of this row lives around: [`home_of`]'s box for a forager, and the ring
+/// [`AMBUSH_RING_NEAR`] argues for an ambusher.
+fn home_for(species: &CritterSpecies, seed: u64, anchor: Vec3) -> Vec3 {
+    match species.gait {
+        Gait::Scurry | Gait::Dash => home_of(seed, anchor),
+        Gait::Ambush => ambush_line(seed, anchor).0,
+    }
+}
+
+/// Where an ambushing critter lies, and the line it bolts along: a point on the ring around the
+/// anchor, and a direction out from the anchor turned by at most [`AMBUSH_ACROSS`].
+///
+/// Both horizontal. The `y` of the home is the anchor's, a placeholder the ground replaces.
+fn ambush_line(seed: u64, anchor: Vec3) -> (Vec3, Vec3) {
+    let angle = unit(seed, SALT_HOME_Z) * TAU;
+    let out = Vec3::new(angle.cos(), 0.0, angle.sin());
+    let radius = lerp(AMBUSH_RING_NEAR, AMBUSH_RING_FAR, unit(seed, SALT_HOME_X));
+    let across = Vec3::new(-out.z, 0.0, out.x);
+    let ahead = (out + across * centred(seed, SALT_BEARING) * AMBUSH_ACROSS).normalize();
+    (anchor + out * radius, ahead)
+}
+
+/// How far along its line an ambushing critter is, `age` seconds in — the three pieces of an
+/// ambush, as one non-decreasing number.
+///
+/// - **The crouch**, from the start of the life to [`AMBUSH_BOLT_SECONDS`] before the forage
+///   ends: [`AMBUSH_CREEP`], barely moving.
+/// - **The bolt**, over the last [`AMBUSH_BOLT_SECONDS`] of the forage: a smoothstep over this
+///   critter's own bolt length, so it starts and stops between frames rather than on one.
+/// - **The hold**, from the end of the forage on: `place` clamps the age there, so the lynx
+///   stops where the bolt put it and goes into the snow from that spot.
+///
+/// Non-decreasing in `age`, which is the half of the no-approach argument that is not geometry:
+/// a lynx never doubles back along its own line.
+fn ambush_travel(species: &CritterSpecies, seed: u64, age: f32) -> f32 {
+    let bolt_starts = (species.forage_seconds() - AMBUSH_BOLT_SECONDS).max(0.0);
+    let creep = AMBUSH_CREEP * age.clamp(0.0, bolt_starts);
+    let bolt = lerp(AMBUSH_BOLT_NEAR, AMBUSH_BOLT_FAR, unit(seed, SALT_LEG));
+    creep + bolt * smooth((age - bolt_starts) / AMBUSH_BOLT_SECONDS)
 }
 
 /// Where one critter is on the horizontal plane, `age` seconds into its life.
@@ -630,6 +819,11 @@ fn forage_at(species: &CritterSpecies, seed: u64, age: f32, anchor: Vec3) -> Vec
         }
         // No browse under a run: the legs themselves carry it along its bearing.
         Gait::Dash => home + legs(seed, age, &DASH_LEG_SECONDS, DASH_SHARE, run_waypoint),
+        // One straight line, out of the eye's cell, travelled in the ambush's three pieces.
+        Gait::Ambush => {
+            let (home, ahead) = ambush_line(seed, anchor);
+            home + ahead * ambush_travel(species, seed, age)
+        }
     }
 }
 
@@ -700,6 +894,35 @@ fn climb_rise(species: &CritterSpecies, age: f32, trunk: Option<Vec3>) -> f32 {
         return 0.0;
     }
     CLIMB_RISE * smooth((age - starts) / (ends - starts))
+}
+
+/// How deep a burrowing critter goes under its surface once it has faded out, in the model's own
+/// units: one body length, which is deeper than any face of a lynx reaches up.
+const BURROW_DEPTH: f32 = 1.0;
+
+/// How far below its surface a burrowing critter is drawn, in blocks, at a fade.
+///
+/// **The disappearance into cover, for a creature whose cover is the ground.** A squirrel is gone
+/// into the leaves because [`climb_rise`] has it at the top of its trunk when the fade begins; a
+/// lynx has no trunk, and a lynx that merely went transparent on open snow would be the fade in
+/// open air the issue rules out. So it sinks: the depth follows the fade, all the way under at
+/// zero, and none at one — which also makes the *arrival* a lynx rising out of the drift, the
+/// "breaks cover" half of the same sentence.
+///
+/// **Tied to the fade rather than to the age, deliberately.** A fade is the one thing every exit
+/// shares — a life running out, a look changing, an anchor left behind — and all of them should
+/// go into the snow. A depth read off the age would sink a lynx only at the end of its life and
+/// leave the other three dissolving on the surface.
+///
+/// [`BURROW_DEPTH`] is deeper than the model is tall by enough that the last fifth of the fade is
+/// spent wholly under the surface, still drawn and hidden by the snow over it:
+/// `a_lynx_goes_into_the_snow_rather_than_fading_in_the_air` measures that on the faces of the
+/// body and the tail rather than on the origin, which is under the surface from the first frame.
+fn burrow_sink(species: &CritterSpecies, fade: f32) -> f32 {
+    if !species.burrows {
+        return 0.0;
+    }
+    BURROW_DEPTH * species.size * (1.0 - fade.clamp(0.0, 1.0))
 }
 
 /// A smoothstep: zero slope at both ends, so nothing starts or stops between two frames.
@@ -1012,15 +1235,22 @@ fn critter_seed(cell: u64, slot: usize, generation: i64, salt: u64) -> u64 {
 /// The bias is the anchor's own displacement. After [`FAR_SIDE_TRIES`] it accepts the first
 /// seed rather than looping: a critter that appears behind the player's shoulder is worth less
 /// than a frame spent hunting for one. `birds::seed_on_the_far_side`, with a home that has no
-/// altitude in it.
-fn seed_on_the_far_side(cell: u64, slot: usize, generation: i64, anchor: Vec3, bias: Vec3) -> u64 {
+/// altitude in it — and the row's own home, since a lynx's ring is not a squirrel's box.
+fn seed_on_the_far_side(
+    species: &CritterSpecies,
+    cell: u64,
+    slot: usize,
+    generation: i64,
+    anchor: Vec3,
+    bias: Vec3,
+) -> u64 {
     let first = critter_seed(cell, slot, generation, 0);
     let Some(direction) = Vec3::new(bias.x, 0.0, bias.z).try_normalize() else {
         return first;
     };
     for salt in 0..FAR_SIDE_TRIES {
         let seed = critter_seed(cell, slot, generation, salt);
-        let home = home_of(seed, anchor) - anchor;
+        let home = home_for(species, seed, anchor) - anchor;
         if Vec3::new(home.x, 0.0, home.z).dot(direction) > 0.0 {
             return seed;
         }
@@ -1054,7 +1284,9 @@ fn group_size(species: &CritterSpecies, cell: u64) -> usize {
 /// startup.
 #[derive(Resource, Debug)]
 pub(super) struct CritterVisuals {
-    body: Handle<Mesh>,
+    /// One body mesh per row of [`CRITTERS`], in that order: a lynx stands on legs that a
+    /// squirrel's crouch has no part of.
+    bodies: [Handle<Mesh>; CRITTERS.len()],
     /// One tail mesh per row of [`CRITTERS`], in that order: a squirrel's plume and a mouse's
     /// cord are different shapes on the same body.
     tails: [Handle<Mesh>; CRITTERS.len()],
@@ -1130,7 +1362,7 @@ pub(super) fn create_visuals(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(CritterVisuals {
-        body: meshes.add(body_mesh()),
+        bodies: std::array::from_fn(|row| meshes.add(CRITTERS[row].frame.mesh())),
         // Each authored from its root outwards, so rotating the child about its own origin is
         // the flick and nothing has to offset it.
         tails: std::array::from_fn(|row| meshes.add(tail_mesh(CRITTERS[row].tail_shape))),
@@ -1162,8 +1394,26 @@ struct MeshBuild {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    /// One linear colour per vertex, multiplied into the coat by the material: white everywhere
+    /// except the faces written while [`MeshBuild::marking`] was set.
+    colours: Vec<[f32; 4]>,
     indices: Vec<u32>,
+    /// Whether the faces being written now are the row's markings.
+    ///
+    /// **Painted into the mesh rather than drawn as another entity**, which is the lynx's black
+    /// ear tufts and tail tip (#1194). A third material would be a third draw per critter, and
+    /// `a_critter_is_two_draws_however_detailed_it_is` is what says a richer model must not
+    /// become a richer scene; a vertex colour costs no draw at all. `player/wards.rs` colours its
+    /// walls the same way. A row with no markings is all white, which multiplies its coat by one.
+    marking: bool,
 }
+
+/// The vertex colour a face written as a marking carries: near black, so a marking is black
+/// whatever coat it is multiplied into.
+const MARKING: [f32; 4] = [0.02, 0.02, 0.022, 1.0];
+
+/// The vertex colour every other face carries, which leaves the coat exactly as the row wrote it.
+const UNMARKED: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 impl MeshBuild {
     /// One flat-shaded quad, wound around its perimeter.
@@ -1196,10 +1446,12 @@ impl MeshBuild {
     /// Appends vertices sharing one normal, and answers the index the first of them landed at.
     fn push(&mut self, corners: impl Iterator<Item = (Vec3, [f32; 2])>, normal: Vec3) -> u32 {
         let first = self.positions.len() as u32;
+        let colour = if self.marking { MARKING } else { UNMARKED };
         for (corner, uv) in corners {
             self.positions.push(corner.to_array());
             self.normals.push(normal.to_array());
             self.uvs.push(uv);
+            self.colours.push(colour);
         }
         first
     }
@@ -1213,7 +1465,53 @@ impl MeshBuild {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colours)
         .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+/// One closed axis-aligned box: six flat quads, each wound outward.
+///
+/// Each face is `centre + normal * half` with two in-plane axes whose cross product *is* that
+/// normal, so the corners `-u-v, +u-v, +u+v, -u+v` run counter-clockwise seen from outside —
+/// the winding [`MeshBuild::quad`] takes its normal from. A pair written the other way round is
+/// a face lit from inside, which `every_face_of_a_critter_is_wound_outward` fails on.
+fn cuboid(build: &mut MeshBuild, centre: Vec3, half: Vec3) {
+    for (normal, u, v) in [
+        (Vec3::X, Vec3::Y, Vec3::Z),
+        (Vec3::NEG_X, Vec3::Z, Vec3::Y),
+        (Vec3::Y, Vec3::Z, Vec3::X),
+        (Vec3::NEG_Y, Vec3::X, Vec3::Z),
+        (Vec3::Z, Vec3::X, Vec3::Y),
+        (Vec3::NEG_Z, Vec3::Y, Vec3::X),
+    ] {
+        let at = centre + normal * half;
+        let (u, v) = (u * half, v * half);
+        build.quad(
+            [at - u - v, at + u - v, at + u + v, at - u + v],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        );
+    }
+}
+
+/// One closed four-sided pyramid standing on a square base: an ear.
+///
+/// The base faces down and each side is one triangle whose normal is taken from its own winding,
+/// walked counter-clockwise seen from above so every side faces out.
+fn pyramid(build: &mut MeshBuild, base: Vec3, half: f32, apex: Vec3) {
+    let corners = [
+        base + Vec3::new(-half, 0.0, -half),
+        base + Vec3::new(half, 0.0, -half),
+        base + Vec3::new(half, 0.0, half),
+        base + Vec3::new(-half, 0.0, half),
+    ];
+    build.quad(corners, [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+    for (from, to) in [(0, 3), (3, 2), (2, 1), (1, 0)] {
+        let side = [corners[from], corners[to], apex];
+        let normal = (side[1] - side[0])
+            .cross(side[2] - side[0])
+            .normalize_or_zero();
+        build.fan(&side, normal);
     }
 }
 
@@ -1457,16 +1755,130 @@ const _: () = assert!(
     "the flick is a sweep rather than a twitch"
 );
 
+/// The shape of a critter's body.
+///
+/// Two, because a squirrel's crouch on a lynx would be a very large squirrel. Both are authored
+/// at a body length of exactly one, nose to rump, standing on `y = 0` with `-Z` forward, so
+/// [`CritterSpecies::size`] means the same thing on either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Frame {
+    /// Low forequarters, high haunches and a belly on the ground — see [`body_sections`].
+    Crouch,
+    /// A cat on legs: a level body carried clear of the ground on four of them, the head up, and
+    /// ears tufted black — see [`stride_mesh`].
+    Stride,
+}
+
+impl Frame {
+    /// The body of this shape, as one mesh.
+    fn mesh(self) -> Mesh {
+        match self {
+            Self::Crouch => body_mesh(),
+            Self::Stride => stride_mesh(),
+        }
+    }
+
+    /// Where the tail is rooted on this body, in the model's own units.
+    fn tail_root(self) -> Vec3 {
+        match self {
+            Self::Crouch => TAIL_ROOT,
+            Self::Stride => STRIDE_TAIL_ROOT,
+        }
+    }
+}
+
+/// The sections a lynx's body is lofted through, from the tip of the nose to the rump.
+///
+/// **Level, and carried high**, which is the whole difference from [`body_sections`]: the
+/// underside is about a third of a body length off the ground for the whole length of the body,
+/// and the four legs in [`STRIDE_LEGS`] are what reach down to it. The head is lifted above the
+/// shoulders rather than held low, because a lynx watching is a head up.
+fn stride_sections() -> [BodySection; 9] {
+    [
+        (-0.500, 0.020, 0.018, 0.520),
+        (-0.455, 0.050, 0.045, 0.525),
+        // The head, and the waist of a neck behind it.
+        (-0.380, 0.085, 0.080, 0.545),
+        (-0.290, 0.060, 0.065, 0.515),
+        // The shoulders, the waist and the haunches: level, and all of them clear of the ground.
+        (-0.190, 0.090, 0.105, 0.455),
+        (-0.020, 0.095, 0.100, 0.440),
+        (0.180, 0.100, 0.110, 0.450),
+        (0.380, 0.080, 0.095, 0.460),
+        // The rump, where the stub of a tail is rooted.
+        (0.500, 0.040, 0.050, 0.470),
+    ]
+    .map(|(z, half_width, half_height, lift)| BodySection {
+        z,
+        half_width,
+        half_height,
+        lift,
+    })
+}
+
+/// A lynx's four legs, as `(x, z, half width, half depth)`: each a box from the ground up into
+/// the body, so the model stands on its own origin at its feet.
+const STRIDE_LEGS: [(f32, f32, f32, f32); 4] = [
+    (-0.055, -0.170, 0.026, 0.030),
+    (0.055, -0.170, 0.026, 0.030),
+    (-0.060, 0.240, 0.030, 0.035),
+    (0.060, 0.240, 0.030, 0.035),
+];
+
+/// How high a lynx's legs reach, into the underside of the body.
+const STRIDE_LEG_TOP: f32 = 0.38;
+
+/// A lynx's two ears, as `(base centre, base half width, apex)` for the right one; the left is
+/// the same mirrored. Set into the top of the head and rising a hand above it, which is where the
+/// black tuft is.
+const STRIDE_EAR: (Vec3, f32, Vec3) = (
+    Vec3::new(0.048, 0.600, -0.370),
+    0.022,
+    Vec3::new(0.055, 0.730, -0.360),
+);
+
+/// Where a lynx's tail is rooted: the middle of its rump.
+const STRIDE_TAIL_ROOT: Vec3 = Vec3::new(0.0, 0.470, 0.460);
+
+/// A lynx's body, as one mesh and therefore one draw: the lofted body, four legs, and two ears
+/// written as its markings.
+fn stride_mesh() -> Mesh {
+    let mut build = MeshBuild::default();
+    let rings: Vec<Vec<Vec3>> = stride_sections()
+        .iter()
+        .map(|section| section.perimeter())
+        .collect();
+    loft(&mut build, &rings, Vec3::Z);
+    for (x, z, half_width, half_depth) in STRIDE_LEGS {
+        cuboid(
+            &mut build,
+            Vec3::new(x, STRIDE_LEG_TOP / 2.0, z),
+            Vec3::new(half_width, STRIDE_LEG_TOP / 2.0, half_depth),
+        );
+    }
+    // The ears are the black of a lynx's head: tufted, and dark behind.
+    build.marking = true;
+    let (base, half, apex) = STRIDE_EAR;
+    for side in [1.0, -1.0] {
+        let mirror = Vec3::new(side, 1.0, 1.0);
+        pyramid(&mut build, base * mirror, half, apex * mirror);
+    }
+    build.finish()
+}
+
 /// The shape of a critter's tail, and the pose it rests in.
 ///
-/// Two, because the two rows that exist have two: a squirrel's plume is the half of its
-/// silhouette that says squirrel, and the same plume on a mouse would say squirrel too.
+/// Three, because the three rows that exist have three: a squirrel's plume is the half of its
+/// silhouette that says squirrel, the same plume on a mouse would say squirrel too, and a lynx's
+/// is barely there at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Tail {
     /// Bushy, and held up over the back in an arch — see [`tail_sections`].
     Plume,
     /// Thin, and trailed behind a little below level — see [`cord_sections`].
     Cord,
+    /// A short stub with a black tip, cocked a little up — see [`bob_sections`].
+    Bob,
 }
 
 impl Tail {
@@ -1475,6 +1887,15 @@ impl Tail {
         match self {
             Self::Plume => tail_sections(),
             Self::Cord => cord_sections(),
+            Self::Bob => bob_sections(),
+        }
+    }
+
+    /// The section from which the rest of this tail is its marking, if any: the lynx's black tip.
+    fn marked_from(self) -> Option<usize> {
+        match self {
+            Self::Plume | Self::Cord => None,
+            Self::Bob => Some(3),
         }
     }
 
@@ -1483,6 +1904,7 @@ impl Tail {
         let (rest, swing) = match self {
             Self::Plume => (TAIL_REST_RADIANS, TAIL_FLICK_RADIANS),
             Self::Cord => (CORD_REST_RADIANS, CORD_SWING_RADIANS),
+            Self::Bob => (BOB_REST_RADIANS, BOB_SWING_RADIANS),
         };
         CritterTail {
             flick_hz,
@@ -1525,6 +1947,35 @@ const _: () = assert!(
     "a mouse's tail droops behind it and only twitches"
 );
 
+/// The sections a lynx's tail is lofted through: a fifth of a body length, thick for its length,
+/// and tapering at the end — the last span and its cap are the black tip ([`Tail::marked_from`]),
+/// which is as short as a lynx's is.
+fn bob_sections() -> [BodySection; 5] {
+    [
+        (0.00, 0.034),
+        (0.07, 0.038),
+        (0.14, 0.032),
+        (0.18, 0.024),
+        (0.21, 0.010),
+    ]
+    .map(|(z, half)| BodySection {
+        z,
+        half_width: half,
+        half_height: half,
+        lift: 0.0,
+    })
+}
+
+/// A lynx's stub is cocked a little up behind it and barely twitches: a negative turn about `X`
+/// lifts it, as the plume's does, by under half of the plume's arch.
+const BOB_REST_RADIANS: f32 = -0.45;
+const BOB_SWING_RADIANS: f32 = 0.08;
+
+const _: () = assert!(
+    BOB_REST_RADIANS < 0.0 && BOB_SWING_RADIANS < -BOB_REST_RADIANS / 4.0,
+    "a lynx's stub is cocked up and only twitches"
+);
+
 /// The body, as one mesh and therefore one draw.
 fn body_mesh() -> Mesh {
     let mut build = MeshBuild::default();
@@ -1537,6 +1988,10 @@ fn body_mesh() -> Mesh {
 }
 
 /// One shape of tail, lofted from its root out to its tip.
+///
+/// A tail with a marked tip is two closed shells meeting at one ring rather than one shell, so
+/// the tip's faces carry the marking and the rest do not — a quad spanning both would blend the
+/// two colours down its length.
 fn tail_mesh(shape: Tail) -> Mesh {
     let mut build = MeshBuild::default();
     let rings: Vec<Vec<Vec3>> = shape
@@ -1544,7 +1999,14 @@ fn tail_mesh(shape: Tail) -> Mesh {
         .iter()
         .map(|section| section.perimeter())
         .collect();
-    loft(&mut build, &rings, Vec3::Z);
+    match shape.marked_from() {
+        None => loft(&mut build, &rings, Vec3::Z),
+        Some(from) => {
+            loft(&mut build, &rings[..=from], Vec3::Z);
+            build.marking = true;
+            loft(&mut build, &rings[from..], Vec3::Z);
+        }
+    }
     build.finish()
 }
 
@@ -1673,12 +2135,20 @@ pub(super) fn keep_the_critters(
         let position = place(row, critter.seed, age, critter.anchor, critter.trunk);
         let from = position - anchor;
         let outside = Vec3::new(from.x, 0.0, from.z).abs().max_element() > CRITTER_RANGE;
-        if wanted != Some(critter.species) || outside || generation != critter.generation {
+        // An ambusher is never kept as a stray: its promise not to bolt toward the player is
+        // made to the cell its anchor is the centre of, and the eye has just left that cell. See
+        // `Gait::Ambush` for what this does and does not buy.
+        let left_behind = row.gait == Gait::Ambush && critter.anchor != anchor;
+        if wanted != Some(critter.species)
+            || outside
+            || left_behind
+            || generation != critter.generation
+        {
             critter.wanted = 0.0;
             // Only a critter the *anchor* left behind says which way the player went; one
             // retired because the ground changed under them, or because its life ran out,
             // says nothing about direction.
-            if outside {
+            if outside || left_behind {
                 bias += anchor - critter.anchor;
             }
             continue;
@@ -1748,7 +2218,7 @@ pub(super) fn keep_the_critters(
         if age + CRITTER_FADE_SECONDS >= species.life {
             continue;
         }
-        let seed = seed_on_the_far_side(cell_seed, slot, generation, anchor, bias);
+        let seed = seed_on_the_far_side(species, cell_seed, slot, generation, anchor, bias);
         // The ground under where this critter's forage begins, which is what both the trunk
         // search and the first frame's height are measured from. No ground, no critter: the
         // alternative is one standing in the air until the probe succeeds.
@@ -1811,10 +2281,16 @@ pub(super) fn keep_the_critters(
                     tail_material: tail_material.clone(),
                     eye_material: eye_material.clone(),
                 },
-                Mesh3d(visuals.body.clone()),
+                Mesh3d(visuals.bodies[index].clone()),
                 MeshMaterial3d(body_material),
-                Transform::from_translation(Vec3::new(at.x, surface, at.z))
-                    .with_scale(Vec3::splat(species.size)),
+                // Already as deep as its fade says: a lynx's first drawn frame is under the snow
+                // rather than on it for one frame and under it the next.
+                Transform::from_translation(Vec3::new(
+                    at.x,
+                    surface - burrow_sink(species, 0.0),
+                    at.z,
+                ))
+                .with_scale(Vec3::splat(species.size)),
                 Visibility::Visible,
             ))
             .id();
@@ -1823,7 +2299,7 @@ pub(super) fn keep_the_critters(
                 species.tail_shape.component(species.flick_hz),
                 Mesh3d(visuals.tails[index].clone()),
                 MeshMaterial3d(tail_material),
-                Transform::from_translation(TAIL_ROOT),
+                Transform::from_translation(species.frame.tail_root()),
             ));
             // A third entity, and only for a row that wears eyes. Authored in the model's own
             // units, so the parent's scale sizes it, and nothing animates it: the glow is
@@ -1954,7 +2430,10 @@ pub(super) fn run_the_critters(
             critter.stand = stand;
         }
         let rise = climb_rise(species, age, critter.trunk);
-        transform.translation = Vec3::new(position.x, stand + rise, position.z);
+        // The ground, the climb, and — for a row that burrows — how far into the ground this
+        // frame's fade has taken it. Zero for every row that does not.
+        let sink = burrow_sink(species, critter.fade);
+        transform.translation = Vec3::new(position.x, stand + rise - sink, position.z);
         // Which way it faces is the direction it is going, sampled from the same pure
         // function rather than differenced against last frame — so a critter nothing drew for
         // a hundred frames comes back facing correctly on the first one. Horizontal only: a
@@ -1994,7 +2473,7 @@ mod tests {
 
     use super::*;
     use crate::world::{BlockId, VoxelChunk};
-    use bevy::mesh::MeshVertexAttributeId;
+    use bevy::mesh::{MeshVertexAttributeId, VertexAttributeValues};
 
     const DT: f32 = 1.0 / 60.0;
     /// The fastest a critter may be drawn climbing, in blocks per second.
@@ -2015,6 +2494,8 @@ mod tests {
     const SETTLED: usize = 6;
     /// The mouse's row, appended after the squirrel's and never moved.
     const MOUSE: usize = 1;
+    /// The lynx's row, appended after the mouse's (#1194).
+    const LYNX: usize = 2;
 
     /// How many frames one whole life is, at sixty a second.
     fn life_frames(species: &CritterSpecies) -> usize {
@@ -2143,7 +2624,7 @@ mod tests {
             }),
             Some(0)
         );
-        // The sand is the mouse's, trees or none (#1192), and the snow has no critter at all.
+        // The sand is the mouse's, trees or none (#1192), and the snow the lynx's (#1194).
         for wooded in [false, true] {
             let sand = Ambience {
                 ground: GroundLook::Sand,
@@ -2158,15 +2639,16 @@ mod tests {
                 ground: GroundLook::Snow,
                 wooded,
             };
-            assert_eq!(
-                species_for(&snow),
-                None,
-                "snow/{wooded} got a critter it has no row for"
-            );
+            assert_eq!(species_for(&snow), Some(LYNX), "snow/{wooded} has no lynx");
         }
-        // And a mouse is abroad after dark, where the squirrel is abroad by day.
+        // And a mouse is abroad after dark, where the squirrel and the lynx are abroad by day.
+        // `keep_the_critters` filters the row by this, which is the whole of "by day, and at no
+        // other hour" — `mice_come_out_on_the_sand_at_night...` and
+        // `a_lynx_breaks_cover_on_the_snow_by_day_and_goes_back_into_it` drive it end to end.
         assert_eq!(CRITTERS[MOUSE].abroad, Period::Night);
         assert_eq!(CRITTERS[0].abroad, Period::Day);
+        assert_eq!(CRITTERS[LYNX].abroad, Period::Day);
+        assert!(!Period::Day.abroad(Some(1.0)) && Period::Day.abroad(Some(0.0)));
         assert!(
             CRITTERS.iter().all(|row| row.ground != GroundLook::Unknown),
             "no row may live on an answer that means there is no answer"
@@ -2300,10 +2782,10 @@ mod tests {
             for frame in 1..=life_frames(species) * 3 {
                 let now = generation_of(species, slot, frame as f32 * DT);
                 assert!(
-                    (0.0..species.life).contains(&now.1),
-                    "slot {slot} aged {} of a {} life",
+                    (0.0..species.window).contains(&now.1),
+                    "slot {slot} aged {} of a {} window",
                     now.1,
-                    species.life
+                    species.window
                 );
                 if now.0 == previous.0 {
                     assert!(now.1 > previous.1, "slot {slot} aged backwards");
@@ -2909,7 +3391,11 @@ mod tests {
         // player's shoulder, never in the middle of the view they are walking into.
         let anchor = Vec3::new(64.0, 96.0, 64.0);
         let cell = cell_seed(IVec3::new(2, 3, 2));
-        for generation in [0i64, 7, -3] {
+        // Every row, because the home is the row's: a lynx lies on a ring, not in a box.
+        for (species, generation) in CRITTERS
+            .iter()
+            .flat_map(|row| [(row, 0i64), (row, 7), (row, -3)])
+        {
             for (bias, axis) in [
                 (Vec3::X, Vec3::X),
                 (Vec3::NEG_X, Vec3::NEG_X),
@@ -2917,9 +3403,10 @@ mod tests {
                 (Vec3::new(-3.0, 7.0, -3.0), Vec3::new(-1.0, 0.0, -1.0)),
             ] {
                 for slot in 0..CRITTER_COUNT_MAX {
-                    let seed = seed_on_the_far_side(cell, slot, generation, anchor, bias * 32.0);
+                    let seed =
+                        seed_on_the_far_side(species, cell, slot, generation, anchor, bias * 32.0);
                     let far = |seed| {
-                        let home = home_of(seed, anchor) - anchor;
+                        let home = home_for(species, seed, anchor) - anchor;
                         Vec3::new(home.x, 0.0, home.z).dot(axis.normalize()) > 0.0
                     };
                     if far(seed) {
@@ -2943,7 +3430,7 @@ mod tests {
         }
         // No move, no bias, and the first seed is taken as it comes.
         assert_eq!(
-            seed_on_the_far_side(cell, 0, 0, anchor, Vec3::ZERO),
+            seed_on_the_far_side(&CRITTERS[0], cell, 0, 0, anchor, Vec3::ZERO),
             critter_seed(cell, 0, 0, 0)
         );
     }
@@ -3049,8 +3536,10 @@ mod tests {
         // the three a mesh built inside out fails.
         for (name, mesh) in [
             ("body", body_mesh()),
+            ("stride", stride_mesh()),
             ("plume", tail_mesh(Tail::Plume)),
             ("cord", tail_mesh(Tail::Cord)),
+            ("bob", tail_mesh(Tail::Bob)),
         ] {
             let (positions, normals, triangles) = geometry(&mesh);
             let mut area = Vec3::ZERO;
@@ -3132,6 +3621,31 @@ mod tests {
             tallest(0.1..=0.35) > tallest(-0.2..=-0.03),
             "the haunches are not above the shoulders, so it is not crouched"
         );
+
+        // The lynx's frame is one long too, and it is a cat on legs rather than a crouch: at the
+        // waist, between the two pairs of legs, nothing of it comes within a quarter of a body
+        // length of the ground — where the squirrel's belly is on it.
+        let stride = points(&stride_mesh());
+        let nose = stride.iter().fold(f32::INFINITY, |near, at| near.min(at.z));
+        let rump = stride
+            .iter()
+            .fold(f32::NEG_INFINITY, |far, at| far.max(at.z));
+        assert_eq!(rump - nose, 1.0, "the lynx is not one long nose to rump");
+        let underside = |shell: &[Vec3]| {
+            shell
+                .iter()
+                .filter(|at| (-0.05..=0.05).contains(&at.z))
+                .fold(f32::INFINITY, |low, at| low.min(at.y))
+        };
+        assert!(
+            underside(&stride) > 0.25,
+            "a lynx's waist is {} off the ground",
+            underside(&stride)
+        );
+        assert!(
+            underside(&body) < 0.05,
+            "the control: a squirrel's belly is on the ground, so this measures clearance"
+        );
     }
 
     #[test]
@@ -3149,6 +3663,23 @@ mod tests {
         assert!(
             (0.2..0.45).contains(&highest),
             "a critter {highest} tall for a body one long is not a squirrel"
+        );
+        // And the lynx stands on its feet, the four legs' lowest faces, exactly.
+        let stride = points(&stride_mesh());
+        let lowest = stride.iter().fold(f32::INFINITY, |low, at| low.min(at.y));
+        assert_eq!(lowest, 0.0, "the lynx does not rest on y = 0");
+        // Four feet, each a square: sixteen distinct corners on the ground and nothing else of
+        // the body touching it.
+        let feet: HashSet<[u32; 3]> = stride
+            .iter()
+            .filter(|at| at.y == 0.0)
+            .map(|at| at.to_array().map(f32::to_bits))
+            .collect();
+        assert_eq!(
+            feet.len(),
+            4 * 4,
+            "the lynx stands on {} corners rather than four feet",
+            feet.len()
         );
     }
 
@@ -3222,19 +3753,20 @@ mod tests {
         // **origin**, and `place` reads no part of `CritterSpecies::size` — so it would pass
         // with a squirrel the size of a hill. This is the half the size moves: the tail tip,
         // not the origin.
-        let mut body = Vec3::ZERO;
-        for point in points(&body_mesh()) {
-            body = body.max(point.abs());
-        }
         let anchor = Vec3::new(-512.0, 64.0, 512.0);
         for species in &CRITTERS {
-            let mut reach = body;
+            // The row's own body.
+            let mut reach = Vec3::ZERO;
+            for point in points(&species.frame.mesh()) {
+                reach = reach.max(point.abs());
+            }
             // The row's own tail wherever the flick takes it, rooted where it is rooted.
             let tail = points(&tail_mesh(species.tail_shape));
+            let root = species.frame.tail_root();
             for step in 0..=32u32 {
                 let turn = tail_turn(&species.tail_shape.component(1.0), step as f32 / 4.0);
                 for point in &tail {
-                    reach = reach.max((TAIL_ROOT + turn * *point).abs());
+                    reach = reach.max((root + turn * *point).abs());
                 }
             }
             // And its eyes, which sit ahead of the head rather than on it.
@@ -3449,5 +3981,363 @@ mod tests {
         }
         assert_eq!(CRITTERS[MOUSE].tail_shape, Tail::Cord);
         assert_eq!(CRITTERS[0].tail_shape, Tail::Plume);
+    }
+
+    // -----------------------------------------------------------------------
+    // The lynx
+    // -----------------------------------------------------------------------
+
+    /// How fast a critter moves between two frames, in blocks a second, on the plane.
+    fn speed(species: &CritterSpecies, seed: u64, anchor: Vec3, frame: usize) -> f32 {
+        let was = place(species, seed, frame as f32 * DT, anchor, None);
+        let now = place(species, seed, (frame + 1) as f32 * DT, anchor, None);
+        Vec3::new(now.x - was.x, 0.0, now.z - was.z).length() / DT
+    }
+
+    #[test]
+    fn a_lynx_crouches_then_bolts_once_and_stops_before_it_goes() {
+        // #1194: "still or barely moving, then a sudden fast bolt, then gone". Measured rather
+        // than read off the pieces: every frame of a whole life is one of a crouch (at most the
+        // creep), a bolt (at least three blocks a second), or the smoothstep's shoulders between
+        // them — and the bolts are **one** run, short, after a crouch many times longer, with
+        // nothing moving from its end to the end of the life.
+        let lynx = &CRITTERS[LYNX];
+        assert_eq!(
+            (lynx.gait, lynx.climbs, lynx.burrows),
+            (Gait::Ambush, false, true)
+        );
+        assert!(
+            lynx.forage_seconds() + CRITTER_FADE_SECONDS < lynx.life,
+            "the bolt outlasts the moment the fade begins"
+        );
+        const FAST: f32 = 3.0;
+        let anchor = Vec3::new(-40.0, 70.0, 88.0);
+        for seed in 0..32u64 {
+            let seed = mix(seed, 0x1A7C);
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut crouched = 0usize;
+            let mut peak = 0.0f32;
+            for frame in 0..life_frames(lynx) {
+                let now = speed(lynx, seed, anchor, frame);
+                peak = peak.max(now);
+                if now >= FAST {
+                    match runs.last_mut() {
+                        Some((_, last)) if *last + 1 == frame => *last = frame,
+                        _ => runs.push((frame, frame)),
+                    }
+                } else if runs.is_empty() && now <= AMBUSH_CREEP * 1.1 {
+                    crouched += 1;
+                }
+            }
+            let [(first, last)] = runs[..] else {
+                panic!("seed {seed}: {} bursts of speed, not one bolt", runs.len());
+            };
+            let bolt = (last - first + 1) as f32 * DT;
+            assert!(
+                bolt <= AMBUSH_BOLT_SECONDS,
+                "seed {seed}: a {bolt}-second bolt"
+            );
+            assert!(
+                crouched as f32 * DT >= bolt * 5.0,
+                "seed {seed}: crouched {} s before a {bolt} s bolt",
+                crouched as f32 * DT
+            );
+            // Fast enough to startle, and bounded.
+            assert!(
+                (10.0..=lynx.max_speed).contains(&peak),
+                "seed {seed}: a bolt peaking at {peak} blocks a second"
+            );
+            // And from shortly after the bolt to the end of the life, not a hair of motion.
+            let stopped = lynx.forage_seconds();
+            let held = place(lynx, seed, stopped, anchor, None);
+            for frame in (stopped / DT).ceil() as usize..=life_frames(lynx) {
+                assert_eq!(
+                    place(lynx, seed, frame as f32 * DT, anchor, None),
+                    held,
+                    "seed {seed} moved after its bolt"
+                );
+            }
+            let bolted = place(lynx, seed, stopped - AMBUSH_BOLT_SECONDS, anchor, None);
+            let across = Vec3::new(held.x - bolted.x, 0.0, held.z - bolted.z).length();
+            assert!(
+                (AMBUSH_BOLT_NEAR - 1e-3..=AMBUSH_BOLT_FAR + 1e-3).contains(&across),
+                "seed {seed}: a {across}-block bolt"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lynx_never_bolts_toward_an_eye_anywhere_in_its_cell() {
+        // "It must never come toward the player." `place` is not told where the player is, so
+        // the claim is made to every point the eye can occupy while this anchor holds — a grid
+        // over the whole cell, its corners included — and measured every frame of the life.
+        let anchor = anchor_of(IVec3::new(3, 2, -5));
+        let half = CRITTER_ANCHOR_CELL / 2.0;
+        let eyes: Vec<Vec3> = (0..=8)
+            .flat_map(|i| (0..=8).map(move |j| (i, j)))
+            .map(|(i, j)| {
+                anchor
+                    + Vec3::new(
+                        -half + i as f32 * half / 4.0,
+                        0.0,
+                        -half + j as f32 * half / 4.0,
+                    )
+            })
+            .collect();
+        let lynx = &CRITTERS[LYNX];
+        let flat = |at: Vec3, eye: Vec3| Vec3::new(at.x - eye.x, 0.0, at.z - eye.z).length();
+        for seed in 0..24u64 {
+            let seed = mix(seed, 0xE7E5);
+            for eye in &eyes {
+                let mut before = flat(place(lynx, seed, 0.0, anchor, None), *eye);
+                for frame in 1..=life_frames(lynx) {
+                    let now = flat(place(lynx, seed, frame as f32 * DT, anchor, None), *eye);
+                    assert!(
+                        now >= before - 1e-4,
+                        "seed {seed} closed from {before} to {now} on an eye at {eye}"
+                    );
+                    before = now;
+                }
+            }
+        }
+        // **The control**: the same line run the other way — every home and every bolt as they
+        // are, travelled inward — does close on an eye in the cell, so the grid can catch one.
+        let seed = mix(0, 0xE7E5);
+        let (home, ahead) = ambush_line(seed, anchor);
+        let inward = |age: f32| home - ahead * ambush_travel(lynx, seed, age);
+        assert!(
+            eyes.iter()
+                .any(|eye| flat(inward(lynx.forage_seconds()), *eye) < flat(inward(0.0), *eye)),
+            "a lynx bolting inward closed on no eye, so the grid measures nothing"
+        );
+    }
+
+    #[test]
+    fn a_lynx_stands_on_broken_ground_all_the_way_through_its_bolt() {
+        // "A lynx stands on the surface over broken terrain, including mid-bolt." The fastest
+        // thing on the ground crossing a slope that steps a voxel every few blocks: every frame
+        // of the bolt within a voxel of the surface, drawn at its footing, and exactly on it for
+        // most of them — the claim `a_critter_stands_on_flat_ground_exactly_...` makes of the
+        // whole forage, taken where it is hardest.
+        let anchor = Vec3::new(16.0, 80.0, 16.0);
+        let slope = terrain(anchor, CRITTER_RANGE + 8.0, palette::SNOW, |at| {
+            at.y < 64 + (at.x + at.z).div_euclid(8)
+        });
+        let lynx = &CRITTERS[LYNX];
+        let bolt_from = ((lynx.forage_seconds() - AMBUSH_BOLT_SECONDS) / DT) as usize;
+        let (mut exact, mut total, mut climbed) = (0usize, 0usize, 0usize);
+        for seed in 0..24u64 {
+            let seed = mix(seed, 0xB017);
+            let path = walked(
+                Some((&slope, CHUNK)),
+                lynx,
+                seed,
+                anchor,
+                None,
+                (lynx.forage_seconds() / DT) as usize,
+            );
+            let mut surfaces = HashSet::new();
+            for (frame, step) in path.iter().enumerate().skip(bolt_from) {
+                let (drawn, stand, _) = step.expect("the slope is under every column");
+                let Ground::Surface(surface) = surface_under(&slope, drawn, anchor.y, CHUNK) else {
+                    panic!("seed {seed} frame {frame}: no ground under a bolting lynx");
+                };
+                assert_eq!(drawn.y, stand, "seed {seed} frame {frame} left its footing");
+                assert!(
+                    (stand - surface).abs() <= 1.0,
+                    "seed {seed} frame {frame}: stood at {stand} over {surface}"
+                );
+                exact += usize::from(stand == surface);
+                total += 1;
+                surfaces.insert(surface as i32);
+            }
+            climbed += usize::from(surfaces.len() > 1);
+        }
+        assert!(
+            climbed * 2 > 24,
+            "only {climbed} of 24 bolts crossed a step, so this measures flat ground"
+        );
+        assert!(
+            exact * 10 >= total * 7,
+            "only {exact} of {total} bolting frames were exactly on the ground"
+        );
+    }
+
+    /// The highest any face of a row's drawn model reaches above its origin, in blocks: the body
+    /// and the tail at every angle its flick takes it to, at the row's size.
+    fn drawn_top(species: &CritterSpecies) -> f32 {
+        let mut top = points(&species.frame.mesh())
+            .iter()
+            .fold(f32::NEG_INFINITY, |high, at| high.max(at.y));
+        let tail = species.tail_shape.component(species.flick_hz);
+        let shell = points(&tail_mesh(species.tail_shape));
+        for step in 0..=64u32 {
+            let turn = tail_turn(&tail, step as f32 / 16.0);
+            for point in &shell {
+                top = top.max((species.frame.tail_root() + turn * *point).y);
+            }
+        }
+        top * species.size
+    }
+
+    #[test]
+    fn a_lynx_goes_into_the_snow_rather_than_fading_in_the_air() {
+        // "A lynx disappears into the snow rather than fading in open air." Its drawn top — the
+        // highest *face*, ears and cocked tail included — against the surface it stands on, at
+        // every fade: whole and standing on the snow at one, and wholly under it for the last
+        // fifth of the fade while it is still being drawn.
+        let lynx = &CRITTERS[LYNX];
+        let top = drawn_top(lynx);
+        let above = |fade: f32| top - burrow_sink(lynx, fade);
+        assert_eq!(burrow_sink(lynx, 1.0), 0.0, "a whole lynx is sunk");
+        assert!(above(1.0) > 0.5, "a whole lynx is {} tall", above(1.0));
+        for step in 0..=20u32 {
+            let fade = step as f32 / 100.0;
+            assert!(
+                above(fade) <= 0.0,
+                "at a fade of {fade} the lynx's top is {} above the snow",
+                above(fade)
+            );
+        }
+        // Continuous in the fade, so a sink is a sinking rather than a drop: a whole fade is
+        // `CRITTER_FADE_SECONDS`, and a frame of it moves the lynx this far down at most.
+        let per_frame = burrow_sink(lynx, 0.0) * DT / CRITTER_FADE_SECONDS;
+        assert!(per_frame < 0.02, "a lynx drops {per_frame} blocks a frame");
+
+        // **The control: the origin is not the model.** At a fade of nine tenths the origin is
+        // already under the snow and most of the lynx is not, so a test that measured where the
+        // lynx *is* rather than what is drawn would have passed at the first frame of the fade.
+        assert!(
+            burrow_sink(lynx, 0.9) > 0.0 && above(0.9) > 0.0,
+            "the origin and the faces agree at 0.9, so this does not separate them"
+        );
+        // And the rows that do not burrow never leave their surface, at any fade.
+        for row in CRITTERS.iter().filter(|row| !row.burrows) {
+            for fade in [0.0, 0.3, 1.0] {
+                assert_eq!(burrow_sink(row, fade), 0.0, "{:?} sank", row.gait);
+            }
+        }
+    }
+
+    /// One mesh's vertex colours.
+    fn colours(mesh: &Mesh) -> Vec<[f32; 4]> {
+        let Some(VertexAttributeValues::Float32x4(values)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("a critter mesh carries float RGBA vertex colours")
+        };
+        values.clone()
+    }
+
+    /// Relative luminance of a linear colour.
+    fn luminance(red: f32, green: f32, blue: f32) -> f32 {
+        0.2126 * red + 0.7152 * green + 0.0722 * blue
+    }
+
+    #[test]
+    fn a_lynx_is_white_with_black_markings_and_stands_out_against_the_snow() {
+        // What is *drawn*: each vertex's colour multiplied into the coat, which is what the
+        // material does with a mesh that carries colours, measured against the snow's own
+        // colour from `palette` rather than a number written down here.
+        let lynx = &CRITTERS[LYNX];
+        let [red, green, blue, _] = palette::linear_rgba(palette::SNOW);
+        let snow = luminance(red, green, blue);
+        let meshes = [
+            ("body", lynx.frame.mesh(), points(&lynx.frame.mesh())),
+            (
+                "tail",
+                tail_mesh(lynx.tail_shape),
+                points(&tail_mesh(lynx.tail_shape)),
+            ),
+        ];
+        for (body, tail) in
+            std::iter::once((lynx.body, lynx.tail)).chain(lynx.coats.iter().copied())
+        {
+            for (name, mesh, positions) in &meshes {
+                let coat = (if *name == "body" { body } else { tail }).to_linear();
+                let (mut fur, mut marked) = (0usize, Vec::new());
+                for (at, vertex) in positions.iter().zip(colours(mesh)) {
+                    let drawn = luminance(
+                        coat.red * vertex[0],
+                        coat.green * vertex[1],
+                        coat.blue * vertex[2],
+                    );
+                    if vertex == UNMARKED {
+                        // White, and not the snow's white: bright, and a tenth darker than a
+                        // drift at least, so a lit lynx is a shape on the snow.
+                        assert!(
+                            drawn >= 0.6,
+                            "{name}: a coat of luminance {drawn} is not white"
+                        );
+                        assert!(
+                            (snow - drawn) / snow >= 0.1,
+                            "{name}: a coat of {drawn} against snow of {snow} disappears into it"
+                        );
+                        fur += 1;
+                    } else {
+                        assert_eq!(
+                            vertex, MARKING,
+                            "{name} carries a colour it has no name for"
+                        );
+                        // Black: nearly the whole of the snow's luminance away.
+                        assert!(
+                            (snow - drawn) / snow >= 0.95,
+                            "{name}: a marking of {drawn} does not read against the snow"
+                        );
+                        marked.push(*at);
+                    }
+                }
+                assert!(
+                    !marked.is_empty() && fur > marked.len(),
+                    "{name}: {fur} white and {} black vertices",
+                    marked.len()
+                );
+                // Where a lynx is black: the ears, above the head, and the tip of the tail.
+                for at in &marked {
+                    let placed = if *name == "body" {
+                        at.y >= STRIDE_EAR.0.y
+                    } else {
+                        at.z >= bob_sections()[Tail::Bob.marked_from().expect("a marked tip")].z
+                    };
+                    assert!(
+                        placed,
+                        "{name} is marked at {at}, where a lynx is not black"
+                    );
+                }
+            }
+        }
+        // Lit and not glowing, like every coat: the night and the fog take a lynx as they take
+        // a mob.
+        let coat = coat_material(lynx.body, 1.0);
+        assert!(!coat.unlit && coat.emissive == LinearRgba::BLACK);
+        // **The control**: the squirrel and the mouse are unmarked, so the vertex colours leave
+        // their coats exactly as they were before a mesh carried any.
+        for mesh in [body_mesh(), tail_mesh(Tail::Plume), tail_mesh(Tail::Cord)] {
+            assert!(colours(&mesh).iter().all(|vertex| *vertex == UNMARKED));
+        }
+    }
+
+    #[test]
+    fn a_lynx_is_where_its_seed_and_the_clock_say_across_whole_windows() {
+        // Position as a pure function of the seed and the session clock, across a whole window
+        // and three windows later: the generation moves on by three and nothing else does.
+        let lynx = &CRITTERS[LYNX];
+        let anchor = Vec3::new(8.0, 40.0, -120.0);
+        let seed = mix(5, 0x5EED);
+        for frame in (0..(lynx.window / DT) as usize).step_by(7) {
+            let elapsed = 3.0 + frame as f32 * DT;
+            let (generation, age) = generation_of(lynx, 0, elapsed);
+            let (later, again) = generation_of(lynx, 0, elapsed + 3.0 * lynx.window);
+            assert_eq!(later, generation + 3, "at {elapsed} s");
+            assert!((age - again).abs() < 1e-3, "aged {age} and then {again}");
+            let here = place(lynx, seed, age, anchor, None);
+            assert_eq!(here, place(lynx, seed, age, anchor, None));
+            assert!(here.distance(place(lynx, seed, again, anchor, None)) < 0.02);
+        }
+        // And a slot's life fits its window, for every row, with the lynx's mostly empty: a
+        // lynx is somebody happening to see one.
+        for row in &CRITTERS {
+            assert!(row.window >= row.life, "{:?} outlives its window", row.gait);
+        }
+        assert!(lynx.life * 4.0 <= lynx.window);
     }
 }

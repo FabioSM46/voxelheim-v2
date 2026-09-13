@@ -6621,7 +6621,9 @@ fn each_country_gets_only_the_critters_its_row_names() {
         (GroundLook::Grass, false, None),
         (GroundLook::Sand, true, Some(1)),
         (GroundLook::Sand, false, Some(1)),
-        (GroundLook::Snow, true, None),
+        // The snow is the lynx's, trees or none (#1194).
+        (GroundLook::Snow, true, Some(2)),
+        (GroundLook::Snow, false, Some(2)),
         (GroundLook::Unknown, false, None),
     ] {
         let mut app = squirrelwatching(ground, wooded);
@@ -7094,6 +7096,161 @@ fn a_critter_on_the_aim_line_is_not_what_the_crosshair_finds() {
             .iter()
             .any(|critter| critter.2 == 1.0 && critter.1 > 0.0),
         "aiming at a squirrel retired it"
+    );
+}
+
+/// A headless client on a server that keeps a day, standing on [`a_snowfield`] whose look is
+/// snow, at `tick_of_day`.
+fn lynx_country(tick_of_day: u32) -> App {
+    let mut app = standing_in_a_wood(headless_player_with_a_clock(), GroundLook::Snow, false);
+    app.insert_resource(a_snowfield());
+    deliver_at_tick_of_day(&mut app, 1, tick_of_day, Instant::now());
+    app
+}
+
+/// What one lynx is drawn as this frame: the highest point of any face of its body or its tail,
+/// where its origin is, the body's alpha, and whether it is visible.
+///
+/// **Read out of the assets the renderer draws**, not recomputed: the body mesh and the tail mesh
+/// by their handles, the tail's own rotation from its entity, the alpha from the material. A lynx
+/// whose meshes were missing, whose tail was never turned, or whose material stopped being written
+/// fails here rather than in a function that restates the systems.
+fn drawn_lynx(app: &App, lynx: Entity) -> (f32, f32, f32, Visibility) {
+    let world = app.world();
+    let entity = world.entity(lynx);
+    let transform = entity.get::<Transform>().expect("a lynx is placed");
+    let meshes = world.resource::<Assets<Mesh>>();
+    let positions = |handle: &Mesh3d| {
+        let mesh = meshes
+            .get(&handle.0)
+            .expect("a lynx is drawn from meshes that exist");
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("a lynx mesh carries positions")
+        };
+        points
+            .iter()
+            .map(|point| Vec3::from_array(*point))
+            .collect::<Vec<_>>()
+    };
+    let mut top = positions(entity.get::<Mesh3d>().expect("a lynx's body is drawn"))
+        .into_iter()
+        .fold(f32::NEG_INFINITY, |high, at| high.max(at.y));
+    let children = entity.get::<Children>().expect("a lynx has a tail");
+    assert_eq!(children.len(), 1, "a lynx is a body and one tail");
+    for tail in children.iter() {
+        let tail = world.entity(tail);
+        let turned = tail.get::<Transform>().expect("a tail is placed");
+        for point in positions(tail.get::<Mesh3d>().expect("a lynx's tail is drawn")) {
+            top = top.max((turned.translation + turned.rotation * point).y);
+        }
+    }
+    let material = world
+        .resource::<Assets<StandardMaterial>>()
+        .get(
+            &entity
+                .get::<MeshMaterial3d<StandardMaterial>>()
+                .expect("a lynx has a coat")
+                .0,
+        )
+        .expect("a lynx's coat exists");
+    (
+        transform.translation.y + top * transform.scale.y,
+        transform.translation.y,
+        material.base_color.alpha(),
+        *entity.get::<Visibility>().expect("a lynx is drawn or not"),
+    )
+}
+
+#[test]
+fn a_lynx_breaks_cover_on_the_snow_by_day_and_goes_back_into_it() {
+    // #1194 end to end, on a server that keeps a day, over real snow: no lynx after dark; by day
+    // one lynx, rising out of the drift, standing whole on the snow and drawn, and going back
+    // under it before its coat has faded to nothing — and then an empty slot for the rest of its
+    // window rather than a second lynx.
+    let surface = CRITTER_SURFACE as f32;
+    let mut app = lynx_country(18_000);
+    watch(&mut app, 16);
+    assert!(wood(&mut app).is_empty(), "a lynx came out after dark");
+
+    deliver_at_tick_of_day(&mut app, 2, 7_200, Instant::now());
+    let mut seen: Option<Entity> = None;
+    let (mut rose, mut stood, mut sank, mut gone) = (false, false, false, false);
+    for frame in 0..130 {
+        app.update();
+        let alive = critter_entities(&mut app);
+        let Some(&lynx) = alive.first() else {
+            gone |= seen.is_some();
+            continue;
+        };
+        assert_eq!(alive.len(), 1, "frame {frame}: a lynx is alone");
+        assert!(
+            !gone,
+            "frame {frame}: a second lynx came out inside the window"
+        );
+        let (top, origin, alpha, visibility) = drawn_lynx(&app, lynx);
+        let critter = app
+            .world()
+            .entity(lynx)
+            .get::<critters::Critter>()
+            .expect("a lynx is a critter");
+        let (fade, wanted) = (critter.fade, critter.wanted);
+        if seen.is_none() {
+            // Its first drawn frame is under the snow: it breaks cover rather than appearing.
+            assert!(
+                top <= surface,
+                "a lynx appeared with its top at {top} over snow at {surface}"
+            );
+            rose = true;
+            seen = Some(lynx);
+        }
+        assert_eq!(seen, Some(lynx), "frame {frame}: the lynx changed");
+        if wanted == 1.0 && fade == 1.0 {
+            // Whole: on the snow exactly, seen above it, opaque, and visible.
+            assert_eq!(origin, surface, "a whole lynx stands at {origin}");
+            assert!(top > surface + 0.5, "a whole lynx is drawn {top} high");
+            assert!(alpha > 0.0 && visibility == Visibility::Visible);
+            stood = true;
+        }
+        if wanted == 0.0 && alpha > 0.0 && top <= surface {
+            sank = true;
+        }
+    }
+    assert!(rose, "no lynx broke cover by day");
+    assert!(stood, "the lynx never stood whole on the snow");
+    assert!(sank, "the lynx faded without going under the snow");
+    assert!(gone, "the lynx never went");
+}
+
+#[test]
+fn a_lynx_left_behind_by_a_move_goes_into_the_snow() {
+    // A stray lynx could bolt at an eye that has left its cell, so it is not kept as one: the
+    // frame the eye crosses into the next cell, the lynx it left behind is on its way out.
+    let mut app = lynx_country(7_200);
+    watch(&mut app, 16);
+    let before = critter_entities(&mut app);
+    let [lynx] = before[..] else {
+        panic!("{} lynxes in the snow by day", before.len());
+    };
+    assert_eq!(
+        app.world()
+            .entity(lynx)
+            .get::<critters::Critter>()
+            .map(|critter| critter.wanted),
+        Some(1.0)
+    );
+    put_the_eye_at(
+        &mut app,
+        CRITTER_EYE + Vec3::X * critters::CRITTER_ANCHOR_CELL,
+    );
+    app.update();
+    assert_eq!(
+        app.world().get_entity(lynx).ok().and_then(|entity| entity
+            .get::<critters::Critter>()
+            .map(|critter| critter.wanted)),
+        Some(0.0),
+        "a lynx left behind a cell away is still staying"
     );
 }
 
