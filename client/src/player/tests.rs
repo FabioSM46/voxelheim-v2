@@ -6543,7 +6543,12 @@ fn a_wood(extra: impl Fn(IVec3) -> Option<crate::world::BlockId>) -> crate::worl
 /// sampler publishes `Unknown` once a second over a store it cannot read a full lattice from,
 /// which would silently empty the wood under every test below.
 fn squirrelwatching(ground: GroundLook, wooded: bool) -> App {
-    let mut app = headless_player();
+    standing_in_a_wood(headless_player(), ground, wooded)
+}
+
+/// [`squirrelwatching`] on whichever headless client the test built — one with a clock, when
+/// the hour is what is under test.
+fn standing_in_a_wood(mut app: App, ground: GroundLook, wooded: bool) -> App {
     app.insert_resource(HeldLook(Ambience { ground, wooded }))
         .insert_resource(a_wood(|_| None))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -6586,14 +6591,16 @@ fn critter_positions(app: &mut App) -> Vec<Vec3> {
 }
 
 #[test]
-fn only_a_wood_in_green_country_gets_critters() {
-    // The gate, end to end: the same look the macaw needs and nothing else. An open plain is
-    // the case worth naming, because it is the one #1176 got wrong for a voice.
+fn each_country_gets_only_the_critters_its_row_names() {
+    // The gate, end to end: the squirrel on the same look the macaw needs and nothing else,
+    // and the mouse on sand, trees or none (#1192). An open plain is the case worth naming,
+    // because it is the one #1176 got wrong for a voice. This client has no clock, so every
+    // row is abroad at every hour — `Period::abroad` — and the hour is tested below.
     for (ground, wooded, expected) in [
         (GroundLook::Grass, true, Some(0)),
         (GroundLook::Grass, false, None),
-        (GroundLook::Sand, true, None),
-        (GroundLook::Sand, false, None),
+        (GroundLook::Sand, true, Some(1)),
+        (GroundLook::Sand, false, Some(1)),
         (GroundLook::Snow, true, None),
         (GroundLook::Unknown, false, None),
     ] {
@@ -6617,6 +6624,58 @@ fn only_a_wood_in_green_country_gets_critters() {
             }
         }
         assert!(critters.len() <= critters::CRITTER_COUNT_MAX);
+    }
+}
+
+#[test]
+fn mice_come_out_on_the_sand_at_night_wearing_their_eyes_and_not_by_day() {
+    // #1192, end to end on a server that keeps a day: the sand is empty at noon, and after dark
+    // it has mice, each drawn as a body, a tail and a pair of glowing eyes — and none of the
+    // three carries anything a gameplay system reads.
+    let mut app = standing_in_a_wood(headless_player_with_a_clock(), GroundLook::Sand, false);
+    deliver_at_tick_of_day(&mut app, 1, 7_200, Instant::now());
+    watch(&mut app, 8);
+    assert!(wood(&mut app).is_empty(), "mice came out at noon");
+
+    deliver_at_tick_of_day(&mut app, 2, 18_000, Instant::now());
+    watch(&mut app, 8);
+    let mice = critter_entities(&mut app);
+    assert!(!mice.is_empty(), "the desert night had no mice");
+    let row = &critters::CRITTERS[1];
+    assert!(mice.len() <= usize::from(*row.count.end()));
+    assert!(wood(&mut app).iter().all(|critter| critter.0 == 1));
+
+    let glow = row.eyeshine.expect("a mouse wears eyeshine").glow;
+    for mouse in mice {
+        let world = app.world();
+        let children = world
+            .entity(mouse)
+            .get::<Children>()
+            .expect("a mouse has a tail and eyes");
+        assert_eq!(
+            children.len(),
+            2,
+            "a mouse is a body, a tail and a pair of eyes"
+        );
+        let mut glowing = 0usize;
+        for child in children.iter().chain(std::iter::once(mouse)) {
+            let entity = world.entity(child);
+            assert!(!entity.contains::<mobs::Mob>());
+            assert!(!entity.contains::<mobs::MobVisual>());
+            assert!(!entity.contains::<structures::Structure>());
+            assert!(!entity.contains::<drops::DroppedItem>());
+            assert!(!entity.contains::<Body>());
+            let handle = &entity
+                .get::<MeshMaterial3d<StandardMaterial>>()
+                .expect("every part of a mouse is drawn")
+                .0;
+            let material = world
+                .resource::<Assets<StandardMaterial>>()
+                .get(handle)
+                .expect("a mouse's material exists");
+            glowing += usize::from(material.emissive == glow);
+        }
+        assert_eq!(glowing, 1, "exactly one part of a mouse glows: its eyes");
     }
 }
 

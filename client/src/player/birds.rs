@@ -68,7 +68,7 @@ use bevy::prelude::*;
 
 use super::ambience::{Ambience, GroundLook};
 use super::camera::WorldCamera;
-use super::eyeshine::{Eyeshine, eye_pair_mesh, eyeshine_material};
+use super::eyeshine::{BLANK_EYES, Eyeshine, eye_pair_mesh, eyeshine_material};
 use super::sky::{self, Period, SkyClock};
 use crate::net::{BlockCoord, ChunkCoord, Session};
 use crate::world::{ChunkStore, palette};
@@ -1397,22 +1397,6 @@ pub(super) fn create_visuals(
         eye_pool: std::array::from_fn(|_| materials.add(eyeshine_material(BLANK_EYES, 0.0))),
     });
 }
-
-/// The eyeshine a pooled material is minted with: dark, and invisible.
-///
-/// Every pool entry is overwritten with its bird's own row the moment a bird claims it, so
-/// this is only ever what an unclaimed handle holds. It is the same "colourless until
-/// claimed" that [`BirdVisuals::pool`] mints its plumage pairs with, and it exists as a named
-/// constant only because [`Eyeshine`] has six fields and a literal here would read as a
-/// species.
-const BLANK_EYES: Eyeshine = Eyeshine {
-    spread: 0.0,
-    forward: 0.0,
-    rise: 0.0,
-    size: 0.0,
-    colour: Color::BLACK,
-    glow: LinearRgba::BLACK,
-};
 
 /// The fractions of a wing's chord the spar's flat runs between.
 ///
