@@ -7224,34 +7224,81 @@ fn a_lynx_breaks_cover_on_the_snow_by_day_and_goes_back_into_it() {
 }
 
 #[test]
-fn a_lynx_left_behind_by_a_move_goes_into_the_snow() {
-    // A stray lynx could bolt at an eye that has left its cell, so it is not kept as one: the
-    // frame the eye crosses into the next cell, the lynx it left behind is on its way out.
+fn a_lynx_left_behind_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye() {
+    // A lynx could bolt at an eye that has left its cell, so it is not kept as a stray, and one
+    // on its way out stops where it was last drawn (review on #1242). Taken at its worst: the eye
+    // jumps into the next cell in the middle of the bolt, three blocks ahead of the lynx on the
+    // line it is running. Drawn by the clock alone it would run on through the eye; held, it
+    // sinks into the snow where it stood, and is gone.
+    let flat = |a: Vec3, b: Vec3| Vec3::new(a.x - b.x, 0.0, a.z - b.z).length();
     let mut app = lynx_country(7_200);
     watch(&mut app, 16);
     let before = critter_entities(&mut app);
     let [lynx] = before[..] else {
         panic!("{} lynxes in the snow by day", before.len());
     };
-    assert_eq!(
-        app.world()
-            .entity(lynx)
-            .get::<critters::Critter>()
-            .map(|critter| critter.wanted),
-        Some(1.0)
+    let drawn_at = |app: &App| {
+        app.world().get_entity(lynx).ok().and_then(|entity| {
+            entity
+                .get::<Transform>()
+                .map(|transform| transform.translation)
+        })
+    };
+    let wanted = |app: &App| {
+        app.world().get_entity(lynx).ok().and_then(|entity| {
+            entity
+                .get::<critters::Critter>()
+                .map(|critter| critter.wanted)
+        })
+    };
+    assert_eq!(wanted(&app), Some(1.0));
+
+    // The bolt: the first frame the lynx covers more than half a block, which at a tenth of a
+    // second a frame is the second frame of an eight-frame bolt.
+    let mut last = drawn_at(&app).expect("the lynx is drawn");
+    let mut bolting = None;
+    for _ in 0..120 {
+        app.update();
+        let now = drawn_at(&app).expect("the lynx is drawn until its bolt");
+        if flat(now, last) > 0.5 {
+            bolting = Some((last, now));
+            break;
+        }
+        last = now;
+    }
+    let (was, now) = bolting.expect("the lynx never bolted");
+    let ahead = Vec3::new(now.x - was.x, 0.0, now.z - was.z).normalize();
+    let eye = Vec3::new(now.x, CRITTER_EYE.y, now.z) + ahead * 3.0;
+    let cell = |at: Vec3| (at / critters::CRITTER_ANCHOR_CELL).floor().xz();
+    assert_ne!(
+        cell(eye),
+        cell(CRITTER_EYE),
+        "the eye never left the lynx's cell"
     );
-    put_the_eye_at(
-        &mut app,
-        CRITTER_EYE + Vec3::X * critters::CRITTER_ANCHOR_CELL,
-    );
-    app.update();
-    assert_eq!(
-        app.world().get_entity(lynx).ok().and_then(|entity| entity
-            .get::<critters::Critter>()
-            .map(|critter| critter.wanted)),
-        Some(0.0),
-        "a lynx left behind a cell away is still staying"
-    );
+    put_the_eye_at(&mut app, eye);
+
+    let start = flat(now, eye);
+    let (mut drawn, mut sank) = (0usize, false);
+    for frame in 0..30 {
+        app.update();
+        let Some(at) = drawn_at(&app) else {
+            break;
+        };
+        assert_eq!(
+            wanted(&app),
+            Some(0.0),
+            "frame {frame}: a lynx left behind a cell away is still staying"
+        );
+        assert!(
+            flat(at, eye) >= start - 1e-3,
+            "frame {frame}: a leaving lynx closed from {start} to {} on the eye",
+            flat(at, eye)
+        );
+        sank |= at.y < CRITTER_SURFACE as f32;
+        drawn += 1;
+    }
+    assert!(drawn > 0 && sank, "the lynx did not sink where it stood");
+    assert!(drawn_at(&app).is_none(), "the lynx never went");
 }
 
 // ---------------------------------------------------------------------------
