@@ -716,13 +716,22 @@ const SQUEAK_DETUNE: f32 = 1.035;
 ///   bright sounds), and at 2.5 kHz their harmonics would fold back down across an 8 kHz
 ///   device. What makes the voice rough is the twin [`SQUEAK_DETUNE`] above it, beating at
 ///   about a hundred hertz.
-/// - **Breath, most of the level.** White noise through two bands across the top of the ceiling
-///   and a wider one under them fills the band the squeak lives in, which is what separates it
-///   from the clean partials `a_squeak_is_thin_and_textured_and_not_a_note` builds as its
-///   negative control.
+/// - **Breath, most of the level.** White noise through two bands high under the ceiling and a
+///   wider one below them fills the band the squeak lives in, which is what separates it from
+///   the clean partials `a_squeak_is_thin_and_textured_and_not_a_note` builds as its negative
+///   control.
 ///
-/// Every band, and every frequency a glide reaches with its arch, stays under 3.6 kHz: the
-/// widest reach is `2800 * SQUEAK_DETUNE * (1 + SQUEAK_ARCH)`, 3188 Hz.
+/// **What the 3.6 kHz ceiling guarantees here, said exactly.** Every frequency a glide reaches
+/// with its arch stays under it — the widest reach is `2800 * SQUEAK_DETUNE * (1 +
+/// SQUEAK_ARCH)`, 3188 Hz — and every band is *centred* under it, which is what
+/// `Sound::validate` bounds and what lets the description bake at an 8 kHz device. A resonant
+/// band is a slope rather than a wall, so the breath does put some energy above the line, and
+/// that is measured rather than claimed: at 8 kHz a squeak carries 0.3 to 0.5% of its energy
+/// above 3.6 kHz, against 2.4 to 5.2% for the same squeak with its top band centred on the
+/// ceiling itself. Noise is drawn at the device's own rate, so nothing that spills is folded
+/// back down. `a_squeak_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more`
+/// holds both numbers; an earlier version of this comment said every band stayed under the
+/// ceiling, which is true of the centres and not of the skirts (review on #1222).
 fn squeak(variation: f32, envelope: Envelope) -> Vec<Layer> {
     let hz = 2500.0 + variation * 300.0;
     let voice = |detune: f32, gain| Layer {
@@ -3283,6 +3292,81 @@ mod tests {
                     peak(samples) * gain >= 0.05,
                     "seed {seed} at {rate}: heard at {}",
                     peak(samples) * gain
+                );
+            }
+        }
+    }
+
+    /// The share of a sound's energy above `hz`: the DFT bins over that line against the whole
+    /// of its energy by Parseval, the same arithmetic [`tonal_share`] uses.
+    fn share_above(samples: &[f32], rate: u32, hz: f32) -> f64 {
+        let high: f64 = band_power(samples, rate, hz, rate as f32 / 2.0)
+            .iter()
+            .sum();
+        let energy: f64 = samples.iter().map(|x| f64::from(*x).powi(2)).sum();
+        high / (energy * samples.len() as f64 / 2.0)
+    }
+
+    /// The squeak with its highest band moved to be centred on `hz`, every other layer as it is.
+    fn squeak_with_its_top_band_at(seed: u64, hz: f32) -> Sound {
+        let description = Call::Mouse.description(seed);
+        let top = description
+            .layers
+            .iter()
+            .filter_map(|layer| layer.filter.map(|filter| filter.hz))
+            .fold(0.0f32, f32::max);
+        Sound {
+            layers: description
+                .layers
+                .into_iter()
+                .map(|layer| match layer.filter {
+                    Some(filter) if filter.hz == top => Layer {
+                        filter: Some(Filter { hz, ..filter }),
+                        ..layer
+                    },
+                    _ => layer,
+                })
+                .collect(),
+        }
+    }
+
+    /// **What the ceiling guarantees for a band, measured rather than claimed** (review on
+    /// #1222).
+    ///
+    /// `no_call_reaches_a_frequency_the_lowest_rate_cannot_carry` holds every glide's reach and
+    /// every band's *centre* under 3.6 kHz. A resonant band is a slope rather than a wall, so
+    /// that alone says nothing about how much of a squeak is heard above the line. This
+    /// measures it at the lowest rate, where the line is what a device can carry, and at the
+    /// 48 kHz a device usually runs at, where no Nyquist cuts the skirt off.
+    ///
+    /// **The control is the point.** The same squeak with its highest band centred on the
+    /// ceiling itself — the most `Sound::validate` allows at 8 kHz — and past it at 48 kHz must
+    /// fail the bound the squeak passes, or the bound separates nothing. Measured when this was
+    /// written: at 8 kHz the squeak spills 0.26–0.50% and the control 2.4–5.2%; at 48 kHz
+    /// 9.8–11.3% against 20–23.5%. For scale, the cricket — four bands up to 3.45 kHz, shipped
+    /// long before this — spills 0.7–1.1% and 21–26%.
+    #[test]
+    fn a_squeak_spills_little_above_the_ceiling_and_a_band_centred_on_it_spills_more() {
+        let seconds = Call::Mouse.profile().seconds;
+        for (rate, seeds, bound, control_hz, control_floor) in [
+            (8000u32, 12u64, 0.01, 3600.0, 0.015),
+            (48000, 4, 0.15, 4500.0, 0.18),
+        ] {
+            for seed in (0..seeds).map(scramble) {
+                let squeak = Call::Mouse.bake(seed, rate).unwrap();
+                let spill = share_above(squeak.samples(), rate, 3600.0);
+                assert!(
+                    spill < bound,
+                    "seed {seed} at {rate}: {spill} of the squeak's energy lies above 3.6 kHz"
+                );
+                let control = squeak_with_its_top_band_at(seed, control_hz)
+                    .bake_at(&squeak_onsets(seed), SQUEAK_SECONDS, seconds, rate, seed)
+                    .unwrap();
+                let over = share_above(control.samples(), rate, 3600.0);
+                assert!(
+                    over > control_floor && over > spill * 1.5,
+                    "seed {seed} at {rate}: a top band centred at {control_hz} Hz spilled only \
+                     {over} against the squeak's {spill}, so the bound separates nothing"
                 );
             }
         }
