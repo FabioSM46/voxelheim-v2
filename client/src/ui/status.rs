@@ -544,11 +544,14 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// `NotEnoughEnergy` was here on the same terms until #1134 landed the surface that answers
 /// it, and it left for [`answered_by_the_energy_bar`] rather than for a sentence.
 ///
+/// `HandsOccupied` is here on the same terms, until the main-hand cell and its sentence
+/// land (#1238). No server sends it before the two-handed rule does (#1236).
+///
 /// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
-        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
+        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen | RefusalReason::HandsOccupied
     )
 }
 
@@ -659,6 +662,7 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         | RefusalReason::SessionMismatch
         | RefusalReason::EntryOfferUnknown
         | RefusalReason::NotEnoughEnergy
+        | RefusalReason::HandsOccupied
         | RefusalReason::Unknown
         | RefusalReason::MalformedNoAnchor
         | RefusalReason::MalformedFacing
@@ -1356,7 +1360,7 @@ mod tests {
     /// every sweep below ran over 27 of 34 members while reading as though it swept them
     /// all — and a wrong sentence for any of the seven was green. The length assert is
     /// what the old comment only promised.
-    const EVERY_REASON: [RefusalReason; 58] = [
+    const EVERY_REASON: [RefusalReason; 59] = [
         RefusalReason::Unknown,
         RefusalReason::GroundNotGenerated,
         RefusalReason::GroundIsAir,
@@ -1417,6 +1421,8 @@ mod tests {
         RefusalReason::EntryOfferUnknown,
         // V40's energy reason.
         RefusalReason::NotEnoughEnergy,
+        // V44's two-handed reason.
+        RefusalReason::HandsOccupied,
         RefusalReason::MalformedNoAnchor,
         RefusalReason::MalformedFacing,
         RefusalReason::MalformedSlot,
@@ -1438,6 +1444,7 @@ mod tests {
             | RefusalReason::NotLeader => RefusedAction::Party,
             RefusalReason::NoAmmunition => RefusedAction::Attack,
             RefusalReason::NotEnoughEnergy => RefusedAction::Energy,
+            RefusalReason::HandsOccupied => RefusedAction::MoveInventory,
             RefusalReason::MountNotLearned
             | RefusalReason::AlreadyMounted
             | RefusalReason::MountNotGrounded

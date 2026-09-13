@@ -63,8 +63,13 @@ func (rcv *AttackRequest) Table() flatbuffers.Table {
 	return rcv._tab
 }
 
-// / The authoritative inventory slot this swing spends. The server reads what is
-// / actually in that slot; naming an empty, resource or broken one gains nothing.
+// / The main-hand equipment slot, which is the only slot a swing spends. The server
+// / reads what is actually in it; naming an empty, resource or broken one gains nothing.
+// /
+// / **V44 changed what this field means**, and the change is why the version moved.
+// / Before V44 it was whichever inventory slot the client named, usually the selected
+// / hotbar slot. Now any slot other than the main hand is refused. A V43 client would go
+// / on naming its hotbar slot, and every swing would be dropped after a clean handshake.
 func (rcv *AttackRequest) Slot() byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
 	if o != 0 {
@@ -73,8 +78,13 @@ func (rcv *AttackRequest) Slot() byte {
 	return 0
 }
 
-// / The authoritative inventory slot this swing spends. The server reads what is
-// / actually in that slot; naming an empty, resource or broken one gains nothing.
+// / The main-hand equipment slot, which is the only slot a swing spends. The server
+// / reads what is actually in it; naming an empty, resource or broken one gains nothing.
+// /
+// / **V44 changed what this field means**, and the change is why the version moved.
+// / Before V44 it was whichever inventory slot the client named, usually the selected
+// / hotbar slot. Now any slot other than the main hand is refused. A V43 client would go
+// / on naming its hotbar slot, and every swing would be dropped after a clean handshake.
 func (rcv *AttackRequest) MutateSlot(n byte) bool {
 	return rcv._tab.MutateByteSlot(4, n)
 }

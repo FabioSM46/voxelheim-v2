@@ -181,6 +181,9 @@ const (
 	/// `RefusedAction.Energy`; the recipient's own `PlayerVitals.energy` is the rest of
 	/// the answer, so no amount is carried here.
 	RefusalReasonNotEnoughEnergy RefusalReason = 53
+	/// A two-handed weapon and an off-hand item cannot be worn together. Paired with
+	/// `RefusedAction.MoveInventory`. The player can take off one of them.
+	RefusalReasonHandsOccupied RefusalReason = 54
 	/// The request carried no anchor at all. The origin is a real place, so an absent
 	/// struct field is refused rather than read as (0, 0, 0).
 	RefusalReasonMalformedNoAnchor RefusalReason = 64
@@ -250,6 +253,7 @@ var EnumNamesRefusalReason = map[RefusalReason]string{
 	RefusalReasonSessionMismatch:             "SessionMismatch",
 	RefusalReasonEntryOfferUnknown:           "EntryOfferUnknown",
 	RefusalReasonNotEnoughEnergy:             "NotEnoughEnergy",
+	RefusalReasonHandsOccupied:               "HandsOccupied",
 	RefusalReasonMalformedNoAnchor:           "MalformedNoAnchor",
 	RefusalReasonMalformedFacing:             "MalformedFacing",
 	RefusalReasonMalformedSlot:               "MalformedSlot",
@@ -311,6 +315,7 @@ var EnumValuesRefusalReason = map[string]RefusalReason{
 	"SessionMismatch":             RefusalReasonSessionMismatch,
 	"EntryOfferUnknown":           RefusalReasonEntryOfferUnknown,
 	"NotEnoughEnergy":             RefusalReasonNotEnoughEnergy,
+	"HandsOccupied":               RefusalReasonHandsOccupied,
 	"MalformedNoAnchor":           RefusalReasonMalformedNoAnchor,
 	"MalformedFacing":             RefusalReasonMalformedFacing,
 	"MalformedSlot":               RefusalReasonMalformedSlot,
