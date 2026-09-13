@@ -744,28 +744,51 @@ const RUSTY_GREAVES: [IconPart; 8] = [
     },
 ];
 
-/// Wooden board, rim and iron boss.
-const SHIELD: [IconPart; 3] = [
+/// A round shield seen from the front: a darker rim, a planked face inside it and an iron boss.
+///
+/// The model the hand, the ground and a body draw, flattened. The face is a circle of five
+/// planks, `70` across; the second and fourth are drawn as darker strips whose corners sit on
+/// that circle — `21` from the centre across and `28` up and down, which is `35` exactly — so
+/// the planks follow the round outline rather than standing out of it. The boss is drawn last,
+/// in the same `iron` the pickaxe's head uses.
+const SHIELD: [IconPart; 5] = [
     IconPart {
-        left: 24.0,
-        top: 16.0,
-        width: 52.0,
-        height: 64.0,
-        radius: 24.0,
+        left: 10.0,
+        top: 10.0,
+        width: 80.0,
+        height: 80.0,
+        radius: 50.0,
+        shade: -0.45,
         ..IconPart::PLAIN
     },
     IconPart {
-        left: 30.0,
-        top: 66.0,
-        width: 40.0,
-        height: 17.0,
+        left: 15.0,
+        top: 15.0,
+        width: 70.0,
+        height: 70.0,
         radius: 50.0,
+        shade: 0.10,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 29.0,
+        top: 22.0,
+        width: 14.0,
+        height: 56.0,
+        shade: -0.22,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 57.0,
+        top: 22.0,
+        width: 14.0,
+        height: 56.0,
         shade: -0.22,
         ..IconPart::PLAIN
     },
     IconPart {
         left: 40.0,
-        top: 35.0,
+        top: 40.0,
         width: 20.0,
         height: 20.0,
         radius: 50.0,
@@ -1892,6 +1915,65 @@ mod tests {
         assert!(
             blade.rotation == 0.0,
             "the shovel's blade is turned, so it no longer reads as flat"
+        );
+    }
+
+    /// **The flat shield is the round one the hand holds**: a planked face inside a darker
+    /// rim, with an iron boss at the centre.
+    ///
+    /// As with the sword and the implements above, the mesh constants are out of reach here,
+    /// so what is pinned is the structure a reader checks by eye — round parts, the rim around
+    /// the face, planks that stay inside the face's circle, and the boss in iron at the middle.
+    #[test]
+    fn the_flat_shield_is_a_round_planked_face_inside_a_rim_around_an_iron_boss() {
+        let [rim, face, left_plank, right_plank, boss] =
+            <[IconPart; 5]>::try_from(parts(ItemShape::Shield))
+                .expect("the shield is drawn as a rim, a face, two planks and a boss");
+        let centre = |part: IconPart| (part.left + part.width / 2.0, part.top + part.height / 2.0);
+
+        for (name, part) in [("rim", rim), ("face", face), ("boss", boss)] {
+            assert!(
+                part.width == part.height && part.radius >= 50.0,
+                "the shield's {name} is not round: {part:?}"
+            );
+            assert_eq!(
+                centre(part),
+                (50.0, 50.0),
+                "the shield's {name} is off centre"
+            );
+        }
+        assert!(
+            rim.width > face.width && rim.shade < face.shade,
+            "the rim is not a darker ring around the face"
+        );
+        assert!(
+            boss.iron && !rim.iron && !face.iron,
+            "only the boss is iron"
+        );
+        assert!(boss.width < face.width / 2.0, "the boss covers the face");
+
+        let face_radius = face.width / 2.0;
+        for (name, plank) in [("left", left_plank), ("right", right_plank)] {
+            assert!(!plank.iron, "the {name} plank is iron");
+            assert!(
+                plank.shade < face.shade,
+                "the {name} plank does not read against the face"
+            );
+            for x in [plank.left, plank.left + plank.width] {
+                for y in [plank.top, plank.top + plank.height] {
+                    let reach = ((x - 50.0).powi(2) + (y - 50.0).powi(2)).sqrt();
+                    assert!(
+                        reach <= face_radius + 1e-3,
+                        "the {name} plank's corner ({x}, {y}) stands {reach} out, past the \
+                         face's {face_radius}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            left_plank.left + left_plank.width / 2.0 + right_plank.left + right_plank.width / 2.0,
+            100.0,
+            "the two planks are not mirrored about the boss"
         );
     }
 

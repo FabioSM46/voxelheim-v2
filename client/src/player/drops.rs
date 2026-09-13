@@ -271,14 +271,14 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        // White preserves the shield mesh's separate bark and iron vertex colours, and the
+        // White preserves the shield's planks, rim, iron boss and leather handle, and the
         // pickaxe's and the shovel's wooden haft and iron head — keyed on the shape for those
-        // two, since that is where their two colours are authored.
-        let colour = if matches!(
-            item_id,
-            super::crafting::ITEM_WOODEN_SHIELD | super::crafting::ITEM_WOODEN_SCEPTRE
-        ) || matches!(item_shape(item_id), ItemShape::Pickaxe | ItemShape::Shovel)
-        {
+        // three, since that is where their colours are authored.
+        let colour = if item_id == super::crafting::ITEM_WOODEN_SCEPTRE
+            || matches!(
+                item_shape(item_id),
+                ItemShape::Shield | ItemShape::Pickaxe | ItemShape::Shovel
+            ) {
             [1.0; 4]
         } else {
             item_linear_rgba(item_id)
