@@ -141,22 +141,26 @@ while true; do
       --jq '.[] | "\(.number) \(.headRefOid[:7]) \(.headRefName)"'); then
     echo "watch: gh pr list failed"; sleep 60; continue
   fi
-  prs=$(printf '%s\n' "$all" | grep -E " [a-z]+/(${ISSUES})-" || true)
+  prs=$(printf '%s\n' "$all" | grep -E "/(${ISSUES})-" || true)
   while read -r n sha _; do
     [ -n "$n" ] || continue
     s=$(bash scripts/gh-automation.sh pr-status-json "$n" 2>/dev/null | jq -c '{ready:.ready_to_merge,
       pending:.ci_pending, failing:.ci_failing, gate:.required_check_state,
       threads:.unresolved_threads, unread:.deepseek_unread_findings,
-      ds_done:(.deepseek_review_complete or .deepseek_rounds_exhausted), mergeable:.mergeable}' 2>/dev/null)
+      ds_done:(.deepseek_review_complete or .deepseek_rounds_exhausted), mergeable:.mergeable}' 2>/dev/null) || s=""
     [ -n "$s" ] || s="status-unreadable"
-    if [ "${last[$n]}" != "$sha $s" ]; then last[$n]="$sha $s"; echo "PR #$n @$sha $s"; fi
+    if [ "${last[$n]:-}" != "$sha $s" ]; then last[$n]="$sha $s"; echo "PR #$n @$sha $s"; fi
   done <<<"$prs"
   sleep 60
 done
 ```
 
 It emits every matching PR once on its first pass and again whenever the head or the state
-changes, and a status it cannot read comes out as `status-unreadable`, never as silence. **See the
+changes, and a status it cannot read comes out as `status-unreadable`, never as silence. Every
+read that can fail is guarded (`|| continue`, `|| true`, `|| s=""`, `${last[$n]:-}`), so the loop
+keeps that promise when a runtime runs it under `set -euo pipefail`; an unguarded failing
+assignment there would end the loop without a line, which is the silence this watch exists to
+prevent. The branch filter anchors on `/<issue>-` and deliberately says nothing about the prefix. **See the
 first pass before trusting it:** a watch that has printed nothing for a PR that exists is broken,
 not quiet — until it has printed, read `pr-status-json` by hand after every wave returns.
 
