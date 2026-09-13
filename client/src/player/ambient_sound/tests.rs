@@ -1578,6 +1578,38 @@ fn one_owl_voice_answers_for_both_of_the_bird_tables_owl_rows() {
     assert_eq!(owl.gain(&plain, 1.0), 0.0);
 }
 
+/// **The bat is silent, and this is where that decision is kept (#1193).**
+///
+/// A bat calls far above the 3.6 kHz the synth reaches, and a voice under that ceiling would be
+/// some other animal, so the bird table flies a bat that nothing in this module names. Two ways
+/// a voice could creep back are closed here: a lane gated on the bat's row would be a sound
+/// heard wherever the bat flies, and a call named for it would be a description waiting for a
+/// lane. The pin table needs no check of its own —
+/// `every_ambient_sound_renders_identically_to_its_pin` renders its rows from the calls of
+/// `WILDLIFE` and compares them by name in order, so a bat pin cannot exist without a bat lane,
+/// and a bat lane fails here.
+#[test]
+fn no_lane_is_gated_on_the_bat_and_no_call_is_a_bat() {
+    // Not vacuous: the row this names exists, and is the desert's night bird.
+    let bat = &birds::BIRDS[birds::BAT];
+    assert_eq!((bat.ground, bat.flies), (GroundLook::Sand, Period::Night));
+    for voice in &WILDLIFE {
+        if let Habitat::Flock(rows) = voice.habitat {
+            assert!(
+                !rows.contains(&birds::BAT),
+                "{:?} is heard wherever the bat flies",
+                voice.call
+            );
+        }
+    }
+    for call in Call::ALL {
+        assert!(
+            !format!("{call:?}").to_lowercase().contains("bat"),
+            "a call is named for the bat: {call:?}"
+        );
+    }
+}
+
 /// **The night's lanes sum, and the sum is bounded — measured at the worst alignment there
 /// is, not at whichever one a ten-minute run happened to produce.**
 ///
