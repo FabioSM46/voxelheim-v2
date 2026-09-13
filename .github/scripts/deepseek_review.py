@@ -1270,7 +1270,15 @@ Rules:
     # each moved into the body with its location. The result is still stamped, and a body
     # carrying findings is counted by the frozen rule's unread-findings half, so nothing
     # that was generated escapes the merge gate; it merely arrives without threads.
-    refused = [{"path": c["path"], "line": c["line"], "body": c["body"]} for c in review_comments]
+    #
+    # No read-back first, and what that costs (review on #1247): if GitHub created the
+    # review and still answered 500, this posts a second stamped review, and
+    # `_count_bot_reviews` counts both — one intended round spends two. At MAX_ROUNDS=1
+    # that changes nothing, since one stamped review already exhausts the cap; a higher
+    # cap would end one round early. Skipping the retry whenever a stamped review exists
+    # was rejected: every PR past its first round has one (#1222 did), so that guard
+    # would lose the review again in exactly the case this path exists for.
+    refused =[{"path": c["path"], "line": c["line"], "body": c["body"]} for c in review_comments]
     print(
         f"Retrying without the {len(refused)} inline comment(s), listed in the body instead: "
         + ", ".join(f"{c['path']}:{c['line']}" for c in refused)
