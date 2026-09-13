@@ -186,8 +186,10 @@ func (rcv *ServerWelcome) MutateViewDistance(n byte) bool {
 
 // / Number of slot pairs in every `InventoryState.stacks` vector this session
 // / receives. The layout is the hotbar first, the pack in the middle, and equipment
-// / last. The V22 equipment layout reserves 40: 9 hotbar, 27 pack and 4 equipment;
-// / the consumer update that adopts the fourth slot is staged separately.
+// / last. The V44 equipment layout reserves 41: 9 hotbar, 27 pack and 5 equipment.
+// / The main hand is appended after the off-hand, so slots 36-39 keep the indices V22
+// / gave them. The consumer change that adopts the fifth slot is staged in the server
+// / and client issues, as V22's fourth slot was.
 func (rcv *ServerWelcome) InventorySlots() byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
@@ -198,8 +200,10 @@ func (rcv *ServerWelcome) InventorySlots() byte {
 
 // / Number of slot pairs in every `InventoryState.stacks` vector this session
 // / receives. The layout is the hotbar first, the pack in the middle, and equipment
-// / last. The V22 equipment layout reserves 40: 9 hotbar, 27 pack and 4 equipment;
-// / the consumer update that adopts the fourth slot is staged separately.
+// / last. The V44 equipment layout reserves 41: 9 hotbar, 27 pack and 5 equipment.
+// / The main hand is appended after the off-hand, so slots 36-39 keep the indices V22
+// / gave them. The consumer change that adopts the fifth slot is staged in the server
+// / and client issues, as V22's fourth slot was.
 func (rcv *ServerWelcome) MutateInventorySlots(n byte) bool {
 	return rcv._tab.MutateByteSlot(16, n)
 }
@@ -399,10 +403,12 @@ func (rcv *ServerWelcome) MutateNightEndTicks(n uint32) bool {
 }
 
 // / Trailing inventory slots reserved for worn equipment. These slots are part of
-// / `inventory_slots`. The V22 equipment layout is four: head, chest, legs and off-hand,
-// / in that slot order at the inventory tail; the consumer update that adopts the fourth
-// / slot is staged separately. The client uses this count to find where the pack ends;
-// / it never decides which item is legal in a worn slot.
+// / `inventory_slots`. The V44 equipment layout is five: head, chest, legs, off-hand and
+// / main hand, in that slot order at the inventory tail. The main hand is appended last
+// / so the four V22 slots keep their indices; the consumer change that adopts the fifth
+// / slot is staged in the server and client issues, as V22's fourth slot was. The client
+// / uses this count to find where the pack ends; it never decides which item is legal in
+// / a worn slot.
 func (rcv *ServerWelcome) EquipmentSlots() byte {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
 	if o != 0 {
@@ -412,10 +418,12 @@ func (rcv *ServerWelcome) EquipmentSlots() byte {
 }
 
 // / Trailing inventory slots reserved for worn equipment. These slots are part of
-// / `inventory_slots`. The V22 equipment layout is four: head, chest, legs and off-hand,
-// / in that slot order at the inventory tail; the consumer update that adopts the fourth
-// / slot is staged separately. The client uses this count to find where the pack ends;
-// / it never decides which item is legal in a worn slot.
+// / `inventory_slots`. The V44 equipment layout is five: head, chest, legs, off-hand and
+// / main hand, in that slot order at the inventory tail. The main hand is appended last
+// / so the four V22 slots keep their indices; the consumer change that adopts the fifth
+// / slot is staged in the server and client issues, as V22's fourth slot was. The client
+// / uses this count to find where the pack ends; it never decides which item is legal in
+// / a worn slot.
 func (rcv *ServerWelcome) MutateEquipmentSlots(n byte) bool {
 	return rcv._tab.MutateByteSlot(28, n)
 }

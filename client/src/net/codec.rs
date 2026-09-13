@@ -1482,6 +1482,9 @@ pub enum RefusedAction {
     /// V40. An attack refused because its energy was not there to spend. Nothing was
     /// queued and nothing was spent.
     Energy,
+    /// V44. An inventory move the server would not apply; nothing moved. The
+    /// answering surface is the inventory window (#1238).
+    MoveInventory,
 }
 
 impl RefusedAction {
@@ -1510,6 +1513,7 @@ impl RefusedAction {
             fb::RefusedAction::PlayerTrade => Self::PlayerTrade,
             fb::RefusedAction::CrossPortal => Self::CrossPortal,
             fb::RefusedAction::Energy => Self::Energy,
+            fb::RefusedAction::MoveInventory => Self::MoveInventory,
             _ => Self::Unknown,
         }
     }
@@ -1592,6 +1596,8 @@ pub enum RefusalReason {
     EntryOfferUnknown,
     /// V40. The player's energy is below what the action costs.
     NotEnoughEnergy,
+    /// V44. A two-handed weapon and an off-hand item cannot be worn together.
+    HandsOccupied,
 
     // The request said something no correct client sends.
     MalformedNoAnchor,
@@ -1658,6 +1664,7 @@ impl RefusalReason {
             fb::RefusalReason::SessionMismatch => Self::SessionMismatch,
             fb::RefusalReason::EntryOfferUnknown => Self::EntryOfferUnknown,
             fb::RefusalReason::NotEnoughEnergy => Self::NotEnoughEnergy,
+            fb::RefusalReason::HandsOccupied => Self::HandsOccupied,
             fb::RefusalReason::MalformedNoAnchor => Self::MalformedNoAnchor,
             fb::RefusalReason::MalformedFacing => Self::MalformedFacing,
             fb::RefusalReason::MalformedSlot => Self::MalformedSlot,
@@ -5311,7 +5318,8 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
         | fb::Payload::VoiceFrame
         | fb::Payload::PortalRequest
         | fb::Payload::InstanceEntryAnswer
-        | fb::Payload::BlockRequest => Ok(Message::ClientOnly(name)),
+        | fb::Payload::BlockRequest
+        | fb::Payload::DrawRequest => Ok(Message::ClientOnly(name)),
         // V26's two server→client payloads. Both are read and validated here and neither
         // is drawn yet: the precipitation volume is #466, the storm's countdown is #470
         // and the ward boundary is its own issue. Validating at the decode boundary is
@@ -8962,6 +8970,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9043,6 +9052,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9098,6 +9108,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9311,6 +9322,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9360,6 +9372,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9418,6 +9431,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -9635,6 +9649,7 @@ pub(super) mod server_side {
                 worn_chest: worn[1],
                 worn_legs: worn[2],
                 worn_offhand: worn[3],
+                worn_mainhand: 0,
             },
         );
         finish_envelope(
@@ -10029,6 +10044,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10429,6 +10445,7 @@ pub(super) mod server_side {
                 max_hunger: vitals.max_hunger,
                 energy: vitals.energy,
                 max_energy: vitals.max_energy,
+                draw_progress: 0,
                 level: vitals.level,
                 experience: vitals.experience,
                 experience_to_next: vitals.experience_to_next,
@@ -10772,7 +10789,10 @@ mod tests {
         // refuses to go without, which a V39 server never sends.
         // V41 puts health on `EntityState`: a non-zero `max_health` this client refuses to
         // go without, where a V40 server's snapshot carries only padding.
-        assert_eq!(fb::ProtocolVersion::Current.0, 43);
+        // V44 appends `DrawRequest`, which a V43 server cannot name, and changes
+        // `AttackRequest.slot` to mean the main hand: a V43 client naming its hotbar slot
+        // would have every swing dropped after a clean handshake.
+        assert_eq!(fb::ProtocolVersion::Current.0, 44);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),
@@ -10845,6 +10865,7 @@ mod tests {
             (fb::Payload::InstanceEntryAnswer, 69),
             (fb::Payload::InstanceBindings, 70),
             (fb::Payload::EncounterTimeline, 71),
+            (fb::Payload::DrawRequest, 72),
         ] {
             assert_eq!(tag.0, value);
         }
@@ -10860,7 +10881,7 @@ mod tests {
         // member is `NONE`, the implicit zero every FlatBuffers union carries.
         assert_eq!(
             fb::Payload::ENUM_VALUES.len(),
-            72,
+            73,
             "a new union member needs a decision, not a test edit"
         );
     }
@@ -10890,7 +10911,7 @@ mod tests {
     /// server→client ones. An entry here is the deliberate decision the fallback used
     /// to make on everyone's behalf, and adding a union member is not possible without
     /// making it — the length and the order are both asserted below.
-    const CLASSIFICATION: [(fb::Payload, Handling); 72] = [
+    const CLASSIFICATION: [(fb::Payload, Handling); 73] = [
         (fb::Payload::NONE, Handling::Deferred),
         (fb::Payload::ClientHello, Handling::ClientOnly),
         (fb::Payload::ServerWelcome, Handling::Consumed),
@@ -10983,6 +11004,8 @@ mod tests {
         // about the decode boundary rather than about a consumer, exactly as it was for
         // `MapTile` before the map window existed.
         (fb::Payload::EncounterTimeline, Handling::Consumed),
+        // V44's bow draw travels client -> server only.
+        (fb::Payload::DrawRequest, Handling::ClientOnly),
     ];
 
     /// An envelope whose union tag is exactly `kind`, carrying an empty payload table.
@@ -12974,6 +12997,7 @@ mod tests {
         assert_eq!(fb::RefusedAction::PlayerTrade.0, 20);
         assert_eq!(fb::RefusedAction::CrossPortal.0, 21);
         assert_eq!(fb::RefusedAction::Energy.0, 22);
+        assert_eq!(fb::RefusedAction::MoveInventory.0, 23);
         // No member for a removal, and its absence is the decision: a refused removal is
         // silence on purpose, because a client that could tell "no such structure" from
         // "not yours" from "too far away" could map somebody else's camp by asking.
@@ -12984,7 +13008,7 @@ mod tests {
         // own pack, which they are already holding a complete `InventoryState` of.
         assert_eq!(
             fb::RefusedAction::ENUM_VALUES.len(),
-            23,
+            24,
             "a removal is refused in silence by design"
         );
 
@@ -13052,6 +13076,9 @@ mod tests {
             // V40's one, appended inside the low group: the player's own reserve answered
             // a legal swing no, and waiting is what they can do about it.
             (fb::RefusalReason::NotEnoughEnergy, 53),
+            // V44's one, appended inside the low group: the player's own equipment
+            // answered a legal move no, and taking one item off is what they can do.
+            (fb::RefusalReason::HandsOccupied, 54),
             (fb::RefusalReason::MalformedNoAnchor, 64),
             (fb::RefusalReason::MalformedFacing, 65),
             (fb::RefusalReason::MalformedSlot, 66),
@@ -13061,7 +13088,7 @@ mod tests {
         }
         assert_eq!(
             fb::RefusalReason::ENUM_VALUES.len(),
-            58,
+            59,
             "a new reason needs a sentence here, not a test edit"
         );
 
@@ -16177,6 +16204,124 @@ mod tests {
             .expect("the payload is a block request");
         assert!(request.active());
         assert_eq!(request.client_tick(), u32::MAX);
+    }
+
+    // -----------------------------------------------------------------------
+    // Protocol V44 — the main hand, the two-handed refusal and the bow draw
+    //
+    // Read through the generated bindings, because nothing in this build consumes
+    // them yet: the main-hand cell and the refusal sentence are #1238, the draw is
+    // #1240.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v44_draw_progress_reads_zero_when_absent_and_survives_encoding() {
+        let mut builder = FlatBufferBuilder::new();
+        let mut vitals = fb::PlayerVitalsBuilder::new(&mut builder);
+        vitals.add_max_health(100);
+        let vitals = vitals.finish();
+        builder.finish_minimal(vitals);
+        let absent = flatbuffers::root::<fb::PlayerVitals>(builder.finished_data())
+            .expect("a vitals table without the field verifies");
+        assert_eq!(
+            absent.draw_progress(),
+            0,
+            "an older server's vitals read as not drawing"
+        );
+
+        for draw_progress in [1, 128, u8::MAX] {
+            let mut builder = FlatBufferBuilder::new();
+            let vitals = fb::PlayerVitals::create(
+                &mut builder,
+                &fb::PlayerVitalsArgs {
+                    max_health: 100,
+                    max_energy: 100,
+                    energy: 40,
+                    draw_progress,
+                    ..Default::default()
+                },
+            );
+            builder.finish_minimal(vitals);
+            let read = flatbuffers::root::<fb::PlayerVitals>(builder.finished_data())
+                .expect("the vitals verify");
+            assert_eq!(read.draw_progress(), draw_progress);
+            assert_eq!(read.energy(), 40, "appending did not move an earlier field");
+        }
+    }
+
+    #[test]
+    fn v44_worn_mainhand_reads_zero_when_absent_and_survives_encoding() {
+        let mut builder = FlatBufferBuilder::new();
+        let mut appearance = fb::PlayerAppearanceBuilder::new(&mut builder);
+        appearance.add_entity_id(7);
+        appearance.add_worn_offhand(310);
+        let appearance = appearance.finish();
+        builder.finish_minimal(appearance);
+        let absent = flatbuffers::root::<fb::PlayerAppearance>(builder.finished_data())
+            .expect("an appearance without the field verifies");
+        assert_eq!(
+            absent.worn_mainhand(),
+            0,
+            "an older server's appearance holds nothing"
+        );
+        assert_eq!(absent.worn_offhand(), 310);
+
+        let mut builder = FlatBufferBuilder::new();
+        let appearance = fb::PlayerAppearance::create(
+            &mut builder,
+            &fb::PlayerAppearanceArgs {
+                entity_id: 7,
+                worn_offhand: 310,
+                worn_mainhand: u16::MAX,
+                ..Default::default()
+            },
+        );
+        builder.finish_minimal(appearance);
+        let read = flatbuffers::root::<fb::PlayerAppearance>(builder.finished_data())
+            .expect("the appearance verifies");
+        assert_eq!(read.worn_mainhand(), u16::MAX);
+        assert_eq!(read.worn_offhand(), 310, "the off-hand keeps its own field");
+    }
+
+    #[test]
+    fn v44_draw_request_carries_only_the_edge_and_is_never_read_by_a_client() {
+        for active in [true, false] {
+            let mut builder = FlatBufferBuilder::new();
+            let payload = fb::DrawRequest::create(
+                &mut builder,
+                &fb::DrawRequestArgs {
+                    active,
+                    client_tick: u32::MAX,
+                },
+            );
+            let frame =
+                finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value());
+            let envelope = fb::root_as_envelope(&frame).expect("the frame verifies");
+            assert_eq!(envelope.payload_type(), fb::Payload::DrawRequest);
+            let request = envelope
+                .payload_as_draw_request()
+                .expect("the payload is a draw request");
+            assert_eq!(request.active(), active);
+            assert_eq!(request.client_tick(), u32::MAX);
+            // Client -> server only: a server that sent one is refused as out of direction.
+            assert_eq!(decode(&frame), Ok(Message::ClientOnly("DrawRequest")));
+        }
+    }
+
+    #[test]
+    fn v44_refusal_members_decode_to_their_own_names() {
+        assert_eq!(
+            RefusedAction::from_wire(fb::RefusedAction::MoveInventory),
+            RefusedAction::MoveInventory
+        );
+        assert_eq!(
+            RefusalReason::from_wire(fb::RefusalReason::HandsOccupied),
+            RefusalReason::HandsOccupied
+        );
+        assert!(
+            !RefusalReason::HandsOccupied.is_client_defect(),
+            "a two-handed conflict is the world saying no, not a defect in this build"
+        );
     }
 
     // -----------------------------------------------------------------------

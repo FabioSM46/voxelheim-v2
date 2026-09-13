@@ -45,8 +45,8 @@ pub enum PlayerAppearanceOffset {}
 ///     stored display text verbatim, and a renderer must bound its layout rather than
 ///     changing what names the server accepts. It is never parsed or used as identity
 ///   - `level` is never zero
-///   - `worn_head`, `worn_chest`, `worn_legs` and `worn_offhand` are item ids, with zero
-///     meaning that the corresponding equipment slot is empty
+///   - `worn_head`, `worn_chest`, `worn_legs`, `worn_offhand` and `worn_mainhand` are
+///     item ids, with zero meaning that the corresponding equipment slot is empty
 ///   - nothing here is required to name an entity in any snapshot, in either
 ///     direction; see above
 pub struct PlayerAppearance<'a> {
@@ -72,6 +72,7 @@ impl<'a> PlayerAppearance<'a> {
     pub const VT_WORN_CHEST: ::flatbuffers::VOffsetT = 14;
     pub const VT_WORN_LEGS: ::flatbuffers::VOffsetT = 16;
     pub const VT_WORN_OFFHAND: ::flatbuffers::VOffsetT = 18;
+    pub const VT_WORN_MAINHAND: ::flatbuffers::VOffsetT = 20;
 
     #[inline]
     pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
@@ -95,6 +96,7 @@ impl<'a> PlayerAppearance<'a> {
         if let Some(x) = args.appearance {
             builder.add_appearance(x);
         }
+        builder.add_worn_mainhand(args.worn_mainhand);
         builder.add_worn_offhand(args.worn_offhand);
         builder.add_worn_legs(args.worn_legs);
         builder.add_worn_chest(args.worn_chest);
@@ -206,6 +208,20 @@ impl<'a> PlayerAppearance<'a> {
                 .unwrap()
         }
     }
+    /// V44. Item id in the trailing main-hand equipment slot, or zero when nothing is held.
+    /// The same type as `worn_offhand`. A V43 server never sends it, and it reads as an
+    /// empty hand, which is what that server's layout has.
+    #[inline]
+    pub fn worn_mainhand(&self) -> u16 {
+        // Safety:
+        // Created from valid Table for this object
+        // which contains a valid value in this slot
+        unsafe {
+            self._tab
+                .get::<u16>(PlayerAppearance::VT_WORN_MAINHAND, Some(0))
+                .unwrap()
+        }
+    }
 }
 
 impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
@@ -227,6 +243,7 @@ impl ::flatbuffers::Verifiable for PlayerAppearance<'_> {
             .visit_field::<u16>("worn_chest", Self::VT_WORN_CHEST, false)?
             .visit_field::<u16>("worn_legs", Self::VT_WORN_LEGS, false)?
             .visit_field::<u16>("worn_offhand", Self::VT_WORN_OFFHAND, false)?
+            .visit_field::<u16>("worn_mainhand", Self::VT_WORN_MAINHAND, false)?
             .finish();
         Ok(())
     }
@@ -240,6 +257,7 @@ pub struct PlayerAppearanceArgs<'a> {
     pub worn_chest: u16,
     pub worn_legs: u16,
     pub worn_offhand: u16,
+    pub worn_mainhand: u16,
 }
 impl<'a> Default for PlayerAppearanceArgs<'a> {
     #[inline]
@@ -253,6 +271,7 @@ impl<'a> Default for PlayerAppearanceArgs<'a> {
             worn_chest: 0,
             worn_legs: 0,
             worn_offhand: 0,
+            worn_mainhand: 0,
         }
     }
 }
@@ -306,6 +325,11 @@ impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PlayerAppearanceBuilder<'a, '
             .push_slot::<u16>(PlayerAppearance::VT_WORN_OFFHAND, worn_offhand, 0);
     }
     #[inline]
+    pub fn add_worn_mainhand(&mut self, worn_mainhand: u16) {
+        self.fbb_
+            .push_slot::<u16>(PlayerAppearance::VT_WORN_MAINHAND, worn_mainhand, 0);
+    }
+    #[inline]
     pub fn new(
         _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
     ) -> PlayerAppearanceBuilder<'a, 'b, A> {
@@ -333,6 +357,7 @@ impl ::core::fmt::Debug for PlayerAppearance<'_> {
         ds.field("worn_chest", &self.worn_chest());
         ds.field("worn_legs", &self.worn_legs());
         ds.field("worn_offhand", &self.worn_offhand());
+        ds.field("worn_mainhand", &self.worn_mainhand());
         ds.finish()
     }
 }
