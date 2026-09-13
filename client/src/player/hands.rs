@@ -2133,8 +2133,9 @@ const SHIELD_POST_HALF_WIDTH: f32 = 0.02;
 ///
 /// **Deep enough for a fist centred on it to clear the wood.** The hand's fist is a cube of
 /// [`HAND_SIZE`], so at [`SHIELD_IN_HAND`] half of it is 0.12 of the diameter; the planks' back
-/// reaches 0.022, so 0.16 leaves the fist's front face a millimetre and more behind them, and
-/// the gap between the wood and the bar the fingers pass through is 0.113 of the diameter.
+/// reaches 0.022, so 0.16 leaves the fist's front face 0.018 of the diameter — 1.8 mm — behind
+/// them, and the gap between the wood's back and the bar's front the fingers pass through is
+/// `0.16 − 0.02 − 0.022 = 0.118` of the diameter.
 /// Both are measured rather than trusted, in
 /// [`a_fist_on_the_grip_point_holds_the_shield_from_behind_with_room_for_the_fingers`].
 const SHIELD_GRIP_DEPTH: f32 = 0.16;
@@ -6691,9 +6692,34 @@ mod tests {
             "a fist on the grip point does not fit between the handle's posts"
         );
 
+        // **Against the fist the hand actually draws, not against the item frame's origin.**
+        // `held_mesh` puts the fist first in its buffers, so its own vertices say where it is;
+        // a composition whose fist were not centred on the origin would move this and not
+        // `item_translation`, which is the gap the review on #1250 named.
+        let held = held_mesh(
+            TEST_SKIN,
+            selected_appearance(Some(InventoryStack {
+                item_id: crafting::ITEM_WOODEN_SHIELD,
+                count: 1,
+                ..Default::default()
+            })),
+        );
+        let fist: Vec<Vec3> = positions(&held)
+            .into_iter()
+            .take(fist_mesh().count_vertices())
+            .map(Vec3::from_array)
+            .collect();
+        let (fist_low, fist_high) = bounds(&fist);
         assert!(
-            (item_translation(ItemShape::Shield) + grip).length() < 1e-7,
-            "the held shield is not seated with its grip point on the fist's centre"
+            (fist_high - fist_low - HAND_SIZE).length() < 1e-6,
+            "the first vertices of the held shield are not the fist: {fist_low:?} to {fist_high:?}"
+        );
+        let fist_centre = (fist_low + fist_high) / 2.0;
+        let seated = item_translation(ItemShape::Shield) + grip;
+        assert!(
+            seated.distance(fist_centre) < 1e-6,
+            "the held shield's grip point lands at {seated:?}, not on the fist's centre at \
+             {fist_centre:?}"
         );
     }
 
