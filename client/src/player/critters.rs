@@ -64,8 +64,9 @@
 //! here had: mostly still, then very fast, then gone. It is a third [`Gait`], a [`Frame`] on
 //! legs, a [`Tail::Bob`], and two row fields — [`CritterSpecies::window`], so a slot can stand
 //! empty between lives, and [`CritterSpecies::burrows`], so a life can end *into* the snow.
-//! The one system change is a lynx left behind by a move being retired rather than kept, and
-//! [`Gait::Ambush`] says why.
+//! The system changes are two and belong together: a lynx left behind by a move is retired
+//! rather than kept, and a lynx on its way out is drawn where it stood rather than by the clock
+//! ([`Critter::held_at`]). [`Gait::Ambush`] says why.
 //!
 //! ## Two entities and no asset
 //!
@@ -349,14 +350,23 @@ pub(super) enum Gait {
     /// creature with remembered state. See [`AMBUSH_RING_NEAR`] for why the bolt can never close
     /// on the player, and [`ambush_travel`] for the three pieces.
     ///
-    /// **A lynx left behind by a move is retired, where any other critter is kept as a stray.**
-    /// The promise not to bolt toward the player is made to the cell its anchor is the centre of;
-    /// once the eye has crossed into another cell, a lynx still crouched on the old ring could
-    /// bolt straight at it. `keep_the_critters` therefore takes it into the snow the frame its
-    /// anchor is left behind — the one gait-dependent line in that system. What is *not* claimed:
-    /// a lynx already mid-bolt when that happens finishes the bolt as it sinks, for at most the
-    /// 0.8 seconds a bolt lasts, and the eye that just walked thirty-two blocks is not guaranteed
-    /// to be on the far side of it.
+    /// **A lynx left behind by a move is retired, where any other critter is kept as a stray —
+    /// and a lynx on its way out stops where it was last drawn.** The promise not to bolt toward
+    /// the player is made to the cell its anchor is the centre of; once the eye has crossed into
+    /// another cell, a lynx on the old ring could run straight at it, crouched or already
+    /// mid-bolt. So `keep_the_critters` retires it the frame its anchor is left behind — the one
+    /// gait-dependent line in that system — and from then on [`drawn_age`] draws it at
+    /// [`Critter::held_at`], the age it had on the last frame the old eye saw. It sinks into the
+    /// snow where it stood, at whatever point of the crouch or the bolt that was, so the distance
+    /// to the new eye changes only by the eye's own movement.
+    ///
+    /// Still a pure function: of the seed, the clock, and one age written once on the way out.
+    /// The hold applies to every way out, so a lynx retired just *before* its bolt does not bolt
+    /// while it sinks either. It was first written without the hold, and review on #1242 found
+    /// the mid-bolt case; `a_lynx_retired_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye`
+    /// measures it against the unheld bolt as its control, and
+    /// `a_lynx_left_behind_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye` does it end
+    /// to end.
     Ambush,
 }
 
@@ -1328,6 +1338,13 @@ pub(super) struct Critter {
     /// What `fade` is moving towards. Zero means this critter is on its way out, and nothing
     /// ever moves it back, so a look that flickers cannot make a critter flicker with it.
     pub(super) wanted: f32,
+    /// The age this critter was last drawn at when it was retired: written once, on the way out,
+    /// and never again.
+    ///
+    /// An ambusher is drawn at it for the rest of its fade — see [`drawn_age`] — so it sinks
+    /// where it stood rather than finishing a bolt at an eye that has left its cell. Every other
+    /// row ignores it.
+    held_at: Option<f32>,
     /// The height its feet are drawn at: the ground's answer, eased.
     ///
     /// The only per-critter state its position has, and it is deliberately the *ground* rather
@@ -1342,6 +1359,34 @@ pub(super) struct Critter {
     tail_material: Handle<StandardMaterial>,
     /// The eye pair's material, for a row that wears one. `None` spawns no eye entity.
     eye_material: Option<Handle<StandardMaterial>>,
+}
+
+impl Critter {
+    /// Starts this critter on its way out, remembering `last_drawn` — the age it had on the
+    /// frame before — as [`Critter::held_at`]. One-way, and the first answer stands: a critter
+    /// already leaving keeps the age it left at.
+    fn retire(&mut self, last_drawn: f32) {
+        self.wanted = 0.0;
+        self.held_at.get_or_insert(last_drawn);
+    }
+}
+
+/// The age a critter is drawn at: the clock's, except for an ambusher on its way out, which is
+/// drawn at the age it was retired at and so holds where it stood. See [`Gait::Ambush`].
+fn drawn_age(species: &CritterSpecies, age: f32, held_at: Option<f32>) -> f32 {
+    match (species.gait, held_at) {
+        (Gait::Ambush, Some(held)) => held,
+        _ => age,
+    }
+}
+
+/// The age a slot's critter had on the previous frame, which is the frame it was last drawn at.
+///
+/// **The previous frame's and not this one's**, because the frame that retires a lynx is the
+/// frame the eye has already crossed: holding it at this frame's age would move it one frame
+/// further along its bolt toward an eye that is no longer in its cell.
+fn last_drawn_age(species: &CritterSpecies, slot: usize, elapsed: f32, dt: f32) -> f32 {
+    generation_of(species, slot, (elapsed - dt).max(0.0)).1
 }
 
 /// One tail, as a child of the critter it belongs to.
@@ -2137,14 +2182,15 @@ pub(super) fn keep_the_critters(
         let outside = Vec3::new(from.x, 0.0, from.z).abs().max_element() > CRITTER_RANGE;
         // An ambusher is never kept as a stray: its promise not to bolt toward the player is
         // made to the cell its anchor is the centre of, and the eye has just left that cell. See
-        // `Gait::Ambush` for what this does and does not buy.
+        // `Gait::Ambush` for why it also holds where it stood.
         let left_behind = row.gait == Gait::Ambush && critter.anchor != anchor;
         if wanted != Some(critter.species)
             || outside
             || left_behind
             || generation != critter.generation
         {
-            critter.wanted = 0.0;
+            let index = critter.index;
+            critter.retire(last_drawn_age(row, index, elapsed, time.delta_secs()));
             // Only a critter the *anchor* left behind says which way the player went; one
             // retired because the ground changed under them, or because its life ran out,
             // says nothing about direction.
@@ -2170,7 +2216,13 @@ pub(super) fn keep_the_critters(
         if staying < wanted_size {
             staying += 1;
         } else if let Ok((_, mut critter)) = ground.get_mut(entity) {
-            critter.wanted = 0.0;
+            let last = last_drawn_age(
+                &CRITTERS[critter.species],
+                critter.index,
+                elapsed,
+                time.delta_secs(),
+            );
+            critter.retire(last);
         }
     }
 
@@ -2275,6 +2327,7 @@ pub(super) fn keep_the_critters(
                     trunk,
                     fade: 0.0,
                     wanted: 1.0,
+                    held_at: None,
                     stand: surface,
                     pool,
                     body_material: body_material.clone(),
@@ -2411,16 +2464,19 @@ pub(super) fn run_the_critters(
         // its trunk while it is disappearing rather than dissolving on the ground. It is set
         // here rather than in `keep_the_critters` because this is the system that owns the
         // fade, and it is one-way: nothing moves `wanted` back up.
+        let last = last_drawn_age(species, critter.index, elapsed, dt);
         if critter.wanted > 0.0 && age >= species.life - CRITTER_FADE_SECONDS {
-            critter.wanted = 0.0;
+            critter.retire(last);
         }
 
-        let position = place(species, critter.seed, age, critter.anchor, critter.trunk);
+        // The clock's age, or — for an ambusher on its way out — the age it was retired at.
+        let drawn = drawn_age(species, age, critter.held_at);
+        let position = place(species, critter.seed, drawn, critter.anchor, critter.trunk);
         // The ground: a named step over `place`'s answer, never a sixth argument to it.
         let Some(stand) = next_stand(terrain, position, critter.anchor.y, critter.stand, dt) else {
             // Nowhere to stand. Retired rather than drawn: this frame keeps the height it
             // had, and the fade takes it from here.
-            critter.wanted = 0.0;
+            critter.retire(last);
             continue;
         };
         // Guarded for the reason the visibility write below is: `Mut` marks a component
@@ -2442,7 +2498,7 @@ pub(super) fn run_the_critters(
         let ahead = place(
             species,
             critter.seed,
-            age + HEADING_STEP,
+            drawn_age(species, age + HEADING_STEP, critter.held_at),
             critter.anchor,
             critter.trunk,
         ) - position;
@@ -4339,5 +4395,60 @@ mod tests {
             assert!(row.window >= row.life, "{:?} outlives its window", row.gait);
         }
         assert!(lynx.life * 4.0 <= lynx.window);
+    }
+
+    #[test]
+    fn a_lynx_retired_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye() {
+        // Review on #1242: a lynx retired because the eye left its cell went on being placed by
+        // the clock for the rest of its fade, so one retired mid-bolt finished the bolt — at an
+        // eye that could be standing in its path. Taken at its worst on purpose: retired halfway
+        // through the bolt, with the eye already in the next cell and three blocks ahead on the
+        // very line the lynx is running.
+        let lynx = &CRITTERS[LYNX];
+        let cell = IVec3::new(-2, 1, 4);
+        let anchor = anchor_of(cell);
+        let retired = lynx.forage_seconds() - AMBUSH_BOLT_SECONDS / 2.0;
+        let flat = |at: Vec3, eye: Vec3| Vec3::new(at.x - eye.x, 0.0, at.z - eye.z).length();
+        for seed in 0..24u64 {
+            let seed = mix(seed, 0x4E7D);
+            let (_, ahead) = ambush_line(seed, anchor);
+            let at = place(lynx, seed, retired, anchor, None);
+            let eye = Vec3::new(at.x, anchor.y, at.z) + ahead * 3.0;
+            let crossed = cell_of(eye);
+            assert!(
+                (crossed.x, crossed.z) != (cell.x, cell.z),
+                "seed {seed}: the eye is still in the lynx's cell, so this is not the case"
+            );
+            let start = flat(at, eye);
+            let mut unheld_closed = 0.0f32;
+            for frame in 0..=(CRITTER_FADE_SECONDS / DT).ceil() as usize {
+                let age = retired + frame as f32 * DT;
+                let held = place(
+                    lynx,
+                    seed,
+                    drawn_age(lynx, age, Some(retired)),
+                    anchor,
+                    None,
+                );
+                assert!(
+                    flat(held, eye) >= start - 1e-4,
+                    "seed {seed} frame {frame}: a leaving lynx closed from {start} to {}",
+                    flat(held, eye)
+                );
+                let unheld = place(lynx, seed, drawn_age(lynx, age, None), anchor, None);
+                unheld_closed = unheld_closed.max(start - flat(unheld, eye));
+            }
+            // **The control**: the same lynx drawn by the clock alone — which is what this module
+            // did before the hold — runs the rest of its bolt through the eye.
+            assert!(
+                unheld_closed > 2.0,
+                "seed {seed}: the unheld bolt closed only {unheld_closed}, so this measures nothing"
+            );
+        }
+        // And only an ambusher holds: a squirrel or a mouse on its way out is drawn by the clock,
+        // exactly as before.
+        for row in CRITTERS.iter().filter(|row| row.gait != Gait::Ambush) {
+            assert_eq!(drawn_age(row, 3.0, Some(1.0)), 3.0, "{:?} held", row.gait);
+        }
     }
 }
