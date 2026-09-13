@@ -490,13 +490,19 @@ pub(super) const CRITTERS: [CritterSpecies; 2] = [
 /// — larger than life, deliberately, for the reason the owl's are. That is 0.30° at four
 /// blocks, a glint, and 0.08° at fifteen, a pinprick, which is what a pair of eyes in the dark
 /// at that range is. They sit ahead of the head either side of the narrow muzzle, far enough out
-/// that the faces are not inside the body's own shell —
-/// `a_critters_eyes_are_not_buried_in_its_own_head` holds that.
+/// that the whole of each face, not just its centre, is outside the body's own shell: at the
+/// eyes' station the muzzle is 0.027 either side of the centre line, and each face's inner edge
+/// is at `spread - size / 2` = 0.03 — `a_critters_eyes_are_not_buried_in_its_own_head` measures
+/// the edges.
+///
+/// **The spread was 0.055, which put that inner edge at 0.02**, so a strip of each face sat inside
+/// the muzzle, behind its front surface and never drawn. The test measured the centres then, and
+/// the centres were clear; review on #1222 pointed out that a face is not its centre.
 ///
 /// A rodent's eyeshine is red where an owl's is gold, and the glow's red component is over one
 /// for the reason `structures.rs`'s rune gives.
 const MOUSE_EYES: Eyeshine = Eyeshine {
-    spread: 0.055,
+    spread: 0.065,
     forward: 0.47,
     rise: 0.14,
     size: 0.07,
@@ -3362,14 +3368,15 @@ mod tests {
     #[test]
     fn a_critters_eyes_are_not_buried_in_its_own_head() {
         // A face inside the body's shell is drawn behind it and never seen, and nothing else
-        // fails on a glint that is not there. So each eye's centre is measured against the
-        // body's cross-section at its own station along the model.
+        // fails on a glint that is not there. So each eye's **face** — a square of side
+        // `size` about its centre, which is what `eye_pair_mesh` draws — is measured against
+        // the body's cross-section at its own station along the model: clear of the section's
+        // widest reach to the side, or wholly above its top, or wholly below its bottom.
+        //
+        // It measured the centres until review on #1222, and the mouse's centres were clear
+        // while a strip of each face was inside the muzzle.
         let sections = body_sections();
-        let mut measured = 0usize;
-        for species in &CRITTERS {
-            let Some(eyes) = species.eyeshine else {
-                continue;
-            };
+        let clear = |eyes: Eyeshine| {
             let z = -eyes.forward;
             let pair = sections
                 .windows(2)
@@ -3379,9 +3386,19 @@ mod tests {
             let half_width = lerp(pair[0].half_width, pair[1].half_width, t);
             let half_height = lerp(pair[0].half_height, pair[1].half_height, t);
             let lift = lerp(pair[0].lift, pair[1].lift, t);
+            let half = eyes.size / 2.0;
+            eyes.spread - half > half_width
+                || eyes.rise - half > lift + half_height
+                || eyes.rise + half < lift - half_height
+        };
+        let mut measured = 0usize;
+        for species in &CRITTERS {
+            let Some(eyes) = species.eyeshine else {
+                continue;
+            };
             assert!(
-                eyes.spread > half_width || (eyes.rise - lift).abs() > half_height,
-                "{:?}'s eyes sit inside its own head",
+                clear(eyes),
+                "{:?}'s eye faces reach inside its own head",
                 species.gait
             );
             // In the front of the animal, and clear of the ground it stands on.
@@ -3389,6 +3406,15 @@ mod tests {
             measured += 1;
         }
         assert!(measured > 0, "no row wears eyes, so this measured nothing");
+        // **The negative control**: the spread the mouse shipped with, whose centres were clear
+        // and whose faces were not, must fail — or this is measuring centres again.
+        assert!(
+            !clear(Eyeshine {
+                spread: 0.055,
+                ..MOUSE_EYES
+            }),
+            "a face whose inner edge is inside the muzzle measured clear"
+        );
     }
 
     #[test]

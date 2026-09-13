@@ -6668,6 +6668,11 @@ fn mice_come_out_on_the_sand_at_night_wearing_their_eyes_and_not_by_day() {
     let glow = row.eyeshine.expect("a mouse wears eyeshine").glow;
     for mouse in mice {
         let world = app.world();
+        assert_eq!(
+            world.entity(mouse).get::<Visibility>(),
+            Some(&Visibility::Visible),
+            "a mouse above water is not drawn"
+        );
         let children = world
             .entity(mouse)
             .get::<Children>()
@@ -6693,7 +6698,23 @@ fn mice_come_out_on_the_sand_at_night_wearing_their_eyes_and_not_by_day() {
                 .resource::<Assets<StandardMaterial>>()
                 .get(handle)
                 .expect("a mouse's material exists");
-            glowing += usize::from(material.emissive == glow);
+            if material.emissive == glow {
+                glowing += 1;
+                // **Visible, not merely claimed** (review on #1222). The glow is written when a
+                // slot is claimed, with an alpha of zero; the fade lives on the base colour's
+                // alpha alone, so eyes whose material stopped being rewritten would still glow
+                // here and never be seen. Eight frames is 0.8 s of a 1.25 s fade.
+                assert!(
+                    material.base_color.alpha() > 0.0,
+                    "a mouse's eyes glow at an alpha of {}",
+                    material.base_color.alpha()
+                );
+                let mesh = &entity.get::<Mesh3d>().expect("a mouse's eyes are drawn").0;
+                assert!(
+                    world.resource::<Assets<Mesh>>().get(mesh).is_some(),
+                    "a mouse's eyes are drawn from a mesh that does not exist"
+                );
+            }
         }
         assert_eq!(glowing, 1, "exactly one part of a mouse glows: its eyes");
     }
@@ -7150,6 +7171,28 @@ fn across(a: Vec3, b: Vec3) -> f32 {
     Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
 }
 
+/// What one pair of eyes is drawn as right now: its fade, its material's alpha and brightest
+/// glow component, whether its mesh is an asset that exists, and its visibility.
+fn pair_drawn(app: &App, entity: Entity) -> (f32, f32, f32, bool, Visibility) {
+    let world = app.world();
+    let pair = world.entity(entity);
+    let fade = pair.get::<watchers::Watcher>().expect("a pair").fade;
+    let meshed = pair
+        .get::<Mesh3d>()
+        .is_some_and(|mesh| world.resource::<Assets<Mesh>>().get(&mesh.0).is_some());
+    let material = pair
+        .get::<MeshMaterial3d<StandardMaterial>>()
+        .and_then(|material| {
+            world
+                .resource::<Assets<StandardMaterial>>()
+                .get(&material.0)
+        })
+        .expect("a pair is drawn with a material that exists");
+    let glow = material.emissive.red.max(material.emissive.green);
+    let visibility = *pair.get::<Visibility>().expect("a pair is drawn or hidden");
+    (fade, material.base_color.alpha(), glow, meshed, visibility)
+}
+
 /// How many frames of a snowy night the positive test below is given to see a pair light: three
 /// windows of every slot, which is how long "now and then" has to be allowed to take.
 const A_WATCH: usize = 900;
@@ -7162,6 +7205,7 @@ fn a_snowy_night_is_watched_from_the_edge_of_the_dark_and_nothing_comes_nearer()
     // drawn inside the floor on any frame — the one it is running at goes out first.
     let mut app = watching_from(GroundLook::Snow, 18_000);
     let mut lit: std::collections::HashMap<Entity, Vec3> = std::collections::HashMap::new();
+    let mut brightest = 0.0f32;
     for frame in 0..A_WATCH {
         app.update();
         let now = watchers_now(&mut app);
@@ -7171,6 +7215,22 @@ fn a_snowy_night_is_watched_from_the_edge_of_the_dark_and_nothing_comes_nearer()
             now.len()
         );
         for (entity, at) in now {
+            // **What is drawn, not only where** (review on #1222): a real mesh, a glowing
+            // material, visible, and an alpha that is exactly the pair's fade — so a pair left
+            // at the alpha of zero it is claimed with, or spawned without a mesh, fails here.
+            let (fade, alpha, glow, meshed, visibility) = pair_drawn(&app, entity);
+            assert!(meshed, "frame {frame}: a pair has no mesh to draw");
+            assert!(glow > 1.0, "frame {frame}: a pair glows at only {glow}");
+            assert_eq!(
+                visibility,
+                Visibility::Visible,
+                "frame {frame}: a pair is not drawn"
+            );
+            assert!(
+                alpha > 0.0 && (alpha - fade).abs() < 1e-6,
+                "frame {frame}: a pair at fade {fade} is drawn at alpha {alpha}"
+            );
+            brightest = brightest.max(alpha);
             let distance = across(at, CRITTER_EYE);
             let placed = watchers::WATCH_PLACED;
             assert!(
@@ -7191,6 +7251,12 @@ fn a_snowy_night_is_watched_from_the_edge_of_the_dark_and_nothing_comes_nearer()
     assert!(
         !lit.is_empty(),
         "a whole watch of a snowy night lit no eyes at all"
+    );
+    // A pair holds for six seconds or more and fades in over one and a half, so at least one
+    // reached its full alpha on the way.
+    assert!(
+        brightest > 0.999,
+        "no pair was ever drawn fully lit: the brightest reached alpha {brightest}"
     );
 
     // The pair is one entity with nothing under it, carrying nothing a gameplay system reads.
