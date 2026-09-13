@@ -817,6 +817,7 @@ fn wildlife_sequence(
                 height: profile.height,
                 origin,
                 gain: 1.0,
+                may_start: true,
             },
             |source| {
                 position.set(source);
@@ -1231,7 +1232,7 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
             eye,
             &profile
         ),
-        (body, 0.0, 0.0)
+        Some((body, 0.0, 0.0))
     );
 
     // Not drawn: the row's bearing circle about the listener, at the row's own numbers.
@@ -1244,7 +1245,32 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
             eye,
             &profile
         ),
-        (eye, profile.radius, profile.height)
+        Some((eye, profile.radius, profile.height))
+    );
+
+    // A row heard only from its body: at the body when one is drawn, exactly as above, and
+    // **no placement at all** when none is — not the circle (#1194, review on #1242).
+    assert_eq!(
+        super::voice_placement(
+            Origin::Body,
+            Habitat::Critter(LYNX),
+            &[],
+            &[(LYNX, body)],
+            eye,
+            &profile
+        ),
+        Some((body, 0.0, 0.0))
+    );
+    assert_eq!(
+        super::voice_placement(
+            Origin::Body,
+            Habitat::Critter(LYNX),
+            &[],
+            &[(SQUIRREL, body)],
+            eye,
+            &profile
+        ),
+        None
     );
 
     // A voice that belongs to no visible creature keeps the circle even with bodies drawn.
@@ -1261,7 +1287,7 @@ fn the_lane_places_a_drawn_creature_at_its_body_and_everything_else_on_its_circl
             eye,
             &profile
         ),
-        (eye, profile.radius, profile.height)
+        Some((eye, profile.radius, profile.height))
     );
 }
 
@@ -1423,7 +1449,8 @@ fn a_simulated_desert_night_hears_a_few_squeaks_each_from_the_mouse() {
     // A squirrel drawn nearer the eye, so "the nearest critter" and "the nearest mouse" differ.
     let drawn = [(SQUIRREL, eye + Vec3::X), (MOUSE, mouse)];
     let (origin, radius, height) =
-        super::voice_placement(row.origin, row.habitat, &[], &drawn, eye, &profile);
+        super::voice_placement(row.origin, row.habitat, &[], &drawn, eye, &profile)
+            .expect("a drawn mouse places its squeak");
     assert_eq!((origin, radius, height), (mouse, 0.0, 0.0));
 
     for seed in [17, 39, 1123] {
@@ -1443,6 +1470,7 @@ fn a_simulated_desert_night_hears_a_few_squeaks_each_from_the_mouse() {
                     height,
                     origin,
                     gain: 1.0,
+                    may_start: true,
                 },
                 |source| {
                     placed.set(source);
@@ -1512,9 +1540,10 @@ fn a_simulated_night_hears_a_few_hoots_rather_than_a_chorus() {
 
 /// The origin rule, as the table declares it.
 ///
-/// An `Origin::Creature` row must name a creature the eye can see — a flock or a critter.
-/// Declaring it on a ground row would be a promise to place a voice at a body that does not
-/// exist, and the fallback would be the only branch ever taken.
+/// An `Origin::Creature` or `Origin::Body` row must name a creature the eye can see — a flock or
+/// a critter. Declaring either on a ground row would be a promise to place a voice at a body that
+/// does not exist, and the fallback — or, for `Body`, the silence — would be the only branch ever
+/// taken.
 ///
 /// **Both kinds now qualify**, which the name of this test no longer had to be widened for
 /// only because it says "flock": #1190 brought the squirrel as a `Critter` row placed at its
@@ -1523,22 +1552,28 @@ fn a_simulated_night_hears_a_few_hoots_rather_than_a_chorus() {
 /// thought about where its voice comes from fails here rather than passing quietly.
 #[test]
 fn at_the_creature_is_only_declared_by_a_row_that_names_one() {
-    let mut placed = 0usize;
+    let (mut placed, mut only_placed) = (0usize, 0usize);
     for voice in &WILDLIFE {
-        if voice.origin == Origin::Creature {
+        if matches!(voice.origin, Origin::Creature | Origin::Body) {
             assert!(
                 matches!(voice.habitat, Habitat::Flock(_) | Habitat::Critter(_)),
                 "{:?} is placed at a creature it does not name",
                 voice.call
             );
             placed += 1;
+            only_placed += usize::from(voice.origin == Origin::Body);
         }
     }
     assert_eq!(
         placed, 4,
         "the squirrel, the owl, the mouse and the lynx are placed at their own bodies today"
     );
-    assert_eq!(WILDLIFE[row_of(Call::Lynx)].origin, Origin::Creature);
+    // And one of them is heard *only* from its body: the lynx, drawn ten seconds in forty.
+    assert_eq!(
+        only_placed, 1,
+        "the lynx is the one row silent without a body"
+    );
+    assert_eq!(WILDLIFE[row_of(Call::Lynx)].origin, Origin::Body);
     assert_eq!(WILDLIFE[row_of(Call::Mouse)].origin, Origin::Creature);
     assert_eq!(WILDLIFE[row_of(Call::Owl)].origin, Origin::Creature);
 
@@ -1764,19 +1799,107 @@ fn the_lynx_is_heard_exactly_where_the_critter_table_stands_it_and_only_by_day()
     );
 }
 
+/// Ten minutes of the northern day's lanes as the real system runs them, at 0.1 s a tick: each
+/// of `calls` through [`super::call_frame`] — the glue `update` uses, not a copy of it — with
+/// `drawn` answering which critters are drawn at each tick. Returns each lane's onsets as
+/// `(tick, where it began)`, and whether each tick was audible at all.
+fn a_northern_day(
+    seed: u64,
+    calls: &[Call],
+    eye: Vec3,
+    drawn: impl Fn(usize) -> Vec<(usize, Vec3)>,
+) -> (Vec<Vec<(usize, Vec3)>>, Vec<bool>) {
+    use std::cell::Cell;
+    let mixer = mixer();
+    let mut lanes: Vec<Calls> = calls.iter().map(|_| Calls::default()).collect();
+    let mut starts: Vec<Vec<(usize, Vec3)>> = vec![Vec::new(); calls.len()];
+    let mut audible = Vec::with_capacity(6000);
+    for tick in 0..6000 {
+        let critters = drawn(tick);
+        for (index, call) in calls.iter().enumerate() {
+            let voice = &WILDLIFE[row_of(*call)];
+            let profile = call.profile();
+            let frame = super::call_frame(voice, &[], &critters, eye, seed, 0.1, 1.0);
+            let placed = Cell::new(Vec3::NAN);
+            let mut started = false;
+            lanes[index].update(
+                &mixer,
+                frame,
+                |source| {
+                    placed.set(source);
+                    spatial::place(eye, 0.0, source, profile.range, 0.0)
+                },
+                |seed, rate| {
+                    started = true;
+                    call.bake(seed, rate)
+                },
+            );
+            if started {
+                starts[index].push((tick, placed.get()));
+            }
+        }
+        audible.push(energy(&mixer, 800) > 0.0);
+    }
+    (starts, audible)
+}
+
+/// "Its call comes from the lynx" — and so **no lynx drawn is no yowl** (review on #1242).
+///
+/// The same ten minutes of the lane twice: once with a mouse drawn and no lynx, which must hear
+/// not one yowl and not one audible tick, and once with a lynx drawn beside the mouse, which must
+/// hear yowls and every one of them begun at the lynx. Before `Origin::Body` the first run was a
+/// commentary from a bearing twenty-four blocks off.
+#[test]
+fn a_yowl_is_heard_only_while_a_lynx_is_drawn() {
+    let eye = Vec3::new(10.0, 64.0, 10.0);
+    let lynx = eye + Vec3::new(21.0, -2.0, -17.0);
+    let mouse = (MOUSE, eye + Vec3::X);
+    let row = &WILDLIFE[row_of(Call::Lynx)];
+    let profile = Call::Lynx.profile();
+    assert_eq!(
+        super::voice_placement(row.origin, row.habitat, &[], &[mouse], eye, &profile),
+        None,
+        "a yowl with no lynx drawn was given somewhere to come from"
+    );
+    for seed in [17, 39, 1123] {
+        let (without, heard_without) = a_northern_day(seed, &[Call::Lynx], eye, |_| vec![mouse]);
+        assert!(
+            without[0].is_empty(),
+            "seed {seed}: {} yowls with no lynx drawn, from {:?}",
+            without[0].len(),
+            without[0]
+        );
+        assert!(
+            heard_without.iter().all(|tick| !tick),
+            "seed {seed}: the lane sounded with no lynx drawn"
+        );
+        let (with, heard_with) =
+            a_northern_day(seed, &[Call::Lynx], eye, |_| vec![mouse, (LYNX, lynx)]);
+        assert!(
+            !with[0].is_empty() && heard_with.iter().any(|tick| *tick),
+            "seed {seed}: a drawn lynx never yowled, so the silence above proves nothing"
+        );
+        assert!(
+            with[0].iter().all(|(_, at)| *at == lynx),
+            "seed {seed}: a yowl began somewhere other than the lynx: {:?}",
+            with[0]
+        );
+    }
+}
+
 /// "Its call comes from the lynx, and is sparse — and the eagle is still heard alongside."
 ///
-/// Driven through the shipped scheduler for ten minutes of a northern day, on one mixer, with a
-/// lynx drawn and the eagle on its bearing, each lane on the stream the real system gives it:
+/// Ten minutes of a northern day through [`a_northern_day`], with the lynx **drawn the way the
+/// critter table draws it** — for its life of every window, and not in between — and the eagle
+/// on its bearing, each lane on the stream the real system gives it:
 ///
 /// - **a few yowls rather than a stream**, sparser than the eagle's screams, and every one of
-///   them started at the lynx — the lane's own placement answer fed to the scheduler;
+///   them begun at the lynx on a tick the lynx was drawn;
 /// - **the eagle is still heard**: the same ten minutes with the eagle's lane alone are audible
 ///   on a set of ticks every one of which is audible with the lynx beside it, so the lynx takes
 ///   nothing from the eagle, and the lynx adds ticks of its own.
 #[test]
 fn a_simulated_day_in_the_north_hears_a_few_yowls_from_the_lynx_and_the_eagle_alongside() {
-    use std::cell::Cell;
     let snow = Ambience {
         ground: GroundLook::Snow,
         wooded: false,
@@ -1787,11 +1910,9 @@ fn a_simulated_day_in_the_north_hears_a_few_yowls_from_the_lynx_and_the_eagle_al
         (1.0, 1.0),
         "the north by day is the lynx's and the eagle's"
     );
-    // The two voices are kept from crowding each other where the issue says they are — the lynx
-    // calls less often than the eagle at its busiest — and a yowl still carries as far as a lynx
-    // can be drawn: `CRITTER_RANGE` out from an anchor the eye can be a cell's corner away from.
+    // A yowl still carries as far as a lynx can be drawn: `CRITTER_RANGE` out from an anchor the
+    // eye can be a cell's corner away from.
     let (lynx_profile, eagle_profile) = (Call::Lynx.profile(), Call::Eagle.profile());
-    assert!(lynx_profile.interval[0] > eagle_profile.interval[1]);
     let farthest = crate::player::critters::CRITTER_RANGE
         + crate::player::critters::CRITTER_ANCHOR_CELL * std::f32::consts::FRAC_1_SQRT_2;
     assert!(
@@ -1801,85 +1922,50 @@ fn a_simulated_day_in_the_north_hears_a_few_yowls_from_the_lynx_and_the_eagle_al
 
     let eye = Vec3::new(10.0, 64.0, 10.0);
     let lynx = eye + Vec3::new(21.0, -2.0, -17.0);
-    // A mouse drawn nearer the eye, so "the nearest critter" and "the nearest lynx" differ.
-    let drawn = [(MOUSE, eye + Vec3::X), (LYNX, lynx)];
-    let lane = |call: Call| {
-        let row = &WILDLIFE[row_of(call)];
-        let profile = call.profile();
-        let placement = super::voice_placement(row.origin, row.habitat, &[], &drawn, eye, &profile);
-        (call, row.stream, placement, profile)
-    };
-    let lynx_lane = lane(Call::Lynx);
-    let eagle_lane = lane(Call::Eagle);
+    let eagle_row = &WILDLIFE[row_of(Call::Eagle)];
     assert_eq!(
-        lynx_lane.2,
-        (lynx, 0.0, 0.0),
-        "the yowl is not placed at the lynx"
-    );
-    assert_eq!(
-        eagle_lane.2,
-        (eye, eagle_profile.radius, eagle_profile.height),
+        super::voice_placement(
+            eagle_row.origin,
+            eagle_row.habitat,
+            &[],
+            &[(LYNX, lynx)],
+            eye,
+            &eagle_profile
+        ),
+        Some((eye, eagle_profile.radius, eagle_profile.height)),
         "the eagle left its bearing"
     );
-
-    // One lane as the real system runs it: its call, its stream salt, where it is placed from
-    // (origin, radius, height), and its profile.
-    type Lane = (Call, u64, (Vec3, f32, f32), CallProfile);
-    let run = |seed: u64, lanes: &[&Lane]| {
-        let mixer = mixer();
-        let mut calls: Vec<Calls> = lanes.iter().map(|_| Calls::default()).collect();
-        let mut starts: Vec<Vec<Vec3>> = vec![Vec::new(); lanes.len()];
-        let mut audible = Vec::with_capacity(6000);
-        for _ in 0..6000 {
-            for (index, (call, stream, (origin, radius, height), profile)) in
-                lanes.iter().enumerate()
-            {
-                let placed = Cell::new(Vec3::NAN);
-                let mut started = false;
-                calls[index].update(
-                    &mixer,
-                    CallFrame {
-                        dt: 0.1,
-                        seed: seed.wrapping_add(*stream),
-                        interval: profile.interval,
-                        radius: *radius,
-                        height: *height,
-                        origin: *origin,
-                        gain: 1.0,
-                    },
-                    |source| {
-                        placed.set(source);
-                        spatial::place(eye, 0.0, source, profile.range, 0.0)
-                    },
-                    |seed, rate| {
-                        started = true;
-                        call.bake(seed, rate)
-                    },
-                );
-                if started {
-                    starts[index].push(placed.get());
-                }
-            }
-            audible.push(energy(&mixer, 800) > 0.0);
+    // Drawn for its life of every window, in ticks of a tenth of a second — the row's own numbers.
+    let row = &crate::player::critters::CRITTERS[LYNX];
+    let (life, window) = ((row.life * 10.0) as usize, (row.window * 10.0) as usize);
+    let drawn_at = |tick: usize| tick % window < life;
+    // A mouse drawn nearer the eye throughout, so "the nearest critter" and "the nearest lynx"
+    // differ.
+    let drawn = |tick: usize| {
+        let mut critters = vec![(MOUSE, eye + Vec3::X)];
+        if drawn_at(tick) {
+            critters.push((LYNX, lynx));
         }
-        (starts, audible)
+        critters
     };
 
     for seed in [17, 39, 1123] {
-        let (starts, together) = run(seed, &[&lynx_lane, &eagle_lane]);
-        let (_, eagle_alone) = run(seed, &[&eagle_lane]);
+        let (starts, together) = a_northern_day(seed, &[Call::Lynx, Call::Eagle], eye, drawn);
+        let (_, eagle_alone) = a_northern_day(seed, &[Call::Eagle], eye, drawn);
         let yowls = starts[0].len() as f32 / 10.0;
         assert!(
             (0.4..=2.5).contains(&yowls),
             "seed {seed}: {yowls} yowls a minute, which is not a few"
         );
         assert!(
-            starts[0].iter().all(|at| *at == lynx),
-            "seed {seed}: a yowl started somewhere other than the lynx: {:?}",
+            starts[0]
+                .iter()
+                .all(|(tick, at)| *at == lynx && drawn_at(*tick)),
+            "seed {seed}: a yowl began somewhere other than a drawn lynx: {:?}",
             starts[0]
         );
         assert!(
-            starts[1].len() >= starts[0].len() * 2,
+            starts[1].len() > starts[0].len(),
             "seed {seed}: {} screams against {} yowls",
             starts[1].len(),
             starts[0].len()

@@ -29,6 +29,11 @@
 //!   exist today — is placed at a body when one is there to place it at, and falls back to
 //!   the bearing when the flock is out of range or has not spawned. Silence is not the
 //!   fallback: a voice with no body is still ambience.
+//! - **The one exception is a creature that is usually not there.** A lynx is drawn for ten
+//!   seconds of every forty, so a lynx voice on the bearing fallback would be heard, three times
+//!   in four, from a lynx nobody can see — and "its call comes from the lynx" (#1194) would be
+//!   true one yowl in four. Such a row declares [`Origin::Body`]: heard from the drawn body, and
+//!   **silent** while none is drawn. Silence is the fallback there, deliberately, and only there.
 //!
 //! Today every row is on the second half of that rule, the two [`Habitat::Flock`] rows
 //! included: their calls come from a bearing, unrelated to where any macaw or vulture is
@@ -106,11 +111,19 @@ pub(super) enum Origin {
     /// At the body of the creature the row names, when one is drawn, and at the bearing when
     /// none is. The first half of the rule.
     ///
-    /// **Only [`Habitat::Flock`] rows may declare it**, because only they name a creature the
-    /// eye can see; `at_the_creature_is_only_declared_by_a_row_that_names_a_flock` holds that.
-    /// The fallback is the bearing rather than silence, which is the rule's own third bullet:
-    /// a voice with no body is still ambience.
+    /// **Only a [`Habitat::Flock`] or [`Habitat::Critter`] row may declare it**, because only
+    /// they name a creature the eye can see; `at_the_creature_is_only_declared_by_a_row_that_names_one`
+    /// holds that. The fallback is the bearing rather than silence, which is the rule's own third
+    /// bullet: a voice with no body is still ambience.
     Creature,
+    /// At the body of the creature the row names, and **nowhere else**: while none is drawn the
+    /// row begins no call at all. The rule's fourth bullet, for a creature that is usually not
+    /// there — the lynx (#1194).
+    ///
+    /// Same restriction as [`Origin::Creature`] on which rows may declare it. A call already
+    /// sounding when its body goes finishes where it began; what is withheld is the *onset*
+    /// (`CallFrame::may_start`).
+    Body,
 }
 
 /// One row of [`WILDLIFE`]: one voice, and everything about where and when it is heard.
@@ -301,21 +314,23 @@ pub(super) const WILDLIFE: [Voice; 10] = [
     },
     // The lynx (#1194), heard by day exactly where the critter table stands it: snow, trees or
     // none. Appended to the seen-and-heard rows below the mouse and above every ground-only row,
-    // for the claim-order reason on this table, and placed at its own body — a yowl arriving from
-    // a bearing while the lynx is plainly bolting across the snow over there is the bug the
-    // origin rule describes. `0x9869` is the next salt no row uses.
+    // for the claim-order reason on this table, and heard **only** from its own body — a yowl
+    // arriving from a bearing while the lynx is plainly bolting across the snow over there is the
+    // bug the origin rule describes, and one arriving while no lynx is drawn at all, which is
+    // three quarters of every window, is the bug `Origin::Body` exists for (review on #1242).
+    // `0x9869` is the next salt no row uses.
     //
     // **The eagle keeps the snow's day and is still heard.** Its row is untouched, a lane of its
     // own below this one; the two share a country and an hour and nothing else. The lynx calls
-    // three times more sparsely, which is where the issue said the two voices would be kept from
-    // crowding each other — its range is the eagle's, because a yowl has to carry as far as a
-    // lynx can be seen — and
+    // more sparsely, because it is only heard while a lynx is drawn, which is where the issue
+    // said the two voices would be kept from crowding each other — its range is the eagle's,
+    // because a yowl has to carry as far as a lynx can be seen — and
     // `a_simulated_day_in_the_north_hears_a_few_yowls_from_the_lynx_and_the_eagle_alongside` is
     // what shows both are heard.
     Voice {
         call: Call::Lynx,
         habitat: Habitat::Critter(LYNX),
-        origin: Origin::Creature,
+        origin: Origin::Body,
         period: Period::Day,
         stream: 0x9869,
     },

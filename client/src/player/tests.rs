@@ -7301,6 +7301,43 @@ fn a_lynx_left_behind_mid_bolt_sinks_where_it_stood_and_never_closes_on_the_eye(
     assert!(drawn_at(&app).is_none(), "the lynx never went");
 }
 
+#[test]
+fn a_lynx_is_drawn_for_a_quarter_of_every_window_and_never_two_at_once() {
+    // "A lynx is about for ten seconds of every forty" is true only while the row stands up one
+    // slot: `generation_of` staggers each slot by a quarter of the window, and four slots of
+    // lynxes would be about for all of it (a measure-only review replay on #1242). So it is
+    // measured where it is drawn — the running client, frame by frame, over two whole windows
+    // after the first one opens — rather than argued from the row's count.
+    let row = &critters::CRITTERS[2];
+    assert_eq!(
+        row.count,
+        1..=1,
+        "the lynx row is not the one-slot row this measures"
+    );
+    let mut app = lynx_country(7_200);
+    let elapsed = |app: &App| app.world().resource::<Time>().elapsed_secs();
+    while elapsed(&app) < row.window {
+        app.update();
+    }
+    // A frame is a tenth of a second.
+    let frames = (row.window * 10.0) as usize * 2;
+    let (mut drawn, mut most) = (0usize, 0usize);
+    for _ in 0..frames {
+        app.update();
+        let lynxes = critter_entities(&mut app).len();
+        most = most.max(lynxes);
+        drawn += usize::from(lynxes > 0);
+    }
+    let share = drawn as f32 / frames as f32;
+    assert_eq!(most, 1, "{most} lynxes were drawn at once");
+    // Its life is a quarter of its window, and a lynx is drawn from its first frame to its last.
+    assert!(
+        (0.2..=0.3).contains(&share),
+        "a lynx was drawn for {share} of two windows, where its life is {} of one",
+        row.life / row.window
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The watchers
 // ---------------------------------------------------------------------------

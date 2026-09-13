@@ -21,6 +21,13 @@ pub(super) struct CallFrame {
     pub height: f32,
     pub origin: Vec3,
     pub gain: f32,
+    /// Whether a new call may begin this frame.
+    ///
+    /// **False holds the lane exactly as a zero gain does** — no onset, and the countdown held
+    /// at the start of the interval — with one difference: a call already sounding finishes, at
+    /// the gain it has and from where it began. It is how a row that is heard only from a body
+    /// stays silent while no body is drawn, without cutting off a yowl the moment its lynx goes.
+    pub may_start: bool,
 }
 
 pub(super) const FADE_SECONDS: f32 = 2.0;
@@ -125,9 +132,10 @@ impl Calls {
             height,
             origin,
             gain,
+            may_start,
         } = frame;
         self.remaining = (self.remaining - dt).max(0.0);
-        if gain <= 0.0001 {
+        if gain <= 0.0001 || !may_start {
             self.remaining = interval[0];
         } else if self.remaining == 0.0 && self.playing.is_none() {
             self.sequence = self.sequence.wrapping_add(1);
@@ -169,7 +177,7 @@ mod tests {
         }
     }
 
-    fn calls(seed: u64, gain: f32) -> Vec<f32> {
+    fn calls(seed: u64, gain: f32, may_start: bool) -> Vec<f32> {
         let shared = Arc::new(Mixer::new());
         shared.set_format(8000, 1);
         let mixer = AudioMixer::from_shared_for_test(shared.clone());
@@ -186,6 +194,7 @@ mod tests {
                     height: 5.0,
                     origin: Vec3::ZERO,
                     gain,
+                    may_start,
                 },
                 |_| Placement::UNPOSITIONED,
                 |seed, rate| sounds::Call::Parrot.bake(seed, rate),
@@ -198,15 +207,17 @@ mod tests {
     }
     #[test]
     fn sparse_calls_are_reproducible_varied_and_gated() {
-        let first = calls(11, 1.0);
-        assert_eq!(first, calls(11, 1.0));
-        assert_ne!(first, calls(12, 1.0));
+        let first = calls(11, 1.0, true);
+        assert_eq!(first, calls(11, 1.0, true));
+        assert_ne!(first, calls(12, 1.0, true));
         assert!(first.iter().any(|s| s.abs() > 0.01));
         let silent_blocks = first
             .chunks(800)
             .filter(|block| block.iter().all(|s| *s == 0.0))
             .count();
         assert!(silent_blocks > 50, "calls leave more silence than sound");
-        assert!(calls(11, 0.0).iter().all(|s| *s == 0.0));
+        assert!(calls(11, 0.0, true).iter().all(|s| *s == 0.0));
+        // A lane that may not begin a call is as silent as one with no gain, at full gain.
+        assert!(calls(11, 1.0, false).iter().all(|s| *s == 0.0));
     }
 }

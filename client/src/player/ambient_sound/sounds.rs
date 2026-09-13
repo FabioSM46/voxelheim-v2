@@ -1024,16 +1024,27 @@ impl Call {
             // longest call, three squeaks at the slowest spacing, ends at 2 * 0.15 + 0.07 =
             // 0.37 s, inside the baked 0.40 s.
             Self::Mouse => ([18.0, 45.0], 5.0, 0.0, 0.40, 20.0),
-            // **Sparse, and sparser than the eagle it shares the snow's day with** (#1194). A
-            // crossing of the north hears a few yowls rather than a running commentary, and the
-            // two voices do not crowd each other: thirty to seventy-five seconds between yowls
-            // against the eagle's nine to twenty-four, so the eagle is the voice of that sky and
-            // the lynx the rare one under it.
+            // **Sparse, and sparser than the eagle it shares the snow's day with** (#1194) — and
+            // the sparseness comes from the lynx more than from this interval. A yowl may only
+            // begin while a lynx is drawn (`Origin::Body`), a lynx is drawn for at most its
+            // ten-second life of every forty-second window, and the lane holds its countdown at
+            // four seconds whenever it may not begin. So a lynx's first yowl comes about four
+            // seconds after it breaks cover, and a second one fits into its life only when the
+            // draw lands under six seconds — about one time in ten. A lynx in the player's cell
+            // every window is one yowl, now and then two, per forty seconds: about one and a half
+            // a minute, against the eagle's three and a half.
             //
-            // `radius` and `height` are the fallback only — a lynx is drawn, so its yowl is placed
-            // at its body — and put an unseen one on the snow twenty-four blocks off, about where
-            // its ring puts one. The 1.05 s climb plus the 0.2 s release ends inside the baked
-            // 1.3 s, with 0.05 s of arrival held between.
+            // **It was thirty to seventy-five seconds**, written while a yowl could still come
+            // from a bearing with no lynx drawn. Under the gating a countdown that starts at
+            // thirty never reaches zero inside a ten-second life, so that interval would have
+            // silenced the lynx altogether.
+            //
+            // `radius` and `height` are **never a placement**: a yowl with no lynx drawn is not
+            // heard at all. They are where a lynx is usually met, twenty-four blocks off on the
+            // snow, which is the distance
+            // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` measures the level at.
+            // The 1.05 s climb plus the 0.2 s release ends inside the baked 1.3 s, with 0.05 s of
+            // arrival held between.
             //
             // **The range is the eagle's ninety-six, and the interval is what keeps the two
             // apart.** A yowl has to carry as far as a lynx can be seen: one is drawn up to 62.6
@@ -1043,7 +1054,7 @@ impl Call {
             // faded to, and one sixty blocks off to 0.002.
             // `a_yowl_carries_across_the_snow_without_clipping_at_any_rate` failing at twenty-four
             // blocks is what said so.
-            Self::Lynx => ([30.0, 75.0], 24.0, 0.0, 1.3, 96.0),
+            Self::Lynx => ([4.0, 25.0], 24.0, 0.0, 1.3, 96.0),
         };
         CallProfile {
             interval,
@@ -3729,10 +3740,12 @@ mod tests {
         }
     }
 
-    /// Heard at the fallback bearing an *unseen* lynx keeps — twenty-four blocks off on the snow
-    /// — faded by the same `spatial::attenuation` every placed sound is, without clipping at any
-    /// device rate. A lynx placed at its body is where it is drawn, twenty to forty-five blocks
-    /// out, so this is the middle of its range rather than its loud end.
+    /// Heard twenty-four blocks off on the snow, faded by the same `spatial::attenuation` every
+    /// placed sound is, without clipping at any device rate.
+    ///
+    /// Twenty-four is about where a lynx is met, not a placement: a yowl is only ever heard from a
+    /// drawn lynx (`Origin::Body`), and a lynx is drawn twenty to forty-five blocks out, so this is
+    /// the middle of its range rather than its loud end.
     #[test]
     fn a_yowl_carries_across_the_snow_without_clipping_at_any_rate() {
         let profile = Call::Lynx.profile();

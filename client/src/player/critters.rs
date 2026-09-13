@@ -247,9 +247,9 @@ const _: () = assert!(
 ///
 /// **The speed is the number to get right** (#1194): fast enough to startle and bounded so it
 /// cannot outrun its range. A smoothstep peaks at one and a half times its average — the factor
-/// [`SCURRY_DASH_SHARE`] explains — so the bolt touches `1.5 * BOLT / BOLT_SECONDS`: 11.3 blocks
-/// a second for the shortest and 15 for the longest, a sprinting cat, under the row's
-/// `max_speed` of 15.5. The far ring plus the longest bolt plus the lynx's whole 7.2-second creep
+/// [`SCURRY_DASH_SHARE`] explains — so the bolt touches `1.5 * BOLT / AMBUSH_BOLT_SECONDS`:
+/// 11.25 blocks a second at [`AMBUSH_BOLT_NEAR`] and 15 at [`AMBUSH_BOLT_FAR`], a sprinting cat.
+/// The margin under the row's `max_speed` of 15.5 is argued from the second, the far one. The far ring plus the longest bolt plus the lynx's whole 7.2-second creep
 /// is 37.7, inside [`CRITTER_RANGE`] with the drawn body added — which
 /// `the_drawn_critter_stays_inside_its_horizontal_box` measures rather than trusts.
 const AMBUSH_BOLT_NEAR: f32 = 6.0;
@@ -408,9 +408,19 @@ pub(super) struct CritterSpecies {
     ///
     /// **Equal to the life for a squirrel and a mouse**, whose slots are never empty — and far
     /// longer for a lynx, which is a creature somebody *happens* to see. It is the whole of why a
-    /// crossing of the north is not a procession of cats: a lynx is about for ten seconds of every
-    /// forty, and `keep_the_critters` stands nobody up in the rest because a slot past its life is
-    /// a slot inside its own fade window, which it already refuses.
+    /// crossing of the north is not a procession of cats: a lynx is about for its ten-second life
+    /// of every forty-second window, and `keep_the_critters` stands nobody up in the rest because a
+    /// slot past its life is a slot inside its own fade window, which it already refuses.
+    ///
+    /// **A quarter of the window because the lynx holds one slot, and only because it does.**
+    /// [`generation_of`] staggers each slot by a quarter of the window, so a row that stood up four
+    /// slots would be about for all of it. The lynx stands up one: its `count` is one, so
+    /// `keep_the_critters` claims slot zero and no other, and a lynx left behind by a move is
+    /// retired rather than kept as a stray beside a new one. The generation is on the session
+    /// clock rather than the cell, so walking into the next cell does not open a second lynx's
+    /// window either. A measure-only review replay on #1242 asked for this to be measured rather
+    /// than argued; `a_lynx_is_drawn_for_a_quarter_of_every_window_and_never_two_at_once` does, in
+    /// the running client over two whole windows.
     pub(super) window: f32,
     /// What share of a life is spent foraging before the climb begins.
     ///
@@ -631,11 +641,26 @@ pub(super) const CRITTERS: [CritterSpecies; 3] = [
         frame: Frame::Stride,
         tail_shape: Tail::Bob,
         eyeshine: None,
-        // 15 at the longest bolt's peak, derived at `AMBUSH_BOLT_NEAR`.
+        // 15 at the longest bolt's peak: `1.5 * AMBUSH_BOLT_FAR / AMBUSH_BOLT_SECONDS`.
         #[cfg(test)]
         max_speed: 15.5,
     },
 ];
+
+// Every row's life fits its window — `CritterSpecies::window` says "never shorter than the life",
+// and a row that broke it would roll its generation over mid-life, so `keep_the_critters` would
+// retire a critter and stand a new one up in its place on the wrap. Held by the compiler rather
+// than by a test, so such a row does not build (review on #1242).
+const _: () = {
+    let mut row = 0;
+    while row < CRITTERS.len() {
+        assert!(
+            CRITTERS[row].window >= CRITTERS[row].life,
+            "a critter row outlives its own window"
+        );
+        row += 1;
+    }
+};
 
 /// The mouse's eyes: small, red, and the one part of a mouse a night eye finds.
 ///
@@ -2831,52 +2856,69 @@ mod tests {
         // are arithmetic on the session clock. Two properties matter — the age walks forward
         // and wraps to zero exactly when the generation increments, and two slots never wrap
         // on the same frame.
-        let species = &CRITTERS[0];
-        for slot in 0..CRITTER_COUNT_MAX {
-            let mut previous = generation_of(species, slot, 0.0);
-            let mut wraps = 0usize;
-            for frame in 1..=life_frames(species) * 3 {
-                let now = generation_of(species, slot, frame as f32 * DT);
-                assert!(
-                    (0.0..species.window).contains(&now.1),
-                    "slot {slot} aged {} of a {} window",
-                    now.1,
-                    species.window
-                );
-                if now.0 == previous.0 {
-                    assert!(now.1 > previous.1, "slot {slot} aged backwards");
-                } else {
-                    assert_eq!(now.0, previous.0 + 1, "slot {slot} skipped a generation");
-                    assert!(now.1 < previous.1, "slot {slot} rolled over without ageing");
-                    wraps += 1;
-                }
-                previous = now;
-            }
-            assert!(wraps >= 2, "slot {slot} lived {wraps} lives in three");
-        }
-
-        // Staggered: no two slots share a window boundary, so a cell's critters do not all
-        // vanish on one frame.
-        let boundaries: HashSet<i64> = (0..CRITTER_COUNT_MAX)
-            .map(|slot| {
-                let mut at = 0;
-                for frame in 1..=life_frames(species) {
-                    let elapsed = frame as f32 * DT;
-                    if generation_of(species, slot, elapsed).0
-                        != generation_of(species, slot, elapsed - DT).0
-                    {
-                        at = frame as i64;
-                        break;
+        //
+        // **Every row, over its whole cycle — `window.max(life)`, not `life`.** This walked the
+        // squirrel over three lives, and review on #1242 pointed out that a lynx's forty-second
+        // window is four of its lives: `life * 3` never reached the wrap `keep_the_critters`
+        // retires on. Three whole cycles reach it twice for every row.
+        for species in &CRITTERS {
+            let cycle = ((species.window.max(species.life) / DT) as usize) + 1;
+            for slot in 0..CRITTER_COUNT_MAX {
+                let mut previous = generation_of(species, slot, 0.0);
+                let mut wraps = 0usize;
+                for frame in 1..=cycle * 3 {
+                    let now = generation_of(species, slot, frame as f32 * DT);
+                    assert!(
+                        (0.0..species.window).contains(&now.1),
+                        "slot {slot} aged {} of a {} window",
+                        now.1,
+                        species.window
+                    );
+                    if now.0 == previous.0 {
+                        assert!(now.1 > previous.1, "slot {slot} aged backwards");
+                    } else {
+                        assert_eq!(now.0, previous.0 + 1, "slot {slot} skipped a generation");
+                        assert!(now.1 < previous.1, "slot {slot} rolled over without ageing");
+                        wraps += 1;
                     }
+                    previous = now;
                 }
-                at
-            })
-            .collect();
-        assert_eq!(
-            boundaries.len(),
-            CRITTER_COUNT_MAX,
-            "two slots roll over on the same frame: {boundaries:?}"
-        );
+                assert!(
+                    wraps >= 2,
+                    "{:?} slot {slot} lived {wraps} lives in three windows",
+                    species.gait
+                );
+            }
+
+            // Staggered: no two slots share a window boundary, so a cell's critters do not all
+            // vanish on one frame.
+            let boundaries: HashSet<i64> = (0..CRITTER_COUNT_MAX)
+                .map(|slot| {
+                    let mut at = 0;
+                    for frame in 1..=cycle {
+                        let elapsed = frame as f32 * DT;
+                        if generation_of(species, slot, elapsed).0
+                            != generation_of(species, slot, elapsed - DT).0
+                        {
+                            at = frame as i64;
+                            break;
+                        }
+                    }
+                    at
+                })
+                .collect();
+            assert_eq!(
+                boundaries.len(),
+                CRITTER_COUNT_MAX,
+                "{:?}: two slots roll over on the same frame: {boundaries:?}",
+                species.gait
+            );
+            assert!(
+                boundaries.iter().all(|at| *at > 0),
+                "{:?}: a slot never rolled over inside one cycle: {boundaries:?}",
+                species.gait
+            );
+        }
     }
 
     #[test]
@@ -4389,11 +4431,8 @@ mod tests {
             assert_eq!(here, place(lynx, seed, age, anchor, None));
             assert!(here.distance(place(lynx, seed, again, anchor, None)) < 0.02);
         }
-        // And a slot's life fits its window, for every row, with the lynx's mostly empty: a
-        // lynx is somebody happening to see one.
-        for row in &CRITTERS {
-            assert!(row.window >= row.life, "{:?} outlives its window", row.gait);
-        }
+        // And the lynx's window is mostly empty: a lynx is somebody happening to see one. That
+        // every row's life fits its window at all is held by the compiler, beside the table.
         assert!(lynx.life * 4.0 <= lynx.window);
     }
 
