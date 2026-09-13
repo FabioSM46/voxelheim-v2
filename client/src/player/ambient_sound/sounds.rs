@@ -3142,30 +3142,101 @@ mod tests {
         }
     }
 
-    /// Short and high means higher than anything else in the catalogue, and a squeak's pitch
-    /// drops as it ends rather than sitting on a note.
-    #[test]
-    fn a_squeak_is_the_highest_voice_there_is_and_falls_as_it_ends() {
-        // Every other voiced call's highest reachable pitch, arch and detune included.
-        let others = Call::ALL
-            .iter()
-            .filter(|call| **call != Call::Mouse)
-            .flat_map(|call| (0..12u64).map(move |seed| call.description(scramble(seed))))
-            .flat_map(|sound| sound.layers)
+    /// The seeds that reach every pitch one call can make — **all of them**, as a finite set that
+    /// provably holds each call's highest and lowest glide, so a bound taken over it is a bound
+    /// over every seed rather than over a sample.
+    ///
+    /// Exhaustive on purpose, like `every_call_is_in_all`: a new call does not compile here until
+    /// it says how its pitch reads its seed.
+    fn every_pitch_seed(call: Call) -> Vec<u64> {
+        match call {
+            // Noise alone: no glide, so there is no pitch for a seed to move.
+            Call::Rattlesnake | Call::Cricket => vec![0],
+            // The pitch reads the seed only through `variation`, which is `seed % 101`: these
+            // hundred and one seeds are every value it can take.
+            Call::Eagle
+            | Call::Condor
+            | Call::Parrot
+            | Call::Squirrel
+            | Call::Owl
+            | Call::Mouse => (0..101).collect(),
+            // The howl reads `seed % 101` for its pitch and a slice of `spread(seed)` for its arch
+            // (`howl_gesture`), and its highest glide rises with both. So every residue of the
+            // one, plus a seed found to take both at their maximum at once — searched for here
+            // rather than assumed to exist.
+            Call::Wolf => {
+                let top = (0..100_000u64)
+                    .map(|step| 100 + 101 * step)
+                    .find(|seed| (spread(*seed) >> 16) % 17 == 16)
+                    .expect("a seed takes the howl's highest pitch and widest arch together");
+                (0..101).chain([top]).collect()
+            }
+        }
+    }
+
+    /// The highest pitch any glide of one call reaches at one seed, arch and detune included.
+    fn highest_glide(call: Call, seed: u64) -> f32 {
+        call.description(seed)
+            .layers
+            .into_iter()
             .filter_map(|layer| match layer.exciter {
                 Exciter::Glide(glide) => {
                     Some(glide.from.max(glide.to) * (1.0 + glide.vibrato.depth))
                 }
                 _ => None,
             })
-            .fold(0.0f32, f32::max);
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Short and high means higher than anything else in the catalogue — **at every seed any call
+    /// can be handed** — and a squeak's pitch drops as it ends rather than sitting on a note.
+    ///
+    /// **This used to take the other calls' pitch from twelve seeds each**, which review on #1224
+    /// pointed out makes the claim a sample: a seed outside it could put another voice above the
+    /// squeak with this test still green. [`every_pitch_seed`] is the set that holds every pitch
+    /// there is, a wide scrambled sweep must never exceed what it finds, and the runner-up is
+    /// named so a regression in another voice's pitch shows here rather than inside the margin.
+    #[test]
+    fn a_squeak_is_the_highest_voice_there_is_and_falls_as_it_ends() {
+        let mut runner_up = (Call::Mouse, 0.0f32);
+        for &call in Call::ALL.iter().filter(|call| **call != Call::Mouse) {
+            let highest = every_pitch_seed(call)
+                .into_iter()
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            // The set is complete, and a wider sweep can only confirm it: nothing past it higher.
+            let swept = (0..1024u64)
+                .map(scramble)
+                .map(|seed| highest_glide(call, seed))
+                .fold(0.0f32, f32::max);
+            assert!(
+                swept <= highest,
+                "{call:?} reached {swept} Hz outside the seeds said to hold its highest, {highest}"
+            );
+            if highest > runner_up.1 {
+                runner_up = (call, highest);
+            }
+        }
+        // The howl's third partial at its highest pitch and widest arch: 365 × 3 × 1.38.
+        assert_eq!(
+            runner_up.0,
+            Call::Wolf,
+            "the next highest voice is no longer the howl: {runner_up:?}"
+        );
+        let lowest = every_pitch_seed(Call::Mouse)
+            .into_iter()
+            .map(squeak_pitch)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            lowest * SQUEAK_FALL > runner_up.1,
+            "a squeak falling to {} Hz is not above {:?} at {} Hz",
+            lowest * SQUEAK_FALL,
+            runner_up.0,
+            runner_up.1
+        );
+
         for seed in (0..12u64).map(scramble) {
             let hz = squeak_pitch(seed);
-            assert!(
-                hz * SQUEAK_FALL > others,
-                "seed {seed}: a squeak falling to {} Hz is not above a voice reaching {others}",
-                hz * SQUEAK_FALL
-            );
 
             // **The first voice alone, not its twin with it.** The twin sits 3.5% above and a
             // thirty-millisecond window cannot tell the two apart, so read together the tracker
