@@ -259,8 +259,12 @@ fn update(input: Inputs, mut country: ResMut<Country>) {
         let call = voice.call;
         let profile = call.profile();
         // **The origin rule, and the whole of where it is applied.** A row that declares
-        // `Origin::Creature` is placed at the nearest drawn body of the creature it names, so
-        // the sound moves when it moves and is occluded by what stands between; every other row
+        // `Origin::Creature` is placed at the nearest drawn body of the creature it names **at
+        // the call's onset**, and stays there for the call's short life: `Calls::update` fixes
+        // the source when a call begins and re-places the call at that point every frame, so it
+        // is heard from where the creature was when it began, not from where the creature is
+        // while it sounds — a yowl begun before the lynx bolts is heard from the crouch (#1244).
+        // Occlusion is recomputed every frame, against that fixed point. Every other row
         // keeps its bearing at the row's radius and height. Which of the two applies is a
         // property of the creature rather than of the frame. An `Origin::Body` row with no body
         // drawn begins no call at all (#1194: the lynx is drawn ten seconds in forty, and a yowl

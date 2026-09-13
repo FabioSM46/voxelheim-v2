@@ -17,7 +17,10 @@
 //!
 //! - **A voice that belongs to a creature the eye can see is placed at that creature.** If
 //!   the squirrel chattering is a squirrel the player is looking at, the sound comes from
-//!   its body, moves when it moves, and is occluded by what stands between. A voice arriving
+//!   its body as it stands when the call begins, stays at that point for the call's short
+//!   life, and is occluded by what stands between. It does not follow a creature that moves
+//!   while the call sounds: [`super::controller::Calls`] anchors every call where it began,
+//!   the bearing below included (#1244). A voice arriving
 //!   from a bearing while its owner is visibly elsewhere reads as a bug in the world, not as
 //!   ambience.
 //! - **A voice that belongs to nothing visible keeps the bearing-on-a-circle placement**
