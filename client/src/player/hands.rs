@@ -1336,10 +1336,49 @@ impl MeshBuild {
         // The cap is never seen — the root is buried in the guard and the tip is a tenth of
         // a section — so it is pointed at the neutral band, where a coordinate that carries
         // no information cannot pick up a colour it did not ask for.
-        let first = self.push(corners.into_iter().zip([livery::neutral_uv(); 6]), normal);
+        self.polygon(&corners, normal);
+    }
+
+    /// One flat-shaded convex polygon of any number of corners, as a fan from its first.
+    ///
+    /// The shield's planks are the reason it takes a slice: a strip of a disc has as many
+    /// corners as the arc it cuts. The same winding rule as [`Self::fan`] applies, and every
+    /// corner points at the neutral band for the same reason.
+    fn polygon(&mut self, corners: &[Vec3], normal: Vec3) {
+        let first = self.push(
+            corners.iter().map(|corner| (*corner, livery::neutral_uv())),
+            normal,
+        );
         for corner in 1..corners.len() as u32 - 1 {
             self.indices
                 .extend([first, first + corner, first + corner + 1]);
+        }
+    }
+
+    /// A closed solid of revolution about the `Z` axis, flat-shaded in `sides` facets.
+    ///
+    /// `profile` is a closed loop of `(radius, z)` points. **Walked so that the outer wall
+    /// runs from `+Z` towards `-Z`**, every quad comes out wound outward — the rule the rim's
+    /// four walls and the boss's cap, flange and dome all follow, and what
+    /// [`every_solid_in_the_sword_is_wound_outward`] reads back. A span lying on the axis
+    /// encloses nothing and is skipped; a span with one end on it closes to a point, which
+    /// leaves one triangle of each quad with no area — harmless, since it covers nothing.
+    fn revolve(&mut self, profile: &[Vec2], sides: usize) {
+        let at = |point: Vec2, angle: f32| {
+            Vec3::new(point.x * angle.cos(), point.x * angle.sin(), point.y)
+        };
+        for (index, from) in profile.iter().enumerate() {
+            let to = profile[(index + 1) % profile.len()];
+            if from.x == 0.0 && to.x == 0.0 {
+                continue;
+            }
+            for side in 0..sides {
+                let [start, end] = [side, side + 1].map(|step| TAU * step as f32 / sides as f32);
+                self.quad(
+                    [at(*from, start), at(to, start), at(to, end), at(*from, end)],
+                    [livery::neutral_uv(); 4],
+                );
+            }
         }
     }
 
@@ -1972,7 +2011,7 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Pickaxe => neutral(pickaxe_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Shovel => neutral(shovel_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Armour => neutral(armour_mesh()),
-        ItemShape::Shield => neutral(shield_mesh(0.065)),
+        ItemShape::Shield => shield_mesh(SHIELD_IN_HAND),
         ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
         ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
         // Turned a quarter about X so the struck face, not the rim, is what the camera sees.
@@ -2019,8 +2058,12 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // The pickaxe and the shovel are the axe's length and are held the way it is.
         ItemShape::Tool | ItemShape::Pickaxe | ItemShape::Shovel => HAND_SIZE.y * 0.35,
         ItemShape::Armour => hand_top + ARMOUR_BODY_SIZE.y / 2.0 - HOLD_OVERLAP,
-        // Cross the top of the fist so the carried shield is gripped, not floating.
-        ItemShape::Shield => hand_top + 0.024,
+        // **The one arrangement with a depth of its own, because a shield is held from
+        // behind.** The fist's centre is seated on the handle's grip point, so the face
+        // stands in front of the fist along `-Z` and the hand is on the handle — the whole
+        // translation, not only its height, since the grip is behind the face rather than
+        // beside it. See [`shield_grip_point`].
+        ItemShape::Shield => return -shield_grip_point(SHIELD_IN_HAND),
         ItemShape::Bow => HAND_SIZE.y * 0.20,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
         // Stood on the top of the fist by its radius, which is the block's and the stub's
@@ -2032,20 +2075,271 @@ fn item_translation(shape: ItemShape) -> Vec3 {
     Vec3::new(0.0, y, 0.0)
 }
 
-/// A wooden board and iron boss shared by hands, bodies and drops.
-pub(super) fn shield_mesh(size: f32) -> Mesh {
-    let mut board = tinted(
-        Mesh::from(Cuboid::from_size(Vec3::new(size, size * 0.82, size * 0.10))),
-        items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD),
+/// The wooden shield's diameter in the first-person hand.
+///
+/// **Larger than the 65 × 53 mm board it replaces, and still smaller than it looks.** A round
+/// shield is carried *in front* of the fist rather than above it, so the width a player sees
+/// is the whole disc; a tenth of a metre at the hand's depth is about a third of the frame's
+/// height, which is a shield rather than a badge, and the fist centred on the handle behind it
+/// still clears the planks — see [`SHIELD_GRIP_DEPTH`].
+const SHIELD_IN_HAND: f32 = 0.10;
+
+/// Larger than the board it replaced, which was 65 mm across.
+const _: () = assert!(SHIELD_IN_HAND > 0.065);
+
+/// How many planks the face is built from, and how many facets a round edge is drawn in.
+const SHIELD_PLANKS: usize = 5;
+const SHIELD_SIDES: usize = 32;
+
+/// The planks' outline radius, and half their thickness, as fractions of the diameter.
+///
+/// **Inside the rim on both counts.** The outline sits between the rim's inner and outer walls,
+/// so the planks' cut edges are buried in it; the thickness is less than the rim's, so the rim
+/// stands proud of the face in front and behind and no face of the wood shares a plane with a
+/// face of the rim.
+const SHIELD_PLANK_RADIUS: f32 = 0.48;
+const SHIELD_PLANK_HALF_THICKNESS: f32 = 0.022;
+
+/// How far every other plank stands forward of its neighbours.
+///
+/// The planks read through this and through the alternating shade, the arrangement the issue
+/// asked for rather than separate boards with gaps: a step half a millimetre deep in the hand
+/// is enough for [`shaded`] to catch a sliver of side wall at every seam.
+const SHIELD_PLANK_STEP: f32 = 0.005;
+
+/// The rim's inner and outer radius and half its thickness, as fractions of the diameter.
+const SHIELD_RIM_INNER: f32 = 0.455;
+const SHIELD_RIM_OUTER: f32 = 0.5;
+const SHIELD_RIM_HALF_THICKNESS: f32 = 0.035;
+
+/// The boss: a flat flange, then a dome rising from it to a point on the axis.
+///
+/// The flange is sunk to the board's centre plane at the back and stands forward of the rim at
+/// the front, so the dome begins in front of everything else on the face.
+const SHIELD_BOSS_FLANGE_RADIUS: f32 = 0.14;
+const SHIELD_BOSS_FLANGE_FRONT: f32 = 0.042;
+const SHIELD_BOSS_DOME_RADIUS: f32 = 0.115;
+const SHIELD_BOSS_DOME_HEIGHT: f32 = 0.075;
+const SHIELD_BOSS_DOME_STEPS: usize = 4;
+
+/// The handle: a horizontal bar behind the boss, carried on two posts sunk into the planks.
+const SHIELD_HANDLE_HALF_SPAN: f32 = 0.17;
+const SHIELD_HANDLE_HALF_HEIGHT: f32 = 0.03;
+const SHIELD_HANDLE_HALF_DEPTH: f32 = 0.02;
+const SHIELD_POST_HALF_WIDTH: f32 = 0.02;
+
+/// How far behind the face's centre plane the handle's centre is, as a fraction of the
+/// diameter.
+///
+/// **Deep enough for a fist centred on it to clear the wood.** The hand's fist is a cube of
+/// [`HAND_SIZE`], so at [`SHIELD_IN_HAND`] half of it is 0.12 of the diameter; the planks' back
+/// reaches 0.022, so 0.16 leaves the fist's front face a millimetre and more behind them, and
+/// the gap between the wood and the bar the fingers pass through is 0.113 of the diameter.
+/// Both are measured rather than trusted, in
+/// [`a_fist_on_the_grip_point_holds_the_shield_from_behind_with_room_for_the_fingers`].
+const SHIELD_GRIP_DEPTH: f32 = 0.16;
+
+/// **The point on the shield's handle a fist closes on**, in a shield mesh built at `diameter`.
+///
+/// This is the contract the shield hand is written against, the counterpart of
+/// [`sword_grip_centre`]: the centre of the horizontal bar, on the axis behind the boss. The
+/// shield's face points along `-Z`, towards the world a body faces, and the handle stands
+/// behind it along `+Z`; a fist whose centre is placed here grips the handle from behind with
+/// the planks in front of it. [`item_translation`] already seats the held shield this way, and
+/// a renderer that poses a fist on a shield should ask this function rather than measure the
+/// mesh.
+pub(super) fn shield_grip_point(diameter: f32) -> Vec3 {
+    Vec3::Z * SHIELD_GRIP_DEPTH * diameter
+}
+
+/// The colours the shield is built in, each absolute.
+///
+/// **One convention, the one it already had.** The wood is the registry's own colour for the
+/// shield, read from [`items`] rather than written here, and every other part is a colour of
+/// its own; the hand therefore skips the item-colour multiply for this shape, and the ground
+/// and the body draw it under a white material — see `drops.rs` and `player/mod.rs`.
+#[derive(Debug, Clone, Copy)]
+struct ShieldColours {
+    /// The two alternating plank shades, the registry's wood first.
+    planks: [[f32; 4]; 2],
+    /// Darker than either plank.
+    rim: [f32; 4],
+    /// The forged iron the implements' heads wear.
+    boss: [f32; 4],
+    /// The leather the bundles' straps are, wrapped round the grip.
+    handle: [f32; 4],
+}
+
+fn shield_colours() -> ShieldColours {
+    let wood = items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD);
+    // **Darker by a hue as well as by a level, and the difference is load-bearing.** A tint
+    // that only scales the wood is, to [`every_held_arrangement_carries_relief`], the wood
+    // under a deeper shade than [`SHADE_FLOOR`] allows — that sweep knows a colour by its
+    // direction and reads every change of magnitude as light. So the second board is a touch
+    // greyer, as a different plank is, and the rim is the brown of a rawhide edge rather
+    // than of the planks it holds.
+    let darker = |by: [f32; 3]| [wood[0] * by[0], wood[1] * by[1], wood[2] * by[2], wood[3]];
+    ShieldColours {
+        planks: [wood, darker([0.78, 0.82, 0.88])],
+        rim: darker([0.55, 0.50, 0.45]),
+        boss: items::forged_iron_linear_rgba(),
+        handle: bundle_strap_linear_rgba(),
+    }
+}
+
+/// The outline of one plank, counter-clockwise seen from behind, at unit diameter.
+///
+/// A vertical strip of the disc: its two seams are straight and its two ends follow the circle,
+/// sampled at every [`SHIELD_SIDES`] facet angle between them. Every corner is on the circle —
+/// a seam's two ends are where it meets it — which is what makes the face measurably round.
+fn shield_plank_outline(plank: usize) -> Vec<Vec2> {
+    let radius = SHIELD_PLANK_RADIUS;
+    let width = 2.0 * radius / SHIELD_PLANKS as f32;
+    let [left, right] = [plank, plank + 1].map(|edge| -radius + width * edge as f32);
+    let angle_of = |x: f32| (x / radius).clamp(-1.0, 1.0).acos();
+    let on_circle = |angle: f32| Vec2::new(angle.cos(), angle.sin()) * radius;
+    let arc = |from: f32, to: f32| {
+        let step = TAU / SHIELD_SIDES as f32;
+        let inner = ((from / step).floor() as i32 + 1..)
+            .map(move |facet| facet as f32 * step)
+            .take_while(move |angle| *angle < to - 1e-4);
+        std::iter::once(from)
+            .chain(inner)
+            .chain(std::iter::once(to))
+    };
+    // The top end runs right to left and the bottom end left to right, both by increasing angle.
+    let mut outline: Vec<Vec2> = arc(angle_of(right), angle_of(left))
+        .chain(arc(TAU - angle_of(left), TAU - angle_of(right)))
+        .map(on_circle)
+        .collect();
+    // The two outer planks meet the circle at a single point on each side, which both ends
+    // reach; one copy of it is a corner and two are a triangle with no area.
+    outline.dedup_by(|one, two| one.distance(*two) < 1e-6);
+    if outline.len() > 1 && outline[0].distance(outline[outline.len() - 1]) < 1e-6 {
+        outline.pop();
+    }
+    outline
+}
+
+/// One plank as a flat-shaded prism, at unit diameter.
+fn shield_plank(plank: usize) -> Mesh {
+    let outline = shield_plank_outline(plank);
+    let forward = if plank % 2 == 1 {
+        SHIELD_PLANK_STEP
+    } else {
+        0.0
+    };
+    let [front, back] = [-1.0, 1.0].map(|side| side * SHIELD_PLANK_HALF_THICKNESS - forward);
+    let at = |point: Vec2, z: f32| point.extend(z);
+
+    let mut build = MeshBuild::default();
+    let backs: Vec<Vec3> = outline.iter().map(|point| at(*point, back)).collect();
+    build.polygon(&backs, Vec3::Z);
+    let fronts: Vec<Vec3> = outline
+        .iter()
+        .rev()
+        .map(|point| at(*point, front))
+        .collect();
+    build.polygon(&fronts, Vec3::NEG_Z);
+    for (index, from) in outline.iter().enumerate() {
+        let to = outline[(index + 1) % outline.len()];
+        build.quad(
+            [
+                at(*from, back),
+                at(*from, front),
+                at(to, front),
+                at(to, back),
+            ],
+            [livery::neutral_uv(); 4],
+        );
+    }
+    build.finish()
+}
+
+/// A round Norse shield shared by the hand, the ground and every body that wears one.
+///
+/// **Round planks inside a darker rim, a domed iron boss at the centre and a horizontal
+/// handle behind it.** It replaces a flat box with a grey cylinder on it, which had no outline,
+/// no rim and nothing behind — and whose boss faced the wielder, since `+Z` is towards the
+/// camera in the hand and towards the back of a body. The face now points along `-Z`, the way
+/// a body faces and the way the first-person view looks, and the handle is behind it along
+/// `+Z` where [`shield_grip_point`] names it.
+///
+/// Authored at unit diameter and scaled uniformly, so the three surfaces draw one shield at
+/// three sizes. Every vertex points at the neutral band: the ground drop's material wears the
+/// wood livery, and a mesh with Bevy's default coordinates would sample the whole image.
+pub(super) fn shield_mesh(diameter: f32) -> Mesh {
+    let colours = shield_colours();
+
+    let mut rim = MeshBuild::default();
+    rim.revolve(
+        &[
+            Vec2::new(SHIELD_RIM_OUTER, SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_OUTER, -SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_INNER, -SHIELD_RIM_HALF_THICKNESS),
+            Vec2::new(SHIELD_RIM_INNER, SHIELD_RIM_HALF_THICKNESS),
+        ],
+        SHIELD_SIDES,
     );
-    let boss = tinted(
-        Mesh::from(Cylinder::new(size * 0.17, size * 0.14))
-            .rotated_by(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-            .translated_by(Vec3::Z * size * 0.10),
-        [0.55, 0.60, 0.66, 1.0],
+
+    let mut boss = MeshBuild::default();
+    let dome = (0..=SHIELD_BOSS_DOME_STEPS).map(|step| {
+        let rise = step as f32 / SHIELD_BOSS_DOME_STEPS as f32 * PI / 2.0;
+        let radius = if step == SHIELD_BOSS_DOME_STEPS {
+            0.0
+        } else {
+            SHIELD_BOSS_DOME_RADIUS * rise.cos()
+        };
+        Vec2::new(
+            radius,
+            -SHIELD_BOSS_FLANGE_FRONT - SHIELD_BOSS_DOME_HEIGHT * rise.sin(),
+        )
+    });
+    let profile: Vec<Vec2> = [
+        Vec2::ZERO,
+        Vec2::new(SHIELD_BOSS_FLANGE_RADIUS, 0.0),
+        Vec2::new(SHIELD_BOSS_FLANGE_RADIUS, -SHIELD_BOSS_FLANGE_FRONT),
+    ]
+    .into_iter()
+    .chain(dome)
+    .collect();
+    boss.revolve(&profile, SHIELD_SIDES);
+
+    let bar = Cuboid::new(
+        2.0 * SHIELD_HANDLE_HALF_SPAN,
+        2.0 * SHIELD_HANDLE_HALF_HEIGHT,
+        2.0 * SHIELD_HANDLE_HALF_DEPTH,
     );
-    merge_all(&mut board, [boss], "wooden shield");
-    board
+    let posts = [-1.0, 1.0].map(|side| {
+        tinted(
+            neutral(Mesh::from(Cuboid::new(
+                2.0 * SHIELD_POST_HALF_WIDTH,
+                2.0 * SHIELD_HANDLE_HALF_HEIGHT,
+                SHIELD_GRIP_DEPTH,
+            ))),
+            colours.handle,
+        )
+        .translated_by(Vec3::new(
+            side * (SHIELD_HANDLE_HALF_SPAN - SHIELD_POST_HALF_WIDTH),
+            0.0,
+            SHIELD_GRIP_DEPTH / 2.0,
+        ))
+    });
+
+    let mut shield = tinted(rim.finish(), colours.rim);
+    merge_all(
+        &mut shield,
+        (0..SHIELD_PLANKS)
+            .map(|plank| tinted(shield_plank(plank), colours.planks[plank % 2]))
+            .chain([
+                tinted(boss.finish(), colours.boss),
+                tinted(neutral(Mesh::from(bar)), colours.handle)
+                    .translated_by(shield_grip_point(1.0)),
+            ])
+            .chain(posts),
+        "wooden shield",
+    );
+    shield.scaled_by(Vec3::splat(diameter))
 }
 
 /// The first-person hand: the player's fist, the wrist it steps into and, when selected, the
@@ -6166,6 +6460,283 @@ mod tests {
         );
     }
 
+    /// The vertices of one part of a shield mesh, found by the absolute colour it is authored in.
+    fn shield_part(mesh: &Mesh, colour: [f32; 4]) -> Vec<Vec3> {
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the shield must carry per-vertex colour");
+        };
+        positions(mesh)
+            .into_iter()
+            .zip(colours)
+            .filter(|(_, tint)| **tint == colour)
+            .map(|(point, _)| Vec3::from_array(point))
+            .collect()
+    }
+
+    /// The least and greatest corner of a set of points, per axis.
+    fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
+        points.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(low, high), point| (low.min(*point), high.max(*point)),
+        )
+    }
+
+    /// **The face is round, it is planks of the registry's wood, and a darker rim holds it.**
+    ///
+    /// Round is read off the vertices rather than the constants: every corner of every plank
+    /// is on one circle, and some corner reaches that circle at every facet angle, so no part
+    /// of the outline is cut flat. The rim stands proud of the wood in front and behind, and
+    /// buries the planks' cut edges between its two walls.
+    #[test]
+    fn the_shield_face_is_round_planks_of_wood_inside_a_darker_rim() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+
+        assert_eq!(
+            colours.planks[0],
+            items::item_linear_rgba(crafting::ITEM_WOODEN_SHIELD),
+            "the planks are not the wood the registry says the shield is"
+        );
+        let every = [
+            colours.planks[0],
+            colours.planks[1],
+            colours.rim,
+            colours.boss,
+            colours.handle,
+        ];
+        for (index, one) in every.iter().enumerate() {
+            for two in &every[index + 1..] {
+                assert_ne!(one, two, "two parts of the shield are one colour");
+            }
+        }
+        for plank in colours.planks {
+            assert!(
+                (0..3).all(|channel| colours.rim[channel] < plank[channel]),
+                "the rim {:?} is not darker than the plank {plank:?}",
+                colours.rim
+            );
+        }
+
+        let radius = SHIELD_PLANK_RADIUS * diameter;
+        let [even, odd] = colours.planks.map(|shade| shield_part(&shield, shade));
+        for (name, points) in [("the registry's", &even), ("the darker", &odd)] {
+            assert!(!points.is_empty(), "no plank is drawn in {name} shade");
+            for point in points {
+                assert!(
+                    (point.truncate().length() - radius).abs() < 1e-6,
+                    "a plank corner at {point:?} is off the face's circle of {radius}"
+                );
+            }
+        }
+        let planks: Vec<Vec3> = even.iter().chain(&odd).copied().collect();
+        for facet in 0..SHIELD_SIDES {
+            let angle = TAU * facet as f32 / SHIELD_SIDES as f32;
+            assert!(
+                planks.iter().any(|point| {
+                    let apart = (point.y.atan2(point.x) - angle).rem_euclid(TAU);
+                    !(1e-3..=TAU - 1e-3).contains(&apart)
+                }),
+                "no plank reaches the circle at {:.1}°, so the face is cut flat there",
+                angle.to_degrees()
+            );
+        }
+        assert!(
+            bounds(&odd).0.z < bounds(&even).0.z,
+            "the darker planks do not stand forward of their neighbours, so no seam shows"
+        );
+
+        let rim = shield_part(&shield, colours.rim);
+        for point in &rim {
+            let reach = point.truncate().length();
+            assert!(
+                [SHIELD_RIM_INNER, SHIELD_RIM_OUTER]
+                    .iter()
+                    .any(|wall| (reach - wall * diameter).abs() < 1e-6),
+                "a rim corner at {point:?} is on neither of its walls"
+            );
+        }
+        let (rim_low, rim_high) = bounds(&rim);
+        let (wood_low, wood_high) = bounds(&planks);
+        assert!(
+            (rim_high.x - rim_low.x - diameter).abs() < 1e-6
+                && (rim_high.y - rim_low.y - diameter).abs() < 1e-6,
+            "the shield is not {diameter} across in both directions"
+        );
+        assert!(
+            rim_low.z < wood_low.z && rim_high.z > wood_high.z,
+            "the rim does not stand proud of the planks in front and behind"
+        );
+        // A plank's end is a chord of at most one facet, so its deepest point is
+        // `cos(π / SHIELD_SIDES)` of the radius; the rim's inner wall must reach inside that,
+        // and its outer wall's own chords must stay outside the planks.
+        let chord = (PI / SHIELD_SIDES as f32).cos();
+        assert!(
+            SHIELD_RIM_INNER < SHIELD_PLANK_RADIUS * chord
+                && SHIELD_PLANK_RADIUS < SHIELD_RIM_OUTER * chord,
+            "the planks' cut edges are not buried between the rim's walls"
+        );
+    }
+
+    /// **The boss is an iron dome at the centre, standing out of everything else on the face.**
+    #[test]
+    fn the_boss_is_an_iron_dome_standing_out_of_the_centre_of_the_face() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+        assert_eq!(colours.boss, items::forged_iron_linear_rgba());
+
+        let boss = shield_part(&shield, colours.boss);
+        let (low, high) = bounds(&boss);
+        assert!(
+            (low.x + high.x).abs() < 1e-6 && (low.y + high.y).abs() < 1e-6,
+            "the boss is off the centre of the face: {low:?} to {high:?}"
+        );
+        let apex = low.z;
+        assert!(
+            boss.iter()
+                .filter(|point| (point.z - apex).abs() < 1e-7)
+                .all(|point| point.truncate().length() < 1e-6),
+            "the boss's foremost point is not on the axis, so it is not a dome"
+        );
+
+        let face: Vec<Vec3> = [colours.rim, colours.planks[0], colours.planks[1]]
+            .into_iter()
+            .flat_map(|colour| shield_part(&shield, colour))
+            .collect();
+        let flange = -SHIELD_BOSS_FLANGE_FRONT * diameter;
+        assert!(
+            flange < bounds(&face).0.z - 1e-6,
+            "the boss's flange does not stand in front of the rim and the planks"
+        );
+
+        // Domed: from the flange forward, each ring is no wider than the one behind it.
+        let mut rings: Vec<(f32, f32)> = boss
+            .iter()
+            .filter(|point| point.z < flange - 1e-7)
+            .map(|point| (point.z, point.truncate().length()))
+            .collect();
+        rings.sort_by(|one, two| two.0.total_cmp(&one.0));
+        assert!(
+            rings.len() > SHIELD_SIDES,
+            "the boss has no dome in front of its flange"
+        );
+        for pair in rings.windows(2) {
+            assert!(
+                pair[1].1 <= pair[0].1 + 1e-6,
+                "the boss widens from {} to {} going forward, so it is not a dome",
+                pair[0].1,
+                pair[1].1
+            );
+        }
+    }
+
+    /// **The handle runs level behind the boss, and a fist on its grip point holds the shield
+    /// from behind** — the contract the shield hand is placed against.
+    ///
+    /// Three measurements, each the thing a fist needs rather than a restatement of the
+    /// constants: the grip point is on the handle; the gap between the wood and the bar is at
+    /// least a quarter of the fist, room for the fingers to pass through; and a fist of
+    /// [`HAND_SIZE`] centred on the grip point is wholly behind the planks and the boss, between
+    /// the two posts. The held arrangement seats exactly that fist there.
+    #[test]
+    fn a_fist_on_the_grip_point_holds_the_shield_from_behind_with_room_for_the_fingers() {
+        let diameter = SHIELD_IN_HAND;
+        let shield = shield_mesh(diameter);
+        let colours = shield_colours();
+        let grip = shield_grip_point(diameter);
+
+        let handle = shield_part(&shield, colours.handle);
+        let (low, high) = bounds(&handle);
+        assert!(
+            high.x - low.x > 4.0 * (high.y - low.y),
+            "the handle is not horizontal: {low:?} to {high:?}"
+        );
+        assert!(
+            grip.truncate() == Vec2::ZERO && (low.x + high.x).abs() < 1e-6,
+            "the handle is not centred behind the boss"
+        );
+        assert!(
+            low.cmple(grip).all() && grip.cmple(high).all(),
+            "the grip point {grip:?} is off the handle, {low:?} to {high:?}"
+        );
+
+        let wood = [colours.planks[0], colours.planks[1]]
+            .into_iter()
+            .flat_map(|colour| shield_part(&shield, colour))
+            .collect::<Vec<_>>();
+        let wood_back = bounds(&wood).1.z;
+        let boss_back = bounds(&shield_part(&shield, colours.boss)).1.z;
+        let bar_front = handle
+            .iter()
+            .map(|point| point.z)
+            .filter(|z| *z > wood_back)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            bar_front - wood_back >= HAND_SIZE.z / 4.0,
+            "only {} between the planks and the handle, where a fist's fingers need {}",
+            bar_front - wood_back,
+            HAND_SIZE.z / 4.0
+        );
+
+        let fist_front = grip.z - HAND_SIZE.z / 2.0;
+        assert!(
+            fist_front > wood_back && fist_front > boss_back,
+            "a fist on the grip point reaches {fist_front}, into the wood at {wood_back}"
+        );
+        let between_posts = (SHIELD_HANDLE_HALF_SPAN - 2.0 * SHIELD_POST_HALF_WIDTH) * diameter;
+        assert!(
+            HAND_SIZE.x / 2.0 < between_posts,
+            "a fist on the grip point does not fit between the handle's posts"
+        );
+
+        assert!(
+            (item_translation(ItemShape::Shield) + grip).length() < 1e-7,
+            "the held shield is not seated with its grip point on the fist's centre"
+        );
+    }
+
+    /// **The hand, the ground and a body draw one shield**, at their own scales and nothing
+    /// else — and every vertex of it points at the neutral band, because the ground drop's
+    /// material wears the wood livery.
+    #[test]
+    fn the_shield_is_one_model_at_every_scale() {
+        let hand = shield_mesh(SHIELD_IN_HAND);
+        let hand_points = positions(&hand);
+        for diameter in [0.5, 0.62] {
+            let other = shield_mesh(diameter);
+            let scale = diameter / SHIELD_IN_HAND;
+            let points = positions(&other);
+            assert_eq!(points.len(), hand_points.len());
+            for (point, held) in points.iter().zip(&hand_points) {
+                assert!(
+                    Vec3::from_array(*point).distance(Vec3::from_array(*held) * scale) < 1e-5,
+                    "the shield at {diameter} is not the hand's scaled: {point:?}"
+                );
+            }
+            assert_eq!(
+                other
+                    .attribute(Mesh::ATTRIBUTE_COLOR)
+                    .map(|colours| colours.len()),
+                hand.attribute(Mesh::ATTRIBUTE_COLOR)
+                    .map(|colours| colours.len())
+            );
+            assert_eq!(
+                other.indices().map(|indices| indices.len()),
+                hand.indices().map(|indices| indices.len())
+            );
+        }
+        let Some(VertexAttributeValues::Float32x2(uvs)) = hand.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("the shield must carry Float32x2 texture coordinates");
+        };
+        assert!(
+            uvs.iter().all(|uv| *uv == livery::neutral_uv()),
+            "the shield samples the livery image outside its neutral band"
+        );
+    }
+
     /// **Every solid in the sword is wound outward**, which is the one failure in a new part
     /// that costs the most to diagnose.
     ///
@@ -6258,6 +6829,7 @@ mod tests {
             ("the pickaxe", pickaxe_mesh(IMPLEMENT_LENGTH)),
             ("the shovel", shovel_mesh(IMPLEMENT_LENGTH)),
             ("the bow", bow_mesh(BOW_LENGTH)),
+            ("the shield", shield_mesh(SHIELD_IN_HAND)),
         ] {
             let solids = solid_volumes(&mesh, false);
             // **The count says which surface this is**, which is the property #435 added and
@@ -6277,6 +6849,9 @@ mod tests {
                 // Two limbs and the string. It is here because its limbs are built by the same
                 // `tapered_prism` as the pick's arms, and were wound inside out until #1121.
                 "the bow" => 3,
+                // The rim, five planks that step alternately and so share no corner, the
+                // boss, and a handle whose bar and two posts meet without sharing one.
+                "the shield" => 10,
                 _ => 4,
             };
             assert_eq!(
