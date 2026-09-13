@@ -1405,13 +1405,32 @@ fn drawn_age(species: &CritterSpecies, age: f32, held_at: Option<f32>) -> f32 {
     }
 }
 
-/// The age a slot's critter had on the previous frame, which is the frame it was last drawn at.
+/// The age a slot's critter of `generation` had on the frame it was last drawn at.
 ///
 /// **The previous frame's and not this one's**, because the frame that retires a lynx is the
 /// frame the eye has already crossed: holding it at this frame's age would move it one frame
 /// further along its bolt toward an eye that is no longer in its cell.
-fn last_drawn_age(species: &CritterSpecies, slot: usize, elapsed: f32, dt: f32) -> f32 {
-    generation_of(species, slot, (elapsed - dt).max(0.0)).1
+///
+/// **Unless the previous frame belongs to an earlier window than the critter's own.** A critter
+/// stood up on the first frame after its window opens was never drawn at the previous frame's
+/// age, which is the *previous* generation's — nearly a whole window — and holding a lynx there
+/// would put it at the end of a bolt it never ran. Its last drawn age is then this frame's,
+/// which is where it was stood up. A critter whose own window has just *closed* keeps the
+/// previous frame's age, which is its own generation's last. Found by a measure-only review
+/// replay on #1242; `a_lynx_retired_as_its_window_opens_is_held_where_it_was_stood_up` holds both.
+fn last_drawn_age(
+    species: &CritterSpecies,
+    slot: usize,
+    generation: i64,
+    elapsed: f32,
+    dt: f32,
+) -> f32 {
+    let (previous_generation, previous_age) = generation_of(species, slot, (elapsed - dt).max(0.0));
+    if previous_generation < generation {
+        generation_of(species, slot, elapsed).1
+    } else {
+        previous_age
+    }
 }
 
 /// One tail, as a child of the critter it belongs to.
@@ -2214,8 +2233,8 @@ pub(super) fn keep_the_critters(
             || left_behind
             || generation != critter.generation
         {
-            let index = critter.index;
-            critter.retire(last_drawn_age(row, index, elapsed, time.delta_secs()));
+            let (index, own) = (critter.index, critter.generation);
+            critter.retire(last_drawn_age(row, index, own, elapsed, time.delta_secs()));
             // Only a critter the *anchor* left behind says which way the player went; one
             // retired because the ground changed under them, or because its life ran out,
             // says nothing about direction.
@@ -2244,6 +2263,7 @@ pub(super) fn keep_the_critters(
             let last = last_drawn_age(
                 &CRITTERS[critter.species],
                 critter.index,
+                critter.generation,
                 elapsed,
                 time.delta_secs(),
             );
@@ -2489,7 +2509,7 @@ pub(super) fn run_the_critters(
         // its trunk while it is disappearing rather than dissolving on the ground. It is set
         // here rather than in `keep_the_critters` because this is the system that owns the
         // fade, and it is one-way: nothing moves `wanted` back up.
-        let last = last_drawn_age(species, critter.index, elapsed, dt);
+        let last = last_drawn_age(species, critter.index, critter.generation, elapsed, dt);
         if critter.wanted > 0.0 && age >= species.life - CRITTER_FADE_SECONDS {
             critter.retire(last);
         }
@@ -4489,5 +4509,116 @@ mod tests {
         for row in CRITTERS.iter().filter(|row| row.gait != Gait::Ambush) {
             assert_eq!(drawn_age(row, 3.0, Some(1.0)), 3.0, "{:?} held", row.gait);
         }
+    }
+
+    #[test]
+    fn a_lynx_retired_as_its_window_opens_is_held_where_it_was_stood_up() {
+        // A measure-only review replay on #1242: `last_drawn_age` read the previous frame's age
+        // without asking whose window that frame was in. A lynx stood up on the first frame
+        // after its window opens has a previous frame in the window before — nearly forty
+        // seconds old — and retired there it was held at the end of a bolt it never ran.
+        let lynx = &CRITTERS[LYNX];
+        let anchor = anchor_of(IVec3::new(1, 2, 3));
+        let dt = 0.1;
+        // Slot zero's second window opens at `window`; the lynx is stood up 30 ms into it, on a
+        // frame whose predecessor is still in the first window.
+        let stood_at = lynx.window + 0.03;
+        let (generation, stood_age) = generation_of(lynx, 0, stood_at);
+        assert_eq!(generation, 1);
+        assert_eq!(
+            generation_of(lynx, 0, stood_at - dt).0,
+            0,
+            "the frame before is in the same window, so this is not the case"
+        );
+        for seed in 0..16u64 {
+            let seed = mix(seed, 0x0BE2);
+            let stood = place(lynx, seed, stood_age, anchor, None);
+            // Retired on the frame it was stood up, and on the frame after.
+            for (name, elapsed) in [("its first frame", stood_at), ("its second", stood_at + dt)] {
+                let held = last_drawn_age(lynx, 0, generation, elapsed, dt);
+                let at = place(lynx, seed, drawn_age(lynx, 0.0, Some(held)), anchor, None);
+                assert!(
+                    at.distance(stood) < 1e-3,
+                    "seed {seed}, retired on {name}: held at {held} s, {} blocks from where it \
+                     was stood up",
+                    at.distance(stood)
+                );
+            }
+        }
+        // And a critter whose own window has just closed keeps its own generation's last age —
+        // the case the previous frame was always right about.
+        let squirrel = &CRITTERS[0];
+        let closed = squirrel.window + 0.03;
+        let kept = last_drawn_age(squirrel, 0, 0, closed, dt);
+        assert!(
+            (kept - (squirrel.window - 0.07)).abs() < 1e-3,
+            "a squirrel retired as its window closed was held at {kept}"
+        );
+    }
+
+    #[test]
+    fn each_ear_of_a_lynx_is_its_own_closed_shell_wound_outward() {
+        // A measure-only review replay on #1242 suspected the left ear inside out: mirrored
+        // through `x = 0`, which reverses a winding. `pyramid` mirrors only the base centre and
+        // the apex and writes the four base corners afresh in the same order for both ears, so
+        // the winding should not reverse — and that is measured here rather than argued.
+        //
+        // **Per ear, because the whole-mesh test cannot answer it.**
+        // `every_face_of_a_critter_is_wound_outward` sums the signed volume of the whole body,
+        // and an ear inside out is a few ten-thousandths of that: its sign would not move.
+        let mesh = stride_mesh();
+        let (positions, _, triangles) = geometry(&mesh);
+        let painted = colours(&mesh);
+        let ear = |side: f32| -> Vec<[Vec3; 3]> {
+            triangles
+                .iter()
+                .filter(|corners| corners.iter().all(|corner| painted[*corner] == MARKING))
+                .map(|corners| corners.map(|corner| positions[corner]))
+                .filter(|[a, b, c]| (a.x + b.x + c.x) * side > 0.0)
+                .collect()
+        };
+        // How open a shell is, the volume its winding encloses, and how many of its faces point
+        // back into it rather than away from its centre.
+        let shell = |faces: &[[Vec3; 3]]| {
+            let centre = faces.iter().flatten().copied().sum::<Vec3>() / (faces.len() * 3) as f32;
+            let (mut area, mut volume, mut inward) = (Vec3::ZERO, 0.0f32, 0usize);
+            for [a, b, c] in faces {
+                let cross = (*b - *a).cross(*c - *a);
+                area += cross;
+                volume += a.cross(*b).dot(*c) / 6.0;
+                inward += usize::from(((*a + *b + *c) / 3.0 - centre).dot(cross) <= 0.0);
+            }
+            (area.length(), volume, inward)
+        };
+        let (right, left) = (ear(1.0), ear(-1.0));
+        // A pyramid is a base of two triangles and four sides.
+        assert_eq!((right.len(), left.len()), (6, 6));
+        let mut volumes = Vec::new();
+        for (name, faces) in [("right", &right), ("left", &left)] {
+            let (open, volume, inward) = shell(faces);
+            assert!(open < 1e-6, "the {name} ear is not closed: {open}");
+            assert!(
+                volume > 0.0,
+                "the {name} ear encloses {volume}, so it is inside out"
+            );
+            assert_eq!(inward, 0, "{inward} faces of the {name} ear point into it");
+            volumes.push(volume);
+        }
+        assert!(
+            (volumes[0] - volumes[1]).abs() < 1e-9,
+            "mirror-image ears enclose {volumes:?}"
+        );
+        // **The control**: the right ear mirrored through `x = 0` by a negative scale — the
+        // construction the finding supposed — reads inside out on both counts.
+        let scaled: Vec<[Vec3; 3]> = right
+            .iter()
+            .map(|face| face.map(|at| at * Vec3::new(-1.0, 1.0, 1.0)))
+            .collect();
+        let (_, volume, inward) = shell(&scaled);
+        assert!(
+            volume < 0.0 && inward == scaled.len(),
+            "a negatively scaled ear read {volume} with {inward} faces inward, so this measures \
+             nothing"
+        );
     }
 }
