@@ -78,7 +78,7 @@ impl Plugin for CombatPlugin {
         app.init_resource::<ViewMode>();
         app.init_resource::<BlockIntent>()
             .init_resource::<SelfVitals>()
-            .init_resource::<LastEnergyAsk>()
+            .init_resource::<EnergyAnswers>()
             .add_message::<SwingSent>()
             .add_message::<SwingAbandoned>()
             // `ui/status.rs` writes it in the game; registered here too so this module
@@ -110,7 +110,12 @@ impl Plugin for CombatPlugin {
                     // the server before the swing that names it. The server resolves the swing
                     // against the aim it last accepted, and an attack that arrived first would
                     // be judged against the previous frame's facing.
-                    .after(super::send_player_input),
+                    .after(super::send_player_input)
+                    // After the shield's edge, pinned rather than left to the scheduler: the
+                    // two systems queue their frames in the order they run, so this order is
+                    // also the order the server answers them in, and [`EnergyAnswers`] has to
+                    // count a raise and a swing pressed on one frame in exactly that order.
+                    .after(send_block_edges),
             )
             .add_systems(
                 Update,
@@ -136,7 +141,7 @@ fn send_block_edges(
     mut intent: ResMut<BlockIntent>,
     outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
-    mut asked: ResMut<LastEnergyAsk>,
+    mut answers: ResMut<EnergyAnswers>,
 ) {
     let pressed = buttons
         .as_deref()
@@ -177,32 +182,73 @@ fn send_block_edges(
     if active {
         intent.raised = sent == Sent::Queued;
         if sent == Sent::Queued {
-            *asked = LastEnergyAsk::Raise;
+            answers.raise_sent();
         }
     } else {
         intent.raised = false;
     }
 }
 
-/// Which request the server may refuse for energy left this client most recently.
+/// Whether the energy refusals that have arrived prove the newest swing was one of them.
 ///
 /// **The server answers a starved swing and a starved shield raise with the same pair**,
 /// `ActionRefused{Energy, NotEnoughEnergy}` (`attackRefusal` and `blockRefusal` in the
 /// session), and an admitted request is answered by nothing at all. So a refusal names no
-/// request, and this is the one thing the client knows that can: the order it asked in.
-/// The session answers on the goroutine that reads the requests, in arrival order, so a
-/// refusal belongs to a request that left before it — and the most recent one is the
-/// only attribution that never abandons a swing because a *later* raise was refused.
+/// request. What the client does know is the order it asked in, and the session answers on
+/// the goroutine that reads the requests, in arrival order.
 ///
-/// It decides nothing about energy. It holds no reserve and no cost; it says only which of
-/// this client's own requests a refusal the server already sent is most likely to answer.
+/// **So it counts, rather than remembering one slot.** Every refusal read since the newest
+/// swing left is set against the shield raises that left after it: each such raise can
+/// explain at most one refusal, so the first refusal beyond them belongs to the swing — or to
+/// something older than it, which asked the same reserve first and was refused first. That
+/// settles both interleavings of a swing followed by a raise, which a single slot could only
+/// settle one of (#1266):
+///
+///   - the swing landed and the raise after it was refused: one refusal against one raise,
+///     and the swing plays in full;
+///   - both were refused — the expected case, since both cost the same 25 — two refusals
+///     against one raise, and the swing is abandoned when the second arrives.
+///
+/// A raise the server answers in some other way — admitted, or dropped because it was not a
+/// new press there — only raises the bar, which is the direction a presentation may fail in:
+/// a swing kept on screen, never a landed one taken back.
+///
+/// It decides nothing about energy. It holds no reserve and no cost; it only compares how
+/// many answers arrived with how many of this client's own requests could have earned them.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
-enum LastEnergyAsk {
-    /// Nothing is awaiting an energy answer, or its answer has already arrived.
-    #[default]
-    Nothing,
-    Swing,
-    Raise,
+struct EnergyAnswers {
+    /// The newest swing that left, until a refusal has been attributed to it.
+    swing_unanswered: bool,
+    /// Shield raises queued since that swing, each able to explain one refusal.
+    raises_since_swing: u32,
+    /// Energy refusals read since that swing.
+    refusals_since_swing: u32,
+}
+
+impl EnergyAnswers {
+    /// A swing left: everything counted so far answers something older.
+    fn swing_sent(&mut self) {
+        *self = Self {
+            swing_unanswered: true,
+            ..Self::default()
+        };
+    }
+
+    /// A shield raise left, after the newest swing.
+    fn raise_sent(&mut self) {
+        self.raises_since_swing = self.raises_since_swing.saturating_add(1);
+    }
+
+    /// One energy refusal arrived. `true` exactly once per swing: when it proves that swing
+    /// was refused.
+    fn refused(&mut self) -> bool {
+        self.refusals_since_swing = self.refusals_since_swing.saturating_add(1);
+        if self.swing_unanswered && self.refusals_since_swing > self.raises_since_swing {
+            self.swing_unanswered = false;
+            return true;
+        }
+        false
+    }
 }
 
 /// The server refused the most recent swing for energy: stop presenting it as a strike.
@@ -215,9 +261,9 @@ pub(super) struct SwingAbandoned;
 
 /// Turns an energy refusal that answers a swing into [`SwingAbandoned`].
 ///
-/// **One refusal answers one request**, so it consumes the attribution: a second refusal
-/// with nothing newer asked is the answer to something already taken back, or to a request
-/// older than the last one, and abandons nothing.
+/// **A swing is abandoned at most once**, however many refusals follow it: the ones after
+/// the first that settled it answer something already taken back. See [`EnergyAnswers`] for
+/// which refusal settles it.
 ///
 /// Two outcomes are left alone on purpose, and both are the direction a presentation may
 /// fail in. A swing the server admitted is never answered, so its arc plays out. A swing
@@ -226,14 +272,13 @@ pub(super) struct SwingAbandoned;
 /// a landed blow look exactly alike, and only a refusal is evidence of anything.
 fn abandon_refused_swings(
     mut refusals: MessageReader<EnergyRefused>,
-    mut asked: ResMut<LastEnergyAsk>,
+    mut answers: ResMut<EnergyAnswers>,
     mut abandoned: MessageWriter<SwingAbandoned>,
 ) {
     for _ in refusals.read() {
-        if *asked == LastEnergyAsk::Swing {
+        if answers.refused() {
             abandoned.write(SwingAbandoned);
         }
-        *asked = LastEnergyAsk::Nothing;
     }
 }
 
@@ -353,7 +398,7 @@ fn send_attacks(
     mut swings: MessageWriter<SwingSent>,
     mut messages: MessageWriter<PlayerMessage>,
     (vitals, intent): (Res<SelfVitals>, Res<BlockIntent>),
-    mut asked: ResMut<LastEnergyAsk>,
+    mut answers: ResMut<EnergyAnswers>,
 ) {
     if !gate.may_act() {
         return;
@@ -394,7 +439,7 @@ fn send_attacks(
     match outbound.send(encode_attack_request(&request)) {
         Sent::Queued => {
             swings.write(SwingSent { item_id });
-            *asked = LastEnergyAsk::Swing;
+            answers.swing_sent();
         }
         Sent::Dropped => {
             warn!(
@@ -413,7 +458,7 @@ fn send_attacks(
 
 pub(super) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<BlockIntent>(world);
-    crate::world::transition::reset::<LastEnergyAsk>(world);
+    crate::world::transition::reset::<EnergyAnswers>(world);
 }
 
 #[cfg(test)]
@@ -972,13 +1017,15 @@ mod tests {
         }
     }
 
-    /// **A refused shield raise abandons no swing, though it arrives as the very same pair.**
+    /// **A swing followed by a shield raise: one refusal is the raise's, two are both** (#1266).
     ///
-    /// The server answers a starved raise with `ActionRefused{Energy, NotEnoughEnergy}` too.
-    /// The raise left after the swing, so the refusal is attributed to it: a swing that landed
-    /// is never taken back because the shield could not follow it up.
+    /// The server answers a starved raise with `ActionRefused{Energy, NotEnoughEnergy}` too, and
+    /// answers in the order the two left. One refusal therefore cannot be the swing's alone —
+    /// the swing may have landed and only the raise after it been refused — so it takes nothing
+    /// back. A second refusal is more than the raise can explain, so the swing was refused as
+    /// well, which is the expected case when both cost the same reserve.
     #[test]
-    fn an_energy_refusal_after_a_shield_raise_abandons_no_swing() {
+    fn a_swing_then_a_shield_raise_is_abandoned_only_when_both_are_refused() {
         let (mut app, sent) = clicking_app(blade());
         let mut cursor = app
             .world()
@@ -998,6 +1045,124 @@ mod tests {
             0,
             "the refusal of the raise abandoned the swing before it"
         );
+
+        refuse_for_energy(&mut app);
+        app.update();
+        assert_eq!(
+            abandons(&app, &mut cursor),
+            1,
+            "the swing's own refusal, behind the raise's, abandoned nothing"
+        );
+    }
+
+    /// The attack and shield requests waiting on the queue, in the order they left.
+    fn combat_requests(sent: &Receiver<Vec<u8>>) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        while let Ok(frame) = sent.try_recv() {
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            if envelope.payload_as_attack_request().is_some() {
+                found.push("attack");
+            } else if envelope.payload_as_block_request().is_some() {
+                found.push("block");
+            }
+        }
+        found
+    }
+
+    /// **A raise and a swing pressed on one frame leave in one pinned order** (#1266).
+    ///
+    /// The order the two systems run is the order their frames reach the server and the order
+    /// it answers them in, so it is scheduled explicitly rather than left ambiguous. The raise
+    /// leaves first, so a refusal that follows is set against the swing with no raise after
+    /// it: a starved pair is abandoned on the first refusal.
+    #[test]
+    fn a_raise_and_a_swing_on_one_frame_leave_raise_first() {
+        let (mut app, sent) = clicking_app(blade());
+        let mut cursor = app
+            .world()
+            .resource::<Messages<SwingAbandoned>>()
+            .get_cursor();
+        block_button(&mut app, ButtonState::Pressed);
+        click(&mut app);
+        app.update();
+        assert_eq!(
+            combat_requests(&sent),
+            ["block", "attack"],
+            "the raise and the swing did not leave in the pinned order"
+        );
+
+        refuse_for_energy(&mut app);
+        app.update();
+        assert_eq!(
+            abandons(&app, &mut cursor),
+            1,
+            "a refusal after a raise-then-swing did not abandon the swing"
+        );
+    }
+
+    /// Every interleaving of swings, raises and refusals the attribution distinguishes.
+    ///
+    /// Written against the counter itself, one event at a time, because the property is about
+    /// order and a frame-driven test can only reach the orders a frame produces.
+    #[test]
+    fn energy_answers_attribute_every_interleaving() {
+        #[derive(Clone, Copy)]
+        enum Step {
+            Swing,
+            Raise,
+            Refusal,
+        }
+        use Step::{Raise, Refusal, Swing};
+
+        for (name, steps, expected) in [
+            (
+                "a refusal with no swing",
+                &[Raise, Refusal][..],
+                &[false][..],
+            ),
+            ("a refused swing", &[Swing, Refusal][..], &[true][..]),
+            (
+                "a refused swing, answered twice",
+                &[Swing, Refusal, Refusal][..],
+                &[true, false][..],
+            ),
+            (
+                "a swing that landed, then a refused raise",
+                &[Swing, Raise, Refusal][..],
+                &[false][..],
+            ),
+            (
+                "a refused swing, then a refused raise",
+                &[Swing, Raise, Refusal, Refusal][..],
+                &[false, true][..],
+            ),
+            (
+                "a refused raise, then a swing before its answer",
+                &[Raise, Swing, Refusal][..],
+                &[true][..],
+            ),
+            (
+                "a swing that landed, then two refused raises",
+                &[Swing, Raise, Raise, Refusal, Refusal][..],
+                &[false, false][..],
+            ),
+            (
+                "an older swing's refusal after a newer swing left",
+                &[Swing, Refusal, Swing, Refusal][..],
+                &[true, true][..],
+            ),
+        ] {
+            let mut answers = EnergyAnswers::default();
+            let mut settled = Vec::new();
+            for step in steps {
+                match step {
+                    Swing => answers.swing_sent(),
+                    Raise => answers.raise_sent(),
+                    Refusal => settled.push(answers.refused()),
+                }
+            }
+            assert_eq!(settled, expected, "{name}");
+        }
     }
 
     /// **A press behind a shield the server says is up starts no swing** (#1228) — and a stale
