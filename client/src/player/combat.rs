@@ -14,10 +14,10 @@ use bevy::prelude::*;
 
 use super::crafting;
 use super::inventory::{Inventory, SelectedSlot};
-use super::{ApplySnapshots, InputCadence, InputGate, ViewMode};
+use super::{ApplySnapshots, InputCadence, InputGate, SelfVitals, ViewMode};
 use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
 use crate::net::{BlockRequest, ConnectionState, encode_block_request};
-use crate::ui::{PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
+use crate::ui::{EnergyRefused, PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
 /// what [`attack_item_in_hand`] decides.
@@ -77,8 +77,23 @@ impl Plugin for CombatPlugin {
         // reads it — resolves when this module is built on its own.
         app.init_resource::<ViewMode>();
         app.init_resource::<BlockIntent>()
+            .init_resource::<SelfVitals>()
+            .init_resource::<EnergyAnswers>()
             .add_message::<SwingSent>()
+            .add_message::<SwingAbandoned>()
+            // `ui/status.rs` writes it in the game; registered here too so this module
+            // stands up without the UI.
+            .add_message::<EnergyRefused>()
             .add_message::<PlayerMessage>()
+            .add_systems(
+                Update,
+                // Before both senders, so a refusal is attributed against the requests that
+                // had left when it was sent — never against a press made on this frame.
+                abandon_refused_swings
+                    .in_set(ApplyCombatInput)
+                    .before(send_attacks)
+                    .before(send_block_edges),
+            )
             .add_systems(
                 Update,
                 send_attacks
@@ -95,7 +110,12 @@ impl Plugin for CombatPlugin {
                     // the server before the swing that names it. The server resolves the swing
                     // against the aim it last accepted, and an attack that arrived first would
                     // be judged against the previous frame's facing.
-                    .after(super::send_player_input),
+                    .after(super::send_player_input)
+                    // After the shield's edge, pinned rather than left to the scheduler: the
+                    // two systems queue their frames in the order they run, so this order is
+                    // also the order the server answers them in, and [`EnergyAnswers`] has to
+                    // count a raise and a swing pressed on one frame in exactly that order.
+                    .after(send_block_edges),
             )
             .add_systems(
                 Update,
@@ -109,6 +129,10 @@ impl Plugin for CombatPlugin {
 }
 
 /// Sends right-button edges and lowers a local guard when gameplay input closes.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one intent-sending system; the energy attribution needs an eighth parameter"
+)]
 fn send_block_edges(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
     gate: InputGate<'_>,
@@ -117,6 +141,7 @@ fn send_block_edges(
     mut intent: ResMut<BlockIntent>,
     outbound: Option<ResMut<Outbound>>,
     mut messages: MessageWriter<PlayerMessage>,
+    mut answers: ResMut<EnergyAnswers>,
 ) {
     let pressed = buttons
         .as_deref()
@@ -156,8 +181,104 @@ fn send_block_edges(
     }
     if active {
         intent.raised = sent == Sent::Queued;
+        if sent == Sent::Queued {
+            answers.raise_sent();
+        }
     } else {
         intent.raised = false;
+    }
+}
+
+/// Whether the energy refusals that have arrived prove the newest swing was one of them.
+///
+/// **The server answers a starved swing and a starved shield raise with the same pair**,
+/// `ActionRefused{Energy, NotEnoughEnergy}` (`attackRefusal` and `blockRefusal` in the
+/// session), and an admitted request is answered by nothing at all. So a refusal names no
+/// request. What the client does know is the order it asked in, and the session answers on
+/// the goroutine that reads the requests, in arrival order.
+///
+/// **So it counts, rather than remembering one slot.** Every refusal read since the newest
+/// swing left is set against the shield raises that left after it: each such raise can
+/// explain at most one refusal, so the first refusal beyond them belongs to the swing — or to
+/// something older than it, which asked the same reserve first and was refused first. That
+/// settles both interleavings of a swing followed by a raise, which a single slot could only
+/// settle one of (#1266):
+///
+///   - the swing landed and the raise after it was refused: one refusal against one raise,
+///     and the swing plays in full;
+///   - both were refused — the expected case, since both cost the same 25 — two refusals
+///     against one raise, and the swing is abandoned when the second arrives.
+///
+/// A raise the server answers in some other way — admitted, or dropped because it was not a
+/// new press there — only raises the bar, which is the direction a presentation may fail in:
+/// a swing kept on screen, never a landed one taken back.
+///
+/// It decides nothing about energy. It holds no reserve and no cost; it only compares how
+/// many answers arrived with how many of this client's own requests could have earned them.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct EnergyAnswers {
+    /// The newest swing that left, until a refusal has been attributed to it.
+    swing_unanswered: bool,
+    /// Shield raises queued since that swing, each able to explain one refusal.
+    raises_since_swing: u32,
+    /// Energy refusals read since that swing.
+    refusals_since_swing: u32,
+}
+
+impl EnergyAnswers {
+    /// A swing left: everything counted so far answers something older.
+    fn swing_sent(&mut self) {
+        *self = Self {
+            swing_unanswered: true,
+            ..Self::default()
+        };
+    }
+
+    /// A shield raise left, after the newest swing.
+    fn raise_sent(&mut self) {
+        self.raises_since_swing = self.raises_since_swing.saturating_add(1);
+    }
+
+    /// One energy refusal arrived. `true` exactly once per swing: when it proves that swing
+    /// was refused.
+    fn refused(&mut self) -> bool {
+        self.refusals_since_swing = self.refusals_since_swing.saturating_add(1);
+        if self.swing_unanswered && self.refusals_since_swing > self.raises_since_swing {
+            self.swing_unanswered = false;
+            return true;
+        }
+        false
+    }
+}
+
+/// The server refused the most recent swing for energy: stop presenting it as a strike.
+///
+/// Read by the view-model arc and the whoosh, the two things [`SwingSent`] started. Only an
+/// arc that is still playing can be abandoned — a refusal that outlives its swing has
+/// nothing left on screen to take back, and the energy bar's flash answers it either way.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SwingAbandoned;
+
+/// Turns an energy refusal that answers a swing into [`SwingAbandoned`].
+///
+/// **A swing is abandoned at most once**, however many refusals follow it: the ones after
+/// the first that settled it answer something already taken back. See [`EnergyAnswers`] for
+/// which refusal settles it.
+///
+/// Two outcomes are left alone on purpose, and both are the direction a presentation may
+/// fail in. A swing the server admitted is never answered, so its arc plays out. A swing
+/// the server drops in silence — a cooldown, a shield raised on the tick, a slot that is not
+/// the main hand — is not answered either, and it plays out too: from here a silent drop and
+/// a landed blow look exactly alike, and only a refusal is evidence of anything.
+fn abandon_refused_swings(
+    mut refusals: MessageReader<EnergyRefused>,
+    mut answers: ResMut<EnergyAnswers>,
+    mut abandoned: MessageWriter<SwingAbandoned>,
+) {
+    for _ in refusals.read() {
+        if answers.refused() {
+            abandoned.write(SwingAbandoned);
+        }
     }
 }
 
@@ -256,9 +377,16 @@ impl HeldItem<'_> {
 /// `just_pressed`, never `pressed`: a swing is an event and the server refuses a second
 /// one inside its cooldown anyway, so holding the button down would only fill the
 /// outbound queue with frames that are declined on arrival.
+///
+/// **A press behind a raised shield starts no swing** (#1228). The server drops every swing
+/// while it says this player is blocking, before it creates anything, so a press there is
+/// neither sent nor animated. Both halves of the test are needed: the server's `blocking` is
+/// the fact, and the local raise still being held is what keeps a stale one from swallowing
+/// the counter-strike a player makes the frame after lowering the shield — that release left
+/// before this press, so the server lowers the shield before it judges the swing.
 #[allow(
     clippy::too_many_arguments,
-    reason = "one intent-sending system; the chat report needs an eighth parameter"
+    reason = "one intent-sending system; the chat report, the shield and the energy attribution need the rest"
 )]
 fn send_attacks(
     buttons: Option<Res<ButtonInput<MouseButton>>>,
@@ -269,6 +397,8 @@ fn send_attacks(
     structure: Res<super::structures::StructureTarget>,
     mut swings: MessageWriter<SwingSent>,
     mut messages: MessageWriter<PlayerMessage>,
+    (vitals, intent): (Res<SelfVitals>, Res<BlockIntent>),
+    mut answers: ResMut<EnergyAnswers>,
 ) {
     if !gate.may_act() {
         return;
@@ -288,6 +418,9 @@ fn send_attacks(
     let Some(item_id) = held.attack_item() else {
         return;
     };
+    if intent.raised && vitals.get().is_some_and(|vitals| vitals.blocking) {
+        return;
+    }
 
     let Some(mut outbound) = outbound else {
         return;
@@ -306,6 +439,7 @@ fn send_attacks(
     match outbound.send(encode_attack_request(&request)) {
         Sent::Queued => {
             swings.write(SwingSent { item_id });
+            answers.swing_sent();
         }
         Sent::Dropped => {
             warn!(
@@ -324,6 +458,7 @@ fn send_attacks(
 
 pub(super) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<BlockIntent>(world);
+    crate::world::transition::reset::<EnergyAnswers>(world);
 }
 
 #[cfg(test)]
@@ -334,6 +469,7 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use bevy::asset::AssetPlugin;
+    use bevy::ecs::message::MessageCursor;
     use bevy::input::ButtonState;
     use bevy::input::InputPlugin;
     use bevy::input::mouse::MouseButtonInput;
@@ -802,6 +938,271 @@ mod tests {
             app.world().resource::<Messages<SwingSent>>().len(),
             0,
             "a swing that never left the client still animated"
+        );
+    }
+
+    /// Every [`SwingAbandoned`] written since `cursor` last read.
+    fn abandons(app: &App, cursor: &mut MessageCursor<SwingAbandoned>) -> usize {
+        cursor
+            .read(app.world().resource::<Messages<SwingAbandoned>>())
+            .count()
+    }
+
+    /// The pair the server answers a starved request with, as `ui/status.rs` hands it on.
+    fn refuse_for_energy(app: &mut App) {
+        app.world_mut().write_message(EnergyRefused);
+    }
+
+    /// A living player at full energy, with the server's word on the shield.
+    fn vitals_blocking(blocking: bool) -> SelfVitals {
+        SelfVitals::from_server(PlayerVitals {
+            health: 100,
+            max_health: 100,
+            hunger: 50,
+            max_hunger: 100,
+            level: 1,
+            experience: 0,
+            experience_to_next: 50,
+            life_state: crate::net::LifeState::Alive,
+            respawn_ticks: 0,
+            invulnerable: false,
+            blocking,
+            energy: 100,
+            max_energy: 100,
+        })
+    }
+
+    /// **A swing the server refuses for energy is abandoned, once** (#1228).
+    ///
+    /// Every attack item, because the server charges one reserve for all of them. Silence
+    /// abandons nothing — that swing may have landed — and a second refusal with nothing
+    /// newer asked answers a swing already taken back.
+    #[test]
+    fn a_swing_refused_for_energy_is_abandoned_once() {
+        for (name, stack) in [
+            ("a blade", blade()),
+            ("a bow", blade_of(crafting::ITEM_BOW)),
+            ("a sceptre", blade_of(crafting::ITEM_WOODEN_SCEPTRE)),
+        ] {
+            let (mut app, sent) = clicking_app(stack);
+            let mut cursor = app
+                .world()
+                .resource::<Messages<SwingAbandoned>>()
+                .get_cursor();
+            click(&mut app);
+            app.update();
+            app.update();
+            assert_eq!(attacks(&sent).len(), 1, "{name}: the press sent no swing");
+            assert_eq!(
+                abandons(&app, &mut cursor),
+                0,
+                "{name}: a swing nobody answered was abandoned"
+            );
+
+            refuse_for_energy(&mut app);
+            app.update();
+            assert_eq!(
+                abandons(&app, &mut cursor),
+                1,
+                "{name}: the refusal did not abandon the swing it answered"
+            );
+
+            refuse_for_energy(&mut app);
+            app.update();
+            assert_eq!(
+                abandons(&app, &mut cursor),
+                0,
+                "{name}: a second refusal abandoned a swing already taken back"
+            );
+        }
+    }
+
+    /// **A swing followed by a shield raise: one refusal is the raise's, two are both** (#1266).
+    ///
+    /// The server answers a starved raise with `ActionRefused{Energy, NotEnoughEnergy}` too, and
+    /// answers in the order the two left. One refusal therefore cannot be the swing's alone —
+    /// the swing may have landed and only the raise after it been refused — so it takes nothing
+    /// back. A second refusal is more than the raise can explain, so the swing was refused as
+    /// well, which is the expected case when both cost the same reserve.
+    #[test]
+    fn a_swing_then_a_shield_raise_is_abandoned_only_when_both_are_refused() {
+        let (mut app, sent) = clicking_app(blade());
+        let mut cursor = app
+            .world()
+            .resource::<Messages<SwingAbandoned>>()
+            .get_cursor();
+        click(&mut app);
+        app.update();
+        block_button(&mut app, ButtonState::Pressed);
+        app.update();
+        let found = attacks(&sent);
+        assert_eq!(found.len(), 1, "the press sent no swing");
+
+        refuse_for_energy(&mut app);
+        app.update();
+        assert_eq!(
+            abandons(&app, &mut cursor),
+            0,
+            "the refusal of the raise abandoned the swing before it"
+        );
+
+        refuse_for_energy(&mut app);
+        app.update();
+        assert_eq!(
+            abandons(&app, &mut cursor),
+            1,
+            "the swing's own refusal, behind the raise's, abandoned nothing"
+        );
+    }
+
+    /// The attack and shield requests waiting on the queue, in the order they left.
+    fn combat_requests(sent: &Receiver<Vec<u8>>) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        while let Ok(frame) = sent.try_recv() {
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            if envelope.payload_as_attack_request().is_some() {
+                found.push("attack");
+            } else if envelope.payload_as_block_request().is_some() {
+                found.push("block");
+            }
+        }
+        found
+    }
+
+    /// **A raise and a swing pressed on one frame leave in one pinned order** (#1266).
+    ///
+    /// The order the two systems run is the order their frames reach the server and the order
+    /// it answers them in, so it is scheduled explicitly rather than left ambiguous. The raise
+    /// leaves first, so a refusal that follows is set against the swing with no raise after
+    /// it: a starved pair is abandoned on the first refusal.
+    #[test]
+    fn a_raise_and_a_swing_on_one_frame_leave_raise_first() {
+        let (mut app, sent) = clicking_app(blade());
+        let mut cursor = app
+            .world()
+            .resource::<Messages<SwingAbandoned>>()
+            .get_cursor();
+        block_button(&mut app, ButtonState::Pressed);
+        click(&mut app);
+        app.update();
+        assert_eq!(
+            combat_requests(&sent),
+            ["block", "attack"],
+            "the raise and the swing did not leave in the pinned order"
+        );
+
+        refuse_for_energy(&mut app);
+        app.update();
+        assert_eq!(
+            abandons(&app, &mut cursor),
+            1,
+            "a refusal after a raise-then-swing did not abandon the swing"
+        );
+    }
+
+    /// Every interleaving of swings, raises and refusals the attribution distinguishes.
+    ///
+    /// Written against the counter itself, one event at a time, because the property is about
+    /// order and a frame-driven test can only reach the orders a frame produces.
+    #[test]
+    fn energy_answers_attribute_every_interleaving() {
+        #[derive(Clone, Copy)]
+        enum Step {
+            Swing,
+            Raise,
+            Refusal,
+        }
+        use Step::{Raise, Refusal, Swing};
+
+        for (name, steps, expected) in [
+            (
+                "a refusal with no swing",
+                &[Raise, Refusal][..],
+                &[false][..],
+            ),
+            ("a refused swing", &[Swing, Refusal][..], &[true][..]),
+            (
+                "a refused swing, answered twice",
+                &[Swing, Refusal, Refusal][..],
+                &[true, false][..],
+            ),
+            (
+                "a swing that landed, then a refused raise",
+                &[Swing, Raise, Refusal][..],
+                &[false][..],
+            ),
+            (
+                "a refused swing, then a refused raise",
+                &[Swing, Raise, Refusal, Refusal][..],
+                &[false, true][..],
+            ),
+            (
+                "a refused raise, then a swing before its answer",
+                &[Raise, Swing, Refusal][..],
+                &[true][..],
+            ),
+            (
+                "a swing that landed, then two refused raises",
+                &[Swing, Raise, Raise, Refusal, Refusal][..],
+                &[false, false][..],
+            ),
+            (
+                "an older swing's refusal after a newer swing left",
+                &[Swing, Refusal, Swing, Refusal][..],
+                &[true, true][..],
+            ),
+        ] {
+            let mut answers = EnergyAnswers::default();
+            let mut settled = Vec::new();
+            for step in steps {
+                match step {
+                    Swing => answers.swing_sent(),
+                    Raise => answers.raise_sent(),
+                    Refusal => settled.push(answers.refused()),
+                }
+            }
+            assert_eq!(settled, expected, "{name}");
+        }
+    }
+
+    /// **A press behind a shield the server says is up starts no swing** (#1228) — and a stale
+    /// `blocking` does not swallow the counter-strike made after letting the shield go.
+    #[test]
+    fn a_press_behind_a_raised_shield_starts_no_swing_until_it_is_let_go() {
+        let (mut app, sent) = clicking_app(blade());
+        block_button(&mut app, ButtonState::Pressed);
+        app.update();
+        *app.world_mut().resource_mut::<SelfVitals>() = vitals_blocking(true);
+        click(&mut app);
+        app.update();
+        assert!(
+            attacks(&sent).is_empty(),
+            "a press behind the raised shield sent a swing"
+        );
+        assert_eq!(
+            app.world().resource::<Messages<SwingSent>>().len(),
+            0,
+            "a press behind the raised shield animated a swing"
+        );
+
+        // The shield is let go, and no snapshot has said so yet. The release left first, so the
+        // server lowers the shield before it judges the next press.
+        release(&mut app);
+        block_button(&mut app, ButtonState::Released);
+        app.update();
+        click(&mut app);
+        app.update();
+        assert_eq!(
+            attacks(&sent).len(),
+            1,
+            "the swing made after letting the shield go never left"
+        );
+        assert!(
+            app.world()
+                .resource::<SelfVitals>()
+                .get()
+                .is_some_and(|vitals| vitals.blocking),
+            "the vitals stopped saying blocking, so the half above proves nothing"
         );
     }
 

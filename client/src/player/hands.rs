@@ -27,7 +27,7 @@ use bevy::prelude::*;
 
 use super::SelfVitals;
 use super::camera::ViewMode;
-use super::combat::SwingSent;
+use super::combat::{SwingAbandoned, SwingSent};
 use super::crafting::{ITEM_ARROW, ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
@@ -2880,6 +2880,9 @@ impl Plugin for HandsPlugin {
         app.init_resource::<HandAnimation>()
             .init_resource::<SelfVitals>()
             .init_resource::<LocalMount>()
+            // `CombatPlugin` owns it in the game, and writes it; registered here so the
+            // focused animation tests stand this plugin up on its own.
+            .add_message::<SwingAbandoned>()
             // `PlayerPlugin` owns the appearance cache in the game. Initialised here too
             // because the focused animation tests build this plugin on its own.
             .init_resource::<super::Appearances>()
@@ -3147,7 +3150,11 @@ struct HandAnimation {
 
     /// The arc playing right now, if one is. Started by a `SwingSent` or a [`ConsumeSent`]
     /// message and by nothing else, so it plays exactly when a request left this client —
-    /// whether that request later hits, misses, feeds anybody or is refused.
+    /// whether that request later hits, misses, feeds anybody or is dropped in silence.
+    ///
+    /// **One answer takes an attack arc back: a refusal for energy** (#1228), which reaches
+    /// here as `SwingAbandoned` once `super::combat` has attributed it to the last swing.
+    /// It ends the arc on the frame it arrives. The eating arc is never abandoned by it.
     ///
     /// **Still one field for two senders, and deliberately.** The arcs are mutually
     /// exclusive on screen — one composition, one transform — so two fields would be two
@@ -3507,6 +3514,7 @@ struct HandIntent<'w, 's> {
     target: Res<'w, BlockTarget>,
     feedback: Res<'w, MiningFeedback>,
     swings: MessageReader<'w, 's, SwingSent>,
+    abandons: MessageReader<'w, 's, SwingAbandoned>,
     consumes: MessageReader<'w, 's, ConsumeSent>,
 }
 
@@ -3572,6 +3580,14 @@ impl HandIntent<'_, '_> {
         if self.mount.mounted() { None } else { sent }
     }
 
+    /// Whether the server refused the last swing for energy since the previous frame.
+    ///
+    /// Not a question this module answers: `super::combat` decides which request a refusal
+    /// belongs to, and this only reads that it did.
+    fn swing_abandoned(&mut self) -> bool {
+        self.abandons.read().count() > 0
+    }
+
     /// Whether a consume request left this client this frame.
     ///
     /// **The same reading as [`Self::swing_sent`], on the other request that draws an arc**:
@@ -3625,6 +3641,19 @@ fn animate_view_model(
     // them today — the left button and the consume key are two presses — but they share one
     // `may_act` gate and one frame, so a player can make both. A blow being answered is the
     // more urgent of the two things to show, and one composition can only draw one arc.
+    //
+    // **An abandoned swing is taken back first, before anything this frame starts** (#1228).
+    // The refusal was attributed before this frame's press was sent, so it answers an arc
+    // already playing and never the one a press on this same frame begins. A starved strike
+    // stops being drawn the frame its refusal arrives and the hand is back at rest — there
+    // is no recovery motion to play, because the blow the arc showed was never made.
+    if intent.swing_abandoned()
+        && next_animation
+            .attack
+            .is_some_and(|swing| swing.shape != SwingShape::Eat)
+    {
+        next_animation.attack = None;
+    }
     if intent.consume_sent() {
         next_animation.attack = Some(Swing {
             shape: SwingShape::Eat,
@@ -10007,6 +10036,7 @@ mod tests {
             .init_resource::<BlockTarget>()
             .init_resource::<ButtonInput<MouseButton>>()
             .add_message::<SwingSent>()
+            .add_message::<SwingAbandoned>()
             .add_message::<ConsumeSent>()
             .init_resource::<Inventory>()
             .init_resource::<InputMode>()
@@ -10150,12 +10180,20 @@ mod tests {
         panic!("a swing was still in flight after 256 frames");
     }
 
-    /// **The animation is driven by the request leaving, and by nothing coming back.**
+    /// **The animation is driven by the request leaving, and silence takes nothing back.**
     ///
     /// There is no session here, no snapshot, no inbound frame of any kind — which is exactly
-    /// the state a player is in when the server refuses a swing, because a refused blow
-    /// produces no reply at all. Six presses still draw six arcs, because what started them
-    /// was the asking.
+    /// the state a player is in when the server drops a swing in silence: a cooldown, a
+    /// shield raised on the tick, a slot that is not the main hand. Six presses still draw
+    /// six arcs, because what started them was the asking and nothing ever answered.
+    ///
+    /// **Revisited on #1228, deliberately.** This used to say a *refused* blow produces no
+    /// reply, and since #1134 that was no longer true of one refusal: a swing the reserve
+    /// cannot pay for is answered with `ActionRefused{Energy, NotEnoughEnergy}`, and that
+    /// answer now abandons the arc —
+    /// [`a_swing_the_server_refuses_for_energy_is_taken_back_mid_arc`]. What this test keeps is
+    /// the other half, which is still a real property: with no answer, the client cannot
+    /// tell a dropped swing from a landed one, so it plays both in full.
     ///
     /// **This is what survives of the rotation's test, and it is the half worth keeping.** It
     /// used to assert that six presses drew all three shapes and never one twice running;
@@ -10195,6 +10233,94 @@ mod tests {
         assert!(
             app.world().get_resource::<Session>().is_none(),
             "a session turned up, so this test says nothing about a refused swing"
+        );
+    }
+
+    /// **A swing the server refuses for energy stops being drawn the frame the refusal
+    /// arrives** (#1228).
+    ///
+    /// Every attack shape, because the server charges the same reserve for a cut, a draw and a
+    /// cast, and refuses all three the same way. Part way in on purpose: a refusal lands a tick
+    /// or two into a 220 ms arc, so what is being tested is an arc abandoned mid-flight, not
+    /// one that had already ended by itself.
+    #[test]
+    fn a_swing_the_server_refuses_for_energy_is_taken_back_mid_arc() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        for item_id in [
+            ITEM_RUSTY_SWORD,
+            crafting::ITEM_BOW,
+            crafting::ITEM_WOODEN_SCEPTRE,
+        ] {
+            let mut app = hand_only_app();
+            app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+            app.world_mut().write_message(SwingSent { item_id });
+            app.update();
+            app.update();
+            let swing = app
+                .world()
+                .resource::<HandAnimation>()
+                .attack
+                .unwrap_or_else(|| panic!("item {item_id}: the swing never played"));
+            assert!(
+                swing.elapsed < ATTACK_SWING_TIME,
+                "item {item_id}: the arc had already ended, so this test proves nothing"
+            );
+
+            app.world_mut().write_message(SwingAbandoned);
+            app.update();
+            assert_eq!(
+                app.world().resource::<HandAnimation>().attack,
+                None,
+                "item {item_id}: the arc went on after the server refused the swing"
+            );
+        }
+    }
+
+    /// **A refusal takes back a swing and nothing else**: not the eating arc, and not a swing
+    /// pressed on the frame the refusal is read.
+    ///
+    /// The second half is the ordering `animate_view_model` states — abandon first, then
+    /// start — because `super::combat` attributes a refusal before that frame's press is
+    /// sent, so it can only ever answer the arc that was already playing.
+    #[test]
+    fn a_refusal_never_takes_back_the_eating_arc_or_a_swing_pressed_with_it() {
+        const STEP: Duration = Duration::from_millis(16);
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().write_message(ConsumeSent);
+        app.update();
+        app.world_mut().write_message(SwingAbandoned);
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<HandAnimation>()
+                .attack
+                .map(|swing| swing.shape),
+            Some(SwingShape::Eat),
+            "an energy refusal took back an eating arc"
+        );
+
+        let mut app = hand_only_app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
+        app.update();
+        app.world_mut().write_message(SwingAbandoned);
+        app.world_mut().write_message(SwingSent {
+            item_id: ITEM_RUSTY_SWORD,
+        });
+        app.update();
+        let swing = app
+            .world()
+            .resource::<HandAnimation>()
+            .attack
+            .expect("the swing pressed with the refusal was taken back too");
+        assert_eq!(
+            swing.elapsed, STEP,
+            "the new press did not start its own arc"
         );
     }
 

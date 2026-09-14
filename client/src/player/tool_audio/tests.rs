@@ -362,6 +362,74 @@ fn real_swing_message_plays_without_any_hit_and_world_or_disconnect_returns_sour
     assert_eq!(held.len(), MAX_SOURCES);
 }
 
+/// A swing the server refused for energy loses its whoosh where it stands (#1228).
+#[test]
+fn a_refusal_for_energy_cuts_the_local_whoosh() {
+    let f = Fixture::new();
+    let mut app = App::new();
+    app.insert_resource(AudioMixer::from_shared_for_test(f.mixer.shared_for_test()))
+        .insert_resource(f.snapshots)
+        .insert_resource(f.store)
+        .insert_resource(session())
+        .init_resource::<MiningFeedback>()
+        .init_resource::<LocalMount>()
+        .insert_resource(InputMode::Playing);
+    register(&mut app);
+    app.world_mut().spawn((WorldCamera, f.eye));
+    app.world_mut()
+        .spawn((Body(1), Transform::from_xyz(0.0, 0.0, 4.0)));
+    app.update();
+    app.world_mut().write_message(SwingSent {
+        item_id: ITEM_RUSTY_SWORD,
+    });
+    app.update();
+    assert_eq!(
+        app.world().resource::<Tools>().playing.len(),
+        1,
+        "the swing never whooshed, so this test proves nothing"
+    );
+
+    app.world_mut().write_message(SwingAbandoned);
+    app.update();
+    assert!(
+        app.world().resource::<Tools>().playing.is_empty(),
+        "the whoosh went on after the refusal"
+    );
+}
+
+/// The cut takes this player's own whoosh and nothing else: not a mining strike, and not a
+/// sound on another actor the refusal says nothing about.
+#[test]
+fn abandoning_a_swing_cuts_only_the_local_whoosh() {
+    let f = Fixture::new();
+    let frame = f.frame(0);
+    let mut tools = Tools::default();
+    tools.start(
+        &f.mixer,
+        Cue::Strike(MiningTool::Pickaxe, palette::material_class(palette::STONE)),
+        1,
+        Some(1),
+        &frame,
+    );
+    tools.start(&f.mixer, Cue::Swing(true), 2, None, &frame);
+    tools.start(&f.mixer, Cue::Swing(true), 1, None, &frame);
+    assert_eq!(tools.playing.len(), 3, "a voice never started");
+
+    tools.abandon_swing(1);
+    assert_eq!(
+        tools.playing.len(),
+        2,
+        "the local whoosh was not the one cut"
+    );
+    assert!(
+        !tools
+            .playing
+            .iter()
+            .any(|voice| voice.swing && voice.actor == 1),
+        "the local whoosh survived its refusal"
+    );
+}
+
 #[test]
 fn completion_renders_its_tail_when_the_next_attempt_starts_in_the_same_batch_or_soon_after() {
     for (next_at, target_loaded) in [(0, true), (100, true), (0, false)] {
