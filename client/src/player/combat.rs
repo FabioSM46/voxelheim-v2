@@ -1705,13 +1705,15 @@ mod tests {
             (2, one(ITEM_STONE)),
             (main_hand(), blade_of(crafting::ITEM_WOODEN_SCEPTRE)),
         ]);
+        // One cursor for the whole test: a message outlives the frame it was written on, so a
+        // cursor made fresh for the second press would still read the first press's swing.
+        let mut cursor = app.world().resource::<Messages<SwingSent>>().get_cursor();
         for selected in [0, 2] {
             // Written directly: a hotbar key would sheathe, which is its own test below.
             *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(selected);
             if !drawn(&app) {
                 toggle_draw(&mut app);
             }
-            let mut cursor = app.world().resource::<Messages<SwingSent>>().get_cursor();
             click(&mut app);
             app.update();
             release(&mut app);
