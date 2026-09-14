@@ -352,6 +352,9 @@ fn send_block_edges(
 #[derive(Resource, Debug, Default)]
 struct BowDraw {
     held: bool,
+    /// A release the full outbound queue dropped, being retried every frame until it leaves.
+    /// Only so the retry is logged once rather than on every frame it waits.
+    release_dropped: bool,
 }
 
 /// Sends the bow's draw as two edges: `DrawRequest{active: true}` on the press and
@@ -367,6 +370,14 @@ struct BowDraw {
 /// so with `NoAmmunition`. The release is not gated: whatever stops the press meaning a draw —
 /// the button let go, a screen opening, death, the weapon sheathed, the bow leaving the main
 /// hand — ends it with one release, as [`send_block_edges`] lowers a shield.
+///
+/// **A dropped release is retried, a dropped press is reported.** A press the full queue drops
+/// began nothing on the server, so the draw is not held and the player is told to try again. A
+/// release it drops leaves the server holding a draw with the button already up, and nothing
+/// the player can do re-sends it; so the draw stays held here and the release goes again on
+/// every frame until it leaves. The server makes the other order safe but not good: a second
+/// press while it is drawing is dropped in silence ("the bow is already drawn"), so without the
+/// retry the arrow would only be loosed by a whole second click.
 ///
 /// A queued press counts in [`EnergyAnswers`] exactly as a swing does, because the server
 /// refuses a starved draw with the same pair.
@@ -407,22 +418,27 @@ fn send_draw_edges(
             client_tick: cadence.client_tick,
         }))
     });
-    if sent == Sent::Dropped {
-        warn!("the outbound queue was full; a bow draw active={active} never reached the server");
-        let text = if active {
-            "Drawing your bow did not reach the server; try again."
-        } else {
-            "Loosing your arrow did not reach the server; try again."
-        };
-        messages.write(PlayerMessage::new(PlayerMessageKind::Error, text));
-    }
     if active {
+        if sent == Sent::Dropped {
+            warn!("the outbound queue was full; a bow draw never reached the server");
+            messages.write(PlayerMessage::new(
+                PlayerMessageKind::Error,
+                "Drawing your bow did not reach the server; try again.",
+            ));
+        }
         bow.held = sent == Sent::Queued;
         if sent == Sent::Queued {
             answers.sent(EnergyRequest::Draw);
         }
     } else {
-        bow.held = false;
+        let dropped = sent == Sent::Dropped;
+        if dropped && !bow.release_dropped {
+            warn!("the outbound queue was full; the bow's release is retried until it leaves");
+        }
+        // Held while the release is waiting, so the next frame sends it again. A closed
+        // session has nowhere to send it and nothing left to loose.
+        bow.held = dropped;
+        bow.release_dropped = dropped;
     }
 }
 
@@ -1473,11 +1489,14 @@ mod tests {
     }
 
     /// Every draw edge waiting on the queue, and how many attack requests were beside them —
-    /// in one read, because reading either drains the other.
+    /// in one read, because reading either drains the other. Skips the filler a test queues to
+    /// fill the channel, which is not a frame at all.
     fn draws(sent: &Receiver<Vec<u8>>) -> (Vec<(bool, u32)>, usize) {
         let (mut edges, mut attacks) = (Vec::new(), 0);
         while let Ok(frame) = sent.try_recv() {
-            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            let Ok(envelope) = fb::root_as_envelope(&frame) else {
+                continue;
+            };
             if let Some(request) = envelope.payload_as_draw_request() {
                 edges.push((request.active(), request.client_tick()));
             } else if envelope.payload_as_attack_request().is_some() {
@@ -2162,6 +2181,50 @@ mod tests {
                 "Drawing your bow did not reach the server; try again."
             )]
         );
+    }
+
+    /// **A release the full queue drops is sent again once there is room, and only once** —
+    /// never left behind with the server still holding the draw and the button already up.
+    #[test]
+    fn a_dropped_release_is_retried_until_it_leaves() {
+        let (mut app, sent) = clicking_app(blade_of(crafting::ITEM_BOW));
+        click(&mut app);
+        app.update();
+        assert_eq!(draws(&sent).0.len(), 1, "the press sent no draw");
+
+        while app
+            .world_mut()
+            .resource_mut::<Outbound>()
+            .send(vec![0u8; 4])
+            == Sent::Queued
+        {}
+        release(&mut app);
+        app.update();
+        app.update();
+        assert!(
+            app.world().resource::<BowDraw>().held,
+            "a dropped release let go of the draw"
+        );
+        assert_eq!(
+            draws(&sent),
+            (vec![], 0),
+            "the queue was supposed to be full, so this test proves nothing"
+        );
+        assert!(
+            player_messages(&app).is_empty(),
+            "a retried release promised the player a retry they cannot make"
+        );
+
+        app.update();
+        let edges: Vec<bool> = draws(&sent).0.iter().map(|edge| edge.0).collect();
+        assert_eq!(
+            edges,
+            [false],
+            "the release was not sent once there was room"
+        );
+        app.update();
+        assert_eq!(draws(&sent), (vec![], 0), "the release repeated");
+        assert!(!app.world().resource::<BowDraw>().held);
     }
 
     /// A bow selected on the hotbar while sheathed draws nothing, as a sheathed blade swings
