@@ -659,8 +659,8 @@ const (
 	// full draw. Damage does not follow the charge: it is ArrowDamage at every one.
 	//
 	// With Gravity at 28 and no drag, a level shot from eye height lands roughly 4 blocks out
-	// uncharged and 13 at a full draw, and the longest reach at a 45-degree pitch is about 5
-	// and 57 blocks; the 5-second lifetime never binds first.
+	// uncharged and 14 at a full draw, and the longest reach at a 45-degree pitch is about 6
+	// and 59 blocks; the 5-second lifetime never binds first.
 	ArrowMinDrawSpeed         = 12.0
 	ArrowFullDrawSpeed        = 40.0
 	ArrowMinDrawSpreadDegrees = 6.0
