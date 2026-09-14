@@ -579,8 +579,12 @@ var ErrHandsOccupied = errors.New("a two-handed weapon and an off-hand item cann
 var errMoveChangesNothing = errors.New("the inventory move changes no authoritative slot")
 
 // handsOccupied reports whether these two items may not be worn in the main and off hand
-// together: both are present and the main-hand item is not registered one-handed. An
-// unregistered main-hand item fails closed, as the registry column's zero does.
+// together: both are present and the main-hand item is not registered one-handed.
+//
+// The unregistered branch is a fail-closed default and is reached by neither caller:
+// moveLocked refuses an unregistered source before asking, and Life.Validate's per-slot
+// loop refuses an unregistered id before it reaches the hands. Neither can therefore
+// report an unknown item as a two-handed conflict.
 func handsOccupied(mainHand, offHand ItemID) bool {
 	if mainHand == ItemNone || offHand == ItemNone {
 		return false

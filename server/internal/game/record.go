@@ -127,9 +127,19 @@ func (l Life) Validate() error {
 			return fmt.Errorf("game: stored inventory slot %d: item %d is worn at the wrong body location", slot, stack.ItemID)
 		}
 	}
-	// The two hands are judged together, because the move rule judges them together: no
-	// legitimate path produces a two-handed weapon beside an off-hand item, and a record
-	// migrated from before the main hand existed holds nothing there.
+	// The two hands are judged together, because the move rule judges them together. A
+	// record migrated from before the main hand existed holds nothing there, and from this
+	// build on no move can produce the pair.
+	//
+	// **One window could, and this refuses it rather than repairing it.** The main hand
+	// reached develop one change before this rule, so a world run on that intermediate
+	// build may hold a bow or sceptre beside a shield. Such a record is refused whole like
+	// every other one: Identities.recall sets it aside with Store.Quarantine — kept on disk,
+	// never written over — and the character starts as new. No release carried that build.
+	// Unequipping one hand on load instead would be the repair this function must not do.
+	//
+	// The per-slot loop above has already refused an unregistered id, so an unknown item
+	// never reaches this check as a two-handed conflict.
 	if handsOccupied(ItemID(l.Slots[equipmentMainHand].ItemID), ItemID(l.Slots[equipmentOffHand].ItemID)) {
 		return fmt.Errorf("game: stored inventory holds two-handed item %d in the main hand beside off-hand item %d",
 			l.Slots[equipmentMainHand].ItemID, l.Slots[equipmentOffHand].ItemID)

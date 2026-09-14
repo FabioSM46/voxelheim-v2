@@ -271,13 +271,18 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        // White preserves the shield's planks, rim, iron boss and leather handle, and every
-        // implement's wooden haft and iron head — keyed on the shape for those four, since
-        // that is where their colours are authored.
+        // White preserves the shield's planks, rim, iron boss and leather handle, every
+        // implement's wooden haft and iron head, and the bow's wooden limbs, leather grip and
+        // cord string — keyed on the shape for those five, since that is where their colours
+        // are authored.
         let colour = if item_id == super::crafting::ITEM_WOODEN_SCEPTRE
             || matches!(
                 item_shape(item_id),
-                ItemShape::Shield | ItemShape::Tool | ItemShape::Pickaxe | ItemShape::Shovel
+                ItemShape::Shield
+                    | ItemShape::Tool
+                    | ItemShape::Pickaxe
+                    | ItemShape::Shovel
+                    | ItemShape::Bow
             ) {
             [1.0; 4]
         } else {
@@ -1569,6 +1574,80 @@ mod tests {
                 .base_color,
             Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
             "the axe's drop material tints its iron head with the row's brown"
+        );
+        world.insert_resource(materials);
+    }
+
+    /// **The bow on the ground, and so in the body's fist, is the held bow at drop scale**
+    /// (#1230): curved wooden limbs, a leather grip and a cord string in one mesh, under a
+    /// white material that still carries the wood's grain.
+    ///
+    /// Proportional vertex for vertex to the bow at unit length, which the hand's
+    /// [`bow_mesh`] call scales from too, so the three surfaces share one silhouette. White,
+    /// or the row's log brown would multiply over the cord; textured, or the limbs' grain
+    /// coordinates would sample nothing.
+    #[test]
+    fn a_dropped_bow_is_the_held_bow_in_wood_leather_and_cord() {
+        let length = DROP_EDGE * BLADE_DROP_LENGTH;
+        let points = |mesh: &Mesh| -> Vec<[f32; 3]> {
+            let Some(VertexAttributeValues::Float32x3(points)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("a bow carries Float32x3 positions");
+            };
+            points.clone()
+        };
+        let dropped = drop_mesh(ItemShape::Bow, None);
+        let unit = points(&bow_mesh(1.0));
+        let drawn = points(&dropped);
+        assert_eq!(
+            drawn.len(),
+            unit.len(),
+            "the dropped bow is not the held one"
+        );
+        for (drop_point, unit_point) in drawn.iter().zip(&unit) {
+            for axis in 0..3 {
+                assert!(
+                    (drop_point[axis] - unit_point[axis] * length).abs() < 1e-5,
+                    "the dropped bow's {drop_point:?} is not the held bow's {unit_point:?} at \
+                     drop scale"
+                );
+            }
+        }
+
+        let Some(VertexAttributeValues::Float32x4(colours)) =
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the dropped bow must carry its wood, leather and cord per vertex");
+        };
+        let mut tints: Vec<[u32; 4]> = colours
+            .iter()
+            .map(|colour| colour.map(|channel| (channel * 1000.0).round() as u32))
+            .collect();
+        tints.sort_unstable();
+        tints.dedup();
+        assert_eq!(
+            tints.len(),
+            3,
+            "the dropped bow is not wood, leather and cord: {tints:?}"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let handle = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::crafting::ITEM_BOW, &mut materials);
+        let material = materials.get(&handle).expect("the bow's material");
+        assert_eq!(
+            material.base_color,
+            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+            "the bow's drop material tints its cord with the row's brown"
+        );
+        assert!(
+            material.base_color_texture.is_some(),
+            "the bow's drop material carries no livery image, so its limbs have no grain"
         );
         world.insert_resource(materials);
     }
