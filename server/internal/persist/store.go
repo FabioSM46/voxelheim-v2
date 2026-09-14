@@ -420,6 +420,9 @@ func NewMemoryStore() *Store {
 //
 // **The first start under this format sets a superseded directory aside**, before
 // anything else happens to it. See [Store.setAsideSuperseded].
+//
+// OpenStore holds no reward journal, so it never enforces strict receipts. Production
+// startup opens through [OpenStoreWithRewardRecovery], which does.
 func OpenStore(worldDir string) (*Store, error) {
 	return openPlayerStore(worldDir, false, nil)
 }
@@ -578,15 +581,17 @@ func (s *Store) setAsideSuperseded() (bool, error) {
 				}
 				continue
 			}
-			// leftBehind answers what a record this pass cannot carry costs: nothing for
-			// v7 in an ordinary world, a refusal under strict receipts, and the cause
-			// itself for every later format, which always migrates losslessly.
+			// leftBehind answers what a record this pass cannot carry costs. Under strict
+			// receipts it is always ErrRewardRecoveryRequired, wrapping the cause, so every
+			// leave-behind in a receipt world reports the same error. Otherwise it is
+			// nothing for v7 and the cause itself for every later format, which always
+			// migrates losslessly.
 			leftBehind := func(cause error) error {
 				switch {
+				case strict:
+					return fmt.Errorf("%w: %w", ErrRewardRecoveryRequired, cause)
 				case version != previousStoreVersion:
 					return cause
-				case strict:
-					return ErrRewardRecoveryRequired
 				default:
 					return nil
 				}

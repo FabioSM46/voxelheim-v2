@@ -10,8 +10,8 @@ import (
 )
 
 // OpenStoreWithRewardRecovery is an exclusive STARTUP primitive, not a live repair
-// API. Production startup remains on OpenStore plus CheckInactive until all reward
-// consumers are ready. The required validator supplies game registry/life semantics
+// API, and it is the production startup path: cmd/voxelheimd opens the player store
+// through it. The required validator supplies game registry/life semantics
 // without making persist import game. No index, login or ordinary writer exists yet.
 //
 // A players directory in an older format is migrated before recovery reads it, and a

@@ -128,6 +128,13 @@ func TestAWorldWithBossReceiptsRefusesAMigrationThatLeavesACharacterBehind(t *te
 			old[len(old)-1] ^= 1
 			return old
 		},
+		// A v10 record always migrates, so its corruption is refused in any world. Under
+		// strict receipts it is refused with the same error as every other leave-behind.
+		"a corrupt v10 record": func(rec Record) []byte {
+			old := encodeRecordLayout(rec, 10, 40)
+			old[len(old)-1] ^= 1
+			return old
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			players, _, dir, owner, _ := transitionFixture(t)
