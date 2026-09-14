@@ -1240,6 +1240,15 @@ from this table — under one white material. One stable mesh asset is rebuilt i
 the selected item or skin colour changes, so arbitrary server colours cannot grow a cache and all
 three swing shapes still move one transform.
 
+**The bow is a pure function of a draw fraction, and every surface draws it at zero** (#1230).
+`hands::bow_mesh_drawn(length, draw)` pulls the string's nock back from the brace height to
+`BOW_DRAW_LENGTH` behind the grip and flexes both limbs toward it, with the string built from the
+same tip positions as the limbs so it is tied to both at every value; `bow_mesh` is that at `0.0`,
+and it is what the hand, the ground drop and the body's fist draw. The rule above decides how a draw
+animation may use it: **quantised rebuilds, not a posed string.** It builds the bow at a handful of
+fractions once, as that many stable assets, and swaps the handle. A pose cannot do it, because the
+string is merged into the same mesh as limbs that flex with it.
+
 **A sword's grip is turned wood, and the wood is reached by division rather than written down.**
 The gladius' three furniture pieces were boxes; the grip is now a cylinder of `GRIP_SIDES`
 inscribed in the box it replaced — same height, radius `GRIP_SIZE.x / 2` — so the three

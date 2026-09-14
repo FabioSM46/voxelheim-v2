@@ -829,9 +829,37 @@ const IMPLEMENT_HAFT: f32 = 0.013;
 const ARMOUR_BODY_SIZE: Vec3 = Vec3::new(0.060, 0.070, 0.016);
 const ARMOUR_SHOULDER_SIZE: Vec3 = Vec3::new(0.026, 0.018, 0.022);
 
+/// The bow's reach from tip to tip, in the view model's metres; [`bow_mesh`] scales from it.
 const BOW_LENGTH: f32 = 0.120;
+/// A limb's width where it leaves the grip. It narrows to [`BOW_TIP_FRACTION`] of this at
+/// the tip, which is the taper that makes a stave read as one rather than as a bar.
 const BOW_STAVE: f32 = 0.009;
+const BOW_TIP_FRACTION: f32 = 0.45;
+/// A limb's depth in z.
 const BOW_DEPTH: f32 = 0.008;
+/// The leather-wrapped grip at the middle of the bow, centred on the bow's own origin so a
+/// fist seated there closes on it.
+///
+/// **Every face of it is on a plane of its own.** Its sides at `±0.0065` clear the limbs'
+/// `±0.0045` where they leave it and the wrist's `±0.006`; its depth at `±0.0055` clears the
+/// limbs' `±0.004`; its ends at `±0.015` clear the fist's `±0.012` — the rule
+/// `no_two_colours_share_a_plane_in_the_hand` holds.
+const BOW_GRIP: Vec3 = Vec3::new(0.013, 0.030, 0.011);
+/// From the grip's centre to the string at rest: the brace height.
+const BOW_BRACE: f32 = 0.024;
+/// From the grip's centre to the nock at a full draw — a little under half the bow's length,
+/// the proportion a real longbow draws to.
+const BOW_DRAW_LENGTH: f32 = 0.056;
+/// How far the upper tip moves at a full draw; the lower one mirrors it. Toward the string
+/// side and toward the middle, which is the limbs flexing rather than the bow shrinking.
+const BOW_TIP_FLEX: Vec2 = Vec2::new(0.010, -0.008);
+/// How far each limb carries on past the point its string is tied to.
+const BOW_TIP_OVERHANG: f32 = 0.003;
+/// The string's square section: under a fifth of a limb's width, and still a few pixels
+/// wide in the hand.
+const BOW_CORD: f32 = 0.0024;
+/// How many straight spans each limb's curve is lofted in.
+const BOW_LIMB_SEGMENTS: usize = 6;
 const SCEPTRE_LENGTH: f32 = 0.130;
 const SCEPTRE_SHAFT: f32 = 0.013;
 const SCEPTRE_ORB_RADIUS: f32 = 0.018;
@@ -1064,60 +1092,234 @@ fn armour_mesh() -> Mesh {
 /// Written for the bow's limbs and shared since #1121 by the pickaxe's arms and the shovel's
 /// blade, grip and socket: every one of them is a flat piece that narrows along its length.
 fn tapered_prism(from: Vec2, to: Vec2, from_width: f32, to_width: f32, depth: f32) -> Mesh {
-    let along = (to - from).normalize();
-    // **To the right of the direction of travel**, and the handedness is the winding. With the
-    // left-hand perpendicular this used until #1121 every face below came out inside out — the
-    // bow's limbs included, which nothing measured until the pickaxe's arms reached
-    // `every_solid_in_the_sword_is_wound_outward` through this same function. The faces are
-    // symmetric about the bar's axis, so mirroring the corners changes the winding and nothing
-    // else about the geometry.
-    let across = Vec2::new(along.y, -along.x);
-    let [from_left, from_right] = [
-        from + across * from_width / 2.0,
-        from - across * from_width / 2.0,
-    ];
-    let [to_left, to_right] = [to + across * to_width / 2.0, to - across * to_width / 2.0];
+    // Nothing built from this wears a livery, so every corner points at the neutral band.
+    swept_bar(&[(from, from_width), (to, to_width)], depth, |_, _| {
+        livery::neutral_uv()
+    })
+}
+
+/// One rectangular bar swept along an XY polyline, `depth` thick in Z: each point of the
+/// spine is a section centre and the width the bar has there.
+///
+/// [`tapered_prism`] is this with two points. More points bend it — the bow's limbs and its
+/// drawn string — and **one sweep is one solid**: consecutive sections share their corners,
+/// so only the two ends are capped and nothing inside the bar is a face.
+///
+/// `uv` answers the texture coordinate for a corner from `around` the perimeter (`0..=1`,
+/// wrapping) and `along` the spine (`0..=1` by length), which is the pair
+/// [`livery::blade_uv`] takes — so a bar can wear a grain that runs along it.
+fn swept_bar(spine: &[(Vec2, f32)], depth: f32, uv: impl Fn(f32, f32) -> [f32; 2]) -> Mesh {
+    let count = spine.len();
+    let mut build = MeshBuild::default();
+    if count < 2 {
+        // A spine with one point has no direction to sweep in. Nothing in this module builds
+        // one; an empty mesh is the cosmetic direction to fail in.
+        return build.finish();
+    }
+    let direction = |from: usize, to: usize| (spine[to].0 - spine[from].0).normalize();
+    let mut lengths = vec![0.0_f32; count];
+    for index in 1..count {
+        lengths[index] = lengths[index - 1] + spine[index].0.distance(spine[index - 1].0);
+    }
+    let total = lengths[count - 1].max(f32::EPSILON);
+
     let point = |xy: Vec2, z: f32| Vec3::new(xy.x, xy.y, z);
     let near = -depth / 2.0;
     let far = depth / 2.0;
-    let fln = point(from_left, near);
-    let frn = point(from_right, near);
-    let tln = point(to_left, near);
-    let trn = point(to_right, near);
-    let flf = point(from_left, far);
-    let frf = point(from_right, far);
-    let tlf = point(to_left, far);
-    let trf = point(to_right, far);
+    // Left-near, right-near, left-far and right-far corners of every section.
+    let sections: Vec<[Vec3; 4]> = spine
+        .iter()
+        .enumerate()
+        .map(|(index, (centre, width))| {
+            // An end takes its one span's direction exactly; an interior section is mitred
+            // along the bisector and widened by the mitre, so a bend keeps the bar's width.
+            let (along, mitre) = if index == 0 {
+                (direction(0, 1), 1.0)
+            } else if index + 1 == count {
+                (direction(index - 1, index), 1.0)
+            } else {
+                let incoming = direction(index - 1, index);
+                let bisector = (incoming + direction(index, index + 1))
+                    .try_normalize()
+                    .unwrap_or(incoming);
+                (bisector, 1.0 / bisector.dot(incoming).max(0.5))
+            };
+            // **To the right of the direction of travel**, and the handedness is the winding.
+            // With the left-hand perpendicular this used until #1121 every face below came out
+            // inside out — the bow's limbs included, which nothing measured until the
+            // pickaxe's arms reached `every_solid_in_the_sword_is_wound_outward` through
+            // [`tapered_prism`]. The faces are symmetric about the bar's axis, so mirroring the
+            // corners changes the winding and nothing else about the geometry.
+            let across = Vec2::new(along.y, -along.x) * mitre;
+            let left = *centre + across * width / 2.0;
+            let right = *centre - across * width / 2.0;
+            [
+                point(left, near),
+                point(right, near),
+                point(left, far),
+                point(right, far),
+            ]
+        })
+        .collect();
 
-    let mut build = MeshBuild::default();
-    for face in [
-        [fln, frn, trn, tln],
-        [flf, tlf, trf, frf],
-        [fln, tln, tlf, flf],
-        [frn, frf, trf, trn],
-        [fln, flf, frf, frn],
-        [tln, trn, trf, tlf],
-    ] {
-        // Nothing built from this wears a livery, so every corner points at the neutral band.
-        build.quad(face, [livery::neutral_uv(); 4]);
+    for index in 1..count {
+        let [fln, frn, flf, frf] = sections[index - 1];
+        let [tln, trn, tlf, trf] = sections[index];
+        let (from, to) = (lengths[index - 1] / total, lengths[index] / total);
+        // Around the perimeter: left-near 0, right-near a quarter, right-far a half, left-far
+        // three quarters, and left-near again at 1 where the left face closes the loop.
+        let faces = [
+            (
+                [fln, frn, trn, tln],
+                [(0.0, from), (0.25, from), (0.25, to), (0.0, to)],
+            ),
+            (
+                [flf, tlf, trf, frf],
+                [(0.75, from), (0.75, to), (0.5, to), (0.5, from)],
+            ),
+            (
+                [fln, tln, tlf, flf],
+                [(1.0, from), (1.0, to), (0.75, to), (0.75, from)],
+            ),
+            (
+                [frn, frf, trf, trn],
+                [(0.25, from), (0.5, from), (0.5, to), (0.25, to)],
+            ),
+        ];
+        for (corners, coordinates) in faces {
+            build.quad(
+                corners,
+                coordinates.map(|(around, along)| uv(around, along)),
+            );
+        }
+        if index == 1 {
+            build.quad(
+                [fln, flf, frf, frn],
+                [0.0, 0.75, 0.5, 0.25].map(|around| uv(around, from)),
+            );
+        }
+        if index + 1 == count {
+            build.quad(
+                [tln, trn, trf, tlf],
+                [0.0, 0.25, 0.5, 0.75].map(|around| uv(around, to)),
+            );
+        }
     }
     build.finish()
 }
 
-/// Two tapered curved limbs and a taut string, shared by held and dropped presentations.
+/// A wooden bow: two curved limbs tapering from a leather-wrapped grip, and a string of
+/// lighter cord from tip to tip — at rest, which is how every surface draws it.
+///
+/// See [`bow_mesh_drawn`], which this is at a draw fraction of zero.
 pub(super) fn bow_mesh(length: f32) -> Mesh {
-    let centre = Vec2::new(-BOW_LENGTH * 0.24, 0.0);
-    let lower_tip = Vec2::new(0.0, -BOW_LENGTH / 2.0);
-    let upper_tip = Vec2::new(0.0, BOW_LENGTH / 2.0);
-    let mut bow = tapered_prism(centre, lower_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
-    let upper = tapered_prism(centre, upper_tip, BOW_STAVE, BOW_STAVE * 0.55, BOW_DEPTH);
-    let string = Mesh::from(Cuboid::from_size(Vec3::new(
-        BOW_STAVE * 0.22,
-        BOW_LENGTH,
-        BOW_DEPTH * 0.28,
-    )));
-    merge_all(&mut bow, [upper, string], "bow stave and string");
+    bow_mesh_drawn(length, 0.0)
+}
+
+/// The bow at a draw fraction in `0..=1`, scaled from [`BOW_LENGTH`] to `length`.
+///
+/// **A pure function of the fraction.** At `0` the string runs straight from tip to tip at
+/// [`BOW_BRACE`] and the limbs are at rest; as it rises the nock is pulled back to
+/// [`BOW_DRAW_LENGTH`] behind the grip and the tips flex toward it by [`BOW_TIP_FLEX`], and the
+/// string is tied to both tips at every value because both are read from [`bow_string`].
+///
+/// **Quantised rebuilds, not a posed string, is what this supports.** The held mesh is one
+/// asset rebuilt only when the item or the skin changes, so a draw animation cannot rebuild it
+/// every frame; and a pose cannot move the nock, because the string is merged into the same
+/// mesh as limbs that flex with it. A draw builds this at a handful of fractions once, as that
+/// many stable assets, and swaps the handle.
+///
+/// Every part is absolute colour — see [`bow_colours`] — and the limbs carry the wood livery's
+/// grain in their texture coordinates, while the grip and the string point at the neutral band.
+/// Merged into one mesh for the reason [`axe_mesh`] is. The grip is centred on the origin, so
+/// a fist seated there closes on it.
+pub(super) fn bow_mesh_drawn(length: f32, draw: f32) -> Mesh {
+    let (wood, leather, cord) = bow_colours();
+    let [upper_tip, nock, lower_tip] = bow_string(draw);
+    let upper = bow_limb(upper_tip);
+    // Mirrored by reflecting the spine, not the mesh: a negative scale would flip the winding,
+    // while a reflected spine is swept outward from the grip like the original.
+    let lower: Vec<(Vec2, f32)> = upper
+        .iter()
+        .map(|(point, width)| (Vec2::new(point.x, -point.y), *width))
+        .collect();
+    let grain = |around: f32, along: f32| livery::blade_uv(Livery::Wood, around, along);
+    let limbs = [upper, lower].map(|spine| tinted(swept_bar(&spine, BOW_DEPTH, grain), wood));
+    let string = tinted(
+        swept_bar(
+            &[
+                (upper_tip, BOW_CORD),
+                (nock, BOW_CORD),
+                (lower_tip, BOW_CORD),
+            ],
+            BOW_CORD,
+            |_, _| livery::neutral_uv(),
+        ),
+        cord,
+    );
+
+    let mut bow = tinted(neutral(Mesh::from(Cuboid::from_size(BOW_GRIP))), leather);
+    let [upper, lower] = limbs;
+    merge_all(&mut bow, [upper, lower, string], "bow");
     bow.scaled_by(Vec3::splat(length / BOW_LENGTH))
+}
+
+/// Where the string is tied to the upper tip, where it is pulled to, and where it is tied to
+/// the lower tip, at one draw fraction and at authored scale.
+///
+/// The one answer both the limbs and the string are built from, which is what keeps the string
+/// attached at every fraction rather than two sums that happen to agree.
+fn bow_string(draw: f32) -> [Vec2; 3] {
+    let draw = draw.clamp(0.0, 1.0);
+    let upper = Vec2::new(BOW_BRACE, BOW_LENGTH / 2.0 - BOW_TIP_OVERHANG) + BOW_TIP_FLEX * draw;
+    let nock = Vec2::new(BOW_BRACE + (BOW_DRAW_LENGTH - BOW_BRACE) * draw, 0.0);
+    [upper, nock, Vec2::new(upper.x, -upper.y)]
+}
+
+/// The upper limb's spine: from inside the grip to `tip`, then a little past it.
+///
+/// A quadratic curve whose control point stands straight above the root, so the limb leaves
+/// the grip along the bow's axis and bends toward the string as it goes — a mid-limb point
+/// sits behind the straight line from grip to tip, which is what reads as a bow rather than
+/// two sticks. Moving the tip bends the whole curve with it, so the limb flexes rather than
+/// hinging at the grip.
+fn bow_limb(tip: Vec2) -> Vec<(Vec2, f32)> {
+    let root = Vec2::new(0.0, BOW_GRIP.y / 2.0 - 0.005);
+    let control = Vec2::new(0.0, (root.y + tip.y) / 2.0);
+    let tip_width = BOW_STAVE * BOW_TIP_FRACTION;
+    let mut spine: Vec<(Vec2, f32)> = (0..=BOW_LIMB_SEGMENTS)
+        .map(|step| {
+            let t = step as f32 / BOW_LIMB_SEGMENTS as f32;
+            let point = root * (1.0 - t) * (1.0 - t) + control * 2.0 * t * (1.0 - t) + tip * t * t;
+            (point, BOW_STAVE + (tip_width - BOW_STAVE) * t)
+        })
+        .collect();
+    spine.push((
+        tip + (tip - control).normalize() * BOW_TIP_OVERHANG,
+        tip_width,
+    ));
+    spine
+}
+
+/// The three colours a bow is made of: the log's wood for the limbs, the leather the packed
+/// structures' straps are for the grip, and a pale cord for the string.
+///
+/// **Absolute, like [`implement_colours`]**, because a vertex colour multiplies the item's
+/// and no multiple of a bark brown is a light cord. So the hand skips the item-colour multiply
+/// for a bow and the world draws it under a white material.
+fn bow_colours() -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (
+        palette::linear_rgba(palette::LOG),
+        bundle_strap_linear_rgba(),
+        bow_cord_linear_rgba(),
+    )
+}
+
+/// The bow string's cord, as linear vertex colour — read by the cell's drawing too, so the
+/// flat string and the modelled one are one colour.
+pub(crate) fn bow_cord_linear_rgba() -> [f32; 4] {
+    let colour = Color::srgb_u8(214, 199, 158).to_linear();
+    [colour.red, colour.green, colour.blue, colour.alpha]
 }
 
 /// A wooden shaft and its small green focus, shared by held and dropped presentations.
@@ -2043,7 +2245,9 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         ItemShape::Shovel => neutral(shovel_mesh(IMPLEMENT_LENGTH)),
         ItemShape::Armour => neutral(armour_mesh()),
         ItemShape::Shield => shield_mesh(SHIELD_IN_HAND),
-        ItemShape::Bow => neutral(bow_mesh(BOW_LENGTH)),
+        // Not pointed at the neutral band: the limbs carry the wood's grain in their own
+        // coordinates, and the grip and the string already point there.
+        ItemShape::Bow => bow_mesh(BOW_LENGTH),
         ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
         // Turned a quarter about X so the struck face, not the rim, is what the camera sees.
         ItemShape::Coin => neutral(
@@ -2095,7 +2299,9 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // translation, not only its height, since the grip is behind the face rather than
         // beside it. See [`shield_grip_point`].
         ItemShape::Shield => return -shield_grip_point(SHIELD_IN_HAND),
-        ItemShape::Bow => HAND_SIZE.y * 0.20,
+        // The fist closes on the grip, which is the bow's own origin. Until #1230 the grip
+        // sat beside the fist and the string ran through it.
+        ItemShape::Bow => 0.0,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
         // Stood on the top of the fist by its radius, which is the block's and the stub's
         // arrangement: the coin is turned face-on, so its radius is its half height.
@@ -2416,9 +2622,11 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
             | ItemShape::Tool
             | ItemShape::Pickaxe
             | ItemShape::Shovel
+            | ItemShape::Bow
     ) {
         // Built in the absolute colours of what they are made of — see
-        // [`implement_colours`] — so the item colour must not multiply over them.
+        // [`implement_colours`] and [`bow_colours`] — so the item colour must not multiply
+        // over them.
         item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
@@ -6276,6 +6484,238 @@ mod tests {
         );
     }
 
+    /// The XY position of every vertex of a bow mesh drawn in one colour.
+    fn bow_points(mesh: &Mesh, colour: [f32; 4]) -> Vec<Vec2> {
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the bow must carry per-vertex colour");
+        };
+        positions(mesh)
+            .iter()
+            .zip(colours)
+            .filter(|(_, tint)| quantise(**tint) == quantise(colour))
+            .map(|(point, _)| Vec2::new(point[0], point[1]))
+            .collect()
+    }
+
+    /// The mean of the points within `radius` of `centre`, which must be some.
+    fn mean_near(points: &[Vec2], centre: Vec2, radius: f32) -> Vec2 {
+        let close: Vec<Vec2> = points
+            .iter()
+            .copied()
+            .filter(|point| point.distance(centre) <= radius)
+            .collect();
+        assert!(
+            !close.is_empty(),
+            "nothing is drawn within {radius} of {centre}"
+        );
+        close.iter().copied().sum::<Vec2>() / close.len() as f32
+    }
+
+    /// **The bow is curved, grained limbs tapering from a leather grip, strung with a lighter
+    /// cord** (#1230), read from the merged vertices by colour rather than from the constants
+    /// they were authored from.
+    #[test]
+    fn the_bow_is_curved_grained_limbs_on_a_leather_grip_with_a_lighter_cord() {
+        let mesh = bow_mesh(BOW_LENGTH);
+        let (wood, leather, cord) = bow_colours();
+
+        // Lighter than the wood in every channel, and by a margin — what reads as cord against
+        // bark rather than as another brown.
+        assert!(
+            (0..3).all(|channel| cord[channel] > wood[channel] * 2.0),
+            "the string's {cord:?} is not a lighter cord than the limbs' {wood:?}"
+        );
+        // Three colours and nothing else: no arrow is drawn on the bow.
+        assert_eq!(
+            tints(&mesh).len(),
+            3,
+            "the bow is not wood, leather and cord: {:?}",
+            tints(&mesh)
+        );
+
+        let span = |points: &[Vec2], axis: usize| {
+            points
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+                    (low.min(point[axis]), high.max(point[axis]))
+                })
+        };
+
+        // The grip: centred on the origin a fist is seated at, and thicker than any limb.
+        let grip = bow_points(&mesh, leather);
+        let (left, right) = span(&grip, 0);
+        let (bottom, top) = span(&grip, 1);
+        assert!(
+            (left + right).abs() < 1e-6 && (bottom + top).abs() < 1e-6,
+            "the grip spans {left}..{right} by {bottom}..{top}, off the bow's origin"
+        );
+        let limbs = bow_points(&mesh, wood);
+        let root = BOW_GRIP.y / 2.0 - 0.005;
+        // The widest the limb's section is around one point on its spine: the farthest two
+        // limb vertices within `radius` of it. Its corners are not on one axis-aligned line,
+        // because each section is square to the curve rather than to the bow.
+        let width_at = |centre: Vec2, radius: f32| {
+            let close: Vec<Vec2> = limbs
+                .iter()
+                .copied()
+                .filter(|point| point.distance(centre) <= radius)
+                .collect();
+            assert!(
+                !close.is_empty(),
+                "no limb vertex within {radius} of {centre}"
+            );
+            close
+                .iter()
+                .flat_map(|one| close.iter().map(move |two| one.distance(*two)))
+                .fold(0.0_f32, f32::max)
+        };
+        let root_width = width_at(Vec2::new(0.0, root), BOW_STAVE * 0.7);
+        assert!(
+            right - left > root_width,
+            "the grip is {} across, no thicker than the {root_width} limb it holds",
+            right - left
+        );
+
+        // Tapering: the limb is less than half as wide at its tip as where it leaves the grip.
+        let [upper_tip, _, _] = bow_string(0.0);
+        let tip_width = width_at(upper_tip, BOW_STAVE * BOW_TIP_FRACTION * 0.7);
+        assert!(
+            tip_width < root_width * 0.5,
+            "the limb is {tip_width} wide at its tip against {root_width} at the grip, so it \
+             does not taper"
+        );
+
+        // Curved: halfway along the upper limb its centre stands well behind the straight
+        // line from the grip to the tip — behind meaning away from the string.
+        let middle: Vec<Vec2> = limbs
+            .iter()
+            .copied()
+            .filter(|point| (0.030..=0.040).contains(&point.y))
+            .collect();
+        assert!(!middle.is_empty(), "no limb vertex halfway up the bow");
+        let centre = middle.iter().copied().sum::<Vec2>() / middle.len() as f32;
+        let straight = upper_tip.x * (centre.y - root) / (upper_tip.y - root);
+        assert!(
+            straight - centre.x > 0.003,
+            "halfway up, the limb is at x {} against {straight} on the straight line from grip \
+             to tip, so it is a stick rather than a bow",
+            centre.x
+        );
+
+        // The grain reaches the limbs and nothing else.
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the bow must carry per-vertex colour");
+        };
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        for (colour, uv) in colours.iter().zip(uvs(&mesh)) {
+            if quantise(*colour) == quantise(wood) {
+                assert!(
+                    livery::band_holds(Livery::Wood, uv),
+                    "a limb samples {uv:?}, outside wood's own band"
+                );
+            } else {
+                assert_eq!(
+                    uv,
+                    livery::neutral_uv(),
+                    "the grip or the string samples the grain"
+                );
+            }
+        }
+    }
+
+    /// **The bow is a pure function of its draw fraction, and the string stays tied to both
+    /// tips at every value** (#1230).
+    ///
+    /// At rest the string is straight from tip to tip; at a full draw the nock is
+    /// [`BOW_DRAW_LENGTH`] behind the grip and both tips have come toward it. The tips are
+    /// found in the mesh, where the string's end sections and the limbs' tip sections are
+    /// centred, rather than taken on trust from [`bow_string`].
+    #[test]
+    fn the_bow_is_a_pure_function_of_its_draw_fraction() {
+        let (wood, leather, cord) = bow_colours();
+        assert_eq!(
+            positions(&bow_mesh(BOW_LENGTH)),
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.0)),
+            "the bow every surface draws is not the bow at rest"
+        );
+        assert_eq!(
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.5)),
+            positions(&bow_mesh_drawn(BOW_LENGTH, 0.5)),
+            "two builds at one draw fraction differ"
+        );
+
+        let rest = bow_mesh_drawn(BOW_LENGTH, 0.0);
+        for point in bow_points(&rest, cord) {
+            assert!(
+                (point.x - BOW_BRACE).abs() <= BOW_CORD / 2.0 + 1e-6,
+                "at rest the string has a vertex at {point}, off the straight line at x \
+                 {BOW_BRACE}"
+            );
+        }
+
+        for draw in [0.0, 0.5, 1.0] {
+            let mesh = bow_mesh_drawn(BOW_LENGTH, draw);
+            let [upper, _, lower] = bow_string(draw);
+            for tip in [upper, lower] {
+                let string_end = mean_near(&bow_points(&mesh, cord), tip, BOW_CORD * 0.6);
+                let limb_tip = mean_near(
+                    &bow_points(&mesh, wood),
+                    tip,
+                    BOW_STAVE * BOW_TIP_FRACTION * 0.7,
+                );
+                assert!(
+                    string_end.distance(tip) < 1e-5 && limb_tip.distance(tip) < 1e-5,
+                    "at draw {draw} the string ends at {string_end} and the limb's tip is at \
+                     {limb_tip}, not both at {tip}"
+                );
+            }
+        }
+
+        let drawn = bow_mesh_drawn(BOW_LENGTH, 1.0);
+        let nock: Vec<Vec2> = bow_points(&drawn, cord)
+            .into_iter()
+            .filter(|point| point.y.abs() < 1e-5)
+            .collect();
+        assert!(
+            !nock.is_empty(),
+            "a drawn string has no section at its nock"
+        );
+        let nock = nock.iter().copied().sum::<Vec2>() / nock.len() as f32;
+        let grip = bow_points(&drawn, leather);
+        let grip = grip.iter().copied().sum::<Vec2>() / grip.len() as f32;
+        assert!(
+            (nock.x - grip.x - BOW_DRAW_LENGTH).abs() < 1e-5,
+            "at a full draw the nock is {} behind the grip, not {BOW_DRAW_LENGTH}",
+            nock.x - grip.x
+        );
+
+        let extreme = |mesh: &Mesh, upper: bool| {
+            bow_points(mesh, wood)
+                .into_iter()
+                .max_by(|one, two| {
+                    if upper {
+                        one.y.total_cmp(&two.y)
+                    } else {
+                        two.y.total_cmp(&one.y)
+                    }
+                })
+                .expect("a bow has limbs")
+        };
+        for upper in [true, false] {
+            let (at_rest, at_full) = (extreme(&rest, upper), extreme(&drawn, upper));
+            assert!(
+                at_full.distance(nock) < at_rest.distance(nock)
+                    && at_full.y.abs() < at_rest.y.abs(),
+                "the {} tip is at {at_rest} at rest and {at_full} at a full draw, which has not \
+                 flexed toward the nock at {nock}",
+                if upper { "upper" } else { "lower" }
+            );
+        }
+    }
+
     /// A blade is held by its grip, never by concealing the furniture around it.
     ///
     /// Read from the real merged vertices for both sword variants: part constants alone would
@@ -6961,6 +7401,7 @@ mod tests {
             ("the pickaxe", pickaxe_mesh(IMPLEMENT_LENGTH)),
             ("the shovel", shovel_mesh(IMPLEMENT_LENGTH)),
             ("the bow", bow_mesh(BOW_LENGTH)),
+            ("a fully drawn bow", bow_mesh_drawn(BOW_LENGTH, 1.0)),
             ("the shield", shield_mesh(SHIELD_IN_HAND)),
         ] {
             let solids = solid_volumes(&mesh, false);
@@ -6980,9 +7421,13 @@ mod tests {
                 "a dropped grip" => 1,
                 "the axe" => 4,
                 "the pickaxe" | "the shovel" => 6,
-                // Two limbs and the string. It is here because its limbs are built by the same
-                // `tapered_prism` as the pick's arms, and were wound inside out until #1121.
-                "the bow" => 3,
+                // The grip, two limbs and the string (#1230: it was two straight limbs and a
+                // string). Each curved limb is one `swept_bar`, whose spans share their
+                // sections and weld, as is the string bent at its nock — at rest and at a full
+                // draw alike, so flexing the bow cannot split a part or turn one inside out.
+                // It is here because that sweep is the `tapered_prism` the pick's arms use,
+                // which wound the bow's old limbs inside out until #1121.
+                "the bow" | "a fully drawn bow" => 4,
                 // The rim, five planks that step alternately and so share no corner, the
                 // boss, and a handle whose bar and two posts meet without sharing one.
                 "the shield" => 10,
