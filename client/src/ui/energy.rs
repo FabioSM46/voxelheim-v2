@@ -351,6 +351,7 @@ mod tests {
             blocking: false,
             energy,
             max_energy,
+            draw_progress: 0,
         }
     }
 

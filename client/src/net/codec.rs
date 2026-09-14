@@ -1044,6 +1044,11 @@ pub struct PlayerVitals {
     pub energy: u16,
     /// Maximum energy. Guaranteed non-zero.
     pub max_energy: u16,
+    /// V44. How far this player's bow is drawn: zero when not drawing, `1..=255` while
+    /// drawing, 255 a full draw still held. **The server's count of its own ticks** — the
+    /// string is animated from it and the client runs no timer of its own. Zero from a V43
+    /// server, which has no draws.
+    pub draw_progress: u8,
 }
 
 impl PlayerVitals {
@@ -1069,6 +1074,7 @@ impl PlayerVitals {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         }
     }
 }
@@ -1733,6 +1739,17 @@ pub struct AttackRequest {
 /// Starts or releases the held shield; the server validates the intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockRequest {
+    pub active: bool,
+    pub client_tick: u32,
+}
+
+/// One edge of the bow's draw: `active` begins it, and the release looses the arrow.
+///
+/// **The edge and the tick are the whole message.** How far the string came back is counted by
+/// the server from its own ticks between the press it admitted and the release it applied, so
+/// there is no hold time, charge, slot or aim here to state — see `schemas/player.fbs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawRequest {
     pub active: bool,
     pub client_tick: u32,
 }
@@ -7139,6 +7156,7 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         blocking: vitals.blocking(),
         energy,
         max_energy,
+        draw_progress: vitals.draw_progress(),
     })
 }
 
@@ -7931,6 +7949,16 @@ pub fn encode_block_request(request: &BlockRequest) -> Vec<u8> {
     table.add_client_tick(request.client_tick);
     let payload = table.finish();
     finish_envelope(builder, fb::Payload::BlockRequest, payload.as_union_value())
+}
+
+/// Builds one edge of the bow's draw.
+pub fn encode_draw_request(request: &DrawRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let mut table = fb::DrawRequestBuilder::new(&mut builder);
+    table.add_active(request.active);
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+    finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value())
 }
 
 /// Builds one craft intent.
@@ -16215,9 +16243,9 @@ mod tests {
     // -----------------------------------------------------------------------
     // Protocol V44 — the main hand, the two-handed refusal and the bow draw
     //
-    // Read through the generated bindings, because nothing in this build consumes
-    // them yet: the main-hand cell and the refusal sentence are #1238, the draw is
-    // #1240.
+    // Read through the generated bindings where nothing in this build consumes them yet:
+    // the main-hand cell and the refusal sentence are #1238. The draw's progress is read
+    // through the decoder too, since #1240 draws the string from it.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -16240,7 +16268,12 @@ mod tests {
             let vitals = fb::PlayerVitals::create(
                 &mut builder,
                 &fb::PlayerVitalsArgs {
+                    health: 100,
                     max_health: 100,
+                    max_hunger: 100,
+                    level: 1,
+                    experience_to_next: 50,
+                    life_state: fb::LifeState::Alive,
                     max_energy: 100,
                     energy: 40,
                     draw_progress,
@@ -16252,6 +16285,11 @@ mod tests {
                 .expect("the vitals verify");
             assert_eq!(read.draw_progress(), draw_progress);
             assert_eq!(read.energy(), 40, "appending did not move an earlier field");
+            assert_eq!(
+                player_vitals(&read).map(|vitals| vitals.draw_progress),
+                Ok(draw_progress),
+                "the decoded vitals dropped the draw"
+            );
         }
     }
 
@@ -16292,16 +16330,10 @@ mod tests {
     #[test]
     fn v44_draw_request_carries_only_the_edge_and_is_never_read_by_a_client() {
         for active in [true, false] {
-            let mut builder = FlatBufferBuilder::new();
-            let payload = fb::DrawRequest::create(
-                &mut builder,
-                &fb::DrawRequestArgs {
-                    active,
-                    client_tick: u32::MAX,
-                },
-            );
-            let frame =
-                finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value());
+            let frame = encode_draw_request(&DrawRequest {
+                active,
+                client_tick: u32::MAX,
+            });
             let envelope = fb::root_as_envelope(&frame).expect("the frame verifies");
             assert_eq!(envelope.payload_type(), fb::Payload::DrawRequest);
             let request = envelope
@@ -17241,6 +17273,7 @@ mod tests {
                 blocking: false,
                 energy: 37,
                 max_energy: 100,
+                draw_progress: 0,
             }
         );
     }
