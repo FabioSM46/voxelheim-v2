@@ -1707,7 +1707,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 				if !p.inventory.mu.TryLock() {
 					continue
 				}
-				wornHead, wornChest, wornLegs, wornOffHand := p.inventory.wornItemsLocked()
+				wornHead, wornChest, wornLegs, wornOffHand, wornMainHand := p.inventory.wornItemsLocked()
 				p.inventory.mu.Unlock()
 				faces[i] = protocol.EncodePlayerAppearance(protocol.PlayerAppearance{
 					EntityID:      p.entityID,
@@ -1718,6 +1718,7 @@ func (s *Sim) stepWorld(tick uint64) []WaterChange {
 					WornChest:     wornChest,
 					WornLegs:      wornLegs,
 					WornOffHand:   wornOffHand,
+					WornMainHand:  wornMainHand,
 					HasAppearance: true,
 					HasName:       true,
 				})

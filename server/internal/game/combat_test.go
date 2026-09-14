@@ -938,6 +938,35 @@ func TestALandedSwingCostsTheBladeNothing(t *testing.T) {
 	}
 }
 
+// A weapon moved into the main hand still swings. The attack names its own slot, and
+// the V44 contract already says that slot is the main hand, so equipping a blade must
+// never be a way to lose the ability to attack while the hotbar is still accepted.
+func TestABladeInTheMainHandStillSwings(t *testing.T) {
+	t.Parallel()
+
+	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
+	if _, err := player.MoveInventory(protocol.InventoryMoveRequest{
+		From: 0, To: uint8(equipmentMainHand), Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the starter blade into the main hand: %v", err)
+	}
+	if err := h.swing(player, uint8(equipmentMainHand), 1); err != nil {
+		t.Fatalf("a swing naming the main hand was refused: %v", err)
+	}
+	h.step()
+
+	if got := draugrRow.maxHealth - h.mobHealth(id); got != RustySwordDamage {
+		t.Errorf("a main-hand swing took %d health, want the blade's %d", got, RustySwordDamage)
+	}
+	state := player.InventoryState()
+	if got := state.Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("the main hand holds %+v after the swing, want the untouched %+v", got, starterSword())
+	}
+	if got := state.Stacks[0]; got != (protocol.InventoryStack{}) {
+		t.Errorf("hotbar slot 0 holds %+v, want the empty slot the blade left", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cadence
 // ---------------------------------------------------------------------------

@@ -212,9 +212,9 @@ func TestRangedItemsCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
 		id   ItemID
 		want itemDefinition
 	}{
-		{ItemBow, 28, itemDefinition{places: world.Air, maxStack: 1, maxDurability: BowMaxDurability, launches: vnet.ProjectileKindArrow, ammunition: ItemArrow}},
+		{ItemBow, 28, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: BowMaxDurability, launches: vnet.ProjectileKindArrow, ammunition: ItemArrow}},
 		{ItemArrow, 29, itemDefinition{places: world.Air, maxStack: 32}},
-		{ItemWoodenSceptre, 30, itemDefinition{places: world.Air, maxStack: 1, maxDurability: SceptreMaxDurability, launches: vnet.ProjectileKindEnergyOrb}},
+		{ItemWoodenSceptre, 30, itemDefinition{places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: SceptreMaxDurability, launches: vnet.ProjectileKindEnergyOrb}},
 	} {
 		if tc.item != tc.id {
 			t.Errorf("item id = %d, want appended wire id %d", tc.item, tc.id)
@@ -230,14 +230,17 @@ func TestRangedItemsCarryTheirPinnedIDsAndLauncherStats(t *testing.T) {
 	}
 }
 
-func TestOnlyWearableItemsCarryWornStatsAndEveryWearableIsDurable(t *testing.T) {
+// Armour, threat and block belong to what is worn on the body and in the off-hand. The
+// main hand is worn too, but a weapon's contribution is its own column — damage or a
+// launch — so a main-hand row carries none of the three.
+func TestOnlyBodyAndOffHandItemsCarryWornStatsAndEveryWearableIsDurable(t *testing.T) {
 	t.Parallel()
 
 	for id, definition := range itemRegistry {
 		hasWornStats := definition.armour != 0 || definition.threat != 0 || definition.blockFraction != 0
 		wearable := definition.wornAt != wornNowhere
-		if hasWornStats != wearable {
-			t.Errorf("item %d wornAt=%d armour=%d threat=%d block=%d; want stats iff wearable",
+		if hasWornStats != (wearable && definition.wornAt != wornMainHand) {
+			t.Errorf("item %d wornAt=%d armour=%d threat=%d block=%d; want stats iff worn on the body or off-hand",
 				id, definition.wornAt, definition.armour, definition.threat, definition.blockFraction)
 		}
 		if definition.blockFraction > 100 {
@@ -260,19 +263,39 @@ func TestWoodenShieldHasItsPinnedIDAndStats(t *testing.T) {
 	}
 }
 
-// One item may occupy each body slot, so the strongest possible set is the
-// strongest registered row for head, chest, legs and off-hand. Sweep that combination
+// A row names the main hand exactly when it is a weapon — it does damage or launches
+// something. The move rule and Life.Validate both read wornAt, so this is what decides
+// that every weapon can be held and that nothing else can be.
+func TestEveryWeaponIsWornInTheMainHandAndNothingElseIs(t *testing.T) {
+	t.Parallel()
+
+	for id, definition := range itemRegistry {
+		weapon := definition.meleeDamage != 0 || definition.launches != 0
+		if weapon != (definition.wornAt == wornMainHand) {
+			t.Errorf("item %d wornAt=%d damage=%d launches=%d; want the main hand iff a weapon",
+				id, definition.wornAt, definition.meleeDamage, definition.launches)
+		}
+	}
+	for _, id := range []ItemID{ItemRustySword, ItemIronSword, ItemBow, ItemWoodenSceptre} {
+		if definition, _ := itemByID(id); definition.wornAt != wornMainHand {
+			t.Errorf("weapon %d is worn at %d, want the main hand", id, definition.wornAt)
+		}
+	}
+}
+
+// One item may occupy each worn slot, so the strongest possible set is the strongest
+// registered row for head, chest, legs, off-hand and main hand. Sweep that combination
 // rather than summing the catalogue: adding a second helmet must not consume armour budget
 // when the player can never wear both helmets at once.
 func TestEveryWearableCombinationFitsTheArmourScale(t *testing.T) {
 	t.Parallel()
 
-	var strongest [wornOffHand + 1]uint16
+	var strongest [wornMainHand + 1]uint16
 	for id, definition := range itemRegistry {
 		if definition.wornAt == wornNowhere {
 			continue
 		}
-		if definition.wornAt > wornOffHand {
+		if definition.wornAt > wornMainHand {
 			t.Errorf("wearable item %d names unknown body slot %d", id, definition.wornAt)
 			continue
 		}
@@ -280,7 +303,7 @@ func TestEveryWearableCombinationFitsTheArmourScale(t *testing.T) {
 	}
 
 	sum := uint32(strongest[wornHead]) + uint32(strongest[wornChest]) +
-		uint32(strongest[wornLegs]) + uint32(strongest[wornOffHand])
+		uint32(strongest[wornLegs]) + uint32(strongest[wornOffHand]) + uint32(strongest[wornMainHand])
 	if sum >= uint32(ArmourScale) {
 		t.Errorf("the strongest wearable combination carries %d armour points against scale %d", sum, ArmourScale)
 	}

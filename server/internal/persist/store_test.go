@@ -478,14 +478,14 @@ func TestARecordIsTheSizeTheFormatSaysItIs(t *testing.T) {
 	}
 }
 
-// V11 keeps the purse and learned-mount byte, then appends the reward epoch. Pin
-// every relationship and the bytes themselves: changing only the struct field would
-// otherwise round trip through an equally wrong encoder and decoder.
-func TestV11StoresRewardEpochAfterLearnedMounts(t *testing.T) {
+// V12 keeps v11's order — slots, purse and learned-mount byte, then the reward epoch —
+// with a 41-slot table. Pin every relationship and the bytes themselves: changing only
+// the struct field would otherwise round trip through an equally wrong encoder and decoder.
+func TestV12StoresRewardEpochAfterLearnedMounts(t *testing.T) {
 	t.Parallel()
 
-	if StoreVersion != 11 {
-		t.Fatalf("StoreVersion = %d, want 11", StoreVersion)
+	if StoreVersion != 12 {
+		t.Fatalf("StoreVersion = %d, want 12", StoreVersion)
 	}
 	if offHunger != offHealth+2 {
 		t.Fatalf("offHunger = %d, want offHealth+2 = %d", offHunger, offHealth+2)
@@ -496,8 +496,8 @@ func TestV11StoresRewardEpochAfterLearnedMounts(t *testing.T) {
 	if offSlots != offExperience+4 {
 		t.Fatalf("offSlots = %d, want offExperience+4 = %d", offSlots, offExperience+4)
 	}
-	if slotsSize != 40*slotSize {
-		t.Fatalf("slotsSize = %d, want 40 slots × %d bytes", slotsSize, slotSize)
+	if slotsSize != 41*slotSize {
+		t.Fatalf("slotsSize = %d, want 41 slots × %d bytes", slotsSize, slotSize)
 	}
 	if offSilver != offSlots+slotsSize {
 		t.Fatalf("offSilver = %d, want offSlots+slotsSize = %d", offSilver, offSlots+slotsSize)

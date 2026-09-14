@@ -33,15 +33,16 @@ const (
 	// server announces and emits. The layout is the hotbar first, the pack in the
 	// middle, and equipment last. The handshake carries the counts so the client
 	// never has to hardcode the layout.
-	InventorySlots uint8 = 40
+	InventorySlots uint8 = 41
 
 	// HotbarSlots is the leading subset of InventorySlots the client may select
 	// with its hotbar.
 	HotbarSlots uint8 = 9
 
 	// EquipmentSlots is the trailing subset of InventorySlots reserved for worn
-	// equipment: head, chest, legs and off-hand, in that order.
-	EquipmentSlots uint8 = 4
+	// equipment: head, chest, legs, off-hand and main hand, in that order. A new worn
+	// slot is appended, so every slot before it keeps its index.
+	EquipmentSlots uint8 = 5
 
 	// SessionTicketLen is the exact length of a ClientHello.session_ticket, from V7:
 	// a 32-byte body and a 64-byte detached signature over it. schemas/handshake.fbs
@@ -1437,6 +1438,10 @@ type PlayerAppearance struct {
 	WornLegs    uint16
 	WornOffHand uint16
 
+	// WornMainHand is the item id in the main-hand slot, zero when it is empty — the
+	// same meaning worn_mainhand has on the wire.
+	WornMainHand uint16
+
 	// HasAppearance is honoured by the encoder so a test can build the frame a client
 	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
 	HasAppearance bool
@@ -2654,6 +2659,7 @@ func EncodePlayerAppearance(p PlayerAppearance) []byte {
 	vnet.PlayerAppearanceAddWornChest(b, p.WornChest)
 	vnet.PlayerAppearanceAddWornLegs(b, p.WornLegs)
 	vnet.PlayerAppearanceAddWornOffhand(b, p.WornOffHand)
+	vnet.PlayerAppearanceAddWornMainhand(b, p.WornMainHand)
 	built := vnet.PlayerAppearanceEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadPlayerAppearance, built)

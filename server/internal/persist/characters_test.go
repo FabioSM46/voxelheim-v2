@@ -469,8 +469,10 @@ func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T)
 	if got.Slots[previousInventorySlots-1] != want.Slots[previousInventorySlots-1] {
 		t.Errorf("the old tail is %+v, want %+v", got.Slots[previousInventorySlots-1], want.Slots[previousInventorySlots-1])
 	}
-	if got.Slots[protocol.InventorySlots-1] != (protocol.InventoryStack{}) {
-		t.Errorf("the inserted off-hand tail is %+v, want empty", got.Slots[protocol.InventorySlots-1])
+	for slot := previousInventorySlots; slot < int(protocol.InventorySlots); slot++ {
+		if got.Slots[slot] != (protocol.InventoryStack{}) {
+			t.Errorf("the inserted tail slot %d is %+v, want empty", slot, got.Slots[slot])
+		}
 	}
 	if _, found, loadErr := store.Load(refusedID); loadErr != nil || found {
 		t.Fatalf("loading the refused silver record: found %v, err %v", found, loadErr)
@@ -490,8 +492,8 @@ func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T)
 	if version, ours := recordVersion(filepath.Join(players, name)); !ours || version != StoreVersion {
 		t.Errorf("the replacement record reports version %d (ours %v), want %d", version, ours, StoreVersion)
 	}
-	if len(migrated) != len(old)+slotSize+4+1+8 {
-		t.Errorf("the migrated record is %d bytes, want v7's %d plus one slot, the purse, learned set and reward epoch", len(migrated), len(old))
+	if len(migrated) != len(old)+2*slotSize+4+1+8 {
+		t.Errorf("the migrated record is %d bytes, want v7's %d plus two slots, the purse, learned set and reward epoch", len(migrated), len(old))
 	}
 	preservedCurrent, err := os.ReadFile(filepath.Join(players, currentName))
 	if err != nil {
@@ -501,8 +503,8 @@ func TestAV7DirectoryMigratesLosslessRecordsAndRefusesSilverStacks(t *testing.T)
 		t.Error("the current record changed while it was copied into the replacement")
 	}
 	aside := store.SetAside()
-	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"11.") {
-		t.Errorf("the v7 directory was kept as %q, want players.pre-v11.<timestamp>", base)
+	if base := filepath.Base(aside); !strings.HasPrefix(base, playersDirName+supersededSuffix+"12.") {
+		t.Errorf("the v7 directory was kept as %q, want players.pre-v12.<timestamp>", base)
 	}
 	kept, err := os.ReadFile(filepath.Join(aside, name))
 	if err != nil {

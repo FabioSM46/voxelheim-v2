@@ -111,8 +111,7 @@ func TestRewardRecoveryKeepsIntentUntilCharacterAndJournalDurability(t *testing.
 				}
 			}
 			writes := 0
-			_, err = openPlayerStore(dir, func(s *Store) error {
-				s.strictRewards.Store(true)
+			_, err = openPlayerStore(dir, true, func(s *Store) error {
 				if stage == "character-before-write" || stage == "character-after-write" || stage == "later-confirm" {
 					s.recordWriter = func(path string, b []byte) error {
 						writes++

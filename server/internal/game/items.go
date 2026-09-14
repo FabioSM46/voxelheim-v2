@@ -246,9 +246,9 @@ type itemDefinition struct {
 	places   world.Block
 	maxStack uint16
 
-	// wornAt names the one equipment slot this item may enter: head, chest, legs or off-hand.
-	// Zero means it cannot be worn, which is every existing registry row. The move
-	// rule reads this column in both directions before changing either slot.
+	// wornAt names the one equipment slot this item may enter: head, chest, legs,
+	// off-hand or main hand. Zero means it cannot be worn. The move rule reads this
+	// column in both directions before changing either slot.
 	wornAt wornAt
 
 	// armour is the percentage points of incoming damage this worn piece will remove.
@@ -330,6 +330,9 @@ const (
 	wornChest
 	wornLegs
 	wornOffHand
+	// wornMainHand is the weapon hand. Every weapon names it and nothing else does; it
+	// carries no armour, threat or block, because what a weapon does is its own column.
+	wornMainHand
 )
 
 // itemRegistry is intentionally not sent to clients. They receive authoritative
@@ -345,8 +348,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 
 	// Places no block and stacks with nothing, including another sword: two blades are
 	// two objects with two different amounts of wear left, and a stack of two could
-	// only carry one of those numbers.
-	ItemRustySword: {places: world.Air, maxStack: 1, maxDurability: RustySwordMaxDurability, meleeDamage: RustySwordDamage},
+	// only carry one of those numbers. Worn in the main hand, like every weapon.
+	ItemRustySword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: RustySwordMaxDurability, meleeDamage: RustySwordDamage},
 
 	// Structures place no *block*. `places: world.Air` is what says so, exactly as it
 	// does for a raw resource — what they put in the world is an entity, and the path
@@ -385,8 +388,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemGreyHorse:  {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindGreyHorse},
 
 	// The forge's own products. The blade is equipment on the same terms the rusty one
-	// is: one to a slot, its own wear, its own damage.
-	ItemIronSword: {places: world.Air, maxStack: 1, maxDurability: IronSwordMaxDurability, meleeDamage: IronSwordDamage},
+	// is: one to a slot, its own wear, its own damage, worn in the main hand.
+	ItemIronSword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: IronSwordMaxDurability, meleeDamage: IronSwordDamage},
 
 	// A stone is a consumable, not equipment: it wears nothing out because spending it
 	// *is* how it is used, and eight to a stack is what makes "limited supplies" a
@@ -461,14 +464,15 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemWoodenShield: {places: world.Air, maxStack: 1, wornAt: wornOffHand, maxDurability: WoodenShieldMaxDurability, blockFraction: 50},
 
 	// One bow launches one authoritative arrow and spends one matching ammunition item.
-	// The arrow itself is a wearless resource and stacks thirty-two deep.
+	// The arrow itself is a wearless resource and stacks thirty-two deep. Both launchers
+	// are weapons, so both are worn in the main hand.
 	ItemBow: {
-		places: world.Air, maxStack: 1, maxDurability: BowMaxDurability,
+		places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: BowMaxDurability,
 		launches: vnet.ProjectileKindArrow, ammunition: ItemArrow,
 	},
 	ItemArrow: {places: world.Air, maxStack: 32},
 	ItemWoodenSceptre: {
-		places: world.Air, maxStack: 1, maxDurability: SceptreMaxDurability,
+		places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: SceptreMaxDurability,
 		launches: vnet.ProjectileKindEnergyOrb,
 	},
 
