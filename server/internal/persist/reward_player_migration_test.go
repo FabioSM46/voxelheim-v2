@@ -2,6 +2,7 @@ package persist
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -9,11 +10,12 @@ import (
 	"testing"
 
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
+	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
 
 // losslessMigrationSources is every older format a record is always carried out of.
 // Each one is a format a world with boss receipts must still be able to start from.
-var losslessMigrationSources = []uint32{10}
+var losslessMigrationSources = []uint32{10, 11}
 
 // A record's layout belongs to the build that wrote it, so the table is pinned by
 // literals: a v10 record read at today's slot count would decode at the wrong size the
@@ -21,7 +23,7 @@ var losslessMigrationSources = []uint32{10}
 func TestEachMigratedFormatDecodesAtTheSlotCountItWasWrittenWith(t *testing.T) {
 	t.Parallel()
 
-	for version, want := range map[uint32]int{previousStoreVersion: 39, 10: 40} {
+	for version, want := range map[uint32]int{previousStoreVersion: 39, 10: 40, 11: 40} {
 		if got, migrates := migratedInventorySlots(version); !migrates || got != want {
 			t.Errorf("format %d migrates at %d slots (migrates %v), want %d", version, got, migrates, want)
 		}
@@ -159,5 +161,81 @@ func TestAWorldWithBossReceiptsRefusesAMigrationThatLeavesACharacterBehind(t *te
 				t.Errorf("a refused start still set a directory aside: %v", moved)
 			}
 		})
+	}
+}
+
+// sealJournalPostimageIn rewrites the one postimage in the world's reward journal as
+// though an older build had sealed it: the same record in that format, its length prefix
+// and the journal checksum updated to match.
+func sealJournalPostimageIn(t *testing.T, dir string, post Record, version uint32) {
+	t.Helper()
+
+	path := filepath.Join(dir, rewardFileName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := encodeRecord(post)
+	if bytes.Count(data, current) != 1 {
+		t.Fatal("the journal fixture does not hold the postimage exactly once")
+	}
+	at := bytes.Index(data, current)
+	slots, _ := migratedInventorySlots(version)
+	old := encodeRecordLayout(post, version, slots)
+	rewritten := append([]byte(nil), data[:at-4]...)
+	rewritten = binary.LittleEndian.AppendUint32(rewritten, uint32(len(old)))
+	rewritten = append(rewritten, old...)
+	rewritten = append(rewritten, data[at+len(current):]...)
+	world.PutChecksum(rewritten)
+	if err := os.WriteFile(path, rewritten, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A reward prepared by a v11 build is sealed as a v11 record. The first v12 start is the
+// one whose job is to replay it, so the journal must still open, read the postimage back
+// whole with the new slot empty, and replay it against the migrated character.
+func TestAJournalSealedBeforeTheSlotTableGrewStillReplays(t *testing.T) {
+	players, rewards, dir, owner, ref := transitionFixture(t)
+	_, post := prepareTransition(t, players, rewards, owner, ref)
+	for id := range players.byID {
+		rec, _, err := players.Load(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(players.recordPath(id), encodeRecordLayout(rec, 11, 40), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sealJournalPostimageIn(t, dir, post, 11)
+
+	cold, err := OpenRewardStore(dir)
+	if err != nil {
+		t.Fatalf("a journal holding a v11 postimage refused to open: %v", err)
+	}
+	if snap, _ := cold.Snapshot(); len(snap.Intents) != 1 || snap.Intents[0].Postimage != post {
+		t.Fatalf("the v11 postimage did not read back whole: %+v", snap.Intents)
+	}
+	restored, err := OpenStoreWithRewardRecovery(dir, cold, recoveryValidator)
+	if err != nil {
+		t.Fatalf("a v11 world with a prepared reward refused to start: %v", err)
+	}
+	if got, found, err := restored.Load(owner.ID); err != nil || !found || got != post {
+		t.Errorf("the replayed character: found %v, err %v\n got  %+v\n want %+v", found, err, got, post)
+	}
+	if snap, _ := cold.Snapshot(); len(snap.Intents) != 0 {
+		t.Errorf("%d reward intents remain unacknowledged", len(snap.Intents))
+	}
+}
+
+// A postimage is a receipt, so a format that cannot carry the reward epoch is not one a
+// postimage was ever written in: the journal holding it is corrupt.
+func TestAJournalPostimageInAFormatWithoutAnEpochIsRefused(t *testing.T) {
+	players, rewards, dir, owner, ref := transitionFixture(t)
+	_, post := prepareTransition(t, players, rewards, owner, ref)
+	sealJournalPostimageIn(t, dir, post, 10)
+
+	if _, err := OpenRewardStore(dir); !errors.Is(err, world.ErrCorruptStore) {
+		t.Fatalf("OpenRewardStore = %v, want world.ErrCorruptStore", err)
 	}
 }

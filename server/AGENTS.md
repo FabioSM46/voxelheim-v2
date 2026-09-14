@@ -477,9 +477,9 @@ action merely to exercise an abstraction.
   session never sends a delta and never drops one on a full outbound queue: unlike a tick
   snapshot, no later frame is guaranteed to supersede it. A pickup is decided on the tick and
   therefore uses the tick's non-blocking seam, which is why it keeps a durable flag and retries
-  until one is accepted rather than dropping the frame. The current protocol sends 40 real,
+  until one is accepted rather than dropping the frame. The current protocol sends 41 real,
   stable slot-indexed pairs; `(0, 0)` is empty, the first nine are the hotbar, slots 9–35 are
-  the pack and slots 36–39 are head, chest, legs and off-hand equipment. Automatic insertions
+  the pack and slots 36–40 are head, chest, legs, off-hand and main-hand equipment. Automatic insertions
   fill partial
   same-item stacks before the lowest empty pack slot and never enter equipment; moves split,
   merge or swap under the same per-player lock, and only an explicit compatible move may enter an
@@ -2832,7 +2832,7 @@ Recorded here so the next reader does not mistake them for oversights:
   Raising `JumpImpulse` to cover 5 Hz would change how every jump feels at 20; the honest fix is a
   sub-stepped integrator, and that is its own issue.
 - **A life survives a disconnect; the session around it deliberately does not.** What is written is
-  position, yaw, health, the purse, the learned-mount set and all 40 slots with their durability — `game.Life`, captured by
+  position, yaw, health, the purse, the learned-mount set and all 41 slots with their durability — `game.Life`, captured by
   `Player.Record` and stored by `persist`. What is **not** written is everything that only means
   something inside one connection: the death countdown, the respawn protection window, mining
   progress, a pending swing, the three client-tick ordering guards, and the drops and mobs in the
