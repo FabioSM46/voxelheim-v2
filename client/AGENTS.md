@@ -712,7 +712,7 @@ The client samples the controls, sends what the player is *trying* to do at the 
   complete state is the only thing that changes the displayed contents. The welcome also
   announces a non-empty trailing equipment subset; the pack grid draws only the slots between
   the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
-  head/chest/legs/off-hand column beside the pack and routes every press through the same slot-index
+  head/chest/legs/off-hand/main-hand column beside the pack and routes every press through the same slot-index
   message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy,
   and a drop onto the off-hand cell of an item that table does not route there sends nothing.
   Every worn slot is found through `player::inventory::equipment_slot` and a named offset
