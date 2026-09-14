@@ -120,6 +120,7 @@ pub use crafting::{CraftClick, Ingredient, Recipe, RecipeCategory};
 // pack and the station panels a partition of the table; tests still sweep the table whole.
 #[cfg(test)]
 pub(crate) use crafting::RECIPES;
+pub(crate) use hands::bow_cord_linear_rgba;
 pub use interpolate::{Interpolated, SnapshotBuffer};
 #[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;

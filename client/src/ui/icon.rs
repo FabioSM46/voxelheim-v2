@@ -79,6 +79,9 @@ pub(crate) struct IconPart {
     iron: bool,
     /// Uses the sceptre focus green instead of the item's base colour.
     green: bool,
+    /// Uses the bow string's cord instead of the item's base colour — the one
+    /// `player::bow_cord_linear_rgba` the modelled string is drawn in, so the two agree.
+    cord: bool,
     /// Draws the item's livery over this rectangle, when the item wears one.
     ///
     /// **A property of the rectangle, not of the shape.** A blade's guard and grip are not
@@ -100,6 +103,7 @@ impl IconPart {
         rotation: 0.0,
         iron: false,
         green: false,
+        cord: false,
         livery: false,
     };
 }
@@ -321,6 +325,7 @@ const BLADE: [IconPart; 3] = [
         rotation: QUARTER_TURN,
         iron: false,
         green: false,
+        cord: false,
         livery: false,
     },
 ];
@@ -820,35 +825,75 @@ const SHIELD: [IconPart; 5] = [
     },
 ];
 
-/// A bowed stave in two limbs and its taut string.
-const BOW: [IconPart; 3] = [
+/// A wooden bow seen from the side: a string of pale cord on the right, two curved limbs
+/// bending toward it from a darker grip on the left.
+///
+/// The model the hand, the ground and a body draw, flattened (#1230). Each limb is two
+/// segments — steep where it leaves the grip, turning over toward the string at its tip, and
+/// narrower there — which is the curve that reads as a bow rather than the `>` of two sticks
+/// this replaced. The upper limb's outer segment ends on the string's top, and the lower limb
+/// mirrors it. Drawn string first, limbs over its ends, grip last.
+const BOW: [IconPart; 6] = [
     IconPart {
-        left: 28.0,
-        top: 12.0,
-        width: 10.0,
-        height: 42.0,
+        left: 57.0,
+        top: 10.0,
+        width: 3.0,
+        height: 80.0,
+        radius: 30.0,
+        cord: true,
+        ..IconPart::PLAIN
+    },
+    // The upper limb, leaving the grip.
+    IconPart {
+        left: 30.0,
+        top: 21.0,
+        width: 8.0,
+        height: 22.0,
+        radius: 30.0,
+        rotation: 0.38,
+        shade: 0.15,
+        ..IconPart::PLAIN
+    },
+    // And turning over toward its tip on the string.
+    IconPart {
+        left: 45.0,
+        top: 5.0,
+        width: 6.0,
+        height: 24.0,
         radius: 35.0,
-        rotation: -0.24,
-        shade: 0.18,
+        rotation: 0.97,
+        shade: 0.22,
+        ..IconPart::PLAIN
+    },
+    // The lower limb, the upper one mirrored across the middle of the cell.
+    IconPart {
+        left: 30.0,
+        top: 57.0,
+        width: 8.0,
+        height: 22.0,
+        radius: 30.0,
+        rotation: -0.38,
+        shade: -0.10,
         ..IconPart::PLAIN
     },
     IconPart {
-        left: 28.0,
-        top: 46.0,
-        width: 10.0,
-        height: 42.0,
+        left: 45.0,
+        top: 71.0,
+        width: 6.0,
+        height: 24.0,
         radius: 35.0,
-        rotation: 0.24,
-        shade: -0.18,
+        rotation: -0.97,
+        shade: -0.15,
         ..IconPart::PLAIN
     },
+    // The leather grip, thicker than either limb, over both their roots.
     IconPart {
-        left: 58.0,
-        top: 13.0,
-        width: 4.0,
-        height: 74.0,
-        radius: 20.0,
-        shade: 0.65,
+        left: 25.0,
+        top: 37.0,
+        width: 10.0,
+        height: 26.0,
+        radius: 30.0,
+        shade: -0.40,
         ..IconPart::PLAIN
     },
 ];
@@ -1352,6 +1397,9 @@ fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
         LinearRgba::new(0.30, 0.35, 0.42, 1.0)
     } else if part.green {
         LinearRgba::new(0.16, 0.82, 0.28, 1.0)
+    } else if part.cord {
+        let [red, green, blue, alpha] = crate::player::bow_cord_linear_rgba();
+        LinearRgba::new(red, green, blue, alpha)
     } else {
         base
     };
@@ -1767,7 +1815,7 @@ mod tests {
         assert!(
             parts(ItemShape::HorseHead)
                 .iter()
-                .all(|part| !part.iron && !part.green && !part.livery),
+                .all(|part| !part.iron && !part.green && !part.cord && !part.livery),
             "every horse-head plane must keep the registry's exact coat colour"
         );
 
@@ -1938,6 +1986,74 @@ mod tests {
             blade.rotation == 0.0,
             "the shovel's blade is turned, so it no longer reads as flat"
         );
+    }
+
+    /// **The flat bow is the modelled one: curved limbs from a grip, and a lighter string**
+    /// (#1230).
+    ///
+    /// The structure a reader can check against `player::hands::bow_mesh` by eye: the string
+    /// is cord and nothing else is; each limb is two segments that turn further over toward
+    /// the string the farther they are from the grip — which is the curve — and the lower limb
+    /// mirrors the upper; the upper tip ends on the string; and the string is drawn lighter
+    /// than any part of the wood.
+    #[test]
+    fn the_flat_bow_is_curved_limbs_on_a_grip_with_a_lighter_string() {
+        let [string, upper_root, upper_tip, lower_root, lower_tip, grip] =
+            <[IconPart; 6]>::try_from(parts(ItemShape::Bow))
+                .expect("the bow is drawn as a string, two limbs of two segments and a grip");
+
+        assert!(string.cord, "the bow's string is not drawn in cord");
+        for part in [upper_root, upper_tip, lower_root, lower_tip, grip] {
+            assert!(
+                !part.cord && !part.iron && !part.green,
+                "a wooden part of the bow is not drawn in the item's colour: {part:?}"
+            );
+        }
+
+        // Curved: the segment at the tip turns further over than the one at the grip, and
+        // the lower limb is the upper one mirrored across the cell's middle.
+        assert!(
+            upper_tip.rotation > upper_root.rotation && upper_root.rotation > 0.0,
+            "the upper limb does not bend toward the string"
+        );
+        for (upper, lower) in [(upper_root, lower_root), (upper_tip, lower_tip)] {
+            assert_eq!(lower.rotation, -upper.rotation);
+            assert_eq!(lower.left, upper.left);
+            assert_eq!(lower.top + lower.height, 100.0 - upper.top);
+        }
+
+        // The upper tip is where the string is: the far end of the turned segment lands on
+        // the string's top, give or take a cell percent or two.
+        let reach = upper_tip.height / 2.0;
+        let end_x = upper_tip.left + upper_tip.width / 2.0 + upper_tip.rotation.sin() * reach;
+        let end_y = upper_tip.top + upper_tip.height / 2.0 - upper_tip.rotation.cos() * reach;
+        assert!(
+            (end_x - (string.left + string.width / 2.0)).abs() < 2.0
+                && (end_y - string.top).abs() < 2.0,
+            "the upper limb ends at ({end_x}, {end_y}), not on the string's top"
+        );
+
+        // The grip is at the middle, behind every limb, and thicker than any of them.
+        assert_eq!(grip.top + grip.height / 2.0, 50.0);
+        for limb in [upper_root, upper_tip, lower_root, lower_tip] {
+            assert!(grip.left < limb.left && grip.width > limb.width);
+        }
+
+        // Lighter: the drawn string is brighter in every channel than any drawn wood.
+        let wood = {
+            let [red, green, blue, alpha] =
+                crate::world::palette::linear_rgba(crate::world::palette::LOG);
+            LinearRgba::new(red, green, blue, alpha)
+        };
+        let [red, green, blue, alpha] = crate::player::bow_cord_linear_rgba();
+        let cord = shaded(LinearRgba::new(red, green, blue, alpha), string.shade).to_linear();
+        for part in [upper_root, upper_tip, lower_root, lower_tip, grip] {
+            let drawn = shaded(wood, part.shade).to_linear();
+            assert!(
+                cord.red > drawn.red && cord.green > drawn.green && cord.blue > drawn.blue,
+                "the string's {cord:?} is not lighter than the wood's {drawn:?}"
+            );
+        }
     }
 
     /// **The flat axe is the held one: an iron bit on one side of a wooden haft** (#1229).
