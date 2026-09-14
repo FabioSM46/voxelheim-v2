@@ -10,6 +10,35 @@ import (
 // parryCost is ParryEnergyCost in the thousandths the reserve is stored in.
 const parryCost = uint32(ParryEnergyCost) * energyScale
 
+// A swing made with the shield up is dropped before it spends anything, so it can neither
+// leave the reserve below the parry's cost under a raised shield nor pay for a swing the
+// per-tick settle then discards. The shield stays up across the tick that follows.
+func TestASwingWithTheShieldUpSpendsNothingAndKeepsTheGuard(t *testing.T) {
+	t.Parallel()
+
+	h, player, out := shieldInHand(t)
+	setEnergy(h, player, parryCost)
+	if reason := player.Block(true); reason != vnet.RefusalReasonUnknown {
+		t.Fatalf("a press at exactly the parry's cost answered %s", reason)
+	}
+	for tick := uint32(1); tick <= 3; tick++ {
+		reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: tick})
+		if err != nil || reason != vnet.RefusalReasonUnknown {
+			t.Fatalf("a swing with the shield up answered reason %s, error %v; it is dropped in silence", reason, err)
+		}
+		h.sim.mu.Lock()
+		energy, pending := player.energy, player.pendingSwing
+		h.sim.mu.Unlock()
+		if energy < parryCost || pending != nil {
+			t.Fatalf("swing %d with the shield up left %d thousandths and a pending swing %v", tick, energy, pending != nil)
+		}
+		h.step()
+		if !shieldAgrees(t, h, player, out) {
+			t.Fatalf("tick %d: a swing with the shield up lowered it", h.tick)
+		}
+	}
+}
+
 // A generous bound on how long any of these scenarios waits for a regeneration: the full
 // reserve refills in eight seconds, so twelve is never the thing that ends a loop.
 var regenerationTicks = 12 * int(DefaultTickRate)
