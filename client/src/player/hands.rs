@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use super::SelfVitals;
 use super::camera::ViewMode;
 use super::combat::{SwingAbandoned, SwingSent};
-use super::crafting::{ITEM_ARROW, ITEM_WOODEN_SCEPTRE};
+use super::crafting::{ITEM_ARROW, ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
@@ -3125,13 +3125,14 @@ struct NockedArrow;
 /// different door: drawing an item as a blade no more swings it than holding it as one does,
 /// and drawing a cast reaches no further than drawing a cut.
 ///
-/// **Three variants since #421, and the two that went were blade arcs.** The shape is now a
-/// function of what is held rather than of a counter — a blade cuts and a sceptre casts — which
-/// is why nothing in [`HandAnimation`] remembers what played last any more. The bow's draw left
-/// this enum in #1240: it follows the server's `draw_progress` ([`StringPull`]), not a clock.
+/// **Two attack arcs since #1240.** #421 removed two blade arcs, which made the shape a function
+/// of what is held rather than of a counter — a blade cuts and a sceptre casts — and is why
+/// nothing in [`HandAnimation`] remembers what played last any more. #1240 removed the bow's
+/// draw: it follows the server's `draw_progress` ([`StringPull`]), not a clock, and a bow's
+/// `SwingSent` plays no arc.
 ///
-/// **Four since #626, and the fourth is not an attack.** [`Self::Eat`] plays on the frame a
-/// `ConsumeRequest` left, so the paragraph above is now a statement about the three arcs a
+/// **Three variants in all, and the third is not an attack** (#626). [`Self::Eat`] plays on the
+/// frame a `ConsumeRequest` left, so the paragraph above is a statement about the two arcs a
 /// *swing* can draw rather than about the whole enum. The paragraph before it is unchanged
 /// and is the one that matters: which arc played still reaches nothing, and the request that
 /// started it was already sent before the shape was chosen.
@@ -3816,7 +3817,9 @@ fn animate_view_model(
             elapsed: Duration::ZERO,
         });
     }
-    if let Some(item_id) = intent.swing_sent() {
+    // A bow never swings: its string follows the server's `draw_progress` ([`StringPull`]). A
+    // `SwingSent` naming one — which `super::combat` does not write — plays no arc, never a cut.
+    if let Some(item_id) = intent.swing_sent().filter(|item_id| *item_id != ITEM_BOW) {
         let shape = if item_id == ITEM_WOODEN_SCEPTRE {
             SwingShape::Cast
         } else {
@@ -10545,19 +10548,15 @@ mod tests {
     /// **A swing the server refuses for energy stops being drawn the frame the refusal
     /// arrives** (#1228).
     ///
-    /// Every attack shape, because the server charges the same reserve for a cut, a draw and a
-    /// cast, and refuses all three the same way. Part way in on purpose: a refusal lands a tick
-    /// or two into a 220 ms arc, so what is being tested is an arc abandoned mid-flight, not
-    /// one that had already ended by itself.
+    /// Every attack arc, because the server charges the same reserve for a cut and a cast, and
+    /// refuses both the same way. The bow plays no arc since #1240, so it has none to take back.
+    /// Part way in on purpose: a refusal lands a tick or two into a 220 ms arc, so what is being
+    /// tested is an arc abandoned mid-flight, not one that had already ended by itself.
     #[test]
     fn a_swing_the_server_refuses_for_energy_is_taken_back_mid_arc() {
         const STEP: Duration = Duration::from_millis(16);
 
-        for item_id in [
-            ITEM_RUSTY_SWORD,
-            crafting::ITEM_BOW,
-            crafting::ITEM_WOODEN_SCEPTRE,
-        ] {
+        for item_id in [ITEM_RUSTY_SWORD, crafting::ITEM_WOODEN_SCEPTRE] {
             let mut app = hand_only_app();
             app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
             app.world_mut().write_message(SwingSent { item_id });
@@ -10633,6 +10632,35 @@ mod tests {
     // -----------------------------------------------------------------------
     // The two-handed draw (#1240), which replaced the 220 ms tip-back a bow request played
     // -----------------------------------------------------------------------
+
+    /// **A bow's `SwingSent` plays no arc, and never a blade's cut.** `super::combat` writes none
+    /// for a bow, whose press is a draw; this holds the picture to that if one arrives anyway. The
+    /// sceptre's message after it is what keeps the first half from passing vacuously.
+    #[test]
+    fn a_bow_swing_message_plays_no_arc() {
+        let mut app = hand_only_app();
+        app.world_mut().write_message(SwingSent {
+            item_id: crafting::ITEM_BOW,
+        });
+        app.update();
+        assert_eq!(
+            app.world().resource::<HandAnimation>().attack,
+            None,
+            "a bow's swing message played an arc"
+        );
+
+        app.world_mut().write_message(SwingSent {
+            item_id: crafting::ITEM_WOODEN_SCEPTRE,
+        });
+        app.update();
+        assert_eq!(
+            app.world()
+                .resource::<HandAnimation>()
+                .attack
+                .map(|swing| swing.shape),
+            Some(SwingShape::Cast)
+        );
+    }
 
     /// **The string follows the server between snapshots and snaps home on release.**
     #[test]
