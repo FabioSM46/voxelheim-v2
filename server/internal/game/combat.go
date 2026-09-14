@@ -119,16 +119,73 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	return vnet.RefusalReasonUnknown, nil
 }
 
-// Block silently accepts only a live player's usable off-hand shield.
-func (p *Player) Block(active bool) {
+// Block records the block button's edge and settles the shield against it.
+//
+// **The request is intent, and the intent outlives the press.** `active: true` is held
+// as wantsBlock until `active: false` arrives or the server takes it away, and the shield
+// itself is re-derived from that intent every tick (settleShieldLocked). That is what lets
+// a press made on an empty reserve raise the shield on the tick regeneration reaches
+// ParryEnergyCost, with no second press, and what lets a shield lowered by a parry that
+// spent the reserve come back up while the button is still down.
+//
+// Only energy is remembered past a refusal. A press from a dead, leaving or mounted player,
+// or with no usable shield in the off hand, is dropped in silence as it always was and
+// leaves no intent behind — so equipping a shield while holding the button raises nothing.
+//
+// A press refused for energy answers NotEnoughEnergy **once per press**: the edge from
+// released to held is what is answered, never a repeated `active: true` without a release
+// and never a tick, so the energy bar flashes for the press and not twenty times a second.
+// Every other outcome answers RefusalReasonUnknown.
+func (p *Player) Block(active bool) vnet.RefusalReason {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
 
-	p.blocking = active && p.alive() && !p.leaving &&
-		p.mounted == vnet.MountKindUnknown && p.wornShield.fraction > 0
+	pressed := active && !p.wantsBlock
+	p.wantsBlock = active && p.mayRaiseShieldLocked()
+	p.settleShieldLocked()
+	if pressed && p.wantsBlock && !p.blocking {
+		return vnet.RefusalReasonNotEnoughEnergy
+	}
+	return vnet.RefusalReasonUnknown
+}
+
+// mayRaiseShieldLocked is every condition on a raised shield except energy: a live player,
+// not leaving, not mounted, with a usable shield in the off hand. The caller holds sim.mu.
+func (p *Player) mayRaiseShieldLocked() bool {
+	return p.alive() && !p.leaving && p.mounted == vnet.MountKindUnknown && p.wornShield.fraction > 0
+}
+
+// settleShieldLocked re-derives blocking from the held intent, the shield and the reserve.
+//
+// **A raised shield needs at least ParryEnergyCost**, so a raised shield always promises a
+// parry it can pay for. Holding it still costs nothing: the cost is spent only when a blow
+// is absorbed (landMobBlowLocked), and that spend is followed by this settle, so a parry
+// that leaves the reserve short lowers the shield on the same tick rather than the next.
+//
+// An intent that can no longer raise the shield for any reason but energy is dropped here
+// too. Every authoritative removal already clears it through lowerShieldLocked; this is
+// the same answer for a condition that changed without passing through one of them.
+//
+// Called by Block, by every tick after energy regenerates (advanceVitalsLocked) and after a
+// parry spends. The caller holds sim.mu.
+func (p *Player) settleShieldLocked() {
+	if !p.mayRaiseShieldLocked() {
+		p.wantsBlock = false
+	}
+	p.blocking = p.wantsBlock && p.energy >= uint32(ParryEnergyCost)*energyScale
 	if p.blocking {
+		// A shield up silently drops every swing, including one admitted before it rose.
 		p.pendingSwing = nil
 	}
+}
+
+// lowerShieldLocked is every authoritative removal of the shield: teleport, mounting,
+// leaving, death, world transfer, and a shield that wears out or leaves the off hand. It
+// lowers the shield **and forgets the intent**, so none of them is undone by regeneration
+// raising the shield again while a stale press is still on record. The caller holds sim.mu.
+func (p *Player) lowerShieldLocked() {
+	p.wantsBlock = false
+	p.blocking = false
 }
 
 // slotHoldsAWeaponLocked reports whether the slot holds a kind of item that swings or

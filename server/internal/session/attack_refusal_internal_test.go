@@ -34,3 +34,14 @@ func TestAnAttackRefusalNamesTheSurfaceThatExplainsIt(t *testing.T) {
 		}
 	}
 }
+
+// A block press refused for energy flashes the same energy bar a starved swing does, and
+// names no voxel either.
+func TestABlockRefusalIsAnsweredUnderEnergy(t *testing.T) {
+	t.Parallel()
+
+	want := protocol.ActionRefused{Action: vnet.RefusedActionEnergy, Reason: vnet.RefusalReasonNotEnoughEnergy}
+	if got := blockRefusal(vnet.RefusalReasonNotEnoughEnergy); got != want {
+		t.Errorf("blockRefusal(NotEnoughEnergy) = %+v, want %+v", got, want)
+	}
+}
