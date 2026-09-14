@@ -3415,6 +3415,7 @@ pub(crate) fn reset_world(world: &mut World) {
     clear_messages::<InventoryClick>(world);
     clear_messages::<CraftClick>(world);
     clear_messages::<combat::SwingSent>(world);
+    clear_messages::<combat::SwingAbandoned>(world);
     clear_messages::<inventory::ConsumeSent>(world);
 }
 
