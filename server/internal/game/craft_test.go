@@ -948,10 +948,10 @@ func TestEachBladeDoesItsOwnDamage(t *testing.T) {
 			h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 
 			player.inventory.mu.Lock()
-			player.inventory.slots[0] = stackOf(tc.item, 1)
+			player.inventory.slots[equipmentMainHand] = stackOf(tc.item, 1)
 			player.inventory.mu.Unlock()
 
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("Attack: %v", err)
 			}
 			h.step()

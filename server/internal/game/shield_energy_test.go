@@ -22,7 +22,7 @@ func TestASwingWithTheShieldUpSpendsNothingAndKeepsTheGuard(t *testing.T) {
 		t.Fatalf("a press at exactly the parry's cost answered %s", reason)
 	}
 	for tick := uint32(1); tick <= 3; tick++ {
-		reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: tick})
+		reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick})
 		if err != nil || reason != vnet.RefusalReasonUnknown {
 			t.Fatalf("a swing with the shield up answered reason %s, error %v; it is dropped in silence", reason, err)
 		}

@@ -29,11 +29,12 @@ func TestAnAttackIsRefusedAt24EnergyAndAdmittedAt25(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.wieldStarterBlade(player)
 			h.sim.mu.Lock()
 			player.energy = tc.stored
 			h.sim.mu.Unlock()
 
-			reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+			reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 
 			h.sim.mu.Lock()
 			defer h.sim.mu.Unlock()
@@ -76,12 +77,12 @@ func TestAnAttackRefusedForAnotherReasonSpendsNoEnergy(t *testing.T) {
 		"an empty slot": func(_ *vitalsHarness, p *Player) {
 			p.inventory.mu.Lock()
 			defer p.inventory.mu.Unlock()
-			p.inventory.slots[0] = inventoryStack{}
+			p.inventory.slots[equipmentMainHand] = inventoryStack{}
 		},
 		"a slot of stone": func(_ *vitalsHarness, p *Player) {
 			p.inventory.mu.Lock()
 			defer p.inventory.mu.Unlock()
-			p.inventory.slots[0] = stackOf(ItemStone, 10)
+			p.inventory.slots[equipmentMainHand] = stackOf(ItemStone, 10)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -93,7 +94,7 @@ func TestAnAttackRefusedForAnotherReasonSpendsNoEnergy(t *testing.T) {
 			arrange(h, player)
 			h.sim.mu.Unlock()
 
-			_, _ = player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+			_, _ = player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 
 			h.sim.mu.Lock()
 			defer h.sim.mu.Unlock()
@@ -112,10 +113,10 @@ func TestAWornThroughBladeIsAdmittedAndPaysLikeAMiss(t *testing.T) {
 
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 	player.inventory.mu.Lock()
-	player.inventory.slots[0].durability = 0
+	player.inventory.slots[equipmentMainHand].durability = 0
 	player.inventory.mu.Unlock()
 
-	if reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+	if reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1}); err != nil {
 		t.Fatalf("a worn-through blade was refused at admission: %s, %v", reason, err)
 	}
 	h.sim.mu.Lock()
@@ -136,8 +137,9 @@ func TestAFullReserveIsFourSwingsAndNotAFifth(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 	for tick := uint32(1); tick <= 5; tick++ {
-		reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: tick})
+		reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick})
 		if tick <= 4 && err != nil {
 			t.Fatalf("swing %d from a full reserve was refused: %s, %v", tick, reason, err)
 		}
@@ -279,7 +281,7 @@ func TestAMountedSwingIsRefusedBeforeEnergyIsAsked(t *testing.T) {
 	player.energy = 0
 	h.sim.mu.Unlock()
 
-	reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 	if !errors.Is(err, ErrActionForbiddenWhileMounted) || reason != vnet.RefusalReasonActionForbiddenWhileMounted {
 		t.Fatalf("mounted starved Attack = %s, %v; want the mounted refusal", reason, err)
 	}

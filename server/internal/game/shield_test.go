@@ -44,13 +44,14 @@ func TestBlockRequiresALiveUsableOffHandShieldAndCancelsAPendingSwing(t *testing
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 
 	player.Block(true)
 	if h.vitals(player).Blocking {
 		t.Fatal("empty off hand blocked")
 	}
 	equipShield(t, player, WoodenShieldMaxDurability)
-	if _, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+	if _, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1}); err != nil {
 		t.Fatalf("Attack: %v", err)
 	}
 	player.Block(true)

@@ -226,11 +226,12 @@ func TestAWardRemovalPaysNoLootAndNoExperience(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	h.keepNight()
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 	// Yaw 0 looks along -Z, so this draugr is directly ahead and inside reach.
 	id := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
 
 	// A real blow through the authoritative path, so the tap is the one combat sets.
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()

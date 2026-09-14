@@ -934,26 +934,36 @@ func TestAnAttackIsAcceptedAndARefusedOneIsSilence(t *testing.T) {
 	chunks, sim, peers := editDeps(t, cfg)
 	conn, frames := admit(t, cfg, chunks, sim, peers, 1)
 
+	// An attack spends the main hand, so the starter blade is taken out of hotbar slot 0
+	// and wielded first, over the wire, as a player would.
+	mainHand := protocol.InventorySlots - 1
+	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: mainHand, Count: 1})
+	waitUntil(t, "the starter blade wielded", func() bool {
+		states := frames.inventoryStates()
+		return len(states) > 0 && states[len(states)-1].Stacks[mainHand].ItemID == uint16(game.ItemRustySword)
+	})
 	joinStates := len(frames.inventoryStates())
 	joinUpdates := len(frames.blockUpdates())
 
-	// The starter blade is in slot 0. Nothing is in reach, so this lands on nothing —
-	// which is the point: a swing that hits nothing must still be an ordinary message.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	// Nothing is in reach, so this lands on nothing — which is the point: a swing that hits
+	// nothing must still be an ordinary message.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: mainHand, ClientTick: 1})
+	// The hotbar slot the blade used to swing from, which the simulation now refuses.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 2})
 	// A slot outside the inventory, which the simulation refuses rather than the decoder.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 255, ClientTick: 2})
-	// A stale tick, refused for a third reason.
-	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: 255, ClientTick: 3})
+	// A stale tick, refused for a fourth reason.
+	conn.in <- protocol.EncodeAttackRequest(protocol.AttackRequest{Slot: mainHand, ClientTick: 1})
 
-	// A barrier behind all three: the move is processed on the same read goroutine, so
+	// A barrier behind all four: the move is processed on the same read goroutine, so
 	// its state arriving proves every frame before it was handled without ending the
-	// session. An accepted move is the only one of the four that replies at all.
+	// session. An accepted move is the only one of the five that replies at all.
 	freeSlot := frames.emptySlot()
 	if freeSlot < 0 {
 		t.Fatal("the starter inventory has no free slot to move into")
 	}
 	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{
-		From: 0, To: uint8(freeSlot), Count: 1,
+		From: mainHand, To: uint8(freeSlot), Count: 1,
 	})
 	waitUntil(t, "the inventory move behind the attacks", func() bool {
 		return len(frames.inventoryStates()) == joinStates+1
