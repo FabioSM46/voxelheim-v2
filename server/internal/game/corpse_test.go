@@ -56,7 +56,7 @@ func TestTheKillingTicksSnapshotAlreadyCarriesAnOpenableCorpse(t *testing.T) {
 	h.sim.mobs[id].health = RustySwordDamage
 	h.sim.mu.Unlock()
 
-	if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+	if err := h.swing(player, mainHandSlot, uint32(h.tick)+1); err != nil {
 		t.Fatalf("the killing swing was refused: %v", err)
 	}
 	h.step()
@@ -139,8 +139,9 @@ func TestCorpseAccessBelongsToFirstTapAndSurvivesReconnect(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	owner, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
 	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(owner)
 	id := h.placeSpeciesAt(vnet.MobKindDraugr, [3]float64{0.5, 64, -1.5})
-	if err := h.swing(owner, 0, 1); err != nil {
+	if err := h.swing(owner, mainHandSlot, 1); err != nil {
 		t.Fatal(err)
 	}
 	h.step()

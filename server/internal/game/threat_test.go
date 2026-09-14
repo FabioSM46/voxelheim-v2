@@ -192,7 +192,7 @@ func TestALandedSwingCreditsTheHealthItActuallyRemoved(t *testing.T) {
 	t.Parallel()
 
 	h, player, mobID := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("swing: %v", err)
 	}
 	h.step()

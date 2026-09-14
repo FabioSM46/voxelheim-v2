@@ -410,7 +410,7 @@ func TestAPendingBossRewardRefusesEveryInventoryAndSilverMutation(t *testing.T) 
 		{"a trade settlement for the counterparty", trade(true)},
 		{"a bow launch", func(t *testing.T) (*Player, func() error) {
 			h, p := rewardPlayer(t)
-			putTradeStack(p, 0, stackOf(ItemBow, 1))
+			putTradeStack(p, mainHandSlot, stackOf(ItemBow, 1))
 			putTradeStack(p, 1, stackOf(ItemArrow, 2))
 			h.aimAt(p, math.Pi/2, math.Pi/6)
 			tick := uint32(0)
@@ -420,7 +420,7 @@ func TestAPendingBossRewardRefusesEveryInventoryAndSilverMutation(t *testing.T) 
 				h.sim.mu.Unlock()
 				if !pending {
 					tick++
-					if _, err := p.Attack(protocol.AttackRequest{Slot: 0, ClientTick: tick}); err != nil {
+					if _, err := p.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick}); err != nil {
 						return err
 					}
 				}
