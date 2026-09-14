@@ -73,8 +73,9 @@ func (p *Player) vitalsLocked() protocol.PlayerVitals {
 		Blocking:         p.blocking,
 		// Rounded down, so the wire never shows a swing as affordable a fraction of a
 		// point before the server would admit it.
-		Energy:    uint16(p.energy / energyScale),
-		MaxEnergy: MaxEnergy,
+		Energy:       uint16(p.energy / energyScale),
+		MaxEnergy:    MaxEnergy,
+		DrawProgress: p.drawProgressLocked(),
 	}
 }
 
@@ -191,6 +192,7 @@ func (p *Player) dieLocked() {
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
 	p.lowerShieldLocked()
+	p.cancelDrawLocked()
 	p.mounted = vnet.MountKindUnknown
 	p.sim.removeAllThreatFor(p.entityID)
 
@@ -367,6 +369,7 @@ func (p *Player) respawnLocked() {
 	p.haveTick, p.lastTick = false, 0
 	p.haveMineTick, p.lastMineTick = false, 0
 	p.haveAttackTick, p.lastAttackTick = false, 0
+	p.haveDrawTick, p.lastDrawTick = false, 0
 	p.haveLootOpenTick, p.lastLootOpenTick = false, 0
 	p.haveLootTakeTick, p.lastLootTakeTick = false, 0
 	// A new life swings immediately: the cooldown belonged to the blade of a player who

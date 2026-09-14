@@ -211,6 +211,7 @@ type Message struct {
 	InventoryMove      *InventoryMoveRequest
 	Attack             *AttackRequest
 	Block              *BlockRequest
+	Draw               *DrawRequest
 	PlaceStructure     *PlaceStructureRequest
 	RemoveStructure    *RemoveStructureRequest
 	Craft              *CraftRequest
@@ -737,6 +738,14 @@ type BlockRequest struct {
 	ClientTick uint32
 }
 
+// DrawRequest is one edge of the bow's draw: a press begins a draw and a release looses it.
+// Intent only — it names no slot, no charge and no aim, and the simulation measures the
+// charge from its own ticks. ClientTick is ordering and staleness only, never a clock.
+type DrawRequest struct {
+	Active     bool
+	ClientTick uint32
+}
+
 // CraftRequest is one decoded attempt to make something. **Intent, never outcome.**
 //
 // It names a recipe and nothing else: what that recipe costs, what it yields and whether
@@ -985,6 +994,9 @@ type PlayerVitals struct {
 	// the absent-field case, never a valid reserve.
 	Energy    uint16
 	MaxEnergy uint16
+	// DrawProgress is zero when the recipient is not drawing and 1..255 while drawing, the
+	// charge as a fraction of 255; 255 is a full draw still held.
+	DrawProgress uint8
 }
 
 // MobState is one mob's authoritative state, as a snapshot carries it.
@@ -1677,6 +1689,20 @@ func Decode(frame []byte) (msg Message, err error) {
 		var request vnet.BlockRequest
 		request.Init(table.Bytes, table.Pos)
 		msg.Block = &BlockRequest{
+			Active:     request.Active(),
+			ClientTick: request.ClientTick(),
+		}
+
+	case vnet.PayloadDrawRequest:
+		table, tErr := unionPayload(env, msg.Kind)
+		if tErr != nil {
+			return Message{}, tErr
+		}
+		var request vnet.DrawRequest
+		request.Init(table.Bytes, table.Pos)
+		// Both fields copied straight through: whether a draw may begin is the simulation's
+		// decision, against state this package cannot see.
+		msg.Draw = &DrawRequest{
 			Active:     request.Active(),
 			ClientTick: request.ClientTick(),
 		}
@@ -2889,6 +2915,7 @@ func EncodeEntitySnapshot(s EntitySnapshot) []byte {
 	vnet.PlayerVitalsAddBlocking(b, s.Vitals.Blocking)
 	vnet.PlayerVitalsAddEnergy(b, s.Vitals.Energy)
 	vnet.PlayerVitalsAddMaxEnergy(b, s.Vitals.MaxEnergy)
+	vnet.PlayerVitalsAddDrawProgress(b, s.Vitals.DrawProgress)
 	vitalsOffset := vnet.PlayerVitalsEnd(b)
 
 	// A vector of structs must be complete before the table that references it
@@ -3259,6 +3286,19 @@ func EncodeBlockRequest(r BlockRequest) []byte {
 	request := vnet.BlockRequestEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadBlockRequest, request)
+}
+
+// EncodeDrawRequest builds one draw edge. The server never sends one; it exists so tests
+// can hand the session the bytes a client would.
+func EncodeDrawRequest(r DrawRequest) []byte {
+	b := flatbuffers.NewBuilder(128)
+
+	vnet.DrawRequestStart(b)
+	vnet.DrawRequestAddActive(b, r.Active)
+	vnet.DrawRequestAddClientTick(b, r.ClientTick)
+	request := vnet.DrawRequestEnd(b)
+
+	return finishEnvelope(b, vnet.PayloadDrawRequest, request)
 }
 
 // EncodePlaceStructureRequest builds one placement intent. The server never sends one,

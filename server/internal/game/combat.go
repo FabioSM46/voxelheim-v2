@@ -61,6 +61,10 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 		// A shield up silently drops every swing before it creates pending state.
 		return vnet.RefusalReasonUnknown, nil
 	}
+	if p.draw != nil {
+		// A drawn bow is held, not swung: the draw's own release is what looses it.
+		return vnet.RefusalReasonUnknown, errors.New("the bow is drawn")
+	}
 
 	// Its own ordering guard, beside movement's and mining's rather than shared with
 	// them: the three arrive on different messages at different cadences, and one
@@ -103,10 +107,17 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	// because the inventory can change between this admission and that judgement.
 	p.inventory.mu.Lock()
 	weapon := p.slotHoldsAWeaponLocked(req.Slot)
-	missingAmmunition := weapon && !p.launcherHasAmmunitionLocked(req.Slot)
+	drawn := weapon && p.slotHoldsADrawnLauncherLocked(req.Slot)
+	missingAmmunition := weapon && !drawn && !p.launcherHasAmmunitionLocked(req.Slot)
 	p.inventory.mu.Unlock()
 	if !weapon {
 		return vnet.RefusalReasonUnknown, fmt.Errorf("slot %d holds nothing that attacks", req.Slot)
+	}
+	if drawn {
+		// A bow is drawn with DrawRequest and loosed by its release; the draw is the bow's
+		// only way to shoot. An attack naming one is dropped here in silence, before any
+		// pending swing, cooldown or energy exists, worn through or not.
+		return vnet.RefusalReasonUnknown, errors.New("a bow is drawn, not swung")
 	}
 	if missingAmmunition {
 		return vnet.RefusalReasonNoAmmunition, errors.New("the launcher has no ammunition")
@@ -182,8 +193,11 @@ func (p *Player) settleShieldLocked() {
 	}
 	p.blocking = p.wantsBlock && p.energy >= uint32(ParryEnergyCost)*energyScale
 	if p.blocking {
-		// A shield up silently drops every swing, including one admitted before it rose.
+		// A shield up silently drops every swing, including one admitted before it rose, and
+		// ends a draw. A bow in the main hand forbids a shield, so the second is the
+		// invariant rather than a live case: drawing and blocking are never both true.
 		p.pendingSwing = nil
+		p.cancelDrawLocked()
 	}
 }
 
@@ -390,16 +404,13 @@ type armedAttack struct {
 }
 
 // launchParameters is the authoritative cadence and initial speed for each projectile
-// kind a registry row may launch. Unknown kinds fail closed.
+// kind an attack may launch. Unknown kinds fail closed, and so does an arrow: a bow is
+// drawn, and resolveDrawLocked looses it at a speed that follows the charge (arrowLaunch).
 func (s *Sim) launchParameters(kind vnet.ProjectileKind) (uint32, float64) {
-	switch kind {
-	case vnet.ProjectileKindArrow:
-		return s.bowCooldownTicks, ArrowSpeed
-	case vnet.ProjectileKindEnergyOrb:
+	if kind == vnet.ProjectileKindEnergyOrb {
 		return s.sceptreCooldownTicks, OrbSpeed
-	default:
-		return 0, 0
 	}
+	return 0, 0
 }
 
 // armedForAttackLocked is what the named slot's contents do, and whether the inventory
@@ -442,42 +453,59 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 		return armedAttack{}, true
 	}
 
+	if drawnLauncher(definition) {
+		// A bow put in the hand between an admitted swing and this tick. It is drawn, never
+		// swung, so the swing ends here and spends neither an arrow nor the bow's wear.
+		return armedAttack{}, true
+	}
 	if definition.launches != vnet.ProjectileKindUnknown {
-		// A launch spends ammunition and wear, so a pending boss reward postpones it
-		// exactly as a contended inventory does. A melee swing spends nothing and is
-		// judged as usual.
-		if p.rewardInventoryBusyLocked() {
-			return armedAttack{}, false
+		launched, sampled := p.spendLaunchLocked(slot, definition)
+		if !launched {
+			return armedAttack{}, sampled
 		}
-		if definition.ammunition != ItemNone {
-			ammunitionSlot := -1
-			for candidate := range p.inventory.slots[:equipmentFirst] {
-				stack := p.inventory.slots[candidate]
-				if stack.item == definition.ammunition && stack.count > 0 {
-					ammunitionSlot = candidate
-					break
-				}
-			}
-			if ammunitionSlot < 0 {
-				// The session-side check already explained the ordinary case. This is the
-				// race where the last arrow moved before the tick, so the queued launch simply
-				// disappears and spends nothing.
-				return armedAttack{}, true
-			}
-			ammunition := &p.inventory.slots[ammunitionSlot]
-			ammunition.count--
-			if ammunition.count == 0 {
-				*ammunition = inventoryStack{}
-			}
-		}
-		launcher := &p.inventory.slots[slot]
-		if launcher.durable() {
-			launcher.durability--
-		}
-		p.inventoryDirty = true
 		return armedAttack{launches: definition.launches}, true
 	}
 	return armedAttack{meleeDamage: definition.meleeDamage}, true
+}
+
+// spendLaunchLocked spends what one launch from slot costs: its first hotbar or pack
+// ammunition, when the row declares one, and one point of the launcher's durability. It
+// reports whether it spent and whether the inventory could be spent from at all. The
+// caller holds inventory.mu and has already found a usable launcher in slot; the swing and
+// the bow's draw both launch through it, so the two cannot charge differently.
+func (p *Player) spendLaunchLocked(slot uint8, definition itemDefinition) (launched, sampled bool) {
+	// A launch spends ammunition and wear, so a pending boss reward postpones it exactly as
+	// a contended inventory does. A melee swing spends nothing and is judged as usual.
+	if p.rewardInventoryBusyLocked() {
+		return false, false
+	}
+	if definition.ammunition != ItemNone {
+		ammunitionSlot := -1
+		for candidate := range p.inventory.slots[:equipmentFirst] {
+			stack := p.inventory.slots[candidate]
+			if stack.item == definition.ammunition && stack.count > 0 {
+				ammunitionSlot = candidate
+				break
+			}
+		}
+		if ammunitionSlot < 0 {
+			// The session-side check already explained the ordinary case. This is the race
+			// where the last arrow moved before the tick, so the launch simply disappears and
+			// spends nothing.
+			return false, true
+		}
+		ammunition := &p.inventory.slots[ammunitionSlot]
+		ammunition.count--
+		if ammunition.count == 0 {
+			*ammunition = inventoryStack{}
+		}
+	}
+	launcher := &p.inventory.slots[slot]
+	if launcher.durable() {
+		launcher.durability--
+	}
+	p.inventoryDirty = true
+	return true, true
 }
 
 // swingTargetLocked is the mob a swing lands on, or nil.
