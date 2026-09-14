@@ -1727,6 +1727,7 @@ func inertWhileLeaving(kind vnet.Payload) bool {
 		vnet.PayloadInventoryMoveRequest,
 		vnet.PayloadAttackRequest,
 		vnet.PayloadBlockRequest,
+		vnet.PayloadDrawRequest,
 		vnet.PayloadPlaceStructureRequest,
 		vnet.PayloadRemoveStructureRequest,
 		vnet.PayloadCraftRequest,
@@ -2170,6 +2171,30 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			log.Debug("block press refused", "code", reason.String())
 			if sErr := send(protocol.EncodeActionRefused(blockRefusal(reason))); sErr != nil {
 				return fmt.Errorf("session: send block refusal: %w", sErr)
+			}
+		}
+		return nil
+
+	case vnet.PayloadDrawRequest:
+		if player == nil || msg.Draw == nil {
+			log.Debug("draw arrived with no player to attribute it to; discarding")
+			return nil
+		}
+		// Admission only: the tick counts the charge and looses the arrow. A draw refused for
+		// arrows, energy or a mount is answered on the surfaces an attack's refusal uses;
+		// every other refusal is silence plus a debug line.
+		reason, dErr := player.Draw(*msg.Draw)
+		if dErr != nil {
+			log.Debug("refusing draw",
+				"reason", dErr.Error(),
+				"code", reason.String(),
+				"active", msg.Draw.Active,
+				"client_tick", msg.Draw.ClientTick,
+			)
+			if reason != vnet.RefusalReasonUnknown {
+				if sErr := send(protocol.EncodeActionRefused(attackRefusal(reason))); sErr != nil {
+					return fmt.Errorf("session: send draw refusal: %w", sErr)
+				}
 			}
 		}
 		return nil

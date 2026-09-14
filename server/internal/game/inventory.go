@@ -505,6 +505,12 @@ func (p *Player) refreshWornLocked() {
 	if shield.fraction == 0 {
 		p.lowerShieldLocked()
 	}
+	// A draw needs its bow in the main hand. Every path that empties that slot or leaves
+	// the bow in it worn through ends here, and ends the draw with it; a move that touches
+	// the slot at all is handled by MoveInventory.
+	if p.draw != nil && !p.mainHandHoldsADrawableBowLocked() {
+		p.cancelDrawLocked()
+	}
 }
 
 // spendShieldDurabilityLocked tries one point once; the caller holds sim.mu.
@@ -773,6 +779,11 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 
 	if err := p.inventory.moveLocked(req); err != nil {
 		return protocol.InventoryState{}, err
+	}
+	if int(req.From) == equipmentMainHand || int(req.To) == equipmentMainHand {
+		// The drawn bow was moved, even when another bow took its place: the string that was
+		// held back belonged to the bow that left.
+		p.cancelDrawLocked()
 	}
 	p.refreshWornLocked()
 	if equipmentSlot(req.From) || equipmentSlot(req.To) {

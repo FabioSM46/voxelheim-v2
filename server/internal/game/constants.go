@@ -635,6 +635,11 @@ const (
 	BowCooldown     = 1 * time.Second
 	SceptreCooldown = 750 * time.Millisecond
 
+	// FullDrawDuration is how long a bow is held to reach a full draw. Converted to
+	// authoritative ticks once by NewSim, on CastDuration's rule; holding past it charges
+	// nothing further and costs nothing further.
+	FullDrawDuration = 1 * time.Second
+
 	// --- Projectiles ---------------------------------------------------------
 	//
 	// These are authoritative simulation numbers. The ranged-item registry only
