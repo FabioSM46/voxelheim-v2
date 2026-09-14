@@ -63,6 +63,7 @@ func (s *Sim) Transfer(p *Player, target *Sim, spawn [3]float32) error {
 	p.miningCompleted = nil
 	p.mineReset = nil
 	p.lowerShieldLocked()
+	p.cancelDrawLocked()
 
 	p.pendingSwing = nil
 	p.cast = nil

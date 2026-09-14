@@ -124,7 +124,7 @@ func TestAuthoritativeProjectilesMeetBarsAndPassGrilleGaps(t *testing.T) {
 						owner, _ := h.join(1, start)
 						direction := [3]float64{}
 						direction[depth] = sign
-						speed := ArrowSpeed
+						speed := ArrowFullDrawSpeed
 						if kind == vnet.ProjectileKindEnergyOrb {
 							speed = OrbSpeed
 						}

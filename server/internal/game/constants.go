@@ -635,6 +635,11 @@ const (
 	BowCooldown     = 1 * time.Second
 	SceptreCooldown = 750 * time.Millisecond
 
+	// FullDrawDuration is how long a bow is held to reach a full draw. Converted to
+	// authoritative ticks once by NewSim, on CastDuration's rule; holding past it charges
+	// nothing further and costs nothing further.
+	FullDrawDuration = 1 * time.Second
+
 	// --- Projectiles ---------------------------------------------------------
 	//
 	// These are authoritative simulation numbers. The ranged-item registry only
@@ -645,12 +650,26 @@ const (
 	ArrowDamage         = 15
 	OrbDamage           = 8
 	OrbHeal             = 10
-	ArrowSpeed          = 30.0
 	OrbSpeed            = 16.0
+
+	// ArrowMinDrawSpeed and ArrowFullDrawSpeed are the launch speeds of an arrow loosed at no
+	// charge and at a full draw; a release between them is interpolated linearly by charge.
+	// ArrowMinDrawSpreadDegrees is the half-angle of the cone an uncharged arrow may leave
+	// in around the look direction, narrowing linearly to exactly the look direction at a
+	// full draw. Damage does not follow the charge: it is ArrowDamage at every one.
+	//
+	// With Gravity at 28 and no drag, a level shot from eye height lands roughly 4 blocks out
+	// uncharged and 14 at a full draw, and the longest reach at a 45-degree pitch is about 6
+	// and 59 blocks; the 5-second lifetime never binds first.
+	ArrowMinDrawSpeed         = 12.0
+	ArrowFullDrawSpeed        = 40.0
+	ArrowMinDrawSpreadDegrees = 6.0
+
 	// ProjectileMaxLaunchSpeed bounds accepted spawn inputs independently of the
 	// caller. Gravity may make an arrow faster later; that acceleration remains
-	// bounded by TerminalFallSpeed and the finite flight lifetime.
-	ProjectileMaxLaunchSpeed = ArrowSpeed
+	// bounded by TerminalFallSpeed and the finite flight lifetime. It is the fastest
+	// launch any weapon makes: a bow at a full draw.
+	ProjectileMaxLaunchSpeed = ArrowFullDrawSpeed
 	ArrowLifetime            = 5 * time.Second
 	OrbLifetime              = 1500 * time.Millisecond
 	// ArrowStuckTicks is converted to the configured server's ticks by NewSim.

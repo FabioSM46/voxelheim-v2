@@ -695,6 +695,15 @@ complete visible set in `EntitySnapshot.projectiles`.
   accelerate under gravity, damage mobs and stick in terrain; energy orbs keep a constant
   velocity, damage mobs, heal other living players and disappear on terrain. The bow and
   sceptre only choose a registry row and call `spawnProjectileLocked`.
+- **The bow is drawn, and the tick is what measures the draw.** A bow never fires from
+  `AttackRequest`; `DrawRequest` edges drive it (`internal/game/draw.go`). A press pays
+  `AttackEnergyCost` at the start; `resolveDrawLocked` counts the charge in ticks up to
+  `FullDrawDuration` and holds it there for free; a release looses the arrow with a speed and a
+  spread cone interpolated from the charge (`arrowLaunch`), draws the direction from the
+  simulation's own seeded stream (`spreadDirection`) and starts `BowCooldown`. Damage does not
+  follow the charge. Every clear of `blocking`, a main-hand move and a main hand that stops
+  holding a usable bow cancel a draw, and nothing is refunded. The client animates from
+  `PlayerVitals.draw_progress` and never times the hold.
 - **The sweep is shorter than half a block.** Each tick is divided so no projectile move
   exceeds `ProjectileMaxStep`; every travelled segment is slab-tested against living body
   boxes. The nearest crossing wins, and terrain shortens the tested segment through
