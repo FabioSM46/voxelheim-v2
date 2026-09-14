@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use super::appearance::ArmourPiece;
 use super::armour::{self, ArmourLook};
 use super::hands::{
-    bow_mesh, pickaxe_mesh, sceptre_mesh, shield_mesh, shovel_mesh, sword_grip_mesh,
+    axe_mesh, bow_mesh, pickaxe_mesh, sceptre_mesh, shield_mesh, shovel_mesh, sword_grip_mesh,
     sword_guard_base, sword_mesh_with,
 };
 #[cfg(test)]
@@ -271,13 +271,13 @@ impl DropVisuals {
         // an item id, and handing it to a block-id lookup is exactly the bug
         // `client/AGENTS.md` records for the pack cells — a log that drew snow-white in one
         // place and bark in another. It would also make item-only colours impossible.
-        // White preserves the shield's planks, rim, iron boss and leather handle, and the
-        // pickaxe's and the shovel's wooden haft and iron head — keyed on the shape for those
-        // three, since that is where their colours are authored.
+        // White preserves the shield's planks, rim, iron boss and leather handle, and every
+        // implement's wooden haft and iron head — keyed on the shape for those four, since
+        // that is where their colours are authored.
         let colour = if item_id == super::crafting::ITEM_WOODEN_SCEPTRE
             || matches!(
                 item_shape(item_id),
-                ItemShape::Shield | ItemShape::Pickaxe | ItemShape::Shovel
+                ItemShape::Shield | ItemShape::Tool | ItemShape::Pickaxe | ItemShape::Shovel
             ) {
             [1.0; 4]
         } else {
@@ -429,25 +429,10 @@ fn drop_mesh(shape: ItemShape, livery: Option<Livery>) -> Mesh {
         // collars. The four structures share this silhouette and their item-table colour
         // tells them apart. `bundle_mesh` fills the old box's exact bounds.
         ItemShape::Bundle => bundle_mesh(),
-        // A haft with a head across the top of it, merged into one mesh for the reason the
-        // held one is: a drop is one entity with one transform, and the spin is on it.
-        ItemShape::Tool => {
-            let mut merged = Mesh::from(Cuboid::from_size(Vec3::new(
-                DROP_EDGE * 0.14,
-                DROP_EDGE * 1.30,
-                DROP_EDGE * 0.14,
-            )));
-            let head = Mesh::from(Cuboid::from_size(Vec3::new(
-                DROP_EDGE * 0.52,
-                DROP_EDGE * 0.20,
-                DROP_EDGE * 0.26,
-            )))
-            .translated_by(Vec3::new(0.0, DROP_EDGE * 0.65, 0.0));
-            merge_all(&mut merged, [head], "dropped tool");
-            merged
-        }
-        // The pick and the shovel are the held silhouettes at the sceptre's and the bow's
-        // drop length, as those two are: which implement it is is not a per-surface retuning.
+        // The axe, the pick and the shovel are the held silhouettes at the sceptre's and the
+        // bow's drop length, as those two are: which implement it is is not a per-surface
+        // retuning. Until #1229 the axe was a second, separately written T here.
+        ItemShape::Tool => axe_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Pickaxe => pickaxe_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Shovel => shovel_mesh(DROP_EDGE * BLADE_DROP_LENGTH),
         ItemShape::Armour => armour_mesh(),
@@ -1514,6 +1499,78 @@ mod tests {
                 "{shape:?} is drawn from nothing"
             );
         }
+    }
+
+    /// **The axe on the ground, and so in the body's fist, is the held axe at drop scale**
+    /// (#1229), drawn in its own wood and iron under a white material.
+    ///
+    /// Proportional vertex for vertex to the axe authored at unit length, which is what the
+    /// hand's [`axe_mesh`] call scales from too — so the three surfaces cannot drift back into
+    /// a held axe and a separately written T on the ground. The material is the shared
+    /// `material_for` the body reaches through `BodyHeldAssets::presentation`, and it must be
+    /// white or the row's log brown would multiply over the iron head.
+    #[test]
+    fn a_dropped_axe_is_the_held_axe_in_wood_and_iron() {
+        let length = DROP_EDGE * BLADE_DROP_LENGTH;
+        let points = |mesh: &Mesh| -> Vec<[f32; 3]> {
+            let Some(VertexAttributeValues::Float32x3(points)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("an axe carries Float32x3 positions");
+            };
+            points.clone()
+        };
+        let dropped = drop_mesh(ItemShape::Tool, None);
+        let unit = points(&axe_mesh(1.0));
+        let drawn = points(&dropped);
+        assert_eq!(
+            drawn.len(),
+            unit.len(),
+            "the dropped axe is not the held one"
+        );
+        for (drop_point, unit_point) in drawn.iter().zip(&unit) {
+            for axis in 0..3 {
+                assert!(
+                    (drop_point[axis] - unit_point[axis] * length).abs() < 1e-5,
+                    "the dropped axe's {drop_point:?} is not the held axe's {unit_point:?} at \
+                     drop scale"
+                );
+            }
+        }
+
+        let Some(VertexAttributeValues::Float32x4(colours)) =
+            dropped.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the dropped axe must carry its wood and iron per vertex");
+        };
+        let mut tints: Vec<[u32; 4]> = colours
+            .iter()
+            .map(|colour| colour.map(|channel| (channel * 1000.0).round() as u32))
+            .collect();
+        tints.sort_unstable();
+        tints.dedup();
+        assert_eq!(
+            tints.len(),
+            2,
+            "the dropped axe is not wood and iron: {tints:?}"
+        );
+
+        let mut app = headless_player();
+        app.update();
+        let world = app.world_mut();
+        let mut materials = world.remove_resource::<Assets<StandardMaterial>>().unwrap();
+        let handle = world
+            .resource_mut::<DropVisuals>()
+            .material_for(crate::player::crafting::ITEM_AXE, &mut materials);
+        assert_eq!(
+            materials
+                .get(&handle)
+                .expect("the axe's material")
+                .base_color,
+            Color::linear_rgba(1.0, 1.0, 1.0, 1.0),
+            "the axe's drop material tints its iron head with the row's brown"
+        );
+        world.insert_resource(materials);
     }
 
     /// A bundle is a rolled load with collars, not the unequal-sided box it replaces.

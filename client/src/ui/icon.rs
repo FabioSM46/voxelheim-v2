@@ -355,43 +355,65 @@ const BUNDLE: [IconPart; 3] = [
     },
 ];
 
-/// An implement: a haft up the cell with a head across the top of it.
+/// An axe: a wooden haft up the cell under an iron head with its cutting bit on one side.
 ///
-/// The T is what tells it from [`BLADE`] at a glance — a blade is one tapering box, and
-/// this is a handle with weight on the end. Only the axe is drawn as it since #1121; the
-/// pickaxe and the shovel are [`PICKAXE`] and [`SHOVEL`].
-///
-/// Drawn head-last so it sits over the haft, which is the order these arrays mean.
-const TOOL: [IconPart; 3] = [
-    // The haft, up the middle and slightly right of centre so the head has somewhere to
-    // overhang.
+/// The head is the held mesh's, drawn flat (#1229): a short poll behind the haft, the bit's
+/// neck leaving the other side, the edge at its end — taller than the neck, which is the flare
+/// that reads as a blade rather than a hammer — and the eye over the haft's end on top of
+/// them. The haft is the row's colour, which is the log's wood; every head part is `iron`, as
+/// the pickaxe's are. Drawn haft first, head over it.
+const AXE: [IconPart; 5] = [
     IconPart {
-        left: 44.0,
+        left: 45.0,
         top: 26.0,
+        width: 10.0,
+        height: 60.0,
+        radius: 6.0,
+        shade: -0.30,
+        ..IconPart::PLAIN
+    },
+    // The poll, short and square, behind the haft.
+    IconPart {
+        left: 32.0,
+        top: 22.0,
         width: 12.0,
-        height: 54.0,
-        radius: 6.0,
-        shade: -0.42,
+        height: 12.0,
+        radius: 10.0,
+        shade: -0.10,
+        iron: true,
         ..IconPart::PLAIN
     },
-    // The head, across the top.
+    // The bit's neck, narrow where it leaves the eye.
     IconPart {
-        left: 20.0,
-        top: 20.0,
-        width: 60.0,
-        height: 20.0,
-        radius: 6.0,
-        shade: 0.22,
+        left: 52.0,
+        top: 21.0,
+        width: 22.0,
+        height: 13.0,
+        radius: 8.0,
+        shade: 0.05,
+        iron: true,
         ..IconPart::PLAIN
     },
-    // And the lit edge along the head's top, which is what stops it reading as a flat bar.
+    // The edge: tall, rounded, and hanging a little below the neck into a beard.
     IconPart {
-        left: 20.0,
-        top: 20.0,
-        width: 60.0,
-        height: 7.0,
-        radius: 6.0,
-        shade: 0.52,
+        left: 66.0,
+        top: 12.0,
+        width: 16.0,
+        height: 34.0,
+        radius: 35.0,
+        shade: 0.28,
+        iron: true,
+        ..IconPart::PLAIN
+    },
+    // The eye closed over the haft's end, lit, on top of the rest of the head.
+    IconPart {
+        left: 41.0,
+        top: 18.0,
+        width: 18.0,
+        height: 18.0,
+        radius: 12.0,
+        shade: 0.40,
+        iron: true,
         ..IconPart::PLAIN
     },
 ];
@@ -451,7 +473,7 @@ const PICKAXE: [IconPart; 4] = [
 
 /// A shovel: a flat iron blade over a wooden haft that ends in a small D-grip.
 ///
-/// Blade up, as the hand holds it and as [`TOOL`] and [`PICKAXE`] put their heads: a cell and
+/// Blade up, as the hand holds it and as [`AXE`] and [`PICKAXE`] put their heads: a cell and
 /// the hand agree about which end the work is at. The blade is the broadest, roundest-ended
 /// part of any implement drawing, which is what reads as a spade at a cell's size; the grip is
 /// a crossbar across the haft's foot. Drawn haft first, head over it.
@@ -1195,7 +1217,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Material => &MATERIAL,
         ItemShape::Blade => &BLADE,
         ItemShape::Bundle => &BUNDLE,
-        ItemShape::Tool => &TOOL,
+        ItemShape::Tool => &AXE,
         ItemShape::Pickaxe => &PICKAXE,
         ItemShape::Shovel => &SHOVEL,
         ItemShape::Armour => &ARMOUR,
@@ -1915,6 +1937,50 @@ mod tests {
         assert!(
             blade.rotation == 0.0,
             "the shovel's blade is turned, so it no longer reads as flat"
+        );
+    }
+
+    /// **The flat axe is the held one: an iron bit on one side of a wooden haft** (#1229).
+    ///
+    /// The structure a reader can check against `player::hands::axe_mesh` by eye, for the
+    /// reason the pickaxe's test above gives: the haft is wood and every head part iron, the
+    /// head sits across the haft's top, the bit reaches much farther from the haft than the
+    /// poll does — a T would reach equally — and the edge is taller than the neck it ends.
+    #[test]
+    fn the_flat_axe_is_an_iron_bit_on_one_side_of_a_wooden_haft() {
+        let centre_x = |part: IconPart| part.left + part.width / 2.0;
+        let centre_y = |part: IconPart| part.top + part.height / 2.0;
+        let [haft, poll, neck, edge, eye] = <[IconPart; 5]>::try_from(parts(ItemShape::Tool))
+            .expect("the axe is drawn as a haft, a poll, a neck, an edge and an eye");
+
+        assert!(
+            !haft.iron,
+            "the axe's haft is drawn in iron rather than wood"
+        );
+        for (name, part) in [("poll", poll), ("neck", neck), ("edge", edge), ("eye", eye)] {
+            assert!(part.iron, "the axe's {name} is not iron");
+            assert!(
+                centre_y(part) < haft.top + haft.height / 4.0,
+                "the axe's {name} is not across the top of the haft"
+            );
+        }
+
+        let axis = centre_x(haft);
+        let ahead = edge.left + edge.width - axis;
+        let behind = axis - poll.left;
+        assert!(
+            ahead > behind * 1.5,
+            "the axe's bit reaches {ahead} from the haft and its poll {behind}, which is a T"
+        );
+        assert!(
+            centre_x(neck) > axis && centre_x(edge) > centre_x(neck) && centre_x(poll) < axis,
+            "the axe's poll, neck and edge are not poll behind, bit ahead"
+        );
+        assert!(
+            edge.height > neck.height * 2.0,
+            "the axe's edge is {} tall against a {} neck, so the bit does not flare",
+            edge.height,
+            neck.height
         );
     }
 
