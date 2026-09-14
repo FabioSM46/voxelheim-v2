@@ -206,7 +206,7 @@ func TestInventoryMoveSplitsMergesAndSwaps(t *testing.T) {
 			t.Parallel()
 			inventory := newInventory()
 			inventory.slots[4], inventory.slots[11] = tc.source, tc.target
-			if changed := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: 11, Count: tc.count}); !changed {
+			if changed := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: 11, Count: tc.count}) == nil; !changed {
 				t.Fatal("move was refused")
 			}
 			if got := inventory.slots[4]; got != tc.wantSrc {
@@ -238,7 +238,7 @@ func TestRefusedInventoryMovesLeaveTheStateByteIdentical(t *testing.T) {
 			inventory.slots[0] = inventoryStack{item: ItemStone, count: 5}
 			inventory.slots[2] = inventoryStack{item: ItemDirt, count: 3}
 			before := protocol.EncodeInventoryState(inventory.stateLocked())
-			if changed := inventory.moveLocked(req); changed {
+			if changed := inventory.moveLocked(req) == nil; changed {
 				t.Fatal("refused move reported a state change")
 			}
 			after := protocol.EncodeInventoryState(inventory.stateLocked())
@@ -279,7 +279,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 	refusedByteIdentical := func(t *testing.T, inventory *inventory, request protocol.InventoryMoveRequest) {
 		t.Helper()
 		before := protocol.EncodeInventoryState(inventory.stateLocked())
-		if inventory.moveLocked(request) {
+		if inventory.moveLocked(request) == nil {
 			t.Fatal("the wrong-location move was accepted")
 		}
 		after := protocol.EncodeInventoryState(inventory.stateLocked())
@@ -305,7 +305,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 			t.Run("matching item enters", func(t *testing.T) {
 				inventory := newInventory()
 				inventory.slots[4] = stackOf(location.matching, 1)
-				if !inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1}) {
+				if inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(location.slot), Count: 1}) != nil {
 					t.Fatalf("matching item %d was refused", location.matching)
 				}
 				if got := inventory.slots[location.slot].item; got != location.matching {
@@ -337,7 +337,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		inventory := newInventory()
 		inventory.slots[equipmentHead] = stackOf(testHead, 1)
 		inventory.slots[4] = stackOf(testOtherHead, 1)
-		if !inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1}) {
+		if inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1}) != nil {
 			t.Fatal("the two matching head items were refused")
 		}
 		if inventory.slots[equipmentHead].item != testOtherHead || inventory.slots[4].item != testHead {
@@ -401,7 +401,7 @@ func TestEveryRegisteredWeaponEntersTheMainHandAndNoOtherItemDoes(t *testing.T) 
 	for id, definition := range itemRegistry {
 		inventory := newInventory()
 		inventory.slots[4] = inventoryStack{item: id, count: 1, durability: definition.maxDurability, maxDurability: definition.maxDurability}
-		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentMainHand), Count: 1})
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentMainHand), Count: 1}) == nil
 		weapon := definition.meleeDamage != 0 || definition.launches != 0
 		if moved != weapon {
 			t.Errorf("moving item %d (weapon %v) into the main hand: accepted %v", id, weapon, moved)
@@ -432,7 +432,7 @@ func TestASwapOutOfTheMainHandMustLeaveAWeaponInIt(t *testing.T) {
 		inventory.slots[equipmentMainHand] = stackOf(ItemRustySword, 1)
 		inventory.slots[4] = tc.pack
 		before := inventory.slots
-		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentMainHand), To: 4, Count: 1})
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentMainHand), To: 4, Count: 1}) == nil
 		if moved != tc.accept {
 			t.Errorf("%s: swap accepted %v, want %v", name, moved, tc.accept)
 			continue

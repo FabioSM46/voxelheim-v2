@@ -127,6 +127,13 @@ func (l Life) Validate() error {
 			return fmt.Errorf("game: stored inventory slot %d: item %d is worn at the wrong body location", slot, stack.ItemID)
 		}
 	}
+	// The two hands are judged together, because the move rule judges them together: no
+	// legitimate path produces a two-handed weapon beside an off-hand item, and a record
+	// migrated from before the main hand existed holds nothing there.
+	if handsOccupied(ItemID(l.Slots[equipmentMainHand].ItemID), ItemID(l.Slots[equipmentOffHand].ItemID)) {
+		return fmt.Errorf("game: stored inventory holds two-handed item %d in the main hand beside off-hand item %d",
+			l.Slots[equipmentMainHand].ItemID, l.Slots[equipmentOffHand].ItemID)
+	}
 	return nil
 }
 

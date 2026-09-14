@@ -251,6 +251,14 @@ type itemDefinition struct {
 	// column in both directions before changing either slot.
 	wornAt wornAt
 
+	// oneHanded is true for a main-hand weapon that leaves the off hand free. **Its zero
+	// is two-handed**, and that is the fail-closed direction: a launcher added without
+	// deliberately naming its hands cannot be held beside a shield. The move rule and
+	// Life.Validate refuse a main-hand item without it together with any off-hand item.
+	// It means nothing for a row not worn in the main hand, and a registry test keeps it
+	// off every such row.
+	oneHanded bool
+
 	// armour is the percentage points of incoming damage this worn piece will remove.
 	// This issue only records the value: three leather pieces sum to 15%, turning a
 	// draugr's 10 into 8 and a vargr's 7 into 5; three rusty pieces sum to 30%, turning
@@ -348,8 +356,9 @@ var itemRegistry = map[ItemID]itemDefinition{
 
 	// Places no block and stacks with nothing, including another sword: two blades are
 	// two objects with two different amounts of wear left, and a stack of two could
-	// only carry one of those numbers. Worn in the main hand, like every weapon.
-	ItemRustySword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: RustySwordMaxDurability, meleeDamage: RustySwordDamage},
+	// only carry one of those numbers. Worn in the main hand, like every weapon, and in
+	// one hand, so a shield can be worn beside it.
+	ItemRustySword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, oneHanded: true, maxDurability: RustySwordMaxDurability, meleeDamage: RustySwordDamage},
 
 	// Structures place no *block*. `places: world.Air` is what says so, exactly as it
 	// does for a raw resource — what they put in the world is an entity, and the path
@@ -388,8 +397,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 	ItemGreyHorse:  {places: world.Air, maxStack: 1, learnsMount: vnet.MountKindGreyHorse},
 
 	// The forge's own products. The blade is equipment on the same terms the rusty one
-	// is: one to a slot, its own wear, its own damage, worn in the main hand.
-	ItemIronSword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: IronSwordMaxDurability, meleeDamage: IronSwordDamage},
+	// is: one to a slot, its own wear, its own damage, worn in one hand.
+	ItemIronSword: {places: world.Air, maxStack: 1, wornAt: wornMainHand, oneHanded: true, maxDurability: IronSwordMaxDurability, meleeDamage: IronSwordDamage},
 
 	// A stone is a consumable, not equipment: it wears nothing out because spending it
 	// *is* how it is used, and eight to a stack is what makes "limited supplies" a
@@ -465,7 +474,8 @@ var itemRegistry = map[ItemID]itemDefinition{
 
 	// One bow launches one authoritative arrow and spends one matching ammunition item.
 	// The arrow itself is a wearless resource and stacks thirty-two deep. Both launchers
-	// are weapons, so both are worn in the main hand.
+	// are weapons, so both are worn in the main hand, and both take both hands: neither
+	// row says oneHanded, so neither can be held beside a shield.
 	ItemBow: {
 		places: world.Air, maxStack: 1, wornAt: wornMainHand, maxDurability: BowMaxDurability,
 		launches: vnet.ProjectileKindArrow, ammunition: ItemArrow,
