@@ -905,6 +905,9 @@ pub struct PlayerAppearance {
     pub worn_chest: u16,
     pub worn_legs: u16,
     pub worn_offhand: u16,
+    /// V44's weapon hand, appended after the off-hand. Decoded and carried, and drawn on no
+    /// body yet: the view model that holds it is #1239's.
+    pub worn_mainhand: u16,
 }
 
 /// One character a client asks the server to create. **Intent only.**
@@ -5036,6 +5039,7 @@ pub fn decode(frame: &[u8]) -> Result<Message, DecodeError> {
                 worn_chest: payload.worn_chest(),
                 worn_legs: payload.worn_legs(),
                 worn_offhand: payload.worn_offhand(),
+                worn_mainhand: payload.worn_mainhand(),
             }))
         }
         fb::Payload::LeaveStarted => {
@@ -8394,9 +8398,9 @@ pub(super) mod server_side {
                 tick_rate: 20,
                 chunk_size: 32,
                 view_distance: 8,
-                inventory_slots: 40,
+                inventory_slots: 41,
                 hotbar_slots: 9,
-                equipment_slots: 4,
+                equipment_slots: 5,
                 player_token: Some(DEFAULT_TOKEN.to_vec()),
                 // No clock by default, which is what every server in this repository
                 // announces today and therefore the shape most fixtures should carry.
@@ -9623,7 +9627,7 @@ pub(super) mod server_side {
         name: Option<&str>,
         level: u16,
     ) -> Vec<u8> {
-        encode_player_appearance_with_worn(entity_id, appearance, name, level, [0; 4])
+        encode_player_appearance_with_worn(entity_id, appearance, name, level, [0; 5])
     }
 
     /// A `PlayerAppearance` with explicit worn item ids, including zero for an empty
@@ -9633,7 +9637,7 @@ pub(super) mod server_side {
         appearance: Option<AppearanceWire>,
         name: Option<&str>,
         level: u16,
-        worn: [u16; 4],
+        worn: [u16; 5],
     ) -> Vec<u8> {
         let mut builder = FlatBufferBuilder::with_capacity(super::BUILDER_CAPACITY);
         let appearance = appearance.map(|a| appearance_offset(&mut builder, a));
@@ -9649,7 +9653,7 @@ pub(super) mod server_side {
                 worn_chest: worn[1],
                 worn_legs: worn[2],
                 worn_offhand: worn[3],
-                worn_mainhand: 0,
+                worn_mainhand: worn[4],
             },
         );
         finish_envelope(
@@ -14022,7 +14026,7 @@ mod tests {
             Some(AppearanceWire::default()),
             Some("Brynhildr"),
             12,
-            [101, 102, 103, 104],
+            [101, 102, 103, 104, 105],
         ));
 
         assert_eq!(
@@ -14036,6 +14040,7 @@ mod tests {
                 worn_chest: 102,
                 worn_legs: 103,
                 worn_offhand: 104,
+                worn_mainhand: 105,
             }))
         );
     }
@@ -14263,6 +14268,7 @@ mod tests {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
             }))
         );
     }
