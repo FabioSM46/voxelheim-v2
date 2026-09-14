@@ -102,16 +102,27 @@ const _: () = assert!(
 /// ceiling is pinned rather than the ratio.
 const HAND_DROP_FRACTION: f32 = 0.670_619_3;
 
-/// And the same for the off-hand shield, which hangs nearer and higher.
+/// How long the left hand takes to move between its rest and the parry, in either direction.
 ///
-/// A second fraction rather than a share of the first: the two hands were never at one
-/// height, and the point of this change is that neither of them moves at the default field
-/// of view. What must not happen is one hand following the frame while the other stays put,
-/// which is the inconsistency deriving only the main hand would have introduced.
-const SHIELD_DROP_FRACTION: f32 = 0.528_098_9;
+/// Short enough that the shield is up while the server says the block is, long enough to read
+/// as a movement: at sixty frames a second it is seven frames, where one would be a snap.
+const PARRY_TIME: Duration = Duration::from_millis(120);
 
-/// How far in front of the eye the off-hand shield sits.
-const SHIELD_DEPTH: f32 = -0.16;
+/// How far the parry carries the left hand toward the centre of the frame, and away from the
+/// eye.
+///
+/// **Away, never toward.** The advance is the one direction that costs the near plane nothing,
+/// and the arm under it is lengthened by exactly what [`drawn_arm_reach`] gives any other
+/// composition carried that far out, so its end stays below the frame.
+const PARRY_INBOARD: f32 = 0.030;
+const PARRY_ADVANCE: f32 = 0.020;
+
+/// How far the parry rolls the left hand about the view axis.
+///
+/// Negative about the camera's `Z` carries the top of the limb — the fist, and the shield on
+/// it — toward `+X`, which is the centre of the frame for a hand on the left: the forearm tilts
+/// inward and the shield swings across the body.
+const PARRY_ROLL_RADIANS: f32 = -0.40;
 
 /// Where the view model sits for a camera projecting `field_of_view` radians vertically.
 ///
@@ -126,20 +137,68 @@ fn base_translation(field_of_view: f32) -> Vec3 {
 }
 
 /// The walking bare hand's resting pose, mirrored for the left rein.
-///
-/// All three limb boxes are symmetric in Z. Turning the left model halfway around Y
-/// therefore mirrors their X geometry while preserving outward triangle winding and the
-/// shared mesh/material. Negating the resting roll mirrors its lean as well.
-/// A negative X scale alone would reverse winding and back-face-cull the outside.
 pub(super) fn mounted_hand_transform(side: f32, field_of_view: f32) -> Transform {
-    let mut pose = presented_transform(&HandAnimation::default(), None, field_of_view);
-    if side < 0.0 {
-        pose.translation.x = -pose.translation.x;
-        pose.rotation = Quat::from_rotation_x(REST_PITCH_RADIANS)
-            * Quat::from_rotation_z(-REST_ROLL_RADIANS)
-            * Quat::from_rotation_y(PI);
+    hand_on_side(
+        side,
+        presented_transform(&HandAnimation::default(), None, field_of_view),
+    )
+}
+
+/// **A right-hand pose, put on `side`**: unchanged for a positive side, and for a negative one
+/// mirrored across the view's vertical plane — by rotation, never by a negative scale.
+///
+/// The mirror of a pose `T·R` is `M·T·R·M` with `M` negating `X`. The translation takes `M`
+/// directly. `M·R·M` is still a rotation — the same turn with its `Y` and `Z` components
+/// negated — and the trailing `M` is the geometry's own mirror, which is a half turn about `Y`
+/// followed by a mirror in `Z`. **Every limb box is symmetric in `Z`**, so that last mirror
+/// maps the fist, the wrist and the forearm onto themselves and the half turn is the whole of
+/// it. A negative `X` scale would say the same thing and reverse the triangle winding, and the
+/// outside of the hand would be back-face culled.
+///
+/// **Not a shield function.** Anything a left hand holds rides on this same pose; an item that
+/// is not symmetric in `Z` is turned the other half turn inside [`left_hand_mesh`], so it faces
+/// the world after the mirror exactly as it does in the right hand.
+pub(super) fn hand_on_side(side: f32, right_hand: Transform) -> Transform {
+    if side >= 0.0 {
+        return right_hand;
     }
-    pose
+    let [x, y, z, w] = right_hand.rotation.to_array();
+    Transform {
+        translation: right_hand.translation * Vec3::new(-1.0, 1.0, 1.0),
+        rotation: Quat::from_xyzw(x, -y, -z, w) * Quat::from_rotation_y(PI),
+        scale: right_hand.scale,
+    }
+}
+
+/// How far into the parry the left hand is drawn, eased: `fraction` is how far the transition
+/// has run, from `0.0` at rest to `1.0` at the parry.
+///
+/// Smoothstep, so the hand leaves one pose and arrives at the other at no speed rather than
+/// starting and stopping on a frame.
+fn parry_ease(fraction: f32) -> f32 {
+    let fraction = fraction.clamp(0.0, 1.0);
+    fraction * fraction * (3.0 - 2.0 * fraction)
+}
+
+/// How far the parry has carried the left hand along the view, for the arm under it.
+fn off_hand_along_view(fraction: f32) -> f32 {
+    -PARRY_ADVANCE * parry_ease(fraction)
+}
+
+/// **The left hand**, `fraction` of the way from its rest to the parry.
+///
+/// At rest it is the right hand's resting pose on the other side — the mirrored position, the
+/// same depth, the same rest pitch — which is also the left rein hand, so the rest and the
+/// mounted pose are one pose. The parry adds its three terms about the hand's own origin: the
+/// roll about the view axis, then the step toward the centre and the advance away from the eye.
+fn off_hand_transform(field_of_view: f32, fraction: f32) -> Transform {
+    let rest = mounted_hand_transform(-1.0, field_of_view);
+    let eased = parry_ease(fraction);
+    Transform {
+        translation: rest.translation + Vec3::new(PARRY_INBOARD, 0.0, -PARRY_ADVANCE) * eased,
+        rotation: Quat::from_rotation_z(PARRY_ROLL_RADIANS * eased) * rest.rotation,
+        scale: rest.scale,
+    }
 }
 
 /// How far below the eye a view model at `depth` sits, to land `fraction` of the way down
@@ -150,15 +209,6 @@ pub(super) fn mounted_hand_transform(side: f32, field_of_view: f32) -> Transform
 /// tangent — the same place in the frame whatever the frame is.
 fn base_height(field_of_view: f32, fraction: f32, depth: f32) -> f32 {
     -fraction * depth.abs() * (field_of_view / 2.0).tan()
-}
-
-/// Where the off-hand shield sits, for the same camera.
-fn shield_translation(field_of_view: f32) -> Vec3 {
-    Vec3::new(
-        -BASE_INBOARD,
-        base_height(field_of_view, SHIELD_DROP_FRACTION, SHIELD_DEPTH),
-        SHIELD_DEPTH,
-    )
 }
 
 /// The vertical field of view the hand is being placed against, in radians.
@@ -1601,9 +1651,15 @@ fn drawn_arm_reach(along_view: f32) -> f32 {
 /// [`drawn_arm_reach`] and [`ARM_REACH`]: a constant length cannot satisfy both bounds, and
 /// rewriting the merged mesh every frame is an asset write per frame.
 fn forearm_transform(animation: &HandAnimation) -> Transform {
+    forearm_transform_along(along_view(animation))
+}
+
+/// The same, for a hand carried `along_view` by something other than [`HandAnimation`] — the
+/// left hand's parry is the one such thing.
+fn forearm_transform_along(along_view: f32) -> Transform {
     Transform::from_translation(Vec3::Y * FOREARM_TOP).with_scale(Vec3::new(
         1.0,
-        FOREARM_TOP + drawn_arm_reach(along_view(animation)),
+        FOREARM_TOP + drawn_arm_reach(along_view),
         1.0,
     ))
 }
@@ -2731,10 +2787,53 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
         [tinted(neutral(wrist_mesh()), skin)],
         "hand and wrist",
     );
+    if let Some(item) = held_item_part(appearance) {
+        merge_all(&mut held, [item], "hand and held item");
+    }
+    // **Last, over the whole composition.** The fist, the wrist and the item are one mesh
+    // under one `unlit` material, so one pass gives all three their relief — and applying it
+    // after the merge rather than to each part is what stops a part being missed.
+    shaded(held)
+}
+
+/// **The left hand**: the same fist and wrist, and the item turned to face the world after the
+/// mirror.
+///
+/// [`hand_on_side`] mirrors the hand by a half turn about `Y`, which is exact for the limb and
+/// would turn anything not symmetric in `Z` around — a shield would show the world its handle.
+/// So the item is turned the other half turn here, about the fist's centre, and the two turns
+/// cancel on screen: it is the right hand's item, where the right hand holds it, seen from the
+/// left. Its shade is baked before the turn, so it reads under the same light it does in the
+/// right hand; the fist and wrist are shaded where they are and mirror with the hand.
+///
+/// The fist is first in the buffers, as in [`held_mesh`].
+fn left_hand_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
+    let mut hand = held_mesh(skin_colour, selected_appearance(None));
+    if let Some(item) = held_item_part(appearance) {
+        merge_all(
+            &mut hand,
+            [shaded(item).rotated_by(Quat::from_rotation_y(PI))],
+            "left hand and held item",
+        );
+    }
+    hand
+}
+
+/// What the shield hand holds: the wooden shield, the one item the off-hand slot takes.
+fn worn_shield_appearance() -> HeldAppearance {
+    HeldAppearance {
+        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
+        shape: Some(ItemShape::Shield),
+        item_colour: Some(items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD)),
+    }
+}
+
+/// The held item alone, placed on the fist and unshaded, or `None` for an empty hand.
+fn held_item_part(appearance: HeldAppearance) -> Option<Mesh> {
     let (Some(item_id), Some(shape), Some(item_colour)) =
         (appearance.item_id, appearance.shape, appearance.item_colour)
     else {
-        return shaded(held);
+        return None;
     };
 
     let item = if shape == ItemShape::Bundle {
@@ -2757,11 +2856,7 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
         coloured(item_mesh(item_id, shape), item_colour)
     }
     .translated_by(item_translation(shape));
-    merge_all(&mut held, [item], "hand and held item");
-    // **Last, over the whole composition.** The fist, the wrist and the item are one mesh
-    // under one `unlit` material, so one pass gives all three their relief — and applying it
-    // after the merge rather than to each part is what stops a part being missed.
-    shaded(held)
+    Some(item)
 }
 
 /// The forearm bar in the player's own skin.
@@ -2805,7 +2900,7 @@ impl Plugin for HandsPlugin {
                     ApplyDeferred,
                     refresh_held_item,
                     animate_view_model,
-                    place_off_hand,
+                    animate_off_hand,
                 )
                     .chain()
                     // After this frame's appearance message has been cached, so the fist
@@ -2861,10 +2956,19 @@ struct ViewModelCamera;
 #[derive(Component)]
 struct Forearm;
 
+/// The left hand: always present, drawn while a usable shield is worn in the off-hand slot or
+/// while the reins borrow it.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 struct OffHandShield {
     skin_colour: u32,
     mounted: bool,
+    /// Whether the server says this player is blocking, with a usable shield worn to block
+    /// with. **The server's state, never the local press**: the parry is drawn from this and
+    /// from nothing `super::combat` sends.
+    blocking: bool,
+    /// How far the transition toward the parry has run, from zero at rest to [`PARRY_TIME`]
+    /// at the parry. Local time, and only the cadence of a movement the server already chose.
+    parry: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -3086,12 +3190,7 @@ fn spawn_view_model(
     let appearance = selected_appearance(None);
     let skin_colour = PLACEHOLDER_APPEARANCE.skin_color();
     let mesh = meshes.add(held_mesh(skin_colour, appearance));
-    let shield_appearance = HeldAppearance {
-        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
-        shape: Some(ItemShape::Shield),
-        item_colour: Some(items::item_linear_rgba(super::crafting::ITEM_WOODEN_SHIELD)),
-    };
-    let shield_mesh_handle = meshes.add(held_mesh(skin_colour, shield_appearance));
+    let shield_mesh_handle = meshes.add(left_hand_mesh(skin_colour, worn_shield_appearance()));
     let material = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         // **One material for the hand, the arm and every item it can hold**, exactly as
@@ -3149,19 +3248,20 @@ fn spawn_view_model(
             OffHandShield {
                 skin_colour,
                 mounted: false,
+                blocking: false,
+                parry: Duration::ZERO,
             },
             ViewModel,
             Mesh3d(shield_mesh_handle),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(shield_translation(view_field_of_view(None)))
-                .with_rotation(Quat::from_rotation_z(-0.48)),
+            off_hand_transform(view_field_of_view(None), 0.0),
             Visibility::Hidden,
             RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
             NotShadowCaster,
         ))
-        // The off-hand entity carries no animation of its own, so its arm never leaves the
-        // resting length. It is still the same bar under the same transform, which is what
-        // keeps the two hands one limb rather than two.
+        // The same bar under the same transform, which is what keeps the two hands one limb
+        // rather than two. Its length follows only the parry's advance — see
+        // [`animate_off_hand`].
         .with_child(arm(forearm_mesh_handle, material));
     commands.insert_resource(visuals);
 }
@@ -3316,21 +3416,22 @@ fn refresh_held_item(
     }
 
     let shield_equipped = subject.session.as_deref().is_some_and(|session| {
-        let params = session.0;
-        params.equipment_slots >= 4
-            && subject
-                .inventory
-                .slot(params.inventory_slots - params.equipment_slots + 3)
-                .is_some_and(|stack| {
-                    stack.item_id == super::crafting::ITEM_WOODEN_SHIELD
-                        && stack.count > 0
-                        && stack.durability > 0
-                })
+        super::inventory::equipment_slot(&session.0, super::inventory::OFF_HAND_OFFSET)
+            .and_then(|slot| subject.inventory.slot(slot))
+            .is_some_and(|stack| {
+                stack.item_id == super::crafting::ITEM_WOODEN_SHIELD
+                    && stack.count > 0
+                    && stack.durability > 0
+            })
     });
     let mounted = subject.mount.mounted();
-    let shield_visible = if visible == Visibility::Visible
-        && (mounted || (shield_equipped && vitals.get().is_some_and(|vitals| vitals.blocking)))
-    {
+    // **The hand is carried whenever the shield is, not only while it is raised.** What
+    // blocking changes is the pose, and the pose is the server's `blocking` alone — a press
+    // the server has not answered raises nothing, and a block it re-raises by itself while
+    // the button is held raises the shield with no press at all.
+    let blocking =
+        !mounted && shield_equipped && vitals.get().is_some_and(|vitals| vitals.blocking);
+    let shield_visible = if visible == Visibility::Visible && (mounted || shield_equipped) {
         Visibility::Visible
     } else {
         Visibility::Hidden
@@ -3340,16 +3441,7 @@ fn refresh_held_item(
         if shield.skin_colour != skin_colour {
             shield.skin_colour = skin_colour;
             if let Some(mut mesh) = assets.meshes.get_mut(&shield_mesh) {
-                *mesh = held_mesh(
-                    skin_colour,
-                    HeldAppearance {
-                        item_id: Some(super::crafting::ITEM_WOODEN_SHIELD),
-                        shape: Some(ItemShape::Shield),
-                        item_colour: Some(items::item_linear_rgba(
-                            super::crafting::ITEM_WOODEN_SHIELD,
-                        )),
-                    },
-                );
+                *mesh = left_hand_mesh(skin_colour, worn_shield_appearance());
             }
         }
         // While mounted both entities draw the very same bare-hand asset. Keep the
@@ -3359,6 +3451,7 @@ fn refresh_held_item(
             mesh.0 = wanted.clone();
         }
         shield.mounted = mounted;
+        shield.blocking = blocking;
         *visibility = shield_visible;
     }
 }
@@ -3589,9 +3682,9 @@ fn animate_view_model(
         if *transform != next {
             *transform = next;
         }
-        // Only the hand that is animated lengthens its arm. The off-hand shield's entity
-        // never moves along the view, so its limb is already at the resting length and
-        // driving it from this animation would stretch an arm nothing had pushed away.
+        // Only the hand that is animated lengthens its arm. The left hand is carried along
+        // the view by its parry and by nothing here, so [`animate_off_hand`] sets its limb
+        // and driving it from this animation would stretch an arm nothing had pushed away.
         for (child_of, mut limb) in &mut forearms {
             if child_of.parent() == entity && *limb != arm {
                 *limb = arm;
@@ -3600,28 +3693,48 @@ fn animate_view_model(
     }
 }
 
-/// **The off-hand shield's placement, which is the only thing about it that moves.**
+/// **The left hand's pose: its rest, its parry and the eased move between them.**
 ///
-/// It carries no animation — [`animate_view_model`]'s note says why — so before #415 its
-/// transform was written once at spawn and never again. That was correct while the height
-/// was a constant and is not correct now: [`base_height`] follows the frame, and a main hand
-/// that follows it while the off hand stays put is two hands at two heights the moment a
-/// player moves the slider. Walking keeps that shield pose; mounting borrows the entity
-/// for the mirrored bare hand, and dismount restores the shield pose on the same frame.
-fn place_off_hand(
+/// Written every frame rather than once at spawn, because [`base_height`] follows the frame
+/// and a right hand that follows it while the left stays put is two hands at two heights the
+/// moment a player moves the slider (#415).
+///
+/// The parry runs toward [`OffHandShield::blocking`], which `refresh_held_item` copies from the
+/// server's vitals earlier in the same chain, over [`PARRY_TIME`] each way. It advances no
+/// request and reads no button. Mounting borrows the entity for the left rein, drops the parry
+/// on that frame and restores the rest pose on dismount; the rein pose is the rest pose.
+fn animate_off_hand(
+    time: Res<Time>,
     camera: Query<&Projection, With<ViewModelCamera>>,
-    mut shields: Query<(&OffHandShield, &mut Transform)>,
+    mut shields: Query<(Entity, &mut OffHandShield, &mut Transform), Without<Forearm>>,
+    mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
 ) {
     let fov = view_field_of_view(camera.iter().next());
-    for (shield, mut transform) in &mut shields {
+    for (entity, mut shield, mut transform) in &mut shields {
+        let parry = if shield.mounted {
+            Duration::ZERO
+        } else if shield.blocking {
+            (shield.parry + time.delta()).min(PARRY_TIME)
+        } else {
+            shield.parry.saturating_sub(time.delta())
+        };
+        if shield.parry != parry {
+            shield.parry = parry;
+        }
+        let fraction = parry.as_secs_f32() / PARRY_TIME.as_secs_f32();
         let next = if shield.mounted {
             mounted_hand_transform(-1.0, fov)
         } else {
-            Transform::from_translation(shield_translation(fov))
-                .with_rotation(Quat::from_rotation_z(-0.48))
+            off_hand_transform(fov, fraction)
         };
         if *transform != next {
             *transform = next;
+        }
+        let arm = forearm_transform_along(off_hand_along_view(fraction));
+        for (child_of, mut limb) in &mut forearms {
+            if child_of.parent() == entity && *limb != arm {
+                *limb = arm;
+            }
         }
     }
 }
@@ -5602,12 +5715,13 @@ mod tests {
             (placement.x - 0.10).abs() < f32::EPSILON && (placement.z - -0.18).abs() < f32::EPSILON,
             "the two axes that stayed constant moved: {placement:?}"
         );
-        // The off-hand shield's own fraction, held to the height it was written at for the
-        // same reason: neither hand moves at the default field of view.
-        let shield = shield_translation(default_fov());
+        // **The left hand is this hand's mirror rather than a placement of its own** (#1233).
+        // It sat at (-0.10, -0.035, -0.16) on a fraction and a depth of its own; it now takes
+        // this placement with `X` negated, so it moves with this one rather than beside it.
+        let left = off_hand_transform(default_fov(), 0.0).translation;
         assert!(
-            (shield.y - -0.035).abs() < 1e-4 && (shield.z - -0.16).abs() < f32::EPSILON,
-            "the off-hand shield sits at {shield:?}, and it was spawned at (-0.10, -0.035, -0.16)"
+            left.abs_diff_eq(placement * Vec3::new(-1.0, 1.0, 1.0), 1e-6),
+            "the left hand sits at {left:?}, not at the mirror of {placement:?}"
         );
     }
 
@@ -5636,9 +5750,9 @@ mod tests {
                     HAND_DROP_FRACTION,
                 ),
                 (
-                    "the off-hand shield",
-                    shield_translation(field_of_view),
-                    SHIELD_DROP_FRACTION,
+                    "the left hand",
+                    off_hand_transform(field_of_view, 0.0).translation,
+                    HAND_DROP_FRACTION,
                 ),
             ] {
                 let at = translation.y / -translation.z / half_height;
@@ -6293,24 +6407,20 @@ mod tests {
         );
     }
 
-    /// **The off-hand shield hand gets the same arm, and the shield's own roll mirrors it.**
+    /// **The left hand gets the same arm, and it is a left arm.**
     ///
-    /// `spawn_view_model` builds that entity from the same [`held_mesh`] and hangs the same
-    /// arm under it, so an arm added there arrives on the left hand whether anybody decided it
-    /// should or not — which is why #389 asked for the decision to be made rather than
-    /// discovered. It is kept: the left hand needs a limb for the same reason the right one
-    /// does, and the entity's own `Rz(-0.48)` is larger than anything the arm carries, so the
-    /// limb leans *outboard for a left hand* — down and to the left — instead of being a right
-    /// arm mirrored the wrong way. That is measured here rather than assumed, because it is
-    /// true by arithmetic on two numbers that live in different functions.
+    /// `spawn_view_model` hangs the same bar under the left hand that it hangs under the right,
+    /// so an arm added there arrives on the left whether anybody decided it should or not —
+    /// which is why #389 asked for the decision to be made rather than discovered. It is kept:
+    /// the left hand needs a limb for the same reason the right one does. Since #1233 the hand
+    /// is the right hand mirrored by [`hand_on_side`], so the limb's straight outboard edge is
+    /// on the left and its lean is the right arm's lean mirrored; that is measured here, and
+    /// every vertex of it in [`the_left_hand_is_the_right_hand_mirrored_by_rotation`].
     ///
-    /// **The arm is now an entity, so the first thing checked is that it is there.** #394 moved
-    /// the limb out of the hand's mesh and onto a child; the off-hand's copy is spawned by the
-    /// same closure and never animated, which is correct — that entity carries no `along_view`
-    /// of its own, so a limb driven from the *held* hand's animation would stretch an arm
-    /// nothing had pushed away. What must be asserted is that it exists and rests at the
-    /// resting length, because both of those are now spawn-time decisions rather than
-    /// properties of a merged mesh.
+    /// **The arm is an entity, so the first thing checked is that it is there.** #394 moved the
+    /// limb onto a child; the left hand's copy is driven by [`animate_off_hand`] from the parry's
+    /// advance and never from the right hand's animation, which would stretch an arm nothing had
+    /// pushed away. At rest it is at the resting length.
     #[test]
     fn the_off_hand_shield_carries_a_left_arm_of_its_own() {
         let mut app = app();
@@ -6342,13 +6452,19 @@ mod tests {
              below the hand"
         );
 
-        let wrist = shield.transform_point(Vec3::new(0.0, -HAND_SIZE.y / 2.0, 0.0));
-        let end = shield.transform_point(far_end);
+        // **Outboard is the limb's flush edge, and on the left hand it is on the left.** This
+        // read the arm's lean while that lean was the −0.48 roll's. The left hand now leans as
+        // the mirror of the right one, so what makes this a left arm is where the limb's
+        // straight outer edge — [`LIMB_OUTBOARD_OFFSET`] out from the fist's centre line —
+        // lands on screen.
+        let centre_line = shield.transform_point(Vec3::new(0.0, far_end.y / 2.0, 0.0));
+        let outboard =
+            shield.transform_point(Vec3::new(LIMB_OUTBOARD_OFFSET, far_end.y / 2.0, 0.0));
         assert!(
-            end.x < wrist.x,
-            "the shield hand's arm runs from x {} to x {}, which is inboard rather than out",
-            wrist.x,
-            end.x
+            outboard.x < centre_line.x && shield.translation.x < 0.0,
+            "the left arm's outboard offset lands at x {} against its centre line at x {}",
+            outboard.x,
+            centre_line.x
         );
 
         let cap = forearm_cap(&HandAnimation::default());
@@ -8464,9 +8580,9 @@ mod tests {
         (*visibility, *transform)
     }
 
-    #[test]
-    fn authoritative_blocking_shows_a_separate_left_hand_shield() {
-        let mut app = app();
+    /// A wooden shield in the off-hand slot of an eight-slot pack with four worn slots, worn
+    /// through or not.
+    fn wear_a_shield(app: &mut App, usable: bool) {
         let mut params = session().0;
         params.inventory_slots = 8;
         params.equipment_slots = 4;
@@ -8475,31 +8591,371 @@ mod tests {
         stacks[7] = InventoryStack {
             item_id: crafting::ITEM_WOODEN_SHIELD,
             count: 1,
-            durability: 40,
+            durability: if usable { 40 } else { 0 },
             max_durability: 40,
         };
         app.insert_resource(Inventory::from_stacks(stacks));
+    }
+
+    /// The server's word on whether this player is blocking, as an accepted snapshot sets it.
+    fn say_blocking(app: &mut App, blocking: bool) {
         app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals {
-            blocking: true,
+            blocking,
             ..crate::net::PlayerVitals::unharmed()
         })));
-        app.update();
+    }
 
+    /// **The shield hand is carried, and the server's `blocking` is the one thing that raises
+    /// it** (#1233).
+    ///
+    /// It was hidden in every state but a block and appeared with no motion. Now it is drawn
+    /// whenever a usable shield is worn and the view is first person; the press alone moves
+    /// nothing, the server's `blocking` eases it into the parry and out again, and the right
+    /// hand's swing reaches none of it.
+    #[test]
+    fn a_worn_shield_keeps_the_left_hand_in_view_and_the_servers_blocking_raises_the_parry() {
+        const STEP: Duration = Duration::from_millis(16);
+        let frames = PARRY_TIME.as_millis().div_ceil(STEP.as_millis()) as usize;
+        let fov = default_fov();
+
+        let mut app = app();
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
+        wear_a_shield(&mut app, true);
+        say_blocking(&mut app, false);
+        app.update();
         let (visibility, resting) = off_hand_shield(&mut app);
-        assert_eq!(visibility, Visibility::Visible);
+        assert_eq!(
+            visibility,
+            Visibility::Visible,
+            "a worn shield's hand is hidden until a block"
+        );
+        assert_eq!(resting, off_hand_transform(fov, 0.0));
+
+        // The press, held, and not a word from the server: a local rule would already be up.
+        app.init_resource::<ButtonInput<MouseButton>>();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        for _ in 0..=frames {
+            app.update();
+        }
+        assert_eq!(
+            off_hand_shield(&mut app).1,
+            resting,
+            "the shield rose on the local press, before the server said it was blocking"
+        );
+
+        say_blocking(&mut app, true);
+        app.update();
+        let parry = off_hand_transform(fov, 1.0);
+        let first = off_hand_shield(&mut app).1;
+        assert!(
+            first != resting && first != parry,
+            "the first frame of the block drew {first:?}: either nothing or a snap to the parry"
+        );
+        for _ in 0..frames {
+            app.update();
+        }
+        assert_eq!(
+            off_hand_shield(&mut app).1,
+            parry,
+            "the parry did not settle"
+        );
+
         app.world_mut().write_message(SwingSent {
             item_id: ITEM_RUSTY_SWORD,
         });
         app.update();
         assert_eq!(
             off_hand_shield(&mut app).1,
-            resting,
+            parry,
             "the right-hand swing moved the shield arm"
         );
 
-        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals::unharmed())));
+        say_blocking(&mut app, false);
+        app.update();
+        assert_ne!(
+            off_hand_shield(&mut app).1,
+            resting,
+            "the parry snapped down"
+        );
+        for _ in 0..frames {
+            app.update();
+        }
+        assert_eq!(off_hand_shield(&mut app), (Visibility::Visible, resting));
+
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
         app.update();
         assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+        *app.world_mut().resource_mut::<ViewMode>() = ViewMode::FirstPerson;
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Inventory;
+        app.update();
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+        *app.world_mut().resource_mut::<InputMode>() = InputMode::Playing;
+        app.update();
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Visible);
+
+        // A shield worn through is no shield: no hand, and a block the server reports raises
+        // nothing behind it.
+        wear_a_shield(&mut app, false);
+        say_blocking(&mut app, true);
+        for _ in 0..=frames {
+            app.update();
+        }
+        assert_eq!(off_hand_shield(&mut app), (Visibility::Hidden, resting));
+    }
+
+    /// The left hand's mesh, split at the fist and wrist, with the shield's vertices read by the
+    /// absolute colour [`shield_mesh`] authors each part in — the drawn mesh carries them shaded.
+    fn left_shield_part(colour: [f32; 4]) -> Vec<Vec3> {
+        let drawn = positions(&left_hand_mesh(TEST_SKIN, worn_shield_appearance()));
+        let shield = shield_mesh(SHIELD_IN_HAND);
+        let hand = fist_mesh().count_vertices() + wrist_mesh().count_vertices();
+        assert_eq!(drawn.len(), hand + shield.count_vertices());
+        let Some(VertexAttributeValues::Float32x4(tints)) = shield.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the shield must carry per-vertex colour");
+        };
+        drawn[hand..]
+            .iter()
+            .zip(tints)
+            .filter(|(_, tint)| **tint == colour)
+            .map(|(point, _)| Vec3::from_array(*point))
+            .collect()
+    }
+
+    fn centroid(points: &[Vec3]) -> Vec3 {
+        points.iter().copied().sum::<Vec3>() / points.len() as f32
+    }
+
+    /// **The left hand is the right hand mirrored — by rotation, at the mirrored position, the
+    /// same depth and the same rest pitch** (#1233), and the left rein hand is that same pose.
+    #[test]
+    fn the_left_hand_is_the_right_hand_mirrored_by_rotation() {
+        let animation = HandAnimation::default();
+        let mirror = Vec3::new(-1.0, 1.0, 1.0);
+        for fov in every_field_of_view() {
+            let degrees = fov.to_degrees();
+            let right = presented_transform(&animation, None, fov);
+            let left = off_hand_transform(fov, 0.0);
+            assert_eq!(
+                left.scale,
+                Vec3::ONE,
+                "the left hand is mirrored by a scale"
+            );
+            assert_eq!(
+                left,
+                mounted_hand_transform(-1.0, fov),
+                "the left hand at rest is not the rein hand at {degrees:.0}°"
+            );
+            assert!(
+                left.translation
+                    .abs_diff_eq(right.translation * mirror, 1e-6),
+                "the left hand is not at the mirrored position at {degrees:.0}°"
+            );
+            // The rest pitch: the hand's own up axis, mirrored, is the right hand's.
+            assert!(
+                (left.rotation * Vec3::Y * mirror).abs_diff_eq(right.rotation * Vec3::Y, 1e-6),
+                "the left hand does not share the right hand's rest pitch at {degrees:.0}°"
+            );
+            // Every vertex of the limb — the forearm's outboard edge included — lands on the
+            // mirror of one of the right limb's.
+            for mesh in [fist_mesh(), wrist_mesh(), placed_forearm(&animation)] {
+                let points = positions(&mesh);
+                for p in &points {
+                    let mirrored = right.transform_point(Vec3::from_array(*p)) * mirror;
+                    assert!(
+                        points.iter().any(|q| left
+                            .transform_point(Vec3::from_array(*q))
+                            .abs_diff_eq(mirrored, 1e-6)),
+                        "the left limb is not the right limb mirrored at {degrees:.0}°"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            hand_on_side(1.0, presented_transform(&animation, None, default_fov())),
+            presented_transform(&animation, None, default_fov()),
+            "the right side is not the pose it was given"
+        );
+    }
+
+    /// **The fist grips the shield's horizontal handle from behind**: the face points at the
+    /// world, and the planks and the boss are in front of the fist, at rest and through the
+    /// parry.
+    ///
+    /// Measured on the left hand's own mesh through the pose it is drawn at, so the half turn
+    /// that mirrors the hand and the half turn [`left_hand_mesh`] gives the item are both in it.
+    #[test]
+    fn the_left_fist_grips_the_shields_handle_from_behind() {
+        let colours = shield_colours();
+        let boss = left_shield_part(colours.boss);
+        let handle = left_shield_part(colours.handle);
+        let wood: Vec<Vec3> = left_shield_part(colours.planks[0])
+            .into_iter()
+            .chain(left_shield_part(colours.planks[1]))
+            .collect();
+        for step in 0..=8u8 {
+            let fraction = f32::from(step) / 8.0;
+            let pose = off_hand_transform(default_fov(), fraction);
+            let drawn = |points: &[Vec3]| -> Vec<Vec3> {
+                points.iter().map(|p| pose.transform_point(*p)).collect()
+            };
+            let fist = pose.transform_point(Vec3::ZERO);
+            let facing = (centroid(&drawn(&boss)) - centroid(&drawn(&handle))).normalize();
+            assert!(
+                facing.z < -0.9,
+                "the shield's face points along {facing:?} at {fraction}, not at the world"
+            );
+            for point in drawn(&wood).into_iter().chain(drawn(&boss)) {
+                assert!(
+                    (point - fist).dot(facing) > HAND_SIZE.z / 2.0,
+                    "the shield's face reaches {point:?}, behind the front of the fist at {fist:?}"
+                );
+            }
+            let (low, high) = bounds(&drawn(&handle));
+            assert!(
+                low.cmple(fist).all() && fist.cmple(high).all(),
+                "the fist at {fist:?} is off the handle, {low:?} to {high:?}"
+            );
+        }
+    }
+
+    /// **The parry tilts the forearm toward the centre of the screen and advances the shield
+    /// across it** (#1233).
+    #[test]
+    fn the_parry_tilts_the_forearm_inward_and_advances_the_shield_toward_the_centre() {
+        let boss = left_shield_part(shield_colours().boss);
+        let project = |point: Vec3| point.truncate() / -point.z;
+        for fov in every_field_of_view() {
+            let degrees = fov.to_degrees();
+            // The forearm's direction on screen, from its far end up to the fist.
+            let forearm = |fraction: f32| {
+                let pose = off_hand_transform(fov, fraction);
+                let arm = forearm_transform_along(off_hand_along_view(fraction));
+                let top = project(pose.transform_point(Vec3::ZERO));
+                let bottom = project(pose.transform_point(arm.transform_point(Vec3::NEG_Y)));
+                (top - bottom).normalize()
+            };
+            let (rest, parry) = (forearm(0.0), forearm(1.0));
+            assert!(
+                parry.x > rest.x + 0.2,
+                "the forearm points along {parry:?} in the parry and {rest:?} at rest at \
+                 {degrees:.0}°, which is not a tilt toward the centre"
+            );
+            let shield = |fraction: f32| {
+                let pose = off_hand_transform(fov, fraction);
+                centroid(
+                    &boss
+                        .iter()
+                        .map(|p| pose.transform_point(*p))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let (rest, parry) = (shield(0.0), shield(1.0));
+            assert!(
+                parry.z < rest.z - 0.01,
+                "the shield advanced from z {} only to z {} at {degrees:.0}°",
+                rest.z,
+                parry.z
+            );
+            assert!(
+                project(parry).x.abs() < project(rest).x.abs() && project(parry).x < 0.0,
+                "the shield's centre moved from {} to {} on screen at {degrees:.0}°, not toward \
+                 the centre from the left",
+                project(rest).x,
+                project(parry).x
+            );
+        }
+    }
+
+    /// **The move into and out of the parry is eased over a short transition, never a snap.**
+    #[test]
+    fn the_move_into_and_out_of_the_parry_is_eased_over_a_short_transition() {
+        assert!(
+            (Duration::from_millis(80)..=Duration::from_millis(250)).contains(&PARRY_TIME),
+            "{PARRY_TIME:?} is either a snap or a drag"
+        );
+        let fov = default_fov();
+        let (rest, parry) = (off_hand_transform(fov, 0.0), off_hand_transform(fov, 1.0));
+        let span = parry.translation - rest.translation;
+        let turn = rest.rotation.angle_between(parry.rotation);
+        let progress = |fraction: f32| {
+            let pose = off_hand_transform(fov, fraction);
+            (
+                (pose.translation - rest.translation).dot(span) / span.length_squared(),
+                rest.rotation.angle_between(pose.rotation) / turn,
+            )
+        };
+        let mut last = (0.0, 0.0);
+        for step in 1..32u8 {
+            let now = progress(f32::from(step) / 32.0);
+            assert!(
+                now.0 > last.0 && now.0 < 1.0 && now.1 > last.1 && now.1 < 1.0 + 1e-4,
+                "step {step}/32 of the parry is at {now:?}, not between {last:?} and the parry"
+            );
+            last = now;
+        }
+        // Eased at both ends: the first and the last sixteenth of the time each cover well under
+        // a sixteenth of the way, where a linear move would cover exactly that.
+        let (first, _) = progress(1.0 / 16.0);
+        let (last, _) = progress(15.0 / 16.0);
+        assert!(
+            first < 0.5 / 16.0 && 1.0 - last < 0.5 / 16.0,
+            "the parry starts at {first} and ends at {last} a sixteenth from either end"
+        );
+    }
+
+    /// **Rest and parry both clear the near plane, and the arm's end stays below the frame**, at
+    /// every step of the transition and every field of view.
+    ///
+    /// The right hand's swing is not swept here because nothing of it reaches this pose:
+    /// [`off_hand_transform`] reads no [`HandAnimation`], and
+    /// [`a_worn_shield_keeps_the_left_hand_in_view_and_the_servers_blocking_raises_the_parry`]
+    /// swings the right hand under a settled parry and reads the left hand unmoved.
+    #[test]
+    fn the_left_hand_clears_the_near_plane_at_rest_and_through_the_parry() {
+        let near = PerspectiveProjection::default().near;
+        let hand = positions(&left_hand_mesh(TEST_SKIN, worn_shield_appearance()));
+        let default = crate::settings::Settings::default().field_of_view();
+        for step in 0..=16u8 {
+            let fraction = f32::from(step) / 16.0;
+            let arm = forearm_transform_along(off_hand_along_view(fraction));
+            let forearm: Vec<Vec3> = positions(&forearm_mesh())
+                .into_iter()
+                .map(|p| arm.transform_point(Vec3::from_array(p)))
+                .collect();
+            for fov in every_field_of_view() {
+                let pose = off_hand_transform(fov, fraction);
+                for point in hand
+                    .iter()
+                    .map(|p| Vec3::from_array(*p))
+                    .chain(forearm.clone())
+                {
+                    let drawn = pose.transform_point(point);
+                    assert!(
+                        -drawn.z > near,
+                        "{point:?} reaches z {} against a near plane at {near}, {fraction} of \
+                         the way into the parry at {:.0}°",
+                        drawn.z,
+                        fov.to_degrees()
+                    );
+                }
+            }
+            let cap: Vec<Vec3> = forearm
+                .iter()
+                .copied()
+                .filter(|p| {
+                    (p.y - forearm.iter().map(|q| q.y).fold(f32::INFINITY, f32::min)).abs() < 1e-6
+                })
+                .collect();
+            let widest = widest_clipped_fov(&cap, &off_hand_transform(default_fov(), fraction));
+            assert!(
+                widest > default,
+                "the left arm shows its end above {widest:.1}°, inside the default {default}°, \
+                 {fraction} of the way into the parry"
+            );
+        }
     }
 
     #[test]
@@ -9036,12 +9492,8 @@ mod tests {
         );
         assert_eq!(app.world().get::<Mesh3d>(off).unwrap().0, shield_mesh);
         assert_eq!(
-            app.world().get::<Transform>(off).unwrap().translation,
-            shield_translation(default_fov())
-        );
-        assert_eq!(
-            app.world().get::<Transform>(off).unwrap().rotation,
-            Quat::from_rotation_z(-0.48)
+            *app.world().get::<Transform>(off).unwrap(),
+            off_hand_transform(default_fov(), 0.0)
         );
     }
 

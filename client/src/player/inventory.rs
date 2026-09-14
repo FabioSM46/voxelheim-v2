@@ -557,13 +557,10 @@ fn request_inventory_action(
             continue;
         }
 
-        let off_hand = slots
-            .checked_sub(session.0.equipment_slots)
-            .and_then(|first| (session.0.equipment_slots >= 4).then_some(first + 3));
-        if off_hand == Some(click.slot)
+        if equipment_slot(&session.0, OFF_HAND_OFFSET) == Some(click.slot)
             && inventory
                 .slot(source.slot)
-                .is_some_and(|stack| !equipment_item_fits(stack.item_id, 3))
+                .is_some_and(|stack| !equipment_item_fits(stack.item_id, OFF_HAND_OFFSET))
         {
             set_if_changed(&mut picked, PickedStack::default());
             continue;
@@ -735,6 +732,30 @@ pub(crate) fn equipment_item_fits(item_id: u16, offset: u8) -> bool {
     EQUIPMENT_ROUTES
         .get(usize::from(offset))
         .is_some_and(|allowed| allowed.contains(&item_id))
+}
+
+/// The off-hand's offset among the equipment slots: head `0`, chest `1`, legs `2`, off-hand `3`.
+///
+/// The server appends further worn slots *after* this one (the main hand is `4`), so the
+/// off-hand keeps this offset however many equipment slots the welcome announces.
+pub(crate) const OFF_HAND_OFFSET: u8 = 3;
+
+/// **The one accessor from an equipment offset to an absolute inventory index**, read off the
+/// slot counts the server's welcome announced.
+///
+/// The equipment slots are the last `equipment_slots` of the `inventory_slots`, so the index is
+/// the first of them plus `offset`. `None` when the welcome announced too few equipment slots
+/// to have that offset, or more equipment slots than slots — a count this client cannot place
+/// rather than one it should guess at. Every reader of a worn slot goes through here, so a
+/// slot appended after the off-hand changes nothing about where the off-hand is read.
+pub(crate) fn equipment_slot(params: &crate::net::SessionParams, offset: u8) -> Option<u8> {
+    if offset >= params.equipment_slots {
+        return None;
+    }
+    params
+        .inventory_slots
+        .checked_sub(params.equipment_slots)
+        .map(|first| first + offset)
 }
 
 /// Whether this client routes a click with one item id onto a worn item to a mend.
@@ -1215,6 +1236,25 @@ mod tests {
 
         assert!(sent.try_recv().is_err());
         assert_eq!(app.world().resource::<PickedStack>().slot(), None);
+    }
+
+    /// **The off-hand is found by its offset from the first worn slot, not by a literal
+    /// index**, so a worn slot the server appends after it moves nothing.
+    #[test]
+    fn the_off_hand_slot_is_read_through_its_offset_from_the_first_worn_slot() {
+        let base = app(false).world().resource::<Session>().0;
+        let params = |inventory_slots, equipment_slots| SessionParams {
+            inventory_slots,
+            equipment_slots,
+            ..base
+        };
+        // Four worn slots, and five once the main hand is appended after the off-hand.
+        assert_eq!(equipment_slot(&params(8, 4), OFF_HAND_OFFSET), Some(7));
+        assert_eq!(equipment_slot(&params(41, 5), OFF_HAND_OFFSET), Some(39));
+        assert_eq!(equipment_slot(&params(41, 5), 4), Some(40));
+        // Too few worn slots to have an off-hand, and a count that cannot be placed.
+        assert_eq!(equipment_slot(&params(40, 3), OFF_HAND_OFFSET), None);
+        assert_eq!(equipment_slot(&params(3, 4), OFF_HAND_OFFSET), None);
     }
 
     /// Replaces the vitals exactly as an accepted snapshot does.
