@@ -328,8 +328,9 @@ const (
 	// There is no per-weapon table: a bow and a blade cost the same.
 	AttackEnergyCost uint16 = 25
 
-	// ParryEnergyCost is what a raised shield spends when it actually absorbs a blow.
-	// Holding the shield up costs nothing.
+	// ParryEnergyCost is what a raised shield spends when it actually absorbs a blow, and
+	// the least the reserve must hold for the shield to be raised at all. Holding the
+	// shield up costs nothing.
 	ParryEnergyCost uint16 = 25
 
 	// EnergyRegenPerSecond refills the reserve from zero to MaxEnergy in eight seconds.

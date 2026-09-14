@@ -188,8 +188,9 @@ func TestAnAbsorbedBlowSpendsParryEnergy(t *testing.T) {
 	}
 }
 
-// A guard with less than the parry's cost absorbs nothing: full damage, no durability,
-// no threat, and the reserve keeps what it had.
+// A guard with less than the parry's cost has no shield up: the shield lowers on the tick
+// the reserve is found short, so the blow lands at full damage, spends no durability and
+// earns no threat, and the reserve keeps what it had.
 func TestAStarvedGuardTakesTheFullBlowAndSpendsNothing(t *testing.T) {
 	t.Parallel()
 
@@ -215,10 +216,13 @@ func TestAStarvedGuardTakesTheFullBlowAndSpendsNothing(t *testing.T) {
 	if got, want := player.energy, stored+h.sim.energyRefill; got != want {
 		t.Errorf("energy after a starved guard = %d, want %d (nothing spent, one refill)", got, want)
 	}
-	stillBlocking := player.blocking
+	stillBlocking, stillHeld := player.blocking, player.wantsBlock
 	h.sim.mu.Unlock()
-	if !stillBlocking {
-		t.Error("a starved guard lowered the shield; only the absorption is refused")
+	if stillBlocking {
+		t.Error("a starved guard kept the shield raised; below the parry's cost it must lower")
+	}
+	if !stillHeld {
+		t.Error("a starved guard forgot the held press; only the shield lowers, the intent stays")
 	}
 	player.inventory.mu.Lock()
 	durability := player.inventory.slots[equipmentOffHand].durability

@@ -190,7 +190,7 @@ func (p *Player) dieLocked() {
 	// The combat seam this comment promised. A swing accepted before the blow that
 	// killed them does not land afterwards.
 	p.pendingSwing = nil
-	p.blocking = false
+	p.lowerShieldLocked()
 	p.mounted = vnet.MountKindUnknown
 	p.sim.removeAllThreatFor(p.entityID)
 
@@ -210,6 +210,10 @@ func (p *Player) advanceVitalsLocked() {
 	// Leave returns an unfinished countdown cannot fire later and cannot reinsert the
 	// player. This is especially load-bearing for a body killed during leave linger.
 	p.regenerateEnergyLocked()
+	// Straight after the refill, so the tick on which energy regenerates to the parry's
+	// cost is the tick a held shield rises — and before anything this tick could swing at
+	// it, so a mob's blow is judged against the guard the reserve can actually pay for.
+	p.settleShieldLocked()
 	if p.protectionTicks > 0 {
 		p.protectionTicks--
 	}

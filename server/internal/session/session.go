@@ -2154,7 +2154,15 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 			log.Debug("block intent arrived with no player to attribute it to; discarding")
 			return nil
 		}
-		player.Block(msg.Block.Active)
+		// The simulation answers a press refused for energy once per press, and that one
+		// refusal is what flashes the energy bar. The press itself is still held: the
+		// shield rises on the tick the reserve allows, and every other refusal is silence.
+		if reason := player.Block(msg.Block.Active); reason != vnet.RefusalReasonUnknown {
+			log.Debug("block press refused", "code", reason.String())
+			if sErr := send(protocol.EncodeActionRefused(blockRefusal(reason))); sErr != nil {
+				return fmt.Errorf("session: send block refusal: %w", sErr)
+			}
+		}
 		return nil
 
 	case vnet.PayloadPlaceStructureRequest:
@@ -3040,4 +3048,11 @@ func attackRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
 		action = vnet.RefusedActionEnergy
 	}
 	return protocol.ActionRefused{Action: action, Reason: reason}
+}
+
+// blockRefusal names the action a block press refusal is answered under. The only one a
+// press carries is NotEnoughEnergy, and it goes under `Energy` for attackRefusal's reason:
+// the energy display is the surface that explains it. The reason travels unchanged.
+func blockRefusal(reason vnet.RefusalReason) protocol.ActionRefused {
+	return protocol.ActionRefused{Action: vnet.RefusedActionEnergy, Reason: reason}
 }

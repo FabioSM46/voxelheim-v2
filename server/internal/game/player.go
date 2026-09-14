@@ -780,7 +780,12 @@ type Player struct {
 		fraction uint16
 		slot     uint8
 	}
-	blocking bool
+	// wantsBlock is the block button as the client last left it — held from an admitted
+	// `active: true` until `active: false` or an authoritative removal — and blocking is
+	// what the server makes of it, re-derived every tick from that intent, the shield and
+	// the energy reserve (settleShieldLocked). Neither is persisted.
+	wantsBlock bool
+	blocking   bool
 
 	// sinceDamageTicks is how long since the last landed hit, regenTicks how far
 	// through the current point of regeneration, and hungerTicks how far through the
@@ -1216,7 +1221,7 @@ func (s *Sim) Leave(p *Player) {
 		p.mineCompleting = false
 		p.miningCompleted = nil
 		p.mineReset = nil
-		p.blocking = false
+		p.lowerShieldLocked()
 		delete(s.players, p.entityID)
 		// Every speaker forgets this listener, the way a refilled chat bucket is
 		// forgotten: the set is keyed by live entity id, and an id nobody holds any more
@@ -1281,7 +1286,7 @@ func (p *Player) BeginLeaving() {
 	p.mineCompleting = false
 	p.miningCompleted = nil
 	p.pendingSwing = nil
-	p.blocking = false
+	p.lowerShieldLocked()
 }
 
 // CancelLeaving makes future client intent live again when this body is still in its

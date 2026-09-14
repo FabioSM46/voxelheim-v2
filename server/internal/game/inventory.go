@@ -498,7 +498,7 @@ func (p *Player) refreshWornLocked() {
 	p.worn = worn
 	p.wornShield = shield
 	if shield.fraction == 0 {
-		p.blocking = false
+		p.lowerShieldLocked()
 	}
 }
 
