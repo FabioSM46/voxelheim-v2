@@ -88,28 +88,32 @@ pub(super) struct WeaponDrawn(pub(super) bool);
 /// What one frame does to [`WeaponDrawn`], and the hint a refused draw shows.
 ///
 /// A function of four facts rather than a system body, so every combination is a row in a
-/// table test. A press toggles; drawing needs something in the main hand and a player on
-/// foot, and either missing leaves the weapon sheathed with a short line saying why. Past the
-/// press, a drawn weapon is sheathed the frame it stops being drawable — mounting, or the
-/// main hand emptied by a move, a drop or a break — so a player is never left unable to
-/// mine behind a weapon that is no longer there.
+/// table test. A press toggles; drawing needs a usable weapon in the main hand and a player
+/// on foot, and either missing leaves the weapon sheathed with a short line saying why. Past
+/// the press, a drawn weapon is sheathed the frame it stops being drawable — mounting, or the
+/// main hand emptied or worn through — so a player is never left unable to mine behind a
+/// weapon that cannot swing.
+///
+/// **`main_hand_armed` is the swing's own question**, [`attack_item_in_hand`] on the main
+/// hand, so drawn always means a press can swing. Asking only whether the slot held a stack
+/// let a worn-through weapon draw, and then the left button neither swung nor mined.
 fn next_drawn(
     drawn: bool,
     pressed: bool,
     mounted: bool,
-    main_hand_holds: bool,
+    main_hand_armed: bool,
 ) -> (bool, Option<&'static str>) {
     let (wanted, hint) = match (pressed, drawn) {
         (true, true) => (false, None),
         (true, false) if mounted => (false, Some("Dismount to draw your weapon.")),
-        (true, false) if !main_hand_holds => (
+        (true, false) if !main_hand_armed => (
             false,
-            Some("Your main hand is empty; equip a weapon to draw it."),
+            Some("Your main hand holds no usable weapon; equip one to draw it."),
         ),
         (true, false) => (true, None),
         (false, drawn) => (drawn, None),
     };
-    (wanted && !mounted && main_hand_holds, hint)
+    (wanted && !mounted && main_hand_armed, hint)
 }
 
 /// Everything the draw key reads, in one bundle.
@@ -143,13 +147,13 @@ fn draw_or_sheathe_weapon(
         && intent
             .keys
             .is_some_and(|keys| keys.just_pressed(bindings.key(Control::DrawWeapon)));
-    let main_hand_holds = intent
+    let main_hand_armed = intent
         .session
         .as_deref()
         .and_then(|session| equipment_slot(&session.0, MAIN_HAND_OFFSET))
-        .and_then(|slot| intent.inventory.slot(slot))
-        .is_some_and(|stack| stack.count > 0);
-    let (next, hint) = next_drawn(drawn.0, pressed, intent.mount.mounted(), main_hand_holds);
+        .and_then(|slot| attack_item_in_hand(&intent.inventory, slot))
+        .is_some();
+    let (next, hint) = next_drawn(drawn.0, pressed, intent.mount.mounted(), main_hand_armed);
     set_if_changed(&mut drawn, WeaponDrawn(next));
     if let Some(hint) = hint {
         messages.write(PlayerMessage::new(PlayerMessageKind::Warn, hint));
@@ -679,7 +683,10 @@ mod tests {
     }
 
     /// An app that can click, somewhere for the frames to go, and `main_hand` in the main hand
-    /// — drawn when there is something to draw.
+    /// — with the draw key pressed whenever there is anything there.
+    ///
+    /// The key is pressed for anything at all, so a stack that must not swing is also shown not
+    /// to swing after a press; whether it drew is held to the swing's own question.
     ///
     /// The queue is deeper than any of these tests needs, so a full one can never be what
     /// makes a request go missing.
@@ -687,7 +694,12 @@ mod tests {
         let (mut app, sent) = sheathed_app(&[(self::main_hand(), main_hand)]);
         if main_hand.count > 0 {
             toggle_draw(&mut app);
-            assert!(drawn(&app), "the main-hand weapon did not draw");
+            let armed = attack_item_in_hand(&Inventory::from_stacks(vec![main_hand]), 0).is_some();
+            assert_eq!(
+                drawn(&app),
+                armed,
+                "the draw disagreed with whether the main hand can swing"
+            );
         }
         drain(&sent);
         (app, sent)
@@ -1575,9 +1587,10 @@ mod tests {
     /// Every combination of press, mount and main hand the draw rule distinguishes.
     #[test]
     fn next_drawn_answers_every_press_and_every_reason_to_sheathe() {
-        const EMPTY: Option<&str> = Some("Your main hand is empty; equip a weapon to draw it.");
+        const UNARMED: Option<&str> =
+            Some("Your main hand holds no usable weapon; equip one to draw it.");
         const RIDING: Option<&str> = Some("Dismount to draw your weapon.");
-        // (name, drawn, pressed, mounted, main hand holds) -> (drawn, hint)
+        // (name, drawn, pressed, mounted, main hand armed) -> (drawn, hint)
         for (name, drawn, pressed, mounted, holds, want) in [
             (
                 "a press draws a held weapon",
@@ -1601,7 +1614,7 @@ mod tests {
                 true,
                 false,
                 false,
-                (false, EMPTY),
+                (false, UNARMED),
             ),
             (
                 "a rider stays sheathed",
@@ -1676,24 +1689,37 @@ mod tests {
         }
     }
 
-    /// Pressing the key with an empty main hand stays sheathed and says why, once.
+    /// Pressing the key without a usable weapon in the main hand — empty, or worn through —
+    /// stays sheathed and says why, once.
     #[test]
-    fn drawing_with_an_empty_main_hand_stays_sheathed_and_hints() {
-        let (mut app, sent) = sheathed_app(&[(0, blade())]);
-        press_draw_weapon(&mut app, ButtonState::Pressed);
-        app.update();
+    fn drawing_without_a_usable_main_hand_weapon_stays_sheathed_and_hints() {
+        for (name, main_hand_stack) in [
+            ("an empty main hand", InventoryStack::default()),
+            (
+                "a worn-through blade",
+                InventoryStack {
+                    durability: 0,
+                    ..blade()
+                },
+            ),
+        ] {
+            let (mut app, sent) = sheathed_app(&[(0, blade()), (main_hand(), main_hand_stack)]);
+            press_draw_weapon(&mut app, ButtonState::Pressed);
+            app.update();
 
-        assert!(!drawn(&app), "an empty main hand drew something");
-        assert_eq!(
-            player_messages(&app),
-            [PlayerMessage::new(
-                PlayerMessageKind::Warn,
-                "Your main hand is empty; equip a weapon to draw it."
-            )]
-        );
-        click(&mut app);
-        app.update();
-        assert!(attacks(&sent).is_empty(), "a sheathed press swung");
+            assert!(!drawn(&app), "{name} drew something");
+            assert_eq!(
+                player_messages(&app),
+                [PlayerMessage::new(
+                    PlayerMessageKind::Warn,
+                    "Your main hand holds no usable weapon; equip one to draw it."
+                )],
+                "{name}"
+            );
+            click(&mut app);
+            app.update();
+            assert!(attacks(&sent).is_empty(), "{name}: a sheathed press swung");
+        }
     }
 
     /// **Drawn, the press swings the main hand whatever the hotbar selects** — and the swing's
@@ -1796,12 +1822,24 @@ mod tests {
         assert!(!drawn(&app), "mounting left the weapon drawn");
     }
 
-    /// A drawn weapon that leaves the main hand sheathes, so the left button mines again.
+    /// A drawn weapon that leaves the main hand or wears through sheathes, so the left button
+    /// mines again rather than doing nothing at all.
     #[test]
-    fn a_main_hand_emptied_while_drawn_sheathes() {
-        let (mut app, _sent) = clicking_app(blade());
-        deliver(&mut app, InventoryStack::default());
-        app.update();
-        assert!(!drawn(&app), "an empty main hand stayed drawn");
+    fn a_main_hand_emptied_or_worn_through_while_drawn_sheathes() {
+        for (name, main_hand_stack) in [
+            ("emptied", InventoryStack::default()),
+            (
+                "worn through",
+                InventoryStack {
+                    durability: 0,
+                    ..blade()
+                },
+            ),
+        ] {
+            let (mut app, _sent) = clicking_app(blade());
+            deliver(&mut app, main_hand_stack);
+            app.update();
+            assert!(!drawn(&app), "a main hand {name} stayed drawn");
+        }
     }
 }

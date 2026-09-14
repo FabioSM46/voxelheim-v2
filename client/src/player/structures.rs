@@ -3796,6 +3796,10 @@ mod tests {
             app.update();
             combat::press_draw_weapon(&mut app, bevy::input::ButtonState::Pressed);
             app.update();
+            assert!(
+                app.world().resource::<combat::WeaponDrawn>().0,
+                "{name}: the blade did not draw, so this test proves nothing"
+            );
             drain(&sent);
 
             click(&mut app, REMOVE_BUTTON);
