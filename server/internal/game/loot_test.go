@@ -41,6 +41,7 @@ import (
 // an assertion about the server's answer instead of about the harness's bookkeeping.
 func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
 	h.t.Helper()
+	h.wieldStarterBlade(p)
 
 	for blow := 1; blow <= 10; blow++ {
 		if _, live := h.mobState(id); !live {
@@ -49,7 +50,7 @@ func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64
 		// The client tick is taken from the simulation's own rather than from the blow
 		// number, because Attack refuses a stale one and a second kill in the same harness
 		// would otherwise start counting again from 1.
-		if err := h.swing(p, 0, uint32(h.tick)+1); err != nil {
+		if err := h.swing(p, mainHandSlot, uint32(h.tick)+1); err != nil {
 			h.t.Fatalf("swing %d was refused: %v", blow, err)
 		}
 		h.step()
@@ -85,6 +86,7 @@ func armedAgainst(t *testing.T, kind vnet.MobKind, at [3]float64) (*vitalsHarnes
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 	return h, player, out, h.placeSpeciesAt(kind, at)
 }
 
@@ -193,7 +195,7 @@ func TestASwingIsNotSpentOnACorpse(t *testing.T) {
 	}
 
 	h.advance(int(h.sim.attackCooldown))
-	if err := h.swing(player, 0, uint32(h.tick)+1); err != nil {
+	if err := h.swing(player, mainHandSlot, uint32(h.tick)+1); err != nil {
 		t.Fatalf("the swing past the body was refused: %v", err)
 	}
 	h.step()

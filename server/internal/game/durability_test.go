@@ -174,7 +174,7 @@ func TestMovingASwordCarriesItsWear(t *testing.T) {
 	inventory := newStarterInventory()
 	inventory.slots[0].durability = 42
 
-	if !inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1}) {
+	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1}) != nil {
 		t.Fatal("moving a sword to an empty slot was refused")
 	}
 	if got := inventory.slots[0]; got != (inventoryStack{}) {
@@ -195,7 +195,7 @@ func TestSwappingASwordWithAStackKeepsBothIntact(t *testing.T) {
 	inventory.slots[0].durability = 7
 	inventory.slots[1] = stackOf(ItemStone, 10)
 
-	if !inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 1, Count: 1}) {
+	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 1, Count: 1}) != nil {
 		t.Fatal("swapping a sword with a resource stack was refused")
 	}
 	wantStone := inventoryStack{item: ItemStone, count: 10}
@@ -218,7 +218,7 @@ func TestOneSwordNeverMergesIntoAnother(t *testing.T) {
 	inventory.slots[1] = stackOf(ItemRustySword, 1)
 	inventory.slots[1].durability = 50
 
-	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 1, Count: 1}) {
+	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 1, Count: 1}) == nil {
 		t.Fatal("one sword merged into another")
 	}
 	if got := inventory.slots[0]; got != starterStack() {
@@ -242,7 +242,7 @@ func TestADurableStackCannotBeSplit(t *testing.T) {
 		item: ItemRustySword, count: 2, durability: 50, maxDurability: RustySwordMaxDurability,
 	}
 
-	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1}) {
+	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1}) == nil {
 		t.Fatal("a durable stack was split in half")
 	}
 	if got := inventory.slots[0].count; got != 2 {

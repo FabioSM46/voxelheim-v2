@@ -45,8 +45,8 @@ type pendingSwing struct {
 // network scheduling from choosing an in-between position to be judged at.
 //
 // Every refusal is an error the session logs at debug. Missing launcher ammunition also
-// carries the actionable NoAmmunition answer; stale ticks, invalid slots and cooldown
-// refusals retain silence. None is a protocol failure.
+// carries the actionable NoAmmunition answer; stale ticks, a slot that is not the main
+// hand and cooldown refusals retain silence. None is a protocol failure.
 func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
@@ -70,8 +70,16 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	}
 	p.haveAttackTick, p.lastAttackTick = true, req.ClientTick
 
-	if req.Slot >= protocol.InventorySlots {
-		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is outside %d slots", req.Slot, protocol.InventorySlots)
+	// The attack spends the main hand and nothing else. Since V44 the slot names the
+	// main-hand equipment slot; a hotbar slot, a pack slot, another worn slot or an index
+	// past the table is dropped here, before any pending swing, cooldown or energy exists —
+	// the same silence as a slot holding nothing that attacks.
+	//
+	// Its tick is already recorded above, deliberately, like every admission refusal below:
+	// the guard orders requests by arrival, not by whether one was admitted. A second request
+	// on the same client tick is stale whatever the first one named.
+	if int(req.Slot) != equipmentMainHand {
+		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is not the main hand %d", req.Slot, equipmentMainHand)
 	}
 	if p.pendingSwing != nil {
 		// Two clicks inside one tick. The first is already waiting to be judged and the

@@ -1423,7 +1423,7 @@ func TestEveryPlacementRefusalNamesItsOwnReason(t *testing.T) {
 		vnet.RefusalReasonInstanceUnavailable,
 		vnet.RefusalReasonSessionMismatch,
 		vnet.RefusalReasonEntryOfferUnknown,
-		// V44 reserves the two-handed refusal for its dependent equip rule (#1236).
+		// V44's two-handed refusal, produced by the equip rule in moveLocked.
 		vnet.RefusalReasonHandsOccupied,
 	} {
 		if reason == vnet.RefusalReasonUnknown || reason >= firstMalformed {

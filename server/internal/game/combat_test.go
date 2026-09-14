@@ -29,6 +29,9 @@ func (h *vitalsHarness) aimAt(p *Player, yaw, pitch float64) {
 
 // swing asks for one attack from a slot, and returns whatever the simulation refused it
 // with.
+// mainHandSlot is the one slot an attack may name: since V44 a swing spends the main hand.
+const mainHandSlot = uint8(equipmentMainHand)
+
 func (h *vitalsHarness) swing(p *Player, slot uint8, tick uint32) error {
 	_, err := p.Attack(protocol.AttackRequest{Slot: slot, ClientTick: tick})
 	return err
@@ -51,8 +54,26 @@ func armedHarness(t *testing.T, rate uint8, draugrAt [3]float32) (*vitalsHarness
 
 	h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 	id := h.spawnDraugrAt(draugrAt)
 	return h, player, id
+}
+
+// wieldStarterBlade moves the starter blade from hotbar slot 0 into the main hand, the one
+// slot an attack may name, the way a player wields it: through MoveInventory. A player
+// whose main hand already holds something is left as they are.
+func (h *vitalsHarness) wieldStarterBlade(p *Player) {
+	h.t.Helper()
+
+	p.inventory.mu.Lock()
+	wielded := p.inventory.slots[equipmentMainHand].count != 0
+	p.inventory.mu.Unlock()
+	if wielded {
+		return
+	}
+	if _, err := p.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: mainHandSlot, Count: 1}); err != nil {
+		h.t.Fatalf("wielding the starter blade: %v", err)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +86,7 @@ func TestASwingInFrontLandsForItsFullDamage(t *testing.T) {
 	// Yaw 0 looks along -Z, so this draugr is directly ahead and inside reach.
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()
@@ -83,7 +104,7 @@ func TestThreeSwingsKillADraugr(t *testing.T) {
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 
 	for blow := range 3 {
-		if err := h.swing(player, 0, uint32(blow+1)); err != nil {
+		if err := h.swing(player, mainHandSlot, uint32(blow+1)); err != nil {
 			t.Fatalf("swing %d was refused: %v", blow+1, err)
 		}
 		h.step()
@@ -112,11 +133,11 @@ func TestTheFirstPlayerToHitOwnsTheExperienceWhoeverLandsTheKillingBlow(t *testi
 	finisher, _ := h.join(2, [3]float32{0.5, 64, 0.5})
 	for _, player := range []*Player{first, finisher} {
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
 		player.inventory.mu.Unlock()
 	}
 
-	if err := h.swing(first, 0, 1); err != nil {
+	if err := h.swing(first, mainHandSlot, 1); err != nil {
 		t.Fatalf("first swing: %v", err)
 	}
 	h.step()
@@ -124,7 +145,7 @@ func TestTheFirstPlayerToHitOwnsTheExperienceWhoeverLandsTheKillingBlow(t *testi
 		t.Fatalf("non-killing blow awarded %d experience, want 0", got)
 	}
 
-	if err := h.swing(finisher, 0, 1); err != nil {
+	if err := h.swing(finisher, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -148,17 +169,17 @@ func TestADeadFirstHitterStillReceivesTheExperience(t *testing.T) {
 	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
 	for _, player := range []*Player{owner, finisher} {
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
 		player.inventory.mu.Unlock()
 	}
 
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
-	if err := h.swing(owner, 0, 1); err != nil {
+	if err := h.swing(owner, mainHandSlot, 1); err != nil {
 		t.Fatalf("tapping swing: %v", err)
 	}
 	h.step()
 	h.hurt(owner, PlayerMaxHealth)
-	if err := h.swing(finisher, 0, 1); err != nil {
+	if err := h.swing(finisher, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -182,17 +203,17 @@ func TestADisconnectedFirstHitterKeepsTheAwardAndReceivesItOnReconnect(t *testin
 	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
 	for _, player := range []*Player{owner, finisher} {
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
 		player.inventory.mu.Unlock()
 	}
 
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
-	if err := h.swing(owner, 0, 1); err != nil {
+	if err := h.swing(owner, mainHandSlot, 1); err != nil {
 		t.Fatalf("tapping swing: %v", err)
 	}
 	h.step()
 	h.sim.Leave(owner)
-	if err := h.swing(finisher, 0, 1); err != nil {
+	if err := h.swing(finisher, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -227,12 +248,12 @@ func TestAnOfflineTapUsesProgressFromTheOwnersLatestSession(t *testing.T) {
 	finisher, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{0.5, 64, 0.5})
 	for _, player := range []*Player{owner, finisher} {
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
 		player.inventory.mu.Unlock()
 	}
 
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
-	if err := h.swing(owner, 0, 1); err != nil {
+	if err := h.swing(owner, mainHandSlot, 1); err != nil {
 		t.Fatalf("tapping swing: %v", err)
 	}
 	h.step()
@@ -251,7 +272,7 @@ func TestAnOfflineTapUsesProgressFromTheOwnersLatestSession(t *testing.T) {
 	h.sim.mu.Unlock()
 	h.sim.Leave(returned)
 
-	if err := h.swing(finisher, 0, 1); err != nil {
+	if err := h.swing(finisher, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -284,16 +305,16 @@ func TestTheFirstHitOwnersPartySharesEvenWhenAnOutsiderFinishesTheMob(t *testing
 	inviteAndAccept(t, owner, member, "Bjorn")
 	for _, player := range []*Player{owner, finisher} {
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = stackOf(ItemIronSword, 1)
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
 		player.inventory.mu.Unlock()
 	}
 
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
-	if err := h.swing(owner, 0, 1); err != nil {
+	if err := h.swing(owner, mainHandSlot, 1); err != nil {
 		t.Fatalf("tapping swing: %v", err)
 	}
 	h.step()
-	if err := h.swing(finisher, 0, 1); err != nil {
+	if err := h.swing(finisher, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -325,6 +346,7 @@ func TestAPartyKillOnlySharesWithLivingMembersInsideTheRadius(t *testing.T) {
 	h.sim.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(killer)
 	near, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{31.5, 64, -1.5})
 	far, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{33.5, 64, -1.5})
 	dead, _ := joinPartyPlayer(t, h, 4, "Dag", [3]float32{1.5, 64, -1.5})
@@ -337,7 +359,7 @@ func TestAPartyKillOnlySharesWithLivingMembersInsideTheRadius(t *testing.T) {
 	h.sim.mu.Lock()
 	h.sim.mobs[mobID].health = RustySwordDamage
 	h.sim.mu.Unlock()
-	if err := h.swing(killer, 0, 1); err != nil {
+	if err := h.swing(killer, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -369,6 +391,7 @@ func TestAPartyKillWithNobodyElseInRangeKeepsTheFullAward(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(killer)
 	far, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{33.5, 64, -1.5})
 	inviteAndAccept(t, killer, far, "Bjorn")
 
@@ -376,7 +399,7 @@ func TestAPartyKillWithNobodyElseInRangeKeepsTheFullAward(t *testing.T) {
 	h.sim.mu.Lock()
 	h.sim.mobs[mobID].health = RustySwordDamage
 	h.sim.mu.Unlock()
-	if err := h.swing(killer, 0, 1); err != nil {
+	if err := h.swing(killer, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -394,6 +417,7 @@ func TestAPartyKillDoesNotShareWithAnOfflineRosterMember(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(killer)
 	offline, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, -1.5})
 	inviteAndAccept(t, killer, offline, offline.name)
 	h.sim.Leave(offline)
@@ -402,7 +426,7 @@ func TestAPartyKillDoesNotShareWithAnOfflineRosterMember(t *testing.T) {
 	h.sim.mu.Lock()
 	h.sim.mobs[mobID].health = RustySwordDamage
 	h.sim.mu.Unlock()
-	if err := h.swing(killer, 0, 1); err != nil {
+	if err := h.swing(killer, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -423,6 +447,7 @@ func TestEverySpeciesSharesExactlyItsRegistryExperience(t *testing.T) {
 		t.Run(kind.String(), func(t *testing.T) {
 			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 			killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+			h.wieldStarterBlade(killer)
 			first, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
 			second, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{2.5, 64, 0.5})
 			inviteAndAccept(t, killer, first, "Bjorn")
@@ -432,7 +457,7 @@ func TestEverySpeciesSharesExactlyItsRegistryExperience(t *testing.T) {
 			h.sim.mu.Lock()
 			h.sim.mobs[mobID].health = RustySwordDamage
 			h.sim.mu.Unlock()
-			if err := h.swing(killer, 0, 1); err != nil {
+			if err := h.swing(killer, mainHandSlot, 1); err != nil {
 				t.Fatalf("killing swing: %v", err)
 			}
 			h.step()
@@ -456,6 +481,7 @@ func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, killerOut := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(killer)
 	member, memberOut := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
 	inviteAndAccept(t, killer, member, "Bjorn")
 	h.step()
@@ -468,7 +494,7 @@ func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
 	h.sim.mu.Lock()
 	h.sim.mobs[mobID].health = RustySwordDamage
 	h.sim.mu.Unlock()
-	if err := h.swing(killer, 0, 1); err != nil {
+	if err := h.swing(killer, mainHandSlot, 1); err != nil {
 		t.Fatalf("killing swing: %v", err)
 	}
 	h.step()
@@ -505,7 +531,7 @@ func TestASwingReachesExactlyAsFarAsItClaims(t *testing.T) {
 			t.Parallel()
 
 			h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, tc.z})
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()
@@ -545,7 +571,7 @@ func TestASwingOnlyReachesInsideItsArc(t *testing.T) {
 			}
 
 			h, player, id := armedHarness(t, DefaultTickRate, at)
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()
@@ -584,9 +610,10 @@ func TestASwingObeysThePlayersPitch(t *testing.T) {
 			// test was ever about.
 			h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			h.wieldStarterBlade(player)
 			id := h.spawnDraugrAt([3]float32{0.5, 62, 0.5})
 			h.aimAt(player, 0, tc.pitch)
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()
@@ -658,7 +685,7 @@ func TestANonFinitePitchNeverReachesTheAim(t *testing.T) {
 
 			// And the aim still works, which is the half a finiteness check alone would
 			// not have shown.
-			if err := h.swing(player, 0, 501); err != nil {
+			if err := h.swing(player, mainHandSlot, 501); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()
@@ -676,19 +703,33 @@ func TestANonFinitePitchNeverReachesTheAim(t *testing.T) {
 func TestOnlyAWorkingBladeSwings(t *testing.T) {
 	t.Parallel()
 
+	// armedHarness has wielded the starter blade, so each case changes what the main hand
+	// holds and names it — except the two that show a blade anywhere else does not count.
 	for name, prepare := range map[string]func(*Player) uint8{
-		"an empty slot": func(*Player) uint8 { return 5 },
-		"a slot of stone": func(p *Player) uint8 {
+		"an empty main hand": func(p *Player) uint8 {
 			p.inventory.mu.Lock()
 			defer p.inventory.mu.Unlock()
-			p.inventory.slots[5] = stackOf(ItemStone, 10)
-			return 5
+			p.inventory.slots[equipmentMainHand] = inventoryStack{}
+			return mainHandSlot
+		},
+		// A hand-built table: no move puts stone in the main hand.
+		"stone in the main hand": func(p *Player) uint8 {
+			p.inventory.mu.Lock()
+			defer p.inventory.mu.Unlock()
+			p.inventory.slots[equipmentMainHand] = stackOf(ItemStone, 10)
+			return mainHandSlot
 		},
 		"a blade worn through": func(p *Player) uint8 {
 			p.inventory.mu.Lock()
 			defer p.inventory.mu.Unlock()
-			p.inventory.slots[0].durability = 0
-			return 0
+			p.inventory.slots[equipmentMainHand].durability = 0
+			return mainHandSlot
+		},
+		"an iron blade named from the pack": func(p *Player) uint8 {
+			p.inventory.mu.Lock()
+			defer p.inventory.mu.Unlock()
+			p.inventory.slots[5] = stackOf(ItemIronSword, 1)
+			return 5
 		},
 		"a slot outside the inventory": func(*Player) uint8 { return protocol.InventorySlots },
 	} {
@@ -716,12 +757,12 @@ func TestABowLaunchesAnArrowAndPaysItsAmmunitionDurabilityAndCooldown(t *testing
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	player.inventory.mu.Lock()
-	player.inventory.slots[0] = stackOf(ItemBow, 1)
+	player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
 	player.inventory.slots[1] = stackOf(ItemArrow, 2)
 	player.inventory.mu.Unlock()
 	h.aimAt(player, math.Pi/2, math.Pi/6)
 
-	reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 	if err != nil || reason != vnet.RefusalReasonUnknown {
 		t.Fatalf("bow attack = (%s, %v), want accepted", reason, err)
 	}
@@ -732,7 +773,7 @@ func TestABowLaunchesAnArrowAndPaysItsAmmunitionDurabilityAndCooldown(t *testing
 	h.sim.mu.Unlock()
 
 	state := player.InventoryState()
-	if got := state.Stacks[0].Durability; got != BowMaxDurability-1 {
+	if got := state.Stacks[equipmentMainHand].Durability; got != BowMaxDurability-1 {
 		t.Errorf("bow durability = %d, want %d", got, BowMaxDurability-1)
 	}
 	if got := state.Stacks[1].Count; got != 1 {
@@ -766,14 +807,14 @@ func TestABowWithoutPackAmmunitionIsRefusedWithoutSpendingAnything(t *testing.T)
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	player.inventory.mu.Lock()
-	player.inventory.slots[0] = stackOf(ItemBow, 1)
+	player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
 	// Equipment never supplies launcher ammunition, even if corrupt persisted data puts
 	// an arrow there: the authoritative search ends before the first equipment slot.
 	player.inventory.slots[equipmentOffHand] = stackOf(ItemArrow, 1)
 	player.inventory.mu.Unlock()
 	before := player.InventoryState()
 
-	reason, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 	if err == nil || reason != vnet.RefusalReasonNoAmmunition {
 		t.Fatalf("bow attack = (%s, %v), want NoAmmunition", reason, err)
 	}
@@ -798,7 +839,7 @@ func TestASceptreLaunchesAnOrbWithoutAmmunitionAndCreditsActualHealingThreat(t *
 	h.hurt(healed, 20)
 	mobID := h.spawnDraugrAt([3]float32{5.5, 64, 0.5})
 	healer.inventory.mu.Lock()
-	healer.inventory.slots[0] = stackOf(ItemWoodenSceptre, 1)
+	healer.inventory.slots[equipmentMainHand] = stackOf(ItemWoodenSceptre, 1)
 	healer.inventory.mu.Unlock()
 	h.aimAt(healer, math.Pi/2, 0)
 
@@ -808,7 +849,7 @@ func TestASceptreLaunchesAnOrbWithoutAmmunitionAndCreditsActualHealingThreat(t *
 	beforeExperience := healer.experience
 	h.sim.mu.Unlock()
 
-	reason, err := healer.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+	reason, err := healer.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 	if err != nil || reason != vnet.RefusalReasonUnknown {
 		t.Fatalf("sceptre attack = (%s, %v), want accepted without ammunition", reason, err)
 	}
@@ -830,7 +871,7 @@ func TestASceptreLaunchesAnOrbWithoutAmmunitionAndCreditsActualHealingThreat(t *
 	}
 	h.sim.mu.Unlock()
 
-	if got := healer.InventoryState().Stacks[0].Durability; got != SceptreMaxDurability-1 {
+	if got := healer.InventoryState().Stacks[equipmentMainHand].Durability; got != SceptreMaxDurability-1 {
 		t.Errorf("sceptre durability = %d, want %d", got, SceptreMaxDurability-1)
 	}
 	for range 6 {
@@ -855,11 +896,11 @@ func TestAWornThroughSceptreDoesNothing(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	player.inventory.mu.Lock()
-	player.inventory.slots[0] = stackOf(ItemWoodenSceptre, 1)
-	player.inventory.slots[0].durability = 0
+	player.inventory.slots[equipmentMainHand] = stackOf(ItemWoodenSceptre, 1)
+	player.inventory.slots[equipmentMainHand].durability = 0
 	player.inventory.mu.Unlock()
 
-	if _, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1}); err != nil {
+	if _, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1}); err != nil {
 		t.Fatalf("worn sceptre admission: %v", err)
 	}
 	h.step()
@@ -881,14 +922,14 @@ func TestAWornThroughBowAndAnArrowMovedBeforeTheTickSpendNothing(t *testing.T) {
 			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 			player.inventory.mu.Lock()
-			player.inventory.slots[0] = stackOf(ItemBow, 1)
+			player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
 			player.inventory.slots[1] = stackOf(ItemArrow, 1)
 			if wornThrough {
-				player.inventory.slots[0].durability = 0
+				player.inventory.slots[equipmentMainHand].durability = 0
 			}
 			player.inventory.mu.Unlock()
 
-			_, err := player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: 1})
+			_, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
 			if wornThrough {
 				// Worn launchers retain the existing silent no-op admission semantics.
 				if err != nil {
@@ -901,12 +942,12 @@ func TestAWornThroughBowAndAnArrowMovedBeforeTheTickSpendNothing(t *testing.T) {
 			if !wornThrough {
 				player.inventory.slots[1] = inventoryStack{}
 			}
-			beforeBow := player.inventory.slots[0]
+			beforeBow := player.inventory.slots[equipmentMainHand]
 			player.inventory.mu.Unlock()
 			h.step()
 
 			player.inventory.mu.Lock()
-			afterBow := player.inventory.slots[0]
+			afterBow := player.inventory.slots[equipmentMainHand]
 			player.inventory.mu.Unlock()
 			if afterBow != beforeBow {
 				t.Errorf("bow changed from %+v to %+v", beforeBow, afterBow)
@@ -925,7 +966,7 @@ func TestALandedSwingCostsTheBladeNothing(t *testing.T) {
 	t.Parallel()
 
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()
@@ -933,24 +974,19 @@ func TestALandedSwingCostsTheBladeNothing(t *testing.T) {
 	if h.mobHealth(id) == draugrRow.maxHealth {
 		t.Fatal("the swing did not land, so this proves nothing about durability")
 	}
-	if got := player.InventoryState().Stacks[0]; got != starterSword() {
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != starterSword() {
 		t.Errorf("the blade is %+v after a hit, want the untouched %+v", got, starterSword())
 	}
 }
 
-// A weapon moved into the main hand still swings. The attack names its own slot, and
-// the V44 contract already says that slot is the main hand, so equipping a blade must
-// never be a way to lose the ability to attack while the hotbar is still accepted.
+// A weapon moved into the main hand swings from there. armedHarness wields the starter
+// blade through MoveInventory, so this pins the whole path a player takes: the move empties
+// hotbar slot 0, and the swing naming the main hand lands for the blade's damage.
 func TestABladeInTheMainHandStillSwings(t *testing.T) {
 	t.Parallel()
 
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
-	if _, err := player.MoveInventory(protocol.InventoryMoveRequest{
-		From: 0, To: uint8(equipmentMainHand), Count: 1,
-	}); err != nil {
-		t.Fatalf("moving the starter blade into the main hand: %v", err)
-	}
-	if err := h.swing(player, uint8(equipmentMainHand), 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("a swing naming the main hand was refused: %v", err)
 	}
 	h.step()
@@ -984,7 +1020,7 @@ func TestTheCooldownBoundsTheSwingRateAtEveryTickRate(t *testing.T) {
 			var tick uint32
 			for range int(rate) {
 				tick++
-				_ = h.swing(player, 0, tick)
+				_ = h.swing(player, mainHandSlot, tick)
 				h.step()
 			}
 
@@ -1009,7 +1045,7 @@ func TestAMissPaysTheCooldown(t *testing.T) {
 	// Nothing within reach: the draugr is placed far away.
 	h, player, _ := armedHarness(t, DefaultTickRate, [3]float32{40.5, 64, 0.5})
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the first swing was refused: %v", err)
 	}
 	h.step()
@@ -1021,7 +1057,7 @@ func TestAMissPaysTheCooldown(t *testing.T) {
 		t.Fatal("a miss paid no cooldown")
 	}
 
-	if err := h.swing(player, 0, 2); err == nil {
+	if err := h.swing(player, mainHandSlot, 2); err == nil {
 		t.Error("a second swing was accepted while the blade was recovering")
 	}
 }
@@ -1035,19 +1071,19 @@ func TestAdmissionRefusesWhatItShould(t *testing.T) {
 
 	h, player, _ := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
 
-	if err := h.swing(player, 0, 5); err != nil {
+	if err := h.swing(player, mainHandSlot, 5); err != nil {
 		t.Fatalf("the first swing was refused: %v", err)
 	}
 	// A replayed tick.
-	if err := h.swing(player, 0, 5); err == nil {
+	if err := h.swing(player, mainHandSlot, 5); err == nil {
 		t.Error("a replayed attack tick was accepted")
 	}
 	// An older one.
-	if err := h.swing(player, 0, 4); err == nil {
+	if err := h.swing(player, mainHandSlot, 4); err == nil {
 		t.Error("a stale attack tick was accepted")
 	}
 	// A second click before the tick has judged the first.
-	if err := h.swing(player, 0, 6); err == nil {
+	if err := h.swing(player, mainHandSlot, 6); err == nil {
 		t.Error("a second swing queued behind the first")
 	}
 
@@ -1055,7 +1091,7 @@ func TestAdmissionRefusesWhatItShould(t *testing.T) {
 	h.step()
 	h.advance(int(h.sim.attackCooldown))
 	h.hurt(player, PlayerMaxHealth)
-	if err := h.swing(player, 0, 100); err == nil {
+	if err := h.swing(player, mainHandSlot, 100); err == nil {
 		t.Error("a dead player's swing was accepted")
 	}
 }
@@ -1070,7 +1106,7 @@ func TestDeathDropsAPendingSwing(t *testing.T) {
 	// director would take it away, and "the swing landed nothing" and "there was
 	// nothing left to swing at" would read identically.
 	h.keepNight()
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.hurt(player, PlayerMaxHealth)
@@ -1090,10 +1126,11 @@ func TestASwingTakesTheNearestAndBreaksTiesByIdentity(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(player)
 	far := h.spawnDraugrAt([3]float32{0.5, 64, -2.0})
 	near := h.spawnDraugrAt([3]float32{0.5, 64, -1.2})
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()
@@ -1112,9 +1149,10 @@ func TestASwingNeverTouchesAnotherPlayer(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	attacker, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.wieldStarterBlade(attacker)
 	victim, _ := h.join(2, [3]float32{0.5, 64, -1.2})
 
-	if err := h.swing(attacker, 0, 1); err != nil {
+	if err := h.swing(attacker, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()
@@ -1141,7 +1179,7 @@ func TestADraugrKilledBySwingLandsNoBlowThatTick(t *testing.T) {
 	m.target = player.entityID
 	h.sim.mu.Unlock()
 
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 	h.step()
@@ -1164,7 +1202,7 @@ func TestAContendedInventoryDefersASwingWithoutLosingIt(t *testing.T) {
 	t.Parallel()
 
 	h, player, id := armedHarness(t, DefaultTickRate, [3]float32{0.5, 64, -1.5})
-	if err := h.swing(player, 0, 1); err != nil {
+	if err := h.swing(player, mainHandSlot, 1); err != nil {
 		t.Fatalf("the swing was refused: %v", err)
 	}
 
@@ -1214,7 +1252,7 @@ func TestSwingsUnderConcurrentSessionTraffic(t *testing.T) {
 			default:
 			}
 			tick++
-			_, _ = player.Attack(protocol.AttackRequest{Slot: 0, ClientTick: tick})
+			_, _ = player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick})
 			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1})
 			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: 0, Count: 1})
 		}
@@ -1269,10 +1307,11 @@ func TestASwingReadsTheBodyItReachesFromTheRegistry(t *testing.T) {
 	for kind, wantHit := range map[vnet.MobKind]bool{vnet.MobKindVargr: true, vnet.MobKindDraugr: false} {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		h.wieldStarterBlade(player)
 		// Yaw 0 looks along -Z, so this is directly ahead of the player.
 		id := h.placeSpeciesAt(kind, [3]float64{0.5, 64, 0.5 - distance})
 
-		if err := h.swing(player, 0, 1); err != nil {
+		if err := h.swing(player, mainHandSlot, 1); err != nil {
 			t.Fatalf("the swing at a %s was refused: %v", kind, err)
 		}
 		h.step()
@@ -1298,10 +1337,11 @@ func TestAVargrDiesInOneSwingFewerThanADraugr(t *testing.T) {
 
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		h.wieldStarterBlade(player)
 		id := h.placeSpeciesAt(kind, [3]float64{0.5, 64, -1.5})
 
 		for blow := 1; blow <= 10; blow++ {
-			if err := h.swing(player, 0, uint32(blow)); err != nil {
+			if err := h.swing(player, mainHandSlot, uint32(blow)); err != nil {
 				t.Fatalf("swing %d at a %s was refused: %v", blow, kind, err)
 			}
 			h.step()
@@ -1355,9 +1395,10 @@ func TestASwingDoesNotCrossASolidBlock(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
 			player, _ := h.join(1, walledPlayerSpawn)
+			h.wieldStarterBlade(player)
 			id := h.spawnDraugrAt(walledMobSpawn)
 
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()
@@ -1433,10 +1474,11 @@ func TestAnOccludedDraugrDoesNotAbsorbTheSwing(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
 			player, _ := h.join(1, pillarPlayerSpawn)
+			h.wieldStarterBlade(player)
 			occluded := h.spawnDraugrAt(occludedMobSpawn)
 			visible := h.spawnDraugrAt(visibleMobSpawn)
 
-			if err := h.swing(player, 0, 1); err != nil {
+			if err := h.swing(player, mainHandSlot, 1); err != nil {
 				t.Fatalf("the swing was refused: %v", err)
 			}
 			h.step()

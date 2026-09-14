@@ -2105,6 +2105,15 @@ func handlePostHandshake(ctx context.Context, msg protocol.Message, player *game
 				"to", msg.InventoryMove.To,
 				"count", msg.InventoryMove.Count,
 			)
+			// The one move refusal a player is told about: their own equipment said no,
+			// and the inventory they hold does not show which hand is in the way. Every
+			// other refused move stays silence — the unchanged inventory is the answer.
+			if errors.Is(mErr, game.ErrHandsOccupied) {
+				refusal := protocol.ActionRefused{Action: vnet.RefusedActionMoveInventory, Reason: vnet.RefusalReasonHandsOccupied}
+				if sErr := send(protocol.EncodeActionRefused(refusal)); sErr != nil {
+					return fmt.Errorf("session: send hands-occupied move refusal: %w", sErr)
+				}
+			}
 			return nil
 		}
 		if sErr := send(protocol.EncodeInventoryState(state)); sErr != nil {

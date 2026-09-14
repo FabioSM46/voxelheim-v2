@@ -570,29 +570,74 @@ func wornByDeath(current uint16) uint16 {
 	return uint16(uint32(current) * deathDurabilityKept / deathDurabilityScale)
 }
 
-// moveLocked applies one authoritative slot move and reports whether the state
+// ErrHandsOccupied refuses a move that would leave a two-handed weapon in the main hand
+// beside anything in the off hand. It is the one move refusal the session answers —
+// with ActionRefused{MoveInventory, HandsOccupied} — and, like every refusal, nothing moves.
+var ErrHandsOccupied = errors.New("a two-handed weapon and an off-hand item cannot be worn together")
+
+// errMoveChangesNothing is every other refused move, which is answered with silence.
+var errMoveChangesNothing = errors.New("the inventory move changes no authoritative slot")
+
+// handsOccupied reports whether these two items may not be worn in the main and off hand
+// together: both are present and the main-hand item is not registered one-handed.
+//
+// The unregistered branch is a fail-closed default and is reached by neither caller:
+// moveLocked refuses an unregistered source before asking, and Life.Validate's per-slot
+// loop refuses an unregistered id before it reaches the hands. Neither can therefore
+// report an unknown item as a two-handed conflict.
+func handsOccupied(mainHand, offHand ItemID) bool {
+	if mainHand == ItemNone || offHand == ItemNone {
+		return false
+	}
+	definition, registered := itemByID(mainHand)
+	return !registered || !definition.oneHanded
+}
+
+// placingOccupiesHandsLocked reports whether putting item into slot would break the
+// two-handed rule against what the *other* hand holds now. Reading the other hand before
+// the move is exact rather than a shortcut: wornAt already refuses every move between the
+// two hand slots, so the other hand is never the far end of the move being judged.
+func (i *inventory) placingOccupiesHandsLocked(slot uint8, item ItemID) bool {
+	switch int(slot) {
+	case equipmentMainHand:
+		return handsOccupied(item, i.slots[equipmentOffHand].item)
+	case equipmentOffHand:
+		return handsOccupied(i.slots[equipmentMainHand].item, item)
+	default:
+		return false
+	}
+}
+
+// moveLocked applies one authoritative slot move, and returns nil exactly when the state
 // changed. A partial move into an occupied different-item slot is refused: there
 // is nowhere to keep both that slot's old stack and the source remainder. A whole
 // source stack swaps with a different item instead.
-func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
+//
+// The two-handed rule is asked wherever an item enters a hand: at the destination, and
+// at the source when a swap sends the destination's item back into it. Both answer
+// ErrHandsOccupied; every other refusal is errMoveChangesNothing.
+func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) error {
 	if req.From >= protocol.InventorySlots || req.To >= protocol.InventorySlots || req.Count == 0 || req.From == req.To {
-		return false
+		return errMoveChangesNothing
 	}
 
 	source := &i.slots[req.From]
 	target := &i.slots[req.To]
 	definition, registered := itemByID(source.item)
 	if source.count == 0 || source.item == ItemNone || !registered {
-		return false
+		return errMoveChangesNothing
 	}
 	toPlace, toEquipment := wornAtForSlot(req.To)
 	if toEquipment && definition.wornAt != toPlace {
-		return false
+		return errMoveChangesNothing
 	}
 
 	moveCount := min(req.Count, source.count)
 	if toEquipment && moveCount != 1 {
-		return false
+		return errMoveChangesNothing
+	}
+	if i.placingOccupiesHandsLocked(req.To, source.item) {
+		return ErrHandsOccupied
 	}
 	switch {
 	case target.count == 0:
@@ -601,7 +646,7 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		// durable item is one to a slot — min(req.Count, 1) is always 1 — and written
 		// anyway, because "one to a slot" is a registry entry somebody can change.
 		if source.durable() && moveCount != source.count {
-			return false
+			return errMoveChangesNothing
 		}
 		// The whole struct, then the count: this is what carries durability across with
 		// the item instead of leaving the new slot holding a wearless copy of it.
@@ -611,41 +656,46 @@ func (i *inventory) moveLocked(req protocol.InventoryMoveRequest) bool {
 		if source.count == 0 {
 			*source = inventoryStack{}
 		}
-		return true
+		return nil
 
 	case target.item == source.item:
 		// Never for equipment, for the reason insertLocked does not merge it: two
 		// blades have two different amounts of wear left and one slot to record it in.
 		if toEquipment || source.durable() || target.durable() {
-			return false
+			return errMoveChangesNothing
 		}
 		if target.count >= definition.maxStack {
-			return false
+			return errMoveChangesNothing
 		}
 		moveCount = min(moveCount, definition.maxStack-target.count)
 		if moveCount == 0 {
-			return false
+			return errMoveChangesNothing
 		}
 		target.count += moveCount
 		source.count -= moveCount
 		if source.count == 0 {
 			*source = inventoryStack{}
 		}
-		return true
+		return nil
 
 	case moveCount == source.count:
 		targetDefinition, ok := itemByID(target.item)
 		if !ok {
-			return false
+			return errMoveChangesNothing
 		}
 		if place, equipment := wornAtForSlot(req.From); equipment && (targetDefinition.wornAt != place || target.count != 1) {
-			return false
+			return errMoveChangesNothing
+		}
+		// The swap-back half of the two-handed rule: dragging a sword out of the main hand
+		// onto a bow would put the bow in the hand beside the shield.
+		if i.placingOccupiesHandsLocked(req.From, target.item) {
+			return ErrHandsOccupied
 		}
 		*source, *target = *target, *source
-		return true
+		return nil
 
 	default:
-		return false
+		return errMoveChangesNothing
 	}
 }
 
@@ -707,7 +757,8 @@ func (p *Player) tryApplyDeathPenaltyLocked() bool {
 
 // MoveInventory resolves one client intent against the live authoritative slots.
 // A changed state is returned whole; every refusal returns an error so the session
-// can log it and send nothing.
+// can log it. ErrHandsOccupied is the one the session also answers; every other refusal
+// sends nothing.
 func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.InventoryState, error) {
 	p.sim.mu.Lock()
 	defer p.sim.mu.Unlock()
@@ -720,8 +771,8 @@ func (p *Player) MoveInventory(req protocol.InventoryMoveRequest) (protocol.Inve
 	}
 	defer p.inventory.mu.Unlock()
 
-	if !p.inventory.moveLocked(req) {
-		return protocol.InventoryState{}, errors.New("the inventory move changes no authoritative slot")
+	if err := p.inventory.moveLocked(req); err != nil {
+		return protocol.InventoryState{}, err
 	}
 	p.refreshWornLocked()
 	if equipmentSlot(req.From) || equipmentSlot(req.To) {
