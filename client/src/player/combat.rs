@@ -167,10 +167,8 @@ fn draw_or_sheathe_weapon(
         && intent
             .keys
             .is_some_and(|keys| keys.just_pressed(bindings.key(Control::DrawWeapon)));
-    let main_hand_armed = intent
-        .session
-        .as_deref()
-        .and_then(|session| equipment_slot(&session.0, MAIN_HAND_OFFSET))
+    // The slot a drawn hand holds, through the one answer the swing and both renderers read.
+    let main_hand_armed = hand_slot(true, 0, intent.session.as_deref())
         .and_then(|slot| attack_item_in_hand(&intent.inventory, slot))
         .is_some();
     let (next, hint) = next_drawn(drawn.0, pressed, intent.mount.mounted(), main_hand_armed);
@@ -492,7 +490,9 @@ impl HeldItem<'_> {
         if !self.drawn.0 {
             return None;
         }
-        let slot = equipment_slot(&self.session.as_deref()?.0, MAIN_HAND_OFFSET)?;
+        // [`hand_slot`], not a second resolution of the main hand: the slot a swing names is
+        // then by construction the slot the view model and the local body draw.
+        let slot = hand_slot(true, self.selected.0, self.session.as_deref())?;
         attack_item_in_hand(&self.inventory, slot).map(|item_id| (slot, item_id))
     }
 
@@ -1769,6 +1769,13 @@ mod tests {
             let found = attacks(&sent);
             assert_eq!(found.len(), 1, "slot {selected}: {found:?}");
             assert_eq!(found[0].0, main_hand(), "slot {selected}");
+            // And the swing names the very slot the drawn hand is drawn from.
+            let session = session();
+            assert_eq!(
+                Some(found[0].0),
+                hand_slot(drawn(&app), selected, Some(&session)),
+                "slot {selected}: the swing and the drawn hand named different slots"
+            );
             let swung: Vec<u16> = cursor
                 .read(app.world().resource::<Messages<SwingSent>>())
                 .map(|swing| swing.item_id)
