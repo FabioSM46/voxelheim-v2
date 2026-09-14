@@ -11,7 +11,13 @@ import (
 // main hand is dropped before admission spends anything — no energy, no cooldown, no
 // pending swing — and answered with silence, exactly as a slot holding nothing that
 // attacks is.
-func TestASwingNamingAnySlotButTheMainHandIsDroppedWithNoSideEffect(t *testing.T) {
+//
+// **Its client tick is still recorded**, as it is for every admission refusal after the
+// staleness check: a slot holding nothing that attacks, a pending swing, a cooldown and a
+// short reserve all consume their tick too. The ordering guard is about the order requests
+// arrived in, not about whether one was admitted, so the drop is pinned to that same rule
+// rather than to an exception of its own.
+func TestASwingNamingAnySlotButTheMainHandIsDroppedAndSpendsNothing(t *testing.T) {
 	t.Parallel()
 
 	for name, slot := range map[string]uint8{
@@ -48,6 +54,10 @@ func TestASwingNamingAnySlotButTheMainHandIsDroppedWithNoSideEffect(t *testing.T
 		}
 		if player.pendingSwing != nil {
 			t.Errorf("%s: a swing is pending after the drop", name)
+		}
+		if !player.haveAttackTick || player.lastAttackTick != 1 {
+			t.Errorf("%s: the ordering guard holds tick %d (recorded %v), want tick 1 recorded like every admission refusal",
+				name, player.lastAttackTick, player.haveAttackTick)
 		}
 		h.sim.mu.Unlock()
 	}

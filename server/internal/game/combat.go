@@ -74,6 +74,10 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	// main-hand equipment slot; a hotbar slot, a pack slot, another worn slot or an index
 	// past the table is dropped here, before any pending swing, cooldown or energy exists —
 	// the same silence as a slot holding nothing that attacks.
+	//
+	// Its tick is already recorded above, deliberately, like every admission refusal below:
+	// the guard orders requests by arrival, not by whether one was admitted. A second request
+	// on the same client tick is stale whatever the first one named.
 	if int(req.Slot) != equipmentMainHand {
 		return vnet.RefusalReasonUnknown, fmt.Errorf("attack slot %d is not the main hand %d", req.Slot, equipmentMainHand)
 	}
