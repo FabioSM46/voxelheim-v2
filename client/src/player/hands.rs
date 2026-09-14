@@ -8137,9 +8137,8 @@ mod tests {
     /// The sweep is the one
     /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] walks — the three
     /// blade arcs and the placement bump they can coincide with, plus rest — and the mining
-    /// loop besides, which a blade cannot reach: `player/target.rs` sends a swing instead of a
-    /// mining intent for both blades and `a_blade_in_hand_sends_a_swing_instead_of_mining`
-    /// pins it. It is swept anyway because the grip's containment is what makes the claim, and
+    /// loop besides, which a blade cannot reach: `player/target.rs` sends no mining intent for
+    /// either blade and `a_blade_on_the_hotbar_does_not_mine` pins it. It is swept anyway because the grip's containment is what makes the claim, and
     /// containment does not care which animation is playing.
     #[test]
     fn the_hand_stays_closed_over_the_grip_through_every_animation() {

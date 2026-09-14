@@ -40,7 +40,7 @@ use super::camera::{AimCamera, WorldCamera};
 use super::combat;
 use super::constants::MAX_REACH;
 use super::interpolate::SnapshotBuffer;
-use super::inventory::{ApplyInventory, Inventory, SelectedSlot};
+use super::inventory::ApplyInventory;
 use super::mobs;
 use super::{InputCadence, InputGate, SelfVitals, ViewMode, set_if_changed, tick_interval};
 use crate::net::{
@@ -578,15 +578,6 @@ fn first_body_is_unoccluded_player(
     raycast(origin, direction, distance, solid).is_none()
 }
 
-/// Whether the selected authoritative stack can present a sceptre cast.
-fn usable_sceptre_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> bool {
-    inventory.slot(selected.0).is_some_and(|stack| {
-        stack.item_id == super::crafting::ITEM_WOODEN_SCEPTRE
-            && stack.count > 0
-            && stack.durability > 0
-    })
-}
-
 /// Slab intersection distance for an already-normalised ray.
 fn ray_box_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     let mut near: f32 = 0.0;
@@ -617,14 +608,15 @@ fn aim_at_a_healing_target(
     session: Option<Res<Session>>,
     buffer: Option<Res<SnapshotBuffer>>,
     store: Option<Res<ChunkStore>>,
-    inventory: Res<Inventory>,
-    selected: Res<SelectedSlot>,
+    held: combat::HeldItem<'_>,
     cameras: Query<&Transform, With<WorldCamera>>,
     mut hint: ResMut<HealTargetHint>,
 ) {
     let next = (|| {
         let session = session.as_deref()?;
-        if !usable_sceptre_in_hand(&inventory, &selected) {
+        // The sceptre a left press would cast: the drawn main hand's, never the hotbar's,
+        // so the hint promises a heal only where a press would ask for one.
+        if held.attack_item() != Some(super::crafting::ITEM_WOODEN_SCEPTRE) {
             return None;
         }
         let buffer = buffer.as_deref()?;
@@ -976,18 +968,19 @@ fn send_block_edits(
     // held mining target becomes `None`, so one `active = false` request goes out for the
     // voxel that was being mined instead of the intent simply going quiet.
     let playing = gate.may_act();
-    // A blade in hand means the left button is a swing, and `super::combat` owns it. One
-    // predicate rather than two conditions that happen to agree: a click must never send
-    // both a mining frame and an attack, and reading the same function is what makes that
-    // structural instead of a coincidence to keep in step.
+    // A drawn weapon means the left button is a swing, and `super::combat` owns it; a weapon
+    // selected on the hotbar while sheathed means the press asks for nothing. One predicate
+    // rather than two conditions that happen to agree: a click must never send both a mining
+    // frame and an attack, and reading the same type is what makes that structural instead
+    // of a coincidence to keep in step.
     //
     // One of this player's own structures standing in front of the voxel takes the same
     // button for the same reason, and `super::structures` owns that one: a press cannot
     // both start digging a wall and ask for the tent pitched against it.
-    let swinging = held.attack_item().is_some() || aim.structure_captures_the_press();
+    let mines = held.left_button_mines() && !aim.structure_captures_the_press();
     let desired = buttons
         .as_deref()
-        .filter(|buttons| playing && !swinging && buttons.pressed(BREAK_BUTTON))
+        .filter(|buttons| playing && mines && buttons.pressed(BREAK_BUTTON))
         .and_then(|_| aim.hit().map(|hit| hit.block));
 
     if mining.target != desired {
@@ -1030,8 +1023,9 @@ fn send_block_edits(
     }
     // A structure in hand means the same press plants a camp, and `super::structures`
     // owns it. The same one-predicate rule the left button follows above: a click must
-    // never ask for a voxel and a building at once.
-    if held.structure().is_some() {
+    // never ask for a voxel and a building at once. And a drawn weapon places nothing: the
+    // right button then raises a worn shield, which `super::combat` sends.
+    if !held.places() || held.structure().is_some() {
         return;
     }
     let Some(pos) = hit.place_target() else {
@@ -1156,6 +1150,7 @@ mod tests {
         ChunkCoord, EntityState, InventoryInbox, InventoryStack, InventoryState, SessionParams,
         Snapshot, SnapshotInbox, WorldInbox, WorldUpdate,
     };
+    use crate::player::SelectedSlot;
     use crate::player::crafting::ITEM_IRON_SWORD;
     use crate::player::{InputMode, Inventory, LookState, PlayerPlugin};
     use crate::wire::voxelheim::net as fb;
@@ -1268,22 +1263,26 @@ mod tests {
         );
     }
 
+    /// The hint asks the same stack question a cast does, so a worn-through sceptre promises
+    /// no heal. Which hand it asks about — the drawn main hand — is `HeldItem`'s.
     #[test]
-    fn healing_aim_requires_durability_in_the_selected_sceptre() {
+    fn healing_aim_requires_durability_in_the_sceptre() {
+        use crate::player::Inventory;
+        use crate::player::crafting::ITEM_WOODEN_SCEPTRE;
         let sceptre = |durability| InventoryStack {
-            item_id: crate::player::crafting::ITEM_WOODEN_SCEPTRE,
+            item_id: ITEM_WOODEN_SCEPTRE,
             count: 1,
             durability,
             max_durability: 50,
         };
-        let selected = SelectedSlot(0);
 
-        assert!(usable_sceptre_in_hand(
-            &Inventory::from_stacks(vec![sceptre(1)]),
-            &selected
-        ));
-        assert!(
-            !usable_sceptre_in_hand(&Inventory::from_stacks(vec![sceptre(0)]), &selected),
+        assert_eq!(
+            combat::attack_item_in_hand(&Inventory::from_stacks(vec![sceptre(1)]), 0),
+            Some(ITEM_WOODEN_SCEPTRE)
+        );
+        assert_eq!(
+            combat::attack_item_in_hand(&Inventory::from_stacks(vec![sceptre(0)]), 0),
+            None,
             "a worn-through sceptre must keep the default crosshair"
         );
     }
@@ -1781,9 +1780,9 @@ mod tests {
             tick_rate: 20,
             chunk_size: SIZE,
             view_distance: 8,
-            inventory_slots: 37,
+            inventory_slots: 41,
             hotbar_slots: 9,
-            equipment_slots: 4,
+            equipment_slots: 5,
             player_token: crate::net::ANY_TOKEN,
             voice_range_blocks: 0.0,
         })
@@ -2464,11 +2463,11 @@ mod tests {
     }
 
     #[test]
-    fn a_blade_in_hand_sends_a_swing_instead_of_mining() {
-        // The mutual exclusion, from the mining side, and over **both** blades. `super::combat`
-        // asserts the other half — that the same click does send a swing — and both read the
-        // one predicate, which is what makes "never both" a property of a function rather
-        // than of two conditions that happen to agree.
+    fn a_blade_on_the_hotbar_does_not_mine() {
+        // The mutual exclusion, from the mining side, and over **both** blades. Sheathed, a
+        // hotbar blade asks for nothing — `super::combat` asserts it sends no swing either —
+        // and both read one `HeldItem`, which is what makes "never both" a property of one
+        // type rather than of two conditions that happen to agree.
         for (name, item_id) in [
             ("the rusty sword", combat::ITEM_RUSTY_SWORD),
             ("the iron sword", ITEM_IRON_SWORD),
@@ -2495,6 +2494,60 @@ mod tests {
                 "{name}: a click with a blade in hand also asked to mine"
             );
         }
+    }
+
+    /// **Drawn, the left button swings the main hand and neither button edits a block** (#1239).
+    ///
+    /// The hotbar holds stone the whole time — something both buttons would otherwise spend —
+    /// so a mining frame or a placement here could only have come from the hotbar slot.
+    #[test]
+    fn a_drawn_weapon_neither_mines_nor_places() {
+        let wall = IVec3::new(3, 81, 0);
+        let (mut app, sent) = clicking_app(store_with(&[wall]));
+        let main_hand =
+            crate::player::inventory::equipment_slot(&session().0, crate::player::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); usize::from(session().0.inventory_slots)];
+        stacks[0] = InventoryStack {
+            item_id: palette::STONE,
+            count: 1,
+            ..Default::default()
+        };
+        stacks[usize::from(main_hand)] = blade_of(combat::ITEM_RUSTY_SWORD, 100);
+        app.world_mut()
+            .resource_mut::<InventoryInbox>()
+            .push(InventoryState { stacks, silver: 0 });
+
+        tick_each_update(&mut app);
+        app.update();
+        app.update();
+        combat::press_draw_weapon(&mut app, ButtonState::Pressed);
+        app.update();
+        assert_eq!(target(&app).0.map(|hit| hit.block), Some(wall));
+        while sent.try_recv().is_ok() {}
+
+        click(&mut app, BREAK_BUTTON);
+        click(&mut app, PLACE_BUTTON);
+        app.update();
+        app.update();
+
+        let mut attacks = Vec::new();
+        let (mut mined, mut edited) = (0, 0);
+        while let Ok(frame) = sent.try_recv() {
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            if let Some(attack) = envelope.payload_as_attack_request() {
+                attacks.push(attack.slot());
+            }
+            mined += usize::from(envelope.payload_as_mine_request().is_some());
+            edited += usize::from(envelope.payload_as_block_edit_request().is_some());
+        }
+        assert_eq!(
+            attacks,
+            [main_hand],
+            "the drawn press did not swing the main hand"
+        );
+        assert_eq!(mined, 0, "a drawn weapon also asked to mine");
+        assert_eq!(edited, 0, "a drawn weapon also placed a block");
     }
 
     /// A blade worn through mines, because the server would refuse the swing.

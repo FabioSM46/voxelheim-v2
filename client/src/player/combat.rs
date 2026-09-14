@@ -13,14 +13,17 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use super::crafting;
-use super::inventory::{Inventory, SelectedSlot};
-use super::{ApplySnapshots, InputCadence, InputGate, SelfVitals, ViewMode};
-use crate::net::{AttackRequest, Outbound, Sent, encode_attack_request};
+use super::inventory::{ApplyInventory, Inventory, MAIN_HAND_OFFSET, SelectedSlot, equipment_slot};
+use super::{
+    ApplySnapshots, InputCadence, InputGate, LocalMount, SelfVitals, ViewMode, set_if_changed,
+};
+use crate::net::{AttackRequest, Outbound, Sent, Session, encode_attack_request};
 use crate::net::{BlockRequest, ConnectionState, encode_block_request};
+use crate::settings::{Control, Settings};
 use crate::ui::{EnergyRefused, PlayerMessage, PlayerMessageKind, PublishPlayerMessages};
 
 /// The button that swings, and the same one that mines. Which of the two it means is
-/// what [`attack_item_in_hand`] decides.
+/// what [`WeaponDrawn`] decides: drawn it swings the main hand, sheathed it mines.
 const SWING_BUTTON: MouseButton = MouseButton::Left;
 const BLOCK_BUTTON: MouseButton = MouseButton::Right;
 
@@ -69,6 +72,90 @@ pub(super) fn item_is_a_blade(item_id: u16) -> bool {
     BLADE_SHAPES.contains(&item_id)
 }
 
+/// Whether the main-hand weapon is drawn: the one bit that routes the left button.
+///
+/// **Drawn**, the left button swings the main-hand weapon and names its slot, whatever the
+/// hotbar has selected, and nothing is mined or placed. **Sheathed**, the hotbar is what the
+/// hand holds: the left button mines, the right button places, and a weapon selected there
+/// swings nothing — the server answers only a swing that names the main hand (#1236).
+///
+/// **Local input routing and presentation, and nothing more** (#1239). It is never encoded
+/// into any frame and it decides no outcome: a modified client that drew nothing could still
+/// name the main hand, and the server would judge that swing exactly as it judges this one.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WeaponDrawn(pub(super) bool);
+
+/// What one frame does to [`WeaponDrawn`], and the hint a refused draw shows.
+///
+/// A function of four facts rather than a system body, so every combination is a row in a
+/// table test. A press toggles; drawing needs something in the main hand and a player on
+/// foot, and either missing leaves the weapon sheathed with a short line saying why. Past the
+/// press, a drawn weapon is sheathed the frame it stops being drawable — mounting, or the
+/// main hand emptied by a move, a drop or a break — so a player is never left unable to
+/// mine behind a weapon that is no longer there.
+fn next_drawn(
+    drawn: bool,
+    pressed: bool,
+    mounted: bool,
+    main_hand_holds: bool,
+) -> (bool, Option<&'static str>) {
+    let (wanted, hint) = match (pressed, drawn) {
+        (true, true) => (false, None),
+        (true, false) if mounted => (false, Some("Dismount to draw your weapon.")),
+        (true, false) if !main_hand_holds => (
+            false,
+            Some("Your main hand is empty; equip a weapon to draw it."),
+        ),
+        (true, false) => (true, None),
+        (false, drawn) => (drawn, None),
+    };
+    (wanted && !mounted && main_hand_holds, hint)
+}
+
+/// Everything the draw key reads, in one bundle.
+#[derive(SystemParam)]
+struct DrawIntent<'w> {
+    keys: Option<Res<'w, ButtonInput<KeyCode>>>,
+    settings: Option<Res<'w, Settings>>,
+    gate: InputGate<'w>,
+    session: Option<Res<'w, Session>>,
+    inventory: Res<'w, Inventory>,
+    mount: Res<'w, LocalMount>,
+}
+
+/// Turns the draw key into [`WeaponDrawn`], and sheathes a weapon that can no longer be drawn.
+///
+/// One press is one toggle: `just_pressed` is an edge. [`InputGate::may_act`] closes the
+/// press for every screen and for death, as it does for the consume key; the forced sheathe
+/// below it is not a press and is not gated, so opening the pack while mounting still ends
+/// the frame sheathed. Selecting a hotbar slot sheathes too, and `super::inventory` does that
+/// where the selection is made.
+fn draw_or_sheathe_weapon(
+    intent: DrawIntent<'_>,
+    mut drawn: ResMut<WeaponDrawn>,
+    mut messages: MessageWriter<PlayerMessage>,
+) {
+    let bindings = intent
+        .settings
+        .as_deref()
+        .map_or_else(Default::default, |settings| *settings.bindings());
+    let pressed = intent.gate.may_act()
+        && intent
+            .keys
+            .is_some_and(|keys| keys.just_pressed(bindings.key(Control::DrawWeapon)));
+    let main_hand_holds = intent
+        .session
+        .as_deref()
+        .and_then(|session| equipment_slot(&session.0, MAIN_HAND_OFFSET))
+        .and_then(|slot| intent.inventory.slot(slot))
+        .is_some_and(|stack| stack.count > 0);
+    let (next, hint) = next_drawn(drawn.0, pressed, intent.mount.mounted(), main_hand_holds);
+    set_if_changed(&mut drawn, WeaponDrawn(next));
+    if let Some(hint) = hint {
+        messages.write(PlayerMessage::new(PlayerMessageKind::Warn, hint));
+    }
+}
+
 pub(super) struct CombatPlugin;
 
 impl Plugin for CombatPlugin {
@@ -79,12 +166,28 @@ impl Plugin for CombatPlugin {
         app.init_resource::<BlockIntent>()
             .init_resource::<SelfVitals>()
             .init_resource::<EnergyAnswers>()
+            .init_resource::<WeaponDrawn>()
+            .init_resource::<LocalMount>()
             .add_message::<SwingSent>()
             .add_message::<SwingAbandoned>()
             // `ui/status.rs` writes it in the game; registered here too so this module
             // stands up without the UI.
             .add_message::<EnergyRefused>()
             .add_message::<PlayerMessage>()
+            .add_systems(
+                Update,
+                // Before every sender that asks [`HeldItem`], so a press of the draw key and a
+                // click on one frame route the click by the state the key just chose. After the
+                // snapshots and the pack, because mounting and an emptied main hand sheathe.
+                draw_or_sheathe_weapon
+                    .in_set(PublishPlayerMessages)
+                    .after(ApplySnapshots)
+                    .after(ApplyInventory)
+                    .before(ApplyCombatInput)
+                    .before(super::target::ApplyTargetInput)
+                    .before(super::structures::AimStructures)
+                    .before(super::structures::PreviewFootprint),
+            )
             .add_systems(
                 Update,
                 // Before both senders, so a refusal is attributed against the requests that
@@ -322,10 +425,10 @@ pub(super) fn blade_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> b
     })
 }
 
-/// The selected attack-capable presentation item, if it is present and usable.
+/// The attack-capable presentation item one slot holds, if it is present and usable.
 /// Ammunition is deliberately absent: only the server decides whether a bow may fire.
-pub(super) fn attack_item_in_hand(inventory: &Inventory, selected: &SelectedSlot) -> Option<u16> {
-    inventory.slot(selected.0).and_then(|stack| {
+pub(super) fn attack_item_in_hand(inventory: &Inventory, slot: u8) -> Option<u16> {
+    inventory.slot(slot).and_then(|stack| {
         (LEFT_BUTTON_USES.contains(&stack.item_id)
             && stack.count > 0
             && (stack.max_durability == 0 || stack.durability > 0))
@@ -333,36 +436,71 @@ pub(super) fn attack_item_in_hand(inventory: &Inventory, selected: &SelectedSlot
     })
 }
 
-/// The selected slot and what it holds, as the input systems ask about it.
+/// What the hand holds and which slot each button names, as the input systems ask about it.
 ///
-/// A bundle rather than two parameters, because both systems that route the left button
-/// need the pair and `send_block_edits` was already at the argument bound. Bundling also
-/// puts the shared question — is there an attack item in hand — on one type instead of leaving
-/// two call sites to remember to ask it the same way.
+/// A bundle rather than separate parameters, because every system that routes a button
+/// needs the same facts and `send_block_edits` was already at the argument bound. Bundling
+/// also puts the shared questions — does the left button swing, mine, or neither; does the
+/// right button place — on one type instead of leaving call sites to ask them the same way.
+///
+/// **Two hands, one bit between them** ([`WeaponDrawn`]). The swing reads the main hand while
+/// drawn; mining and placing read the hotbar while sheathed. Neither ever reads the other.
 #[derive(SystemParam)]
 pub(super) struct HeldItem<'w> {
     inventory: Res<'w, Inventory>,
     selected: Res<'w, SelectedSlot>,
+    session: Option<Res<'w, Session>>,
+    drawn: Res<'w, WeaponDrawn>,
 }
 
 impl HeldItem<'_> {
-    /// Which authoritative slot the hotbar has selected.
+    /// Which authoritative slot the hotbar has selected: the one mining and placing name.
     pub(super) fn slot(&self) -> u8 {
         self.selected.0
     }
 
-    /// Which usable attack item that slot presents, if any.
-    pub(super) fn attack_item(&self) -> Option<u16> {
-        attack_item_in_hand(&self.inventory, &self.selected)
+    /// The main-hand slot and the usable attack item in it, while the weapon is drawn.
+    ///
+    /// `None` while sheathed, whatever the hotbar holds: a swing names only the main hand,
+    /// found through [`equipment_slot`] and never as a literal.
+    pub(super) fn swing(&self) -> Option<(u8, u16)> {
+        if !self.drawn.0 {
+            return None;
+        }
+        let slot = equipment_slot(&self.session.as_deref()?.0, MAIN_HAND_OFFSET)?;
+        attack_item_in_hand(&self.inventory, slot).map(|item_id| (slot, item_id))
     }
 
-    /// Which structure that slot would plant, if it plants one.
+    /// Which usable attack item a left press would swing, if any. See [`Self::swing`].
+    pub(super) fn attack_item(&self) -> Option<u16> {
+        self.swing().map(|(_, item_id)| item_id)
+    }
+
+    /// Whether the left button mines: sheathed, and no weapon selected on the hotbar.
+    ///
+    /// A hotbar weapon mines nothing and swings nothing. It never mined before the main hand
+    /// existed, and a press that asked for neither is the honest answer to a weapon held
+    /// where the server will not swing it. A worn-through one mines, as it always has.
+    pub(super) fn left_button_mines(&self) -> bool {
+        !self.drawn.0 && attack_item_in_hand(&self.inventory, self.selected.0).is_none()
+    }
+
+    /// Whether the right button may place a block or a structure: only while sheathed. Drawn,
+    /// it raises a worn shield and nothing else.
+    pub(super) fn places(&self) -> bool {
+        !self.drawn.0
+    }
+
+    /// Which structure that slot would plant, if it plants one — never while drawn.
     ///
     /// Read by the placement sender in [`super::structures`] and by the block-edit path in
     /// [`super::target`], for the reason [`Self::attack_item`] is read by two sites: one press
     /// must never ask for a voxel and a building at once, and asking the same function is
     /// what makes that structural.
     pub(super) fn structure(&self) -> Option<crate::net::StructureKind> {
+        if !self.places() {
+            return None;
+        }
         super::structures::structure_in_hand(
             self.inventory
                 .slot(self.selected.0)
@@ -372,7 +510,12 @@ impl HeldItem<'_> {
     }
 }
 
-/// Sends exactly one `AttackRequest` per press, while a usable attack item is selected.
+/// Sends exactly one `AttackRequest` per press, while a usable weapon is drawn.
+///
+/// **The slot is the main hand's**, whatever the hotbar has selected, and the swing's shape
+/// follows the main-hand item. Sheathed, a press sends nothing from here. A swing from the
+/// main hand is still a swing, so [`EnergyAnswers`] counts it exactly as before. A drawn bow
+/// sends an `AttackRequest` the server ignores — its bow fires only through a draw (#1237).
 ///
 /// `just_pressed`, never `pressed`: a swing is an event and the server refuses a second
 /// one inside its cooldown anyway, so holding the button down would only fill the
@@ -415,7 +558,7 @@ fn send_attacks(
     if structure.0.is_some() {
         return;
     }
-    let Some(item_id) = held.attack_item() else {
+    let Some((slot, item_id)) = held.swing() else {
         return;
     };
     if intent.raised && vitals.get().is_some_and(|vitals| vitals.blocking) {
@@ -426,7 +569,7 @@ fn send_attacks(
         return;
     };
     let request = AttackRequest {
-        slot: held.slot(),
+        slot,
         // The counter `PlayerInput`, placement and mining all share, so the server can
         // order a swing against the aim frame that carries the same number.
         client_tick: cadence.client_tick,
@@ -459,6 +602,23 @@ fn send_attacks(
 pub(super) fn reset_world(world: &mut World) {
     crate::world::transition::reset::<BlockIntent>(world);
     crate::world::transition::reset::<EnergyAnswers>(world);
+    crate::world::transition::reset::<WeaponDrawn>(world);
+}
+
+/// Presses the default [`Control::DrawWeapon`] key the way a window does, for tests in any
+/// player module. Needs `InputPlugin`; release is not required between presses of different
+/// keys, but is between two presses of this one.
+#[cfg(test)]
+pub(super) fn press_draw_weapon(app: &mut App, state: bevy::input::ButtonState) {
+    use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+    app.world_mut().write_message(KeyboardInput {
+        key_code: crate::settings::Bindings::default().key(Control::DrawWeapon),
+        logical_key: Key::Unidentified(NativeKey::Unidentified),
+        state,
+        text: None,
+        repeat: false,
+        window: Entity::PLACEHOLDER,
+    });
 }
 
 #[cfg(test)]
@@ -493,19 +653,48 @@ mod tests {
             tick_rate: 20,
             chunk_size: 32,
             view_distance: 8,
-            inventory_slots: 37,
+            inventory_slots: 41,
             hotbar_slots: 9,
-            equipment_slots: 4,
+            equipment_slots: 5,
             player_token: crate::net::ANY_TOKEN,
             voice_range_blocks: 0.0,
         })
     }
 
-    /// An app that can click and somewhere for the frames to go.
+    /// The main hand's absolute slot in [`session`], through the one accessor.
+    fn main_hand() -> u8 {
+        equipment_slot(&session().0, MAIN_HAND_OFFSET).expect("the session has a main hand")
+    }
+
+    /// Presses and lets go of the draw key, a frame each.
+    fn toggle_draw(app: &mut App) {
+        press_draw_weapon(app, ButtonState::Pressed);
+        app.update();
+        press_draw_weapon(app, ButtonState::Released);
+        app.update();
+    }
+
+    fn drawn(app: &App) -> bool {
+        app.world().resource::<WeaponDrawn>().0
+    }
+
+    /// An app that can click, somewhere for the frames to go, and `main_hand` in the main hand
+    /// — drawn when there is something to draw.
     ///
     /// The queue is deeper than any of these tests needs, so a full one can never be what
     /// makes a request go missing.
-    fn clicking_app(slot_zero: InventoryStack) -> (App, Receiver<Vec<u8>>) {
+    fn clicking_app(main_hand: InventoryStack) -> (App, Receiver<Vec<u8>>) {
+        let (mut app, sent) = sheathed_app(&[(self::main_hand(), main_hand)]);
+        if main_hand.count > 0 {
+            toggle_draw(&mut app);
+            assert!(drawn(&app), "the main-hand weapon did not draw");
+        }
+        drain(&sent);
+        (app, sent)
+    }
+
+    /// An app holding `pack`, with nothing drawn.
+    fn sheathed_app(pack: &[(u8, InventoryStack)]) -> (App, Receiver<Vec<u8>>) {
         let mut app = App::new();
         let (outbound, sent) = Outbound::to_a_test(64);
         app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
@@ -516,7 +705,10 @@ mod tests {
             .insert_resource(outbound)
             .add_plugins(PlayerPlugin);
 
-        deliver(&mut app, slot_zero);
+        deliver_pack(&mut app, pack);
+        // Two frames: the first ingests the pack, and the second leaves `InputMode` unchanged
+        // so `may_act` is not looking at a mode that changed this frame.
+        app.update();
         app.update();
         drain(&sent);
         (app, sent)
@@ -529,7 +721,7 @@ mod tests {
     /// reads as `Sent::Dropped`. The receiver is returned rather than discarded — dropping
     /// it would disconnect the channel and turn every later send into the silent
     /// `Sent::Closed` instead.
-    fn clicking_app_that_drops(slot_zero: InventoryStack) -> (App, Receiver<Vec<u8>>) {
+    fn clicking_app_that_drops(main_hand: InventoryStack) -> (App, Receiver<Vec<u8>>) {
         let mut app = App::new();
         let (outbound, never_received) = Outbound::to_a_test(0);
         app.add_plugins((MinimalPlugins, AssetPlugin::default(), InputPlugin))
@@ -540,8 +732,12 @@ mod tests {
             .insert_resource(outbound)
             .add_plugins(PlayerPlugin);
 
-        deliver(&mut app, slot_zero);
+        deliver(&mut app, main_hand);
         app.update();
+        app.update();
+        if main_hand.count > 0 {
+            toggle_draw(&mut app);
+        }
         (app, never_received)
     }
 
@@ -581,13 +777,21 @@ mod tests {
         );
     }
 
-    /// Replaces the pack wholesale, as one more complete `InventoryState` from the server.
+    /// Replaces the pack wholesale with `main_hand` in the main hand, as one more complete
+    /// `InventoryState` from the server.
     ///
     /// Whole rather than edited, because that is the only kind of inventory this client
     /// has: there is no `set_slot` here to reach for.
-    fn deliver(app: &mut App, slot_zero: InventoryStack) {
-        let mut stacks = vec![InventoryStack::default(); 36];
-        stacks[0] = slot_zero;
+    fn deliver(app: &mut App, main_hand: InventoryStack) {
+        deliver_pack(app, &[(self::main_hand(), main_hand)]);
+    }
+
+    /// Replaces the pack wholesale with these stacks at these slots.
+    fn deliver_pack(app: &mut App, pack: &[(u8, InventoryStack)]) {
+        let mut stacks = vec![InventoryStack::default(); usize::from(session().0.inventory_slots)];
+        for (slot, stack) in pack {
+            stacks[usize::from(*slot)] = *stack;
+        }
         app.world_mut()
             .resource_mut::<InventoryInbox>()
             .push(InventoryState { stacks, silver: 0 });
@@ -752,11 +956,19 @@ mod tests {
                 "{name}: one click sent {} swings",
                 found.len()
             );
-            assert_eq!(found[0].0, 0, "{name}: the swing named the wrong slot");
+            assert_eq!(
+                found[0].0,
+                main_hand(),
+                "{name}: the swing named the wrong slot"
+            );
         }
     }
 
     /// Local ammunition is never a gate: the server owns both the count and the refusal.
+    ///
+    /// From the drawn main hand, where the bow now has to be for a press to name it. The
+    /// server launches nothing from this frame since #1237 — its bow fires through a draw —
+    /// and that is its answer to give, not a reason to stop asking here.
     #[test]
     fn one_click_with_a_bow_sends_an_attack_without_checking_for_arrows() {
         let (mut app, sent) = clicking_app(blade_of(crafting::ITEM_BOW));
@@ -790,7 +1002,7 @@ mod tests {
             app.update();
 
             let tick = app.world().resource::<InputCadence>().client_tick;
-            assert_eq!(attacks(&sent), vec![(0, tick)], "{name}");
+            assert_eq!(attacks(&sent), vec![(main_hand(), tick)], "{name}");
         }
     }
 
@@ -911,13 +1123,14 @@ mod tests {
             .insert_resource(outbound)
             .add_plugins(PlayerPlugin);
 
-        let mut stacks = vec![InventoryStack::default(); 36];
-        stacks[0] = blade();
-        app.world_mut()
-            .resource_mut::<InventoryInbox>()
-            .push(InventoryState { stacks, silver: 0 });
-
+        deliver(&mut app, blade());
         app.update();
+        app.update();
+        toggle_draw(&mut app);
+        assert!(
+            drawn(&app),
+            "the blade did not draw, so this test proves nothing"
+        );
 
         // Filled explicitly rather than by waiting for the input stream to do it: the
         // input cadence is time-paced, so an app that runs two frames in a microsecond
@@ -1300,7 +1513,7 @@ mod tests {
         let slots: Vec<u8> = asked.iter().map(|(slot, _)| *slot).collect();
         assert_eq!(
             slots,
-            vec![0, 0, 0],
+            vec![main_hand(); 3],
             "the three swings named different slots: {asked:?}"
         );
 
@@ -1353,5 +1566,240 @@ mod tests {
                 "item {item_id} swings and the hand does not draw it as a blade"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Drawing the main-hand weapon (#1239)
+    // -----------------------------------------------------------------------
+
+    /// Every combination of press, mount and main hand the draw rule distinguishes.
+    #[test]
+    fn next_drawn_answers_every_press_and_every_reason_to_sheathe() {
+        const EMPTY: Option<&str> = Some("Your main hand is empty; equip a weapon to draw it.");
+        const RIDING: Option<&str> = Some("Dismount to draw your weapon.");
+        // (name, drawn, pressed, mounted, main hand holds) -> (drawn, hint)
+        for (name, drawn, pressed, mounted, holds, want) in [
+            (
+                "a press draws a held weapon",
+                false,
+                true,
+                false,
+                true,
+                (true, None),
+            ),
+            (
+                "a second press sheathes it",
+                true,
+                true,
+                false,
+                true,
+                (false, None),
+            ),
+            (
+                "an empty main hand stays sheathed",
+                false,
+                true,
+                false,
+                false,
+                (false, EMPTY),
+            ),
+            (
+                "a rider stays sheathed",
+                false,
+                true,
+                true,
+                true,
+                (false, RIDING),
+            ),
+            (
+                "no press keeps it drawn",
+                true,
+                false,
+                false,
+                true,
+                (true, None),
+            ),
+            (
+                "no press keeps it sheathed",
+                false,
+                false,
+                false,
+                true,
+                (false, None),
+            ),
+            ("mounting sheathes", true, false, true, true, (false, None)),
+            (
+                "an emptied main hand sheathes",
+                true,
+                false,
+                false,
+                false,
+                (false, None),
+            ),
+            (
+                "a press while mounted and drawn sheathes",
+                true,
+                true,
+                true,
+                true,
+                (false, None),
+            ),
+        ] {
+            assert_eq!(next_drawn(drawn, pressed, mounted, holds), want, "{name}");
+        }
+    }
+
+    /// **The key toggles, and the drawn state never leaves this client.**
+    ///
+    /// Every frame sent across three presses is the tick-paced input stream and nothing else:
+    /// no frame carries the state, because no frame has a field for it.
+    #[test]
+    fn the_draw_key_toggles_and_encodes_nothing() {
+        let (mut app, sent) = sheathed_app(&[(main_hand(), blade())]);
+        let mut frames = Vec::new();
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            toggle_draw(&mut app);
+            seen.push(drawn(&app));
+            while let Ok(frame) = sent.try_recv() {
+                frames.push(frame);
+            }
+        }
+        assert_eq!(seen, [true, false, true]);
+        for frame in frames {
+            let envelope = fb::root_as_envelope(&frame).expect("the client's own bytes are valid");
+            assert!(
+                envelope.payload_as_player_input().is_some(),
+                "drawing or sheathing sent a {:?} frame",
+                envelope.payload_type()
+            );
+        }
+    }
+
+    /// Pressing the key with an empty main hand stays sheathed and says why, once.
+    #[test]
+    fn drawing_with_an_empty_main_hand_stays_sheathed_and_hints() {
+        let (mut app, sent) = sheathed_app(&[(0, blade())]);
+        press_draw_weapon(&mut app, ButtonState::Pressed);
+        app.update();
+
+        assert!(!drawn(&app), "an empty main hand drew something");
+        assert_eq!(
+            player_messages(&app),
+            [PlayerMessage::new(
+                PlayerMessageKind::Warn,
+                "Your main hand is empty; equip a weapon to draw it."
+            )]
+        );
+        click(&mut app);
+        app.update();
+        assert!(attacks(&sent).is_empty(), "a sheathed press swung");
+    }
+
+    /// **Drawn, the press swings the main hand whatever the hotbar selects** — and the swing's
+    /// shape follows the main-hand item, not the selected one.
+    #[test]
+    fn a_drawn_press_swings_the_main_hand_whatever_the_hotbar_selects() {
+        let (mut app, sent) = sheathed_app(&[
+            (0, blade_of(ITEM_IRON_SWORD)),
+            (2, one(ITEM_STONE)),
+            (main_hand(), blade_of(crafting::ITEM_WOODEN_SCEPTRE)),
+        ]);
+        for selected in [0, 2] {
+            // Written directly: a hotbar key would sheathe, which is its own test below.
+            *app.world_mut().resource_mut::<SelectedSlot>() = SelectedSlot(selected);
+            if !drawn(&app) {
+                toggle_draw(&mut app);
+            }
+            let mut cursor = app.world().resource::<Messages<SwingSent>>().get_cursor();
+            click(&mut app);
+            app.update();
+            release(&mut app);
+            app.update();
+
+            let found = attacks(&sent);
+            assert_eq!(found.len(), 1, "slot {selected}: {found:?}");
+            assert_eq!(found[0].0, main_hand(), "slot {selected}");
+            let swung: Vec<u16> = cursor
+                .read(app.world().resource::<Messages<SwingSent>>())
+                .map(|swing| swing.item_id)
+                .collect();
+            assert_eq!(swung, [crafting::ITEM_WOODEN_SCEPTRE], "slot {selected}");
+        }
+    }
+
+    /// A weapon selected on the hotbar while sheathed does not attack: no request, no swing.
+    #[test]
+    fn a_weapon_on_the_hotbar_while_sheathed_neither_swings_nor_animates() {
+        for (name, stack) in blades() {
+            let (mut app, sent) =
+                sheathed_app(&[(0, stack), (main_hand(), blade_of(ITEM_IRON_SWORD))]);
+            click(&mut app);
+            app.update();
+            assert!(attacks(&sent).is_empty(), "{name}: a sheathed press swung");
+            assert_eq!(
+                app.world().resource::<Messages<SwingSent>>().len(),
+                0,
+                "{name}: a sheathed press animated a swing"
+            );
+        }
+    }
+
+    /// Selecting a hotbar slot while drawn sheathes — the slot already selected included.
+    #[test]
+    fn selecting_a_hotbar_slot_sheathes_the_drawn_weapon() {
+        use bevy::input::keyboard::{Key, KeyboardInput};
+        let (mut app, sent) = clicking_app(blade());
+        assert_eq!(app.world().resource::<SelectedSlot>().0, 0);
+        app.world_mut().write_message(KeyboardInput {
+            key_code: KeyCode::Digit1,
+            logical_key: Key::Character("1".into()),
+            state: ButtonState::Pressed,
+            text: Some("1".into()),
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
+        app.update();
+        assert!(
+            !drawn(&app),
+            "selecting a hotbar slot left the weapon drawn"
+        );
+
+        click(&mut app);
+        app.update();
+        assert!(attacks(&sent).is_empty(), "the sheathed press still swung");
+    }
+
+    /// Mounting sheathes: the frame the server's snapshot says this session rides.
+    #[test]
+    fn mounting_sheathes_the_drawn_weapon() {
+        use crate::net::{MountKind, MountState, Snapshot, SnapshotInbox};
+        let (mut app, _sent) = clicking_app(blade());
+        app.world_mut().resource_mut::<SnapshotInbox>().push(
+            Snapshot {
+                server_tick: 1,
+                mounts: vec![MountState {
+                    entity_id: session().0.entity_id,
+                    mount: MountKind::GreyHorse,
+                }],
+                ..Default::default()
+            },
+            std::time::Instant::now(),
+        );
+        app.update();
+        assert!(
+            app.world().resource::<LocalMount>().mounted(),
+            "the snapshot did not mount this session, so this test proves nothing"
+        );
+        assert!(!drawn(&app), "mounting left the weapon drawn");
+    }
+
+    /// A drawn weapon that leaves the main hand sheathes, so the left button mines again.
+    #[test]
+    fn a_main_hand_emptied_while_drawn_sheathes() {
+        let (mut app, _sent) = clicking_app(blade());
+        deliver(&mut app, InventoryStack::default());
+        app.update();
+        assert!(!drawn(&app), "an empty main hand stayed drawn");
     }
 }

@@ -16,7 +16,7 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
-use super::combat::ITEM_RUSTY_SWORD;
+use super::combat::{ITEM_RUSTY_SWORD, WeaponDrawn};
 use super::crafting::{
     ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN,
     ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES,
@@ -185,6 +185,7 @@ impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Inventory>()
             .init_resource::<SelectedSlot>()
+            .init_resource::<WeaponDrawn>()
             .init_resource::<PickedStack>()
             // PlayerPlugin owns all three in the game, while InventoryPlugin's headless
             // contract stays complete when the module is tested on its own.
@@ -242,12 +243,17 @@ fn ingest_inventory(
 }
 
 /// Selects a hotbar slot by index with keys 1 through 9 or the mouse wheel.
+///
+/// **Any selection sheathes a drawn weapon** (#1239), the slot already selected included:
+/// choosing from the hotbar is choosing what the hand holds, and a drawn weapon is the other
+/// answer to that. Local routing only, like the selection itself.
 fn select_hotbar(
     keys: Option<Res<ButtonInput<KeyCode>>>,
     scroll: Option<Res<AccumulatedMouseScroll>>,
     session: Option<Res<Session>>,
     gate: InputGate<'_>,
     mut selected: ResMut<SelectedSlot>,
+    mut drawn: ResMut<WeaponDrawn>,
 ) {
     // Death is read here exactly as a UI mode is: the selection survives it untouched, so
     // a respawned player comes back holding what they were holding. Nothing is chosen for
@@ -264,6 +270,7 @@ fn select_hotbar(
         for (index, key) in HOTBAR_KEYS.into_iter().take(selectable).enumerate() {
             if keys.just_pressed(key) {
                 set_if_changed(&mut selected, SelectedSlot(index as u8));
+                set_if_changed(&mut drawn, WeaponDrawn(false));
                 return;
             }
         }
@@ -283,6 +290,7 @@ fn select_hotbar(
         (current + slots - 1) % slots
     };
     set_if_changed(&mut selected, SelectedSlot(next));
+    set_if_changed(&mut drawn, WeaponDrawn(false));
 }
 
 /// Everything the hotbar's own consume press reads, in one bundle.

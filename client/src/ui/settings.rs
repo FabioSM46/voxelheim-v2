@@ -469,7 +469,9 @@ const _: () = assert!(
 /// panel jumping, and #399 is what made it fail: adding `Control::Consume` grew Controls to
 /// eleven rows, so this number moved with it rather than the area silently overflowing.
 /// #452 moved it again, to twelve, for `Control::Map`; #711 moves it to thirteen for the
-/// rebindable default-mount call; #852 moves it to fourteen for `Control::Talk`.
+/// rebindable default-mount call; #852 moves it to fourteen for `Control::Talk`. #1239's
+/// `Control::DrawWeapon` brings Controls to sixteen rows, level with Audio, so the number
+/// holds.
 ///
 /// **#982 moves it to sixteen, and Audio is the taller tab for the first time.** Four bus
 /// volumes, a ducking amount and two switches arrived; the tone tests did not cost a row
