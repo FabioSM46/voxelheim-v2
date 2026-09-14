@@ -225,7 +225,10 @@ func (rcv *PlayerVitals) MutateExperienceToNext(n uint32) bool {
 }
 
 // / Whether the authoritative server currently holds this recipient's off-hand raised.
-// / Intent alone never makes this true; the server's equipment and durability rules do.
+// / Intent alone never makes this true; the server's equipment, durability and energy
+// / rules do. A raised shield needs at least the parry's cost in energy: it lowers on the
+// / tick the reserve falls below that cost and, while the press is still held, rises again
+// / on the tick the reserve reaches it.
 func (rcv *PlayerVitals) Blocking() bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
 	if o != 0 {
@@ -235,14 +238,17 @@ func (rcv *PlayerVitals) Blocking() bool {
 }
 
 // / Whether the authoritative server currently holds this recipient's off-hand raised.
-// / Intent alone never makes this true; the server's equipment and durability rules do.
+// / Intent alone never makes this true; the server's equipment, durability and energy
+// / rules do. A raised shield needs at least the parry's cost in energy: it lowers on the
+// / tick the reserve falls below that cost and, while the press is still held, rises again
+// / on the tick the reserve reaches it.
 func (rcv *PlayerVitals) MutateBlocking(n bool) bool {
 	return rcv._tab.MutateBoolSlot(24, n)
 }
 
 // / V40. Current energy, in the same units as `max_energy`, rounded down to a whole
-// / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
-// / the blow through the shield at full damage, and nothing else changes. Attacks and
+// / point. Zero is legal. Below an action's cost the server refuses the swing, or keeps
+// / the shield down, and nothing else changes. Attacks and
 // / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
 // / locally**: a client that drew its own regeneration would show a swing as ready the
 // / tick before the server refuses it.
@@ -255,8 +261,8 @@ func (rcv *PlayerVitals) Energy() uint16 {
 }
 
 // / V40. Current energy, in the same units as `max_energy`, rounded down to a whole
-// / point. Zero is legal. Below an action's cost the server refuses the swing, or lets
-// / the blow through the shield at full damage, and nothing else changes. Attacks and
+// / point. Zero is legal. Below an action's cost the server refuses the swing, or keeps
+// / the shield down, and nothing else changes. Attacks and
 // / shield blocks that absorb a blow spend it; it refills on its own every tick. **The server's number, never a prediction to run
 // / locally**: a client that drew its own regeneration would show a swing as ready the
 // / tick before the server refuses it.

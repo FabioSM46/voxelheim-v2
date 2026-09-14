@@ -3252,10 +3252,10 @@ Recorded here so the next reader does not mistake them for oversights:
 
   **The column is explicit per row and is never derived from `ItemColour`**, which is the finding
   that decided the shape of it. `ItemColour::Block(palette::LOG)` is worn by the log, the campfire,
-  the wooden shield, the bow and the sceptre — and also by the **axe**, whose swatch is the ground
-  it works rather than what it is made of, and by the **leather patch**, which is bark-coloured
-  worked hide. Two of those seven are not wood, so a livery inferred from the colour would grain
-  them both.
+  the wooden shield, the bow, the sceptre and the three implements' hafts — and also by the
+  **leather patch**, which is bark-coloured worked hide and not wood, so a livery inferred from the
+  colour would grain it. (The axe was the second such row until #1229 drew it as a wooden haft
+  under an iron bit; its swatch now names its haft.)
 
   **A livery has to earn its place, and the default answer is no.** Which materials have one, and
   why the rest do not:
@@ -3264,7 +3264,7 @@ Recorded here so the next reader does not mistake them for oversights:
   | --- | --- | --- |
   | worn steel | oxide | The starter blade is meant to look old, and a flat tint said "grey sword". It displaces as well as tints, because corrosion eats metal. |
   | forged steel | forge marks | Colour only: an unground flat over the ridge, hammer banding, grinding streaks, a sparse scale. It darkens toward **blue-grey** where the rust goes warm, which is what tells the two blades apart at a distance. |
-  | wood | grain | Lines along the piece, wandering slowly across it, sharpened to narrow dark bands. The strongest case in the set: a bare cube carried in the hand is the flattest thing in the game. Colour only — grain is what a tree grew, not what took its surface away. Worn by the log, the campfire, the wooden shield, the bow and the sceptre; **not** by the axe or the leather patch, which borrow the `LOG` swatch for reasons that are not their material. |
+  | wood | grain | Lines along the piece, wandering slowly across it, sharpened to narrow dark bands. The strongest case in the set: a bare cube carried in the hand is the flattest thing in the game. Colour only — grain is what a tree grew, not what took its surface away. Worn by the log, the campfire, the wooden shield, the bow and the sceptre; **not** by the leather patch, which borrows the `LOG` swatch for a reason that is not its material, nor by the axe, pickaxe and shovel, whose hafts are wood too thin for grain to earn a texture. |
   | worked hide | none | Three pieces share one `Armour` silhouette, and a warm dark brown already reads as hide. Grain would be detail neither the mesh nor the cell's plate-and-shoulders picture has anywhere else. |
   | bone, meat, arrow | none | One `Material` stub each. A texture nobody will look at. |
   | stone, earth, snow, ore | none | Block-like items take the terrain swatch they represent, whole. **Terrain is not in this**: `world/palette.rs` plus vertex colours is that material system, greedy meshing merges quads across blocks, and a texture there is a different problem with different costs. An item that represents a block may take a livery in the hand and in the cell; the world does not change. |
