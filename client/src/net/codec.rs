@@ -1737,6 +1737,17 @@ pub struct BlockRequest {
     pub client_tick: u32,
 }
 
+/// One edge of the bow's draw: `active` begins it, and the release looses the arrow.
+///
+/// **The edge and the tick are the whole message.** How far the string came back is counted by
+/// the server from its own ticks between the press it admitted and the release it applied, so
+/// there is no hold time, charge, slot or aim here to state — see `schemas/player.fbs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawRequest {
+    pub active: bool,
+    pub client_tick: u32,
+}
+
 /// Intent to craft one recipe. It names no materials and no product.
 ///
 /// Both are the server's, read from the authoritative inventory and the authoritative
@@ -7931,6 +7942,16 @@ pub fn encode_block_request(request: &BlockRequest) -> Vec<u8> {
     table.add_client_tick(request.client_tick);
     let payload = table.finish();
     finish_envelope(builder, fb::Payload::BlockRequest, payload.as_union_value())
+}
+
+/// Builds one edge of the bow's draw.
+pub fn encode_draw_request(request: &DrawRequest) -> Vec<u8> {
+    let mut builder = FlatBufferBuilder::with_capacity(BUILDER_CAPACITY);
+    let mut table = fb::DrawRequestBuilder::new(&mut builder);
+    table.add_active(request.active);
+    table.add_client_tick(request.client_tick);
+    let payload = table.finish();
+    finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value())
 }
 
 /// Builds one craft intent.
@@ -16292,16 +16313,10 @@ mod tests {
     #[test]
     fn v44_draw_request_carries_only_the_edge_and_is_never_read_by_a_client() {
         for active in [true, false] {
-            let mut builder = FlatBufferBuilder::new();
-            let payload = fb::DrawRequest::create(
-                &mut builder,
-                &fb::DrawRequestArgs {
-                    active,
-                    client_tick: u32::MAX,
-                },
-            );
-            let frame =
-                finish_envelope(builder, fb::Payload::DrawRequest, payload.as_union_value());
+            let frame = encode_draw_request(&DrawRequest {
+                active,
+                client_tick: u32::MAX,
+            });
             let envelope = fb::root_as_envelope(&frame).expect("the frame verifies");
             assert_eq!(envelope.payload_type(), fb::Payload::DrawRequest);
             let request = envelope
