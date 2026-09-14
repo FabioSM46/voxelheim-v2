@@ -544,14 +544,14 @@ fn trade_end_text(ended: &PlayerTradeEnded) -> Option<String> {
 /// `NotEnoughEnergy` was here on the same terms until #1134 landed the surface that answers
 /// it, and it left for [`answered_by_the_energy_bar`] rather than for a sentence.
 ///
-/// `HandsOccupied` is here on the same terms, until the main-hand cell and its sentence
-/// land (#1238). No server sends it before the two-handed rule does (#1236).
+/// `HandsOccupied` was here on the same terms until #1238 gave the main hand a cell, and with
+/// it a place for a two-handed conflict to happen; it left for a sentence.
 ///
 /// The non-empty assertion keeps the category from quietly becoming decorative.
 fn has_no_sentence_yet(reason: RefusalReason) -> bool {
     matches!(
         reason,
-        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen | RefusalReason::HandsOccupied
+        RefusalReason::TileMisaligned | RefusalReason::TradeNotOpen
     )
 }
 
@@ -780,6 +780,15 @@ fn describe_refusal(refused: &ActionRefused) -> Option<String> {
         (RefusedAction::Trade, _) => trade_reason.map(str::to_owned),
         (RefusedAction::PlayerTrade, _) => player_trade_reason.map(str::to_owned),
         (RefusedAction::Attack, RefusalReason::NoAmmunition) => Some("No arrows".to_owned()),
+        // The server answers this for a move that would put a weapon it does not register
+        // one-handed beside a shield, **in either direction**: the shield onto the off-hand
+        // while such a weapon is held, or the weapon onto the main hand while a shield is. One
+        // sentence is true of both, and it names the rule rather than the item, because the
+        // refusal carries no slot. Nothing else moves: the picked item was already let go, and
+        // the next complete `InventoryState` is what puts it where the server kept it.
+        (RefusedAction::MoveInventory, RefusalReason::HandsOccupied) => {
+            Some("A two-handed weapon leaves no hand for a shield".to_owned())
+        }
         // A whole sentence about the person rather than the "Cannot X: y" shape, for the
         // reason the map's lines are whole sentences: nothing was refused that the player
         // meant to do to the world. They addressed somebody, and the answer is about that
@@ -1558,6 +1567,7 @@ mod tests {
                 assert!(
                     line.starts_with("Cannot ")
                         || line == "No arrows"
+                        || line == "A two-handed weapon leaves no hand for a shield"
                         || line.starts_with("The map holds no more marks")
                         || line == "That note is too long"
                         || line == "That mark is already gone"
@@ -1629,6 +1639,28 @@ mod tests {
     /// placements. This is where the `RefusedAction::Trade` arm is actually read, and the
     /// three the issue names are spelled out rather than matched loosely — they are the
     /// whole of what a player is told about a trade that did not happen.
+    /// **The two-handed refusal is a sentence, and only for the move that produces it.** The
+    /// server sends `HandsOccupied` as a refused inventory move and under no other action, so
+    /// the pair is matched exactly: the same reason under a placement says nothing rather than
+    /// borrowing a sentence about hands.
+    #[test]
+    fn a_two_handed_conflict_is_explained_on_the_inventory_move_it_refused() {
+        let refused = |action| ActionRefused {
+            action,
+            reason: RefusalReason::HandsOccupied,
+            anchor: None,
+        };
+        assert_eq!(
+            describe_refusal(&refused(RefusedAction::MoveInventory)).as_deref(),
+            Some("A two-handed weapon leaves no hand for a shield")
+        );
+        assert!(!has_no_sentence_yet(RefusalReason::HandsOccupied));
+        assert_eq!(
+            describe_refusal(&refused(RefusedAction::PlaceStructure)),
+            None
+        );
+    }
+
     #[test]
     fn every_trade_refusal_has_its_own_sentence() {
         for (reason, want) in [

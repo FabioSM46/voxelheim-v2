@@ -122,8 +122,9 @@ pub use crafting::{CraftClick, Ingredient, Recipe, RecipeCategory};
 pub(crate) use crafting::RECIPES;
 pub(crate) use hands::{arrow_fletching_linear_rgba, bow_cord_linear_rgba};
 pub use interpolate::{Interpolated, SnapshotBuffer};
-#[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;
+#[cfg(test)]
+pub(crate) use inventory::MAIN_HAND_OFFSET;
 pub(crate) use inventory::equipment_item_fits;
 pub use inventory::{
     ApplyInventory, Inventory, InventoryClick, InventoryClickKind, PickedStack, SelectedSlot,
