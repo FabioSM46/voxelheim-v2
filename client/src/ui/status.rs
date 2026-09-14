@@ -1639,28 +1639,6 @@ mod tests {
     /// placements. This is where the `RefusedAction::Trade` arm is actually read, and the
     /// three the issue names are spelled out rather than matched loosely — they are the
     /// whole of what a player is told about a trade that did not happen.
-    /// **The two-handed refusal is a sentence, and only for the move that produces it.** The
-    /// server sends `HandsOccupied` as a refused inventory move and under no other action, so
-    /// the pair is matched exactly: the same reason under a placement says nothing rather than
-    /// borrowing a sentence about hands.
-    #[test]
-    fn a_two_handed_conflict_is_explained_on_the_inventory_move_it_refused() {
-        let refused = |action| ActionRefused {
-            action,
-            reason: RefusalReason::HandsOccupied,
-            anchor: None,
-        };
-        assert_eq!(
-            describe_refusal(&refused(RefusedAction::MoveInventory)).as_deref(),
-            Some("A two-handed weapon leaves no hand for a shield")
-        );
-        assert!(!has_no_sentence_yet(RefusalReason::HandsOccupied));
-        assert_eq!(
-            describe_refusal(&refused(RefusedAction::PlaceStructure)),
-            None
-        );
-    }
-
     #[test]
     fn every_trade_refusal_has_its_own_sentence() {
         for (reason, want) in [
@@ -1685,6 +1663,28 @@ mod tests {
             };
             assert_eq!(describe_refusal(&refused).as_deref(), Some(want));
         }
+    }
+
+    /// **The two-handed refusal is a sentence, and only for the move that produces it.** The
+    /// server sends `HandsOccupied` as a refused inventory move and under no other action, so
+    /// the pair is matched exactly: the same reason under a placement says nothing rather than
+    /// borrowing a sentence about hands.
+    #[test]
+    fn a_two_handed_conflict_is_explained_on_the_inventory_move_it_refused() {
+        let refused = |action| ActionRefused {
+            action,
+            reason: RefusalReason::HandsOccupied,
+            anchor: None,
+        };
+        assert_eq!(
+            describe_refusal(&refused(RefusedAction::MoveInventory)).as_deref(),
+            Some("A two-handed weapon leaves no hand for a shield")
+        );
+        assert!(!has_no_sentence_yet(RefusalReason::HandsOccupied));
+        assert_eq!(
+            describe_refusal(&refused(RefusedAction::PlaceStructure)),
+            None
+        );
     }
 
     #[test]
