@@ -509,7 +509,8 @@ impl Plugin for PlayerPlugin {
                     // their owners have published this frame's values.
                     refresh_body_held_item
                         .after(ApplySnapshots)
-                        .after(ApplyInventory),
+                        .after(ApplyInventory)
+                        .after(combat::ApplyWeaponDrawn),
                 )
                     .after(crate::net::DrainNetwork),
             )
@@ -3024,10 +3025,11 @@ fn show_the_local_body(view: Res<ViewMode>, mut bodies: Query<&mut Visibility, W
     }
 }
 
-/// The authoritative selected stack and the local state that chooses its renderer.
+/// The authoritative stack in the hand and the local state that chooses its renderer.
 ///
 /// Grouped because they are one subject: the item comes from the server-sent pack, while
-/// the selected index and camera view decide only where that presentation appears.
+/// the drawn state, the selected index and the camera view decide only which slot is shown
+/// and where. Drawn, the hand is the main hand; sheathed, the selected hotbar slot.
 #[derive(SystemParam)]
 struct BodyHeldSubject<'w> {
     inventory: Res<'w, Inventory>,
@@ -3036,6 +3038,7 @@ struct BodyHeldSubject<'w> {
     view: Res<'w, ViewMode>,
     mount: Res<'w, LocalMount>,
     session: Option<Res<'w, Session>>,
+    drawn: Res<'w, combat::WeaponDrawn>,
 }
 
 impl BodyHeldSubject<'_> {
@@ -3043,7 +3046,8 @@ impl BodyHeldSubject<'_> {
         if self.mount.mounted() {
             None
         } else {
-            stack_item_id(self.inventory.slot(self.selected.0))
+            combat::hand_slot(self.drawn.0, self.selected.0, self.session.as_deref())
+                .and_then(|slot| stack_item_id(self.inventory.slot(slot)))
         }
     }
 

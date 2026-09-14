@@ -1420,6 +1420,54 @@ fn exactly_one_held_item_renderer_owns_each_playing_view() {
     assert_eq!(body_held_item(&mut app)[0].visibility, Visibility::Hidden);
 }
 
+/// **The local third-person body holds the drawn main-hand weapon, and the hotbar item while
+/// sheathed** (#1239). Presentation only: the drawn state is local, and nothing here sends.
+#[test]
+fn the_local_body_holds_the_drawn_main_hand_and_the_hotbar_while_sheathed() {
+    let mut app = headless_player();
+    let mut params = session().0;
+    params.inventory_slots = 41;
+    params.equipment_slots = 5;
+    app.insert_resource(Session(params));
+    let main_hand =
+        inventory::equipment_slot(&params, MAIN_HAND_OFFSET).expect("the session has a main hand");
+    let mut stacks = vec![crate::net::InventoryStack::default(); 41];
+    stacks[0] = crate::net::InventoryStack {
+        item_id: items::ITEM_STONE,
+        count: 1,
+        ..Default::default()
+    };
+    stacks[usize::from(main_hand)] = crate::net::InventoryStack {
+        item_id: crafting::ITEM_IRON_SWORD,
+        count: 1,
+        durability: 100,
+        max_durability: 100,
+    };
+    *app.world_mut().resource_mut::<Inventory>() = Inventory::from_stacks(stacks);
+    *app.world_mut().resource_mut::<ViewMode>() = ViewMode::ThirdPerson;
+    deliver(
+        &mut app,
+        1,
+        vec![state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0)],
+        Instant::now(),
+    );
+    app.update();
+    assert_eq!(body_held_item(&mut app)[0].item.item_id, items::ITEM_STONE);
+
+    app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = true;
+    app.update();
+    app.update();
+    let drawn = body_held_item(&mut app);
+    assert_eq!(drawn.len(), 1, "the body holds more than one item");
+    assert_eq!(drawn[0].item.item_id, crafting::ITEM_IRON_SWORD);
+    assert_eq!(drawn[0].visibility, Visibility::Inherited);
+
+    app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = false;
+    app.update();
+    app.update();
+    assert_eq!(body_held_item(&mut app)[0].item.item_id, items::ITEM_STONE);
+}
+
 #[test]
 fn a_local_mount_removes_the_body_item_until_the_authoritative_dismount() {
     let mut app = headless_player();

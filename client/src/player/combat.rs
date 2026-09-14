@@ -112,6 +112,26 @@ fn next_drawn(
     (wanted && !mounted && main_hand_holds, hint)
 }
 
+/// Orders what the hand draws after this frame's [`WeaponDrawn`] was decided, so the view
+/// model and the local body change on the frame the key was pressed.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct ApplyWeaponDrawn;
+
+/// **Which slot the hand holds**: the main hand while the weapon is drawn, the selected
+/// hotbar slot while sheathed.
+///
+/// The one answer both renderers read — the first-person view model in `super::hands` and
+/// the local third-person body in `super` — so the two can never hold different things, and
+/// the same split [`HeldItem`] makes for the buttons. `None` only when drawn and the session
+/// announces no main hand, which draws an empty hand rather than a guessed slot.
+pub(super) fn hand_slot(drawn: bool, selected: u8, session: Option<&Session>) -> Option<u8> {
+    if drawn {
+        session.and_then(|session| equipment_slot(&session.0, MAIN_HAND_OFFSET))
+    } else {
+        Some(selected)
+    }
+}
+
 /// Everything the draw key reads, in one bundle.
 #[derive(SystemParam)]
 struct DrawIntent<'w> {
@@ -180,6 +200,7 @@ impl Plugin for CombatPlugin {
                 // click on one frame route the click by the state the key just chose. After the
                 // snapshots and the pack, because mounting and an emptied main hand sheathe.
                 draw_or_sheathe_weapon
+                    .in_set(ApplyWeaponDrawn)
                     .in_set(PublishPlayerMessages)
                     .after(ApplySnapshots)
                     .after(ApplyInventory)
