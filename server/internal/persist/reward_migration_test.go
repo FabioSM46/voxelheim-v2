@@ -28,7 +28,7 @@ func TestV10MigrationPreservesEveryCharacterFieldAndAddsZeroEpoch(t *testing.T) 
 	want.LearnedMounts = 5
 	want.Slots[39] = protocol.InventoryStack{ItemID: 1, Count: 2}
 	want.Slots[0] = protocol.InventoryStack{ItemID: 2, Count: 1, Durability: 3, MaxDurability: 4}
-	old := encodeRecordLayout(want, 10, int(protocol.InventorySlots))
+	old := encodeRecordLayout(want, 10, 40)
 	if len(old) != len(encodeRecord(want))-8 {
 		t.Fatal("v10 fixture contains an epoch")
 	}
@@ -66,7 +66,7 @@ func TestCorruptV10MigrationRefusesBeforeMovingTheDirectory(t *testing.T) {
 		s, dir := openStore(t)
 		c := newCharacter(t, s, testID(1), "Eivor")
 		rec, _, _ := s.Load(c.ID)
-		old := encodeRecordLayout(rec, 10, int(protocol.InventorySlots))
+		old := encodeRecordLayout(rec, 10, 40)
 		if oversize {
 			old = append(old, make([]byte, maxRecordSize)...)
 		} else {

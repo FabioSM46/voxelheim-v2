@@ -1187,6 +1187,12 @@ That is deliberate: a journal that delivers nothing cannot duplicate them.
   A prepared reward is replayed or reconfirmed before the players directory is indexed, and a
   journal that has issued a generation makes receipt handling strict. `session.ValidateRewardRecord`
   is the game's judgement of a recovered life.
+- **A player-format migration runs before that recovery, and strict receipts only narrow it.**
+  Recovery reads records in this build's format, so an older directory is migrated first; under
+  strict receipts a record the migration would leave behind — a format with no migration, an
+  unreadable v7 record, a v7 silver stack — refuses the start before anything moves, while a
+  migration that carries every character keeps each epoch and runs. Refusing every migration
+  instead would stop any world that has run a ruin at its next record-format bump.
 - **Saved runs restore through the journal.** `OverlaySessions` lays the journal over the
   sessions file:
   - its defeats are authoritative;

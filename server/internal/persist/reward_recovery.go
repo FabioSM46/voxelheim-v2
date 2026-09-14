@@ -13,6 +13,10 @@ import (
 // API. Production startup remains on OpenStore plus CheckInactive until all reward
 // consumers are ready. The required validator supplies game registry/life semantics
 // without making persist import game. No index, login or ordinary writer exists yet.
+//
+// A players directory in an older format is migrated before recovery reads it, and a
+// journal that has issued a generation lets only a migration that carries every
+// character run. See [Store.setAsideSuperseded].
 func OpenStoreWithRewardRecovery(dir string, rewards *RewardStore, validate func(Record) error) (*Store, error) {
 	if rewards == nil || validate == nil {
 		return nil, ErrRewardRecoveryRequired
@@ -27,8 +31,7 @@ func OpenStoreWithRewardRecovery(dir string, rewards *RewardStore, validate func
 	}
 	rewards.mu.Lock()
 	defer rewards.mu.Unlock()
-	return openPlayerStore(dir, func(s *Store) error {
-		s.strictRewards.Store(rewards.journal.NextGeneration > 1)
+	return openPlayerStore(dir, rewards.journal.NextGeneration > 1, func(s *Store) error {
 		return rewards.recoverRecordsLocked(s, validate)
 	})
 }
