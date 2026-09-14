@@ -1696,6 +1696,7 @@ mod tests {
             worn_chest: 0,
             worn_legs: 0,
             worn_offhand: 0,
+            worn_mainhand: 0,
             level: 1,
         }
     }

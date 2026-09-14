@@ -122,8 +122,9 @@ pub use crafting::{CraftClick, Ingredient, Recipe, RecipeCategory};
 pub(crate) use crafting::RECIPES;
 pub(crate) use hands::{arrow_fletching_linear_rgba, bow_cord_linear_rgba};
 pub use interpolate::{Interpolated, SnapshotBuffer};
-#[cfg(test)]
 pub(crate) use inventory::EQUIPMENT_ROUTES;
+#[cfg(test)]
+pub(crate) use inventory::MAIN_HAND_OFFSET;
 pub(crate) use inventory::equipment_item_fits;
 pub use inventory::{
     ApplyInventory, Inventory, InventoryClick, InventoryClickKind, PickedStack, SelectedSlot,
@@ -1033,6 +1034,7 @@ impl Appearances {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: Instant::now(),
                 drawn: true,
             },
@@ -1051,6 +1053,7 @@ impl Appearances {
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: Instant::now(),
                 drawn: true,
             },
@@ -1129,6 +1132,7 @@ struct Described {
     worn_chest: u16,
     worn_legs: u16,
     worn_offhand: u16,
+    worn_mainhand: u16,
     /// When this entry was written. Read only while `drawn` is false — once a body
     /// exists, that body's presence in the newest snapshot is what keeps the entry.
     at: Instant,
@@ -1394,6 +1398,11 @@ struct Worn {
     chest: u16,
     legs: u16,
     off_hand: u16,
+    /// The weapon the server says this body holds. **Carried and drawn by nothing**: no
+    /// overlay, no material key and no mesh reads it, so a sword in the main hand leaves a
+    /// body exactly as it was. It is here so that what a body wears is the server's whole
+    /// description rather than four fifths of it.
+    main_hand: u16,
 }
 
 impl Worn {
@@ -1404,6 +1413,7 @@ impl Worn {
             chest: 0,
             legs: 0,
             off_hand: 0,
+            main_hand: 0,
         }
     }
 
@@ -1414,6 +1424,7 @@ impl Worn {
             chest: description.worn_chest,
             legs: description.worn_legs,
             off_hand: description.worn_offhand,
+            main_hand: description.worn_mainhand,
         }
     }
 
@@ -2175,6 +2186,7 @@ fn ingest_appearances(
                 worn_chest: message.worn_chest,
                 worn_legs: message.worn_legs,
                 worn_offhand: message.worn_offhand,
+                worn_mainhand: message.worn_mainhand,
                 at: now,
                 drawn: false,
             },
@@ -2196,6 +2208,7 @@ fn ingest_appearances(
                 worn_chest: 0,
                 worn_legs: 0,
                 worn_offhand: 0,
+                worn_mainhand: 0,
                 at: now,
                 drawn: false,
             },

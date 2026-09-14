@@ -246,11 +246,25 @@ fn describe_as_level(
             worn_chest: 0,
             worn_legs: 0,
             worn_offhand: 0,
+            worn_mainhand: 0,
             level,
         });
 }
 
 fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn: [u16; 4]) {
+    describe_equipped(app, entity_id, appearance, worn, 0);
+}
+
+/// [`describe_wearing`] with the weapon hand too, in the wire's order: the main hand is
+/// appended after the four, so it is an argument of its own rather than a fifth element
+/// every armour fixture would have to spell as zero.
+fn describe_equipped(
+    app: &mut App,
+    entity_id: u64,
+    appearance: Appearance,
+    worn: [u16; 4],
+    main_hand: u16,
+) {
     app.world_mut()
         .resource_mut::<AppearanceInbox>()
         .push(PlayerAppearance {
@@ -261,6 +275,7 @@ fn describe_wearing(app: &mut App, entity_id: u64, appearance: Appearance, worn:
             worn_chest: worn[1],
             worn_legs: worn[2],
             worn_offhand: worn[3],
+            worn_mainhand: main_hand,
             level: 1,
         });
 }
@@ -1802,6 +1817,47 @@ fn a_body_is_drawn_from_pieces_that_each_take_their_part_colour() {
 
     let meshes: HashSet<Handle<Mesh>> = drawn.iter().map(|(_, mesh, _)| mesh.clone()).collect();
     assert_eq!(meshes.len(), drawn.len(), "no two parts share geometry");
+}
+
+/// **The main hand is decoded and carried, and no body draws it yet.** A sword the server
+/// describes in the weapon hand reaches the body's `Worn` and adds no overlay, no child and
+/// no respawn; emptying the hand again changes nothing either.
+#[test]
+fn a_described_main_hand_is_carried_onto_the_body_and_draws_nothing() {
+    let mut app = headless_player();
+    let appearance = an_appearance(HairModel::Braided);
+    describe_equipped(&mut app, 99, appearance, [0; 4], crafting::ITEM_IRON_SWORD);
+    deliver(
+        &mut app,
+        1,
+        vec![
+            state(LOCAL_ID, [0.0, 64.0, 0.0], 0.0),
+            state(99, [4.0, 64.0, 0.0], 0.0),
+        ],
+        Instant::now(),
+    );
+    app.update();
+
+    let body = body_of(&mut app, 99).expect("the described body is drawn");
+    assert_eq!(
+        app.world().get::<Worn>(body).map(|worn| worn.main_hand),
+        Some(crafting::ITEM_IRON_SWORD),
+        "the body does not carry the main hand the server described"
+    );
+    assert!(
+        armour_of(&mut app, 99).is_empty(),
+        "a weapon drew an overlay"
+    );
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
+
+    describe_equipped(&mut app, 99, appearance, [0; 4], 0);
+    app.update();
+    assert_eq!(body_of(&mut app, 99), Some(body), "the body was respawned");
+    assert_eq!(
+        app.world().get::<Worn>(body).map(|worn| worn.main_hand),
+        Some(0)
+    );
+    assert_eq!(child_count(&mut app, 99), BodyPiece::ALL.len());
 }
 
 #[test]

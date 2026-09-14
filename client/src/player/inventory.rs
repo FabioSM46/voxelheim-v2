@@ -16,10 +16,11 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
+use super::combat::ITEM_RUSTY_SWORD;
 use super::crafting::{
-    ITEM_COOKED_MEAT, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN, ITEM_LEATHER_LEGGINGS,
-    ITEM_LEATHER_PATCH, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES, ITEM_RUSTY_HELM,
-    ITEM_SHARPENING_STONE, ITEM_WOODEN_SHIELD,
+    ITEM_BOW, ITEM_COOKED_MEAT, ITEM_IRON_SWORD, ITEM_LEATHER_CAP, ITEM_LEATHER_JERKIN,
+    ITEM_LEATHER_LEGGINGS, ITEM_LEATHER_PATCH, ITEM_RUSTY_CUIRASS, ITEM_RUSTY_GREAVES,
+    ITEM_RUSTY_HELM, ITEM_SHARPENING_STONE, ITEM_WOODEN_SCEPTRE, ITEM_WOODEN_SHIELD,
 };
 use super::items::{ITEM_BLACK_HORSE, ITEM_BROWN_HORSE, ITEM_GREY_HORSE, ITEM_RAW_MEAT};
 use super::{
@@ -701,16 +702,28 @@ fn consume_request(
 const KITS: &[u16] = &[ITEM_SHARPENING_STONE, ITEM_LEATHER_PATCH];
 
 /// Display-side routing from an equipment-slot offset to the item ids it accepts:
-/// head `0`, chest `1`, legs `2`, off-hand `3`.
+/// head `0`, chest `1`, legs `2`, off-hand `3`, main hand `4`.
 ///
 /// This is deliberately only a routing table for the cells that draw or grey a drop
 /// target. The server re-reads `itemRegistry.wornAt` before every move, so an entry here
 /// can grant nothing and an omitted entry can only make the client less helpful.
-pub(crate) const EQUIPMENT_ROUTES: [&[u16]; 4] = [
+///
+/// **Sized by the last offset it routes**, so a worn slot appended after the main hand is a
+/// new named offset first and a longer table second. The main hand takes every weapon the
+/// server's registry names `wornMainHand`: both swords, the bow and the sceptre. Which of them
+/// leave a hand free for a shield is the server's `oneHanded`, and nothing here mirrors it —
+/// a refused pair comes back as `HandsOccupied` and `ui/status.rs` says why.
+pub(crate) const EQUIPMENT_ROUTES: [&[u16]; MAIN_HAND_OFFSET as usize + 1] = [
     &[ITEM_LEATHER_CAP, ITEM_RUSTY_HELM],
     &[ITEM_LEATHER_JERKIN, ITEM_RUSTY_CUIRASS],
     &[ITEM_LEATHER_LEGGINGS, ITEM_RUSTY_GREAVES],
     &[ITEM_WOODEN_SHIELD],
+    &[
+        ITEM_RUSTY_SWORD,
+        ITEM_IRON_SWORD,
+        ITEM_BOW,
+        ITEM_WOODEN_SCEPTRE,
+    ],
 ];
 
 /// Which route of [`EQUIPMENT_ROUTES`] one piece of the rig is worn through.
@@ -739,6 +752,10 @@ pub(crate) fn equipment_item_fits(item_id: u16, offset: u8) -> bool {
 /// The server appends further worn slots *after* this one (the main hand is `4`), so the
 /// off-hand keeps this offset however many equipment slots the welcome announces.
 pub(crate) const OFF_HAND_OFFSET: u8 = 3;
+
+/// The main hand's offset among the equipment slots: appended after the off-hand by V44, and
+/// read through [`equipment_slot`] like every other worn slot — never as a literal `first + 4`.
+pub(crate) const MAIN_HAND_OFFSET: u8 = 4;
 
 /// **The one accessor from an equipment offset to an absolute inventory index**, read off the
 /// slot counts the server's welcome announced.
@@ -1251,7 +1268,9 @@ mod tests {
         // Four worn slots, and five once the main hand is appended after the off-hand.
         assert_eq!(equipment_slot(&params(8, 4), OFF_HAND_OFFSET), Some(7));
         assert_eq!(equipment_slot(&params(41, 5), OFF_HAND_OFFSET), Some(39));
-        assert_eq!(equipment_slot(&params(41, 5), 4), Some(40));
+        assert_eq!(equipment_slot(&params(41, 5), MAIN_HAND_OFFSET), Some(40));
+        // And no main hand at all in a welcome that announces only the first four.
+        assert_eq!(equipment_slot(&params(40, 4), MAIN_HAND_OFFSET), None);
         // Too few worn slots to have an off-hand, and a count that cannot be placed.
         assert_eq!(equipment_slot(&params(40, 3), OFF_HAND_OFFSET), None);
         assert_eq!(equipment_slot(&params(3, 4), OFF_HAND_OFFSET), None);
@@ -1523,10 +1542,67 @@ mod tests {
         );
     }
 
+    /// **Every weapon routes to the main hand, and nothing else does** — swept over the whole
+    /// display registry by shape rather than spot-checked, so a weapon added to the registry
+    /// without a route (or a route naming something that is not a weapon) fails here. The
+    /// server's `wornMainHand` is still the only answer; this pins the courtesy to it.
+    #[test]
+    fn every_weapon_routes_to_the_main_hand_and_nothing_else_does() {
+        use crate::player::items::{ITEMS, ItemShape};
+
+        let weapons: Vec<u16> = ITEMS
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.shape,
+                    ItemShape::Blade | ItemShape::Bow | ItemShape::Sceptre
+                )
+            })
+            .map(|row| row.item_id)
+            .collect();
+        for id in [
+            ITEM_RUSTY_SWORD,
+            ITEM_IRON_SWORD,
+            ITEM_BOW,
+            ITEM_WOODEN_SCEPTRE,
+        ] {
+            assert!(weapons.contains(&id), "item {id} is not drawn as a weapon");
+        }
+        for row in ITEMS {
+            assert_eq!(
+                equipment_item_fits(row.item_id, MAIN_HAND_OFFSET),
+                weapons.contains(&row.item_id),
+                "item {} routes to the main hand wrongly",
+                row.item_id
+            );
+            if weapons.contains(&row.item_id) {
+                for offset in 0..MAIN_HAND_OFFSET {
+                    assert!(
+                        !equipment_item_fits(row.item_id, offset),
+                        "weapon {} also routes to worn slot {offset}",
+                        row.item_id
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_equipment_route_names_one_registry_item_once() {
-        assert_eq!(EQUIPMENT_ROUTES.len(), 4);
-        assert_eq!(EQUIPMENT_ROUTES[3], &[ITEM_WOODEN_SHIELD]);
+        assert_eq!(EQUIPMENT_ROUTES.len(), 5);
+        assert_eq!(
+            EQUIPMENT_ROUTES[usize::from(OFF_HAND_OFFSET)],
+            &[ITEM_WOODEN_SHIELD]
+        );
+        assert_eq!(
+            EQUIPMENT_ROUTES[usize::from(MAIN_HAND_OFFSET)],
+            &[
+                ITEM_RUSTY_SWORD,
+                ITEM_IRON_SWORD,
+                ITEM_BOW,
+                ITEM_WOODEN_SCEPTRE
+            ]
+        );
         for (slot, items) in EQUIPMENT_ROUTES.iter().enumerate() {
             for &item_id in *items {
                 assert_ne!(

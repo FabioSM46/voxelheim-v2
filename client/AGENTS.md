@@ -712,12 +712,15 @@ The client samples the controls, sends what the player is *trying* to do at the 
   complete state is the only thing that changes the displayed contents. The welcome also
   announces a non-empty trailing equipment subset; the pack grid draws only the slots between
   the hotbar and that subset. The inventory screen draws the trailing subset as a labelled
-  head/chest/legs/off-hand column beside the pack and routes every press through the same slot-index
-  message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy;
-  because no off-hand item exists yet, a non-off-hand drop onto that fourth cell sends nothing.
-  The four worn ids in a described appearance select optional head, chest and legs overlays on
-  world bodies while preserving the off-hand id without adding geometry. That renderer
-  reads only the server's latest description; it never infers equipment from the local pack.
+  head/chest/legs/off-hand/main-hand column beside the pack and routes every press through the same slot-index
+  message as an ordinary cell. `EQUIPMENT_ROUTES` may tint a mismatched destination as a courtesy,
+  and a drop onto the off-hand cell of an item that table does not route there sends nothing.
+  Every worn slot is found through `player::inventory::equipment_slot` and a named offset
+  (`OFF_HAND_OFFSET`), never a literal `first + n`, so a slot the server appends after the
+  off-hand moves nothing. The five worn ids in a described appearance select optional head,
+  chest and legs overlays and the wooden shield on world bodies; the main-hand id (V44) is
+  decoded and carried on `Worn`, and no body draws it yet. That renderer reads only the
+  server's latest description; it never infers equipment from the local pack.
 - **Item drops are snapshot entities, not pickup candidates.** `player/drops.rs` uses the
   newest `drops` vector as the complete existence set and interpolates positions through the
   same two-snapshot buffer as player bodies. Proximity and clicks are not inputs. Spin and bob
