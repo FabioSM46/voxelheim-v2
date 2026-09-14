@@ -459,12 +459,13 @@ func equipmentSlot(slot uint8) bool {
 }
 
 // wornItemsLocked returns the item ids announced with this player's appearance.
-// The caller holds inventory.mu, so all four ids describe one authoritative instant.
-func (i *inventory) wornItemsLocked() (head, chest, legs, offHand uint16) {
+// The caller holds inventory.mu, so all five ids describe one authoritative instant.
+func (i *inventory) wornItemsLocked() (head, chest, legs, offHand, mainHand uint16) {
 	return uint16(i.slots[equipmentHead].item),
 		uint16(i.slots[equipmentChest].item),
 		uint16(i.slots[equipmentLegs].item),
-		uint16(i.slots[equipmentOffHand].item)
+		uint16(i.slots[equipmentOffHand].item),
+		uint16(i.slots[equipmentMainHand].item)
 }
 
 // refreshWornLocked rebuilds the combat summary from the authoritative worn

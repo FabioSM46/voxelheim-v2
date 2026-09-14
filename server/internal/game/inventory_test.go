@@ -485,7 +485,65 @@ func TestAnOffHandMoveResendsTheAppearanceWithTheSyntheticItem(t *testing.T) {
 	}
 }
 
+// The main hand is announced like every other worn slot: a move into it re-sends the
+// appearance carrying the weapon, and a move out of it re-sends one carrying nothing.
+// A real weapon row, because what reaches the wire is the slot's item id and nothing else.
+func TestAMainHandMoveResendsTheAppearanceWithTheWeapon(t *testing.T) {
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	subject.inventory.mu.Lock()
+	subject.inventory.slots[4] = stackOf(ItemIronSword, 1)
+	subject.inventory.mu.Unlock()
+	h.step()
+
+	frames := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 1 {
+		t.Fatalf("the watcher began with %d subject appearances, want one", len(frames))
+	}
+	if got := playerAppearance(t, frames[0]).WornMainhand(); got != 0 {
+		t.Fatalf("the initial appearance holds item %d, want nothing", got)
+	}
+
+	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
+		From: 4, To: uint8(equipmentMainHand), Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the iron sword into the main hand: %v", err)
+	}
+	h.step()
+	frames = appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 2 {
+		t.Fatalf("equipping produced %d subject appearances, want two total", len(frames))
+	}
+	equipped := playerAppearance(t, frames[1])
+	if got := equipped.WornMainhand(); got != uint16(ItemIronSword) {
+		t.Errorf("resent appearance holds main-hand item %d, want %d", got, ItemIronSword)
+	}
+	if got := equipped.WornOffhand(); got != 0 {
+		t.Errorf("the main hand leaked into the off-hand as item %d", got)
+	}
+
+	if _, err := subject.MoveInventory(protocol.InventoryMoveRequest{
+		From: uint8(equipmentMainHand), To: 4, Count: 1,
+	}); err != nil {
+		t.Fatalf("moving the iron sword out of the main hand: %v", err)
+	}
+	h.step()
+	frames = appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 3 {
+		t.Fatalf("unequipping produced %d subject appearances, want three total", len(frames))
+	}
+	if got := playerAppearance(t, frames[2]).WornMainhand(); got != 0 {
+		t.Errorf("the appearance after unequipping holds item %d, want nothing", got)
+	}
+}
+
 func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
+	t.Helper()
+	return playerAppearance(t, frame).WornOffhand()
+}
+
+func playerAppearance(t *testing.T, frame []byte) *vnet.PlayerAppearance {
 	t.Helper()
 	envelope := vnet.GetRootAsEnvelope(frame, 0)
 	var table flatbuffers.Table
@@ -494,7 +552,7 @@ func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
 	}
 	var appearance vnet.PlayerAppearance
 	appearance.Init(table.Bytes, table.Pos)
-	return appearance.WornOffhand()
+	return &appearance
 }
 
 // starterSword is the slot every player joins with, as InventoryState carries it. A

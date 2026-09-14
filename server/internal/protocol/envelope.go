@@ -1438,6 +1438,10 @@ type PlayerAppearance struct {
 	WornLegs    uint16
 	WornOffHand uint16
 
+	// WornMainHand is the item id in the main-hand slot, zero when it is empty — the
+	// same meaning worn_mainhand has on the wire.
+	WornMainHand uint16
+
 	// HasAppearance is honoured by the encoder so a test can build the frame a client
 	// must refuse, exactly as ActionRefused.HasAnchor is. The server always sets it.
 	HasAppearance bool
@@ -2655,6 +2659,7 @@ func EncodePlayerAppearance(p PlayerAppearance) []byte {
 	vnet.PlayerAppearanceAddWornChest(b, p.WornChest)
 	vnet.PlayerAppearanceAddWornLegs(b, p.WornLegs)
 	vnet.PlayerAppearanceAddWornOffhand(b, p.WornOffHand)
+	vnet.PlayerAppearanceAddWornMainhand(b, p.WornMainHand)
 	built := vnet.PlayerAppearanceEnd(b)
 
 	return finishEnvelope(b, vnet.PayloadPlayerAppearance, built)
