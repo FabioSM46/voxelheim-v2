@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use super::SelfVitals;
 use super::camera::ViewMode;
 use super::combat::{SwingAbandoned, SwingSent};
-use super::crafting::{ITEM_ARROW, ITEM_BOW, ITEM_WOODEN_SCEPTRE};
+use super::crafting::{ITEM_ARROW, ITEM_WOODEN_SCEPTRE};
 use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
@@ -198,6 +198,95 @@ fn off_hand_transform(field_of_view: f32, fraction: f32) -> Transform {
         translation: rest.translation + Vec3::new(PARRY_INBOARD, 0.0, -PARRY_ADVANCE) * eased,
         rotation: Quat::from_rotation_z(PARRY_ROLL_RADIANS * eased) * rest.rotation,
         scale: rest.scale,
+    }
+}
+
+/// How many string pulls the drawn bow is built at besides rest (#1240): the quantised rebuilds
+/// [`bow_mesh_drawn`] records, each one stable mesh asset, swapped by handle and never rewritten.
+const DRAW_STEPS: usize = 12;
+/// Where the drawn bow's grip, and the left fist on it, sits: left of the eye, further out
+/// than the resting hands, this fraction of the way down the lower half of the frame.
+const DRAW_GRIP_INBOARD: f32 = -0.050;
+const DRAW_GRIP_DEPTH: f32 = -0.220;
+const DRAW_GRIP_DROP_FRACTION: f32 = 0.50;
+/// The drawn bow's cant about the arrow: its upper limb leans toward the string hand.
+const DRAW_CANT_RADIANS: f32 = -0.22;
+/// The time constant the drawn string follows the server's `draw_progress` with between
+/// snapshots — about one server tick.
+const DRAW_FOLLOW_SECONDS: f32 = 0.05;
+/// How long the string takes to snap from a full draw home once the server says the draw is over.
+const DRAW_SNAP_TIME: Duration = Duration::from_millis(70);
+
+/// **The drawn bow's frame**: the grip at its origin, the bow's string side (its own `+X`)
+/// turned toward the eye and its limbs up, canted by [`DRAW_CANT_RADIANS`]. The arrow therefore
+/// lies along the view and points where every line along it vanishes: the centre of the frame.
+fn draw_frame(field_of_view: f32) -> Transform {
+    Transform {
+        translation: Vec3::new(
+            DRAW_GRIP_INBOARD,
+            base_height(field_of_view, DRAW_GRIP_DROP_FRACTION, DRAW_GRIP_DEPTH),
+            DRAW_GRIP_DEPTH,
+        ),
+        rotation: Quat::from_rotation_z(DRAW_CANT_RADIANS)
+            * Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
+        scale: Vec3::ONE,
+    }
+}
+
+/// The string's nock at draw fraction `draw`, in the bow's own space: [`bow_string`]'s answer,
+/// the same one the drawn mesh is built from.
+fn nock_point(draw: f32) -> Vec3 {
+    bow_string(draw)[1].extend(0.0)
+}
+
+/// The rest pose's rotation, which both hands keep on the bow so each limb hangs as at rest.
+fn rest_rotation() -> Quat {
+    Quat::from_rotation_x(REST_PITCH_RADIANS) * Quat::from_rotation_z(REST_ROLL_RADIANS)
+}
+
+/// **The right hand while the bow is drawn**: its fist closed on the nock at `draw`, so it
+/// travels back with the string.
+fn string_hand_transform(field_of_view: f32, draw: f32) -> Transform {
+    Transform::from_translation(draw_frame(field_of_view).transform_point(nock_point(draw)))
+        .with_rotation(rest_rotation())
+}
+
+/// **The left hand while the bow is drawn**: the right hand's rest pose closed on the grip,
+/// mirrored onto the left by [`hand_on_side`].
+fn grip_hand_transform(field_of_view: f32) -> Transform {
+    let grip = draw_frame(field_of_view).translation * Vec3::new(-1.0, 1.0, 1.0);
+    hand_on_side(
+        -1.0,
+        Transform::from_translation(grip).with_rotation(rest_rotation()),
+    )
+}
+
+/// The nocked arrow at `draw`: [`arrow_mesh`] turned from point-up to run from the nock toward
+/// the grip, with its nock end on the string.
+fn nocked_arrow_transform(field_of_view: f32, draw: f32) -> Transform {
+    draw_frame(field_of_view)
+        * Transform::from_translation(nock_point(draw) - Vec3::X * ARROW_IN_HAND / 2.0)
+            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2))
+}
+
+/// Which of the bows built at [`DRAW_STEPS`] is nearest a draw fraction.
+fn draw_step(draw: f32) -> usize {
+    (draw.clamp(0.0, 1.0) * DRAW_STEPS as f32).round() as usize
+}
+
+/// One frame of the drawn string toward the server's fraction `target`: an eased follow while
+/// it comes back, a short linear snap on the way home, never past the target and exactly on it
+/// once within a thousandth.
+fn settle_draw(shown: f32, target: f32, delta: f32) -> f32 {
+    let next = if target >= shown {
+        target - (target - shown) * (-delta / DRAW_FOLLOW_SECONDS).exp()
+    } else {
+        (shown - delta / DRAW_SNAP_TIME.as_secs_f32()).max(target)
+    };
+    if (target - next).abs() < 1e-3 {
+        target
+    } else {
+        next
     }
 }
 
@@ -2878,6 +2967,7 @@ impl Plugin for HandsPlugin {
     fn build(&self, app: &mut App) {
         livery::register(app);
         app.init_resource::<HandAnimation>()
+            .init_resource::<StringPull>()
             .init_resource::<SelfVitals>()
             .init_resource::<LocalMount>()
             // `CombatPlugin` owns and writes it in the game; here for the focused tests.
@@ -2903,9 +2993,11 @@ impl Plugin for HandsPlugin {
                 (
                     attach_to_view_model_camera,
                     ApplyDeferred,
+                    pull_the_string,
                     refresh_held_item,
                     animate_view_model,
                     animate_off_hand,
+                    animate_drawn_bow,
                 )
                     .chain()
                     // After this frame's appearance message has been cached, so the fist
@@ -2995,7 +3087,32 @@ struct HandVisuals {
     /// The forearm bar both hands draw. Its contents change only with the player's skin
     /// colour; its *length* is a scale on each arm's own transform, never a rewrite of this.
     forearm_mesh: Handle<Mesh>,
+    /// The bow at rest and at every one of [`DRAW_STEPS`] pulls. Built once, because a bow has
+    /// no skin to rebuild for: a draw swaps [`DrawnBow`]'s handle among these and writes none.
+    drawn_bows: Vec<Handle<Mesh>>,
 }
+
+/// **The bow's draw as first person shows it** (#1240).
+///
+/// `two_handed` is whether the drawn main hand holds a bow on foot, which puts both hands on it.
+/// `drawing` and `shown` are the server's `PlayerVitals.draw_progress` and nothing else:
+/// `drawing` is whether it is non-zero, which is exactly when the arrow is nocked, and `shown` is
+/// it as a fraction, smoothed between snapshots by [`settle_draw`]. No press moves either, so a
+/// draw the server refused — for arrows or for energy — shows no arrow and no pull.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct StringPull {
+    two_handed: bool,
+    drawing: bool,
+    shown: f32,
+}
+
+/// The bow both hands draw, as its own entity showing one of [`HandVisuals::drawn_bows`].
+#[derive(Component)]
+struct DrawnBow;
+
+/// The arrow on the drawn bow's string: [`arrow_mesh`], shown only while the server is drawing.
+#[derive(Component)]
+struct NockedArrow;
 
 /// Which arc an attack draws.
 ///
@@ -3009,8 +3126,9 @@ struct HandVisuals {
 /// and drawing a cast reaches no further than drawing a cut.
 ///
 /// **Three variants since #421, and the two that went were blade arcs.** The shape is now a
-/// function of what is held rather than of a counter — a blade cuts, a bow draws, a sceptre
-/// casts — which is why nothing in [`HandAnimation`] remembers what played last any more.
+/// function of what is held rather than of a counter — a blade cuts and a sceptre casts — which
+/// is why nothing in [`HandAnimation`] remembers what played last any more. The bow's draw left
+/// this enum in #1240: it follows the server's `draw_progress` ([`StringPull`]), not a clock.
 ///
 /// **Four since #626, and the fourth is not an attack.** [`Self::Eat`] plays on the frame a
 /// `ConsumeRequest` left, so the paragraph above is now a statement about the three arcs a
@@ -3022,8 +3140,6 @@ enum SwingShape {
     /// Down and across: the one arc a blade draws, from the upper right to the lower left.
     #[default]
     Cut,
-    /// The string hand drawing back. Chosen only for a bow request.
-    Draw,
     /// A short forward presentation thrust, never a blade arc.
     Cast,
     /// The held item tipped back toward the eye and returned to rest: eating.
@@ -3053,7 +3169,7 @@ impl SwingShape {
     /// `ItemShape::ALL` also sat until a runtime reader turned up for it, and the day one
     /// turns up here the attribute comes off rather than the list changing.
     #[cfg(test)]
-    const ALL: [Self; 4] = [Self::Cut, Self::Draw, Self::Cast, Self::Eat];
+    const ALL: [Self; 3] = [Self::Cut, Self::Cast, Self::Eat];
 }
 
 /// One attack swing in flight: which shape is playing, and how far into it the hand is.
@@ -3117,14 +3233,6 @@ fn swing_pose(shape: SwingShape, elapsed: Duration) -> SwingPose {
             pitch: -arc * CUT_PITCH_RADIANS,
             yaw: -arc * CUT_YAW_RADIANS,
             roll: arc * CUT_ROLL_RADIANS,
-            ..default()
-        },
-        SwingShape::Draw => SwingPose {
-            pitch: arc * 0.18,
-            roll: arc * 0.28,
-            // Back toward the string, while retaining enough near-plane clearance when a
-            // placement bump and the draw begin in the same frame.
-            reach: arc * 0.03,
             ..default()
         },
         SwingShape::Cast => SwingPose {
@@ -3219,11 +3327,35 @@ fn spawn_view_model(
         ..default()
     });
     let forearm_mesh_handle = meshes.add(skinned_forearm_mesh(skin_colour));
+    let drawn_bows: Vec<Handle<Mesh>> = (0..=DRAW_STEPS)
+        .map(|step| {
+            meshes.add(shaded(bow_mesh_drawn(
+                BOW_LENGTH,
+                step as f32 / DRAW_STEPS as f32,
+            )))
+        })
+        .collect();
     let visuals = HandVisuals {
         mesh: mesh.clone(),
         shield_mesh: shield_mesh_handle.clone(),
         forearm_mesh: forearm_mesh_handle.clone(),
+        drawn_bows: drawn_bows.clone(),
     };
+    // The drawn bow and its arrow: hidden until a bow is drawn, never rebuilt (#1240).
+    let fov = view_field_of_view(None);
+    let hidden = |mesh: Handle<Mesh>| {
+        (
+            ViewModel,
+            Mesh3d(mesh),
+            MeshMaterial3d(material.clone()),
+            Visibility::Hidden,
+            RenderLayers::layer(VIEW_MODEL_RENDER_LAYER),
+            NotShadowCaster,
+        )
+    };
+    commands.spawn((DrawnBow, draw_frame(fov), hidden(drawn_bows[0].clone())));
+    let arrow = meshes.add(shaded(arrow_mesh(ARROW_IN_HAND)));
+    commands.spawn((NockedArrow, nocked_arrow_transform(fov, 0.0), hidden(arrow)));
 
     // The arm each hand hangs. `Visibility` is left at its default `Inherited`, so a hand
     // hidden by the view toggle takes its own limb with it and there is no second thing to
@@ -3365,11 +3497,14 @@ fn refresh_held_item(
     mut held: HeldItemViewModelQuery<'_, '_>,
     mut shields: OffHandShieldViewModelQuery<'_, '_>,
     vitals: Res<SelfVitals>,
+    pull: Res<StringPull>,
 ) {
     let (selected, skin_colour) = subject.read();
     // Both rein hands share this empty fist while mounted. The authoritative selected
-    // stack is read again on dismount, including changes made while riding.
-    let appearance = if subject.mount.mounted() {
+    // stack is read again on dismount, including changes made while riding. A drawn bow is
+    // held by both hands the same way: the bow is its own entity, and each fist is bare.
+    let two_handed = pull.two_handed;
+    let appearance = if subject.mount.mounted() || two_handed {
         selected_appearance(None)
     } else {
         selected
@@ -3444,13 +3579,16 @@ fn refresh_held_item(
     // blocking changes is the pose, and the pose is the server's `blocking` alone — a press
     // the server has not answered raises nothing, and a block it re-raises by itself while
     // the button is held raises the shield with no press at all.
-    let blocking =
-        !mounted && shield_equipped && vitals.get().is_some_and(|vitals| vitals.blocking);
-    let shield_visible = if visible == Visibility::Visible && (mounted || shield_equipped) {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
+    let blocking = !mounted
+        && !two_handed
+        && shield_equipped
+        && vitals.get().is_some_and(|vitals| vitals.blocking);
+    let shield_visible =
+        if visible == Visibility::Visible && (mounted || two_handed || shield_equipped) {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     let shield_mesh = assets.visuals.shield_mesh.clone();
     for (mut shield, mut mesh, mut visibility) in &mut shields {
         if shield.skin_colour != skin_colour {
@@ -3461,7 +3599,11 @@ fn refresh_held_item(
         }
         // While mounted both entities draw the very same bare-hand asset. Keep the
         // shield asset ready for dismount even when an appearance arrived while riding.
-        let wanted = if mounted { &view_mesh } else { &shield_mesh };
+        let wanted = if mounted || two_handed {
+            &view_mesh
+        } else {
+            &shield_mesh
+        };
         if mesh.0 != *wanted {
             mesh.0 = wanted.clone();
         }
@@ -3626,6 +3768,7 @@ fn animate_view_model(
     mut held: Query<(Entity, &HeldItem, &mut Transform), Without<Forearm>>,
     mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
     camera: Query<&Projection, With<ViewModelCamera>>,
+    pull: Res<StringPull>,
 ) {
     let field_of_view = view_field_of_view(camera.iter().next());
     let mut next_animation = *animation;
@@ -3674,9 +3817,7 @@ fn animate_view_model(
         });
     }
     if let Some(item_id) = intent.swing_sent() {
-        let shape = if item_id == ITEM_BOW {
-            SwingShape::Draw
-        } else if item_id == ITEM_WOODEN_SCEPTRE {
+        let shape = if item_id == ITEM_WOODEN_SCEPTRE {
             SwingShape::Cast
         } else {
             SwingShape::Cut
@@ -3714,10 +3855,17 @@ fn animate_view_model(
 
     // The one transform the hand's own arm carries. It is read once and written into the
     // child below rather than being a second reading of the animation.
-    let arm = forearm_transform(&next_animation);
+    // On a drawn bow the right hand is the string's, and no arc of this animation moves it.
+    let arm = if pull.two_handed {
+        forearm_transform_along(0.0)
+    } else {
+        forearm_transform(&next_animation)
+    };
     for (entity, item, mut transform) in &mut held {
         let next = if intent.mount.mounted() {
             mounted_hand_transform(1.0, field_of_view)
+        } else if pull.two_handed {
+            string_hand_transform(field_of_view, pull.shown)
         } else {
             presented_transform(&next_animation, item.shape, field_of_view)
         };
@@ -3750,6 +3898,7 @@ fn animate_off_hand(
     camera: Query<&Projection, With<ViewModelCamera>>,
     mut shields: Query<(Entity, &mut OffHandShield, &mut Transform), Without<Forearm>>,
     mut forearms: Query<(&ChildOf, &mut Transform), With<Forearm>>,
+    pull: Res<StringPull>,
 ) {
     let fov = view_field_of_view(camera.iter().next());
     for (entity, mut shield, mut transform) in &mut shields {
@@ -3766,17 +3915,121 @@ fn animate_off_hand(
         let fraction = parry.as_secs_f32() / PARRY_TIME.as_secs_f32();
         let next = if shield.mounted {
             mounted_hand_transform(-1.0, fov)
+        } else if pull.two_handed {
+            grip_hand_transform(fov)
         } else {
             off_hand_transform(fov, fraction)
         };
         if *transform != next {
             *transform = next;
         }
-        let arm = forearm_transform_along(off_hand_along_view(fraction));
+        let along = if pull.two_handed {
+            0.0
+        } else {
+            off_hand_along_view(fraction)
+        };
+        let arm = forearm_transform_along(along);
         for (child_of, mut limb) in &mut forearms {
             if child_of.parent() == entity && *limb != arm {
                 *limb = arm;
             }
+        }
+    }
+}
+
+/// **Decides [`StringPull`] for this frame** (#1240), before the hands are refreshed from it.
+///
+/// Two-handed while the drawn hand holds a bow on foot. The pull is the server's
+/// `draw_progress` and nothing local: the button, the press sent and the time it has been held
+/// reach none of it. Off the bow, the pull is at rest.
+fn pull_the_string(
+    time: Res<Time>,
+    subject: HandSubject<'_>,
+    vitals: Res<SelfVitals>,
+    mut pull: ResMut<StringPull>,
+) {
+    let (appearance, _) = subject.read();
+    let two_handed =
+        subject.drawn.0 && appearance.shape == Some(ItemShape::Bow) && !subject.mount.mounted();
+    let progress = vitals
+        .get()
+        .filter(|_| two_handed)
+        .map_or(0, |vitals| vitals.draw_progress);
+    let shown = if two_handed {
+        settle_draw(pull.shown, f32::from(progress) / 255.0, time.delta_secs())
+    } else {
+        0.0
+    };
+    let next = StringPull {
+        two_handed,
+        drawing: progress > 0,
+        shown,
+    };
+    if *pull != next {
+        *pull = next;
+    }
+}
+
+type RightHandVisibilityQuery<'w, 's> =
+    Query<'w, 's, &'static Visibility, (With<HeldItem>, Without<DrawnBow>, Without<NockedArrow>)>;
+
+type DrawnBowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Mesh3d,
+        &'static mut Transform,
+        &'static mut Visibility,
+    ),
+    (With<DrawnBow>, Without<HeldItem>, Without<NockedArrow>),
+>;
+
+type NockedArrowQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<NockedArrow>, Without<HeldItem>, Without<DrawnBow>),
+>;
+
+/// Places the drawn bow at its pull and the nocked arrow on its string, and shows both only with
+/// the right hand on screen (#1240). The bow's mesh is swapped by handle among the built steps.
+fn animate_drawn_bow(
+    pull: Res<StringPull>,
+    visuals: Res<HandVisuals>,
+    camera: Query<&Projection, With<ViewModelCamera>>,
+    hands: RightHandVisibilityQuery<'_, '_>,
+    mut bows: DrawnBowQuery<'_, '_>,
+    mut arrows: NockedArrowQuery<'_, '_>,
+) {
+    let fov = view_field_of_view(camera.iter().next());
+    let on_screen = pull.two_handed && hands.iter().any(|hand| *hand == Visibility::Visible);
+    let shown = |yes: bool| {
+        if yes {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        }
+    };
+    let bow_mesh = &visuals.drawn_bows[draw_step(pull.shown)];
+    for (mut mesh, mut transform, mut visibility) in &mut bows {
+        if mesh.0 != *bow_mesh {
+            mesh.0 = bow_mesh.clone();
+        }
+        let next = draw_frame(fov);
+        if *transform != next {
+            *transform = next;
+        }
+        if *visibility != shown(on_screen) {
+            *visibility = shown(on_screen);
+        }
+    }
+    for (mut transform, mut visibility) in &mut arrows {
+        let next = nocked_arrow_transform(fov, pull.shown);
+        if *transform != next {
+            *transform = next;
+        }
+        if *visibility != shown(on_screen && pull.drawing) {
+            *visibility = shown(on_screen && pull.drawing);
         }
     }
 }
@@ -5141,7 +5394,6 @@ mod tests {
             );
             let mut arcs: Vec<Option<SwingShape>> = match appearance.shape {
                 Some(ItemShape::Blade) => vec![Some(SwingShape::Cut)],
-                Some(ItemShape::Bow) => vec![Some(SwingShape::Draw)],
                 Some(ItemShape::Sceptre) => vec![Some(SwingShape::Cast)],
                 _ => Vec::new(),
             };
@@ -5850,10 +6102,11 @@ mod tests {
     /// carry the composition toward the eye and a margin measured at rest is not one.
     #[test]
     fn the_whole_fist_stays_in_frame_at_every_field_of_view_a_player_can_choose() {
-        // **Two of the eight animations, and the other six are excluded by measurement rather
-        // than by omission.** A placement bump, all three swing arcs, a bow draw and a sceptre
-        // cast each carry the fist past the bottom edge **at the default field of view
-        // already** — measured here at 1.08, 1.08, 1.07, 1.05, 1.33 and 1.08 of the way to it.
+        // **Two of the seven animations, and the other five are excluded by measurement rather
+        // than by omission.** A placement bump, all three swing arcs and a sceptre cast each
+        // carry the fist past the bottom edge **at the default field of view already** —
+        // measured here at 1.08, 1.08, 1.07, 1.05 and 1.08 of the way to it. The bow's draw
+        // is not an arc of this hand since #1240, and its two hands are swept on their own.
         // The hand dipping out of frame is what those arcs are; requiring otherwise of them
         // would be inventing a property this composition has never had and calling the
         // invention a regression test. What is asserted is the property #384 established and
@@ -6234,7 +6487,7 @@ mod tests {
     ///
     /// | animation | before #396 | after #396 | **now** |
     /// |---|---|---|---|
-    /// | at rest / placement bump / bow draw | 60.5° | 61.2° | **61.2°** |
+    /// | at rest / placement bump | 60.5° | 61.2° | **61.2°** |
     /// | overhead cut | 56.2° | 54.2° | **54.2°** |
     /// | lateral slash | 52.8° | 53.8° | **53.8°** |
     /// | mining punch | 52.4° | 52.1° | **60.2°** |
@@ -6286,11 +6539,6 @@ mod tests {
                 "through a blade cut",
                 widest(Some(SwingShape::Cut), Some(ItemShape::Blade), true, false),
                 53.0,
-            ),
-            (
-                "through a bow draw",
-                widest(Some(SwingShape::Draw), Some(ItemShape::Bow), true, false),
-                60.0,
             ),
             (
                 "through a sceptre cast",
@@ -9170,7 +9418,11 @@ mod tests {
                     .expect("every drawn view-model part has a local transform")
             })
             .collect();
-        assert_eq!(models.len(), 4, "both hands and forearms are measured");
+        assert_eq!(
+            models.len(),
+            6,
+            "both hands, their forearms, the drawn bow and its arrow are measured"
+        );
         for entity in &models {
             assert_eq!(
                 app.world().get::<RenderLayers>(*entity),
@@ -10378,27 +10630,416 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bow_request_draws_the_string_rather_than_a_blade_arc() {
-        const STEP: Duration = Duration::from_millis(16);
+    // -----------------------------------------------------------------------
+    // The two-handed draw (#1240), which replaced the 220 ms tip-back a bow request played
+    // -----------------------------------------------------------------------
 
+    /// **The string follows the server between snapshots and snaps home on release.**
+    #[test]
+    fn the_string_follows_the_servers_draw_smoothly_and_snaps_back_on_release() {
+        const FRAME: f32 = 0.016;
+        let first = settle_draw(0.0, 1.0, FRAME);
+        assert!(
+            first > 0.0 && first < 1.0,
+            "the first frame of a draw drew {first}: a jump or nothing"
+        );
+        let mut shown = first;
+        for _ in 0..30 {
+            let next = settle_draw(shown, 1.0, FRAME);
+            assert!(
+                next >= shown && next <= 1.0,
+                "the string overshot to {next}"
+            );
+            shown = next;
+        }
+        assert_eq!(
+            shown, 1.0,
+            "half a second did not settle on the server's value"
+        );
+
+        let released = settle_draw(1.0, 0.0, FRAME);
+        assert!(
+            released > 0.0 && released < 1.0,
+            "the release drew {released}: a jump or nothing"
+        );
+        let frames = (DRAW_SNAP_TIME.as_secs_f32() / FRAME).ceil() as usize;
+        assert!(
+            (2..=8).contains(&frames),
+            "{DRAW_SNAP_TIME:?} is not a short snap"
+        );
+        let mut shown = 1.0;
+        for _ in 0..frames {
+            shown = settle_draw(shown, 0.0, FRAME);
+        }
+        assert_eq!(
+            shown, 0.0,
+            "the string was not home after {DRAW_SNAP_TIME:?}"
+        );
+    }
+
+    /// **Both hands hold the drawn bow at every pull**: the left fist on the grip, the right
+    /// closed on the string's nock of the bow built for that pull, and the arrow's nock on the
+    /// string with its point past the grip and along the view. At rest, mid and full draw the
+    /// nock is at the brace, halfway and the full draw length, and the limbs flex with it.
+    #[test]
+    fn both_hands_hold_the_drawn_bow_and_the_arrow_rides_the_string_at_every_pull() {
+        let (wood, _, cord) = bow_colours();
+        let fov = default_fov();
+        let frame = draw_frame(fov);
+        let bows: Vec<Mesh> = (0..=DRAW_STEPS)
+            .map(|step| bow_mesh_drawn(BOW_LENGTH, step as f32 / DRAW_STEPS as f32))
+            .collect();
+        assert!(
+            grip_hand_transform(fov)
+                .translation
+                .abs_diff_eq(frame.translation, 1e-6),
+            "the left fist is off the grip"
+        );
+        for progress in 0..=u8::MAX {
+            let draw = f32::from(progress) / 255.0;
+            let right = string_hand_transform(fov, draw);
+            let inverse = right.compute_affine().inverse();
+            let nock: Vec<Vec2> = bow_points(&bows[draw_step(draw)], cord)
+                .into_iter()
+                .filter(|point| point.y.abs() < 1e-5)
+                .collect();
+            assert!(
+                !nock.is_empty(),
+                "the bow at {progress} has no nock section"
+            );
+            for point in nock {
+                let local = inverse.transform_point3(frame.transform_point(point.extend(0.0)));
+                assert!(
+                    local.abs().cmple(HAND_SIZE / 2.0).all(),
+                    "at {progress} the drawn string's nock is at {local:?} from the right fist"
+                );
+            }
+            let arrow = nocked_arrow_transform(fov, draw);
+            let arrow_nock = arrow.transform_point(Vec3::NEG_Y * ARROW_IN_HAND / 2.0);
+            let arrow_point = arrow.transform_point(Vec3::Y * ARROW_IN_HAND / 2.0);
+            assert!(
+                arrow_nock.abs_diff_eq(right.translation, 1e-5),
+                "at {progress} the arrow's nock is at {arrow_nock}, off the string hand"
+            );
+            assert!(
+                (arrow_point - arrow_nock)
+                    .normalize()
+                    .abs_diff_eq(Vec3::NEG_Z, 1e-5)
+                    && arrow_point.z < frame.translation.z,
+                "at {progress} the arrow points at {arrow_point}, not along the view past the grip"
+            );
+        }
+        for (progress, fraction) in [(0u8, 0.0), (128, 0.5), (255, 1.0)] {
+            let draw = f32::from(progress) / 255.0;
+            let expected = frame.transform_point(nock_point(fraction));
+            assert!(
+                string_hand_transform(fov, draw)
+                    .translation
+                    .abs_diff_eq(expected, 2e-4),
+                "at {progress} the string hand is not at {fraction} of the draw"
+            );
+            assert_eq!(draw_step(draw), (fraction * DRAW_STEPS as f32) as usize);
+        }
+        let tip = |step: usize| {
+            let at = bow_string(step as f32 / DRAW_STEPS as f32)[0];
+            mean_near(
+                &bow_points(&bows[step], wood),
+                at,
+                BOW_STAVE * BOW_TIP_FRACTION * 0.7,
+            )
+        };
+        assert!(
+            tip(DRAW_STEPS).x > tip(0).x + 0.005,
+            "the limbs do not flex at a full draw"
+        );
+    }
+
+    /// The server's word on this player's draw, as an accepted snapshot sets it.
+    fn say_drawing(app: &mut App, draw_progress: u8) {
+        app.insert_resource(SelfVitals(Some(crate::net::PlayerVitals {
+            draw_progress,
+            ..crate::net::PlayerVitals::unharmed()
+        })));
+    }
+
+    /// The drawn bow's visibility and which built step it shows — which must be one of them.
+    fn drawn_bow(app: &mut App) -> (Visibility, usize) {
+        let bows = app.world().resource::<HandVisuals>().drawn_bows.clone();
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<(&Visibility, &Mesh3d), With<DrawnBow>>();
+        let (visibility, mesh) = query.single(world).expect("one drawn bow");
+        let step = bows
+            .iter()
+            .position(|bow| *bow == mesh.0)
+            .expect("the drawn bow shows a mesh it was not built with");
+        (*visibility, step)
+    }
+
+    fn nocked_arrow(app: &mut App) -> Visibility {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Visibility, With<NockedArrow>>();
+        *query.single(world).expect("one nocked arrow")
+    }
+
+    fn string_hand(app: &mut App) -> Transform {
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<&Transform, With<HeldItem>>();
+        *query.single(world).expect("one right hand")
+    }
+
+    /// **What the draw shows is the server's `draw_progress`, and a held press is not.**
+    ///
+    /// The left button is held throughout. With the server silent — which is what a draw refused
+    /// for arrows or for energy is — the bow is in both hands at rest with no arrow. Then the
+    /// server's progress pulls the string and nocks the arrow, and its zero looses both.
+    #[test]
+    fn the_drawn_bow_follows_the_servers_progress_and_a_refused_draw_draws_nothing() {
+        const STEP: Duration = Duration::from_millis(16);
+        let fov = default_fov();
         let mut app = hand_only_app();
         app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP));
-        app.world_mut().write_message(SwingSent {
+        let mut params = session().0;
+        params.inventory_slots = 9;
+        params.equipment_slots = 5;
+        let main_hand =
+            super::super::inventory::equipment_slot(&params, super::super::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); 9];
+        stacks[usize::from(main_hand)] = InventoryStack {
             item_id: crafting::ITEM_BOW,
-        });
-        app.update();
+            count: 1,
+            durability: 100,
+            max_durability: 100,
+        };
+        app.insert_resource(Session(params))
+            .insert_resource(Inventory::from_stacks(stacks));
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = true;
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
 
-        let animation = *app.world().resource::<HandAnimation>();
+        say_drawing(&mut app, 0);
+        for _ in 0..10 {
+            app.update();
+        }
+        let pull = *app.world().resource::<StringPull>();
+        assert!(pull.two_handed, "the drawn bow is not held with two hands");
         assert_eq!(
-            animation.attack.expect("the bow played nothing").shape,
-            SwingShape::Draw
+            (pull.drawing, pull.shown),
+            (false, 0.0),
+            "a press the server did not answer drew the string"
         );
-        let pose = swing_pose(SwingShape::Draw, ATTACK_SWING_TIME / 2);
+        assert_eq!(drawn_bow(&mut app), (Visibility::Visible, 0));
+        assert_eq!(
+            nocked_arrow(&mut app),
+            Visibility::Hidden,
+            "a refused draw nocked an arrow"
+        );
+        assert_eq!(
+            held(&mut app).0.item_id,
+            None,
+            "the right fist still holds the bow"
+        );
+        assert_eq!(string_hand(&mut app), string_hand_transform(fov, 0.0));
+        assert_eq!(
+            off_hand_shield(&mut app),
+            (Visibility::Visible, grip_hand_transform(fov))
+        );
+
+        for (progress, step) in [(128u8, DRAW_STEPS / 2), (255, DRAW_STEPS)] {
+            say_drawing(&mut app, progress);
+            for _ in 0..40 {
+                app.update();
+            }
+            let pull = *app.world().resource::<StringPull>();
+            assert!(pull.drawing, "{progress}: the server's draw is not drawing");
+            assert_eq!(
+                pull.shown,
+                f32::from(progress) / 255.0,
+                "{progress}: unsettled"
+            );
+            assert_eq!(
+                drawn_bow(&mut app),
+                (Visibility::Visible, step),
+                "{progress}"
+            );
+            assert_eq!(nocked_arrow(&mut app), Visibility::Visible, "{progress}");
+            assert_eq!(
+                string_hand(&mut app),
+                string_hand_transform(fov, pull.shown),
+                "{progress}"
+            );
+        }
+
+        say_drawing(&mut app, 0);
+        app.update();
+        assert_eq!(
+            nocked_arrow(&mut app),
+            Visibility::Hidden,
+            "the loosed arrow stayed"
+        );
         assert!(
-            pose.reach > 0.0,
-            "the draw did not pull back toward the camera"
+            app.world().resource::<StringPull>().shown > 0.0,
+            "the string jumped home rather than snapping"
         );
+        for _ in 0..8 {
+            app.update();
+        }
+        assert_eq!(drawn_bow(&mut app), (Visibility::Visible, 0));
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = false;
+        app.update();
+        assert!(!app.world().resource::<StringPull>().two_handed);
+        assert_eq!(
+            drawn_bow(&mut app).0,
+            Visibility::Hidden,
+            "a sheathed bow stayed drawn"
+        );
+        assert_eq!(off_hand_shield(&mut app).0, Visibility::Hidden);
+    }
+
+    /// **The two-handed draw clears the near plane at every built pull and every field of view,
+    /// and neither arm shows its end at the default one**: both hands with their forearms, the
+    /// bow at each step and the arrow on its string.
+    #[test]
+    fn the_two_handed_draw_clears_the_near_plane_and_hides_both_arms_at_every_pull() {
+        let near = PerspectiveProjection::default().near;
+        let default = crate::settings::Settings::default().field_of_view();
+        let rest = HandAnimation::default();
+        let limb: Vec<Vec3> = positions(&held_mesh(TEST_SKIN, selected_appearance(None)))
+            .into_iter()
+            .chain(positions(&placed_forearm(&rest)))
+            .map(Vec3::from_array)
+            .collect();
+        let arrow: Vec<Vec3> = positions(&arrow_mesh(ARROW_IN_HAND))
+            .into_iter()
+            .map(Vec3::from_array)
+            .collect();
+        for step in 0..=DRAW_STEPS {
+            let draw = step as f32 / DRAW_STEPS as f32;
+            let bow: Vec<Vec3> = positions(&bow_mesh_drawn(BOW_LENGTH, draw))
+                .into_iter()
+                .map(Vec3::from_array)
+                .collect();
+            for fov in every_field_of_view() {
+                for (name, pose, points) in [
+                    ("the left hand", grip_hand_transform(fov), &limb),
+                    ("the right hand", string_hand_transform(fov, draw), &limb),
+                    ("the bow", draw_frame(fov), &bow),
+                    ("the arrow", nocked_arrow_transform(fov, draw), &arrow),
+                ] {
+                    for point in points {
+                        let z = pose.transform_point(*point).z;
+                        assert!(
+                            -z > near,
+                            "{name} reaches z {z} against a near plane at {near}, drawn \
+                             {step}/{DRAW_STEPS} at {:.0}°",
+                            fov.to_degrees()
+                        );
+                    }
+                }
+            }
+            for (name, pose) in [
+                ("left", grip_hand_transform(default_fov())),
+                ("right", string_hand_transform(default_fov(), draw)),
+            ] {
+                let widest = widest_clipped_fov(&forearm_cap(&rest), &pose);
+                assert!(
+                    widest > default,
+                    "the {name} arm shows its end above {widest:.1}°, inside the default \
+                     {default}°, drawn {step}/{DRAW_STEPS}"
+                );
+            }
+        }
+    }
+
+    /// **Rule 2 of `client/AGENTS.md` for the two-handed draw**: no two faces of different colours
+    /// share a plane where they overlap — the bow at every built step, the arrow on its string
+    /// and both fists, each where it is drawn.
+    ///
+    /// The draw is canted and turned, so its faces are not axis-aligned and
+    /// [`no_two_colours_share_a_plane_in_the_hand`] cannot read them. Here each triangle is
+    /// compared by its plane, and two of different colours on one plane by the rectangle each
+    /// covers in it — which can only overstate an overlap, never miss one.
+    #[test]
+    fn no_two_colours_share_a_plane_in_the_two_handed_draw() {
+        struct Face {
+            normal: Vec3,
+            offset: f32,
+            points: [Vec3; 3],
+            colour: [u8; 4],
+        }
+        fn faces(mesh: &Mesh, pose: Transform) -> Vec<Face> {
+            let positions = positions(mesh);
+            let Some(VertexAttributeValues::Float32x4(colours)) =
+                mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+            else {
+                panic!("the mesh must carry per-vertex colour");
+            };
+            let indices: Vec<usize> = mesh.indices().expect("indexed").iter().collect();
+            indices
+                .chunks_exact(3)
+                .filter_map(|corner| {
+                    let quantise = |index: usize| colours[index].map(|c| (c * 255.0).round() as u8);
+                    let colour = quantise(corner[0]);
+                    if corner.iter().any(|index| quantise(*index) != colour) {
+                        return None;
+                    }
+                    let points = [corner[0], corner[1], corner[2]]
+                        .map(|index| pose.transform_point(Vec3::from_array(positions[index])));
+                    let normal = (points[1] - points[0]).cross(points[2] - points[0]);
+                    (normal.length_squared() > 1e-18).then(|| {
+                        let normal = normal.normalize();
+                        Face {
+                            normal,
+                            offset: normal.dot(points[0]),
+                            points,
+                            colour,
+                        }
+                    })
+                })
+                .collect()
+        }
+        let span = |face: &Face, axis: Vec3| {
+            face.points
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), point| {
+                    (low.min(point.dot(axis)), high.max(point.dot(axis)))
+                })
+        };
+        let overlaps = |a: (f32, f32), b: (f32, f32)| a.0.max(b.0) < a.1.min(b.1) - 1e-7;
+
+        let fov = default_fov();
+        let hand = held_mesh(TEST_SKIN, selected_appearance(None));
+        let arrow = arrow_mesh(ARROW_IN_HAND);
+        for step in 0..=DRAW_STEPS {
+            let draw = step as f32 / DRAW_STEPS as f32;
+            let mut all = faces(&bow_mesh_drawn(BOW_LENGTH, draw), draw_frame(fov));
+            all.extend(faces(&arrow, nocked_arrow_transform(fov, draw)));
+            all.extend(faces(&hand, grip_hand_transform(fov)));
+            all.extend(faces(&hand, string_hand_transform(fov, draw)));
+            for (index, one) in all.iter().enumerate() {
+                for two in &all[index + 1..] {
+                    if one.colour == two.colour
+                        || one.normal.dot(two.normal) < 1.0 - 1e-4
+                        || (one.offset - two.offset).abs() > 1e-5
+                    {
+                        continue;
+                    }
+                    let u = one.normal.any_orthonormal_vector();
+                    let v = one.normal.cross(u);
+                    assert!(
+                        !(overlaps(span(one, u), span(two, u))
+                            && overlaps(span(one, v), span(two, v))),
+                        "drawn {step}/{DRAW_STEPS}: {:?} and {:?} share the plane at {} along {}",
+                        one.colour,
+                        two.colour,
+                        one.offset,
+                        one.normal
+                    );
+                }
+            }
+        }
     }
 
     /// **A right press while a weapon is drawn plays no placement bump** (#1239): the button

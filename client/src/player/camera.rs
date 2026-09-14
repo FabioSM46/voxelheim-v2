@@ -948,6 +948,7 @@ mod tests {
                     blocking: false,
                     energy: 100,
                     max_energy: 100,
+                    draw_progress: 0,
                 }))
                 .add_systems(Update, toggle_view);
 
