@@ -13,7 +13,7 @@ import (
 
 // losslessMigrationSources is every older format a record is always carried out of.
 // Each one is a format a world with boss receipts must still be able to start from.
-var losslessMigrationSources = []uint32{10}
+var losslessMigrationSources = []uint32{10, 11}
 
 // A record's layout belongs to the build that wrote it, so the table is pinned by
 // literals: a v10 record read at today's slot count would decode at the wrong size the
@@ -21,7 +21,7 @@ var losslessMigrationSources = []uint32{10}
 func TestEachMigratedFormatDecodesAtTheSlotCountItWasWrittenWith(t *testing.T) {
 	t.Parallel()
 
-	for version, want := range map[uint32]int{previousStoreVersion: 39, 10: 40} {
+	for version, want := range map[uint32]int{previousStoreVersion: 39, 10: 40, 11: 40} {
 		if got, migrates := migratedInventorySlots(version); !migrates || got != want {
 			t.Errorf("format %d migrates at %d slots (migrates %v), want %d", version, got, migrates, want)
 		}

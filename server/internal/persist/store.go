@@ -131,7 +131,13 @@ import (
 // permanent progression while presenting it as a successful load.
 // 11 adds the monotonic boss-reward receipt epoch. Versions 10 and eligible 7
 // migrate losslessly with epoch zero: neither format could contain a boss receipt.
-const StoreVersion uint32 = 11
+//
+// **12 widens the fixed slot table to 41 entries for the trailing main-hand slot.**
+// V11 and v10 are migrated at 40 slots — see [migratedInventorySlots] for why that
+// number is a literal — so every slot keeps its index and the new tail is empty; a v11
+// epoch is carried unchanged. A reward journal's pending postimage keeps the format it
+// was sealed in until the journal is next committed.
+const StoreVersion uint32 = 12
 
 const (
 	previousStoreVersion   uint32 = 7
@@ -153,11 +159,25 @@ func migratedInventorySlots(version uint32) (int, bool) {
 	switch version {
 	case previousStoreVersion:
 		return previousInventorySlots, true
-	case 10:
+	case 10, 11:
 		return 40, true
 	default:
 		return 0, false
 	}
+}
+
+// recordNameOffset is where a record of this format and slot count keeps its name
+// length: the slot table, then the purse and learned-mount byte from v10, then the
+// reward epoch from v11.
+func recordNameOffset(version uint32, inventorySlots int) int {
+	offset := offSlots + inventorySlots*slotSize
+	if version >= 10 {
+		offset += 5
+	}
+	if version >= 11 {
+		offset += 8
+	}
+	return offset
 }
 
 // On-disk layout, little-endian throughout, one file per character.
@@ -497,8 +517,9 @@ func (s *Store) Unreadable() []string {
 // its character looks like; a v4 record says nothing about hunger; a v5 record says
 // nothing about experience; a v6 record has no worn-equipment slots — so there is no
 // migration for those formats. V7 maps losslessly to the first 39 slots only when it has
-// no historical silver stack; otherwise it stays in the directory kept aside. V10 always
-// maps losslessly, so a v10 record is migrated or the start is refused. Current records
+// no historical silver stack; otherwise it stays in the directory kept aside. V10 and
+// v11 always map losslessly to the first 40 slots, so a record in either is migrated or
+// the start is refused. Current records
 // sharing that directory are copied byte-for-byte into the replacement.
 //
 // **A world that has issued boss receipts may not leave a character behind.** Strict
@@ -1007,13 +1028,7 @@ func encodeRecord(rec Record) []byte {
 func encodeRecordLayout(rec Record, version uint32, inventorySlots int) []byte {
 	name := rec.Name
 	silverOffset := offSlots + inventorySlots*slotSize
-	nameOffset := silverOffset
-	if version >= 10 {
-		nameOffset += 5
-	}
-	if version >= 11 {
-		nameOffset += 8
-	}
+	nameOffset := recordNameOffset(version, inventorySlots)
 	headerSize := nameOffset + 2
 
 	buf := world.NewRecord(headerSize, len(name), playerMagic, version)
@@ -1079,13 +1094,7 @@ func v7RecordHasNoSilverStack(rec Record) bool {
 
 func decodeRecordLayout(data []byte, version uint32, inventorySlots int) (Record, error) {
 	silverOffset := offSlots + inventorySlots*slotSize
-	nameOffset := silverOffset
-	if version >= 10 {
-		nameOffset += 5
-	}
-	if version >= 11 {
-		nameOffset += 8
-	}
+	nameOffset := recordNameOffset(version, inventorySlots)
 	headerSize := nameOffset + 2
 	if len(data) < headerSize+world.ChecksumSize {
 		return Record{}, fmt.Errorf("%w: %d bytes is shorter than an empty player record",

@@ -33,12 +33,14 @@ type slotTable [protocol.InventorySlots]inventoryStack
 
 const (
 	// equipmentFirst is the first slot automatic insertion must never reach. The
-	// inventory is laid out as hotbar, pack, then the four worn slots.
-	equipmentFirst   = int(protocol.InventorySlots - protocol.EquipmentSlots)
-	equipmentHead    = equipmentFirst
-	equipmentChest   = equipmentFirst + 1
-	equipmentLegs    = equipmentFirst + 2
-	equipmentOffHand = equipmentFirst + 3
+	// inventory is laid out as hotbar, pack, then the five worn slots. The main hand is
+	// appended last, so the four worn slots before it keep their indices.
+	equipmentFirst    = int(protocol.InventorySlots - protocol.EquipmentSlots)
+	equipmentHead     = equipmentFirst
+	equipmentChest    = equipmentFirst + 1
+	equipmentLegs     = equipmentFirst + 2
+	equipmentOffHand  = equipmentFirst + 3
+	equipmentMainHand = equipmentFirst + 4
 )
 
 // inventoryStack is one slot's authoritative contents. The zero value is an empty slot.
@@ -444,6 +446,8 @@ func wornAtForSlot(slot uint8) (wornAt, bool) {
 		return wornLegs, true
 	case equipmentOffHand:
 		return wornOffHand, true
+	case equipmentMainHand:
+		return wornMainHand, true
 	default:
 		return wornNowhere, false
 	}
@@ -463,8 +467,8 @@ func (i *inventory) wornItemsLocked() (head, chest, legs, offHand uint16) {
 		uint16(i.slots[equipmentOffHand].item)
 }
 
-// refreshWornLocked rebuilds the combat summary from the four authoritative
-// equipment slots. The caller holds sim.mu and inventory.mu; assigning the complete
+// refreshWornLocked rebuilds the combat summary from the authoritative worn
+// equipment slots. A main-hand weapon carries no armour or threat, so it adds nothing. The caller holds sim.mu and inventory.mu; assigning the complete
 // local value at the end means the tick can never observe half of one refresh.
 //
 // A piece at zero durability stays equipped and visible but contributes nothing: worn

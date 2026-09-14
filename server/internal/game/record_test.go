@@ -180,6 +180,38 @@ func TestARecordRestoresAWornChestItemAndRejectsItInTheWrongSlot(t *testing.T) {
 	}
 }
 
+// Life.Validate reaches the fifth slot through wornAtForSlot like the other four: a
+// stored main hand holds one weapon or nothing, and a weapon is refused anywhere worn
+// but there.
+func TestAStoredMainHandHoldsOneWeaponOrNothing(t *testing.T) {
+	t.Parallel()
+
+	whole := func(item ItemID) protocol.InventoryStack {
+		definition, _ := itemByID(item)
+		return protocol.InventoryStack{ItemID: uint16(item), Count: 1, Durability: definition.maxDurability, MaxDurability: definition.maxDurability}
+	}
+	for name, tc := range map[string]struct {
+		slot  int
+		stack protocol.InventoryStack
+		legal bool
+	}{
+		"an empty main hand":           {slot: equipmentMainHand, legal: true},
+		"a sword in the main hand":     {slot: equipmentMainHand, stack: whole(ItemRustySword), legal: true},
+		"a sceptre in the main hand":   {slot: equipmentMainHand, stack: whole(ItemWoodenSceptre), legal: true},
+		"a shield in the main hand":    {slot: equipmentMainHand, stack: whole(ItemWoodenShield)},
+		"stone in the main hand":       {slot: equipmentMainHand, stack: protocol.InventoryStack{ItemID: uint16(ItemStone), Count: 1}},
+		"a sword in the off-hand":      {slot: equipmentOffHand, stack: whole(ItemRustySword)},
+		"a sword on the head":          {slot: equipmentHead, stack: whole(ItemIronSword)},
+		"a sword in the last pack row": {slot: equipmentFirst - 1, stack: whole(ItemBow), legal: true},
+	} {
+		life := Life{Pos: [3]float64{0.5, 64, 0.5}, Health: PlayerMaxHealth, Hunger: PlayerMaxHunger}
+		life.Slots[tc.slot] = tc.stack
+		if err := life.Validate(); (err == nil) != tc.legal {
+			t.Errorf("%s: Validate = %v, want legal %v", name, err, tc.legal)
+		}
+	}
+}
+
 // A restored player settles the same way a new one does, and keeps facing where they
 // were facing until their client says otherwise.
 //

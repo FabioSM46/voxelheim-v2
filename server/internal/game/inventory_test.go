@@ -257,6 +257,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		testLegs
 		testOffHand
 		testStackableHead
+		testMainHand
 	)
 	itemRegistry[testHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
 	itemRegistry[testOtherHead] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornHead}
@@ -264,6 +265,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 	itemRegistry[testLegs] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornLegs}
 	itemRegistry[testOffHand] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornOffHand}
 	itemRegistry[testStackableHead] = itemDefinition{places: world.Air, maxStack: 4, wornAt: wornHead}
+	itemRegistry[testMainHand] = itemDefinition{places: world.Air, maxStack: 1, maxDurability: 10, wornAt: wornMainHand}
 	t.Cleanup(func() {
 		delete(itemRegistry, testHead)
 		delete(itemRegistry, testOtherHead)
@@ -271,6 +273,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		delete(itemRegistry, testLegs)
 		delete(itemRegistry, testOffHand)
 		delete(itemRegistry, testStackableHead)
+		delete(itemRegistry, testMainHand)
 	})
 
 	refusedByteIdentical := func(t *testing.T, inventory *inventory, request protocol.InventoryMoveRequest) {
@@ -295,6 +298,7 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		{name: "chest", slot: equipmentChest, matching: testChest, mismatched: testLegs},
 		{name: "legs", slot: equipmentLegs, matching: testLegs, mismatched: testHead},
 		{name: "off-hand", slot: equipmentOffHand, matching: testOffHand, mismatched: testLegs},
+		{name: "main hand", slot: equipmentMainHand, matching: testMainHand, mismatched: testOffHand},
 	}
 	for _, location := range locations {
 		t.Run(location.name, func(t *testing.T) {
@@ -360,6 +364,86 @@ func TestEquipmentMovesRequireTheRegistryLocationInBothDirections(t *testing.T) 
 		inventory.slots[4] = stackOf(testStackableHead, 2)
 		refusedByteIdentical(t, &inventory, protocol.InventoryMoveRequest{From: uint8(equipmentHead), To: 4, Count: 1})
 	})
+}
+
+// The fifth worn slot is appended: the four before it keep the indices a stored record
+// and the wire already use, and the main hand is the last slot of the table.
+func TestTheMainHandIsAppendedAfterTheFourWornSlots(t *testing.T) {
+	t.Parallel()
+
+	if protocol.InventorySlots != 41 || protocol.EquipmentSlots != 5 {
+		t.Fatalf("layout is %d slots with %d worn, want 41 with 5", protocol.InventorySlots, protocol.EquipmentSlots)
+	}
+	for name, got := range map[string]int{"head": equipmentHead, "chest": equipmentChest, "legs": equipmentLegs, "off-hand": equipmentOffHand} {
+		if want := map[string]int{"head": 36, "chest": 37, "legs": 38, "off-hand": 39}[name]; got != want {
+			t.Errorf("the %s slot is %d, want %d", name, got, want)
+		}
+	}
+	if equipmentMainHand != 40 {
+		t.Errorf("the main hand is slot %d, want 40", equipmentMainHand)
+	}
+	if last := int(protocol.InventorySlots) - 1; equipmentMainHand != last {
+		t.Errorf("the main hand is slot %d, want the last slot %d", equipmentMainHand, last)
+	}
+	if place, worn := wornAtForSlot(uint8(equipmentMainHand)); !worn || place != wornMainHand {
+		t.Errorf("wornAtForSlot(%d) = %d, %v; want the main hand", equipmentMainHand, place, worn)
+	}
+	if _, worn := wornAtForSlot(uint8(equipmentFirst - 1)); worn {
+		t.Errorf("the last pack slot %d is treated as worn", equipmentFirst-1)
+	}
+}
+
+// Every registered weapon can be taken into the main hand and every other registered
+// item is refused there, whole rows at a time rather than one synthetic item.
+func TestEveryRegisteredWeaponEntersTheMainHandAndNoOtherItemDoes(t *testing.T) {
+	t.Parallel()
+
+	for id, definition := range itemRegistry {
+		inventory := newInventory()
+		inventory.slots[4] = inventoryStack{item: id, count: 1, durability: definition.maxDurability, maxDurability: definition.maxDurability}
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentMainHand), Count: 1})
+		weapon := definition.meleeDamage != 0 || definition.launches != 0
+		if moved != weapon {
+			t.Errorf("moving item %d (weapon %v) into the main hand: accepted %v", id, weapon, moved)
+		}
+		if moved && inventory.slots[equipmentMainHand].item != id {
+			t.Errorf("the main hand holds %d after moving %d", inventory.slots[equipmentMainHand].item, id)
+		}
+	}
+}
+
+// A swap out of the main hand is checked in the direction back into it too: a weapon
+// can trade places with a weapon, and never with a stack of stone or a shield.
+func TestASwapOutOfTheMainHandMustLeaveAWeaponInIt(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		pack   inventoryStack
+		accept bool
+	}{
+		"another blade":  {pack: stackOf(ItemIronSword, 1), accept: true},
+		"a bow":          {pack: stackOf(ItemBow, 1), accept: true},
+		"a stone":        {pack: stackOf(ItemStone, 1)},
+		"a shield":       {pack: stackOf(ItemWoodenShield, 1)},
+		"a leather cap":  {pack: stackOf(ItemLeatherCap, 1)},
+		"a stack of two": {pack: stackOf(ItemArrow, 2)},
+	} {
+		inventory := newInventory()
+		inventory.slots[equipmentMainHand] = stackOf(ItemRustySword, 1)
+		inventory.slots[4] = tc.pack
+		before := inventory.slots
+		moved := inventory.moveLocked(protocol.InventoryMoveRequest{From: uint8(equipmentMainHand), To: 4, Count: 1})
+		if moved != tc.accept {
+			t.Errorf("%s: swap accepted %v, want %v", name, moved, tc.accept)
+			continue
+		}
+		if !moved && inventory.slots != before {
+			t.Errorf("%s: a refused swap changed the slots", name)
+		}
+		if moved && (inventory.slots[equipmentMainHand].item != tc.pack.item || inventory.slots[4].item != ItemRustySword) {
+			t.Errorf("%s: swap left main hand %d and pack %d", name, inventory.slots[equipmentMainHand].item, inventory.slots[4].item)
+		}
+	}
 }
 
 func TestAnOffHandMoveResendsTheAppearanceWithTheSyntheticItem(t *testing.T) {

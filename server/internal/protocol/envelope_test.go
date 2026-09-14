@@ -5235,3 +5235,20 @@ func TestABurningFireOccupiesNoSlotAndADousedOneDoes(t *testing.T) {
 		}
 	}
 }
+
+// The welcome announces these two numbers, and the client lays out its inventory from
+// them. The main hand made the table 41 slots with five worn, appended so every earlier
+// slot kept its index.
+func TestTheInventoryLayoutIsFortyOneSlotsWithFiveWorn(t *testing.T) {
+	t.Parallel()
+
+	if InventorySlots != 41 {
+		t.Errorf("InventorySlots = %d, want 41", InventorySlots)
+	}
+	if EquipmentSlots != 5 {
+		t.Errorf("EquipmentSlots = %d, want 5", EquipmentSlots)
+	}
+	if HotbarSlots != 9 || InventorySlots-EquipmentSlots != 36 {
+		t.Errorf("the hotbar is %d and equipment starts at %d, want 9 and 36", HotbarSlots, InventorySlots-EquipmentSlots)
+	}
+}

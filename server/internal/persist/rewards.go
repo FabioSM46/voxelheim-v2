@@ -24,7 +24,9 @@ import (
 // Defeats contain separate personal and XP lists. A personal row carries its stable
 // owner, taken mask, silver flag/purse and fixed eight-byte inventory entries.
 // An intent names generation/boss/owner/selection, prior epoch and a length-delimited
-// complete v11 character record (including that record's own checksum).
+// complete character record (including that record's own checksum). The record is
+// always written in the current player format and read in whichever epoch-carrying
+// format it names, so a journal sealed before a slot-table change still opens.
 // Cumulative bounds include bindings, BOTH recipient lists, all entries and complete
 // intent postimages; name lengths are checked before any string allocation.
 const (
@@ -366,6 +368,32 @@ func encodeRewardJournal(j RewardJournal) ([]byte, error) {
 	return b, nil
 }
 
+// postimageLayout names the format and slot count of one journal postimage, read from
+// the record's own header, and false for any format a postimage cannot be written in.
+//
+// A postimage is a whole record in the format of the build that sealed it, so a journal
+// written before a slot-table change still holds records of the old length. Reading
+// those at today's length would refuse every pending reward on the first start after
+// the change — the one start whose job is to replay them. Only formats that carry the
+// reward epoch (v11 on) qualify; the magic and checksum are the decoder's to check.
+func postimageLayout(data []byte) (uint32, int, bool) {
+	if len(data) < world.HeaderSize {
+		return 0, 0, false
+	}
+	version := binary.LittleEndian.Uint32(data[4:8])
+	switch {
+	case version == StoreVersion:
+		return version, int(protocol.InventorySlots), true
+	case version < 11:
+		return 0, 0, false
+	}
+	slots, migrates := migratedInventorySlots(version)
+	if !migrates {
+		return 0, 0, false
+	}
+	return version, slots, true
+}
+
 func decodeRewardJournal(b []byte) (RewardJournal, error) {
 	if len(b) > MaxRewardJournalBytes || len(b) < world.HeaderSize+24+world.ChecksumSize {
 		return RewardJournal{}, world.ErrCorruptStore
@@ -455,20 +483,24 @@ func walkRewardJournal(b []byte, allocate bool) (RewardJournal, error) {
 		in.Experience = rewardFlag(&r)
 		in.PreviousEpoch = r.number(8)
 		size := r.count(MaxRewardIntents*maxRecordSize, &postimages)
-		if size > maxRecordSize || size < recordHeaderSize+world.ChecksumSize {
+		if size > maxRecordSize {
 			r.err = world.ErrCorruptStore
 			size = 0
 		}
 		data := r.take(size)
-		// A fixed-width preflight verifies the name before the allocating decoder runs.
-		if len(data) >= recordHeaderSize {
-			name := int(binary.LittleEndian.Uint16(data[offNameLen : offNameLen+2]))
-			if name > MaxNameBytes || recordHeaderSize+name+world.ChecksumSize != len(data) {
+		version, slots, known := postimageLayout(data)
+		headerSize := recordNameOffset(version, slots) + 2
+		if !known || len(data) < headerSize+world.ChecksumSize {
+			r.err = world.ErrCorruptStore
+		} else {
+			// A fixed-width preflight verifies the name before the allocating decoder runs.
+			name := int(binary.LittleEndian.Uint16(data[headerSize-2 : headerSize]))
+			if name > MaxNameBytes || headerSize+name+world.ChecksumSize != len(data) {
 				r.err = world.ErrCorruptStore
 			}
 		}
 		if allocate && r.err == nil {
-			rec, err := decodeRecord(data)
+			rec, err := decodeRecordLayout(data, version, slots)
 			if err != nil {
 				r.err = err
 			} else {

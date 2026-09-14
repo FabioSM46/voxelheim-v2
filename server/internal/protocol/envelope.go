@@ -33,15 +33,16 @@ const (
 	// server announces and emits. The layout is the hotbar first, the pack in the
 	// middle, and equipment last. The handshake carries the counts so the client
 	// never has to hardcode the layout.
-	InventorySlots uint8 = 40
+	InventorySlots uint8 = 41
 
 	// HotbarSlots is the leading subset of InventorySlots the client may select
 	// with its hotbar.
 	HotbarSlots uint8 = 9
 
 	// EquipmentSlots is the trailing subset of InventorySlots reserved for worn
-	// equipment: head, chest, legs and off-hand, in that order.
-	EquipmentSlots uint8 = 4
+	// equipment: head, chest, legs, off-hand and main hand, in that order. A new worn
+	// slot is appended, so every slot before it keeps its index.
+	EquipmentSlots uint8 = 5
 
 	// SessionTicketLen is the exact length of a ClientHello.session_ticket, from V7:
 	// a 32-byte body and a 64-byte detached signature over it. schemas/handshake.fbs
