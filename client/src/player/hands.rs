@@ -28,7 +28,7 @@ use bevy::prelude::*;
 use super::SelfVitals;
 use super::camera::ViewMode;
 use super::combat::SwingSent;
-use super::crafting::{ITEM_BOW, ITEM_WOODEN_SCEPTRE};
+use super::crafting::{ITEM_ARROW, ITEM_BOW, ITEM_WOODEN_SCEPTRE};
 use super::horse::horse_head_item_mesh;
 use super::inventory::{ApplyInventory, ConsumeSent, Inventory, SelectedSlot};
 use super::items::{self, ItemShape, Livery};
@@ -1322,6 +1322,125 @@ pub(crate) fn bow_cord_linear_rgba() -> [f32; 4] {
     [colour.red, colour.green, colour.blue, colour.alpha]
 }
 
+/// An arrow's length in the first-person hand, nock to point, in the view model's metres.
+///
+/// Shorter than the [`BOW_LENGTH`] it is shot from, as an arrow is, and short enough that one
+/// stood on its nock in the fist reaches no higher above the hand than a sword's point does.
+const ARROW_IN_HAND: f32 = 0.085;
+/// How far below the fist's top face the nock end sits in the hand: the fist is closed on the
+/// nock, and the fletching leaves it just above.
+const ARROW_HELD_NOCK: f32 = 0.007;
+
+// An arrow's proportions, as fractions of its length from nock to point. [`arrow_mesh`] is
+// authored at unit length and scaled, so the hand, the ground and the flight share all of them.
+
+/// The square shaft's side. At the flying arrow's 0.8 blocks this is the 36 mm the projectile
+/// always had; in the hand it is under four millimetres.
+const ARROW_SHAFT: f32 = 0.045;
+/// The bone point, from its base to its tip.
+const ARROW_HEAD: f32 = 0.15;
+/// The point's radius at its base: nearly four shaft-halves, so the head reads as a point on a
+/// stick rather than the stick sharpened.
+const ARROW_HEAD_RADIUS: f32 = 0.085;
+/// How far the shaft runs up inside the point, so its end is inside the cone rather than on the
+/// cone's base plane in another colour.
+const ARROW_HEAD_SOCKET: f32 = 0.02;
+/// The bare shaft behind the fletching: the nock.
+const ARROW_NOCK: f32 = 0.06;
+/// The fletching's length along the shaft.
+const ARROW_FLETCH: f32 = 0.17;
+/// The fletching's span across the shaft at its back and at its front: tallest at the tail and
+/// cut down toward the point, which is how a vane is trimmed.
+const ARROW_FLETCH_BACK: f32 = 0.13;
+const ARROW_FLETCH_FRONT: f32 = 0.055;
+/// One vane's thickness.
+const ARROW_FLETCH_THICKNESS: f32 = 0.012;
+
+/// The fletching stands proud of the shaft along the whole of its length, or its front end
+/// would disappear into the wood.
+const _: () = assert!(ARROW_FLETCH_FRONT > ARROW_SHAFT && ARROW_FLETCH_THICKNESS < ARROW_SHAFT);
+
+/// An arrow: a long thin wooden shaft, a bone point, and two crossed vanes of dark fletching
+/// behind a short bare nock — point up along `+Y`, `length` from nock to point, centred on its
+/// origin.
+///
+/// **The one arrow in the client** (#1231). The hand, the ground drop, the body's fist and the
+/// projectile in flight all draw it: the hand stands it on its nock, the drop lays it flat, and
+/// `projectiles` turns it point-forward at its `ARROW_LENGTH`. **The arrow nocked on a drawing bow
+/// is meant to be this mesh too**, placed on the string of [`bow_mesh_drawn`] rather than authored
+/// again — which is why it is point-up like every other held mesh here and leaves the turning to
+/// its caller.
+///
+/// Every part is absolute colour — see [`arrow_colours`] — so the hand skips the item-colour
+/// multiply and the world draws it under a white material. Nothing on it wears a livery, so
+/// every coordinate points at the neutral band. Merged into one mesh for the reason [`axe_mesh`]
+/// is.
+pub(super) fn arrow_mesh(length: f32) -> Mesh {
+    let (wood, bone, feather) = arrow_colours();
+    let nock = -0.5;
+    let head_base = 0.5 - ARROW_HEAD;
+    let shaft_end = head_base + ARROW_HEAD_SOCKET;
+    let mut arrow = tinted(
+        neutral(
+            Mesh::from(Cuboid::from_size(Vec3::new(
+                ARROW_SHAFT,
+                shaft_end - nock,
+                ARROW_SHAFT,
+            )))
+            .translated_by(Vec3::Y * (shaft_end + nock) / 2.0),
+        ),
+        wood,
+    );
+    // Bevy's cone stands on its base with its apex toward `+Y`, which is already the arrow's way
+    // up.
+    let head = tinted(
+        neutral(
+            Mesh::from(Cone::new(ARROW_HEAD_RADIUS, ARROW_HEAD))
+                .translated_by(Vec3::Y * (head_base + ARROW_HEAD / 2.0)),
+        ),
+        bone,
+    );
+    let fletch_back = nock + ARROW_NOCK;
+    let vane = tinted(
+        tapered_prism(
+            Vec2::new(0.0, fletch_back),
+            Vec2::new(0.0, fletch_back + ARROW_FLETCH),
+            ARROW_FLETCH_BACK,
+            ARROW_FLETCH_FRONT,
+            ARROW_FLETCH_THICKNESS,
+        ),
+        feather,
+    );
+    // The second vane is the first turned a quarter about the shaft: a rotation keeps the
+    // winding, where a mirrored copy would turn it inside out.
+    let crossed = vane
+        .clone()
+        .rotated_by(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+    merge_all(&mut arrow, [head, vane, crossed], "arrow");
+    arrow.scaled_by(Vec3::splat(length))
+}
+
+/// The three colours an arrow is made of: the arrow row's pale wood for the shaft, the bone the
+/// point is knapped from — the forge makes arrows of a log and a bone — and a dark feather for
+/// the fletching, which is the contrast that finds an arrow's tail at a glance.
+///
+/// **Absolute, like [`bow_colours`]**, because a vertex colour multiplies the item's and no
+/// multiple of a pale shaft is a dark feather beside a white point.
+fn arrow_colours() -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (
+        items::item_linear_rgba(ITEM_ARROW),
+        items::item_linear_rgba(items::ITEM_BONE),
+        arrow_fletching_linear_rgba(),
+    )
+}
+
+/// The fletching's dark feather, as linear vertex colour — read by the cell's drawing too, so
+/// the flat fletching and the modelled one are one colour. sRGB `#3A3430`.
+pub(crate) fn arrow_fletching_linear_rgba() -> [f32; 4] {
+    let colour = Color::srgb_u8(0x3A, 0x34, 0x30).to_linear();
+    [colour.red, colour.green, colour.blue, colour.alpha]
+}
+
 /// A wooden shaft and its small green focus, shared by held and dropped presentations.
 pub(super) fn sceptre_mesh(length: f32) -> Mesh {
     let scale = length / SCEPTRE_LENGTH;
@@ -2248,6 +2367,8 @@ fn item_mesh(item_id: u16, shape: ItemShape) -> Mesh {
         // Not pointed at the neutral band: the limbs carry the wood's grain in their own
         // coordinates, and the grip and the string already point there.
         ItemShape::Bow => bow_mesh(BOW_LENGTH),
+        // Already on the neutral band, part by part.
+        ItemShape::Arrow => arrow_mesh(ARROW_IN_HAND),
         ItemShape::Sceptre => neutral(sceptre_mesh(SCEPTRE_LENGTH)),
         // Turned a quarter about X so the struck face, not the rim, is what the camera sees.
         ItemShape::Coin => neutral(
@@ -2302,6 +2423,9 @@ fn item_translation(shape: ItemShape) -> Vec3 {
         // The fist closes on the grip, which is the bow's own origin. Until #1230 the grip
         // sat beside the fist and the string ran through it.
         ItemShape::Bow => 0.0,
+        // **The fist is closed on the nock** (#1231): the arrow stands point up out of the top
+        // of the hand, and its fletching leaves the fist just above where it grips.
+        ItemShape::Arrow => hand_top - ARROW_HELD_NOCK + ARROW_IN_HAND / 2.0,
         ItemShape::Sceptre => HAND_SIZE.y * 0.22,
         // Stood on the top of the fist by its radius, which is the block's and the stub's
         // arrangement: the coin is turned face-on, so its radius is its half height.
@@ -2623,10 +2747,11 @@ fn held_mesh(skin_colour: u32, appearance: HeldAppearance) -> Mesh {
             | ItemShape::Pickaxe
             | ItemShape::Shovel
             | ItemShape::Bow
+            | ItemShape::Arrow
     ) {
         // Built in the absolute colours of what they are made of — see
-        // [`implement_colours`] and [`bow_colours`] — so the item colour must not multiply
-        // over them.
+        // [`implement_colours`], [`bow_colours`] and [`arrow_colours`] — so the item colour
+        // must not multiply over them.
         item_mesh(item_id, shape)
     } else {
         coloured(item_mesh(item_id, shape), item_colour)
@@ -3651,6 +3776,7 @@ mod tests {
             (ItemShape::Armour, crafting::ITEM_LEATHER_CAP),
             (ItemShape::Shield, crafting::ITEM_WOODEN_SHIELD),
             (ItemShape::Bow, crafting::ITEM_BOW),
+            (ItemShape::Arrow, crafting::ITEM_ARROW),
             (ItemShape::Sceptre, crafting::ITEM_WOODEN_SCEPTRE),
             (ItemShape::Coin, items::ITEM_SILVER),
             (ItemShape::HorseHead, items::ITEM_BLACK_HORSE),
@@ -7308,6 +7434,142 @@ mod tests {
         );
     }
 
+    /// **One arrow, proportioned like one** (#1231): a shaft many times longer than it is wide,
+    /// a point that narrows to nothing at the front, and fletching at the tail in a colour that
+    /// is neither the shaft's nor the point's — and the hand holds exactly that arrow, in those
+    /// colours.
+    ///
+    /// Each part is read off [`arrow_mesh`] by its colour, so it is measured as the solid it is
+    /// rather than from the constants that built it.
+    #[test]
+    fn the_arrow_is_a_long_shaft_a_point_and_fletching_at_the_tail() {
+        let length = 1.0;
+        let mesh = arrow_mesh(length);
+        let points = positions(&mesh);
+        let Some(VertexAttributeValues::Float32x4(colours)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("the arrow must carry per-vertex colour");
+        };
+        let (wood, bone, feather) = arrow_colours();
+        let quantise = |colour: [f32; 4]| colour.map(|channel| (channel * 255.0).round() as u8);
+        let part = |colour: [f32; 4]| -> Vec<[f32; 3]> {
+            points
+                .iter()
+                .zip(colours)
+                .filter(|(_, tint)| quantise(**tint) == quantise(colour))
+                .map(|(point, _)| *point)
+                .collect()
+        };
+        let [shaft, head, fletching] = [wood, bone, feather].map(part);
+        assert_eq!(
+            shaft.len() + head.len() + fletching.len(),
+            points.len(),
+            "the arrow carries a colour that is not its shaft, point or fletching"
+        );
+        for (name, vertices) in [
+            ("shaft", &shaft),
+            ("point", &head),
+            ("fletching", &fletching),
+        ] {
+            assert!(!vertices.is_empty(), "the arrow has no {name}");
+        }
+
+        // Nock to point is exactly the length asked for, along the arrow's own axis.
+        let (low, high) = extent(&points, 1);
+        assert!(
+            (high - low - length).abs() < 1e-5,
+            "the arrow is {} long",
+            high - low
+        );
+
+        // A shaft: far longer than it is wide, running from the nock into the point.
+        let (shaft_low, shaft_high) = extent(&shaft, 1);
+        let (across_low, across_high) = extent(&shaft, 0);
+        let shaft_width = across_high - across_low;
+        assert!(
+            shaft_high - shaft_low > 15.0 * shaft_width,
+            "the shaft is {} long and {shaft_width} wide, which is not an arrow's",
+            shaft_high - shaft_low
+        );
+        assert!(
+            (shaft_low - low).abs() < 1e-5,
+            "the shaft does not reach the nock"
+        );
+
+        // A point: it is the front of the arrow, and it narrows from wider than the shaft to
+        // nothing at its tip.
+        let (head_low, head_high) = extent(&head, 1);
+        assert!(
+            (head_high - high).abs() < 1e-5,
+            "the point is not at the front"
+        );
+        let radius_at = |y: f32| {
+            head.iter()
+                .filter(|point| (point[1] - y).abs() < 1e-5)
+                .map(|point| Vec2::new(point[0], point[2]).length())
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(
+            radius_at(head_high) < 1e-5,
+            "the point does not come to a point"
+        );
+        assert!(
+            radius_at(head_low) > shaft_width,
+            "the point's base is {} across a {shaft_width} shaft",
+            radius_at(head_low)
+        );
+
+        // Fletching: at the tail, short of the nock, and standing out of the shaft on both
+        // axes across it.
+        let (fletch_low, fletch_high) = extent(&fletching, 1);
+        assert!(
+            fletch_low > low + 1e-5 && fletch_high < low + length / 3.0,
+            "the fletching runs {fletch_low}..{fletch_high}, not at the tail of {low}..{high}"
+        );
+        for axis in [0, 2] {
+            let (from, to) = extent(&fletching, axis);
+            assert!(
+                to - from > 2.0 * shaft_width,
+                "the fletching is {} across axis {axis} over a {shaft_width} shaft",
+                to - from
+            );
+        }
+
+        // In colours that tell the three apart: the fletching darker than both in every
+        // channel, and the point not the shaft's wood.
+        for channel in 0..3 {
+            assert!(
+                feather[channel] < wood[channel] && feather[channel] < bone[channel],
+                "the fletching's {feather:?} does not contrast with the shaft and the point"
+            );
+        }
+        assert_ne!(
+            quantise(wood),
+            quantise(bone),
+            "the point is the shaft's colour"
+        );
+
+        // And the hand holds this arrow, at its own length, in these colours rather than the
+        // row's colour multiplied over them.
+        let held = item_mesh(ITEM_ARROW, ItemShape::Arrow);
+        assert_eq!(positions(&held), positions(&arrow_mesh(ARROW_IN_HAND)));
+        let mut expected = vec![quantise(wood), quantise(bone), quantise(feather)];
+        expected.sort_unstable();
+        assert_eq!(tints(&held), expected);
+        assert!(
+            matches!(
+                selected_appearance(Some(InventoryStack {
+                    item_id: ITEM_ARROW,
+                    count: 1,
+                    ..Default::default()
+                }))
+                .shape,
+                Some(ItemShape::Arrow)
+            ),
+            "the hand does not draw an arrow stack as an arrow"
+        );
+    }
+
     /// **Every solid in the sword is wound outward**, which is the one failure in a new part
     /// that costs the most to diagnose.
     ///
@@ -7402,6 +7664,7 @@ mod tests {
             ("the shovel", shovel_mesh(IMPLEMENT_LENGTH)),
             ("the bow", bow_mesh(BOW_LENGTH)),
             ("a fully drawn bow", bow_mesh_drawn(BOW_LENGTH, 1.0)),
+            ("the arrow", arrow_mesh(ARROW_IN_HAND)),
             ("the shield", shield_mesh(SHIELD_IN_HAND)),
         ] {
             let solids = solid_volumes(&mesh, false);
@@ -7428,6 +7691,10 @@ mod tests {
                 // It is here because that sweep is the `tapered_prism` the pick's arms use,
                 // which wound the bow's old limbs inside out until #1121.
                 "the bow" | "a fully drawn bow" => 4,
+                // The shaft, the bone point and two crossed vanes, none of which shares a
+                // corner with another (#1231): the shaft ends inside the cone and the vanes
+                // cross without meeting at a vertex.
+                "the arrow" => 4,
                 // The rim, five planks that step alternately and so share no corner, the
                 // boss, and a handle whose bar and two posts meet without sharing one.
                 "the shield" => 10,

@@ -175,6 +175,14 @@ pub(crate) enum ItemShape {
     Shield,
     /// A bent stave and string, distinct from a blade in every held and flat renderer.
     Bow,
+    /// A long thin wooden shaft, a bone point and dark fletching at the tail: the arrow.
+    ///
+    /// **Its own variant rather than a [`Self::Material`] in a pale colour** (#1231). As a
+    /// material it was a capsule on the ground, a capsule in the hand and three nuggets in the
+    /// pack, while the same item in flight was already a shaft, a point and fletching — one
+    /// item, two objects. Every surface draws `player::hands::arrow_mesh` now, the projectile
+    /// included, so what a player picks up is what they shot.
+    Arrow,
     /// A wooden shaft capped by a green healing focus.
     Sceptre,
     /// A struck disc: one circle with a smaller darker one inset, which is what a coin reads
@@ -225,7 +233,7 @@ impl ItemShape {
     /// stands in its place is the wildcard-free match above, which is the stronger
     /// guarantee anyway — and it is exactly what `ConnectionState` fell back on for the
     /// same reason.
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Block,
         Self::Material,
         Self::Blade,
@@ -236,6 +244,7 @@ impl ItemShape {
         Self::Armour,
         Self::Shield,
         Self::Bow,
+        Self::Arrow,
         Self::Sceptre,
         Self::Coin,
         Self::HorseHead,
@@ -263,7 +272,11 @@ enum ItemColour {
     RawMeat,
     /// Cooked meat. A browned swatch distinct from the raw ingredient. sRGB `#8B5A3C`.
     CookedMeat,
-    /// Bone-white shaft and point, kept distinct from other material rows. sRGB `#D8C9A3`.
+    /// The arrow's pale wooden shaft. sRGB `#D8C9A3`.
+    ///
+    /// Only the shaft: the point is the bone it is knapped from and the fletching a dark
+    /// feather, both absolute colours in `player::hands::arrow_mesh`, so the ground and the
+    /// flight draw an arrow under a white material rather than tinting the whole of it.
     Arrow,
     /// Struck silver: paler and cooler than forged steel, so a coin is not a small ingot.
     /// sRGB `#BFC7D2`.
@@ -701,7 +714,7 @@ pub(super) const ITEMS: [ItemDisplay; 46] = [
     ItemDisplay {
         item_id: ITEM_ARROW,
         name: "arrow",
-        shape: ItemShape::Material,
+        shape: ItemShape::Arrow,
         colour: ItemColour::Arrow,
         livery: None,
         armour_style: None,
@@ -1512,6 +1525,32 @@ mod tests {
                 "item {item_id} still presents as the iron sword's forged steel"
             );
         }
+    }
+
+    /// **The arrow is drawn as an arrow, and it is the only thing that is** (#1231).
+    ///
+    /// Pinned by id for the reason every id here is, and the shape is pinned to exactly that
+    /// one row: redrawing [`ItemShape::Arrow`] is not an item-id exception only while no other
+    /// row wears it. The colour stays the arrow's own, because it is what the shaft is drawn in
+    /// on every surface.
+    #[test]
+    fn the_arrow_is_the_one_item_drawn_as_an_arrow() {
+        assert_eq!(ITEM_ARROW, 29);
+        assert_eq!(item_shape(ITEM_ARROW), ItemShape::Arrow);
+        let drawn: Vec<u16> = ITEMS
+            .iter()
+            .filter(|row| row.shape == ItemShape::Arrow)
+            .map(|row| row.item_id)
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![ITEM_ARROW],
+            "the arrow's shape is worn by {drawn:?}"
+        );
+        assert_eq!(
+            display(ITEM_ARROW).map(|row| row.colour),
+            Some(ItemColour::Arrow)
+        );
     }
 
     /// **Three implements, three silhouettes, each in the colour of what its haft is made of**

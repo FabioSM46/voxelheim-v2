@@ -82,6 +82,9 @@ pub(crate) struct IconPart {
     /// Uses the bow string's cord instead of the item's base colour — the one
     /// `player::bow_cord_linear_rgba` the modelled string is drawn in, so the two agree.
     cord: bool,
+    /// Uses the arrow's dark fletching instead of the item's base colour — the one
+    /// `player::arrow_fletching_linear_rgba` the modelled vanes are drawn in, so the two agree.
+    fletching: bool,
     /// Draws the item's livery over this rectangle, when the item wears one.
     ///
     /// **A property of the rectangle, not of the shape.** A blade's guard and grip are not
@@ -104,6 +107,7 @@ impl IconPart {
         iron: false,
         green: false,
         cord: false,
+        fletching: false,
         livery: false,
     };
 }
@@ -326,6 +330,7 @@ const BLADE: [IconPart; 3] = [
         iron: false,
         green: false,
         cord: false,
+        fletching: false,
         livery: false,
     },
 ];
@@ -898,6 +903,46 @@ const BOW: [IconPart; 6] = [
     },
 ];
 
+/// An arrow, on the blade's diagonal: point to the top right, fletching to the bottom left.
+///
+/// The model every other surface draws, flattened (#1231): a long thin shaft in the row's pale
+/// wood, a point lifted toward bone-white at its front end, and a vane of dark fletching over the
+/// shaft near its tail — short of the end, so a nock shows behind it. The point is a square left
+/// square to the cell, which at the shaft's forty-five degrees puts one corner on the shaft's own
+/// line: the one way a rectangle comes to a point along a diagonal. Until then an arrow was the
+/// three nuggets [`MATERIAL`] draws. Drawn fletching first, shaft over it, point last.
+const ARROW: [IconPart; 3] = [
+    IconPart {
+        left: 21.0,
+        top: 59.0,
+        width: 18.0,
+        height: 22.0,
+        radius: 25.0,
+        rotation: QUARTER_TURN,
+        fletching: true,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 47.0,
+        top: 8.0,
+        width: 6.0,
+        height: 84.0,
+        radius: 30.0,
+        shade: 0.10,
+        rotation: QUARTER_TURN,
+        ..IconPart::PLAIN
+    },
+    IconPart {
+        left: 66.0,
+        top: 18.0,
+        width: 16.0,
+        height: 16.0,
+        radius: 12.0,
+        shade: 0.55,
+        ..IconPart::PLAIN
+    },
+];
+
 /// A wooden shaft with a small green focus at its tip.
 const SCEPTRE: [IconPart; 2] = [
     IconPart {
@@ -1268,6 +1313,7 @@ pub(crate) fn parts(shape: ItemShape) -> &'static [IconPart] {
         ItemShape::Armour => &ARMOUR,
         ItemShape::Shield => &SHIELD,
         ItemShape::Bow => &BOW,
+        ItemShape::Arrow => &ARROW,
         ItemShape::Sceptre => &SCEPTRE,
         ItemShape::Coin => &COIN,
         ItemShape::HorseHead => &HORSE_HEAD,
@@ -1399,6 +1445,9 @@ fn part_bundle(part: &IconPart, base: LinearRgba) -> impl Bundle {
         LinearRgba::new(0.16, 0.82, 0.28, 1.0)
     } else if part.cord {
         let [red, green, blue, alpha] = crate::player::bow_cord_linear_rgba();
+        LinearRgba::new(red, green, blue, alpha)
+    } else if part.fletching {
+        let [red, green, blue, alpha] = crate::player::arrow_fletching_linear_rgba();
         LinearRgba::new(red, green, blue, alpha)
     } else {
         base
@@ -2052,6 +2101,89 @@ mod tests {
             assert!(
                 cord.red > drawn.red && cord.green > drawn.green && cord.blue > drawn.blue,
                 "the string's {cord:?} is not lighter than the wood's {drawn:?}"
+            );
+        }
+    }
+
+    /// **The flat arrow is the modelled one on the blade's diagonal** (#1231): a long thin shaft
+    /// at forty-five degrees, a lighter point past its top-right end and dark fletching near its
+    /// bottom-left one, every part on the shaft's own line — not the three nuggets a material
+    /// stub is drawn as.
+    #[test]
+    fn the_flat_arrow_is_a_diagonal_shaft_with_a_point_and_fletching() {
+        use crate::player::{item_linear_rgba, item_shape, known_item_ids};
+
+        let [fletching, shaft, point] = <[IconPart; 3]>::try_from(parts(ItemShape::Arrow))
+            .expect("the arrow is drawn as fletching, a shaft and a point");
+        assert!(
+            fletching.fletching && !shaft.fletching && !point.fletching,
+            "only the fletching is drawn in the fletching's colour"
+        );
+        for part in [fletching, shaft, point] {
+            assert!(
+                !part.iron && !part.green && !part.cord && !part.livery,
+                "a part of the arrow borrows another item's colour: {part:?}"
+            );
+        }
+
+        // A shaft on the diagonal, far longer than it is wide.
+        assert_eq!(shaft.rotation, QUARTER_TURN, "the shaft is not diagonal");
+        assert!(
+            shaft.height > shaft.width * 10.0,
+            "the shaft is {} by {}, which is not an arrow's",
+            shaft.width,
+            shaft.height
+        );
+
+        // Along the shaft's own line: the rotation is clockwise on a y-down cell, so the
+        // rectangle's top end is toward the top right.
+        let centre =
+            |part: IconPart| Vec2::new(part.left + part.width / 2.0, part.top + part.height / 2.0);
+        let axis = Vec2::new(shaft.rotation.sin(), -shaft.rotation.cos());
+        let along = |part: IconPart| (centre(part) - centre(shaft)).dot(axis);
+        let off_line = |part: IconPart| (centre(part) - centre(shaft)).dot(axis.perp()).abs();
+        let half = shaft.height / 2.0;
+        for (name, part) in [("point", point), ("fletching", fletching)] {
+            assert!(off_line(part) < 1.0, "the {name} is off the shaft's line");
+        }
+        // The point is at the front, and the corner the square turns toward the front reaches
+        // past the shaft's end: that corner is the tip.
+        assert!(
+            point.rotation == 0.0 && along(point) > half * 0.6,
+            "the point is not a square at the shaft's front end"
+        );
+        assert!(
+            along(point) + point.width / 2.0 * std::f32::consts::SQRT_2 > half,
+            "the point does not reach past the end of the shaft"
+        );
+        // The fletching is at the tail, wider than the shaft, and short of its end.
+        assert!(
+            along(fletching) < -half * 0.4 && along(fletching) - fletching.height / 2.0 > -half,
+            "the fletching is not at the tail short of the nock"
+        );
+        assert!(
+            fletching.width > shaft.width * 2.0,
+            "the fletching is no wider than the shaft"
+        );
+
+        // In the colours that tell the three apart: a point lighter than the shaft, and
+        // fletching darker than both in every channel.
+        let arrow = known_item_ids()
+            .find(|item_id| item_shape(*item_id) == ItemShape::Arrow)
+            .expect("an item is drawn as an arrow");
+        let [red, green, blue, alpha] = item_linear_rgba(arrow);
+        let wood = LinearRgba::new(red, green, blue, alpha);
+        let [red, green, blue, alpha] = crate::player::arrow_fletching_linear_rgba();
+        let feather = shaded(LinearRgba::new(red, green, blue, alpha), fletching.shade).to_linear();
+        assert!(
+            point.shade > shaft.shade,
+            "the point is not lighter than the shaft"
+        );
+        for part in [shaft, point] {
+            let drawn = shaded(wood, part.shade).to_linear();
+            assert!(
+                feather.red < drawn.red && feather.green < drawn.green && feather.blue < drawn.blue,
+                "the fletching's {feather:?} does not contrast with the arrow's {drawn:?}"
             );
         }
     }
