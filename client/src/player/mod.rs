@@ -80,6 +80,7 @@ mod prompt;
 mod saddle;
 mod shapes;
 mod sky;
+mod static_props;
 mod station;
 mod structures;
 mod target;
@@ -368,6 +369,7 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
+        static_props::register(app);
         horse::register(app);
         ambient_sound::register(app);
         tool_audio::register(app);
@@ -3357,6 +3359,7 @@ mod tests;
 /// Inventory, learned mounts, selected slot and input tick sequence are personal
 /// connection state and deliberately survive.
 pub(crate) fn reset_world(world: &mut World) {
+    static_props::reset_world(world);
     crate::world::transition::reset::<portal::PortalFocus>(world);
     use crate::world::transition::{despawn, reset};
     reset::<SnapshotBuffer>(world);

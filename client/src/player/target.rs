@@ -612,16 +612,29 @@ fn ray_box_distance(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Opti
     (far >= 0.0).then_some(near.max(0.0))
 }
 
+/// Snapshot and terrain inputs shared by the healing presentation ray.
+#[derive(bevy::ecs::system::SystemParam)]
+struct HealingWorld<'w> {
+    session: Option<Res<'w, Session>>,
+    buffer: Option<Res<'w, SnapshotBuffer>>,
+    store: Option<Res<'w, ChunkStore>>,
+    solids: Option<Res<'w, super::static_props::StaticPropSolids>>,
+}
+
 /// Recomputes the sceptre crosshair hint from the same interpolated snapshot drawn now.
 fn aim_at_a_healing_target(
-    session: Option<Res<Session>>,
-    buffer: Option<Res<SnapshotBuffer>>,
-    store: Option<Res<ChunkStore>>,
+    world: HealingWorld<'_>,
     inventory: Res<Inventory>,
     selected: Res<SelectedSlot>,
     cameras: Query<&Transform, With<WorldCamera>>,
     mut hint: ResMut<HealTargetHint>,
 ) {
+    let HealingWorld {
+        session,
+        buffer,
+        store,
+        solids,
+    } = world;
     let next = (|| {
         let session = session.as_deref()?;
         if !usable_sceptre_in_hand(&inventory, &selected) {
@@ -659,6 +672,15 @@ fn aim_at_a_healing_target(
                     }
                 }),
         );
+        if let Some((distance, _)) = first_body_hit(eye.translation, *eye.forward(), &bodies)
+            && solids.as_deref().is_some_and(|solids| {
+                solids
+                    .nearest_hit(eye.translation, *eye.forward(), distance)
+                    .is_some()
+            })
+        {
+            return Some(false);
+        }
         let size = usize::from(session.0.chunk_size);
         Some(first_body_is_unoccluded_player(
             eye.translation,
@@ -696,6 +718,7 @@ fn aim_at_a_block(
     store: Option<Res<ChunkStore>>,
     cameras: Query<&Transform, With<WorldCamera>>,
     mut target: ResMut<BlockTarget>,
+    solids: Option<Res<super::static_props::StaticPropSolids>>,
 ) {
     // A player the server says is dead aims at nothing, so nothing is outlined and the
     // request below has no voxel to name. Presentation, not authority: the server refuses
@@ -708,7 +731,11 @@ fn aim_at_a_block(
             // server side of the same distinction, and `ChunkStore::targetable_at` for
             // why the other three callers of `solid_at` keep reading solidity. Water is
             // still looked through: it is not cover.
-            raycast_blocks(eye.translation, *eye.forward(), MAX_REACH, |voxel| {
+            let reach = solids
+                .as_deref()
+                .and_then(|solids| solids.nearest_hit(eye.translation, *eye.forward(), MAX_REACH))
+                .map_or(MAX_REACH, |hit| (hit - 0.0001).max(0.0));
+            raycast_blocks(eye.translation, *eye.forward(), reach, |voxel| {
                 let pos = BlockCoord {
                     x: voxel.x,
                     y: voxel.y,
@@ -2959,5 +2986,44 @@ mod tests {
             ([wall.x, wall.y, wall.z], false, found[2].2),
             "dying did not cancel the held voxel exactly once"
         );
+    }
+    #[test]
+    fn furniture_occludes_the_real_block_target_but_a_low_table_does_not() {
+        use crate::net::{StaticPropKind, StaticPropState};
+        let wall = IVec3::new(3, 81, 0);
+        for (kind, blocked) in [
+            (StaticPropKind::Bookcase, true),
+            (StaticPropKind::BanquetTable, false),
+        ] {
+            let mut app = aiming_app(store_with(&[wall]));
+            app.world_mut().resource_mut::<SnapshotInbox>().push(
+                Snapshot {
+                    server_tick: 2,
+                    entities: vec![EntityState {
+                        entity_id: LOCAL_ID,
+                        pos: SPAWN,
+                        vel: [0.0; 3],
+                        yaw: 0.0,
+                        health: 100,
+                        max_health: 100,
+                    }],
+                    static_props: vec![StaticPropState {
+                        prop_id: 1,
+                        kind,
+                        origin: BlockCoord { x: 2, y: 80, z: 0 },
+                        facing: crate::net::Facing::East,
+                        variant: 0,
+                    }],
+                    ..default()
+                },
+                Instant::now(),
+            );
+            app.update();
+            assert_eq!(
+                target(&app).0.map(|hit| hit.block),
+                if blocked { None } else { Some(wall) },
+                "{kind:?}"
+            );
+        }
     }
 }

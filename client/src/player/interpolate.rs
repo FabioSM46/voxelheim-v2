@@ -208,7 +208,12 @@ impl SnapshotBuffer {
     /// Ties are broken by the lower entity id, exactly as the corpse search breaks them,
     /// so two people standing at the same distance produce one stable answer rather than
     /// whichever the snapshot happened to list first.
-    pub(super) fn nearest_resident(&self, player_id: u64, max_distance: f32) -> Option<u64> {
+    pub(super) fn nearest_resident(
+        &self,
+        player_id: u64,
+        max_distance: f32,
+        visible: impl Fn(Vec3, Vec3) -> bool,
+    ) -> Option<u64> {
         let latest = &self.latest.as_ref()?.snapshot;
         let player = latest
             .entities
@@ -220,6 +225,7 @@ impl SnapshotBuffer {
             .mobs
             .iter()
             .filter(|mob| mob.kind == MobKind::Villager)
+            .filter(|mob| visible(player, Vec3::from_array(mob.pos)))
             .filter_map(|mob| {
                 let distance = player.distance_squared(Vec3::from_array(mob.pos));
                 (distance <= max_distance * max_distance).then_some((distance, mob.entity_id))
@@ -474,8 +480,6 @@ impl SnapshotBuffer {
     }
 
     /// Immutable poses use only the newest complete snapshot; never interpolate them.
-    /// The renderer is supplied by the following #1203 part.
-    #[allow(dead_code)]
     pub fn static_props(&self) -> &[StaticPropState] {
         match &self.latest {
             Some(latest) => &latest.snapshot.static_props,
