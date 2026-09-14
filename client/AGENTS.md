@@ -1249,6 +1249,15 @@ animation may use it: **quantised rebuilds, not a posed string.** It builds the 
 fractions once, as that many stable assets, and swaps the handle. A pose cannot do it, because the
 string is merged into the same mesh as limbs that flex with it.
 
+**The arrow is one mesh on every surface, the flight included** (#1231). `hands::arrow_mesh(length)`
+is a square wooden shaft in the arrow row's colour, a bone point and two crossed vanes of dark
+fletching behind a short nock — point up, centred, in absolute vertex colours, with every coordinate
+on the neutral band. The hand stands it on its nock in the fist; the ground drop and the body's fist
+lay it flat; `projectiles.rs` turns it point-forward at `ARROW_LENGTH` under a white material, so
+the arrow in flight is no longer one bone colour over the whole of it and the arrow a player picks
+up is the one they shot. The arrow nocked on a drawing bow builds this same mesh rather than a
+sixth arrow.
+
 **A sword's grip is turned wood, and the wood is reached by division rather than written down.**
 The gladius' three furniture pieces were boxes; the grip is now a cylinder of `GRIP_SIDES`
 inscribed in the box it replaced — same height, radius `GRIP_SIZE.x / 2` — so the three
