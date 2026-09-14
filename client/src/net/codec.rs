@@ -1044,6 +1044,11 @@ pub struct PlayerVitals {
     pub energy: u16,
     /// Maximum energy. Guaranteed non-zero.
     pub max_energy: u16,
+    /// V44. How far this player's bow is drawn: zero when not drawing, `1..=255` while
+    /// drawing, 255 a full draw still held. **The server's count of its own ticks** — the
+    /// string is animated from it and the client runs no timer of its own. Zero from a V43
+    /// server, which has no draws.
+    pub draw_progress: u8,
 }
 
 impl PlayerVitals {
@@ -1069,6 +1074,7 @@ impl PlayerVitals {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         }
     }
 }
@@ -7150,6 +7156,7 @@ fn player_vitals(vitals: &fb::PlayerVitals) -> Result<PlayerVitals, DecodeError>
         blocking: vitals.blocking(),
         energy,
         max_energy,
+        draw_progress: vitals.draw_progress(),
     })
 }
 
@@ -16236,9 +16243,9 @@ mod tests {
     // -----------------------------------------------------------------------
     // Protocol V44 — the main hand, the two-handed refusal and the bow draw
     //
-    // Read through the generated bindings, because nothing in this build consumes
-    // them yet: the main-hand cell and the refusal sentence are #1238, the draw is
-    // #1240.
+    // Read through the generated bindings where nothing in this build consumes them yet:
+    // the main-hand cell and the refusal sentence are #1238. The draw's progress is read
+    // through the decoder too, since #1240 draws the string from it.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -16261,7 +16268,12 @@ mod tests {
             let vitals = fb::PlayerVitals::create(
                 &mut builder,
                 &fb::PlayerVitalsArgs {
+                    health: 100,
                     max_health: 100,
+                    max_hunger: 100,
+                    level: 1,
+                    experience_to_next: 50,
+                    life_state: fb::LifeState::Alive,
                     max_energy: 100,
                     energy: 40,
                     draw_progress,
@@ -16273,6 +16285,11 @@ mod tests {
                 .expect("the vitals verify");
             assert_eq!(read.draw_progress(), draw_progress);
             assert_eq!(read.energy(), 40, "appending did not move an earlier field");
+            assert_eq!(
+                player_vitals(&read).map(|vitals| vitals.draw_progress),
+                Ok(draw_progress),
+                "the decoded vitals dropped the draw"
+            );
         }
     }
 
@@ -17256,6 +17273,7 @@ mod tests {
                 blocking: false,
                 energy: 37,
                 max_energy: 100,
+                draw_progress: 0,
             }
         );
     }

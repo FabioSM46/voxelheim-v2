@@ -1023,6 +1023,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         }
     }
 
@@ -1041,6 +1042,7 @@ mod tests {
             blocking: false,
             energy: 100,
             max_energy: 100,
+            draw_progress: 0,
         }
     }
 
@@ -1225,6 +1227,7 @@ mod tests {
             blocking: false,
             energy: 0,
             max_energy: 1,
+            draw_progress: 0,
         };
         let longest = PlayerVitals {
             health: u16::MAX,
@@ -1240,6 +1243,7 @@ mod tests {
             blocking: false,
             energy: u16::MAX,
             max_energy: u16::MAX,
+            draw_progress: 0,
         };
 
         let mut app = App::new();
