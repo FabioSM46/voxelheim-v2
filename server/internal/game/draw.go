@@ -3,6 +3,8 @@ package game
 import (
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
@@ -168,15 +170,95 @@ func (p *Player) resolveDrawLocked() {
 		return
 	}
 
-	cooldown, speed := p.sim.launchParameters(vnet.ProjectileKindArrow)
-	p.attackCooldown = cooldown
+	// The cooldown starts at the release, and the launch goes through the one flight path:
+	// this function only chooses the speed and the direction.
+	speed, spread := arrowLaunch(draw.charge(p.sim.fullDrawTicks))
+	p.attackCooldown = p.sim.bowCooldownTicks
+	aim := lookDirection(p.current.yaw, p.current.pitch)
 	p.sim.spawnProjectileLocked(
 		vnet.ProjectileKindArrow,
 		p,
 		projectileOriginLocked(p),
-		lookDirection(p.current.yaw, p.current.pitch),
+		spreadDirection(aim, spread, p.sim.draws),
 		speed,
 	)
+}
+
+// charge is how far the string came back: 0 at the press, 1 at a full draw and never more,
+// counted in ticks only.
+func (d *bowDraw) charge(fullDrawTicks uint32) float64 {
+	full := max(fullDrawTicks, 1)
+	return float64(min(d.held, full)) / float64(full)
+}
+
+// arrowLaunch is the launch speed and the spread half-angle, in radians, of an arrow loosed
+// at a charge. Both are linear in the charge: the speed from ArrowMinDrawSpeed to
+// ArrowFullDrawSpeed, and the cone from ArrowMinDrawSpreadDegrees to exactly zero. The
+// charge says nothing about damage.
+func arrowLaunch(charge float64) (speed, spread float64) {
+	charge = min(max(charge, 0), 1)
+	speed = ArrowMinDrawSpeed + (ArrowFullDrawSpeed-ArrowMinDrawSpeed)*charge
+	spread = ArrowMinDrawSpreadDegrees * math.Pi / 180 * (1 - charge)
+	return speed, spread
+}
+
+// spreadDirection is a unit direction drawn uniformly over the spherical cap of half-angle
+// spread around aim, which must be a unit vector. A zero spread returns aim unchanged and
+// draws nothing, so a full draw flies exactly where the player looked.
+//
+// The generator is the simulation's own, guarded by Sim.mu and advanced only on the tick,
+// on the terms the spawn and loot generators are: a client can neither see nor steer it.
+func spreadDirection(aim [3]float64, spread float64, rng *rand.Rand) [3]float64 {
+	if spread <= 0 {
+		return aim
+	}
+	// Uniform over the cap: cos(theta) uniform on [cos(spread), 1], the azimuth uniform.
+	cosTheta := 1 - rng.Float64()*(1-math.Cos(spread))
+	sinTheta := math.Sqrt(max(1-cosTheta*cosTheta, 0))
+	sinPhi, cosPhi := math.Sincos(rng.Float64() * 2 * math.Pi)
+
+	// Any axis not parallel to aim builds the basis perpendicular to it.
+	helper := [3]float64{0, 1, 0}
+	if math.Abs(aim[1]) > 0.9 {
+		helper = [3]float64{1, 0, 0}
+	}
+	u := cross(helper, aim)
+	length := vectorLength(u)
+	u = [3]float64{u[0] / length, u[1] / length, u[2] / length}
+	v := cross(aim, u)
+
+	var direction [3]float64
+	for axis := range 3 {
+		direction[axis] = aim[axis]*cosTheta + (u[axis]*cosPhi+v[axis]*sinPhi)*sinTheta
+	}
+	return direction
+}
+
+func cross(a, b [3]float64) [3]float64 {
+	return [3]float64{
+		a[1]*b[2] - a[2]*b[1],
+		a[2]*b[0] - a[0]*b[2],
+		a[0]*b[1] - a[1]*b[0],
+	}
+}
+
+// bowDrawStream is the second word of the draw generator's PCG seed, so a bow's spread never
+// draws the spawn director's or the loot table's numbers, and neither of them draws its.
+const bowDrawStream = 0x766F78656C626F77 // "voxelbow"
+
+func newDrawRNG(worldSeed int64) *rand.Rand {
+	return rand.New(rand.NewPCG(uint64(worldSeed), bowDrawStream))
+}
+
+// slotHoldsADrawnLauncherLocked reports whether a slot holds a bow, whatever its condition.
+// The caller holds inventory.mu.
+func (p *Player) slotHoldsADrawnLauncherLocked(slot uint8) bool {
+	stack, held := p.inventory.stackAtLocked(slot)
+	if !held {
+		return false
+	}
+	definition, registered := itemByID(stack.item)
+	return registered && drawnLauncher(definition)
 }
 
 // looseArrowLocked spends one arrow and one point of the main-hand bow's durability, and

@@ -135,6 +135,9 @@ type Sim struct {
 	// fullDrawTicks is FullDrawDuration in authoritative ticks: how many ticks a held draw
 	// counts before it is fully charged.
 	fullDrawTicks uint32
+	// draws is what an arrow's spread is drawn from: seeded from the world seed on its own PCG
+	// stream, guarded by mu and advanced only inside Step, like spawns and loot. See draw.go.
+	draws *rand.Rand
 
 	// dropLifetime is DropLifetime expressed in the ticks Step counts, derived from the
 	// tick rate for the same reason the physics timestep is.
@@ -574,6 +577,7 @@ func NewSim(tickRate, viewDistance uint8, worldSeed int64, terrain Terrain, edit
 		bowCooldownTicks:     ticksFor(BowCooldown, tickRate),
 		sceptreCooldownTicks: ticksFor(SceptreCooldown, tickRate),
 		fullDrawTicks:        ticksFor(FullDrawDuration, tickRate),
+		draws:                newDrawRNG(worldSeed),
 		log:                  log,
 		players:              make(map[uint64]*Player),
 		chatLimiters:         make(map[identity.PlayerID]*tokenBucket),

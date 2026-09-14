@@ -66,6 +66,7 @@ func TestASwingNamingAnySlotButTheMainHandIsDroppedAndSpendsNothing(t *testing.T
 // A wielded bow still draws its arrows from the hotbar and the pack and from nowhere worn.
 // The worn case is a hand-built table no move can produce — an arrow is not equipment —
 // and pins that the scan stops at equipmentFirst rather than reading the whole inventory.
+// Asked through the draw, since the draw is the bow's only way to shoot.
 func TestAWieldedBowFindsArrowsInTheHotbarAndPackOnly(t *testing.T) {
 	t.Parallel()
 
@@ -88,7 +89,7 @@ func TestAWieldedBowFindsArrowsInTheHotbarAndPackOnly(t *testing.T) {
 		}
 		player.inventory.mu.Unlock()
 
-		reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
+		reason, err := player.Draw(protocol.DrawRequest{Active: true, ClientTick: 1})
 		if tc.admitted {
 			if err != nil {
 				t.Errorf("%s: the wielded bow was refused: %s, %v", name, reason, err)

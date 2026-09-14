@@ -107,10 +107,17 @@ func (p *Player) Attack(req protocol.AttackRequest) (vnet.RefusalReason, error) 
 	// because the inventory can change between this admission and that judgement.
 	p.inventory.mu.Lock()
 	weapon := p.slotHoldsAWeaponLocked(req.Slot)
-	missingAmmunition := weapon && !p.launcherHasAmmunitionLocked(req.Slot)
+	drawn := weapon && p.slotHoldsADrawnLauncherLocked(req.Slot)
+	missingAmmunition := weapon && !drawn && !p.launcherHasAmmunitionLocked(req.Slot)
 	p.inventory.mu.Unlock()
 	if !weapon {
 		return vnet.RefusalReasonUnknown, fmt.Errorf("slot %d holds nothing that attacks", req.Slot)
+	}
+	if drawn {
+		// A bow is drawn with DrawRequest and loosed by its release; the draw is the bow's
+		// only way to shoot. An attack naming one is dropped here in silence, before any
+		// pending swing, cooldown or energy exists, worn through or not.
+		return vnet.RefusalReasonUnknown, errors.New("a bow is drawn, not swung")
 	}
 	if missingAmmunition {
 		return vnet.RefusalReasonNoAmmunition, errors.New("the launcher has no ammunition")
@@ -397,16 +404,13 @@ type armedAttack struct {
 }
 
 // launchParameters is the authoritative cadence and initial speed for each projectile
-// kind a registry row may launch. Unknown kinds fail closed.
+// kind an attack may launch. Unknown kinds fail closed, and so does an arrow: a bow is
+// drawn, and resolveDrawLocked looses it at a speed that follows the charge (arrowLaunch).
 func (s *Sim) launchParameters(kind vnet.ProjectileKind) (uint32, float64) {
-	switch kind {
-	case vnet.ProjectileKindArrow:
-		return s.bowCooldownTicks, ArrowSpeed
-	case vnet.ProjectileKindEnergyOrb:
+	if kind == vnet.ProjectileKindEnergyOrb {
 		return s.sceptreCooldownTicks, OrbSpeed
-	default:
-		return 0, 0
 	}
+	return 0, 0
 }
 
 // armedForAttackLocked is what the named slot's contents do, and whether the inventory
@@ -449,6 +453,11 @@ func (p *Player) armedForAttackLocked(slot uint8) (armedAttack, bool) {
 		return armedAttack{}, true
 	}
 
+	if drawnLauncher(definition) {
+		// A bow put in the hand between an admitted swing and this tick. It is drawn, never
+		// swung, so the swing ends here and spends neither an arrow nor the bow's wear.
+		return armedAttack{}, true
+	}
 	if definition.launches != vnet.ProjectileKindUnknown {
 		launched, sampled := p.spendLaunchLocked(slot, definition)
 		if !launched {

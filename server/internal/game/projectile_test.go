@@ -79,7 +79,7 @@ func TestProjectileSpawnUsesTheSharedIdentityAndStartsOutsideItsOwner(t *testing
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 
-	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 	proj, ok := projectileState(h, id)
 	if !ok {
 		t.Fatal("spawned projectile is absent")
@@ -87,8 +87,8 @@ func TestProjectileSpawnUsesTheSharedIdentityAndStartsOutsideItsOwner(t *testing
 	if id <= 100 || proj.owner != owner.entityID || proj.kind != vnet.ProjectileKindArrow {
 		t.Fatalf("projectile identity = %#v, owner=%d kind=%s", proj.entityID, proj.owner, proj.kind)
 	}
-	if proj.vel != [3]float64{0, 0, -ArrowSpeed} {
-		t.Errorf("velocity = %v, want [0 0 %v]", proj.vel, -ArrowSpeed)
+	if proj.vel != [3]float64{0, 0, -ArrowFullDrawSpeed} {
+		t.Errorf("velocity = %v, want [0 0 %v]", proj.vel, -ArrowFullDrawSpeed)
 	}
 	if boxesIntersect(projectileBody.boxAt(proj.pos), playerBox(owner.pos)) {
 		t.Fatalf("projectile at %v still intersects its owner's box", proj.pos)
@@ -119,7 +119,7 @@ func TestAnArrowHitsADraugrWithoutTunnelling(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	mobID := h.spawnDraugrAt([3]float32{0.5, 64, -5.5})
-	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 
 	for range 5 {
 		advanceTestProjectiles(h)
@@ -137,7 +137,7 @@ func TestArrowGravityMatchesTheAuthoritativeAcceleration(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{1, 0, 0}, ArrowSpeed)
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{1, 0, 0}, ArrowFullDrawSpeed)
 	start, _ := projectileState(h, id)
 
 	const ticks = 17
@@ -176,7 +176,7 @@ func TestAOneBlockWallStopsEveryArrowOffset(t *testing.T) {
 		h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{wallZ: &wallZ})
 		x := float32(sample)/100 + 0.01
 		owner, _ := h.join(1, [3]float32{x, 64, 0.5})
-		id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+		id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 		for range 4 {
 			advanceTestProjectiles(h)
 		}
@@ -202,7 +202,7 @@ func TestAVargrBodyCannotBeTunnelledThrough(t *testing.T) {
 	for axis := range 3 {
 		direction[axis] /= length
 	}
-	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, direction, ArrowSpeed)
+	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, direction, ArrowFullDrawSpeed)
 
 	for range 4 {
 		advanceTestProjectiles(h)
@@ -216,7 +216,7 @@ func TestAnArrowNeverHitsItsOwnerEvenWhenFiredStraightDown(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowSpeed)
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowFullDrawSpeed)
 	advanceTestProjectiles(h)
 
 	if got := h.vitals(owner).Health; got != PlayerMaxHealth {
@@ -231,7 +231,7 @@ func TestTerrainAndLifetimeEndEachProjectileAtItsOwnRule(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	arrowID := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowSpeed)
+	arrowID := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowFullDrawSpeed)
 	orbID := spawnTestProjectile(t, h, vnet.ProjectileKindEnergyOrb, owner, [3]float64{0, -1, 0}, OrbSpeed)
 	advanceTestProjectiles(h)
 
@@ -268,7 +268,7 @@ func TestArrowExpiryWinsOverStickingOnItsFinalTick(t *testing.T) {
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
 	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowSpeed)
+	id := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, -1, 0}, ArrowFullDrawSpeed)
 	h.sim.mu.Lock()
 	h.sim.projectiles[id].ticksLeft = 1
 	h.sim.mu.Unlock()
@@ -324,7 +324,7 @@ func TestAnOrbHealsAPlayerButAnArrowPassesThrough(t *testing.T) {
 		t.Errorf("healed health = %d, want %d", got, PlayerMaxHealth-20+OrbHeal)
 	}
 
-	arrowID := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{1, 0, 0}, ArrowSpeed)
+	arrowID := spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{1, 0, 0}, ArrowFullDrawSpeed)
 	for range 4 {
 		advanceTestProjectiles(h)
 	}
@@ -344,7 +344,7 @@ func TestAProjectileWhoseOwnerLeftStillCreditsTheStableTap(t *testing.T) {
 	h.sim.mu.Lock()
 	h.sim.mobs[mobID].health = ArrowDamage
 	h.sim.mu.Unlock()
-	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 	h.sim.Leave(owner)
 
 	for range 4 {

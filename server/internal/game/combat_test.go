@@ -751,82 +751,50 @@ func TestOnlyAWorkingBladeSwings(t *testing.T) {
 	}
 }
 
-func TestABowLaunchesAnArrowAndPaysItsAmmunitionDurabilityAndCooldown(t *testing.T) {
+// A bow is drawn, never swung. An attack naming the main hand while it holds one launches
+// nothing and spends nothing — no arrow, no wear, no energy, no cooldown — and is silence
+// whether the bow has arrows, has none, or is worn through. The draw is the bow's only way to
+// shoot (draw_test.go); the sceptre keeps the attack, as the test below this one pins.
+func TestAnAttackWithABowInTheMainHandLaunchesNothing(t *testing.T) {
 	t.Parallel()
 
-	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	player.inventory.mu.Lock()
-	player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
-	player.inventory.slots[1] = stackOf(ItemArrow, 2)
-	player.inventory.mu.Unlock()
-	h.aimAt(player, math.Pi/2, math.Pi/6)
+	for name, prepare := range map[string]func(*Player){
+		"a bow with arrows":    func(p *Player) { p.inventory.slots[1] = stackOf(ItemArrow, 2) },
+		"a bow with no arrows": func(*Player) {},
+		"a worn-through bow with arrows": func(p *Player) {
+			p.inventory.slots[1] = stackOf(ItemArrow, 2)
+			p.inventory.slots[equipmentMainHand].durability = 0
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
-	if err != nil || reason != vnet.RefusalReasonUnknown {
-		t.Fatalf("bow attack = (%s, %v), want accepted", reason, err)
-	}
-	// Resolve without advancing the projectile, so this assertion reads the exact launch
-	// velocity before the projectile integrator applies its first gravity step.
-	h.sim.mu.Lock()
-	player.resolveAttackLocked()
-	h.sim.mu.Unlock()
+			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+			player.inventory.mu.Lock()
+			player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
+			prepare(player)
+			player.inventory.mu.Unlock()
+			before := player.InventoryState()
+			h.sim.mu.Lock()
+			energy := player.energy
+			h.sim.mu.Unlock()
 
-	state := player.InventoryState()
-	if got := state.Stacks[equipmentMainHand].Durability; got != BowMaxDurability-1 {
-		t.Errorf("bow durability = %d, want %d", got, BowMaxDurability-1)
-	}
-	if got := state.Stacks[1].Count; got != 1 {
-		t.Errorf("arrow count = %d, want 1", got)
-	}
-	h.sim.mu.Lock()
-	defer h.sim.mu.Unlock()
-	if player.attackCooldown != h.sim.bowCooldownTicks {
-		t.Errorf("bow cooldown = %d, want %d", player.attackCooldown, h.sim.bowCooldownTicks)
-	}
-	if len(h.sim.projectiles) != 1 {
-		t.Fatalf("projectiles = %d, want one", len(h.sim.projectiles))
-	}
-	for _, projectile := range h.sim.projectiles {
-		if projectile.kind != vnet.ProjectileKindArrow || projectile.owner != player.entityID {
-			t.Errorf("projectile kind/owner = %s/%d, want Arrow/%d", projectile.kind, projectile.owner, player.entityID)
-		}
-		wantDirection := lookDirection(player.current.yaw, player.current.pitch)
-		for axis := range 3 {
-			want := wantDirection[axis] * ArrowSpeed
-			if math.Abs(projectile.vel[axis]-want) > 1e-9 {
-				t.Errorf("velocity[%d] = %v, want %v", axis, projectile.vel[axis], want)
+			reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
+			if err == nil || reason != vnet.RefusalReasonUnknown {
+				t.Errorf("bow attack = (%s, %v), want it dropped in silence", reason, err)
 			}
-		}
-	}
-}
-
-func TestABowWithoutPackAmmunitionIsRefusedWithoutSpendingAnything(t *testing.T) {
-	t.Parallel()
-
-	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
-	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	player.inventory.mu.Lock()
-	player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
-	// Equipment never supplies launcher ammunition, even if corrupt persisted data puts
-	// an arrow there: the authoritative search ends before the first equipment slot.
-	player.inventory.slots[equipmentOffHand] = stackOf(ItemArrow, 1)
-	player.inventory.mu.Unlock()
-	before := player.InventoryState()
-
-	reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
-	if err == nil || reason != vnet.RefusalReasonNoAmmunition {
-		t.Fatalf("bow attack = (%s, %v), want NoAmmunition", reason, err)
-	}
-	h.step()
-	if got := player.InventoryState(); !reflect.DeepEqual(got, before) {
-		t.Errorf("inventory changed after refused shot: got %+v, want %+v", got, before)
-	}
-	h.sim.mu.Lock()
-	defer h.sim.mu.Unlock()
-	if player.pendingSwing != nil || player.attackCooldown != 0 || len(h.sim.projectiles) != 0 {
-		t.Errorf("refused shot left pending=%v cooldown=%d projectiles=%d",
-			player.pendingSwing != nil, player.attackCooldown, len(h.sim.projectiles))
+			h.step()
+			if got := player.InventoryState(); !reflect.DeepEqual(got, before) {
+				t.Errorf("inventory changed after a bow attack: got %+v, want %+v", got, before)
+			}
+			h.sim.mu.Lock()
+			defer h.sim.mu.Unlock()
+			if player.pendingSwing != nil || player.attackCooldown != 0 || len(h.sim.projectiles) != 0 || player.energy < energy {
+				t.Errorf("a bow attack left pending=%v cooldown=%d projectiles=%d energy %d (was %d)",
+					player.pendingSwing != nil, player.attackCooldown, len(h.sim.projectiles), player.energy, energy)
+			}
+		})
 	}
 }
 
@@ -911,53 +879,40 @@ func TestAWornThroughSceptreDoesNothing(t *testing.T) {
 	}
 }
 
-func TestAWornThroughBowAndAnArrowMovedBeforeTheTickSpendNothing(t *testing.T) {
+// A bow put in the main hand after a blade's swing was admitted and before the tick judged it
+// is not loosed by that swing: the tick spends neither an arrow nor the bow's wear, and starts
+// no cooldown. The worn-through bow and the last arrow moved before the release are the
+// draw's cases now (draw_test.go).
+func TestABowPutInTheHandBeforeTheTickIsNotLoosedByASwing(t *testing.T) {
 	t.Parallel()
 
-	for name, wornThrough := range map[string]bool{
-		"worn-through bow":       true,
-		"last arrow moved first": false,
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
-			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-			player.inventory.mu.Lock()
-			player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
-			player.inventory.slots[1] = stackOf(ItemArrow, 1)
-			if wornThrough {
-				player.inventory.slots[equipmentMainHand].durability = 0
-			}
-			player.inventory.mu.Unlock()
+	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
+	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	player.inventory.mu.Lock()
+	player.inventory.slots[equipmentMainHand] = stackOf(ItemIronSword, 1)
+	player.inventory.slots[1] = stackOf(ItemArrow, 2)
+	player.inventory.mu.Unlock()
 
-			_, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1})
-			if wornThrough {
-				// Worn launchers retain the existing silent no-op admission semantics.
-				if err != nil {
-					t.Fatalf("worn bow admission: %v", err)
-				}
-			} else if err != nil {
-				t.Fatalf("bow admission: %v", err)
-			}
-			player.inventory.mu.Lock()
-			if !wornThrough {
-				player.inventory.slots[1] = inventoryStack{}
-			}
-			beforeBow := player.inventory.slots[equipmentMainHand]
-			player.inventory.mu.Unlock()
-			h.step()
+	if _, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: 1}); err != nil {
+		t.Fatalf("blade admission: %v", err)
+	}
+	player.inventory.mu.Lock()
+	player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
+	before := player.inventory.slots
+	player.inventory.mu.Unlock()
+	h.step()
 
-			player.inventory.mu.Lock()
-			afterBow := player.inventory.slots[equipmentMainHand]
-			player.inventory.mu.Unlock()
-			if afterBow != beforeBow {
-				t.Errorf("bow changed from %+v to %+v", beforeBow, afterBow)
-			}
-			h.sim.mu.Lock()
-			if player.attackCooldown != 0 || len(h.sim.projectiles) != 0 {
-				t.Errorf("no-op shot left cooldown=%d projectiles=%d", player.attackCooldown, len(h.sim.projectiles))
-			}
-			h.sim.mu.Unlock()
-		})
+	player.inventory.mu.Lock()
+	after := player.inventory.slots
+	player.inventory.mu.Unlock()
+	if after != before {
+		t.Error("the tick spent from the inventory for a swing that found a bow in the hand")
+	}
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if player.pendingSwing != nil || player.attackCooldown != 0 || len(h.sim.projectiles) != 0 {
+		t.Errorf("the swing left pending=%v cooldown=%d projectiles=%d",
+			player.pendingSwing != nil, player.attackCooldown, len(h.sim.projectiles))
 	}
 }
 

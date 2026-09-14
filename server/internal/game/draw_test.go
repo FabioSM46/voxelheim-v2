@@ -3,6 +3,7 @@ package game
 import (
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -220,7 +221,8 @@ func TestAReleaseLoosesOneArrowAndStartsTheBowsCooldown(t *testing.T) {
 	if _, err := h.draw(player, true, 1); err != nil {
 		t.Fatalf("press: %v", err)
 	}
-	h.advance(3)
+	// Held to a full draw, so the arrow carries no spread and its direction is the aim exactly.
+	h.advance(int(h.sim.fullDrawTicks))
 	if reason, err := h.draw(player, false, 2); err != nil || reason != vnet.RefusalReasonUnknown {
 		t.Fatalf("release = (%s, %v), want accepted", reason, err)
 	}
@@ -542,5 +544,211 @@ func TestASwingWhileDrawingIsDropped(t *testing.T) {
 	if player.pendingSwing != nil || player.energy != energy || player.draw == nil {
 		t.Errorf("a dropped swing left pending %v energy %d (want %d) drawing %v",
 			player.pendingSwing != nil, player.energy, energy, player.draw != nil)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The charged launch
+// ---------------------------------------------------------------------------
+
+// looseAfter presses, holds for held ticks, releases, and resolves the release without
+// advancing the projectile, so the arrow's launch velocity is read before any gravity step.
+func looseAfter(t *testing.T, h *vitalsHarness, p *Player, held int) *projectile {
+	t.Helper()
+
+	if _, err := h.draw(p, true, 1); err != nil {
+		t.Fatalf("press: %v", err)
+	}
+	h.advance(held)
+	if _, err := h.draw(p, false, 2); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	p.resolveDrawLocked()
+	if len(h.sim.projectiles) != 1 {
+		t.Fatalf("projectiles after the release = %d, want one arrow", len(h.sim.projectiles))
+	}
+	for _, proj := range h.sim.projectiles {
+		return proj
+	}
+	return nil
+}
+
+func angleBetween(a, b [3]float64) float64 {
+	dot := (a[0]*b[0] + a[1]*b[1] + a[2]*b[2]) / (vectorLength(a) * vectorLength(b))
+	return math.Acos(min(max(dot, -1), 1))
+}
+
+// The launch speed is interpolated from the charge: the minimum when released before a tick
+// has elapsed, halfway at half a draw, the full-draw speed at a full draw and no faster for
+// holding past it.
+func TestTheLaunchSpeedFollowsTheCharge(t *testing.T) {
+	t.Parallel()
+
+	h, _ := archer(t, 1)
+	full := int(h.sim.fullDrawTicks)
+	for name, tc := range map[string]struct {
+		held  int
+		speed float64
+	}{
+		"released at once":         {held: 0, speed: ArrowMinDrawSpeed},
+		"half a draw":              {held: full / 2, speed: (ArrowMinDrawSpeed + ArrowFullDrawSpeed) / 2},
+		"a full draw":              {held: full, speed: ArrowFullDrawSpeed},
+		"held three times as long": {held: 3 * full, speed: ArrowFullDrawSpeed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h, player := archer(t, 1)
+			arrow := looseAfter(t, h, player, tc.held)
+			if got := vectorLength(arrow.vel); math.Abs(got-tc.speed) > 1e-9 {
+				t.Errorf("launch speed after %d held ticks = %v, want %v", tc.held, got, tc.speed)
+			}
+		})
+	}
+}
+
+// A full draw carries no spread at all: the arrow leaves along the look direction exactly.
+func TestAFullDrawFliesExactlyAlongTheAim(t *testing.T) {
+	t.Parallel()
+
+	for _, look := range [][2]float64{{0, 0}, {0.7, 0.3}, {-2.1, -0.9}, {math.Pi, 1.4}} {
+		h, player := archer(t, 1)
+		h.aimAt(player, look[0], look[1])
+		arrow := looseAfter(t, h, player, int(h.sim.fullDrawTicks))
+		h.sim.mu.Lock()
+		aim := lookDirection(player.current.yaw, player.current.pitch)
+		h.sim.mu.Unlock()
+		speed := vectorLength(arrow.vel)
+		for axis := range 3 {
+			if got := arrow.vel[axis] / speed; math.Abs(got-aim[axis]) > 1e-12 {
+				t.Errorf("look %v: direction[%d] = %v, want %v", look, axis, got, aim[axis])
+			}
+		}
+	}
+}
+
+// Below a full draw the arrow leaves inside a cone around the aim, whose half-angle narrows
+// linearly with the charge. Across many seeds and aims — straight up and straight down
+// included, where the basis has to turn — every direction is a unit vector inside its cone,
+// and the cone is actually used rather than collapsed onto the aim.
+func TestAnUnchargedArrowStaysInsideItsCone(t *testing.T) {
+	t.Parallel()
+
+	for _, charge := range []float64{0, 0.5, 0.9} {
+		_, spread := arrowLaunch(charge)
+		want := ArrowMinDrawSpreadDegrees * math.Pi / 180 * (1 - charge)
+		if math.Abs(spread-want) > 1e-15 {
+			t.Fatalf("spread at charge %v = %v, want %v", charge, spread, want)
+		}
+		widest := 0.0
+		for seed := range uint64(40) {
+			rng := rand.New(rand.NewPCG(seed, bowDrawStream))
+			for _, aim := range [][3]float64{
+				lookDirection(0, 0), lookDirection(1.3, -0.4), {0, 1, 0}, {0, -1, 0}, lookDirection(-2.8, 0.95),
+			} {
+				for range 50 {
+					direction := spreadDirection(aim, spread, rng)
+					if length := vectorLength(direction); math.Abs(length-1) > 1e-9 {
+						t.Fatalf("charge %v: direction %v has length %v", charge, direction, length)
+					}
+					angle := angleBetween(aim, direction)
+					if angle > spread+1e-9 {
+						t.Fatalf("charge %v: direction %v is %v rad off the aim, beyond the %v cone", charge, direction, angle, spread)
+					}
+					widest = max(widest, angle)
+				}
+			}
+		}
+		if widest < 0.9*spread {
+			t.Errorf("charge %v: the widest of 10,000 arrows was %v rad inside a %v cone; the spread is not being drawn", charge, widest, spread)
+		}
+	}
+	if got := spreadDirection([3]float64{0, 0, -1}, 0, nil); got != [3]float64{0, 0, -1} {
+		t.Errorf("a zero spread turned the aim into %v", got)
+	}
+}
+
+// Through the simulation, over several worlds: an arrow released at no charge leaves inside
+// the minimum-charge cone, drawn from the world's own generator.
+func TestAReleaseAtNoChargeLeavesInsideTheWidestCone(t *testing.T) {
+	t.Parallel()
+
+	for seed := range int64(8) {
+		h := newVitalsHarnessOver(t, DefaultTickRate, dropTerrain{groundTop: 63}, 8, seed+1)
+		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+		player.inventory.mu.Lock()
+		player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
+		player.inventory.slots[1] = stackOf(ItemArrow, 1)
+		player.inventory.mu.Unlock()
+		h.aimAt(player, 0.4, 0.1)
+
+		arrow := looseAfter(t, h, player, 0)
+		h.sim.mu.Lock()
+		aim := lookDirection(player.current.yaw, player.current.pitch)
+		h.sim.mu.Unlock()
+		if angle, cone := angleBetween(aim, arrow.vel), ArrowMinDrawSpreadDegrees*math.Pi/180; angle > cone+1e-9 {
+			t.Errorf("world %d: the arrow left %v rad off the aim, beyond the %v cone", seed+1, angle, cone)
+		}
+	}
+}
+
+// Damage does not follow the charge: an arrow loosed at no charge and one loosed at a full
+// draw both take ArrowDamage off the draugr they hit.
+func TestArrowDamageIsTheSameAtEveryCharge(t *testing.T) {
+	t.Parallel()
+
+	for name, full := range map[string]bool{"no charge": false, "a full draw": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			h, player := archer(t, 1)
+			h.keepNight()
+			// Close and a little below the eyes, so even the widest cone and the drop over two
+			// blocks stay inside the draugr's body.
+			target := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
+			h.aimAt(player, 0, -0.2)
+			held := 0
+			if full {
+				held = int(h.sim.fullDrawTicks)
+			}
+			if _, err := h.draw(player, true, 1); err != nil {
+				t.Fatalf("press: %v", err)
+			}
+			h.advance(held)
+			if _, err := h.draw(player, false, 2); err != nil {
+				t.Fatalf("release: %v", err)
+			}
+			for range 10 {
+				h.step()
+				if h.mobHealth(target) != draugrRow.maxHealth {
+					break
+				}
+			}
+			if got := draugrRow.maxHealth - h.mobHealth(target); got != ArrowDamage {
+				t.Errorf("the arrow took %d health, want ArrowDamage %d", got, ArrowDamage)
+			}
+		})
+	}
+}
+
+// The launch cap is the full-draw speed: a full draw is accepted by the one flight path and
+// nothing faster is.
+func TestTheLaunchCapIsTheFullDrawSpeed(t *testing.T) {
+	t.Parallel()
+
+	if ProjectileMaxLaunchSpeed != ArrowFullDrawSpeed {
+		t.Fatalf("ProjectileMaxLaunchSpeed = %v, want the full-draw speed %v", ProjectileMaxLaunchSpeed, ArrowFullDrawSpeed)
+	}
+	if ArrowMinDrawSpeed <= 0 || ArrowMinDrawSpeed >= ArrowFullDrawSpeed || OrbSpeed > ProjectileMaxLaunchSpeed {
+		t.Fatalf("speeds min %v, full %v, orb %v are not ordered under the cap", ArrowMinDrawSpeed, ArrowFullDrawSpeed, OrbSpeed)
+	}
+	h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{})
+	owner, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	h.sim.mu.Lock()
+	defer h.sim.mu.Unlock()
+	if _, ok := h.sim.spawnProjectileLocked(vnet.ProjectileKindArrow, owner, projectileOriginLocked(owner), [3]float64{0, 0, -1}, ArrowFullDrawSpeed); !ok {
+		t.Error("the flight path refused a full-draw launch")
 	}
 }
