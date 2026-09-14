@@ -2880,6 +2880,8 @@ impl Plugin for HandsPlugin {
         app.init_resource::<HandAnimation>()
             .init_resource::<SelfVitals>()
             .init_resource::<LocalMount>()
+            // `CombatPlugin` owns and writes it in the game; here for the focused tests.
+            .init_resource::<super::combat::WeaponDrawn>()
             // `CombatPlugin` owns it in the game, and writes it; registered here so the
             // focused animation tests stand this plugin up on its own.
             .add_message::<SwingAbandoned>()
@@ -2921,7 +2923,10 @@ impl Plugin for HandsPlugin {
                     .after(ApplyMiningFeedback)
                     // After the swing is sent, so the feedback plays on the frame the
                     // request left rather than the one after it.
-                    .after(super::combat::ApplyCombatInput),
+                    .after(super::combat::ApplyCombatInput)
+                    // After the draw key, so the hand holds the drawn weapon on the frame it
+                    // was drawn. `ApplyCombatInput` implies it today; this states it.
+                    .after(super::combat::ApplyWeaponDrawn),
             );
     }
 }
@@ -3298,8 +3303,9 @@ struct HandAssets<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
 }
 
-/// The two facts that choose what the view model draws: the selected authoritative stack
-/// and the local player's authoritative appearance.
+/// The two facts that choose what the view model draws: the authoritative stack in the hand
+/// — the drawn main hand, or the selected hotbar slot while sheathed — and the local player's
+/// authoritative appearance.
 ///
 /// They arrive on different streams and change independently, so keeping the lookup in one
 /// parameter is what prevents a slot refresh from forgetting skin or an appearance refresh
@@ -3313,11 +3319,13 @@ struct HandSubject<'w> {
     mode: Res<'w, InputMode>,
     view: Res<'w, ViewMode>,
     mount: Res<'w, LocalMount>,
+    drawn: Res<'w, super::combat::WeaponDrawn>,
 }
 
 impl HandSubject<'_> {
     fn read(&self) -> (HeldAppearance, u32) {
-        let appearance = selected_appearance(self.inventory.slot(self.selected.0));
+        let slot = super::combat::hand_slot(self.drawn.0, self.selected.0, self.session.as_deref());
+        let appearance = selected_appearance(slot.and_then(|slot| self.inventory.slot(slot)));
         let skin_colour = self
             .session
             .as_deref()
@@ -3516,6 +3524,7 @@ struct HandIntent<'w, 's> {
     swings: MessageReader<'w, 's, SwingSent>,
     abandons: MessageReader<'w, 's, SwingAbandoned>,
     consumes: MessageReader<'w, 's, ConsumeSent>,
+    drawn: Res<'w, super::combat::WeaponDrawn>,
 }
 
 impl HandIntent<'_, '_> {
@@ -3565,8 +3574,12 @@ impl HandIntent<'_, '_> {
     }
 
     /// A press that asked for a block somewhere there is room to put one.
+    ///
+    /// Never while a weapon is drawn: the right button then raises a shield and places
+    /// nothing, so the bump would play for a request that never left (#1239).
     fn placing(&self) -> bool {
         self.playing()
+            && !self.drawn.0
             && self
                 .buttons
                 .as_deref()
@@ -8137,9 +8150,8 @@ mod tests {
     /// The sweep is the one
     /// [`every_held_arrangement_clears_the_near_plane_through_every_swing`] walks — the three
     /// blade arcs and the placement bump they can coincide with, plus rest — and the mining
-    /// loop besides, which a blade cannot reach: `player/target.rs` sends a swing instead of a
-    /// mining intent for both blades and `a_blade_in_hand_sends_a_swing_instead_of_mining`
-    /// pins it. It is swept anyway because the grip's containment is what makes the claim, and
+    /// loop besides, which a blade cannot reach: `player/target.rs` sends no mining intent for
+    /// either blade and `a_blade_on_the_hotbar_does_not_mine` pins it. It is swept anyway because the grip's containment is what makes the claim, and
     /// containment does not care which animation is playing.
     #[test]
     fn the_hand_stays_closed_over_the_grip_through_every_animation() {
@@ -9002,6 +9014,46 @@ mod tests {
             app.update();
             assert_eq!(held(&mut app).0.shape, expected, "slot {slot}");
         }
+    }
+
+    /// **Drawn, the hand holds the main-hand weapon whatever the hotbar selects; sheathed, the
+    /// hotbar item** (#1239) — on the frame the state changes, both ways.
+    #[test]
+    fn the_view_model_holds_the_drawn_main_hand_and_the_hotbar_while_sheathed() {
+        let mut app = app();
+        let mut params = session().0;
+        params.inventory_slots = 9;
+        params.equipment_slots = 5;
+        app.insert_resource(Session(params));
+        let main_hand =
+            super::super::inventory::equipment_slot(&params, super::super::MAIN_HAND_OFFSET)
+                .expect("the session has a main hand");
+        let mut stacks = vec![InventoryStack::default(); 9];
+        stacks[0] = InventoryStack {
+            item_id: ITEM_STONE,
+            count: 2,
+            ..Default::default()
+        };
+        stacks[usize::from(main_hand)] = InventoryStack {
+            item_id: combat::ITEM_RUSTY_SWORD,
+            count: 1,
+            durability: 100,
+            max_durability: 100,
+        };
+        app.insert_resource(Inventory::from_stacks(stacks));
+        app.update();
+        assert_eq!(held(&mut app).0.item_id, Some(ITEM_STONE), "sheathed");
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = true;
+        app.update();
+        let (item, visibility, _) = held(&mut app);
+        assert_eq!(item.item_id, Some(combat::ITEM_RUSTY_SWORD), "drawn");
+        assert_eq!(item.shape, Some(ItemShape::Blade), "drawn");
+        assert_eq!(visibility, Visibility::Visible, "drawn");
+
+        app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = false;
+        app.update();
+        assert_eq!(held(&mut app).0.item_id, Some(ITEM_STONE), "sheathed again");
     }
 
     #[test]
@@ -10347,6 +10399,33 @@ mod tests {
             pose.reach > 0.0,
             "the draw did not pull back toward the camera"
         );
+    }
+
+    /// **A right press while a weapon is drawn plays no placement bump** (#1239): the button
+    /// then raises a shield and places nothing, so the bump would animate a request that never
+    /// left. The sheathed half of the same frame is what keeps this from passing vacuously.
+    #[test]
+    fn a_right_press_while_drawn_plays_no_placement_bump() {
+        for (drawn, bumps) in [(false, true), (true, false)] {
+            let mut app = hand_only_app();
+            app.world_mut().resource_mut::<combat::WeaponDrawn>().0 = drawn;
+            *app.world_mut().resource_mut::<BlockTarget>() = BlockTarget(Some(BlockHit {
+                block: IVec3::new(3, 0, 0),
+                face: IVec3::X,
+            }));
+            app.world_mut()
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
+            app.update();
+            assert_eq!(
+                app.world()
+                    .resource::<HandAnimation>()
+                    .bump_elapsed
+                    .is_some(),
+                bumps,
+                "drawn: {drawn}"
+            );
+        }
     }
 
     #[test]
