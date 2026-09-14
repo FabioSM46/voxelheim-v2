@@ -136,7 +136,7 @@ func TestProjectileContactReportsOnceAndHealingAndTerrainDoNot(t *testing.T) {
 			if hit {
 				target = h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 			}
-			spawnTestProjectile(t, h, kind, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+			spawnTestProjectile(t, h, kind, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 			h.advance(6)
 			blows := disclosedBlows(t, out.all())
 			if !hit {
@@ -257,7 +257,7 @@ func TestTerrainImpactAndEnvironmentalDamageHaveNoBlow(t *testing.T) {
 	for _, kind := range []vnet.ProjectileKind{vnet.ProjectileKindArrow, vnet.ProjectileKindEnergyOrb} {
 		h := newVitalsHarness(t, DefaultTickRate, projectileTerrain{wallZ: &wall})
 		p, out := h.join(1, [3]float32{.5, 64, .5})
-		spawnTestProjectile(t, h, kind, p, [3]float64{0, 0, -1}, ArrowSpeed)
+		spawnTestProjectile(t, h, kind, p, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 		h.advance(6)
 		if len(disclosedBlows(t, out.all())) != 0 {
 			t.Fatal("terrain impact reported as a landed blow")
@@ -275,7 +275,7 @@ func TestOfflineProjectileOwnerIsAnonymousInARealSnapshot(t *testing.T) {
 	owner, _ := h.join(1, [3]float32{.5, 64, .5})
 	_, out := h.join(2, [3]float32{4, 64, .5})
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
-	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowSpeed)
+	spawnTestProjectile(t, h, vnet.ProjectileKindArrow, owner, [3]float64{0, 0, -1}, ArrowFullDrawSpeed)
 	h.sim.Leave(owner)
 	h.advance(5)
 	blows := disclosedBlows(t, out.all())

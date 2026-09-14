@@ -415,17 +415,21 @@ func TestAPendingBossRewardRefusesEveryInventoryAndSilverMutation(t *testing.T) 
 			h.aimAt(p, math.Pi/2, math.Pi/6)
 			tick := uint32(0)
 			return p, func() error {
+				// The bow is drawn and loosed. A release the pending reward postponed is still
+				// held on the second call, which only resolves it again.
 				h.sim.mu.Lock()
-				pending := p.pendingSwing != nil
+				drawing := p.draw != nil
 				h.sim.mu.Unlock()
-				if !pending {
-					tick++
-					if _, err := p.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick}); err != nil {
-						return err
+				if !drawing {
+					for _, active := range []bool{true, false} {
+						tick++
+						if _, err := p.Draw(protocol.DrawRequest{Active: active, ClientTick: tick}); err != nil {
+							return err
+						}
 					}
 				}
 				h.sim.mu.Lock()
-				p.resolveAttackLocked()
+				p.resolveDrawLocked()
 				h.sim.mu.Unlock()
 				return nil
 			}
