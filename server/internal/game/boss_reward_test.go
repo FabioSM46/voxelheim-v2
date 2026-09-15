@@ -111,11 +111,11 @@ func TestBossRewardReservationImagesTheGrantWithoutTouchingTheLivePack(t *testin
 		if stack.ItemID == uint16(ItemBone) {
 			bones += int(stack.Count)
 		}
-		if slot != 0 && stack == grant.Entries[1] {
+		if slot != equipmentMainHand && stack == grant.Entries[1] {
 			blade = true
 		}
 	}
-	if bones != 3 || !blade || image.Life.Slots[0] != before.slots.stored()[0] {
+	if bones != 3 || !blade || image.Life.Slots[equipmentMainHand] != before.slots.stored()[equipmentMainHand] {
 		t.Fatalf("image slots = %+v, want the starter blade, three bones and the worn blade", image.Life.Slots)
 	}
 	if image.Life.Silver != 17 || image.Life.Experience != 130 || image.Life.BossRewardEpoch != 1 {
@@ -472,7 +472,7 @@ func TestAPendingBossRewardStillJudgesAMeleeSwing(t *testing.T) {
 	h, p := rewardPlayer(t)
 	mustReserveReward(t, p, BossRewardGrant{Experience: 1})
 	h.sim.mu.Lock()
-	armed, sampled := p.armedForAttackLocked(0)
+	armed, sampled := p.armedForAttackLocked(mainHandSlot)
 	h.sim.mu.Unlock()
 	if !sampled || armed.meleeDamage != RustySwordDamage {
 		t.Fatalf("melee during a pending reward = %+v sampled %v, want the starter blade's damage", armed, sampled)
@@ -490,13 +490,13 @@ func TestDeathsBeforePublicationWearThePublishedImageExactlyOnce(t *testing.T) {
 
 	h.hurt(p, PlayerMaxHealth)
 	h.step()
-	if got := rewardPackOf(p).slots[0].durability; got != RustySwordMaxDurability {
+	if got := rewardPackOf(p).slots[equipmentMainHand].durability; got != RustySwordMaxDurability {
 		t.Fatalf("a death spent %d wear on the frozen pack", RustySwordMaxDurability-got)
 	}
 	capture := p.Record()
-	if capture.BossRewardEpoch != 0 || capture.Slots[0].Durability != once || capture.Slots[1] != (protocol.InventoryStack{}) {
-		t.Fatalf("pre-publication capture = epoch %d slots %+v, want the old epoch and a worn pack without the reward",
-			capture.BossRewardEpoch, capture.Slots[:2])
+	if capture.BossRewardEpoch != 0 || capture.Slots[equipmentMainHand].Durability != once || capture.Slots[0] != (protocol.InventoryStack{}) {
+		t.Fatalf("pre-publication capture = epoch %d main hand %+v slot 0 %+v, want the old epoch and a worn pack without the reward",
+			capture.BossRewardEpoch, capture.Slots[equipmentMainHand], capture.Slots[0])
 	}
 
 	riseAgain(t, h, p)
@@ -509,11 +509,11 @@ func TestDeathsBeforePublicationWearThePublishedImageExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pack := rewardPackOf(p)
-	if pack.slots[0].durability != twice {
-		t.Errorf("the carried blade = %d, want %d after two deferred deaths", pack.slots[0].durability, twice)
+	if pack.slots[equipmentMainHand].durability != twice {
+		t.Errorf("the carried blade = %d, want %d after two deferred deaths", pack.slots[equipmentMainHand].durability, twice)
 	}
-	if pack.slots[1] != (inventoryStack{item: ItemRustySword, count: 1, durability: 50, maxDurability: RustySwordMaxDurability}) {
-		t.Errorf("the reward blade = %+v, worn by deaths before it arrived", pack.slots[1])
+	if pack.slots[0] != (inventoryStack{item: ItemRustySword, count: 1, durability: 50, maxDurability: RustySwordMaxDurability}) {
+		t.Errorf("the reward blade = %+v, worn by deaths before it arrived", pack.slots[0])
 	}
 	for _, slot := range []int{equipmentHead, equipmentChest, equipmentLegs} {
 		if got := pack.slots[slot].durability; got != wornByDeath(wornByDeath(LeatherArmourMaxDurability)) {
@@ -528,11 +528,11 @@ func TestDeathsBeforePublicationWearThePublishedImageExactlyOnce(t *testing.T) {
 	h.hurt(p, PlayerMaxHealth)
 	h.step()
 	pack = rewardPackOf(p)
-	if pack.slots[0].durability != wornByDeath(twice) || pack.slots[1].durability != wornByDeath(50) {
-		t.Errorf("a death after publication wore %d/%d, want it spent directly on the image", pack.slots[0].durability, pack.slots[1].durability)
+	if pack.slots[equipmentMainHand].durability != wornByDeath(twice) || pack.slots[0].durability != wornByDeath(50) {
+		t.Errorf("a death after publication wore %d/%d, want it spent directly on the image", pack.slots[equipmentMainHand].durability, pack.slots[0].durability)
 	}
-	if capture := p.Record(); capture.BossRewardEpoch != 1 || capture.Slots[1].Durability != wornByDeath(50) {
-		t.Errorf("post-publication capture = epoch %d reward %+v", capture.BossRewardEpoch, capture.Slots[1])
+	if capture := p.Record(); capture.BossRewardEpoch != 1 || capture.Slots[0].Durability != wornByDeath(50) {
+		t.Errorf("post-publication capture = epoch %d reward %+v", capture.BossRewardEpoch, capture.Slots[0])
 	}
 	if err := p.FinishBossReward(claim); err != nil {
 		t.Fatal(err)
@@ -634,11 +634,11 @@ func TestAnAbortedBossRewardSpendsTheWearItDeferredOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	once := wornByDeath(RustySwordMaxDurability)
-	if got := rewardPackOf(p).slots[0].durability; got != once {
+	if got := rewardPackOf(p).slots[equipmentMainHand].durability; got != once {
 		t.Fatalf("aborted durability = %d, want %d", got, once)
 	}
 	riseAgain(t, h, p)
-	if got := rewardPackOf(p).slots[0].durability; got != once {
+	if got := rewardPackOf(p).slots[equipmentMainHand].durability; got != once {
 		t.Fatalf("the death was charged again after abort: %d", got)
 	}
 }
@@ -673,8 +673,8 @@ func TestADetachedCaptureReceivesTheRewardWithTheWearItCarried(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Slots[0].Durability != wornByDeath(RustySwordMaxDurability) || got.Slots[1] != blade {
-		t.Errorf("detached slots = %+v, want the worn carried blade and the unworn reward", got.Slots[:2])
+	if got.Slots[equipmentMainHand].Durability != wornByDeath(RustySwordMaxDurability) || got.Slots[0] != blade {
+		t.Errorf("detached main hand %+v and slot 0 %+v, want the worn carried blade and the unworn reward", got.Slots[equipmentMainHand], got.Slots[0])
 	}
 	if got.Silver != 15 || got.Experience != 130 || got.BossRewardEpoch != sealed.Life.BossRewardEpoch || got.rewardDeathDebt.pending() {
 		t.Errorf("detached purse/experience/epoch/debt = %d/%d/%d/%v", got.Silver, got.Experience, got.BossRewardEpoch, got.rewardDeathDebt.pending())

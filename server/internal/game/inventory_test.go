@@ -492,8 +492,12 @@ func TestAMainHandMoveResendsTheAppearanceWithTheWeapon(t *testing.T) {
 	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
 	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	// A new character joins with the rusty sword in the main hand. Empty it first, so the
+	// move below is into a hand that holds nothing, which is what this test is about.
 	subject.inventory.mu.Lock()
 	subject.inventory.slots[4] = stackOf(ItemIronSword, 1)
+	subject.inventory.slots[equipmentMainHand] = inventoryStack{}
+	subject.refreshWornLocked()
 	subject.inventory.mu.Unlock()
 	h.step()
 
@@ -538,6 +542,23 @@ func TestAMainHandMoveResendsTheAppearanceWithTheWeapon(t *testing.T) {
 	}
 }
 
+// A new character is seen holding the blade they joined with: the first appearance a
+// watcher receives already names the rusty sword in the main hand, with no move behind it.
+func TestANewCharactersFirstAppearanceCarriesTheStarterBlade(t *testing.T) {
+	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 0)
+	subject, _ := h.join(1, [3]float32{0.5, 64, 0.5})
+	_, watcherOut := h.join(2, [3]float32{1.5, 64, 0.5})
+	h.step()
+
+	frames := appearanceFrames(t, watcherOut, subject.entityID)
+	if len(frames) != 1 {
+		t.Fatalf("the watcher began with %d subject appearances, want one", len(frames))
+	}
+	if got := playerAppearance(t, frames[0]).WornMainhand(); got != uint16(ItemRustySword) {
+		t.Errorf("the first appearance holds main-hand item %d, want the starter blade %d", got, ItemRustySword)
+	}
+}
+
 func playerAppearanceWornOffHand(t *testing.T, frame []byte) uint16 {
 	t.Helper()
 	return playerAppearance(t, frame).WornOffhand()
@@ -555,7 +576,8 @@ func playerAppearance(t *testing.T, frame []byte) *vnet.PlayerAppearance {
 	return &appearance
 }
 
-// starterSword is the slot every player joins with, as InventoryState carries it. A
+// starterSword is the main-hand slot every new character joins with, as InventoryState
+// carries it. A
 // function rather than a var so no test can mutate what the others compare against.
 func starterSword() protocol.InventoryStack {
 	return protocol.InventoryStack{
@@ -690,11 +712,11 @@ func TestAMiningCompletionHoldsNoInventoryLock(t *testing.T) {
 	if got := heldCount(player.InventoryState(), ItemStone); got != 0 {
 		t.Errorf("the break put %d Stone in the pack; the yield belongs on the ground", got)
 	}
-	// Slot 0 is no longer the empty slot it was when this test was written — every
-	// player joins holding a blade — so the assertion is that the break left the
-	// starter loadout alone rather than that it left nothing anywhere.
-	if got := player.InventoryState().Stacks[0]; got != starterSword() {
-		t.Errorf("the break disturbed slot 0: %+v, want the starter sword", got)
+	// Every new character joins holding a blade, in the main hand, so the assertion is
+	// that the break left the starter loadout alone rather than that it left nothing
+	// anywhere.
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("the break disturbed the main hand: %+v, want the starter sword", got)
 	}
 	if got := len(sim.drops); got != 1 {
 		t.Errorf("the break left %d drops in the world, want 1", got)

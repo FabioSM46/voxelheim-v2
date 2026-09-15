@@ -34,13 +34,27 @@ func TestAHandsOccupiedMoveIsAnsweredOnceAndMovesNothing(t *testing.T) {
 		t.Fatalf("slots bow %d, shield %d, sword %d; want all three held", bowSlot, shieldSlot, swordSlot)
 	}
 
+	// A new character joins with the blade already in the main hand. Stow it first, so the
+	// bow is refused into an empty hand for the shield beside it, and the blade's return is
+	// the accepted move behind the refusal.
+	if swordSlot != int(mainHand) {
+		t.Fatalf("the starter blade joined in slot %d, want the main hand %d", swordSlot, mainHand)
+	}
+	stowed := frames.emptySlot()
+	if stowed < 0 {
+		t.Fatal("there is nowhere to stow the starter blade")
+	}
+	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: mainHand, To: uint8(stowed), Count: 1})
+	waitUntil(t, "the blade stowed", func() bool { return len(frames.inventoryStates()) == joinStates+3 })
+	swordSlot = stowed
+
 	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: uint8(shieldSlot), To: offHand, Count: 1})
-	waitUntil(t, "the shield worn", func() bool { return len(frames.inventoryStates()) == joinStates+3 })
+	waitUntil(t, "the shield worn", func() bool { return len(frames.inventoryStates()) == joinStates+4 })
 	refusalsBefore := len(frames.actionRefusals())
 
 	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: uint8(bowSlot), To: mainHand, Count: 1})
 	conn.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: uint8(swordSlot), To: mainHand, Count: 1})
-	waitUntil(t, "the one-handed blade behind the refused bow", func() bool { return len(frames.inventoryStates()) == joinStates+4 })
+	waitUntil(t, "the one-handed blade behind the refused bow", func() bool { return len(frames.inventoryStates()) == joinStates+5 })
 
 	refusals := frames.actionRefusals()[refusalsBefore:]
 	want := protocol.ActionRefused{Action: vnet.RefusedActionMoveInventory, Reason: vnet.RefusalReasonHandsOccupied}

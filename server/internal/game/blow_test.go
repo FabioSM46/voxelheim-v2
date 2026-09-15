@@ -80,8 +80,6 @@ func TestBlowsReportTwoSameTickSwingsAndAKillExactlyOnce(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	a, out := h.join(1, [3]float32{.5, 64, .5})
 	b, _ := h.join(2, [3]float32{.6, 64, .5})
-	h.wieldStarterBlade(a)
-	h.wieldStarterBlade(b)
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 	h.sim.mobs[target].health = 2 * RustySwordDamage
 	for _, player := range []*Player{a, b} {
@@ -117,7 +115,6 @@ func TestMissAndInvalidIntentProduceNoBlow(t *testing.T) {
 	for _, slot := range []uint8{mainHandSlot, 0, uint8(equipmentOffHand), 255} {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		p, out := h.join(1, [3]float32{.5, 64, .5})
-		h.wieldStarterBlade(p)
 		h.spawnDraugrAt([3]float32{.5, 64, 6}) // Behind and beyond sword reach.
 		_, _ = p.Attack(protocol.AttackRequest{Slot: slot, ClientTick: 1})
 		h.step()
@@ -205,7 +202,6 @@ func TestMobBlowsReportProtectedMissBlockedAndKillingOutcomes(t *testing.T) {
 func TestBlowProjectionSuppressesAbsentTargetsAndAnonymousSources(t *testing.T) {
 	h := newVitalsHarnessAt(t, DefaultTickRate, dropTerrain{groundTop: 63}, 1)
 	attacker, near := h.join(1, [3]float32{.5, 64, .5})
-	h.wieldStarterBlade(attacker)
 	_, far := h.join(2, [3]float32{200, 64, 200})
 	target := h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 	if err := h.swing(attacker, mainHandSlot, 1); err != nil {
@@ -233,7 +229,6 @@ func TestBlowProjectionSuppressesAbsentTargetsAndAnonymousSources(t *testing.T) 
 func TestDroppedBlowSnapshotDoesNotReplay(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	p, out := h.join(1, [3]float32{.5, 64, .5})
-	h.wieldStarterBlade(p)
 	h.spawnDraugrAt([3]float32{.5, 64, -1.5})
 	deliver := p.deliverSnapshot
 	attempted := 0

@@ -164,7 +164,7 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	// simulation could have produced: the blade moved out of the slot every new player
 	// finds it in, and the settle every join begins with.
 	const movedTo = 4
-	before.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: movedTo, Count: 1})
+	before.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: protocol.InventorySlots - 1, To: movedTo, Count: 1})
 	waitFor(t, "the blade to move", func() bool {
 		life, ok := first.sim.Records()[id]
 		return ok && life.Slots[movedTo].ItemID == uint16(game.ItemRustySword)
@@ -231,7 +231,7 @@ func TestAPlayerSurvivesARestart(t *testing.T) {
 	}
 
 	// And the pack, read from the simulation the new process built: the blade is where
-	// the previous session left it rather than back in slot 0.
+	// the previous session left it rather than back in the main hand.
 	waitFor(t, "the restored player to join", func() bool { return second.sim.Count() == 1 })
 	restored, ok := second.sim.Records()[id]
 	if !ok {
@@ -293,8 +293,8 @@ func TestShutdownSavesASessionThatIsStillConnected(t *testing.T) {
 	if saved.Health == 0 {
 		t.Error("the record holds no health; a record always describes a living player")
 	}
-	if saved.Slots[0].ItemID != uint16(game.ItemRustySword) {
-		t.Errorf("the record holds %+v in slot 0, want the blade the player joined with", saved.Slots[0])
+	if saved.Slots[protocol.InventorySlots-1].ItemID != uint16(game.ItemRustySword) {
+		t.Errorf("the record holds %+v in the main hand, want the blade the player joined with", saved.Slots[protocol.InventorySlots-1])
 	}
 }
 
