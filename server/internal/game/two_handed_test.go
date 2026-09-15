@@ -217,8 +217,8 @@ func TestMoveInventoryReturnsHandsOccupied(t *testing.T) {
 	if _, err := player.MoveInventory(protocol.InventoryMoveRequest{From: 4, To: uint8(equipmentMainHand), Count: 1}); !errors.Is(err, ErrHandsOccupied) {
 		t.Fatalf("MoveInventory = %v, want ErrHandsOccupied", err)
 	}
-	if got := player.InventoryState().Stacks[equipmentMainHand]; got != (protocol.InventoryStack{}) {
-		t.Errorf("the main hand holds %+v after the refusal, want nothing", got)
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("the main hand holds %+v after the refusal, want the starter sword it already held", got)
 	}
 }
 

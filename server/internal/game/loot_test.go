@@ -41,7 +41,6 @@ import (
 // an assertion about the server's answer instead of about the harness's bookkeeping.
 func (h *vitalsHarness) killWithTheStarterBlade(p *Player, id uint64) [3]float64 {
 	h.t.Helper()
-	h.wieldStarterBlade(p)
 
 	for blow := 1; blow <= 10; blow++ {
 		if _, live := h.mobState(id); !live {
@@ -86,7 +85,6 @@ func armedAgainst(t *testing.T, kind vnet.MobKind, at [3]float64) (*vitalsHarnes
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, out := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 	return h, player, out, h.placeSpeciesAt(kind, at)
 }
 

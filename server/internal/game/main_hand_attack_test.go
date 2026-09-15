@@ -82,7 +82,6 @@ func TestAWieldedBowFindsArrowsInTheHotbarAndPackOnly(t *testing.T) {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
 		player.inventory.mu.Lock()
-		player.inventory.slots[0] = inventoryStack{}
 		player.inventory.slots[equipmentMainHand] = stackOf(ItemBow, 1)
 		if tc.arrowSlot >= 0 {
 			player.inventory.slots[tc.arrowSlot] = stackOf(ItemArrow, 4)

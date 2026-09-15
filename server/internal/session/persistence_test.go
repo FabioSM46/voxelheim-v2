@@ -71,11 +71,11 @@ func TestALifeSurvivesADisconnect(t *testing.T) {
 	sink := collect(t, first)
 
 	// A pack this player could not have joined with: the starter blade somewhere other
-	// than the slot every new player finds it in. An assertion against slot 0 would
+	// than the slot every new player finds it in. An assertion against the main hand would
 	// pass for a session that restored nothing at all.
 	const movedTo = 4
 	sword := uint16(game.ItemRustySword)
-	first.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: movedTo, Count: 1})
+	first.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: protocol.InventorySlots - 1, To: movedTo, Count: 1})
 	waitUntil(t, "the blade to move to slot 4", func() bool { return sink.slotOf(sword) == movedTo })
 
 	// Settle onto the ground before walking, so what follows is a walk rather than the
@@ -235,8 +235,8 @@ func TestAnIdleSessionStillSavesItsLife(t *testing.T) {
 	if !found {
 		t.Fatal("an idle session left no record behind")
 	}
-	if saved.Slots[0].ItemID != uint16(game.ItemRustySword) {
-		t.Errorf("the record holds %+v in slot 0, want the blade the player was carrying", saved.Slots[0])
+	if saved.Slots[protocol.InventorySlots-1].ItemID != uint16(game.ItemRustySword) {
+		t.Errorf("the record holds %+v in the main hand, want the blade the player was carrying", saved.Slots[protocol.InventorySlots-1])
 	}
 }
 
@@ -348,7 +348,7 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 	// slot every new player finds it in.
 	const movedTo = 4
 	sword := uint16(game.ItemRustySword)
-	first.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: 0, To: movedTo, Count: 1})
+	first.in <- protocol.EncodeInventoryMoveRequest(protocol.InventoryMoveRequest{From: protocol.InventorySlots - 1, To: movedTo, Count: 1})
 	waitUntil(t, "the blade to move to slot 4", func() bool { return sink.slotOf(sword) == movedTo })
 
 	if err := first.Close(); err != nil {
@@ -386,7 +386,7 @@ func TestAnEphemeralWorldKeepsNoLife(t *testing.T) {
 	if state.Stacks[movedTo].ItemID == sword {
 		t.Error("an ephemeral world restored a pack it cannot have stored")
 	}
-	if state.Stacks[0].ItemID != sword {
-		t.Errorf("the reconnect's slot 0 is %+v, want the starter blade every new player joins with", state.Stacks[0])
+	if state.Stacks[protocol.InventorySlots-1].ItemID != sword {
+		t.Errorf("the reconnect's main hand is %+v, want the starter blade every new player joins with", state.Stacks[protocol.InventorySlots-1])
 	}
 }

@@ -44,7 +44,6 @@ func TestBlockRequiresALiveUsableOffHandShieldAndCancelsAPendingSwing(t *testing
 	t.Parallel()
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 
 	player.Block(true)
 	if h.vitals(player).Blocking {

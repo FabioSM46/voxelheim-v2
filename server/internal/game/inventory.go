@@ -102,8 +102,14 @@ func stackOf(itemID ItemID, count uint16) inventoryStack {
 
 func newInventory() inventory { return inventory{} }
 
-// newStarterInventory is what a player joins holding: one rusty sword at full
-// durability in the first hotbar slot, and nothing else.
+// newStarterInventory is what a new character joins holding: one rusty sword at full
+// durability in the main hand, and nothing else — the hotbar starts empty.
+//
+// In the main hand rather than on the hotbar because the main hand is the one slot an
+// attack may name and the one the draw key reads, so a sword anywhere else is a sword a
+// new player cannot fight with until they have found the equipment cell to drag it into.
+// Only a character with no stored life is handed this; a restored one keeps the pack it
+// saved, wherever its sword happens to be.
 //
 // Granted on join deliberately, and **crafting arriving did not change that**. The blade a
 // player can now make costs three raw iron, two coal, a log and a forge to make them at,
@@ -124,9 +130,14 @@ func newStarterInventory() inventory {
 // Split out because Join now chooses between this and a restored pack before it builds
 // the player, and slotTable is the type that can be chosen: `inventory` carries a mutex
 // and `go vet`'s copylocks check refuses to see one assigned from a variable.
+//
+// The sword is keyed by equipmentMainHand and not by a hotbar index: the rusty sword's
+// registry row is one-handed and names the main hand as where it is worn, so this is a
+// record Life.Validate accepts, and the death penalty reaches it there exactly as it did
+// on the hotbar because carriedOnPerson covers the equipment slots.
 func starterSlots() slotTable {
 	return slotTable{
-		0: stackOf(ItemRustySword, 1),
+		equipmentMainHand: stackOf(ItemRustySword, 1),
 	}
 }
 

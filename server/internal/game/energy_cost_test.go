@@ -29,7 +29,6 @@ func TestAnAttackIsRefusedAt24EnergyAndAdmittedAt25(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-			h.wieldStarterBlade(player)
 			h.sim.mu.Lock()
 			player.energy = tc.stored
 			h.sim.mu.Unlock()
@@ -137,7 +136,6 @@ func TestAFullReserveIsFourSwingsAndNotAFifth(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 	for tick := uint32(1); tick <= 5; tick++ {
 		reason, err := player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick})
 		if tick <= 4 && err != nil {

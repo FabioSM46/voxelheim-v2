@@ -226,7 +226,6 @@ func TestAWardRemovalPaysNoLootAndNoExperience(t *testing.T) {
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	h.keepNight()
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 	// Yaw 0 looks along -Z, so this draugr is directly ahead and inside reach.
 	id := h.spawnDraugrAt([3]float32{0.5, 64, -1.5})
 
