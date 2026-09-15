@@ -56,9 +56,25 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			if fallback == seeded {
 				t.Fatal("fixture: the crossing kept the spawn as its return point")
 			}
+			// The session's read loop, not the chat, is what this waits on. The PortalRequest is
+			// read after the input by the same owner loop, in the instance world's epoch — at
+			// most the one read issued before the crossing is discarded as stale, and that read
+			// takes an earlier frame — so its answer is proof the session is serving the instance.
+			//
+			// It used to be a ChatRequest and the chat line coming back, and that line is
+			// best-effort by design — Sim.broadcastLocked offers it without blocking and drops
+			// it when the outbound queue is full. A world change is exactly when the queue is
+			// full: the old view's ChunkUnloads and the instance's first chunks go into a
+			// 32-frame lane at once, so on a loaded runner the line was dropped and the wait
+			// ran out its whole patience. A PortalRequest's refusal goes through the blocking
+			// enqueue instead, and inside an instance it is always NotAtPortal and changes
+			// nothing.
 			conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: walkClientTicks.Add(1), MoveX: .5})
-			conn.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "walking"})
-			waitUntil(t, "movement accepted", func() bool { return len(frames.chatMessages()) == 1 })
+			conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
+			waitUntil(t, "the session to handle the input inside the instance", func() bool { return len(frames.actionRefusals()) == 1 })
+			if refusal := frames.actionRefusals()[0]; refusal.Action != vnet.RefusedActionCrossPortal || refusal.Reason != vnet.RefusalReasonNotAtPortal {
+				t.Fatalf("the readiness request was answered with %+v, want CrossPortal/NotAtPortal", refusal)
+			}
 			for range 3 {
 				cfg.Instances.Step()
 			}
@@ -148,8 +164,10 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			}
 			resumed := collect(t, conn)
 			if mode != "live" {
-				conn.in <- protocol.EncodeChatRequest(protocol.ChatRequest{Text: "back"})
-				waitUntil(t, "open chat", func() bool { return len(resumed.chatMessages()) == 1 })
+				// The same best-effort chat line the wait above stopped relying on, one join later:
+				// the open world's first view is streaming into the queue as this is sent.
+				conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
+				waitUntil(t, "the session to handle a request in the open world", func() bool { return len(resumed.actionRefusals()) == 1 })
 				if len(resumed.transitions()) != 0 {
 					t.Fatal("dead instance announced")
 				}
