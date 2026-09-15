@@ -584,8 +584,12 @@ trap 'rm -rf -- "$JQ_ABSENT_DIR" "$JQ_BROKEN_DIR" "$API_FAIL_DIR"' EXIT
 # is the whole point when PATH holds one directory. `env` would resolve — it is named
 # absolutely too — and then fail to find `bash`, so the stub would exit 127 and the
 # run would die on "gh not authenticated" with nothing about jq in it.
+#
+# It answers `--version` with the minimum, because `require_gh` reads the version before
+# `auth status`, and a gh it cannot read would be refused before jq is ever examined.
 cat >"${JQ_ABSENT_DIR}/gh" <<'STUB'
 #!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "gh version 2.18.0"; exit 0; fi
 if [ "${1:-}" = "auth" ]; then exit 0; fi
 echo "gh: the stub was reached — the jq preflight did not run first" >&2
 exit 1
@@ -666,6 +670,7 @@ echo "jq preflight — the fail-closed contract survives it"
 # must still answer -1 — never 0 — and still say so on stderr.
 cat >"${API_FAIL_DIR}/gh" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then echo "gh version 2.18.0"; exit 0; fi
 if [ "${1:-}" = "auth" ]; then exit 0; fi
 echo "gh: API rate limit exceeded" >&2
 exit 1
@@ -687,6 +692,161 @@ assert_contains "the required check is still UNREADABLE" "$closed_out" '"require
 assert_contains "and the PR is still not ready" "$closed_out" '"ready_to_merge":false'
 assert_contains "a WARN per unreadable field still reaches stderr" "$closed_err" "failing closed"
 assert_not_contains "the preflight adds no line when jq works" "$closed_err" "jq"
+
+echo
+echo "gh version preflight — a gh too old for the pipeline is refused before any API call"
+
+# #1281, the #211 fix one tool over. A gh older than the pipeline needs used to pass
+# `require_gh` — it was on PATH and authenticated — and the missing feature surfaced
+# only when a command needed it: `pr-merge --head` as `unknown flag:
+# --match-head-commit`, right after `is-ready-to-merge` had passed.
+#
+# The stub logs every invocation, and a refusal must leave exactly one line in that
+# log: `--version`. No `auth status`, and no API call.
+GH_VERSION_DIR="$(mktemp -d)"
+GH_CALL_LOG="$(mktemp)"
+GH_ERR_FILE="$(mktemp)"
+trap 'rm -rf -- "$JQ_ABSENT_DIR" "$JQ_BROKEN_DIR" "$API_FAIL_DIR" "$GH_VERSION_DIR" "$GH_CALL_LOG" "$GH_ERR_FILE"' EXIT
+
+cat >"${GH_VERSION_DIR}/gh" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"$GH_CALL_LOG"
+if [ "${1:-}" = "--version" ]; then
+  [ -n "$GH_STUB_VERSION" ] && printf '%s\n' "$GH_STUB_VERSION"
+  exit "${GH_STUB_VERSION_STATUS:-0}"
+fi
+if [ "${1:-}" = "auth" ]; then exit 0; fi
+echo "gh: no API is reachable from this test" >&2
+exit 1
+STUB
+chmod +x "${GH_VERSION_DIR}/gh"
+
+# run_gh_version <gh --version output> <helper argv...>  → GH_OUT GH_ERR GH_STATUS GH_CALLS
+run_gh_version() {
+  local version="$1"
+  shift
+  : >"$GH_CALL_LOG"
+  GH_OUT=$(PATH="${GH_VERSION_DIR}:${PATH}" GH_CALL_LOG="$GH_CALL_LOG" GH_STUB_VERSION="$version" \
+    REPO="$FIXTURE_REPO" GITHUB_REPOSITORY="$FIXTURE_REPO" \
+    INTEGRATION_SHA="abc123" INTEGRATION_RUN_URL="https://example.invalid/run/1" \
+    "$BASH" "${SCRIPT_DIR}/gh-automation.sh" "$@" 2>"$GH_ERR_FILE")
+  GH_STATUS=$?
+  GH_ERR=$(<"$GH_ERR_FILE")
+  GH_CALLS=$(<"$GH_CALL_LOG")
+}
+
+GH_INSTALL_HINT="https://github.com/cli/cli#installation"
+OLD_UBUNTU_GH="gh version 2.4.0+dfsg1 (2022-03-23 Ubuntu 2.4.0+dfsg1-2)"
+
+assert_eq "the minimum is the one the audit set" "2.18.0" "$GH_MIN_VERSION"
+assert_contains "and README's Toolchain row states the same number" \
+  "$(<"${SCRIPT_DIR}/../README.md")" "| gh    | ${GH_MIN_VERSION} or newer"
+
+# The reproduction from the issue, through every subcommand that calls `require_gh`.
+# `is-ready-to-merge` is the one that matters most: it reaches gh inside a subshell
+# whose stderr it discards, so a refusal there alone would print "NOT ready" instead.
+for gh_case in "pr-status 279" \
+               "pr-status-json 279" \
+               "pr-comments 279" \
+               "pr-edit 279 --title retitled" \
+               "pr-label 279 add ready-for-dev" \
+               "pr-deepseek-rounds 279" \
+               "pr-deepseek-force-review 279" \
+               "is-ready-to-merge 279" \
+               "pr-merge 279" \
+               "iteration-advance" \
+               "integration-report"; do
+  gh_name="${gh_case%% *}"
+  # Word splitting is the point: the case string carries the argv.
+  # shellcheck disable=SC2086
+  run_gh_version "$OLD_UBUNTU_GH" $gh_case
+  assert_nonzero "${gh_name} refuses gh 2.4.0+dfsg1" "$GH_STATUS"
+  assert_contains "${gh_name} names the installed version" "$GH_ERR" "gh 2.4.0 is too old"
+  assert_contains "${gh_name} names the required minimum" "$GH_ERR" "requires gh ${GH_MIN_VERSION} or newer"
+  assert_contains "${gh_name} says how to install a current release" "$GH_ERR" "$GH_INSTALL_HINT"
+  assert_eq "${gh_name} writes nothing to stdout" "" "$GH_OUT"
+  assert_eq "${gh_name} makes no call but the version probe — no auth, no API" "--version" "$GH_CALLS"
+done
+
+echo
+echo "gh version preflight — the comparison is numeric, per component"
+
+for old in "gh version 2.17.9" "gh version 2.9.0" "gh version 1.100.0"; do
+  base="${old#gh version }"
+  run_gh_version "$old" pr-status-json 279
+  assert_nonzero "${base} is refused" "$GH_STATUS"
+  assert_contains "${base} is named in the refusal" "$GH_ERR" "gh ${base} is too old"
+  assert_eq "${base} is refused before any other call" "--version" "$GH_CALLS"
+done
+
+# `2.100.0` is the case a string compare gets wrong: as text it sorts before `2.18.0`.
+# The multi-line shape is what a real gh prints.
+for good in "gh version ${GH_MIN_VERSION}" \
+            $'gh version 2.100.0 (2026-09-03)\nhttps://github.com/cli/cli/releases/tag/v2.100.0' \
+            "gh version 3.0.0"; do
+  base="${good#gh version }"
+  base="${base%% *}"
+  base="${base%%$'\n'*}"
+  run_gh_version "$good" pr-comments 279
+  assert_eq "${base} passes the preflight" "0" "$GH_STATUS"
+  assert_not_contains "${base} draws no version refusal" "$GH_ERR" "too old"
+  assert_contains "${base} goes on to gh auth status" "$GH_CALLS" "auth status"
+  assert_contains "${base} goes on to the API" "$GH_CALLS" "api repos/${FIXTURE_REPO}/pulls/279/comments"
+done
+
+echo
+echo "gh version preflight — output it cannot read fails closed"
+
+for unreadable in "gh version DEV" "gh version 2.18" "hub version 2.14.2"; do
+  run_gh_version "$unreadable" pr-status-json 279
+  assert_nonzero "'${unreadable}' is refused" "$GH_STATUS"
+  assert_contains "'${unreadable}' is reported as unreadable" "$GH_ERR" "could not read the gh version"
+  assert_contains "'${unreadable}' is quoted in the refusal" "$GH_ERR" "printed '${unreadable}'"
+  assert_contains "'${unreadable}' still names the minimum" "$GH_ERR" "requires gh ${GH_MIN_VERSION} or newer"
+  assert_eq "'${unreadable}' is refused before any other call" "--version" "$GH_CALLS"
+done
+
+run_gh_version "" pr-status-json 279
+assert_nonzero "an empty version is refused" "$GH_STATUS"
+assert_contains "and says nothing was printed" "$GH_ERR" "printed 'nothing'"
+
+# A supported version string from a probe that failed is not a supported gh.
+export GH_STUB_VERSION_STATUS=3
+run_gh_version "gh version 2.45.0" pr-status-json 279
+unset GH_STUB_VERSION_STATUS
+assert_nonzero "a failing version probe is refused whatever it printed" "$GH_STATUS"
+assert_contains "and the exit status is named" "$GH_ERR" "exited 3"
+assert_eq "and nothing else is called" "--version" "$GH_CALLS"
+
+echo
+echo "gh version preflight — once per process, and not skippable"
+
+# `is-ready-to-merge` calls `require_gh` itself, again inside cmd_pr_status_json's
+# subshell, and again in the DeepSeek rounds read nested inside that. Counting the
+# `auth status` lines proves the repeat calls happened — at least two, without pinning
+# how deep the nesting runs today; one `--version` line is the claim.
+run_gh_version "gh version ${GH_MIN_VERSION}" is-ready-to-merge 279
+probes=$(printf '%s\n' "$GH_CALLS" | grep -cx -- '--version')
+auths=$(printf '%s\n' "$GH_CALLS" | grep -cx -- 'auth status')
+if [ "$auths" -ge 2 ]; then
+  echo "  ok   — require_gh ran more than once in one process (${auths} times)"
+  pass=$((pass + 1))
+else
+  echo "  FAIL — require_gh ran more than once in one process: ran ${auths} time(s), so the next case proves nothing"
+  fail=$((fail + 1))
+fi
+assert_eq "and gh --version ran once" "1" "$probes"
+
+export GH_VERSION_OK="2.45.0"
+run_gh_version "$OLD_UBUNTU_GH" pr-status-json 279
+unset GH_VERSION_OK
+assert_nonzero "an inherited GH_VERSION_OK does not skip the check" "$GH_STATUS"
+assert_contains "and the old gh is still named" "$GH_ERR" "gh 2.4.0 is too old"
+
+run_gh_version "$OLD_UBUNTU_GH" --help
+assert_eq "the usage path still exits 0 on an old gh" "0" "$GH_STATUS"
+assert_contains "the usage path still prints usage" "$GH_OUT" "Usage: gh-automation.sh"
+assert_eq "and never runs gh at all" "" "$GH_CALLS"
 
 echo
 echo "${pass} passed, ${fail} failed"

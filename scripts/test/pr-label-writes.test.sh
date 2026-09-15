@@ -137,6 +137,11 @@ GH_WRITE_STATUS=0
 gh() {
   printf 'gh %s\n' "$*" >>"$CALL_LOG"
   case "$*" in
+    "--version")
+      # `require_gh` refuses a release below GH_MIN_VERSION before `auth status`.
+      printf '%s\n' 'gh version 2.18.0'
+      return 0
+      ;;
     "auth status"*)
       return "$GH_AUTH_STATUS"
       ;;
@@ -410,6 +415,7 @@ echo "pr-label — end to end through the CLI, with gh failing"
 STUB_BIN="$(mktemp -d)"
 cat >"${STUB_BIN}/gh" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = "--version" ]; then echo "gh version 2.18.0"; exit 0; fi
 if [ "${1:-}" = "auth" ]; then exit 0; fi
 if [ "${2:-}" = "--paginate" ]; then printf 'ready-for-dev\n'; exit 0; fi
 echo "gh: Could not resolve to a PullRequest with the number of 99999." >&2

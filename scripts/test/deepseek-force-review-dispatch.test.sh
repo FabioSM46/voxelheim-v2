@@ -72,6 +72,8 @@ cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" >> "$CALL_LOG"
 case "$1 ${2:-}" in
+  # `require_gh` refuses a release below GH_MIN_VERSION, and an empty answer is unreadable.
+  "--version ") printf '%s\n' 'gh version 2.18.0'; exit 0 ;;
   "auth status") exit 0 ;;
   "repo view") printf '%s\n' 'owner/repo'; exit 0 ;;
   "workflow run") exit 0 ;;
