@@ -56,25 +56,33 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			if fallback == seeded {
 				t.Fatal("fixture: the crossing kept the spawn as its return point")
 			}
-			// The session's read loop, not the chat, is what this waits on. The PortalRequest is
-			// read after the input by the same owner loop, in the instance world's epoch — at
-			// most the one read issued before the crossing is discarded as stale, and that read
-			// takes an earlier frame — so its answer is proof the session is serving the instance.
+			// requestAnswered is the readiness signal: a PortalRequest and the refusal it earns.
+			// The session answers it NotAtPortal in any world, so it proves liveness and order —
+			// the owner loop has read and handled every frame sent before it — and nothing about
+			// which world that loop is serving. The count starts from the refusals already
+			// collected, and the assertion reads the one this request produced, so an earlier
+			// refusal can neither satisfy the wait nor stand in for the answer.
 			//
 			// It used to be a ChatRequest and the chat line coming back, and that line is
 			// best-effort by design — Sim.broadcastLocked offers it without blocking and drops
 			// it when the outbound queue is full. A world change is exactly when the queue is
-			// full: the old view's ChunkUnloads and the instance's first chunks go into a
+			// full: the old view's ChunkUnloads and the new world's first chunks go into a
 			// 32-frame lane at once, so on a loaded runner the line was dropped and the wait
-			// ran out its whole patience. A PortalRequest's refusal goes through the blocking
-			// enqueue instead, and inside an instance it is always NotAtPortal and changes
-			// nothing.
-			conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: walkClientTicks.Add(1), MoveX: .5})
-			conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
-			waitUntil(t, "the session to handle the input inside the instance", func() bool { return len(frames.actionRefusals()) == 1 })
-			if refusal := frames.actionRefusals()[0]; refusal.Action != vnet.RefusedActionCrossPortal || refusal.Reason != vnet.RefusalReasonNotAtPortal {
-				t.Fatalf("the readiness request was answered with %+v, want CrossPortal/NotAtPortal", refusal)
+			// ran out its whole patience. A refusal goes through the blocking enqueue instead,
+			// and it changes nothing.
+			requestAnswered := func(sink *collector, what string) {
+				t.Helper()
+				prev := len(sink.actionRefusals())
+				conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
+				waitUntil(t, what, func() bool { return len(sink.actionRefusals()) > prev })
+				if refusal := sink.actionRefusals()[prev]; refusal.Action != vnet.RefusedActionCrossPortal || refusal.Reason != vnet.RefusalReasonNotAtPortal {
+					t.Fatalf("the readiness request was answered with %+v, want CrossPortal/NotAtPortal", refusal)
+				}
 			}
+			// Read after the input by the same owner loop. At most the one read issued before
+			// the crossing is discarded as stale, and that read takes an earlier frame.
+			conn.in <- protocol.EncodePlayerInput(protocol.PlayerInput{ClientTick: walkClientTicks.Add(1), MoveX: .5})
+			requestAnswered(frames, "the session to handle the input after the crossing")
 			for range 3 {
 				cfg.Instances.Step()
 			}
@@ -166,8 +174,7 @@ func TestPortalReconnectHandshakeAndPersistenceBoundary(t *testing.T) {
 			if mode != "live" {
 				// The same best-effort chat line the wait above stopped relying on, one join later:
 				// the open world's first view is streaming into the queue as this is sent.
-				conn.in <- protocol.EncodePortalRequest(protocol.PortalRequest{HasArch: true, Arch: change.ExitArch})
-				waitUntil(t, "the session to handle a request in the open world", func() bool { return len(resumed.actionRefusals()) == 1 })
+				requestAnswered(resumed, "the session to handle a request after the rejoin")
 				if len(resumed.transitions()) != 0 {
 					t.Fatal("dead instance announced")
 				}
