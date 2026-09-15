@@ -75,8 +75,80 @@ CEREMONY_LOOKUP_LIMIT="${CEREMONY_LOOKUP_LIMIT:-500}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# The oldest `gh` this repository works with. It is a floor derived from what the pipeline
+# calls, not a preference, and it is the one place that number lives (#1281). Two
+# features set it:
+#
+#   - the `headRefOid` pull-request `--json` field — gh 2.18.0 (cli/cli#6399). The
+#     `/develop-iteration` watch and the `/process-pr` head re-read both request it.
+#   - `gh pr merge --match-head-commit` — gh 2.13.0 (cli/cli#5692). `pr-merge --head`
+#     passes it, and without it the atomic head check is lost.
+#
+# Everything else in use is older: `--json` with `--jq` (1.9.0), the `files`,
+# `createdAt` and `updatedAt` fields and `repo view --json` (1.10.0), `pr list --head`
+# (2.1.0), `label create` (2.7.0). `baseRefOid` (2.63.0) is deliberately NOT used — the
+# base SHA is read through REST — and it must not become a reason to raise this without
+# the audit being repeated. On an older release none of this failed until a command
+# needed the missing feature, and the first to need it was the merge (#1281).
+GH_MIN_VERSION="2.18.0"
+
+# Set once `require_gh` has read a supported release, so `gh --version` runs once per
+# process however many commands call `require_gh`. Assigned, never defaulted from the
+# environment: an inherited value must not be able to skip the check. A command
+# substitution inherits it, which is why `is-ready-to-merge` checks on its own side of
+# the subshell whose stderr it discards.
+GH_VERSION_OK=""
+
+# Refuse a `gh` older than GH_MIN_VERSION, before any API call and before `gh auth
+# status`, so an old release is named for what it is rather than as an auth problem.
+#
+# Builtins only: the jq preflight tests run this with PATH holding a single directory.
+# The comparison is numeric per component, because as strings `2.100.0` sorts before
+# `2.18.0`; a distribution suffix (`2.4.0+dfsg1`) parses to its base version. Output
+# that cannot be read fails closed — an unreadable version is not evidence of a
+# supported one — and the refusal quotes what was read.
+require_gh_version() {
+  [ -z "$GH_VERSION_OK" ] || return 0
+
+  local raw status=0 line first="" installed=""
+  local -a have=() want=()
+  raw=$(gh --version 2>&1) || status=$?
+  first="${raw%%$'\n'*}"
+  first="${first:0:160}"
+
+  if [ "$status" -eq 0 ]; then
+    while IFS= read -r line; do
+      [[ "$line" == "gh version "* ]] || continue
+      if [[ "$line" =~ ^gh\ version\ ([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([^0-9.]|$) ]]; then
+        have=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+        installed="${have[0]}.${have[1]}.${have[2]}"
+      fi
+      break
+    done <<<"$raw"
+  fi
+
+  [ -n "$installed" ] \
+    || die "could not read the gh version (\`gh --version\` exited ${status} and printed '${first:-nothing}'). This pipeline requires gh ${GH_MIN_VERSION} or newer, and an unreadable version is not evidence of one. Install a current release: https://github.com/cli/cli#installation"
+
+  [[ "$GH_MIN_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] \
+    || die "GH_MIN_VERSION '${GH_MIN_VERSION}' is not X.Y.Z"
+  want=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+
+  local i
+  for i in 0 1 2; do
+    if (( 10#${have[$i]} > 10#${want[$i]} )); then
+      break
+    elif (( 10#${have[$i]} < 10#${want[$i]} )); then
+      die "gh ${installed} is too old: this pipeline requires gh ${GH_MIN_VERSION} or newer (read: '${first}'). Distribution packages lag behind — install a current release: https://github.com/cli/cli#installation"
+    fi
+  done
+
+  GH_VERSION_OK="$installed"
+}
+
 require_gh() {
   command -v gh &>/dev/null || die "gh CLI not found. Install: https://cli.github.com"
+  require_gh_version
   gh auth status &>/dev/null || die "gh not authenticated. Run: gh auth login"
 }
 
@@ -1393,7 +1465,9 @@ cmd_is_ready_to_merge() {
   # This command reaches jq only through cmd_pr_status_json — whose stderr it
   # discards, because stdout there is JSON this function parses. That redirection
   # would swallow the preflight's own diagnostic exactly as it swallowed `jq:
-  # command not found`, so the check belongs on this side of it.
+  # command not found`, so the check belongs on this side of it. The gh version check
+  # likewise (#1281): refused inside that subshell, an old gh would read as "NOT ready".
+  require_gh
   require_jq
   local json
   json=$(cmd_pr_status_json "$pr" 2>/dev/null)

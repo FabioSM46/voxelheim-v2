@@ -451,6 +451,8 @@ for arg in "$@"; do
 done
 [ -n "$BODY" ] && printf '%s\n' "$BODY" >> "$CALL_LOG.body"
 case "$1 ${2:-}" in
+  # `require_gh` refuses a release below GH_MIN_VERSION, and an empty answer is unreadable.
+  "--version ") printf '%s\n' 'gh version 2.18.0'; exit 0 ;;
   "auth status") exit 0 ;;
   "issue list")
     if [ "${GH_LIST_OK:-1}" != "1" ]; then

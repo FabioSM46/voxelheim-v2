@@ -92,6 +92,12 @@ cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" >> "$CALL_LOG"
 case "$1 ${2:-}" in
+  "--version ")
+    # The release `require_gh` must accept: GH_MIN_VERSION, which is also the first
+    # release with everything `pr-merge` passes (`--match-head-commit` is 2.13.0).
+    printf '%s\n' 'gh version 2.18.0'
+    exit 0
+    ;;
   "auth status")
     exit 0
     ;;
