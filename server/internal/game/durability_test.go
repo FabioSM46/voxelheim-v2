@@ -21,14 +21,28 @@ func TestAJoinedPlayerCarriesOneSwordAndNothingElse(t *testing.T) {
 	if len(state.Stacks) != int(protocol.InventorySlots) {
 		t.Fatalf("the starter inventory has %d slots, want %d", len(state.Stacks), protocol.InventorySlots)
 	}
-	if got := state.Stacks[0]; got != starterSword() {
-		t.Errorf("hotbar slot 0 is %+v, want %+v", got, starterSword())
+	if got := state.Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("the main hand is %+v, want %+v", got, starterSword())
 	}
-	for slot, stack := range state.Stacks[1:] {
-		if stack != (protocol.InventoryStack{}) {
-			t.Errorf("slot %d is %+v, want empty", slot+1, stack)
+	// Hotbar slot 0 included: that is where the blade used to start.
+	for slot, stack := range state.Stacks {
+		if slot != equipmentMainHand && stack != (protocol.InventoryStack{}) {
+			t.Errorf("slot %d is %+v, want empty", slot, stack)
 		}
 	}
+}
+
+// bladeOnTheHotbar is an inventory holding one full rusty sword in hotbar slot 0 and
+// nothing else.
+//
+// The move rules below are about a durable item changing places between ordinary slots,
+// and they borrowed the starter pack while the starter pack put its blade there. It no
+// longer does: a new character's blade starts in the main hand, where a swap with a
+// resource or with a second blade answers the main hand's own rule instead. So these
+// tests state the layout they are about rather than the one a join hands out. A
+// composite literal for the copylocks reason newStarterInventory gives.
+func bladeOnTheHotbar() inventory {
+	return inventory{slots: slotTable{0: starterStack()}}
 }
 
 // The registry is what makes a slot durable, and the complete durable set is explicit.
@@ -171,7 +185,7 @@ func TestInsertionAccountsForWhatEachSlotActuallyTook(t *testing.T) {
 func TestMovingASwordCarriesItsWear(t *testing.T) {
 	t.Parallel()
 
-	inventory := newStarterInventory()
+	inventory := bladeOnTheHotbar()
 	inventory.slots[0].durability = 42
 
 	if inventory.moveLocked(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1}) != nil {
@@ -191,7 +205,7 @@ func TestMovingASwordCarriesItsWear(t *testing.T) {
 func TestSwappingASwordWithAStackKeepsBothIntact(t *testing.T) {
 	t.Parallel()
 
-	inventory := newStarterInventory()
+	inventory := bladeOnTheHotbar()
 	inventory.slots[0].durability = 7
 	inventory.slots[1] = stackOf(ItemStone, 10)
 
@@ -214,7 +228,7 @@ func TestSwappingASwordWithAStackKeepsBothIntact(t *testing.T) {
 func TestOneSwordNeverMergesIntoAnother(t *testing.T) {
 	t.Parallel()
 
-	inventory := newStarterInventory()
+	inventory := bladeOnTheHotbar()
 	inventory.slots[1] = stackOf(ItemRustySword, 1)
 	inventory.slots[1].durability = 50
 
@@ -258,7 +272,7 @@ func TestADurableStackCannotBeSplit(t *testing.T) {
 func TestAWornOutSwordStaysInItsSlot(t *testing.T) {
 	t.Parallel()
 
-	inventory := newStarterInventory()
+	inventory := bladeOnTheHotbar()
 	inventory.slots[0].durability = 0
 
 	stack, ok := inventory.stackAtLocked(0)
@@ -318,10 +332,10 @@ func TestTheDeathPenaltyWearsOnlyEquipment(t *testing.T) {
 	}
 
 	for slot, want := range map[int]inventoryStack{
-		0: {item: ItemRustySword, count: 1, durability: 80, maxDurability: RustySwordMaxDurability},
-		1: {item: ItemStone, count: 64},
-		2: {item: ItemRustySword, count: 1, durability: 0, maxDurability: RustySwordMaxDurability},
-		3: {item: ItemRustySword, count: 1, durability: 0, maxDurability: RustySwordMaxDurability},
+		equipmentMainHand: {item: ItemRustySword, count: 1, durability: 80, maxDurability: RustySwordMaxDurability},
+		1:                 {item: ItemStone, count: 64},
+		2:                 {item: ItemRustySword, count: 1, durability: 0, maxDurability: RustySwordMaxDurability},
+		3:                 {item: ItemRustySword, count: 1, durability: 0, maxDurability: RustySwordMaxDurability},
 	} {
 		if got := inventory.slots[slot]; got != want {
 			t.Errorf("slot %d is %+v, want %+v", slot, got, want)
@@ -342,8 +356,9 @@ func TestTheDeathPenaltySparesThePack(t *testing.T) {
 	last := equipmentFirst - 1
 
 	inventory := newStarterInventory()
-	// On them: the far end of the hotbar, so the rule is not passing by only reaching
-	// slot 0, and a resource beside it that has nothing to lose either way.
+	// On them: the starter blade in the main hand, the far end of the hotbar so the rule is
+	// not passing by reaching only equipment, and a resource beside it that has nothing to
+	// lose either way.
 	inventory.slots[hotbar] = stackOf(ItemPickaxe, 1)
 	inventory.slots[1] = stackOf(ItemStone, 64)
 	// Stowed: the first slot past the hotbar, and the last slot of the pack.
@@ -355,11 +370,11 @@ func TestTheDeathPenaltySparesThePack(t *testing.T) {
 	}
 
 	for slot, want := range map[int]inventoryStack{
-		0:      {item: ItemRustySword, count: 1, durability: wornByDeath(RustySwordMaxDurability), maxDurability: RustySwordMaxDurability},
-		1:      {item: ItemStone, count: 64},
-		hotbar: {item: ItemPickaxe, count: 1, durability: wornByDeath(ToolMaxDurability), maxDurability: ToolMaxDurability},
-		stowed: {item: ItemIronSword, count: 1, durability: IronSwordMaxDurability, maxDurability: IronSwordMaxDurability},
-		last:   {item: ItemAxe, count: 1, durability: ToolMaxDurability, maxDurability: ToolMaxDurability},
+		equipmentMainHand: {item: ItemRustySword, count: 1, durability: wornByDeath(RustySwordMaxDurability), maxDurability: RustySwordMaxDurability},
+		1:                 {item: ItemStone, count: 64},
+		hotbar:            {item: ItemPickaxe, count: 1, durability: wornByDeath(ToolMaxDurability), maxDurability: ToolMaxDurability},
+		stowed:            {item: ItemIronSword, count: 1, durability: IronSwordMaxDurability, maxDurability: IronSwordMaxDurability},
+		last:              {item: ItemAxe, count: 1, durability: ToolMaxDurability, maxDurability: ToolMaxDurability},
 	} {
 		if got := inventory.slots[slot]; got != want {
 			t.Errorf("slot %d is %+v, want %+v", slot, got, want)
@@ -422,13 +437,13 @@ func TestTheDeathPenaltyOnWornEquipmentChangesNothing(t *testing.T) {
 	t.Parallel()
 
 	inventory := newStarterInventory()
-	inventory.slots[0].durability = 0
+	inventory.slots[equipmentMainHand].durability = 0
 
 	if inventory.applyDeathPenaltyLocked() {
 		t.Error("the penalty reported a change on an inventory of worn-out equipment")
 	}
-	if got := inventory.slots[0].durability; got != 0 {
-		t.Errorf("slot 0 durability is %d, want 0", got)
+	if got := inventory.slots[equipmentMainHand].durability; got != 0 {
+		t.Errorf("the main hand's durability is %d, want 0", got)
 	}
 }
 
@@ -453,8 +468,8 @@ func TestTheDeathPenaltyDefersRatherThanWaitingForTheInventoryLock(t *testing.T)
 	if dirty {
 		t.Error("a deferred penalty marked the inventory for delivery")
 	}
-	if got := player.InventoryState().Stacks[0]; got != starterSword() {
-		t.Errorf("a deferred penalty changed slot 0 to %+v", got)
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != starterSword() {
+		t.Errorf("a deferred penalty changed the main hand to %+v", got)
 	}
 }
 
@@ -485,8 +500,8 @@ func TestAnAppliedDeathPenaltyMarksTheInventoryForDelivery(t *testing.T) {
 		Durability:    wornByDeath(RustySwordMaxDurability),
 		MaxDurability: RustySwordMaxDurability,
 	}
-	if got := player.InventoryState().Stacks[0]; got != want {
-		t.Errorf("slot 0 is %+v, want %+v", got, want)
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != want {
+		t.Errorf("the main hand is %+v, want %+v", got, want)
 	}
 
 	// And the tick delivers it, which is what the flag is for.
@@ -495,7 +510,7 @@ func TestAnAppliedDeathPenaltyMarksTheInventoryForDelivery(t *testing.T) {
 	if len(states) == 0 {
 		t.Fatal("the penalised inventory was never delivered")
 	}
-	if got := states[len(states)-1].Stacks[0]; got != want {
-		t.Errorf("the delivered slot 0 is %+v, want %+v", got, want)
+	if got := states[len(states)-1].Stacks[equipmentMainHand]; got != want {
+		t.Errorf("the delivered main hand is %+v, want %+v", got, want)
 	}
 }

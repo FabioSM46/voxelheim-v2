@@ -1017,8 +1017,8 @@ func TestDeathSpendsDurabilityOnceAndKeepsEveryItem(t *testing.T) {
 		Durability:    wornByDeath(RustySwordMaxDurability),
 		MaxDurability: RustySwordMaxDurability,
 	}
-	if got := state.Stacks[0]; got != wantSword {
-		t.Errorf("slot 0 is %+v after one death, want %+v", got, wantSword)
+	if got := state.Stacks[equipmentMainHand]; got != wantSword {
+		t.Errorf("the main hand is %+v after one death, want %+v", got, wantSword)
 	}
 	wantStone := protocol.InventoryStack{ItemID: uint16(ItemStone), Count: 40}
 	if got := state.Stacks[1]; got != wantStone {
@@ -1027,8 +1027,8 @@ func TestDeathSpendsDurabilityOnceAndKeepsEveryItem(t *testing.T) {
 
 	// Every remaining tick of the countdown must not spend it again.
 	h.advance(int(h.sim.deathTicks))
-	if got := player.InventoryState().Stacks[0]; got != wantSword {
-		t.Errorf("slot 0 is %+v after the whole countdown, want the one penalty %+v", got, wantSword)
+	if got := player.InventoryState().Stacks[equipmentMainHand]; got != wantSword {
+		t.Errorf("the main hand is %+v after the whole countdown, want the one penalty %+v", got, wantSword)
 	}
 
 	// A second death is a second penalty, though — the operation is per death, not once
@@ -1041,7 +1041,7 @@ func TestDeathSpendsDurabilityOnceAndKeepsEveryItem(t *testing.T) {
 	h.hurt(player, PlayerMaxHealth)
 	h.step()
 	twice := wornByDeath(wornByDeath(RustySwordMaxDurability))
-	if got := player.InventoryState().Stacks[0].Durability; got != twice {
+	if got := player.InventoryState().Stacks[equipmentMainHand].Durability; got != twice {
 		t.Errorf("durability is %d after two deaths, want %d", got, twice)
 	}
 }
@@ -1074,7 +1074,7 @@ func TestAContendedInventoryDefersTheDeathPenaltyAndTheRespawn(t *testing.T) {
 		t.Errorf("the player is %s once the inventory was free, want Alive", got)
 	}
 	want := wornByDeath(RustySwordMaxDurability)
-	if got := player.InventoryState().Stacks[0].Durability; got != want {
+	if got := player.InventoryState().Stacks[equipmentMainHand].Durability; got != want {
 		t.Errorf("durability is %d, want the single penalty %d", got, want)
 	}
 }
@@ -1098,10 +1098,10 @@ func TestDeathUnderConcurrentInventoryMovement(t *testing.T) {
 				return
 			default:
 			}
-			// Slot 0 holds the blade; moving it about is what a player rearranging their
-			// hotbar does while they are being killed.
-			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1})
-			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: 0, Count: 1})
+			// The main hand holds the blade; taking it out and putting it back is what a
+			// player rearranging their equipment does while they are being killed.
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: uint8(equipmentMainHand), To: 5, Count: 1})
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: uint8(equipmentMainHand), Count: 1})
 		}
 	}()
 

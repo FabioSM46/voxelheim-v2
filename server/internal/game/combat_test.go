@@ -54,26 +54,8 @@ func armedHarness(t *testing.T, rate uint8, draugrAt [3]float32) (*vitalsHarness
 
 	h := newVitalsHarness(t, rate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 	id := h.spawnDraugrAt(draugrAt)
 	return h, player, id
-}
-
-// wieldStarterBlade moves the starter blade from hotbar slot 0 into the main hand, the one
-// slot an attack may name, the way a player wields it: through MoveInventory. A player
-// whose main hand already holds something is left as they are.
-func (h *vitalsHarness) wieldStarterBlade(p *Player) {
-	h.t.Helper()
-
-	p.inventory.mu.Lock()
-	wielded := p.inventory.slots[equipmentMainHand].count != 0
-	p.inventory.mu.Unlock()
-	if wielded {
-		return
-	}
-	if _, err := p.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: mainHandSlot, Count: 1}); err != nil {
-		h.t.Fatalf("wielding the starter blade: %v", err)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +328,6 @@ func TestAPartyKillOnlySharesWithLivingMembersInsideTheRadius(t *testing.T) {
 	h.sim.log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(killer)
 	near, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{31.5, 64, -1.5})
 	far, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{33.5, 64, -1.5})
 	dead, _ := joinPartyPlayer(t, h, 4, "Dag", [3]float32{1.5, 64, -1.5})
@@ -391,7 +372,6 @@ func TestAPartyKillWithNobodyElseInRangeKeepsTheFullAward(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(killer)
 	far, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{33.5, 64, -1.5})
 	inviteAndAccept(t, killer, far, "Bjorn")
 
@@ -417,7 +397,6 @@ func TestAPartyKillDoesNotShareWithAnOfflineRosterMember(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(killer)
 	offline, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, -1.5})
 	inviteAndAccept(t, killer, offline, offline.name)
 	h.sim.Leave(offline)
@@ -447,7 +426,6 @@ func TestEverySpeciesSharesExactlyItsRegistryExperience(t *testing.T) {
 		t.Run(kind.String(), func(t *testing.T) {
 			h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 			killer, _ := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
-			h.wieldStarterBlade(killer)
 			first, _ := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
 			second, _ := joinPartyPlayer(t, h, 3, "Cora", [3]float32{2.5, 64, 0.5})
 			inviteAndAccept(t, killer, first, "Bjorn")
@@ -481,7 +459,6 @@ func TestASharedKillLevelUpResendsThePartyMembersAppearance(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	killer, killerOut := joinPartyPlayer(t, h, 1, "Astrid", [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(killer)
 	member, memberOut := joinPartyPlayer(t, h, 2, "Bjorn", [3]float32{1.5, 64, 0.5})
 	inviteAndAccept(t, killer, member, "Bjorn")
 	h.step()
@@ -610,7 +587,6 @@ func TestASwingObeysThePlayersPitch(t *testing.T) {
 			// test was ever about.
 			h := newVitalsHarness(t, DefaultTickRate, emptyProjectileTerrain{})
 			player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-			h.wieldStarterBlade(player)
 			id := h.spawnDraugrAt([3]float32{0.5, 62, 0.5})
 			h.aimAt(player, 0, tc.pitch)
 			if err := h.swing(player, mainHandSlot, 1); err != nil {
@@ -934,9 +910,10 @@ func TestALandedSwingCostsTheBladeNothing(t *testing.T) {
 	}
 }
 
-// A weapon moved into the main hand swings from there. armedHarness wields the starter
-// blade through MoveInventory, so this pins the whole path a player takes: the move empties
-// hotbar slot 0, and the swing naming the main hand lands for the blade's damage.
+// A new character swings the blade they joined with, from where they joined with it. The
+// starter pack puts the rusty sword in the main hand, so armedHarness makes no inventory
+// move at all: the swing naming the main hand lands for the blade's damage straight after
+// the join, and hotbar slot 0, where the blade used to start, is empty.
 func TestABladeInTheMainHandStillSwings(t *testing.T) {
 	t.Parallel()
 
@@ -954,7 +931,7 @@ func TestABladeInTheMainHandStillSwings(t *testing.T) {
 		t.Errorf("the main hand holds %+v after the swing, want the untouched %+v", got, starterSword())
 	}
 	if got := state.Stacks[0]; got != (protocol.InventoryStack{}) {
-		t.Errorf("hotbar slot 0 holds %+v, want the empty slot the blade left", got)
+		t.Errorf("hotbar slot 0 holds %+v, want it empty: the starter blade no longer starts there", got)
 	}
 }
 
@@ -1081,7 +1058,6 @@ func TestASwingTakesTheNearestAndBreaksTiesByIdentity(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(player)
 	far := h.spawnDraugrAt([3]float32{0.5, 64, -2.0})
 	near := h.spawnDraugrAt([3]float32{0.5, 64, -1.2})
 
@@ -1104,7 +1080,6 @@ func TestASwingNeverTouchesAnotherPlayer(t *testing.T) {
 
 	h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 	attacker, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-	h.wieldStarterBlade(attacker)
 	victim, _ := h.join(2, [3]float32{0.5, 64, -1.2})
 
 	if err := h.swing(attacker, mainHandSlot, 1); err != nil {
@@ -1208,8 +1183,8 @@ func TestSwingsUnderConcurrentSessionTraffic(t *testing.T) {
 			}
 			tick++
 			_, _ = player.Attack(protocol.AttackRequest{Slot: mainHandSlot, ClientTick: tick})
-			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 0, To: 5, Count: 1})
-			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: 0, Count: 1})
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: mainHandSlot, To: 5, Count: 1})
+			_, _ = player.MoveInventory(protocol.InventoryMoveRequest{From: 5, To: mainHandSlot, Count: 1})
 		}
 	}()
 	go func() {
@@ -1262,7 +1237,6 @@ func TestASwingReadsTheBodyItReachesFromTheRegistry(t *testing.T) {
 	for kind, wantHit := range map[vnet.MobKind]bool{vnet.MobKindVargr: true, vnet.MobKindDraugr: false} {
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-		h.wieldStarterBlade(player)
 		// Yaw 0 looks along -Z, so this is directly ahead of the player.
 		id := h.placeSpeciesAt(kind, [3]float64{0.5, 64, 0.5 - distance})
 
@@ -1292,7 +1266,6 @@ func TestAVargrDiesInOneSwingFewerThanADraugr(t *testing.T) {
 
 		h := newVitalsHarness(t, DefaultTickRate, dropTerrain{groundTop: 63})
 		player, _ := h.join(1, [3]float32{0.5, 64, 0.5})
-		h.wieldStarterBlade(player)
 		id := h.placeSpeciesAt(kind, [3]float64{0.5, 64, -1.5})
 
 		for blow := 1; blow <= 10; blow++ {
@@ -1350,7 +1323,6 @@ func TestASwingDoesNotCrossASolidBlock(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
 			player, _ := h.join(1, walledPlayerSpawn)
-			h.wieldStarterBlade(player)
 			id := h.spawnDraugrAt(walledMobSpawn)
 
 			if err := h.swing(player, mainHandSlot, 1); err != nil {
@@ -1429,7 +1401,6 @@ func TestAnOccludedDraugrDoesNotAbsorbTheSwing(t *testing.T) {
 
 			h := newVitalsHarness(t, DefaultTickRate, tc.terrain)
 			player, _ := h.join(1, pillarPlayerSpawn)
-			h.wieldStarterBlade(player)
 			occluded := h.spawnDraugrAt(occludedMobSpawn)
 			visible := h.spawnDraugrAt(visibleMobSpawn)
 

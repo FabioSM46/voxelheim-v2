@@ -16,7 +16,7 @@ import (
 
 // stockPack replaces a player's whole pack with exactly the stacks named.
 //
-// Replaces rather than adds, because the starter loadout puts a blade in slot 0 and a test
+// Replaces rather than adds, because the starter loadout puts a blade in the main hand and a test
 // about materials should say what the pack holds rather than what it holds *besides* that.
 func (h *structureHarness) stockPack(p *Player, contents ...ingredient) {
 	h.t.Helper()
