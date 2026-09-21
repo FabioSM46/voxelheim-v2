@@ -72,7 +72,7 @@ var keepFixtureProps = []StaticPropPose{
 	{Slot: 228, Kind: PropWallSconce, X: 50, Y: 33, Z: 15, Facing: 1},
 	{Slot: 229, Kind: PropWallSconce, X: 50, Y: 36, Z: 9, Facing: 3},
 	{Slot: 230, Kind: PropWallSconce, X: 50, Y: 39, Z: 15, Facing: 1},
-	{Slot: 231, Kind: PropWallSconce, X: 50, Y: 43, Z: 9, Facing: 3},
+	{Slot: 231, Kind: PropWallSconce, X: 52, Y: 43, Z: 9, Facing: 3},
 	{Slot: 232, Kind: PropWallSconce, X: 42, Y: 30, Z: 29, Facing: 3},
 	{Slot: 233, Kind: PropWallSconce, X: 42, Y: 33, Z: 35, Facing: 1},
 	{Slot: 234, Kind: PropWallSconce, X: 42, Y: 37, Z: 29, Facing: 3},

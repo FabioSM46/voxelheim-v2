@@ -39,7 +39,7 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 			}
 		}
 	}
-	for _, w := range []struct{ x, y, z0, z1 int }{{10, 35, 16, 18}, {20, 29, 36, 37}, {50, 41, 16, 19}, {42, 35, 36, 38}} {
+	for _, w := range []struct{ x, y, z0, z1 int }{{10, 35, 16, 18}, {20, 29, 36, 37}, {42, 35, 36, 38}} {
 		for x := w.x - 1; x <= w.x+1; x++ {
 			for y := w.y + 1; y <= w.y+2; y++ {
 				for z := w.z0; z <= w.z1; z++ {
@@ -54,6 +54,37 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 			}
 		}
 	}
+	// A slit through glass is insufficient if an opaque slate trim remains outside it.
+	// Check the entire outward column, not only the declared wall-depth interval.
+	for _, w := range []struct{ x, y, z int }{{10, 35, 18}, {20, 29, 37}, {42, 35, 38}} {
+		for x := w.x - 1; x <= w.x+1; x++ {
+			for y := w.y + 1; y <= w.y+2; y++ {
+				for z := w.z + 1; z < s.D; z++ {
+					b := s.At(x, y, z)
+					if b != Air && b != keepTerrain {
+						t.Fatalf("tower window has opaque exterior backing at %d,%d,%d", x, y, z)
+					}
+				}
+			}
+		}
+	}
+	// The NE south side faces the wing roof. Its working window faces north,
+	// through the wall and trim while its overhead roof and old glass stay intact.
+	for x := 49; x <= 51; x++ {
+		for y := 42; y <= 43; y++ {
+			for z := 0; z <= 8; z++ {
+				want := Air
+				if z == 5 {
+					want = IronGrilleX
+				}
+				got := s.At(x, y, z)
+				if got != want && !(want == Air && got == keepTerrain) {
+					t.Fatalf("NE north aperture blocked at %d,%d,%d", x, y, z)
+				}
+			}
+		}
+	}
+
 	for facing := North; facing <= West; facing++ {
 		want := IronGrilleZ
 		if facing%2 == 1 {
