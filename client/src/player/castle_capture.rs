@@ -171,6 +171,7 @@ fn castle_app(
         .world_mut()
         .spawn((
             WorldCamera,
+            bevy::camera::ShadowLodOrigin,
             Camera3d::default(),
             Camera {
                 clear_color: fixed.sky.into(),
