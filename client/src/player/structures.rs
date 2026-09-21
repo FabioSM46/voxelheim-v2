@@ -382,7 +382,7 @@ fn bounds(kind: StructureKind, facing: Facing, anchor: IVec3) -> (Vec3, Vec3) {
 /// A ray starting inside the box enters it at zero, which is the honest answer and the
 /// nearest possible one. `direction` need not be normalised; it is normalised here, so the
 /// result is a distance in blocks.
-fn ray_box_entry(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+pub(super) fn ray_box_entry(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
     if !origin.is_finite() || !direction.is_finite() {
         return None;
     }
@@ -562,6 +562,7 @@ fn aim_at_structures(
     block: Res<BlockTarget>,
     mut target: ResMut<StructureTarget>,
     mut station: ResMut<StationTarget>,
+    solids: Option<Res<super::static_props::StaticPropSolids>>,
 ) {
     let (picked, station_picked) = match (gate.may_aim(), cameras.iter().next()) {
         (true, Some(eye)) => (
@@ -581,6 +582,14 @@ fn aim_at_structures(
         _ => (None, None),
     };
 
+    let cutoff = cameras.iter().next().and_then(|eye| {
+        solids
+            .as_deref()
+            .and_then(|solids| solids.nearest_hit(eye.translation, *eye.forward(), MAX_REACH))
+    });
+    let picked = picked.filter(|pick| cutoff.is_none_or(|cutoff| pick.distance < cutoff));
+    let station_picked =
+        station_picked.filter(|pick| cutoff.is_none_or(|cutoff| pick.distance < cutoff));
     set_if_changed(&mut target, StructureTarget(picked));
     set_if_changed(&mut station, StationTarget(station_picked));
 }
