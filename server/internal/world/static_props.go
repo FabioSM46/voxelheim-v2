@@ -145,9 +145,9 @@ func PropVisualBounds(kind StaticPropKind) PropBox {
 	case PropRunner:
 		return PropBox{[3]float64{-.8, 0, -2.6}, [3]float64{.8, .1, 2.6}}
 	case PropBanner:
-		return PropBox{[3]float64{-.8, 0, -.2}, [3]float64{.8, 2.5, .2}}
+		return PropBox{[3]float64{-.8, 0, .4}, [3]float64{.8, 2.5, .5}}
 	case PropShield, PropTrophy:
-		return PropBox{[3]float64{-.8, 0, -.6}, [3]float64{.8, 1.8, .6}}
+		return PropBox{[3]float64{-.8, 0, .1}, [3]float64{.8, 1.8, .5}}
 	case PropFeastSetting:
 		return PropBox{[3]float64{-.6, 0, -.6}, [3]float64{.6, .7, .6}}
 	case PropWallSconce, PropFloorCandelabrum, PropTableCandelabrum:

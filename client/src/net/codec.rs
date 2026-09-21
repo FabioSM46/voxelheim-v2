@@ -10824,7 +10824,7 @@ mod tests {
         // V44 appends `DrawRequest`, which a V43 server cannot name, and changes
         // `AttackRequest.slot` to mean the main hand: a V43 client naming its hotbar slot
         // would have every swing dropped after a clean handshake.
-        assert_eq!(fb::ProtocolVersion::Current.0, 44);
+        assert_eq!(fb::ProtocolVersion::Current.0, 45);
         for (tag, value) in [
             (fb::Payload::ClientHello, 1),
             (fb::Payload::ServerWelcome, 2),

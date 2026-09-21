@@ -12,7 +12,13 @@ import (
 // castleTerrain presents the actual authored cells to the production collider.
 // Independent inverse transforms complement world's visitSchematic rotation tests.
 // The offset deliberately puts flights across both horizontal chunk boundaries.
-type castleTerrain struct{ turn int }
+type castleTerrain struct {
+	turn  int
+	props *staticPropIndex
+}
+
+func (c castleTerrain) staticPropOverlap(b box) bool           { return c.props.overlaps(b) }
+func (c castleTerrain) staticPropRay(from, to [3]float64) bool { return c.props.blocksRay(from, to) }
 
 func (c castleTerrain) Block(x, y, z int64) (world.Block, bool) {
 	x -= 11
@@ -65,6 +71,7 @@ func (c castleTerrain) point(p [3]float64) [3]float64 {
 // Waypoints only steer: neither feet height nor vertical velocity is corrected.
 func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 	t.Helper()
+	c.props = castleFurnitureIndex(t, c)
 	player := &Player{sim: &Sim{idleLimit: 10000}, pos: c.point(route[0]),
 		lifeState: vnet.LifeStateAlive, health: 100, hunger: 100}
 	dt := 1 / float64(DefaultTickRate)

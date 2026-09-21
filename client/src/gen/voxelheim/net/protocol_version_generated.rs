@@ -11,7 +11,7 @@ pub const ENUM_MIN_PROTOCOL_VERSION: u16 = 0;
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
 )]
-pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 44;
+pub const ENUM_MAX_PROTOCOL_VERSION: u16 = 45;
 #[deprecated(
     since = "2.0.0",
     note = "Use associated constants instead. This will no longer be generated in 2021."
@@ -359,10 +359,13 @@ impl ProtocolVersion {
     /// server, and `RefusedAction.MoveInventory` and `RefusalReason.HandsOccupied` ride inside
     /// an `ActionRefused`, whose decoders are total. The fifth equipment slot is a layout
     /// the welcome announces, and the consumers adopt it separately, as they did at V22.
-    pub const Current: Self = Self(44);
+    /// V45: the capital now activates solid furnishings. V42-V44 decoded their
+    /// descriptors before the renderer existed; reject those peers rather than
+    /// exposing invisible authoritative obstacles.
+    pub const Current: Self = Self(45);
 
     pub const ENUM_MIN: u16 = 0;
-    pub const ENUM_MAX: u16 = 44;
+    pub const ENUM_MAX: u16 = 45;
     pub const ENUM_VALUES: &'static [Self] = &[Self::Unknown, Self::Current];
     /// Returns the variant's name or "" if unknown.
     pub fn variant_name(self) -> Option<&'static str> {

@@ -331,8 +331,8 @@ func TestProtocolV37AnnouncesABossMoveBeforeItCanLand(t *testing.T) {
 	// V44 appends DrawRequest, which a V43 server cannot name, and changes
 	// AttackRequest.slot to mean the main hand: a V43 client naming its hotbar slot would
 	// have every swing dropped after a clean handshake.
-	if got := uint16(vnet.ProtocolVersionCurrent); got != 44 {
-		t.Fatalf("ProtocolVersion.Current = %d, want 44", got)
+	if got := uint16(vnet.ProtocolVersionCurrent); got != 45 {
+		t.Fatalf("ProtocolVersion.Current = %d, want 45", got)
 	}
 	want := []vnet.Payload{
 		vnet.PayloadClientHello,
