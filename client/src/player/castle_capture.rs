@@ -172,6 +172,7 @@ fn castle_app(
         .spawn((
             WorldCamera,
             bevy::camera::ShadowLodOrigin,
+            bevy::camera::Exposure::default(),
             Camera3d::default(),
             Camera {
                 clear_color: fixed.sky.into(),
@@ -307,6 +308,11 @@ fn capture_castle_production_scene() {
     let counts = draw_counts::take();
     assert!(counts[0] > 0, "production scene issued no main mesh draws");
     let mut manifest = capture_manifest(&app, &fixture, &config, counts);
+    let limits = app
+        .world()
+        .resource::<bevy::render::renderer::RenderDevice>()
+        .limits();
+    manifest.push_str(&format!("max_texture_array_layers={}\npoint_shadow_map_size={}\ndirectional_shadow_map_size={}\nexposure_ev100={}\ntonemapping=AcesFitted\ncamera_eye_local={:?}\ncamera_target_local={:?}\n", limits.max_texture_array_layers, app.world().resource::<bevy::light::PointLightShadowMap>().size, app.world().resource::<bevy::light::DirectionalLightShadowMap>().size, bevy::camera::Exposure::default().ev100, config.eye, config.target));
     manifest.push_str(&capture_costs(&mut app));
     manifest.push_str(&format!(
         "lighting={}\nwindows={}\n",
