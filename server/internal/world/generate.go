@@ -528,7 +528,7 @@ func amplitudeAt(seed, worldX, worldZ int64) int64 {
 // 33 → 34: shaped courtyard stairs and two-wide curtain/corner lookouts.
 // 34 → 35: internal west spire stairs and accessible upper lookout rooms.
 // 35 → 36: internal east spire stairs, guarded lookouts and audience dais.
-const WorldgenVersion uint32 = 36
+const WorldgenVersion uint32 = 37
 
 // Generate builds the chunk at coord for seed.
 //

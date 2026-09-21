@@ -53,6 +53,14 @@ func (c castleTerrain) Block(x, y, z int64) (world.Block, bool) {
 			break
 		}
 	}
+	if c.turn%2 == 1 {
+		switch b {
+		case world.IronGrilleX:
+			b = world.IronGrilleZ
+		case world.IronGrilleZ:
+			b = world.IronGrilleX
+		}
+	}
 	return b, true
 }
 func (c castleTerrain) Solid(x, y, z int64) bool { b, _ := c.Block(x, y, z); return world.Solid(b) }
@@ -106,6 +114,14 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 			player.step(dt, c)
 			if capture {
 				trace = append(trace, player.pos)
+			}
+			for _, fixture := range c.props.props {
+				if fixture.state.Kind != vnet.StaticPropKindFloorCandelabrum {
+					continue
+				}
+				if propBoxesTouch(player.box(), castleFixtureBox(fixture)) {
+					t.Fatalf("walking body crosses floor candle %d at %v", fixture.state.PropID&511, player.pos)
+				}
 			}
 			if overlaps(c, player.box()) {
 				t.Fatalf("body overlaps actual castle at %v", player.pos)
