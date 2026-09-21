@@ -122,6 +122,9 @@ fn castle_app(
     .add_systems(Startup, (sky::spawn_sun, sky::spawn_sky))
     .add_systems(Update, (sky::drive_the_sky, sky::follow_the_eye).chain());
     static_props::register(&mut app);
+    if std::env::var("CASTLE_CAPTURE_LIGHTING").as_deref() != Ok("off") {
+        castle_lighting::register(&mut app);
+    }
     if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
         let bytes = std::fs::read(path).expect("server snapshot export");
         let crate::net::codec::Message::Snapshot(mut snapshot) =
@@ -197,11 +200,18 @@ fn capture_castle_production_scene() {
     let _capture = draw_counts::acquire();
     let data =
         std::fs::read(std::env::var("CASTLE_CAPTURE_FIXTURE").expect("fixture path")).unwrap();
-    let fixture = CastleFixture::parse(
+    let mut fixture = CastleFixture::parse(
         &data,
         &[&[palette::AIR][..], &palette::PALETTE[..]].concat(),
     )
     .expect("validated server-authored fixture");
+    if std::env::var("CASTLE_CAPTURE_WINDOWS").as_deref() == Ok("blocked") {
+        for block in &mut fixture.blocks {
+            if matches!(*block, palette::IRON_GRILLE_X | palette::IRON_GRILLE_Z) {
+                *block = palette::STONE;
+            }
+        }
+    }
     let view = std::env::var("CASTLE_CAPTURE_VIEW").unwrap_or_else(|_| "exterior_gate".into());
     let (eye, target) = match view.as_str() {
         "exterior_gate" => ([31.5, 35.0, 130.0], [31.5, 26.0, 28.0]),
@@ -213,6 +223,9 @@ fn capture_castle_production_scene() {
         "sw_lookout" => ([20.5, 29.0 + EYE_HEIGHT, 34.5], [18.0, 29.0, 30.5]),
         "ne_lookout" => ([50.5, 41.0 + EYE_HEIGHT, 14.5], [48.0, 41.0, 10.5]),
         "se_lookout" => ([42.5, 35.0 + EYE_HEIGHT, 34.5], [40.0, 35.0, 30.5]),
+        "corridor" => ([16.5, EYE_HEIGHT, 28.5], [16.5, 1.5, 10.0]),
+        "landing" => ([14.5, 7.0 + EYE_HEIGHT, 29.5], [8.5, 7.5, 30.5]),
+        "window_patch" => ([12.5, EYE_HEIGHT, 24.5], [6.5, 1.0, 21.5]),
         "banquet" => ([54.5, EYE_HEIGHT, 29.5], [44.0, 1.2, 20.5]),
         "study" => ([21.5, 7.0 + EYE_HEIGHT, 28.5], [14.0, 8.0, 17.5]),
         "throne" => ([46.5, 7.0 + EYE_HEIGHT, 21.5], [40.0, 9.0, 21.5]),
@@ -245,6 +258,12 @@ fn capture_castle_production_scene() {
     let mut drained_frames = 0;
     for frame in 0..2000 {
         app.update();
+        if frame == 0 && std::env::var("CASTLE_CAPTURE_LIGHTING").as_deref() == Ok("off") {
+            let world = app.world_mut();
+            for mut light in world.query::<&mut DirectionalLight>().iter_mut(world) {
+                light.shadow_maps_enabled = false;
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
         let stats = *app.world().resource::<MeshStats>();
         if frame >= 200
@@ -279,6 +298,11 @@ fn capture_castle_production_scene() {
     assert!(counts[0] > 0, "production scene issued no main mesh draws");
     let mut manifest = capture_manifest(&app, &fixture, &config, counts);
     manifest.push_str(&capture_costs(&mut app));
+    manifest.push_str(&format!(
+        "lighting={}\nwindows={}\n",
+        std::env::var("CASTLE_CAPTURE_LIGHTING").unwrap_or_else(|_| "on".into()),
+        std::env::var("CASTLE_CAPTURE_WINDOWS").unwrap_or_else(|_| "open".into())
+    ));
     if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
         let name = std::path::Path::new(&path)
             .file_name()
