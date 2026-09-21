@@ -132,6 +132,16 @@ fn castle_app(
         else {
             panic!("expected snapshot envelope")
         };
+        if std::env::var("CASTLE_CAPTURE_CANDLES").as_deref() == Ok("off") {
+            snapshot.static_props.retain(|p| {
+                !matches!(
+                    p.kind,
+                    crate::net::StaticPropKind::WallSconce
+                        | crate::net::StaticPropKind::FloorCandelabrum
+                        | crate::net::StaticPropKind::TableCandelabrum
+                )
+            });
+        }
         if std::env::var("CASTLE_CAPTURE_FURNITURE").as_deref() == Ok("off") {
             snapshot.static_props.clear();
         }
@@ -230,15 +240,17 @@ fn capture_castle_production_scene() {
         "west_stair" => ([8.5, EYE_HEIGHT, 37.5], [8.5, 7.0, 29.5]),
         "east_stair" => ([53.5, EYE_HEIGHT, 37.5], [53.5, 7.0, 29.5]),
         "bridge" => ([31.5, 21.0 + EYE_HEIGHT, 24.5], [46.5, 23.0, 24.5]),
-        "nw_lookout" => ([10.5, 35.0 + EYE_HEIGHT, 14.5], [8.0, 35.0, 10.5]),
+        "nw_lookout" => ([8.5, 35.0 + EYE_HEIGHT, 14.5], [10.5, 36.0, 18.5]),
         "sw_lookout" => ([20.5, 29.0 + EYE_HEIGHT, 34.5], [18.0, 29.0, 30.5]),
         "ne_lookout" => ([50.5, 41.0 + EYE_HEIGHT, 14.5], [48.0, 41.0, 10.5]),
         "se_lookout" => ([42.5, 35.0 + EYE_HEIGHT, 34.5], [40.0, 35.0, 30.5]),
         "corridor" => ([16.5, EYE_HEIGHT, 28.5], [16.5, 1.5, 10.0]),
-        "landing" => ([14.5, 7.0 + EYE_HEIGHT, 29.5], [8.5, 7.5, 30.5]),
-        "window_patch" => ([12.5, EYE_HEIGHT, 24.5], [6.5, 1.0, 21.5]),
+        "landing" => ([11.5, 7.0 + EYE_HEIGHT, 28.5], [11.5, 11.0, 34.5]),
+        "window_patch" => ([12.5, 21.0 + EYE_HEIGHT, 24.5], [6.5, 22.0, 21.5]),
+        "window_east" => ([50.5, 21.0 + EYE_HEIGHT, 24.5], [56.5, 22.0, 21.5]),
+        "tower_study" => ([12.5, 35.0 + EYE_HEIGHT, 14.5], [10.5, 36.0, 12.5]),
         "banquet" => ([54.5, EYE_HEIGHT, 29.5], [44.0, 1.2, 20.5]),
-        "study" => ([21.5, 7.0 + EYE_HEIGHT, 28.5], [14.0, 8.0, 17.5]),
+        "study" => ([18.5, 7.0 + EYE_HEIGHT, 24.5], [22.5, 8.2, 14.5]),
         "throne" => ([46.5, 7.0 + EYE_HEIGHT, 21.5], [40.0, 9.0, 21.5]),
         _ => panic!("unknown fixed camera id"),
     };
@@ -313,6 +325,10 @@ fn capture_castle_production_scene() {
         .resource::<bevy::render::renderer::RenderDevice>()
         .limits();
     manifest.push_str(&format!("max_texture_array_layers={}\npoint_shadow_map_size={}\ndirectional_shadow_map_size={}\nexposure_ev100={}\ntonemapping=AcesFitted\ncamera_eye_local={:?}\ncamera_target_local={:?}\n", limits.max_texture_array_layers, app.world().resource::<bevy::light::PointLightShadowMap>().size, app.world().resource::<bevy::light::DirectionalLightShadowMap>().size, bevy::camera::Exposure::default().ev100, config.eye, config.target));
+    manifest.push_str(&format!(
+        "candles={}\n",
+        std::env::var("CASTLE_CAPTURE_CANDLES").unwrap_or_else(|_| "on".into())
+    ));
     manifest.push_str(&capture_costs(&mut app));
     manifest.push_str(&format!(
         "lighting={}\nwindows={}\n",
