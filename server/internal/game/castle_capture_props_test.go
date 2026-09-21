@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/protocol"
 	"github.com/FabioSM46/voxelheim-v2/server/internal/world"
 )
@@ -94,7 +95,7 @@ func TestExportCastleCaptureSnapshot(t *testing.T) {
 	}
 	snapshot := protocol.EncodeEntitySnapshot(protocol.EntitySnapshot{
 		Tick: 1, StaticProps: states,
-		Vitals: protocol.PlayerVitals{Health: 100, MaxHealth: 100, Hunger: 100, MaxHunger: 100, Energy: 100, MaxEnergy: 100, Level: 1, ExperienceToNext: 100},
+		Vitals: protocol.PlayerVitals{LifeState: vnet.LifeStateAlive, Health: 100, MaxHealth: 100, Hunger: 100, MaxHunger: 100, Energy: 100, MaxEnergy: 100, Level: 1, ExperienceToNext: 100},
 	})
 	if err := os.WriteFile(path+".snapshot", snapshot, 0600); err != nil {
 		t.Fatal(err)
