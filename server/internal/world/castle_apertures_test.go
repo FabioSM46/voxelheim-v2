@@ -78,7 +78,7 @@ func TestCastleWindowsAreFullDepthBarredOpeningsWithIntactRoofs(t *testing.T) {
 					want = IronGrilleX
 				}
 				got := s.At(x, y, z)
-				if got != want && !(want == Air && got == keepTerrain) {
+				if got != want && (want != Air || got != keepTerrain) {
 					t.Fatalf("NE north aperture blocked at %d,%d,%d", x, y, z)
 				}
 			}
