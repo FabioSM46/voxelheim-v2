@@ -115,11 +115,29 @@ fn castle_app(
     }))
     .insert_resource(InputMode::Playing)
     .init_resource::<CaptureReceipt>()
+    .init_resource::<SnapshotBuffer>()
     .init_resource::<Weather>()
     .init_resource::<sky::SkyClock>()
     .add_plugins(WorldPlugin)
     .add_systems(Startup, (sky::spawn_sun, sky::spawn_sky))
     .add_systems(Update, (sky::drive_the_sky, sky::follow_the_eye).chain());
+    static_props::register(&mut app);
+    if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
+        let bytes = std::fs::read(path).expect("server snapshot export");
+        let crate::net::codec::Message::Snapshot(mut snapshot) =
+            crate::net::codec::decode(&bytes).expect("production snapshot decoder")
+        else {
+            panic!("expected snapshot envelope")
+        };
+        if std::env::var("CASTLE_CAPTURE_FURNITURE").as_deref() == Ok("off") {
+            snapshot.static_props.clear();
+        }
+        assert!(
+            app.world_mut()
+                .resource_mut::<SnapshotBuffer>()
+                .accept(snapshot, std::time::Instant::now())
+        );
+    }
     while app.plugins_state() != bevy::app::PluginsState::Ready {
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -195,6 +213,8 @@ fn capture_castle_production_scene() {
         "sw_lookout" => ([20.5, 29.0 + EYE_HEIGHT, 34.5], [18.0, 29.0, 30.5]),
         "ne_lookout" => ([50.5, 41.0 + EYE_HEIGHT, 14.5], [48.0, 41.0, 10.5]),
         "se_lookout" => ([42.5, 35.0 + EYE_HEIGHT, 34.5], [40.0, 35.0, 30.5]),
+        "banquet" => ([54.5, EYE_HEIGHT, 29.5], [44.0, 1.2, 20.5]),
+        "study" => ([21.5, 7.0 + EYE_HEIGHT, 28.5], [14.0, 8.0, 17.5]),
         "throne" => ([46.5, 7.0 + EYE_HEIGHT, 21.5], [40.0, 9.0, 21.5]),
         _ => panic!("unknown fixed camera id"),
     };
@@ -258,6 +278,22 @@ fn capture_castle_production_scene() {
     let counts = draw_counts::take();
     assert!(counts[0] > 0, "production scene issued no main mesh draws");
     let mut manifest = capture_manifest(&app, &fixture, &config, counts);
+    manifest.push_str(&capture_costs(&mut app));
+    if let Ok(path) = std::env::var("CASTLE_CAPTURE_SNAPSHOT") {
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        manifest.push_str(&format!(
+            "snapshot_file={name}\nfurniture={}\n",
+            if std::env::var("CASTLE_CAPTURE_FURNITURE").as_deref() == Ok("off") {
+                "off"
+            } else {
+                "on"
+            }
+        ));
+    }
     if let Ok(path) = std::env::var("CASTLE_CAPTURE_TRACE") {
         let name = std::path::Path::new(&path)
             .file_name()
@@ -543,5 +579,41 @@ fn capture_manifest(
         adapter.driver.replace(['\n', '\r'], " "),
         adapter.driver_info.replace(['\n', '\r'], " "),
         adapter.backend
+    )
+}
+
+// Synchronized CPU+GPU frame latency after meshing and pipeline warmup; not GPU-only timing.
+fn capture_costs(app: &mut App) -> String {
+    let mut millis = Vec::with_capacity(120);
+    for _ in 0..120 {
+        let started = std::time::Instant::now();
+        app.update();
+        app.sub_app(bevy::render::RenderApp)
+            .world()
+            .resource::<bevy::render::renderer::RenderDevice>()
+            .poll(bevy::render::render_resource::PollType::wait_indefinitely())
+            .unwrap();
+        millis.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    millis.sort_by(f64::total_cmp);
+    let world = app.world_mut();
+    let entities = world.entities().len();
+    let props = world
+        .query::<&static_props::StaticPropRoot>()
+        .iter(world)
+        .count();
+    let lights = world
+        .query::<&PointLight>()
+        .iter(world)
+        .filter(|l| l.intensity > 0.0)
+        .count();
+    let shadowed = world
+        .query::<&PointLight>()
+        .iter(world)
+        .filter(|l| l.intensity > 0.0 && l.shadow_maps_enabled)
+        .count();
+    format!(
+        "frame_samples=120\nframe_metric=synchronized_cpu_gpu_ms\nframe_p50_ms={:.3}\nframe_p95_ms={:.3}\nentities={}\nstatic_prop_roots={}\nactive_point_lights={}\nshadowed_point_lights={}\n",
+        millis[59], millis[113], entities, props, lights, shadowed
     )
 }

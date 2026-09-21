@@ -84,6 +84,17 @@ def manifest(directory):
         if len(matches) != 1 or matches[0]["source_commit"] != data["source_commit"]:
             raise ValueError("capture and fixture source/frame do not match uniquely")
         item = dict(report=report.name, settings=data, fixture=matches[0]["name"])
+        if "snapshot_file" in data:
+            name = data["snapshot_file"]
+            if Path(name).name != name:
+                raise ValueError("snapshot reference must be a basename")
+            snapshot = directory / name
+            metadata = json.loads(Path(str(snapshot) + ".json").read_text())
+            if (metadata["source_commit"] != data["source_commit"] or
+                    metadata["sha256"] != sha256(snapshot) or
+                    metadata["fixture_sha256"] != matches[0]["sha256"]):
+                raise ValueError("snapshot source or digest differs from fixture")
+            item["snapshot"] = dict(name=name, sha256=sha256(snapshot))
         if "trace_file" in data:
             name = data["trace_file"]
             if Path(name).name != name:
