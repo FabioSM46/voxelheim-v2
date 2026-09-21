@@ -58,8 +58,12 @@ class CaptureManifestTests(unittest.TestCase):
             path.write_text(header + row)
             with self.assertRaises(ValueError):
                 capture.trace_points(path)
-        path.write_text(header + "0\t1\t2\t3\n1\t2\t3\t4\n")
-        self.assertEqual(capture.trace_points(path)[-1], [2, 3, 4])
+        path.write_text(header + "0\t31.5\t0\t62.5\n1\t31.5\t0\t62.49\n")
+        self.assertEqual(capture.trace_points(path)[-1], [31.5, 0, 62.49])
+        for row in ["0\t1\t2\t3", "0\t31.5\t0\t62.5\n1\t32.5\t0\t62.5"]:
+            path.write_text(header + row)
+            with self.assertRaisesRegex(ValueError, "canonical gate"):
+                capture.trace_points(path)
 
 unittest.main(argv=[sys.argv[0]])
 PY

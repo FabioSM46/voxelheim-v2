@@ -38,6 +38,12 @@ def trace_points(path):
         points.append(point)
     if not points:
         raise ValueError("empty trace")
+    # Columns are keep-local: fixture.building_origin is applied by the renderer.
+    # Comparing these to a world-space gate would incorrectly reject other seeds.
+    gate = (31.5, 0.0, 62.5)
+    for endpoint in (points[0], points[-1]):
+        if any(not math.isclose(a, b, abs_tol=0.02) for a, b in zip(endpoint, gate)):
+            raise ValueError("trace endpoints do not match the canonical gate")
     return points
 
 

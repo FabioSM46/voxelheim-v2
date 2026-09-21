@@ -112,10 +112,21 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 		}
 	}
 	if capture {
+		// The trace is canonical keep-local, independent of the generated capital
+		// origin or seed. Derive the fixture offset through its actual transform.
+		origin := c.point([3]float64{})
+		gate := c.point([3]float64{31.5, 0, 62.5})
+		for _, endpoint := range [][3]float64{trace[0], trace[len(trace)-1]} {
+			for axis := range 3 {
+				if math.Abs(endpoint[axis]-gate[axis]) > .02 {
+					t.Fatal("capture route must begin and end at the canonical gate")
+				}
+			}
+		}
 		var output bytes.Buffer
 		output.WriteString("tick\tlocal_feet_x\tlocal_feet_y\tlocal_feet_z\n")
 		for tick, p := range trace {
-			fmt.Fprintf(&output, "%d\t%.9f\t%.9f\t%.9f\n", tick, p[0]-11, p[1]-5, p[2]-13)
+			fmt.Fprintf(&output, "%d\t%.9f\t%.9f\t%.9f\n", tick, p[0]-origin[0], p[1]-origin[1], p[2]-origin[2])
 		}
 		if err := os.MkdirAll(captureDir, 0700); err != nil {
 			t.Fatal(err)
