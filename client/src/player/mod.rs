@@ -54,6 +54,7 @@ mod appearance;
 mod armour;
 mod birds;
 mod camera;
+mod castle_lighting;
 mod combat;
 mod combat_audio;
 mod constants;
@@ -371,6 +372,7 @@ pub struct PlayerPlugin;
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
         static_props::register(app);
+        castle_lighting::register(app);
         horse::register(app);
         ambient_sound::register(app);
         tool_audio::register(app);
@@ -3377,6 +3379,7 @@ mod tests;
 /// connection state and deliberately survive.
 pub(crate) fn reset_world(world: &mut World) {
     static_props::reset_world(world);
+    castle_lighting::reset_world(world);
     crate::world::transition::reset::<portal::PortalFocus>(world);
     use crate::world::transition::{despawn, reset};
     reset::<SnapshotBuffer>(world);

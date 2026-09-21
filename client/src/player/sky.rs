@@ -832,20 +832,18 @@ fn lerp(from: f32, to: f32, t: f32) -> f32 {
 
 /// Spawns the one directional light.
 ///
-/// Shadow maps stay **off**, exactly as they were when this light lived in
-/// `world/render.rs`: they belong to a lighting issue and this one puts them out of scope.
-/// Without them the face normals plus the ambient term are what give the terrain its shape,
-/// which is the reason [`NIGHT_AMBIENT_BRIGHTNESS`] above is a playability constant and not
-/// a taste one.
+/// The castle lighting budget enables two built-in shadow cascades over 64 blocks.
+/// Solar motion, daylight/weather brightness and ambient curves remain unchanged.
 pub(super) fn spawn_sun(mut commands: Commands) {
     let fixed = Daylight::FIXED;
     commands.spawn((
         Sun,
         DirectionalLight {
             illuminance: fixed.sun_illuminance,
-            shadow_maps_enabled: false,
+            shadow_maps_enabled: true,
             ..default()
         },
+        super::castle_lighting::sun_cascades(),
         Transform::default().looking_to(fixed.sun_direction, Vec3::Y),
     ));
 }
