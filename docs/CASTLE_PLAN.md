@@ -43,7 +43,7 @@ Their two-wide flights alternate X52–53 northwards and X55–56 southwards,
 connecting Y0/7/14/21/28. X51 and X54 guard the flights; the existing outer wall
 at X57 guards the return flight. Landings occupy Z27–29 and Z37–38.
 The existing entrance remains X46–47/Z39–41 and connects to the south landing.
-The east north route is X37–38/Z6–19, with the future tower-entry corridor
+The east north route is X37–38/Z6–19, with the tower-entry corridor
 X37–44/Z11–12. Cross-room routes use Z24–25 across X6–24 (west) and
 X37–56 (east), joined across the bridge at Y21.
 
@@ -58,7 +58,7 @@ At feet Y13 the continuous two-wide circuit occupies X1–2 and X60–61 on the
 west/east, and Z1–2 and Z60–61 on the north/south. The existing exterior masonry
 and inner parapets guard it. Each corner contains a sheltered 7 × 7 lookout:
 X1–7 or X55–61 combined with Z1–7 or Z55–61. Their outer two-wide circuit stays
-clear; interior dressing awaits the furnishing follow-up.
+clear; no solid furnishing is placed on either circulation lane.
 
 ## Tower destinations
 
@@ -80,8 +80,8 @@ Western lookout furniture pockets are **NW X9–11/Z12–13 at Y35** and
 **SW X19–21/Z32–33 at Y29**. The complete southern two-wide route, NW Z14–15
 and SW Z34–35, stays clear across each core. Guards enclose the northern and
 eastern stair openings; keep the emerging western flight unobstructed.
-South-facing glass slits reserve viewing apertures above intact sills; the
-lighting follow-up replaces their opaque placeholder blocks with grilles.
+South-facing barred openings preserve the sills and clear the exterior slate
+trim, so their narrow iron members do not conceal an opaque backing.
 
 The eastern cores are NE X47–53/Z9–15 and SE X39–45/Z29–35, entered from Y28.
 Three-block flights alternate sides, ending with a final one-block rise into
@@ -92,6 +92,16 @@ X45–50/Z29–30. Furniture pockets are **NE X49–51/Z12–13 at Y41** and
 Northern parapets and raised eastern guard beams protect the return-flight
 openings: a standing body cannot enter from either side, while the lower flight
 retains its necessary headroom. Preserve the differentiated external silhouettes.
+
+## Windows and candle fixtures
+
+Worldgen 37 provides eighteen 3-by-5 openings across the nine main floors,
+through both wall layers with one grille layer. The NW, SW and SE tower openings
+face south; the NE opening faces north to avoid its wing roof. Headers, roofs,
+piers and stair guards remain intact. The shared catalogue contains 117 furnishings
+and 92 cosmetic candle fixtures (82 wall, seven floor, three table), 209 roots total.
+[Combined visual acceptance](reviews/castle-lighting-acceptance.md) records room
+captures, four-rotation sunlight comparisons, complete night walks and GPU costs.
 
 ## Delivery and verification
 

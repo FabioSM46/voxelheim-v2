@@ -1,5 +1,9 @@
 # Castle architecture capture and acceptance — issue #1202
 
+The later [furnishing and lighting acceptance](castle-lighting-acceptance.md)
+records worldgen 37, final props, windows and day/night evidence. The architecture
+baseline below predates that dressing.
+
 The final architecture remains **63 × 63 × 68 blocks**, worldgen **36**. Its
 floor plan, furniture reservations and exact standing-height exception for the
 E7 audience dais are in [CASTLE_PLAN.md](../CASTLE_PLAN.md). The nine main floors,

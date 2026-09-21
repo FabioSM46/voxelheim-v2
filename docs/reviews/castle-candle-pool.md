@@ -5,7 +5,7 @@ floor candelabra and table candelabra. It adds shared iron/wax meshes and small
 emissive flames as children, so complete-set snapshot replacement, instance entry
 and world reset retain the static-prop owner's lifetime semantics.
 
-The point-light pool admits at most eight fixtures within 24 blocks of the camera.
+The point-light pool admits at most four fixtures within 24 blocks of the camera.
 Ranking runs at most five times per second, with at most 32 shape-aware visibility
 rays, stable ID ordering and a 1.5-block retention bias. Removed or hidden roots,
 distance limits and reduced device capacity take effect immediately. Each fixture
@@ -24,7 +24,9 @@ Tests cover pool capacity changes, root removal, session exit, shared mesh reuse
 recursive teardown, production snapshot synchronization, rotated camera frusta,
 and grille-member visibility with unloaded chunks failing closed.
 
-No fixture catalogue is activated in this renderer part. The window/placement and
-capture acceptance follow-up must tune the provisional fixture lumens and record
-matched day/night views, active/shadowed light counts, draw submissions and frame
-distributions through the production castle capture harness.
+The final catalogue activates 92 fixtures. GPU acceptance chose four active
+lights below the eight-light design ceiling; wall/floor/table output is tuned to
+120,000/240,000/160,000 in Bevy's lumen scale at the production exposure. Celestial
+meshes carry `NotShadowCaster` so the enclosing sky cannot occlude the sun.
+[Combined acceptance](castle-lighting-acceptance.md) records the fixed settings,
+matched image comparisons, actual draw submissions and frame distributions.
