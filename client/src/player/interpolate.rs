@@ -225,10 +225,11 @@ impl SnapshotBuffer {
             .mobs
             .iter()
             .filter(|mob| mob.kind == MobKind::Villager)
-            .filter(|mob| visible(player, Vec3::from_array(mob.pos)))
             .filter_map(|mob| {
-                let distance = player.distance_squared(Vec3::from_array(mob.pos));
-                (distance <= max_distance * max_distance).then_some((distance, mob.entity_id))
+                let target = Vec3::from_array(mob.pos);
+                let distance = player.distance_squared(target);
+                (distance <= max_distance * max_distance && visible(player, target))
+                    .then_some((distance, mob.entity_id))
             })
             .min_by(|left, right| {
                 left.0
@@ -1692,5 +1693,74 @@ mod projectile_tests {
         let much_later = start + Duration::from_secs(30);
         let drawn = buffer.sample_projectiles(much_later, INTERVAL);
         assert_eq!(drawn[0].1.pos, Vec3::new(4.0, 64.0, 0.0));
+    }
+}
+
+#[cfg(test)]
+mod resident_tests {
+    use super::*;
+    #[test]
+    fn resident_visibility_is_only_queried_within_reach_and_preserves_nearest_choice() {
+        use std::cell::Cell;
+        let resident = |entity_id, x, kind| MobState {
+            entity_id,
+            kind,
+            pos: [x, 64.0, 0.0],
+            vel: [0.0; 3],
+            yaw: 0.0,
+            health: 100,
+            max_health: 100,
+            action: MobAction::Idle,
+            target_entity_id: 0,
+        };
+        let mut residents: Vec<_> = [(30, 2.0), (40, 100.0), (20, 1.0), (10, 3.0)]
+            .into_iter()
+            .map(|(id, x)| resident(id, x, MobKind::Villager))
+            .collect();
+        residents.push(resident(50, 0.5, MobKind::Draugr));
+        let mut buffer = SnapshotBuffer::default();
+        assert!(buffer.accept(
+            Snapshot {
+                server_tick: 1,
+                entities: vec![EntityState {
+                    entity_id: 7,
+                    pos: [0.0, 64.0, 0.0],
+                    vel: [0.0; 3],
+                    yaw: 0.0,
+                    health: 100,
+                    max_health: 100
+                }],
+                mobs: residents,
+                ..default()
+            },
+            Instant::now()
+        ));
+        let calls = Cell::new(0);
+        assert_eq!(
+            buffer.nearest_resident(7, 3.0, |_, target| {
+                calls.set(calls.get() + 1);
+                assert!(target.x <= 3.0);
+                true
+            }),
+            Some(20)
+        );
+        assert_eq!(
+            calls.get(),
+            3,
+            "only in-range residents, including the boundary"
+        );
+        calls.set(0);
+        assert_eq!(
+            buffer.nearest_resident(7, 3.0, |_, target| {
+                calls.set(calls.get() + 1);
+                target.x != 1.0
+            }),
+            Some(30)
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(
+            buffer.nearest_resident(7, 0.1, |_, _| panic!("no resident is within this reach")),
+            None
+        );
     }
 }

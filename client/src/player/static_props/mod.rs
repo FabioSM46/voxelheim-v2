@@ -420,4 +420,75 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn asymmetric_rendered_member_matches_exact_occlusion_in_every_facing() {
+        use bevy::mesh::VertexAttributeValues;
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let models = models::PropModels::build(&mut meshes, &mut materials);
+        let mut throne = pose(1, StaticPropKind::Throne);
+        throne.origin = BlockCoord { x: 7, y: 11, z: 13 };
+        // The throne back is offset behind its origin. Opposite handedness moves
+        // it to a different place, unlike a symmetric tabletop envelope.
+        let (min, max) = models::solid_members(throne.kind)[2];
+        let positions: Vec<_> = models
+            .parts(throne.kind, 0)
+            .iter()
+            .flat_map(|part| {
+                let Some(VertexAttributeValues::Float32x3(positions)) = meshes
+                    .get(&part.mesh)
+                    .unwrap()
+                    .attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("mesh positions")
+                };
+                positions.iter().copied()
+            })
+            .map(Vec3::from_array)
+            .collect();
+        for (facing, expected_min, expected_max) in [
+            (Facing::North, [-0.55, 0.65, 0.38], [0.55, 2.1, 0.52]),
+            (Facing::East, [-0.52, 0.65, -0.55], [-0.38, 2.1, 0.55]),
+            (Facing::South, [-0.55, 0.65, -0.52], [0.55, 2.1, -0.38]),
+            (Facing::West, [0.38, 0.65, -0.55], [0.52, 2.1, 0.55]),
+        ] {
+            throne.facing = facing;
+            let origin = prop_origin(throne);
+            let exact = placed_bounds(throne, Vec3::from_array(min), Vec3::from_array(max));
+            assert_eq!(
+                exact,
+                (
+                    origin + Vec3::from_array(expected_min),
+                    origin + Vec3::from_array(expected_max)
+                )
+            );
+            let mut rendered_min = Vec3::splat(f32::INFINITY);
+            let mut rendered_max = Vec3::splat(f32::NEG_INFINITY);
+            for x in [min[0], max[0]] {
+                for y in [min[1], max[1]] {
+                    for z in [min[2], max[2]] {
+                        let corner = Vec3::new(x, y, z);
+                        let vertex = positions
+                            .iter()
+                            .find(|vertex| vertex.distance_squared(corner) < 1e-10)
+                            .expect("physical member corner is rendered");
+                        let rendered = prop_rotation(facing) * *vertex + origin;
+                        rendered_min = rendered_min.min(rendered);
+                        rendered_max = rendered_max.max(rendered);
+                    }
+                }
+            }
+            // Quaternion trig is not bit-exact; gameplay-aligned AABBs stay discrete.
+            assert!(
+                rendered_min.abs_diff_eq(exact.0, 1e-5),
+                "{facing:?} rendered minimum {rendered_min:?} != {:?}",
+                exact.0
+            );
+            assert!(
+                rendered_max.abs_diff_eq(exact.1, 1e-5),
+                "{facing:?} rendered maximum {rendered_max:?} != {:?}",
+                exact.1
+            );
+        }
+    }
 }

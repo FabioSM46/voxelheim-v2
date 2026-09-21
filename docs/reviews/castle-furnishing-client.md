@@ -17,6 +17,9 @@ Each family has at most five merged material parts. Four variants share the same
 mesh handles, with eleven shared materials across the catalogue. Timber, iron,
 textiles, brass and colored details retain a coherent palette. The 39 major
 physical members are checked against the server's committed bounds fixture.
+This is an intentional test-only monorepo dependency: client tests require the
+server tree, while normal client builds do not embed the fixture. Sharing it
+avoids two authoritative-looking copies drifting apart.
 Bookcases intentionally use a filled shelving collision envelope.
 
 `StaticPropRoot(StaticPropState)` owns every furnishing child. Fixture kinds have
@@ -53,6 +56,12 @@ filters candidates before nearest-distance selection, matching the server's
 rule and preserving interaction above low tables. Its input system explicitly
 runs after `StaticPropsSet::Sync`; tests exercise a snapshot and interaction
 press in the same operational update. Existing no-prop voxel-wall behavior is preserved.
+The cheap distance bound precedes resident visibility, so out-of-range residents
+never incur a furniture ray. A predicate-count regression pins the boundary and
+nearest-visible choice. A separate test transforms actual asymmetric throne-back
+vertices for all four facings and compares them to the exact discrete AABBs;
+a controlled opposite-handedness mutation fails that test. Quaternion transforms
+use a tolerance while the authoritative-style bounds keep exact sign/swap arithmetic.
 This introduces no local movement prediction or gameplay authority.
 
 ## Verification scope

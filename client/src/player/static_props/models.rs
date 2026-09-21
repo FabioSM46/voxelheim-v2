@@ -686,6 +686,9 @@ mod tests {
 
     #[test]
     fn major_members_match_authoritative_fixture_and_visual_extrema() {
+        // Intentional monorepo test-only dependency: the client test target requires
+        // the server tree so both consumers read the same authoritative fixture.
+        // Normal client builds do not include this file; moving it fails compilation.
         let fixture =
             include_str!("../../../../server/internal/world/testdata/static_prop_bounds.tsv");
         let mut checked = 0;
