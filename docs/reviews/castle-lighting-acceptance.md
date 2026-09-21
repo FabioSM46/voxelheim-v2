@@ -18,9 +18,9 @@ connectivity; they are window sills, not rooms.
 
 ## Sources and settings
 
-32 stills and seven videos use `5706ab3`; extra west-wing/bridge videos use
-`0bdc373` (route tests only). Client source, generated fixture and encoded snapshot
-bytes match. The production decoder consumes that snapshot. Manifests verify clean
+24 stills and seven videos use `5706ab3`; eight refreshed cost views use
+`c491f50` (capture metadata hardening); extra west-wing/bridge videos use `0bdc373`
+(route tests only). Production rendering, fixture and snapshot bytes are unchanged. The production decoder consumes that snapshot. Manifests verify clean
 source, hashes, traces and frames. Main views use generated surroundings; window
 pairs use labelled isolated rotations. Poses live in `castle_capture.rs`.
 
@@ -62,14 +62,14 @@ complete lighting costs, not point-shadow cost alone.
 
 | View | Lighting / furnishings | Live entities | Main / shadow draws | Active / shadowed points | p50 / p95 ms |
 | --- | --- | --- | --- | --- | --- |
-| Banquet | off / off | 517 | 4 / 0 | 0 / 0 | 4.394 / 13.903 |
-| Banquet | off / on | 1100 | 5 / 0 | 0 / 0 | 3.958 / 13.100 |
-| Banquet | on / off | 520 | 4 / 5 | 0 / 0 | 4.912 / 13.580 |
-| Banquet | on / on | 1403 | 6 / 79 | 4 / 4 | 15.162 / 25.161 |
-| Exterior gate | off / off | 517 | 4 / 0 | 0 / 0 | 4.496 / 14.805 |
-| Exterior gate | off / on | 1100 | 5 / 0 | 0 / 0 | 4.447 / 13.865 |
-| Exterior gate | on / off | 520 | 4 / 4 | 0 / 0 | 4.940 / 15.562 |
-| Exterior gate | on / on | 1399 | 6 / 6 | 0 / 0 | 5.122 / 17.004 |
+| Banquet | off / off | 517 | 4 / 0 | 0 / 0 | 2.956 / 3.602 |
+| Banquet | off / on | 1100 | 5 / 0 | 0 / 0 | 2.918 / 3.446 |
+| Banquet | on / off | 520 | 4 / 5 | 0 / 0 | 3.557 / 4.253 |
+| Banquet | on / on | 1403 | 6 / 79 | 4 / 4 | 12.121 / 12.917 |
+| Exterior gate | off / off | 517 | 4 / 0 | 0 / 0 | 3.009 / 3.639 |
+| Exterior gate | off / on | 1100 | 5 / 0 | 0 / 0 | 3.634 / 4.566 |
+| Exterior gate | on / off | 520 | 4 / 4 | 0 / 0 | 3.268 / 3.970 |
+| Exterior gate | on / on | 1399 | 6 / 6 | 0 / 0 | 3.569 / 4.032 |
 
 Prepass draws are zero. Furnishings-on retains 209 roots; cosmetic details use the
 existing 64-block visibility rule. Entities count live main-world entities via
