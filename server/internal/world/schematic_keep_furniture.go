@@ -93,31 +93,31 @@ var keepFurnitureProps = []StaticPropPose{
 	{Slot: 93, Kind: PropRug, X: 46, Y: 21, Z: 21, Facing: 1, Variant: 3},           // East hall
 	{Slot: 94, Kind: PropRug, X: 46, Y: 28, Z: 21, Facing: 1, Variant: 0},           // East hall
 
-	{Slot: 99, Kind: PropBanner, X: 24, Y: 2, Z: 21, Facing: 4, Variant: 0},   // Attached room wall detail
+	{Slot: 99, Kind: PropBanner, X: 24, Y: 2, Z: 18, Facing: 4, Variant: 0},   // Attached room wall detail
 	{Slot: 100, Kind: PropShield, X: 24, Y: 3, Z: 15, Facing: 4, Variant: 0},  // Attached room wall detail
 	{Slot: 101, Kind: PropTrophy, X: 24, Y: 3, Z: 8, Facing: 4, Variant: 0},   // Attached room wall detail
-	{Slot: 102, Kind: PropBanner, X: 24, Y: 9, Z: 21, Facing: 4, Variant: 1},  // Attached room wall detail
+	{Slot: 102, Kind: PropBanner, X: 24, Y: 9, Z: 18, Facing: 4, Variant: 1},  // Attached room wall detail
 	{Slot: 103, Kind: PropShield, X: 24, Y: 10, Z: 15, Facing: 4, Variant: 1}, // Attached room wall detail
 	{Slot: 104, Kind: PropTrophy, X: 24, Y: 10, Z: 8, Facing: 4, Variant: 1},  // Attached room wall detail
-	{Slot: 105, Kind: PropBanner, X: 24, Y: 16, Z: 21, Facing: 4, Variant: 2}, // Attached room wall detail
+	{Slot: 105, Kind: PropBanner, X: 24, Y: 16, Z: 18, Facing: 4, Variant: 2}, // Attached room wall detail
 	{Slot: 106, Kind: PropShield, X: 24, Y: 17, Z: 15, Facing: 4, Variant: 2}, // Attached room wall detail
 	{Slot: 107, Kind: PropTrophy, X: 24, Y: 17, Z: 8, Facing: 4, Variant: 2},  // Attached room wall detail
-	{Slot: 108, Kind: PropBanner, X: 24, Y: 23, Z: 21, Facing: 4, Variant: 3}, // Attached room wall detail
+	{Slot: 108, Kind: PropBanner, X: 24, Y: 23, Z: 18, Facing: 4, Variant: 3}, // Attached room wall detail
 	{Slot: 109, Kind: PropShield, X: 24, Y: 24, Z: 15, Facing: 4, Variant: 3}, // Attached room wall detail
 	{Slot: 110, Kind: PropTrophy, X: 24, Y: 24, Z: 8, Facing: 4, Variant: 3},  // Attached room wall detail
-	{Slot: 111, Kind: PropBanner, X: 38, Y: 2, Z: 21, Facing: 2, Variant: 0},  // Attached room wall detail
+	{Slot: 111, Kind: PropBanner, X: 38, Y: 2, Z: 18, Facing: 2, Variant: 0},  // Attached room wall detail
 	{Slot: 112, Kind: PropShield, X: 38, Y: 3, Z: 15, Facing: 2, Variant: 0},  // Attached room wall detail
 	{Slot: 113, Kind: PropTrophy, X: 38, Y: 3, Z: 8, Facing: 2, Variant: 0},   // Attached room wall detail
-	{Slot: 114, Kind: PropBanner, X: 38, Y: 9, Z: 21, Facing: 2, Variant: 1},  // Attached room wall detail
+	{Slot: 114, Kind: PropBanner, X: 38, Y: 9, Z: 18, Facing: 2, Variant: 1},  // Attached room wall detail
 	{Slot: 115, Kind: PropShield, X: 38, Y: 10, Z: 15, Facing: 2, Variant: 1}, // Attached room wall detail
 	{Slot: 116, Kind: PropTrophy, X: 38, Y: 10, Z: 8, Facing: 2, Variant: 1},  // Attached room wall detail
-	{Slot: 117, Kind: PropBanner, X: 38, Y: 16, Z: 21, Facing: 2, Variant: 2}, // Attached room wall detail
+	{Slot: 117, Kind: PropBanner, X: 38, Y: 16, Z: 18, Facing: 2, Variant: 2}, // Attached room wall detail
 	{Slot: 118, Kind: PropShield, X: 38, Y: 17, Z: 15, Facing: 2, Variant: 2}, // Attached room wall detail
 	{Slot: 119, Kind: PropTrophy, X: 38, Y: 17, Z: 8, Facing: 2, Variant: 2},  // Attached room wall detail
-	{Slot: 120, Kind: PropBanner, X: 38, Y: 23, Z: 21, Facing: 2, Variant: 3}, // Attached room wall detail
+	{Slot: 120, Kind: PropBanner, X: 38, Y: 23, Z: 18, Facing: 2, Variant: 3}, // Attached room wall detail
 	{Slot: 121, Kind: PropShield, X: 38, Y: 24, Z: 15, Facing: 2, Variant: 3}, // Attached room wall detail
 	{Slot: 122, Kind: PropTrophy, X: 38, Y: 24, Z: 8, Facing: 2, Variant: 3},  // Attached room wall detail
-	{Slot: 123, Kind: PropBanner, X: 38, Y: 30, Z: 21, Facing: 2, Variant: 0}, // Attached room wall detail
+	{Slot: 123, Kind: PropBanner, X: 38, Y: 30, Z: 18, Facing: 2, Variant: 0}, // Attached room wall detail
 	{Slot: 124, Kind: PropShield, X: 38, Y: 31, Z: 15, Facing: 2, Variant: 0}, // Attached room wall detail
 	{Slot: 125, Kind: PropTrophy, X: 38, Y: 31, Z: 8, Facing: 2, Variant: 0},  // Attached room wall detail
 }

@@ -121,3 +121,26 @@ func TestCastleFurnitureFitsArchitectureAndRestsOnFloors(t *testing.T) {
 		}
 	}
 }
+
+func TestFurnishedCastleKeepsResidentWorkAreasAccessible(t *testing.T) {
+	for turn := range 4 {
+		c := castleTerrain{turn: turn}
+		c.props = castleFurnitureIndex(t, c)
+		for _, anchor := range world.SchematicFor(world.BuildingKeep).Anchors {
+			centre := c.point([3]float64{float64(anchor.X) + .5, float64(anchor.Y), float64(anchor.Z) + .5})
+			if overlaps(c, playerBox(centre)) {
+				t.Fatalf("turn %d resident %s obstructed", turn, anchor.Kind)
+			}
+			approaches := 0
+			for _, delta := range [][2]float64{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+				point := [3]float64{centre[0] + delta[0], centre[1], centre[2] + delta[1]}
+				if !overlaps(c, playerBox(point)) {
+					approaches++
+				}
+			}
+			if approaches == 0 {
+				t.Fatalf("turn %d resident %s has no clear approach", turn, anchor.Kind)
+			}
+		}
+	}
+}

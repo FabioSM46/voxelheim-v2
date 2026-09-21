@@ -860,3 +860,61 @@ mod tests {
         assert_eq!(checked, 39);
     }
 }
+
+#[cfg(test)]
+mod placed_dressing_tests {
+    use super::*;
+    use bevy::mesh::VertexAttributeValues;
+
+    #[test]
+    fn wall_details_touch_the_support_plane_without_entering_the_wall() {
+        for kind in [
+            StaticPropKind::Banner,
+            StaticPropKind::Shield,
+            StaticPropKind::Trophy,
+        ] {
+            let assembly = geometry(kind);
+            let mut back = f32::NEG_INFINITY;
+            for mesh in assembly.meshes.iter().flatten() {
+                let Some(VertexAttributeValues::Float32x3(points)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("positions")
+                };
+                for p in points {
+                    assert!(
+                        p[2] >= 0.1 && p[2] <= 0.50001,
+                        "{kind:?} leaves wall envelope: {p:?}"
+                    );
+                    back = back.max(p[2]);
+                }
+            }
+            assert!(
+                (back - 0.5).abs() < 1e-5,
+                "{kind:?} floats away from support"
+            );
+        }
+    }
+
+    #[test]
+    fn pantry_food_stays_inside_the_authoritative_shelving_envelope() {
+        let pantry = geometry_with_pantry(StaticPropKind::Bookcase, true);
+        let library = geometry(StaticPropKind::Bookcase);
+        let positions = |mesh: &Mesh| {
+            let Some(VertexAttributeValues::Float32x3(p)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("positions")
+            };
+            p.clone()
+        };
+        let food = positions(pantry.meshes[DETAIL].as_ref().unwrap());
+        assert_ne!(food, positions(library.meshes[DETAIL].as_ref().unwrap()));
+        let (lo, hi) = solid_members(StaticPropKind::Bookcase)[0];
+        for p in food {
+            for axis in 0..3 {
+                assert!(p[axis] >= lo[axis] && p[axis] <= hi[axis]);
+            }
+        }
+    }
+}
