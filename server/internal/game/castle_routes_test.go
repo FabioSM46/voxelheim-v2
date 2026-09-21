@@ -1,8 +1,12 @@
 package game
 
 import (
+	"bytes"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	vnet "github.com/FabioSM46/voxelheim-v2/server/gen/Voxelheim/Net"
@@ -67,6 +71,12 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 	t.Helper()
 	player := &Player{sim: &Sim{idleLimit: 10000}, pos: c.point(route[0]),
 		lifeState: vnet.LifeStateAlive, health: 100, hunger: 100}
+	captureDir := os.Getenv("CASTLE_CAPTURE_TRACE_DIR")
+	capture := captureDir != "" && c.turn == 0
+	var trace [][3]float64
+	if capture {
+		trace = append(trace, player.pos)
+	}
 	dt := 1 / float64(DefaultTickRate)
 	for n, local := range route[1:] {
 		target := c.point(local)
@@ -87,6 +97,9 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 			}
 			before := player.pos
 			player.step(dt, c)
+			if capture {
+				trace = append(trace, player.pos)
+			}
 			if overlaps(c, player.box()) {
 				t.Fatalf("body overlaps actual castle at %v", player.pos)
 			}
@@ -98,6 +111,21 @@ func walkCastle(t *testing.T, c castleTerrain, route [][3]float64) {
 			}
 		}
 	}
+	if capture {
+		var output bytes.Buffer
+		output.WriteString("tick\tlocal_feet_x\tlocal_feet_y\tlocal_feet_z\n")
+		for tick, p := range trace {
+			fmt.Fprintf(&output, "%d\t%.9f\t%.9f\t%.9f\n", tick, p[0]-11, p[1]-5, p[2]-13)
+		}
+		if err := os.MkdirAll(captureDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(captureDir, strings.ReplaceAll(t.Name(), "/", "_")+".tsv")
+		if err := os.WriteFile(path, output.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 }
 
 func TestCastleMainFloorsAreWalkedWithoutJumpingInEveryRotation(t *testing.T) {
