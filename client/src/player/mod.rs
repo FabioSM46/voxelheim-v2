@@ -3449,3 +3449,6 @@ pub(crate) fn arrival_body_width(world: &World) -> f32 {
         constants::PLAYER_WIDTH
     }
 }
+
+#[cfg(test)]
+mod castle_capture;
