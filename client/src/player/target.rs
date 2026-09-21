@@ -350,7 +350,7 @@ fn ray_shape(block: crate::world::BlockId) -> Option<RayShape> {
     }
 }
 
-fn raycast_blocks(
+pub(super) fn raycast_blocks(
     origin: Vec3,
     direction: Vec3,
     reach: f32,
