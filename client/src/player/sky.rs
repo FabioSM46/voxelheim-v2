@@ -909,6 +909,7 @@ pub(super) fn spawn_sky(
 
     commands.spawn((
         SkyBody,
+        bevy::light::NotShadowCaster,
         SkyBodyKind::Dome,
         // Never turned: a dome on the camera's rotation is a horizon you cannot look away from.
         SkyPlacement::Around(Quat::IDENTITY),
@@ -920,6 +921,7 @@ pub(super) fn spawn_sky(
 
     commands.spawn((
         SkyBody,
+        bevy::light::NotShadowCaster,
         SkyBodyKind::Sun,
         SkyPlacement::Facing(Vec3::Y),
         Mesh3d(meshes.add(sun_mesh())),
@@ -934,6 +936,7 @@ pub(super) fn spawn_sky(
     let moon = meshes.add(disc_mesh());
     commands.spawn((
         SkyBody,
+        bevy::light::NotShadowCaster,
         SkyBodyKind::Moon,
         SkyPlacement::Facing(Vec3::Y),
         Mesh3d(moon.clone()),
@@ -956,6 +959,7 @@ pub(super) fn spawn_sky(
     });
     commands.spawn((
         SkyBody,
+        bevy::light::NotShadowCaster,
         SkyBodyKind::Stars,
         SkyPlacement::Around(Quat::IDENTITY),
         Mesh3d(meshes.add(star_mesh())),
@@ -2762,6 +2766,22 @@ mod tests {
                 "moon vertex {index} escaped the clean disc"
             );
         }
+    }
+
+    /// The sky encloses the terrain but is never an occluder of sunlight.
+    #[test]
+    fn celestial_meshes_do_not_shadow_the_world() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .add_systems(Startup, spawn_sky);
+        app.update();
+        let world = app.world_mut();
+        let mut bodies =
+            world.query_filtered::<Option<&bevy::light::NotShadowCaster>, With<SkyBody>>();
+        assert_eq!(bodies.iter(world).count(), 4);
+        assert!(bodies.iter(world).all(|excluded| excluded.is_some()));
     }
 
     /// One sun entity with one blended material is one transparent draw; the corona and

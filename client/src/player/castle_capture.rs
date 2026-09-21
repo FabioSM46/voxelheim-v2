@@ -653,7 +653,8 @@ fn capture_costs(app: &mut App) -> String {
     }
     millis.sort_by(f64::total_cmp);
     let world = app.world_mut();
-    let entities = world.entities().len();
+    // Entities::len counts allocated indices, including vacant allocator capacity.
+    let entities = world.entity_count();
     let props = world
         .query::<&static_props::StaticPropRoot>()
         .iter(world)
